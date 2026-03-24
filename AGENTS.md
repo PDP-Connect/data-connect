@@ -20,7 +20,8 @@ DataConnect is the protocol client: it runs connectors, orchestrates grants, and
 
 - Prefer retrieval‑led reasoning for project‑specific knowledge.
 - Don’t overwrite comments; don’t change styles/classes unless asked.
-- When I report a bug, don't start by trying to fix it. Instead, start by writing a test that reproduces the bug. Then, have subagents try to fix the bug and prove it with a passing test.
+- Prefer minimal patches over full-file rewrites when feasible; this keeps outputs smaller, reduces token usage in debug loops, and makes changes easier to review. Keep context scoped to the relevant file, function, and failure, and avoid regenerating entire files unless a full rewrite is clearly justified.
+- When I report a bug, do not start with a fix. First reproduce the bug and add the smallest failing test for the reported behavior when feasible. Then have subagents propose fixes, and accept a fix only when that reproducing test passes.
 - Commit only when asked; never push; stage explicit paths only (no `git add .`, `-A`, `-u`, `git commit -a`); run relevant tests before commit.
 - For all commit actions, follow `.agents/skills/commit-discipline/SKILL.md` exactly.
 - For links/actions that open URLs or local file/folder paths, use shared helpers in `src/lib/open-resource.ts` and `src/lib/tauri-paths.ts`; avoid inline runtime/OS branching in page components.
@@ -52,4 +53,6 @@ Use skills only when the task matches; explore the code first.
 - Text usage edits: when changing usage of `src/components/typography/text.tsx`, read ui-component-audit first (soft default; use judgment).
 - Testing: invoke react-testing when writing/running tests or before commit.
 - Linear: invoke linear skill when asked to create/update tickets or statuses.
+- Commit messages: invoke conventional-commits when creating, reviewing, or fixing commit messages.
+- Test-fix harnesses: invoke test-fix-loop when the user wants a constrained failing-test repair loop, minimal-patch harness, or automated test-fix workflow.
 - Committing: invoke committing skill only when user explicitly asks to commit.
