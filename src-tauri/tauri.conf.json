@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DataConnect",
-  "version": "0.7.47",
+  "version": "0.7.48",
   "identifier": "dev.dataconnect",
   "build": {
     "frontendDist": "../dist",
