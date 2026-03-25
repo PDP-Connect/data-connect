@@ -30,6 +30,11 @@ Treat the model as a constrained repair engine.
 - Preserve existing style and structure.
 - Stop when the failure is ambiguous.
 
+## Clean rule
+
+- `test-fix-loop` is the automated loop shape: use it when the user wants a repeatable harness that runs tests, isolates one failing test, proposes a patch, applies it, and reruns automatically.
+- If the user just wants a normal bug fix or surgical debugging pass without a harness, use `patch-first-debugging` instead.
+
 ## When to use
 
 Use this skill when the user wants any of the following:
@@ -41,6 +46,7 @@ Use this skill when the user wants any of the following:
 - strict guardrails against unrelated refactors
 
 Do not use this skill for greenfield design, large refactors, or vague requests like "improve this codebase."
+Do not use this skill when the main need is debugging philosophy rather than loop orchestration; that belongs to `patch-first-debugging`.
 
 ## Required loop shape
 
@@ -170,4 +176,3 @@ When helping the user build this workflow:
 - preserve the tight loop shape
 - avoid turning the pattern into a generic coding agent
 - name any disagreement with the user's design explicitly before changing it
-

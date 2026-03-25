@@ -15,6 +15,11 @@ Fix the problem with the smallest correct change, keep outputs reviewable, reduc
 - Minimal diffs are easier to review and less likely to introduce unrelated churn.
 - Tight debug loops work better when each iteration changes only the code justified by the latest failure.
 
+## Clean rule
+
+- `patch-first-debugging` is the editing philosophy: use it for manual or assistant-led bug fixing where the main goal is to keep scope narrow, prefer minimal diffs, and verify with the smallest useful check.
+- If the user wants a repeatable harness that runs tests, isolates one failure, proposes a patch, applies it, and loops automatically, use `test-fix-loop` instead.
+
 ## When to use
 
 - Bug fixes
@@ -60,6 +65,7 @@ Fix the problem with the smallest correct change, keep outputs reviewable, reduc
 - If the bug report is vague, first identify the failure mode before editing.
 - If the requested change would trigger broad churn, say that a larger refactor is needed and explain why patch-first is no longer the right shape.
 - If a rewrite is necessary, say why the patch boundary broke down.
+- If the user is really asking for loop orchestration rather than a single debugging pass, hand off to `test-fix-loop`.
 
 ## Examples
 
