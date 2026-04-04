@@ -34,6 +34,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={vi.fn()}
@@ -80,6 +82,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={vi.fn()}
@@ -122,6 +126,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={vi.fn()}
@@ -132,6 +138,50 @@ describe("SettingsAbout", () => {
     expect(screen.getByText(/Hostname:/)).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Close" }))
     expect(screen.queryByText(/Hostname:/)).toBeNull()
+  })
+
+
+  it("shows explicit telemetry copy", () => {
+    render(
+      <TooltipProvider delayDuration={120}>
+        <SettingsAbout
+          appVersion="1.2.3"
+          logPath="/tmp/logs"
+          nodeTestStatus="idle"
+          nodeTestResult={null}
+          nodeTestError={null}
+          browserStatus={{ available: true, browser_type: "system" }}
+          pathsDebug={null}
+          personalServer={{ status: "stopped", port: null, error: null }}
+          simulateNoChrome={false}
+          onTestNodeJs={vi.fn()}
+          onCheckBrowserStatus={vi.fn()}
+          onDebugPaths={vi.fn()}
+          onClearDebugPaths={vi.fn()}
+          onRestartPersonalServer={vi.fn()}
+          onStopPersonalServer={vi.fn()}
+          onSimulateNoChromeChange={vi.fn()}
+          onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
+          clearPersonalServerDataStatus="idle"
+          clearPersonalServerDataError={null}
+          onClearPersonalServerData={vi.fn()}
+        />
+      </TooltipProvider>
+    )
+
+    expect(
+      screen.getByText("Share anonymous usage & reliability data")
+    ).toBeTruthy()
+    expect(
+      screen.getByText("Helps improve connector reliability and app quality.")
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /No payload contents, file paths, Personal Server URLs, or account-linked identity are sent\./
+      )
+    ).toBeTruthy()
   })
 
   it("routes resource links to docs", () => {
@@ -155,6 +205,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={vi.fn()}
@@ -191,6 +243,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="success"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={onClearPersonalServerData}
@@ -232,6 +286,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           onCheckAppUpdate={onCheckAppUpdate}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
@@ -266,6 +322,8 @@ describe("SettingsAbout", () => {
           onStopPersonalServer={vi.fn()}
           onSimulateNoChromeChange={vi.fn()}
           onOpenLogFolder={vi.fn()}
+          telemetryEnabled={true}
+          onTelemetryEnabledChange={vi.fn()}
           clearPersonalServerDataStatus="idle"
           clearPersonalServerDataError={null}
           onClearPersonalServerData={vi.fn()}
