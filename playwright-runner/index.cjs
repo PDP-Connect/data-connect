@@ -384,6 +384,35 @@ function createPageApi(runState, runId) {
   }
 
   return {
+    // ── Canonical page API minimum surface ─────────────────────────────
+    // These are thin pass-throughs to the underlying Playwright page object.
+    // See types/connector.d.ts in data-connectors for the canonical contract.
+
+    url: async () => {
+      const page = requirePage();
+      return page.url();
+    },
+
+    click: async (selector, options = {}) => {
+      const page = requirePage();
+      await page.click(selector, options);
+    },
+
+    fill: async (selector, value, options = {}) => {
+      const page = requirePage();
+      await page.fill(selector, value, options);
+    },
+
+    press: async (selector, key, options = {}) => {
+      const page = requirePage();
+      await page.press(selector, key, options);
+    },
+
+    waitForSelector: async (selector, options = {}) => {
+      const page = requirePage();
+      await page.waitForSelector(selector, options);
+    },
+
     goto: async (url, options = {}) => {
       const page = requirePage();
       log(`pageApi.goto called with: ${url}`);
@@ -409,14 +438,6 @@ function createPageApi(runState, runId) {
       const page = requirePage();
       const buffer = await page.screenshot({ type: 'jpeg', quality: 70, timeout: 5000 });
       return buffer.toString('base64');
-    },
-
-    requestInput: async (payload) => {
-      const requestId = `input-${++runState.requestCounter}`;
-      send({ type: 'request-input', runId, requestId, payload });
-      return new Promise((resolve, reject) => {
-        runState.pendingInputs.set(requestId, { resolve, reject });
-      });
     },
 
     sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
@@ -801,16 +822,25 @@ async function runConnector(runId, connectorPath, url, headless = true, allowHea
     // Find the LAST IIFE and add 'return' before it (there may be inner IIFEs in helpers)
     let modifiedCode = connectorCode;
 
-    // Find all occurrences and replace the last one
-    const iifePattern = /\n\(async\s*\(\)\s*=>\s*\{/g;
+    // Match both a leading-newline IIFE and one that starts on line 1
+    // (e.g. steam-playwright.js). An earlier version required `\n` as a
+    // leading anchor, which silently false-succeeded any script whose only
+    // top-level IIFE was on line 1 — the AsyncFunction would resolve to
+    // undefined instantly while the IIFE ran fire-and-forget.
+    const iifePattern = /(?:^|\n)\(async\s*\(\)\s*=>\s*\{/g;
     const matches = [...modifiedCode.matchAll(iifePattern)];
 
     if (matches.length > 0) {
       const lastMatch = matches[matches.length - 1];
+      const matchedText = lastMatch[0];
+      const leadingNewline = matchedText.startsWith('\n');
       const insertPos = lastMatch.index;
+      const replacement = leadingNewline
+        ? '\nreturn (async () => {'
+        : 'return (async () => {';
       modifiedCode = modifiedCode.substring(0, insertPos) +
-        '\nreturn (async () => {' +
-        modifiedCode.substring(insertPos + lastMatch[0].length);
+        replacement +
+        modifiedCode.substring(insertPos + matchedText.length);
       log(`Added return before IIFE (match ${matches.length} of ${matches.length})`);
     } else {
       log('WARNING: Could not find IIFE pattern in connector code');

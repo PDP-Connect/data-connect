@@ -21,26 +21,55 @@ pub struct ConnectorScope {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConnectorMetadata {
-    pub id: Option<String>,
+    /// Canonical connector_id (e.g. "instagram-playwright").
+    pub connector_id: Option<String>,
+    /// Legacy `id` field — accepted so manifests with both `connector_id`
+    /// and `id` don't fail to parse. Value is ignored; connector_id is used.
+    #[serde(default)]
+    id: Option<String>,
+    /// Canonical source_id (e.g. "instagram"). Distinct from connector_id.
+    pub source_id: Option<String>,
+    /// Version of the manifest contract itself (e.g. "1.0"). Independent of
+    /// connector version and page_api_version.
+    pub manifest_version: Option<String>,
+    /// Major version of the page API this connector targets (e.g. 1).
+    /// Independent of connector version.
+    pub page_api_version: Option<u32>,
     pub name: String,
     pub company: Option<String>,
     pub description: String,
-    #[serde(rename = "connectURL")]
-    pub connect_url: String,
-    #[serde(rename = "connectSelector")]
-    pub connect_selector: String,
+    /// Canonical connect_url.
+    pub connect_url: Option<String>,
+    /// Legacy connectURL — accepted so manifests with both don't fail.
+    #[serde(rename = "connectURL", default)]
+    connect_url_legacy: Option<String>,
+    /// Canonical connect_selector.
+    pub connect_selector: Option<String>,
+    /// Legacy connectSelector — accepted so manifests with both don't fail.
+    #[serde(rename = "connectSelector", default)]
+    connect_selector_legacy: Option<String>,
     #[serde(rename = "exportFrequency")]
     pub export_frequency: Option<String>,
     pub vectorize_config: Option<serde_json::Value>,
     /// Runtime type: "vanilla" (default) or "network-capture" (uses network interception)
     pub runtime: Option<String>,
-    /// Semantic version string (e.g. "1.0.0")
+    /// Semantic version string (e.g. "1.0.0"). This is the connector version,
+    /// not the manifest version or page API version.
     pub version: Option<String>,
-    /// Relative path to an SVG icon (e.g. "icons/chatgpt.svg")
-    #[serde(rename = "iconURL")]
+    /// Canonical icon_url.
     pub icon_url: Option<String>,
+    /// Legacy iconURL — accepted so manifests with both don't fail.
+    #[serde(rename = "iconURL", default)]
+    icon_url_legacy: Option<String>,
+    /// Legacy icon — accepted so manifests with both don't fail.
+    #[serde(default)]
+    icon: Option<String>,
     /// Scopes this connector can export (e.g. chatgpt.conversations, chatgpt.memories)
     pub scopes: Option<Vec<ConnectorScope>>,
+    /// Declarative runtime constraints. Reserved for future use.
+    pub runtime_requirements: Option<serde_json::Value>,
+    /// Optional feature flags the connector needs.
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -220,7 +249,7 @@ pub async fn debug_connector_paths(app: AppHandle) -> Result<serde_json::Value, 
             }
             if let Ok(content) = fs::read_to_string(path) {
                 if let Ok(meta) = serde_json::from_str::<ConnectorMetadata>(&content) {
-                    let id = meta.id.unwrap_or_else(|| format!("{}-001", fname));
+                    let id = meta.connector_id.or(meta.id).unwrap_or_else(|| format!("{}-001", fname));
                     connectors_map.insert(id.clone(), serde_json::json!({
                         "id": id,
                         "name": meta.name,
@@ -292,8 +321,10 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
                                 .unwrap_or_else(|| "Unknown".to_string());
 
                             // Resolve icon: read SVG from disk and convert to data URI
-                            let logo_url = metadata
-                                .icon_url
+                            let resolved_icon = metadata.icon_url
+                                .or(metadata.icon_url_legacy)
+                                .or(metadata.icon);
+                            let logo_url = resolved_icon
                                 .as_ref()
                                 .and_then(|icon_path| {
                                     let svg_path = dir.join(icon_path);
@@ -310,8 +341,8 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
                             });
 
                             platforms.push(Platform {
-                                id: metadata
-                                    .id
+                                id: metadata.connector_id
+                                    .or(metadata.id)
                                     .unwrap_or_else(|| format!("{}-001", filename)),
                                 company: metadata.company.unwrap_or(company),
                                 name: metadata.name.clone(),
@@ -320,8 +351,8 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
                                 is_updated: false,
                                 logo_url,
                                 needs_connection: true,
-                                connect_url: Some(metadata.connect_url),
-                                connect_selector: Some(metadata.connect_selector),
+                                connect_url: metadata.connect_url.or(metadata.connect_url_legacy),
+                                connect_selector: metadata.connect_selector.or(metadata.connect_selector_legacy),
                                 export_frequency: metadata.export_frequency,
                                 vectorize_config: metadata.vectorize_config,
                                 runtime: metadata.runtime,

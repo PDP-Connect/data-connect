@@ -1,0 +1,189 @@
+{
+  "lock_version": "2.0",
+  "dependency_file": "connectors/connector-dependencies.json",
+  "resolved_at": "2026-04-14T05:30:20.709Z",
+  "source_repo": "https://github.com/vana-com/data-connectors",
+  "source_ref": "feat/connector-contract-unification",
+  "source_revision": "unknown",
+  "index": {
+    "mode": "remote",
+    "path": null,
+    "url": "https://raw.githubusercontent.com/vana-com/data-connectors/main/connector-index.json",
+    "version": "1.0"
+  },
+  "dependencies": {
+    "chatgpt-playwright": "2.0.0",
+    "github-playwright": "1.1.4",
+    "instagram-ads-playwright": "1.0.0",
+    "instagram-playwright": "1.1.0",
+    "linkedin-playwright": "5.0.0",
+    "oura-playwright": "1.0.1",
+    "shop-playwright": "1.0.0",
+    "spotify-playwright": "1.0.0",
+    "youtube-playwright": "1.0.0"
+  },
+  "connectors": [
+    {
+      "id": "chatgpt-playwright",
+      "company": "openai",
+      "version": "2.0.0",
+      "resolved_from": "2.0.0",
+      "files": {
+        "script": "openai/chatgpt-playwright.js",
+        "metadata": "openai/chatgpt-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:72518dd765ff2103a0ad7dd184a9efcfac359764fca1613714400e661b2fe73a",
+        "metadata": "sha256:be7140f442a11a4475f1778e8e32e93d3a633d4ad515ed925bf7ecca461d793d",
+        "artifact": "sha256:39cf00bdcb16124d9d5f0f37e77035076b62361a5cd8dea4e9eadd4d97ff8dcc"
+      },
+      "artifact_path": "artifacts/chatgpt-playwright/chatgpt-playwright-2.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/chatgpt-playwright/chatgpt-playwright-2.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "github-playwright",
+      "company": "github",
+      "version": "1.1.4",
+      "resolved_from": "1.1.4",
+      "files": {
+        "script": "github/github-playwright.js",
+        "metadata": "github/github-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:7f221ddf698383f1fbceb6bd8cb97f457fc0a4143b4c13c5135a11b8ef230516",
+        "metadata": "sha256:72521c9a991f0587134214c835679de737d313a19e88478bc4ef40cf9e3fc89f",
+        "artifact": "sha256:9d98daed4c11795320b5be94bd4fee24080513253db423d0a0800c3cd6472fcd"
+      },
+      "artifact_path": "artifacts/github-playwright/github-playwright-1.1.4.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/github-playwright/github-playwright-1.1.4.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "instagram-ads-playwright",
+      "company": "meta",
+      "version": "1.0.0",
+      "resolved_from": "1.0.0",
+      "files": {
+        "script": "meta/instagram-ads-playwright.js",
+        "metadata": "meta/instagram-ads-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:ef759279f73e52a05b063cf8e6a6bceb63409039f35f529b342bc1af004c972d",
+        "metadata": "sha256:7403ddd375b61c5b0f5d078bdc90207e85fcf476542bba85b39c49fe3e9c51b2",
+        "artifact": "sha256:e0f46f9791bcc336f5f0b9125da671bf0a0f5512d58a562175bf91e4584ba3dc"
+      },
+      "artifact_path": "artifacts/instagram-ads-playwright/instagram-ads-playwright-1.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/instagram-ads-playwright/instagram-ads-playwright-1.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "instagram-playwright",
+      "company": "meta",
+      "version": "1.1.0",
+      "resolved_from": "1.1.0",
+      "files": {
+        "script": "meta/instagram-playwright.js",
+        "metadata": "meta/instagram-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:b22a21d76e08bb78acd873cacf25afb6cc5c501820649214b48374509bb3e903",
+        "metadata": "sha256:cafc2a147f64dea779ae8ead2df4547241f8fec90afc08718f253f710a15e0bc",
+        "artifact": "sha256:cb595642f4148c2a68109378a88c3a14ebf0ff2f8ce44f1340f4d4704b6d3fe0"
+      },
+      "artifact_path": "artifacts/instagram-playwright/instagram-playwright-1.1.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/instagram-playwright/instagram-playwright-1.1.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "linkedin-playwright",
+      "company": "linkedin",
+      "version": "5.0.0",
+      "resolved_from": "5.0.0",
+      "files": {
+        "script": "linkedin/linkedin-playwright.js",
+        "metadata": "linkedin/linkedin-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:351a1a6706903bfbd7055c332f8baa118faa1ccb556cf019005f77cde422480b",
+        "metadata": "sha256:7e0a1f8ff7d4572a7e09f507011025bbe8c84c59f550628879aacf8900a4624e",
+        "artifact": "sha256:c1b059959f3d924d763abac20430328c5b5165ed37b9f8fbe538dab125e8173d"
+      },
+      "artifact_path": "artifacts/linkedin-playwright/linkedin-playwright-5.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/linkedin-playwright/linkedin-playwright-5.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "oura-playwright",
+      "company": "oura",
+      "version": "1.0.1",
+      "resolved_from": "1.0.1",
+      "files": {
+        "script": "oura/oura-playwright.js",
+        "metadata": "oura/oura-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:b5dd43f3381b8cc51d5cd7e48b727d6f18fa26c06577f530d54020960ff5c43f",
+        "metadata": "sha256:59dd8496619999db8d6e11663a70c57189e725199e5ed9e2c70be874575542d2",
+        "artifact": "sha256:a3363983002e99d166cd53bc2640361ddea32551dac3c4da2324b5fb12435b35"
+      },
+      "artifact_path": "artifacts/oura-playwright/oura-playwright-1.0.1.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/oura-playwright/oura-playwright-1.0.1.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "shop-playwright",
+      "company": "shopify",
+      "version": "1.0.0",
+      "resolved_from": "1.0.0",
+      "files": {
+        "script": "shopify/shop-playwright.js",
+        "metadata": "shopify/shop-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:d9364d7cbaf95fbf0e3130b9221195099b33afe3bb700f411d336e40a705d37f",
+        "metadata": "sha256:5eded7e19e3381743d2935a4f6ee41b3ef77524357bcade27bad754791b5cf4c",
+        "artifact": "sha256:6e046ba9ba0f10e7d37b885f1e053b87db467d737f9355d58aadf98a9ecd8c51"
+      },
+      "artifact_path": "artifacts/shop-playwright/shop-playwright-1.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/shop-playwright/shop-playwright-1.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "spotify-playwright",
+      "company": "spotify",
+      "version": "1.0.0",
+      "resolved_from": "1.0.0",
+      "files": {
+        "script": "spotify/spotify-playwright.js",
+        "metadata": "spotify/spotify-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:35d879b28c1e3b2bb7c84e97985b8edb4e80dbd61d2dae17c969ad02ff5e3e37",
+        "metadata": "sha256:1803a12843e4b5bb022d1dfea580c830db9b1267e0d8b75855a5499d6760515b",
+        "artifact": "sha256:625d1c697e49370715ef2e54358eb0832875f8314bb676ac32f34964f854a78a"
+      },
+      "artifact_path": "artifacts/spotify-playwright/spotify-playwright-1.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/spotify-playwright/spotify-playwright-1.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    },
+    {
+      "id": "youtube-playwright",
+      "company": "google",
+      "version": "1.0.0",
+      "resolved_from": "1.0.0",
+      "files": {
+        "script": "google/youtube-playwright.js",
+        "metadata": "google/youtube-playwright.json"
+      },
+      "checksums": {
+        "script": "sha256:41edd09ec113ad7f9d09c9c0de76e40577087ab4600d2c8ccba4ca95c3f919c6",
+        "metadata": "sha256:8af6a9623851d2f0db9f86cdce50a3e60f2fee5387c5922f11c064043298ec6f",
+        "artifact": "sha256:d9c833fa1ffef8b7bb7b86abaa82a593b385541813f6cc23939ae399d95498a1"
+      },
+      "artifact_path": "artifacts/youtube-playwright/youtube-playwright-1.0.0.tgz",
+      "artifact_url": "https://raw.githubusercontent.com/vana-com/data-connectors/feat/connector-contract-unification/artifacts/youtube-playwright/youtube-playwright-1.0.0.tgz",
+      "git_ref": "feat/connector-contract-unification"
+    }
+  ]
+}
