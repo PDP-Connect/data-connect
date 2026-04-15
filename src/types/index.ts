@@ -30,7 +30,7 @@ export interface Run {
   isConnected: boolean;
   startDate: string;
   endDate?: string;
-  status: 'pending' | 'running' | 'success' | 'error' | 'stopped';
+  status: 'pending' | 'running' | 'success' | 'partial' | 'error' | 'stopped';
   url: string;
   exportSize?: number;
   exportPath?: string;
@@ -98,6 +98,15 @@ export interface ConnectorStatusPayload {
   phase?: ProgressPhase;
   count?: number;
   data?: unknown;
+  outcome?: 'success' | 'partial' | 'failure' | 'cancelled';
+  errorClass?: string;
+  recordCount?: number;
+  scopeSummary?: {
+    requested: number;
+    produced: number;
+    degraded: number;
+    omitted: number;
+  };
 }
 
 export interface ConnectorStatusEvent {
