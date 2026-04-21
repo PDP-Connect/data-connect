@@ -2,6 +2,7 @@ use flate2::read::GzDecoder;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sigstore::bundle::verify::{blocking::Verifier, policy};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
@@ -10,8 +11,26 @@ use tar::Archive;
 use tauri::{AppHandle, Manager};
 use tempfile::tempdir_in;
 
+use super::connector_store::{
+    get_active_connector_install, get_connectors_store_dir, get_legacy_user_connectors_dir,
+    read_active_connector_manifest, write_active_connector_manifest, ActiveConnectorInstall,
+    ActiveConnectorManifest,
+};
+
 const DEFAULT_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/vana-com/data-connectors/main/connector-index.json";
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-latest/connector-index.json";
+const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER: &str = "https://token.actions.githubusercontent.com";
+const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY: &str =
+    "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureInfo {
+    #[serde(rename = "type")]
+    pub signature_type: String,
+    pub bundle_path: Option<String>,
+    pub bundle_url: Option<String>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +38,7 @@ pub struct ConnectorIndex {
     pub index_version: String,
     pub generated_at: String,
     pub source_repo: Option<String>,
+    pub signature: Option<SignatureInfo>,
     pub connectors: HashMap<String, Vec<IndexedConnector>>,
 }
 
@@ -35,6 +55,7 @@ pub struct IndexedConnector {
     pub script_sha256: String,
     pub artifact_sha256: String,
     pub artifact_url: String,
+    pub artifact_signature: Option<SignatureInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -75,10 +96,20 @@ struct ArtifactBundle {
 }
 
 fn get_user_connectors_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
-    Some(PathBuf::from(home).join(".dataconnect").join("connectors"))
+    get_legacy_user_connectors_dir()
+}
+
+fn activate_connector_install(install: ActiveConnectorInstall) -> Result<(), String> {
+    let mut manifest = read_active_connector_manifest().unwrap_or(ActiveConnectorManifest {
+        version: "1.0".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        connectors: HashMap::new(),
+    });
+    manifest.updated_at = chrono::Utc::now().to_rfc3339();
+    manifest
+        .connectors
+        .insert(install.connector_id.clone(), install);
+    write_active_connector_manifest(&manifest)
 }
 
 fn get_bundled_connectors_dir(app: &AppHandle) -> PathBuf {
@@ -127,6 +158,10 @@ fn get_installed_connector_version(
     connector_id: &str,
     company: &str,
 ) -> Option<String> {
+    if let Some(install) = get_active_connector_install(connector_id) {
+        return Some(install.version);
+    }
+
     if let Some(user_dir) = get_user_connectors_dir() {
         let metadata_path =
             find_installed_metadata_path(&user_dir.join(company.to_lowercase()), connector_id);
@@ -150,6 +185,10 @@ fn get_installed_connector_version(
 }
 
 fn is_connector_installed(app: &AppHandle, connector_id: &str, company: &str) -> bool {
+    if get_active_connector_install(connector_id).is_some() {
+        return true;
+    }
+
     if let Some(user_dir) = get_user_connectors_dir() {
         if find_installed_metadata_path(&user_dir.join(company.to_lowercase()), connector_id)
             .exists()
@@ -201,21 +240,77 @@ fn verify_checksum(data: &[u8], expected: &str) -> bool {
     calculate_checksum(data) == expected
 }
 
-fn get_index_cache_path() -> Option<PathBuf> {
+fn resolve_bundle_url(subject_url: &str, signature: &SignatureInfo) -> Result<String, String> {
+    if signature.signature_type != "sigstoreBundle" {
+        return Err(format!(
+            "Unsupported signature type {} for {}",
+            signature.signature_type, subject_url
+        ));
+    }
+
+    if let Some(bundle_url) = &signature.bundle_url {
+        return Ok(bundle_url.clone());
+    }
+
+    if let Some(bundle_path) = &signature.bundle_path {
+        let subject = reqwest::Url::parse(subject_url)
+            .map_err(|e| format!("Invalid signed artifact URL {}: {}", subject_url, e))?;
+        return subject
+            .join(bundle_path)
+            .map(|url| url.to_string())
+            .map_err(|e| format!("Invalid signature bundle path {}: {}", bundle_path, e));
+    }
+
+    Ok(format!("{}.sigstore.json", subject_url))
+}
+
+fn verify_sigstore_bundle(
+    payload: &[u8],
+    bundle_bytes: &[u8],
+    subject_label: &str,
+) -> Result<(), String> {
+    let bundle: sigstore::bundle::Bundle = serde_json::from_slice(bundle_bytes)
+        .map_err(|e| format!("Failed to parse {} signature bundle: {}", subject_label, e))?;
+    let verifier = Verifier::production()
+        .map_err(|e| format!("Failed to initialize Sigstore verifier: {}", e))?;
+    let policy = policy::Identity::new(
+        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+        DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
+    );
+
+    verifier
+        .verify(Cursor::new(payload), bundle, &policy, true)
+        .map_err(|e| format!("{} signature verification failed: {}", subject_label, e))?;
+
+    Ok(())
+}
+
+fn get_index_cache_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
     Some(
         PathBuf::from(home)
             .join(".dataconnect")
-            .join("cache")
-            .join("connector-index.json"),
+            .join("cache"),
     )
+}
+
+fn get_index_cache_path() -> Option<PathBuf> {
+    Some(get_index_cache_dir()?.join("connector-index.json"))
+}
+
+fn get_index_bundle_cache_path() -> Option<PathBuf> {
+    Some(get_index_cache_dir()?.join("connector-index.sigstore.json"))
 }
 
 fn load_cached_index() -> Option<ConnectorIndex> {
     let cache_path = get_index_cache_path()?;
+    let bundle_cache_path = get_index_bundle_cache_path()?;
     if !cache_path.exists() {
+        return None;
+    }
+    if !bundle_cache_path.exists() {
         return None;
     }
 
@@ -226,20 +321,27 @@ fn load_cached_index() -> Option<ConnectorIndex> {
         return None;
     }
 
-    let content = fs::read_to_string(&cache_path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn save_index_cache(index: &ConnectorIndex) -> Result<(), String> {
-    let cache_path = get_index_cache_path().ok_or("Could not determine cache path")?;
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    let index_bytes = fs::read(&cache_path).ok()?;
+    let bundle_bytes = fs::read(&bundle_cache_path).ok()?;
+    if verify_sigstore_bundle(index_bytes.as_ref(), bundle_bytes.as_ref(), "Cached connector index")
+        .is_err()
+    {
+        return None;
     }
 
-    let content = serde_json::to_string_pretty(index)
-        .map_err(|e| format!("Failed to serialize connector index: {}", e))?;
-    fs::write(&cache_path, content).map_err(|e| format!("Failed to write cache: {}", e))?;
+    serde_json::from_slice(index_bytes.as_ref()).ok()
+}
+
+fn save_index_cache(index_bytes: &[u8], bundle_bytes: &[u8]) -> Result<(), String> {
+    let cache_dir = get_index_cache_dir().ok_or("Could not determine cache path")?;
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+
+    let cache_path = cache_dir.join("connector-index.json");
+    let bundle_cache_path = cache_dir.join("connector-index.sigstore.json");
+    fs::write(&cache_path, index_bytes).map_err(|e| format!("Failed to write cache: {}", e))?;
+    fs::write(&bundle_cache_path, bundle_bytes)
+        .map_err(|e| format!("Failed to write signature cache: {}", e))?;
     Ok(())
 }
 
@@ -262,12 +364,37 @@ async fn fetch_index(force: bool) -> Result<ConnectorIndex, String> {
         ));
     }
 
-    let index: ConnectorIndex = response
-        .json()
+    let index_bytes = response
+        .bytes()
         .await
+        .map_err(|e| format!("Failed to read connector index: {}", e))?;
+    let index: ConnectorIndex = serde_json::from_slice(index_bytes.as_ref())
         .map_err(|e| format!("Failed to parse connector index: {}", e))?;
+    let signature = index
+        .signature
+        .as_ref()
+        .ok_or("Connector index is missing Sigstore bundle metadata")?;
+    let bundle_url = resolve_bundle_url(DEFAULT_INDEX_URL, signature)?;
+    let bundle_response = reqwest::get(&bundle_url)
+        .await
+        .map_err(|e| format!("Failed to fetch connector index signature bundle: {}", e))?;
+    if !bundle_response.status().is_success() {
+        return Err(format!(
+            "Connector index signature bundle fetch failed with status: {}",
+            bundle_response.status()
+        ));
+    }
+    let bundle_bytes = bundle_response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read connector index signature bundle: {}", e))?;
+    verify_sigstore_bundle(
+        index_bytes.as_ref(),
+        bundle_bytes.as_ref(),
+        "Connector index",
+    )?;
 
-    if let Err(err) = save_index_cache(&index) {
+    if let Err(err) = save_index_cache(index_bytes.as_ref(), bundle_bytes.as_ref()) {
         log::warn!("Failed to cache connector index: {}", err);
     }
 
@@ -371,91 +498,6 @@ fn connector_path_within_root(path: &str, connector: &IndexedConnector) -> Resul
                 root_relative.display()
             )
         })
-}
-
-fn collect_owned_paths(
-    root_dir: &Path,
-    manifest_path: &Path,
-    connector: &IndexedConnector,
-    manifest: &serde_json::Value,
-) -> Vec<PathBuf> {
-    let mut owned = vec![manifest_path.to_path_buf()];
-
-    for extension in ["js", "mjs", "cjs"] {
-        owned.push(root_dir.join(format!("{}.{}", connector.connector_id, extension)));
-    }
-
-    if let Ok(script_relative) =
-        connector_path_within_root(&connector.source_files.script, connector)
-    {
-        owned.push(root_dir.join(script_relative));
-    }
-
-    if let Some(scopes) = manifest.get("scopes").and_then(|value| value.as_array()) {
-        for scope_entry in scopes {
-            let scope = match scope_entry {
-                serde_json::Value::String(value) => Some(value.as_str()),
-                serde_json::Value::Object(map) => map.get("scope").and_then(|value| value.as_str()),
-                _ => None,
-            };
-            if let Some(scope) = scope {
-                owned.push(root_dir.join("schemas").join(format!("{}.json", scope)));
-            }
-        }
-    }
-
-    for asset_value in [manifest.get("icon"), manifest.get("iconURL")] {
-        if let Some(relative_path) = asset_value.and_then(|value| value.as_str()) {
-            owned.push(root_dir.join(relative_path));
-        }
-    }
-
-    owned.push(root_dir.join("README.md"));
-    owned
-}
-
-fn remove_owned_paths(paths: &[PathBuf], stop_dir: &Path) -> Result<(), String> {
-    let mut parents = Vec::new();
-
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-
-        if path.is_dir() {
-            fs::remove_dir_all(path)
-                .map_err(|e| format!("Failed to remove stale directory {:?}: {}", path, e))?;
-        } else {
-            fs::remove_file(path)
-                .map_err(|e| format!("Failed to remove stale file {:?}: {}", path, e))?;
-        }
-
-        if let Some(parent) = path.parent() {
-            parents.push(parent.to_path_buf());
-        }
-    }
-
-    cleanup_empty_dirs(parents, stop_dir);
-    Ok(())
-}
-
-fn cleanup_empty_dirs(mut dirs: Vec<PathBuf>, stop_dir: &Path) {
-    while let Some(dir) = dirs.pop() {
-        if dir == stop_dir || !dir.starts_with(stop_dir) {
-            continue;
-        }
-
-        let is_empty = match fs::read_dir(&dir) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(_) => false,
-        };
-
-        if is_empty && fs::remove_dir(&dir).is_ok() {
-            if let Some(parent) = dir.parent() {
-                dirs.push(parent.to_path_buf());
-            }
-        }
-    }
 }
 
 fn unpack_artifact_bundle(bytes: &[u8]) -> Result<ArtifactBundle, String> {
@@ -620,6 +662,29 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
         .bytes()
         .await
         .map_err(|e| format!("Failed to read connector artifact: {}", e))?;
+    let artifact_signature = connector
+        .artifact_signature
+        .as_ref()
+        .ok_or_else(|| format!("Connector {} is missing Sigstore bundle metadata", id))?;
+    let artifact_bundle_url = resolve_bundle_url(&connector.artifact_url, artifact_signature)?;
+    let artifact_bundle_response = reqwest::get(&artifact_bundle_url)
+        .await
+        .map_err(|e| format!("Failed to fetch connector signature bundle: {}", e))?;
+    if !artifact_bundle_response.status().is_success() {
+        return Err(format!(
+            "Connector signature bundle fetch failed with status: {}",
+            artifact_bundle_response.status()
+        ));
+    }
+    let artifact_bundle_bytes = artifact_bundle_response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read connector signature bundle: {}", e))?;
+    verify_sigstore_bundle(
+        artifact_bytes.as_ref(),
+        artifact_bundle_bytes.as_ref(),
+        &format!("Connector artifact {}@{}", connector.connector_id, connector.version),
+    )?;
     if !verify_checksum(artifact_bytes.as_ref(), &connector.artifact_sha256) {
         return Err(format!(
             "Connector artifact checksum verification failed. Expected: {}, Got: {}",
@@ -659,102 +724,54 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
         ));
     }
 
-    let user_dir =
-        get_user_connectors_dir().ok_or("Could not determine user connectors directory")?;
-    let company_dir = user_dir.join(connector.company.to_lowercase());
-    fs::create_dir_all(&company_dir)
-        .map_err(|e| format!("Failed to create connector directory: {}", e))?;
+    let store_dir =
+        get_connectors_store_dir().ok_or("Could not determine connectors store directory")?;
+    let connector_store_dir = store_dir.join(&connector.connector_id);
+    fs::create_dir_all(&connector_store_dir)
+        .map_err(|e| format!("Failed to create connector store directory: {}", e))?;
 
-    let install_root = company_dir.join(connector_root_relative_path(connector)?);
-    let existing_manifest_path =
-        find_installed_metadata_path(&company_dir, &connector.connector_id);
-    let existing_root = existing_manifest_path
-        .exists()
-        .then(|| existing_manifest_path.parent().map(Path::to_path_buf))
-        .flatten();
+    let install_root = connector_store_dir.join(&connector.version);
+    let metadata_relative =
+        connector_path_within_root(&connector.source_files.metadata, connector)?;
+    let script_relative =
+        connector_path_within_root(&connector.source_files.script, connector)?;
 
-    let temp_dir = tempdir_in(&company_dir)
-        .map_err(|e| format!("Failed to create connector staging directory: {}", e))?;
-    write_artifact_bundle(temp_dir.path(), connector, bundle)?;
+    if !install_root.exists() {
+        let temp_dir = tempdir_in(&connector_store_dir)
+            .map_err(|e| format!("Failed to create connector staging directory: {}", e))?;
+        write_artifact_bundle(temp_dir.path(), connector, bundle)?;
 
-    log::info!(
-        "Installing connector artifact for {} to {:?} (manifest {}, script {})",
-        connector.connector_id,
-        install_root,
-        metadata_checksum,
-        script_checksum
-    );
+        log::info!(
+            "Installing connector artifact for {} to {:?} (manifest {}, script {})",
+            connector.connector_id,
+            install_root,
+            metadata_checksum,
+            script_checksum
+        );
 
-    if let Some(existing_manifest_path) = existing_manifest_path
-        .exists()
-        .then_some(existing_manifest_path)
-    {
-        if let Ok(existing_manifest_bytes) = fs::read(&existing_manifest_path) {
-            if let Ok(existing_manifest_json) =
-                serde_json::from_slice::<serde_json::Value>(&existing_manifest_bytes)
-            {
-                let existing_root = existing_root.clone().unwrap_or_else(|| company_dir.clone());
-                let owned_paths = collect_owned_paths(
-                    &existing_root,
-                    &existing_manifest_path,
-                    connector,
-                    &existing_manifest_json,
-                );
-                remove_owned_paths(&owned_paths, &company_dir)?;
-            }
-        }
+        let staged_root = temp_dir.keep();
+        fs::rename(&staged_root, &install_root).map_err(|e| {
+            format!(
+                "Failed to promote staged connector artifact into {:?}: {}",
+                install_root, e
+            )
+        })?;
+    } else {
+        log::info!(
+            "Connector {} v{} already present in store, activating existing install",
+            connector.connector_id,
+            connector.version
+        );
     }
 
-    if let Some(existing_root) = existing_root {
-        if existing_root != install_root && existing_root.exists() {
-            cleanup_empty_dirs(vec![existing_root], &company_dir);
-        }
-    }
-
-    for entry in fs::read_dir(temp_dir.path())
-        .map_err(|e| format!("Failed to read connector staging directory: {}", e))?
-    {
-        let entry = entry.map_err(|e| format!("Failed to read staged connector entry: {}", e))?;
-        let source = entry.path();
-        let destination = install_root.join(entry.file_name());
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create install directory {:?}: {}", parent, e))?;
-        }
-        fs::rename(&source, &destination)
-            .or_else(|_| {
-                if source.is_dir() {
-                    fs::create_dir_all(&destination)?;
-                    for child in fs::read_dir(&source)? {
-                        let child = child?;
-                        let child_source = child.path();
-                        let child_destination = destination.join(child.file_name());
-                        if child_source.is_dir() {
-                            fs::create_dir_all(&child_destination)?;
-                            fs::remove_dir_all(&child_destination).ok();
-                            fs::rename(&child_source, &child_destination)?;
-                        } else {
-                            if let Some(parent) = child_destination.parent() {
-                                fs::create_dir_all(parent)?;
-                            }
-                            fs::rename(&child_source, &child_destination)?;
-                        }
-                    }
-                    fs::remove_dir_all(&source)
-                } else {
-                    if let Some(parent) = destination.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::rename(&source, &destination)
-                }
-            })
-            .map_err(|e| {
-                format!(
-                    "Failed to install connector artifact into {:?}: {}",
-                    destination, e
-                )
-            })?;
-    }
+    activate_connector_install(ActiveConnectorInstall {
+        connector_id: connector.connector_id.clone(),
+        company: connector.company.clone(),
+        version: connector.version.clone(),
+        root_path: install_root.to_string_lossy().to_string(),
+        metadata_relative_path: metadata_relative.to_string_lossy().to_string(),
+        script_relative_path: script_relative.to_string_lossy().to_string(),
+    })?;
 
     log::info!(
         "=== Successfully installed connector: {} ===",
@@ -771,6 +788,12 @@ pub fn get_registry_url() -> String {
 #[tauri::command]
 pub async fn get_installed_connectors(app: AppHandle) -> Result<HashMap<String, String>, String> {
     let mut versions = HashMap::new();
+
+    if let Some(active_manifest) = read_active_connector_manifest() {
+        for (connector_id, install) in active_manifest.connectors {
+            versions.insert(connector_id, install.version);
+        }
+    }
 
     if let Some(user_dir) = get_user_connectors_dir() {
         if user_dir.exists() {
@@ -845,7 +868,8 @@ fn scan_connectors_dir_no_overwrite(dir: &PathBuf, versions: &mut HashMap<String
 #[cfg(test)]
 mod tests {
     use super::{
-        connector_path_within_root, connector_root_relative_path, ConnectorFiles, IndexedConnector,
+        calculate_checksum, connector_path_within_root, connector_root_relative_path,
+        verify_checksum, verify_sigstore_bundle, ConnectorFiles, IndexedConnector,
     };
 
     fn nested_connector() -> IndexedConnector {
@@ -863,6 +887,7 @@ mod tests {
             script_sha256: "sha256:test".to_string(),
             artifact_sha256: "sha256:test".to_string(),
             artifact_url: "https://example.com/goodreads.tgz".to_string(),
+            artifact_signature: None,
         }
     }
 
@@ -883,5 +908,50 @@ mod tests {
 
         assert_eq!(metadata.to_string_lossy(), "goodreads-playwright.json");
         assert_eq!(script.to_string_lossy(), "goodreads-playwright.js");
+    }
+
+    #[test]
+    fn verify_checksum_rejects_tampered_payload() {
+        let original = b"connector artifact contents";
+        let expected = calculate_checksum(original);
+
+        assert!(verify_checksum(original, &expected));
+
+        let mut tampered = original.to_vec();
+        tampered[0] ^= 0x01;
+        assert!(
+            !verify_checksum(&tampered, &expected),
+            "tampered payload must not match the original checksum"
+        );
+    }
+
+    #[test]
+    fn verify_checksum_rejects_mismatched_expected() {
+        let payload = b"connector index bytes";
+        let wrong = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+        assert!(
+            !verify_checksum(payload, wrong),
+            "mismatched checksum must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_sigstore_bundle_rejects_malformed_bundle() {
+        let payload = b"connector-index bytes";
+        let malformed_bundle = b"not a sigstore bundle";
+
+        let result = verify_sigstore_bundle(payload, malformed_bundle, "tampered bundle");
+
+        assert!(
+            result.is_err(),
+            "malformed signature bundle must be rejected before reaching verification"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("signature bundle"),
+            "error message should name the signature bundle, got: {}",
+            err
+        );
     }
 }
