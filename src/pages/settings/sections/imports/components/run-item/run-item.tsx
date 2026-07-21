@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { ChevronDownIcon, ChevronUpIcon, FolderOpenIcon } from "lucide-react"
 import type { Run } from "@/types"
 import { PlatformIcon } from "@/components/icons/platform-icon"

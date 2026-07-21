@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // Telemetry client for data-connect. Sends canonical nested events to the
 // context-gateway ingest endpoint. See @/lib/telemetry/contract.ts for the
 // event shape, and the upstream TELEMETRY.md for the state machine.

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 
 import { readFileSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"

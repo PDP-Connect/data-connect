@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { LOGO_DEV_PUBLISHABLE_KEY } from "@/config/logo-provider"
 import { getPlatformRegistryEntryById } from "@/lib/platform/utils"
 

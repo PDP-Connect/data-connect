@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { formatShortWeekdayMonthTime } from "@/lib/date-format"
 import type { Run } from "@/types"
 

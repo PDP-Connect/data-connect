@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { AuthUser } from '../types';
 
 export type AccountRole = 'standard' | 'debug';

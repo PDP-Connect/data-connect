@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { corsFetch } from "@/lib/cors-fetch"
 
 const GITHUB_LATEST_RELEASE_API =

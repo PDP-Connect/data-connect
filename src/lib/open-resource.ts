@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 type OpenResourceKind = "auto" | "external-url" | "local-path"
 
 interface OpenResourceOptions {

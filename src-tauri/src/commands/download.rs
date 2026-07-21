@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 use crate::processors;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};

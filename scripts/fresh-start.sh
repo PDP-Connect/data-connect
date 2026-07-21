@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
 # fresh-start.sh — Reset DataConnect to a clean first-run state.
 # Usage: ./scripts/fresh-start.sh          (reset data only)
 #        ./scripts/fresh-start.sh --uninstall  (remove app + all data)

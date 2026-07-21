@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // Session Relay v1 API client
 // Endpoints: claim, approve, deny
 // All calls require `secret` from deep link for authorization

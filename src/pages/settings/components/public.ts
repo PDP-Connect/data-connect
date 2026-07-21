@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // NOTE: Barrel files are a tool, not a default.
 // Keep this file intentionally tiny and curated for stable, cross-section imports.
 // Reference: React Best Practices skill -> "2.1 Avoid Barrel File Imports".

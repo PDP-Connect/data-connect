@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { MonitorIcon } from "lucide-react"
 import type { AuthUser } from "@/types"
 import { Text } from "@/components/typography/text"

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { cn } from "@/lib/classes"
 
 interface SettingsRowDescriptionDotProps {

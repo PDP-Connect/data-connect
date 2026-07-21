@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { signTypedData } from './accountApi';
 

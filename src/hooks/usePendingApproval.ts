@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useRef } from "react"
 import { getPendingApproval, clearPendingApproval } from "../lib/storage"
 import { approveSession } from "../services/sessionRelay"

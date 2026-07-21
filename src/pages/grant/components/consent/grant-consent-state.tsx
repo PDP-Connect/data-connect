@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { AlertTriangleIcon } from "lucide-react"
 import { IconFlow } from "@/components/elements/icon-flow"
 import { PageContainer } from "@/components/elements/page-container"

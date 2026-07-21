@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { ElementType } from "react"
 import type { Platform, Run } from "@/types"
 import { PlatformIcon } from "@/components/icons/platform-icon"

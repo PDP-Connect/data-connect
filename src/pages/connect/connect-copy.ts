@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 export function getConnectTitle(
   dataSourceLabel: string | null,
   isAlreadyConnected: boolean

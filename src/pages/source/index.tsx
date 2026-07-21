@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { Link, useParams } from "react-router-dom"
 import { ArrowLeftIcon } from "lucide-react"
 import { PageContainer } from "@/components/elements/page-container"

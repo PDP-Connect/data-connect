@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react"
 import { CopyIcon } from "lucide-react"
 import { Text } from "@/components/typography/text"

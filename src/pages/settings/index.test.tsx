@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, beforeEach, vi } from "vitest"
 import { cleanup, fireEvent, render } from "@testing-library/react"
 import {

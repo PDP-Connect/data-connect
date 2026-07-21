@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { getPlatformIngestScope } from "@/lib/platform/utils"
 
 const METADATA_KEYS = ["exportSummary", "timestamp", "version", "platform"]
