@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { Link } from "react-router-dom"
 import { CheckIcon, UserRoundCogIcon, HomeIcon } from "lucide-react"
 import { PageContainer } from "@/components/elements/page-container"

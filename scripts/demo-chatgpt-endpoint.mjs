@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 
 import http from "node:http";
 import { homedir } from "node:os";

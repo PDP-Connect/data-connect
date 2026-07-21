@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useState } from "react"
 import { ChevronDown, ChevronUp } from "lucide-react"
 import { Text } from "@/components/typography/text"

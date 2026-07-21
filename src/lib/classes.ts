@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { type ClassValue, clsx } from "clsx"
 import { extendTailwindMerge } from "tailwind-merge"
 

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { getAppRegistryEntries } from "@/apps/registry"
 import { PageContainer } from "@/components/elements/page-container"
 import { SlidingTabs } from "@/components/elements/sliding-tabs"

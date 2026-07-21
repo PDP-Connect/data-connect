@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { ChevronRight } from "lucide-react"
 import { PageContainer } from "@/components/elements/page-container"
 import { LoadingState } from "@/components/elements/loading-state"

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Generate all app icons from the source SVG.
  * Usage: node scripts/generate-icons.mjs

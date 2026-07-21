@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useSearchParams, useLocation, useNavigate } from "react-router-dom"
 import { useState } from "react"
 import { getGrantParamsFromSearchParams } from "@/lib/grant-params"

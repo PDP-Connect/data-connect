@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { DcLogotype } from "@/components/icons/dc-logotype"
 import { IconMcp } from "@/components/icons/icon-mcp"
 import { topNavItemClassName } from "@/components/navigation/nav-item-styles"

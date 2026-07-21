@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { Children, Fragment, type ComponentProps, type ReactNode } from "react"
 import { ChevronRightIcon } from "lucide-react"
 import { PlatformIcon } from "@/components/icons/platform-icon"

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback, useEffect, useMemo } from "react"
 import type { NavigateFunction } from "react-router-dom"
 import {

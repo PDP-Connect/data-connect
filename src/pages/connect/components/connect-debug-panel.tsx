@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { Link } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Text } from "@/components/typography/text"

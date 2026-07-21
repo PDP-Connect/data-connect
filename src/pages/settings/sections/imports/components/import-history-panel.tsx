@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback, useMemo, useState } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import { ActivityIcon } from "lucide-react"

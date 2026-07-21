@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { Platform, Run } from "@/types"
 import { testPlatforms } from "./home-debug-fixtures"
 

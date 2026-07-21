@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Platform } from "@/types"
 import type { PlatformRegistryEntry } from "./registry"

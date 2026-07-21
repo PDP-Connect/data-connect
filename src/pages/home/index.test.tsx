@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
 import { render, waitFor, cleanup, fireEvent, screen } from "@testing-library/react"
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom"

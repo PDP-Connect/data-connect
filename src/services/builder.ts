@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // Builder verification service
 // Verifies builder identity via Gateway lookup + manifest fetch + EIP-191 signature check.
 

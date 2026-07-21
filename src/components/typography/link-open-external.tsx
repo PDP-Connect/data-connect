@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { MouseEvent } from "react"
 import type { TextProps } from "@/components/typography/text"
 import { Text } from "@/components/typography/text"

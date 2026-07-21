@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { ROUTES } from "@/config/routes"
 import { SETTINGS_SECTION_ORDER } from "./sections"
 import type { SettingsSection } from "./types"

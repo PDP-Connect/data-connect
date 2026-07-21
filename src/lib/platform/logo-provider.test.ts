@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 async function importLogoProvider() {

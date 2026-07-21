@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 pub mod connector;
 pub mod connector_store;
 pub mod download;

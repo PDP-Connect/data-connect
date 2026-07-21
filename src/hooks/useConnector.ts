@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useDispatch, useSelector } from 'react-redux';

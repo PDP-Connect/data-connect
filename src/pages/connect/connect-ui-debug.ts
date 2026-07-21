@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { buildGrantSearchParams, type GrantParams } from "@/lib/grant-params"
 
 export type ConnectDebugState =

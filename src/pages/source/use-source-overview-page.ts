@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useMemo, useState } from "react"
 import { useSelector } from "react-redux"
 import { copyTextToClipboard } from "@/lib/clipboard"
