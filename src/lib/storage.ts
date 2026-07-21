@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /** Centralized localStorage cleanup for removed app-level persistence. */
 
 const STORAGE_VERSION = "v1"

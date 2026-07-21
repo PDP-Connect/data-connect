@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Syncs project connectors to ~/.dataconnect/connectors/ for dev mode.

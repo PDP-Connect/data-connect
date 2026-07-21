@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { SettingsSection } from "./types"
 
 export const SETTINGS_SECTION_ORDER: SettingsSection[] = [

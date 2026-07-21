@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { cn } from "@/lib/utils"
 
 export const PAGE_CONTAINER_PT_CLASS = "pt-w12"

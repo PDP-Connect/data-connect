@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 export const LINKS = {
   docs: "https://github.com/PDP-Connect/data-connect",
   appBuilderDocs: "https://github.com/PDP-Connect/data-connect",

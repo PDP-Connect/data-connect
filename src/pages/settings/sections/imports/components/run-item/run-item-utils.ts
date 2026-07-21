@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { Run } from "@/types"
 
 export type IngestStatus = "idle" | "sending" | "sent" | "error"

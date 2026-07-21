@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { ComponentPropsWithoutRef, ElementType } from "react";
 
 export type PolymorphicProps<E extends ElementType> = {

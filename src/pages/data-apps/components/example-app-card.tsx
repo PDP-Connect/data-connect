@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { AsteriskIcon } from "lucide-react"
 import { AdaptiveIcon } from "@/components/icons/adaptive-icon"
 import { Text } from "@/components/typography/text"

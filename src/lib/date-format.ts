@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 function toValidDate(value: string | Date): Date | null {
   const date = value instanceof Date ? value : new Date(value)
   return Number.isNaN(date.getTime()) ? null : date

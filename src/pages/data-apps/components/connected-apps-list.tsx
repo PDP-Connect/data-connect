@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { Link } from "react-router-dom"
 import {
   SourceRowList,

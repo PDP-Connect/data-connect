@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { writeText } from "@tauri-apps/plugin-clipboard-manager"
 
 export async function copyTextToClipboard(text: string): Promise<boolean> {

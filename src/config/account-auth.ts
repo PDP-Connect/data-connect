@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { ROUTES } from "@/config/routes"
 
 export const PERSONAL_SERVER_AUTH_SESSION_ID = "local-server-auth"

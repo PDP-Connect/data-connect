@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback } from "react"
 import { useDispatch, useSelector } from "react-redux"
 import { setConnectedApps, addConnectedApp, removeConnectedApp as removeConnectedAppAction } from "../state/store"

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { TestImportsUiState } from "./import-history-panel-state"
 
 // Import History UI debug (development only):

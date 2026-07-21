@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useSelector } from "react-redux"

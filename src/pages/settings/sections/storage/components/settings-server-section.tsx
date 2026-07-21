@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useState } from "react"
 import { ChevronDownIcon, RefreshCwIcon } from "lucide-react"
 import type { usePersonalServer } from "@/hooks/usePersonalServer"

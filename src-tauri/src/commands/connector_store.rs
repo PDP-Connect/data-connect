@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

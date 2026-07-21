@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // Personal Server grant client
 // Communicates with the locally-running Personal Server over localhost.
 // The server creates grants (signs EIP-712 + submits to Gateway) and lists them.

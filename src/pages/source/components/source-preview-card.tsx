@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { CopyIcon, FolderIcon } from "lucide-react"
 import { LoadingButton } from "@/components/elements/button-loading"
 import { Text } from "@/components/typography/text"

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
 import type { Run, Platform, AppState, ExportedData, ProgressPhase, ConnectorUpdateInfo, AuthState, AuthUser, ConnectedApp, AppConfig } from '../types';

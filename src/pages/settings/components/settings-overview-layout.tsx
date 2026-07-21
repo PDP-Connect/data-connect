@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { ReactNode } from "react"
 import { cn } from "@/lib/classes"
 import { PAGE_CONTAINER_PT_CLASS } from "@/components/elements/page-container"

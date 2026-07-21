@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { useCallback, useEffect, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 
