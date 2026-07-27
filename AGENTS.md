@@ -23,6 +23,7 @@ DataConnect is the protocol client: it runs connectors, orchestrates grants, and
 - Prefer minimal patches over full-file rewrites when feasible; this keeps outputs smaller, reduces token usage in debug loops, and makes changes easier to review. Keep context scoped to the relevant file, function, and failure, and avoid regenerating entire files unless a full rewrite is clearly justified.
 - When I report a bug, do not start with a fix. First reproduce the bug and add the smallest failing test for the reported behavior when feasible. Then have subagents propose fixes, and accept a fix only when that reproducing test passes.
 - Commit only when asked; never push; stage explicit paths only (no `git add .`, `-A`, `-u`, `git commit -a`); run relevant tests before commit.
+- For meaningfully AI-assisted contributions, include `Assisted-by: AI` in each assisted commit and as a standalone final line in the PR description.
 - For all commit actions, follow `.agents/skills/commit-discipline/SKILL.md` exactly.
 - For links/actions that open URLs or local file/folder paths, use shared helpers in `src/lib/open-resource.ts` and `src/lib/tauri-paths.ts`; avoid inline runtime/OS branching in page components.
 - For routes in `src/pages/*`, keep `index.tsx` as entry/composition (params, guards, wiring) and move side effects/async orchestration into a page-local hook (`use-<page>-*.ts`).
