@@ -30,3 +30,6 @@
 - [ ] I included a live URL or clearly described the current app status
 - [ ] I included a repo or other verifiable builder profile
 - [ ] I included demo material or screenshots
+- [ ] If AI helped meaningfully, commits and the PR description each include `Assisted-by: AI`
+
+<!-- If AI helped meaningfully, add `Assisted-by: AI` as a standalone line below. -->
