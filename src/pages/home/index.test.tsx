@@ -316,6 +316,112 @@ describe("Home", () => {
     expect(screen.getAllByRole("button", { name: /open chatgpt/i }).length).toBeGreaterThan(0)
   })
 
+  it.each([
+    [
+      "legacy runtime before PDPP runtime",
+      ["github-playwright", "github-pdpp"],
+    ],
+    [
+      "PDPP runtime before legacy runtime",
+      ["github-pdpp", "github-playwright"],
+    ],
+  ])(
+    "shows one canonical GitHub source when both runtimes are connected (%s)",
+    (_ordering, platformIds) => {
+      const platformsById = {
+        "github-playwright": {
+          id: "github-playwright",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-playwright",
+          description: "GitHub export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "playwright",
+        },
+        "github-pdpp": {
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          description: "GitHub PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: false,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      }
+      mockConnectedPlatforms = { "github-playwright": true }
+      mockUsePlatforms.mockReturnValue({
+        platforms: platformIds.map(
+          id => platformsById[id as keyof typeof platformsById]
+        ),
+        connectedPlatforms: mockConnectedPlatforms,
+        loadPlatforms: vi.fn(),
+        refreshConnectedStatus: vi.fn(),
+        getPlatformById: vi.fn(),
+        isPlatformConnected: vi.fn(id => Boolean(mockConnectedPlatforms[id])),
+      })
+      mockRuns = [
+        {
+          id: "github-playwright-1",
+          platformId: "github-playwright",
+          filename: "github-playwright",
+          isConnected: true,
+          startDate: "2026-07-29T12:00:00.000Z",
+          status: "success",
+          url: "",
+          company: "GitHub",
+          name: "GitHub",
+          logs: "",
+          exportPath: "/tmp/exported_data/GitHub/github-playwright-1",
+        },
+        {
+          id: "github-pdpp-1",
+          platformId: "github-pdpp",
+          filename: "github-pdpp",
+          isConnected: true,
+          startDate: "2026-07-30T12:00:00.000Z",
+          status: "success",
+          url: "",
+          company: "GitHub",
+          name: "GitHub",
+          logs: "",
+          exportPath: "/tmp/exported_data/GitHub/github-pdpp-1",
+        },
+      ]
+
+      renderHome()
+
+      // Each source row exposes both its main surface and chevron as the same
+      // accessible action. Two buttons means exactly one visible GitHub row.
+      const openGithubButtons = screen.getAllByRole("button", {
+        name: /open github/i,
+      })
+      expect(openGithubButtons).toHaveLength(2)
+      fireEvent.click(openGithubButtons[0])
+      expect(mockNavigate).toHaveBeenCalledWith(
+        ROUTES.source.replace(":platformId", "github")
+      )
+
+      fireEvent.click(
+        screen.getByRole("button", { name: /fetch latest data for github/i })
+      )
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" })
+      )
+    }
+  )
+
   it("syncs a connected source from the home list", () => {
     const chatgpt = {
       id: "chatgpt",

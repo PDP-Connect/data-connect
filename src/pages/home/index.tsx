@@ -187,13 +187,22 @@ export function Home() {
 
   // Separate available platforms (memoized to avoid re-filtering on every render)
   const connectedPlatformsList = useMemo(() => {
-    return displayPlatforms.filter(platform => {
-      if (isPlatformConnected(platform.id)) return true
-      const canonicalId = getPlatformRegistryEntry(platform)?.id
-      return canonicalId
-        ? connectedCanonicalIdsFromRuns.has(canonicalId)
-        : false
-    })
+    const connectedByCanonicalId = new Map<string, Platform>()
+
+    for (const platform of displayPlatforms) {
+      const canonicalId = getPlatformRegistryEntry(platform)?.id ?? platform.id
+      const isConnected =
+        isPlatformConnected(platform.id) ||
+        connectedCanonicalIdsFromRuns.has(canonicalId)
+      if (!isConnected) continue
+
+      const existing = connectedByCanonicalId.get(canonicalId)
+      if (!existing || platform.runtime === "pdpp-network") {
+        connectedByCanonicalId.set(canonicalId, platform)
+      }
+    }
+
+    return [...connectedByCanonicalId.values()]
   }, [connectedCanonicalIdsFromRuns, displayPlatforms, isPlatformConnected])
 
   const connectedPlatformIds = useMemo(
