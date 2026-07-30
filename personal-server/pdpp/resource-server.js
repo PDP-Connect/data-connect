@@ -46,7 +46,7 @@ export async function createPdppResourceServer({
     requestId,
     tokenIntrospector: createGrantValidatedIntrospector(
       tokenIntrospector,
-      installed.manifest.connector_id
+      [installed.manifest.connector_id, installed.manifest.connector_key]
     ),
     recordsRepository: createCoreRepositoryPort({
       repository,
@@ -76,7 +76,7 @@ function createRepository(databasePath) {
   return new GrantScopedRecordsRepository({ databasePath })
 }
 
-function createGrantValidatedIntrospector(tokenIntrospector, connectorId) {
+function createGrantValidatedIntrospector(tokenIntrospector, connectorIds) {
   if (typeof tokenIntrospector?.introspect !== "function") {
     throw new TypeError("tokenIntrospector.introspect must be a function")
   }
@@ -110,7 +110,7 @@ function createGrantValidatedIntrospector(tokenIntrospector, connectorId) {
       }
       if (
         identity.grant.source?.kind !== "connector" ||
-        identity.grant.source?.id !== connectorId
+        !connectorIds.includes(identity.grant.source?.id)
       ) {
         throw new CoreOperationError(
           403,

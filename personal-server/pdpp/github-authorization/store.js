@@ -99,6 +99,7 @@ export function openGithubAuthorizationStore({
         "The verified installed GitHub manifest changed before approval"
       )
     }
+    const authorizationDetails = JSON.parse(request.terms_json)
     const grant = Object.freeze({
       version: "0.1.0",
       grant_id: `pdpp_grant_${randomUUID()}`,
@@ -107,9 +108,11 @@ export function openGithubAuthorizationStore({
       client_id: requiredString(clientId, "client_id"),
       session_id: request.session_id,
       scopes: JSON.parse(request.scopes_json),
+      source: authorizationDetails.source,
+      streams: authorizationDetails.streams,
       manifest_version: request.manifest_version,
       manifest_digest: request.manifest_digest,
-      authorization_details: JSON.parse(request.terms_json),
+      authorization_details: authorizationDetails,
     })
     const accessToken = `pdpp_at_${random(32).toString("base64url")}`
     db.transaction(() => {

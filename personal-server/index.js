@@ -25,7 +25,6 @@ import { execSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { registerProtectedRoutes } from './protected-routes.js';
 import { mountPdppResourceServer } from './pdpp/resource-server.js';
-import { createHttpTokenIntrospector } from './pdpp/token-introspector.js';
 import { createGithubAuthorizationAdapter } from './pdpp/github-authorization/index.js';
 import { registerGithubAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
 
@@ -400,10 +399,9 @@ async function main() {
         databasePath: join(pdppStorageRoot, 'pdpp-github-records.sqlite'),
         exportRoot: process.env.DATACONNECT_EXPORT_ROOT,
         connectionId: process.env.PDPP_GITHUB_CONNECTION_ID || 'default',
-        tokenIntrospector: createHttpTokenIntrospector({
-          url: process.env.PDPP_TOKEN_INTROSPECTION_URL,
-          authorization: process.env.PDPP_INTROSPECTION_AUTHORIZATION,
-        }),
+        tokenIntrospector: {
+          introspect: token => pdppAuthorization.resolveForResourceServer(token),
+        },
       });
       send({ type: 'log', message: '[pdpp] mounted installed GitHub resource routes' });
     } catch (error) {

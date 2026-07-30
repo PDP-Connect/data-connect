@@ -3,12 +3,15 @@ import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import test from "node:test"
 
 import { Hono } from "hono"
 
+import { registerProtectedRoutes } from "../protected-routes.js"
 import { GrantScopedRecordsRepository } from "./grant-scoped-records-repository.js"
+import { createGithubAuthorizationAdapter, PDPP_DATA_ACCESS_TYPE } from "./github-authorization/index.js"
+import { registerGithubAuthorizationRoutes } from "./github-authorization/http-routes.js"
 import { mountPdppResourceServer } from "./resource-server.js"
 
 const tempRoots = []
@@ -368,6 +371,107 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
     assert.equal(response.status, 401)
     assert.equal((await response.json()).error.code, "authentication_error")
   }
+})
+
+test("composes local GitHub authorization with imported PDPP reads and legacy revocation", async () => {
+  const fixture = createInstalledGithubFixture()
+  const adapter = createGithubAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    databasePath: join(dirname(fixture.databasePath), "authorization.sqlite"),
+  })
+  const app = new Hono()
+  const desktopToken = "desktop-token"
+  const legacyRevocations = []
+
+  app.get("/v1/data", context => context.json({ legacy: true }))
+  registerProtectedRoutes({
+    app,
+    devToken: desktopToken,
+    gatewayClient: {
+      revokeGrant: async ({ grantId }) => legacyRevocations.push(grantId),
+    },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: {
+      signGrantRevocation: async () => "signature",
+    },
+    onLegacyGrantRevoked: legacyGrantId => adapter.revokeByLegacyGrantId(legacyGrantId),
+  })
+  registerGithubAuthorizationRoutes({ app, devToken: desktopToken, adapter })
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    tokenIntrospector: {
+      introspect: token => adapter.resolveForResourceServer(token),
+    },
+  })
+
+  assert.deepEqual(await (await app.request("http://personal.example/v1/data")).json(), { legacy: true })
+
+  const authorizationDetails = [{
+    type: PDPP_DATA_ACCESS_TYPE,
+    source: { kind: "connector", id: "github" },
+    access_mode: "continuous",
+    purpose_code: "https://example.test/purpose/research",
+    streams: [{ name: "repositories", resources: ["allowed"] }],
+  }]
+  const consent = await app.request("http://personal.example/v1/pdpp/consent-requests", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${desktopToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: "legacy-session",
+      scopes: ["github.repositories"],
+      authorization_details: authorizationDetails,
+    }),
+  })
+  assert.equal(consent.status, 201)
+  const request = await consent.json()
+
+  const approval = await app.request(
+    `http://personal.example/v1/pdpp/consent-requests/${request.request_id}/approve`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${desktopToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        legacy_grant_id: "legacy-grant-1",
+        subject_id: "subject-1",
+        client_id: "client-1",
+      }),
+    }
+  )
+  assert.equal(approval.status, 201)
+  const issued = await approval.json()
+  const bearer = { authorization: `Bearer ${issued.access_token}` }
+  const identity = adapter.resolveForResourceServer(issued.access_token)
+  assert.equal(identity.active, true)
+  assert.equal(Array.isArray(identity.grant.streams), true)
+
+  const streams = await app.request("http://personal.example/v1/streams", { headers: bearer })
+  assert.equal(streams.status, 200, await streams.clone().text())
+  assert.equal((await streams.json()).data[0].name, "repositories")
+  const records = await app.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers: bearer }
+  )
+  assert.equal(records.status, 200)
+  assert.deepEqual((await records.json()).data.map(record => record.data.id), ["allowed"])
+
+  const revoke = await app.request("http://personal.example/v1/grants/legacy-grant-1", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${desktopToken}` },
+  })
+  assert.equal(revoke.status, 204)
+  assert.deepEqual(legacyRevocations, ["legacy-grant-1"])
+
+  const inactive = await app.request("http://personal.example/v1/streams", { headers: bearer })
+  assert.equal(inactive.status, 401)
+  adapter.close()
 })
 
 test("maps durable cursor errors to stable resource-server responses", async () => {
