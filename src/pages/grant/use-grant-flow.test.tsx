@@ -9,6 +9,8 @@ const mockDenySession = vi.fn()
 const mockVerifyBuilder = vi.fn()
 const mockCreateGrant = vi.fn()
 const mockFetchServerIdentity = vi.fn()
+const mockCreateGithubPdppConsentRequest = vi.fn()
+const mockIssueGithubPdppGrant = vi.fn()
 
 let authState = {
   isAuthenticated: false,
@@ -50,8 +52,7 @@ vi.mock("../../services/sessionRelay", () => ({
     mockClaimSession.apply(null, args as []),
   approveSession: (...args: unknown[]) =>
     mockApproveSession.apply(null, args as []),
-  denySession: (...args: unknown[]) =>
-    mockDenySession.apply(null, args as []),
+  denySession: (...args: unknown[]) => mockDenySession.apply(null, args as []),
   SessionRelayError: class SessionRelayError extends Error {},
 }))
 
@@ -67,9 +68,15 @@ vi.mock("../../services/builder", () => ({
 }))
 
 vi.mock("../../services/personalServer", () => ({
-  createGrant: (...args: unknown[]) =>
-    mockCreateGrant.apply(null, args as []),
+  createGrant: (...args: unknown[]) => mockCreateGrant.apply(null, args as []),
   PersonalServerError: class PersonalServerError extends Error {},
+}))
+
+vi.mock("../../services/pdppAuthorization", () => ({
+  createGithubPdppConsentRequest: (...args: unknown[]) =>
+    mockCreateGithubPdppConsentRequest.apply(null, args as []),
+  issueGithubPdppGrant: (...args: unknown[]) =>
+    mockIssueGithubPdppGrant.apply(null, args as []),
 }))
 
 vi.mock("../../services/serverRegistration", () => ({
@@ -85,7 +92,26 @@ beforeEach(() => {
   mockVerifyBuilder.mockReset()
   mockCreateGrant.mockReset()
   mockFetchServerIdentity.mockReset()
-  mockFetchServerIdentity.mockResolvedValue({ address: "0xserver", publicKey: "pk", serverId: null })
+  mockCreateGithubPdppConsentRequest.mockReset()
+  mockIssueGithubPdppGrant.mockReset()
+  mockFetchServerIdentity.mockResolvedValue({
+    address: "0xserver",
+    publicKey: "pk",
+    serverId: null,
+  })
+  mockCreateGithubPdppConsentRequest.mockResolvedValue({
+    request_id: "pdpp_request_1",
+    session_id: "pdpp-session",
+    scopes: ["github.repositories"],
+    authorization_details: {
+      type: "https://pdpp.org/data-access",
+      source: { kind: "connector", id: "github" },
+      access_mode: "single_use",
+      purpose_code: "https://example.test/purpose",
+      streams: [{ name: "repositories", fields: ["name"] }],
+    },
+  })
+  mockIssueGithubPdppGrant.mockResolvedValue({})
   authState = {
     isAuthenticated: false,
     isLoading: false,
@@ -106,6 +132,73 @@ beforeEach(() => {
 })
 
 describe("useGrantFlow", () => {
+  it("adds only server-normalized GitHub terms to the legacy approval flow", async () => {
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      walletAddress: "subject-1",
+    }
+    const prefetched = {
+      session: {
+        id: "pdpp-session",
+        granteeAddress: "client-1",
+        scopes: ["github.repositories"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "GitHub builder",
+        appUrl: "https://builder.example.com",
+      },
+    }
+    mockCreateGrant.mockResolvedValue({ grantId: "legacy-1" })
+    const details = [
+      {
+        type: "https://pdpp.org/data-access" as const,
+        source: { kind: "connector" as const, id: "github" as const },
+        access_mode: "single_use" as const,
+        purpose_code: "https://example.test/purpose",
+        streams: [{ name: "repositories", fields: ["name"] }],
+      },
+    ]
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "pdpp-session",
+          secret: "secret",
+          scopes: ["github.repositories"],
+          authorizationDetails: details,
+        },
+        prefetched
+      )
+    )
+    await waitFor(() => expect(result.current.flowState.status).toBe("consent"))
+    expect(result.current.flowState.githubPdppConsentRequest?.request_id).toBe(
+      "pdpp_request_1"
+    )
+    await act(async () => {
+      await result.current.handleApprove()
+    })
+    expect(mockCreateGrant).toHaveBeenCalledWith(
+      8080,
+      { granteeAddress: "client-1", scopes: ["github.repositories"] },
+      "test-dev-token"
+    )
+    expect(mockIssueGithubPdppGrant).toHaveBeenCalledWith(
+      8080,
+      {
+        requestId: "pdpp_request_1",
+        legacyGrantId: "legacy-1",
+        subjectId: "subject-1",
+        clientId: "client-1",
+      },
+      "test-dev-token"
+    )
+    expect(mockApproveSession).toHaveBeenCalledWith(
+      "pdpp-session",
+      expect.objectContaining({ grantId: "legacy-1" })
+    )
+  })
+
   it("uses demo session data for grant-session-* IDs", async () => {
     const { result } = renderHook(() =>
       useGrantFlow({
@@ -185,8 +278,8 @@ describe("useGrantFlow", () => {
     const { result, rerender } = renderHook(() =>
       useGrantFlow(
         { sessionId: "race-session-1", secret: "race-secret" },
-        prefetched,
-      ),
+        prefetched
+      )
     )
 
     await waitFor(() => {
@@ -235,7 +328,7 @@ describe("useGrantFlow", () => {
         granteeAddress: "0xbuilder",
         scopes: ["chatgpt.conversations"],
       },
-      "test-dev-token",
+      "test-dev-token"
     )
   })
 
@@ -326,10 +419,14 @@ describe("useGrantFlow", () => {
       expect(result.current.flowState.status).toBe("success")
     })
 
-    expect(mockCreateGrant).toHaveBeenCalledWith(8080, {
-      granteeAddress: "0xbuilder",
-      scopes: ["chatgpt.conversations"],
-    }, "test-dev-token")
+    expect(mockCreateGrant).toHaveBeenCalledWith(
+      8080,
+      {
+        granteeAddress: "0xbuilder",
+        scopes: ["chatgpt.conversations"],
+      },
+      "test-dev-token"
+    )
     expect(mockApproveSession).toHaveBeenCalledWith("real-session-2", {
       secret: "test-secret",
       grantId: "grant-123",
@@ -384,7 +481,9 @@ describe("useGrantFlow", () => {
 
     expect(mockClaimSession).not.toHaveBeenCalled()
     expect(mockVerifyBuilder).not.toHaveBeenCalled()
-    expect(result.current.flowState.session?.granteeAddress).toBe("0xprefetchbuilder")
+    expect(result.current.flowState.session?.granteeAddress).toBe(
+      "0xprefetchbuilder"
+    )
     expect(result.current.builderName).toBe("Pre-fetched Builder")
   })
 
@@ -421,7 +520,9 @@ describe("useGrantFlow", () => {
     await waitFor(() => {
       expect(result.current.flowState.status).toBe("error")
     })
-    expect(result.current.flowState.error).toContain("does not match this authorization URL")
+    expect(result.current.flowState.error).toContain(
+      "does not match this authorization URL"
+    )
     expect(mockClaimSession).not.toHaveBeenCalled()
     expect(mockVerifyBuilder).not.toHaveBeenCalled()
 
@@ -451,7 +552,9 @@ describe("useGrantFlow", () => {
     await waitFor(() => {
       expect(result.current.flowState.status).toBe("error")
     })
-    expect(result.current.flowState.error).toContain("requested scopes do not match")
+    expect(result.current.flowState.error).toContain(
+      "requested scopes do not match"
+    )
     expect(mockVerifyBuilder).not.toHaveBeenCalled()
     expect(mockCreateGrant).not.toHaveBeenCalled()
   })
@@ -518,7 +621,9 @@ describe("useGrantFlow", () => {
       expiresAt: "2030-01-01T00:00:00.000Z",
     })
     mockVerifyBuilder.mockRejectedValue(
-      new BuilderVerificationError("Builder app at https://example.com is unreachable")
+      new BuilderVerificationError(
+        "Builder app at https://example.com is unreachable"
+      )
     )
 
     const { result } = renderHook(() =>
@@ -553,9 +658,8 @@ describe("useGrantFlow", () => {
       name: "Test Builder",
       appUrl: "https://test.example.com",
     })
-    const { PersonalServerError } = await import(
-      "../../services/personalServer"
-    )
+    const { PersonalServerError } =
+      await import("../../services/personalServer")
     mockCreateGrant.mockRejectedValue(
       new PersonalServerError("Server signer not available")
     )
@@ -578,9 +682,7 @@ describe("useGrantFlow", () => {
     await waitFor(() => {
       expect(result.current.flowState.status).toBe("error")
     })
-    expect(result.current.flowState.error).toBe(
-      "Server signer not available"
-    )
+    expect(result.current.flowState.error).toBe("Server signer not available")
   })
 
   it("navigates away even when deny API call fails", async () => {
@@ -824,8 +926,8 @@ describe("useGrantFlow", () => {
     const { result, rerender } = renderHook(() =>
       useGrantFlow(
         { sessionId: "restart-session", secret: "test-secret" },
-        prefetched,
-      ),
+        prefetched
+      )
     )
 
     await waitFor(() => {

@@ -7,7 +7,10 @@ import {
   getClaimedAuthorizationMismatch,
   getGrantParamsFromSearchParams,
 } from "@/lib/grant-params"
-import { getPrimaryDataSourceLabel, getPrimaryScopeToken } from "@/lib/scope-labels"
+import {
+  getPrimaryDataSourceLabel,
+  getPrimaryScopeToken,
+} from "@/lib/scope-labels"
 import { ROUTES } from "@/config/routes"
 import {
   trackBuilderVerificationCompleted,
@@ -74,9 +77,15 @@ export function useConnectPage(): UseConnectPageResult {
   const requestedScopes =
     params.scopes && params.scopes.length > 0 ? params.scopes : undefined
   const requestedScopesKey = requestedScopes?.join("|") ?? ""
+  const authorizationDetailsKey =
+    params.authorizationDetails === undefined
+      ? ""
+      : JSON.stringify(params.authorizationDetails)
   const requestedTelemetryPlatform = useMemo(() => {
     const scopeToken = getPrimaryScopeToken(requestedScopes)
-    return scopeToken ? getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken : null
+    return scopeToken
+      ? (getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken)
+      : null
   }, [requestedScopesKey])
   const claimedScopes = prefetched?.session.scopes
   // Grant sessions must remain canonical to URL/claimed session inputs.
@@ -84,7 +93,7 @@ export function useConnectPage(): UseConnectPageResult {
   const fallbackAppScopes = hasGrantSession ? undefined : appEntry?.scopes
   const grantScopes = hasGrantSession
     ? claimedScopes
-    : requestedScopes ?? fallbackAppScopes
+    : (requestedScopes ?? fallbackAppScopes)
   const scopesKey = grantScopes?.join("|") ?? ""
   useEffect(() => {
     const sessionIdParam = params.sessionId
@@ -132,7 +141,7 @@ export function useConnectPage(): UseConnectPageResult {
         const authorizationMismatch = getClaimedAuthorizationMismatch(
           sessionIdParam,
           requestedScopes,
-          claimed,
+          claimed
         )
         if (authorizationMismatch) {
           setPrefetchError(authorizationMismatch)
@@ -188,7 +197,12 @@ export function useConnectPage(): UseConnectPageResult {
       if (!isCurrentPrefetch()) return
       setPrefetchDone(true)
     })()
-  }, [params.secret, params.sessionId, requestedScopesKey, requestedTelemetryPlatform])
+  }, [
+    params.secret,
+    params.sessionId,
+    requestedScopesKey,
+    requestedTelemetryPlatform,
+  ])
 
   const { platforms, isPlatformConnected, platformsLoaded, platformLoadError } =
     usePlatforms()
@@ -226,15 +240,26 @@ export function useConnectPage(): UseConnectPageResult {
         secret: params.secret,
         appId: resolvedAppId,
         scopes: grantScopes,
+        authorizationDetails: authorizationDetailsKey
+          ? JSON.parse(authorizationDetailsKey)
+          : undefined,
       }).toString(),
-    [params.secret, resolvedAppId, scopesKey, sessionId]
+    [
+      authorizationDetailsKey,
+      params.secret,
+      resolvedAppId,
+      scopesKey,
+      sessionId,
+    ]
   )
 
   const isConnecting = Boolean(connectRunId)
   const scopeSummary =
     grantScopes && grantScopes.length > 0 ? grantScopes.join(", ") : null
   const isMissingAppSelection =
-    platformsLoaded && !resolvedAppId && (!grantScopes || grantScopes.length === 0)
+    platformsLoaded &&
+    !resolvedAppId &&
+    (!grantScopes || grantScopes.length === 0)
   const isMissingRegistryEntry = platformsLoaded && !registryEntry
   const isMissingConnector =
     platformsLoaded && Boolean(registryEntry) && !connectPlatform
@@ -243,19 +268,17 @@ export function useConnectPage(): UseConnectPageResult {
     ? `Could not load connectors.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}`
     : prefetchError
       ? prefetchError
-    : isMissingAppSelection
-      ? "Missing app or scopes. Open Connect from a data app, or include scopes in the URL."
-      : isMissingRegistryEntry
-      ? `Invalid scope: ${scopeSummary ?? "unknown"}. Available scopes: ${getAllAvailableScopes(platforms).join(", ")}.`
-      : isMissingConnector
-        ? `No connector installed for ${
-            dataSourceLabel ?? "requested scope"
-          }.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}${
-            platforms.length > 0
-              ? ` Installed connectors: ${platforms.map(p => p.name ?? p.id).join(", ")}.`
-              : ""
-          }`
-        : null
+      : isMissingAppSelection
+        ? "Missing app or scopes. Open Connect from a data app, or include scopes in the URL."
+        : isMissingRegistryEntry
+          ? `Invalid scope: ${scopeSummary ?? "unknown"}. Available scopes: ${getAllAvailableScopes(platforms).join(", ")}.`
+          : isMissingConnector
+            ? `No connector installed for ${dataSourceLabel ?? "requested scope"}.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}${
+                platforms.length > 0
+                  ? ` Installed connectors: ${platforms.map(p => p.name ?? p.id).join(", ")}.`
+                  : ""
+              }`
+            : null
 
   const isBusy = isCheckingPlatforms || isConnecting
   // Show loading while prefetch is resolving scopes (avoids a brief
@@ -300,7 +323,9 @@ export function useConnectPage(): UseConnectPageResult {
     if (isDebugging) return
     if (!hasGrantSession || !platformsLoaded || !isAlreadyConnected) return
 
-    const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+    const grantHref = grantSearch
+      ? `${ROUTES.grant}?${grantSearch}`
+      : ROUTES.grant
     navigate(grantHref, {
       replace: true,
       state: prefetchedDataRef.current
@@ -321,7 +346,9 @@ export function useConnectPage(): UseConnectPageResult {
     if (!activeRun) return
 
     if (activeRun.status === "success" || activeRun.status === "partial") {
-      const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+      const grantHref = grantSearch
+        ? `${ROUTES.grant}?${grantSearch}`
+        : ROUTES.grant
       setConnectRunId(null)
       navigate(grantHref, {
         state: prefetchedDataRef.current
@@ -337,14 +364,22 @@ export function useConnectPage(): UseConnectPageResult {
   }, [activeRun, grantSearch, isDebugging, navigate])
 
   const handleConnect = async () => {
-    if (isDebugging || !connectPlatform || isBusy || (hasGrantSession && !prefetched)) return
+    if (
+      isDebugging ||
+      !connectPlatform ||
+      isBusy ||
+      (hasGrantSession && !prefetched)
+    )
+      return
     const runId = await startImport(connectPlatform)
     if (!runId) return
     setConnectRunId(runId)
   }
 
   const handleDebugGrant = () => {
-    const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+    const grantHref = grantSearch
+      ? `${ROUTES.grant}?${grantSearch}`
+      : ROUTES.grant
     navigate(grantHref, {
       state: prefetched ? { prefetched } : undefined,
     })

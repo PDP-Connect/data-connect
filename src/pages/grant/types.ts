@@ -40,6 +40,7 @@ export interface GrantFlowState {
   session?: GrantSession
   builderManifest?: BuilderManifest
   grantId?: string
+  githubPdppConsentRequest?: import("@/services/pdppAuthorization").GithubPdppConsentRequest
 }
 
 export interface GrantFlowParams {
@@ -48,6 +49,9 @@ export interface GrantFlowParams {
   appId?: string
   scopes?: string[]
   status?: "success"
+  authorizationDetails?:
+    | import("@/services/pdppAuthorization").PdppAuthorizationDetail[]
+    | null
 }
 
 /** Pre-fetched session + builder data passed via navigation state from the connect page.

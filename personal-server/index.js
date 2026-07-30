@@ -26,14 +26,13 @@ import { pathToFileURL } from 'node:url';
 import { registerProtectedRoutes } from './protected-routes.js';
 import { mountPdppResourceServer } from './pdpp/resource-server.js';
 import { createHttpTokenIntrospector } from './pdpp/token-introspector.js';
+import { createGithubAuthorizationAdapter } from './pdpp/github-authorization/index.js';
+import { registerGithubAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
 
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
-  '@opendatalabs/personal-server-ts-core/config':
-    '@opendatalabs/personal-server-ts-core/dist/config/index.js',
-  '@opendatalabs/personal-server-ts-server':
-    '@opendatalabs/personal-server-ts-server/dist/api.js',
-  '@hono/node-server':
-    '@hono/node-server/dist/index.js',
+  '@opendatalabs/personal-server-ts-core/config': '@opendatalabs/personal-server-ts-core/dist/config/index.js',
+  '@opendatalabs/personal-server-ts-server': '@opendatalabs/personal-server-ts-server/dist/api.js',
+  '@hono/node-server': '@hono/node-server/dist/index.js',
 };
 
 function send(msg) {
@@ -42,7 +41,10 @@ function send(msg) {
     json = JSON.stringify(msg);
   } catch {
     // Fallback for cyclic or non-serializable messages
-    json = JSON.stringify({ type: msg?.type || 'error', message: String(msg?.message ?? 'Serialization error') });
+    json = JSON.stringify({
+      type: msg?.type || 'error',
+      message: String(msg?.message ?? 'Serialization error'),
+    });
   }
   process.stdout.write(json + '\n');
 }
@@ -50,11 +52,7 @@ function send(msg) {
 async function importRuntimeModule(specifier) {
   const packagedEntrypoint = PACKAGED_RUNTIME_ENTRYPOINTS[specifier];
   if (process.pkg && packagedEntrypoint) {
-    const filesystemEntrypoint = join(
-      dirname(process.execPath),
-      'node_modules',
-      ...packagedEntrypoint.split('/')
-    );
+    const filesystemEntrypoint = join(dirname(process.execPath), 'node_modules', ...packagedEntrypoint.split('/'));
     return import(pathToFileURL(filesystemEntrypoint).href);
   }
 
@@ -100,7 +98,9 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   send({ type: 'log', message: `[tunnel] Storage root: ${storageRoot}` });
 
   // Stop the library's frpc
-  try { await tunnelManager.stop(); } catch {}
+  try {
+    await tunnelManager.stop();
+  } catch {}
   killStaleFrpc(storageRoot);
   send({ type: 'log', message: `[tunnel] Stopped stale frpc processes` });
 
@@ -108,15 +108,24 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   let toml;
   try {
     toml = readFileSync(tomlPath, 'utf-8');
-    send({ type: 'log', message: `[tunnel] Loaded TOML config (${toml.length} bytes)` });
+    send({
+      type: 'log',
+      message: `[tunnel] Loaded TOML config (${toml.length} bytes)`,
+    });
   } catch (err) {
-    send({ type: 'tunnel-failed', message: `Tunnel config not found at ${tomlPath}: ${err.message}` });
+    send({
+      type: 'tunnel-failed',
+      message: `Tunnel config not found at ${tomlPath}: ${err.message}`,
+    });
     return;
   }
 
   // Log the FRP server address from the config
   const serverAddrMatch = toml.match(/serverAddr = "(.+)"/);
-  send({ type: 'log', message: `[tunnel] FRP server: ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'}` });
+  send({
+    type: 'log',
+    message: `[tunnel] FRP server: ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'}`,
+  });
 
   // Extract subdomain for the public URL
   const subdomainMatch = toml.match(/subdomain = "(.+)"/);
@@ -126,9 +135,7 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   }
   // Derive the public URL domain from the FRP server address
   // frpc.server.vana.org → server.vana.org, frpc.server-dev.vana.org → server-dev.vana.org
-  const tunnelDomain = serverAddrMatch
-    ? serverAddrMatch[1].replace(/^frpc\./, '')
-    : 'server.vana.org';
+  const tunnelDomain = serverAddrMatch ? serverAddrMatch[1].replace(/^frpc\./, '') : 'server.vana.org';
   const publicUrl = `https://${subdomainMatch[1]}.${tunnelDomain}`;
   send({ type: 'log', message: `[tunnel] Subdomain: ${subdomainMatch[1]}` });
   send({ type: 'log', message: `[tunnel] Public URL will be: ${publicUrl}` });
@@ -138,8 +145,14 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   toml = toml.replace(/name = "(?:personal-server|ps-[0-9a-f]+)"/, `name = "${uniqueName}"`);
   writeFileSync(tomlPath, toml);
 
-  send({ type: 'log', message: `[tunnel] Connecting with proxy name: ${uniqueName}${attempt > 0 ? ` (retry ${attempt}/${MAX_RETRIES})` : ''}` });
-  send({ type: 'log', message: `[tunnel] Spawning: ${frpcPath} -c ${tomlPath}` });
+  send({
+    type: 'log',
+    message: `[tunnel] Connecting with proxy name: ${uniqueName}${attempt > 0 ? ` (retry ${attempt}/${MAX_RETRIES})` : ''}`,
+  });
+  send({
+    type: 'log',
+    message: `[tunnel] Spawning: ${frpcPath} -c ${tomlPath}`,
+  });
 
   // Spawn frpc with the patched config
   const frpc = spawn(frpcPath, ['-c', tomlPath], {
@@ -154,20 +167,31 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   const retry = async () => {
     if (connected || retrying || attempt >= MAX_RETRIES) return;
     retrying = true;
-    try { frpc.kill(); } catch {}
+    try {
+      frpc.kill();
+    } catch {}
     if (refreshAuth) {
-      send({ type: 'log', message: '[tunnel] Auth rejected, refreshing and retrying...' });
+      send({
+        type: 'log',
+        message: '[tunnel] Auth rejected, refreshing and retrying...',
+      });
       try {
         await refreshAuth();
       } catch (err) {
-        send({ type: 'tunnel-failed', message: `Failed to refresh tunnel auth: ${err.message}` });
+        send({
+          type: 'tunnel-failed',
+          message: `Failed to refresh tunnel auth: ${err.message}`,
+        });
         return;
       }
     }
-    connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, attempt: attempt + 1 });
+    connectTunnel(tunnelManager, storageRoot, send, {
+      refreshAuth,
+      attempt: attempt + 1,
+    });
   };
 
-  const onData = (data) => {
+  const onData = data => {
     const text = data.toString().trim();
     send({ type: 'log', message: `[tunnel] frpc output: ${text}` });
     if (!connected && text.includes('start proxy success')) {
@@ -178,7 +202,10 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
       tunnelManager.status = 'connected';
       tunnelManager.publicUrl = publicUrl;
       tunnelManager.connectedSince = new Date();
-      send({ type: 'log', message: `[tunnel] Connected to ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'} — ${publicUrl}` });
+      send({
+        type: 'log',
+        message: `[tunnel] Connected to ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'} — ${publicUrl}`,
+      });
       send({ type: 'tunnel', url: publicUrl });
     }
     // The FRP server auth token has a short TTL. If the wrapper kills the
@@ -191,21 +218,28 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
   };
   frpc.stdout?.on('data', onData);
   frpc.stderr?.on('data', onData);
-  frpc.on('error', (err) => {
+  frpc.on('error', err => {
     send({ type: 'log', message: `[tunnel] frpc error event: ${err.message}` });
     if (!connected) {
       send({ type: 'tunnel-failed', message: `frpc error: ${err.message}` });
     }
   });
   frpc.on('exit', (code, signal) => {
-    send({ type: 'log', message: `[tunnel] frpc exited (code: ${code}, signal: ${signal})` });
+    send({
+      type: 'log',
+      message: `[tunnel] frpc exited (code: ${code}, signal: ${signal})`,
+    });
     if (!connected && !retrying) {
       send({ type: 'tunnel-failed', message: `frpc exited with code ${code}` });
     }
   });
 
   // Ensure frpc is killed on process exit
-  const killFrpc = () => { try { frpc.kill(); } catch {} };
+  const killFrpc = () => {
+    try {
+      frpc.kill();
+    } catch {}
+  };
   process.on('exit', killFrpc);
   process.on('SIGTERM', killFrpc);
   process.on('SIGINT', killFrpc);
@@ -218,9 +252,7 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
  * wallet) and POSTs to the gateway. Idempotent — 409 means already registered.
  */
 async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignature, ownerAddress, serverAddress, publicKey, tunnelServerAddr, send }) {
-  const regDomain = tunnelServerAddr
-    ? tunnelServerAddr.replace(/^frpc\./, '')
-    : 'server.vana.org';
+  const regDomain = tunnelServerAddr ? tunnelServerAddr.replace(/^frpc\./, '') : 'server.vana.org';
   const serverUrl = `https://${serverAddress.toLowerCase()}.${regDomain}`;
   const typedData = {
     types: {
@@ -241,11 +273,18 @@ async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignatu
     message: { ownerAddress, serverAddress, publicKey, serverUrl },
   };
 
-  send({ type: 'log', message: `[registration] Signing ServerRegistration via ${accountUrl}/api/sign` });
+  send({
+    type: 'log',
+    message: `[registration] Signing ServerRegistration via ${accountUrl}/api/sign`,
+  });
   const signRes = await fetch(`${accountUrl}/api/sign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ masterKeySignature, typedData, type: 'eth_signTypedData_v4' }),
+    body: JSON.stringify({
+      masterKeySignature,
+      typedData,
+      type: 'eth_signTypedData_v4',
+    }),
   });
   if (!signRes.ok) {
     const text = await signRes.text().catch(() => '');
@@ -253,16 +292,25 @@ async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignatu
   }
   const { signature } = await signRes.json();
 
-  send({ type: 'log', message: `[registration] Registering with gateway ${gatewayConfig.url}` });
+  send({
+    type: 'log',
+    message: `[registration] Registering with gateway ${gatewayConfig.url}`,
+  });
   const regRes = await fetch(`${gatewayConfig.url}/v1/servers`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Web3Signed ${signature}` },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Web3Signed ${signature}`,
+    },
     body: JSON.stringify({ ownerAddress, serverAddress, publicKey, serverUrl }),
   });
 
   if (regRes.status === 409) {
     const body = await regRes.json().catch(() => ({}));
-    send({ type: 'log', message: `[registration] Already registered (serverId: ${body.serverId ?? 'unknown'})` });
+    send({
+      type: 'log',
+      message: `[registration] Already registered (serverId: ${body.serverId ?? 'unknown'})`,
+    });
     return { serverId: body.serverId ?? null, alreadyRegistered: true };
   }
   if (!regRes.ok) {
@@ -270,7 +318,10 @@ async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignatu
     throw new Error(`Gateway registration failed (${regRes.status}): ${text}`);
   }
   const body = await regRes.json();
-  send({ type: 'log', message: `[registration] Registered (serverId: ${body.serverId ?? 'unknown'})` });
+  send({
+    type: 'log',
+    message: `[registration] Registered (serverId: ${body.serverId ?? 'unknown'})`,
+  });
   return { serverId: body.serverId ?? null, alreadyRegistered: false };
 }
 
@@ -321,12 +372,21 @@ async function main() {
       config.tunnel.serverPort = tunnelServerPort;
     }
 
-    send({ type: 'log', message: `[init] gateway config: chainId=${config.gateway?.chainId}, url=${config.gateway?.url}, contracts=${JSON.stringify(config.gateway?.contracts ?? {})}` });
-    send({ type: 'log', message: `[init] tunnel config: serverAddr=${config.tunnel?.serverAddr}, enabled=${config.tunnel?.enabled}` });
+    send({
+      type: 'log',
+      message: `[init] gateway config: chainId=${config.gateway?.chainId}, url=${config.gateway?.url}, contracts=${JSON.stringify(config.gateway?.contracts ?? {})}`,
+    });
+    send({
+      type: 'log',
+      message: `[init] tunnel config: serverAddr=${config.tunnel?.serverAddr}, enabled=${config.tunnel?.enabled}`,
+    });
 
     // Keep as a reference — startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
+    const pdppAuthorization = createGithubAuthorizationAdapter({
+      databasePath: join(configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server'), 'pdpp-github-authorization.sqlite'),
+    });
 
     // PDPP reads are additive: unavailable or invalid local connector state
     // leaves the established Personal Server routes running without a fallback
@@ -361,10 +421,16 @@ async function main() {
       const path = url.pathname;
       const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || '';
       const host = request.headers.get('host') || '';
-      send({ type: 'log', message: `[http] --> ${method} ${path} (host: ${host}${forwarded ? `, from: ${forwarded}` : ''})` });
+      send({
+        type: 'log',
+        message: `[http] --> ${method} ${path} (host: ${host}${forwarded ? `, from: ${forwarded}` : ''})`,
+      });
       const response = await originalFetch(request, ...args);
       const ms = Date.now() - start;
-      send({ type: 'log', message: `[http] <-- ${method} ${path} ${response.status} (${ms}ms)` });
+      send({
+        type: 'log',
+        message: `[http] <-- ${method} ${path} ${response.status} (${ms}ms)`,
+      });
       return response;
     };
 
@@ -380,11 +446,17 @@ async function main() {
       port,
       send,
       serverSigner,
+      onLegacyGrantRevoked: grantId => pdppAuthorization.revokeByLegacyGrantId(grantId),
+    });
+    registerGithubAuthorizationRoutes({
+      app,
+      devToken,
+      adapter: pdppAuthorization,
     });
 
     // Start HTTP server first so the desktop app can connect immediately.
     // Background services (gateway check, tunnel) run afterwards.
-    const server = serve({ fetch: app.fetch, port }, (info) => {
+    const server = serve({ fetch: app.fetch, port }, info => {
       send({ type: 'ready', port: info.port });
 
       if (devToken) {
@@ -397,10 +469,7 @@ async function main() {
     });
 
     // Kill any stale frpc from a previous app session.
-    const storageRoot = configDir || join(
-      (await import('node:os')).homedir(),
-      '.data-connect', 'personal-server'
-    );
+    const storageRoot = configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server');
     killStaleFrpc(storageRoot);
 
     // --- Pre-registration + background services ---
@@ -409,7 +478,10 @@ async function main() {
     // finds the registration on its first check and connects the tunnel
     // immediately — no restart cycle needed.
     const hasMasterKey = !!masterKeySignature;
-    send({ type: 'log', message: `[bg] hasMasterKey: ${hasMasterKey}, gatewayUrl: ${config.gateway?.url || 'none'}` });
+    send({
+      type: 'log',
+      message: `[bg] hasMasterKey: ${hasMasterKey}, gatewayUrl: ${config.gateway?.url || 'none'}`,
+    });
 
     if (hasMasterKey && context.serverAccount && gatewayClient) {
       // Check if already registered
@@ -417,9 +489,15 @@ async function main() {
       try {
         const existing = await gatewayClient.getServer(context.serverAccount.address);
         serverId = existing?.id ?? null;
-        send({ type: 'log', message: `[bg] Gateway lookup: serverId=${serverId}` });
+        send({
+          type: 'log',
+          message: `[bg] Gateway lookup: serverId=${serverId}`,
+        });
       } catch (lookupErr) {
-        send({ type: 'log', message: `[bg] Gateway lookup failed: ${lookupErr.message}` });
+        send({
+          type: 'log',
+          message: `[bg] Gateway lookup failed: ${lookupErr.message}`,
+        });
       }
 
       // Register if not found
@@ -437,7 +515,10 @@ async function main() {
           });
           serverId = result.serverId;
         } catch (regErr) {
-          send({ type: 'log', message: `[bg] Self-registration failed: ${regErr.message}` });
+          send({
+            type: 'log',
+            message: `[bg] Self-registration failed: ${regErr.message}`,
+          });
         }
       }
 
@@ -453,27 +534,47 @@ async function main() {
       await context.startBackgroundServices();
       send({ type: 'log', message: '[bg] Background services started' });
     } catch (bgErr) {
-      send({ type: 'log', message: `[bg] Background services FAILED: ${bgErr.message || bgErr}` });
+      send({
+        type: 'log',
+        message: `[bg] Background services FAILED: ${bgErr.message || bgErr}`,
+      });
     }
 
-    send({ type: 'log', message: `[bg] tunnelManager: ${!!context.tunnelManager}, tunnelUrl: ${context.tunnelUrl || 'none'}` });
+    send({
+      type: 'log',
+      message: `[bg] tunnelManager: ${!!context.tunnelManager}, tunnelUrl: ${context.tunnelUrl || 'none'}`,
+    });
 
     if (context.tunnelManager && context.tunnelManager.status === 'connected' && context.tunnelManager.publicUrl) {
-      send({ type: 'log', message: `[bg] Library tunnel reports connected — verifying...` });
+      send({
+        type: 'log',
+        message: `[bg] Library tunnel reports connected — verifying...`,
+      });
       const verifyUrl = `${context.tunnelManager.publicUrl}/health`;
       try {
-        const resp = await fetch(verifyUrl, { signal: AbortSignal.timeout(5000) });
+        const resp = await fetch(verifyUrl, {
+          signal: AbortSignal.timeout(5000),
+        });
         if (resp.ok) {
-          send({ type: 'log', message: `[bg] Tunnel verified on ${tunnelServerAddr || 'frpc.server.vana.org'} (status ${resp.status})` });
+          send({
+            type: 'log',
+            message: `[bg] Tunnel verified on ${tunnelServerAddr || 'frpc.server.vana.org'} (status ${resp.status})`,
+          });
           send({ type: 'tunnel', url: context.tunnelManager.publicUrl });
         } else {
-          send({ type: 'log', message: `[bg] Tunnel verify failed (status ${resp.status}) — reconnecting` });
+          send({
+            type: 'log',
+            message: `[bg] Tunnel verify failed (status ${resp.status}) — reconnecting`,
+          });
           connectTunnel(context.tunnelManager, storageRoot, send, {
             refreshAuth: () => context.startBackgroundServices(),
           });
         }
       } catch (err) {
-        send({ type: 'log', message: `[bg] Tunnel verify failed (${err.message}) — reconnecting` });
+        send({
+          type: 'log',
+          message: `[bg] Tunnel verify failed (${err.message}) — reconnecting`,
+        });
         connectTunnel(context.tunnelManager, storageRoot, send, {
           refreshAuth: () => context.startBackgroundServices(),
         });
@@ -487,13 +588,20 @@ async function main() {
     } else if (context.tunnelUrl) {
       send({ type: 'tunnel', url: context.tunnelUrl });
     } else if (hasMasterKey) {
-      send({ type: 'tunnel-failed', message: 'Tunnel could not be established' });
+      send({
+        type: 'tunnel-failed',
+        message: 'Tunnel could not be established',
+      });
     } else {
-      send({ type: 'log', message: '[bg] No master key — skipping tunnel (expected for Phase 1)' });
+      send({
+        type: 'log',
+        message: '[bg] No master key — skipping tunnel (expected for Phase 1)',
+      });
     }
 
     function shutdown(signal) {
       send({ type: 'log', message: `Shutdown signal: ${signal}` });
+      pdppAuthorization.close();
       if (cleanup) cleanup().catch(() => {});
       server.close(() => {
         process.exit(0);

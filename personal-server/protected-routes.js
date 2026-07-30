@@ -22,6 +22,7 @@ export function registerProtectedRoutes({
   port,
   send,
   serverSigner,
+  onLegacyGrantRevoked,
 }) {
   const desktopAuth = requireDesktopAuth(devToken)
 
@@ -49,6 +50,11 @@ export function registerProtectedRoutes({
         grantorAddress: ownerAddress,
         signature,
       })
+
+      // The local token is never revoked if the authoritative Gateway revoke
+      // fails. Keeping this after the awaited Gateway call preserves that
+      // principal-bound lifecycle invariant.
+      await onLegacyGrantRevoked?.(grantId)
 
       return c.body(null, 204)
     } catch (err) {

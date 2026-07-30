@@ -19,6 +19,8 @@ import {
 import type { BuilderManifest } from "../../types"
 import { ActionPanel } from "@/components/typography/button-action"
 import { fieldHeight } from "@/components/typography/field"
+import { GithubPdppConsentTerms } from "./github-pdpp-consent-terms"
+import type { PdppAuthorizationDetail } from "@/services/pdppAuthorization"
 
 // Note: `isApproving` maps to the "creating-grant" / "approving" states.
 // The consent screen stays visible while the Allow button shows a loading spinner.
@@ -27,6 +29,7 @@ interface GrantConsentStateProps {
   builderManifest?: BuilderManifest
   appName?: string
   isApproving: boolean
+  githubPdppTerms?: PdppAuthorizationDetail
   onApprove: () => void
   onDeny?: () => void
 }
@@ -75,11 +78,7 @@ function buildConsentRows(scopes: string[]) {
         kind: "grouped",
         key: platformKey,
         sourceLabel: group.sourceLabel,
-        sentence: `See your ${group.sourceLabel} ${formatListAsSentence(
-          scopeLabels.map(label =>
-            getDataTypeFromScopeLabel(label, group.sourceLabel!)
-          )
-        )}`,
+        sentence: `See your ${group.sourceLabel} ${formatListAsSentence(scopeLabels.map(label => getDataTypeFromScopeLabel(label, group.sourceLabel!)))}`,
       })
       continue
     }
@@ -115,6 +114,7 @@ export function GrantConsentState({
   builderManifest,
   appName,
   isApproving,
+  githubPdppTerms,
   onApprove,
   onDeny,
 }: GrantConsentStateProps) {
@@ -155,6 +155,10 @@ export function GrantConsentState({
           appName={resolvedAppName}
           builderIconSrc={builderIconSrc}
         />
+
+        {githubPdppTerms ? (
+          <GithubPdppConsentTerms terms={githubPdppTerms} />
+        ) : null}
 
         <Text as="p" intent="fine" dim align="left" balance>
           By clicking <strong>Agree and Allow</strong>, you acknowledge that you

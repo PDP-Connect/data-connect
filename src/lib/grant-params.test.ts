@@ -82,6 +82,16 @@ describe("grant-params", () => {
     expect(roundTrip.secret).toBe("my-secret-token")
   })
 
+  it("preserves explicit malformed authorization details so consent fails closed", () => {
+    const params = getGrantParamsFromSearchParams(
+      new URLSearchParams({ authorizationDetails: "not-json" })
+    )
+    expect(params.authorizationDetails).toBeNull()
+    expect(buildGrantSearchParams(params).get("authorizationDetails")).toBe(
+      "null"
+    )
+  })
+
   it("omits secret from search params when not provided", () => {
     const searchParams = buildGrantSearchParams({
       sessionId: "sess-1",

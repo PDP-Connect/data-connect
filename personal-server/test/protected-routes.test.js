@@ -8,9 +8,10 @@ import { registerProtectedRoutes } from "../protected-routes.js"
 const DEV_TOKEN = "desktop-dev-token"
 const OWNER = "0x1234567890abcdef1234567890abcdef12345678"
 
-async function startServer() {
+async function startServer({ revokeError } = {}) {
   const app = new Hono()
   const revocations = []
+  const localRevocations = []
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 })
   await once(server, "listening")
 
@@ -20,6 +21,7 @@ async function startServer() {
     gatewayClient: {
       async revokeGrant(request) {
         revocations.push(request)
+        if (revokeError) throw revokeError
       },
     },
     ownerAddress: OWNER,
@@ -30,12 +32,16 @@ async function startServer() {
         return "revocation-signature"
       },
     },
+    onLegacyGrantRevoked(grantId) {
+      localRevocations.push(grantId)
+    },
   })
 
   const origin = `http://127.0.0.1:${server.address().port}`
   return {
     origin,
     revocations,
+    localRevocations,
     async close() {
       await new Promise((resolve, reject) =>
         server.close(error => (error ? reject(error) : resolve()))
@@ -64,6 +70,7 @@ test("anonymous local and tunnel-shaped requests cannot revoke grants or read ow
     })
     assert.equal(revokeResponse.status, 401)
     assert.equal(server.revocations.length, 0)
+    assert.deepEqual(server.localRevocations, [])
 
     const statusResponse = await fetch(`${server.origin}/status`, { headers })
     assert.equal(statusResponse.status, 401)
@@ -88,6 +95,7 @@ test("an authorized desktop request can revoke and read the owner status", async
       signature: "revocation-signature",
     },
   ])
+  assert.deepEqual(server.localRevocations, ["grant-1"])
 
   const statusResponse = await fetch(`${server.origin}/status`, { headers })
   assert.equal(statusResponse.status, 200)
@@ -96,4 +104,17 @@ test("an authorized desktop request can revoke and read the owner status", async
     owner: OWNER,
     port: Number(new URL(server.origin).port),
   })
+})
+
+test("does not revoke the local token when the authoritative Gateway revoke fails", async t => {
+  const server = await startServer({ revokeError: new Error("gateway unavailable") })
+  t.after(() => server.close())
+
+  const response = await fetch(`${server.origin}/v1/grants/grant-1`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${DEV_TOKEN}` },
+  })
+
+  assert.equal(response.status, 500)
+  assert.deepEqual(server.localRevocations, [])
 })

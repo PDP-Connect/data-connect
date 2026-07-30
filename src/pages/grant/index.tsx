@@ -115,6 +115,9 @@ export function Grant() {
         builderManifest={resolvedBuilderManifest}
         appName={resolvedAppName}
         isApproving={resolvedIsApproving}
+        githubPdppTerms={
+          resolvedFlowState.githubPdppConsentRequest?.authorization_details
+        }
         onApprove={handleApprove}
         onDeny={handleDeny}
       />
