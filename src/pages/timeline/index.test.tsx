@@ -8,7 +8,10 @@ import {
 import { createMemoryRouter, RouterProvider } from "react-router-dom"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ROUTES } from "@/config/routes"
-import type { TimelineDataSource } from "@/apps/timeline/timeline-data-source"
+import type {
+  TimelineDataSource,
+  TimelineReadResult,
+} from "@/apps/timeline/timeline-data-source"
 import type { LocalTimelineConsentRequest } from "@/services/pdppTimeline"
 import { Timeline } from "./index"
 
@@ -108,9 +111,190 @@ describe("Timeline", () => {
     fireEvent.click(screen.getByRole("option", { name: "Notes" }))
 
     await waitFor(() => {
-      expect(screen.getByText("Showing 1 of 2 loaded records")).toBeTruthy()
+      expect(screen.getByText("1 matching records")).toBeTruthy()
     })
+    expect(screen.getByText("Filtered from 2 loaded records.")).toBeTruthy()
     expect(screen.queryByText("A message from the archive")).toBeNull()
+  })
+
+  it("appends the next page while preserving the active stream filter", async () => {
+    const read = vi.fn().mockResolvedValue({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            stream: {
+              id: "messages",
+              label: "Messages",
+              fields: [{ name: "createdAt", format: "date-time" }],
+              primaryKey: [],
+              timestampFields: ["createdAt"],
+            },
+            records: [
+              {
+                id: "message-1",
+                data: {
+                  createdAt: "2026-07-30T15:00:00Z",
+                  title: "First message",
+                },
+              },
+            ],
+            hasMore: true,
+            cursor: "messages:2",
+          },
+          {
+            stream: {
+              id: "notes",
+              label: "Notes",
+              fields: [{ name: "text" }],
+              primaryKey: [],
+              timestampFields: [],
+            },
+            records: [{ id: "note-1", data: { text: "First note" } }],
+            hasMore: false,
+          },
+        ],
+      },
+    })
+    const loadMore = vi.fn().mockResolvedValue({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            stream: {
+              id: "messages",
+              label: "Messages",
+              fields: [{ name: "createdAt", format: "date-time" }],
+              primaryKey: [],
+              timestampFields: ["createdAt"],
+            },
+            records: [
+              {
+                id: "message-1",
+                data: {
+                  createdAt: "2026-07-30T15:00:00Z",
+                  title: "First message",
+                },
+              },
+              {
+                id: "message-2",
+                data: {
+                  createdAt: "2026-07-31T15:00:00Z",
+                  title: "Second message",
+                },
+              },
+            ],
+            hasMore: false,
+          },
+          {
+            stream: {
+              id: "notes",
+              label: "Notes",
+              fields: [{ name: "text" }],
+              primaryKey: [],
+              timestampFields: [],
+            },
+            records: [{ id: "note-1", data: { text: "First note" } }],
+            hasMore: false,
+          },
+        ],
+      },
+    })
+    renderTimeline({ read, loadMore })
+
+    await screen.findByRole("button", { name: "Load more" })
+    fireEvent.click(screen.getByRole("combobox", { name: /filter timeline/i }))
+    fireEvent.click(screen.getByRole("option", { name: "Messages" }))
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }))
+
+    await waitFor(() => {
+      expect(screen.getByText("Second message")).toBeTruthy()
+    })
+    expect(loadMore).toHaveBeenCalledOnce()
+    expect(screen.getByText("2 matching records")).toBeTruthy()
+    expect(screen.getByText("Filtered from 3 loaded records.")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
+    expect(screen.queryByText("First note")).toBeNull()
+  })
+
+  it("fences duplicate load-more clicks while a page is pending", async () => {
+    let resolveMore: (value: TimelineReadResult) => void = () => {
+      throw new Error("loadMore promise was not captured")
+    }
+    const loadMore = vi.fn(
+      () =>
+        new Promise<TimelineReadResult>(resolve => {
+          resolveMore = resolve
+        })
+    )
+    renderTimeline({
+      read: vi.fn().mockResolvedValue({
+        kind: "ready",
+        read: {
+          streams: [
+            {
+              stream: {
+                id: "messages",
+                label: "Messages",
+                fields: [{ name: "createdAt", format: "date-time" }],
+                primaryKey: [],
+                timestampFields: ["createdAt"],
+              },
+              records: [{ id: "message-1", data: { title: "First" } }],
+              hasMore: true,
+              cursor: "cursor",
+            },
+          ],
+        },
+      }),
+      loadMore,
+    })
+
+    const button = await screen.findByRole("button", { name: "Load more" })
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    expect(loadMore).toHaveBeenCalledOnce()
+    resolveMore({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            stream: {
+              id: "messages",
+              label: "Messages",
+              fields: [{ name: "title" }],
+              primaryKey: [],
+              timestampFields: [],
+            },
+            records: [{ id: "message-1", data: { title: "First" } }],
+            hasMore: false,
+          },
+        ],
+      },
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("Loading more")).toBeNull()
+    })
+  })
+
+  it("resets the demo approval and returns to the consent prompt", async () => {
+    const revokeConsent = vi.fn().mockResolvedValue(true)
+    renderTimeline({
+      ...readyDataSource,
+      requestConsent: vi.fn().mockResolvedValue(localTimelineTerms),
+      revokeConsent,
+    })
+
+    await screen.findByText("2 records loaded")
+    fireEvent.click(screen.getByRole("button", { name: "Reset Timeline demo" }))
+
+    await waitFor(() => {
+      expect(revokeConsent).toHaveBeenCalledOnce()
+    })
+    expect(
+      screen.getByText("Allow Timeline to read your connected data")
+    ).toBeTruthy()
   })
 
   it("shows unauthorized and revoked source states", async () => {

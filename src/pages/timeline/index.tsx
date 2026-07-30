@@ -57,10 +57,14 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
     visibleTimeline,
     requestConsent,
     approveConsent,
+    loadMore,
+    isLoadingMore,
+    revokeConsent,
   } = useTimelinePage(dataSource)
   const [consentError, setConsentError] = useState<string | null>(null)
   const [pendingConsent, setPendingConsent] =
     useState<LocalTimelineConsentRequest | null>(null)
+  const [resetError, setResetError] = useState<string | null>(null)
 
   const requestTerms = async () => {
     if (!requestConsent) return
@@ -88,6 +92,22 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
         error instanceof Error
           ? error.message
           : "Timeline consent could not be approved."
+      )
+    }
+  }
+
+  const resetTimelineDemo = async () => {
+    if (!revokeConsent) return
+    setResetError(null)
+    try {
+      await revokeConsent()
+      setPendingConsent(null)
+      setConsentError(null)
+    } catch (error) {
+      setResetError(
+        error instanceof Error
+          ? error.message
+          : "Timeline access could not be reset."
       )
     }
   }
@@ -132,6 +152,10 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
             streams={timeline.streams}
             timeline={timeline}
             visibleTimeline={visibleTimeline}
+            onLoadMore={loadMore}
+            isLoadingMore={isLoadingMore}
+            onResetDemo={revokeConsent ? resetTimelineDemo : undefined}
+            resetError={resetError}
           />
         ) : null}
       </section>
@@ -300,6 +324,10 @@ function TimelineReady({
   streams,
   timeline,
   visibleTimeline,
+  onLoadMore,
+  isLoadingMore,
+  onResetDemo,
+  resetError,
 }: {
   activeStreamId: string | null
   onStreamChange: (streamId: string | null) => void
@@ -316,17 +344,30 @@ function TimelineReady({
     undatedRecords: readonly TimelineUndatedRecord[]
     processedRecordCount: number
   }
+  onLoadMore?: () => void
+  isLoadingMore: boolean
+  onResetDemo?: () => void
+  resetError: string | null
 }) {
   const hasRecords = visibleTimeline.processedRecordCount > 0
 
   return (
     <div className="space-y-w8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <Text as="p" intent="small" muted>
-          {activeStreamId
-            ? `Showing ${visibleTimeline.processedRecordCount} of ${timeline.processedRecordCount} loaded records`
-            : `${timeline.processedRecordCount} records loaded`}
-        </Text>
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-4">
+        <div className="space-y-1">
+          <Text as="p" intent="heading">
+            {activeStreamId
+              ? `${visibleTimeline.processedRecordCount} matching records`
+              : `${timeline.processedRecordCount} records loaded`}
+          </Text>
+          <Text as="p" intent="small" muted>
+            {activeStreamId
+              ? `Filtered from ${timeline.processedRecordCount} loaded records.`
+              : timeline.isTruncated
+                ? "Additional records are available from your local Personal Server."
+                : "All available records are loaded."}
+          </Text>
+        </div>
         <div className="space-y-1">
           <Text as="span" intent="fine" muted>
             Stream
@@ -352,10 +393,22 @@ function TimelineReady({
         </div>
       </div>
 
-      {timeline.isTruncated ? (
-        <Text as="p" intent="small" muted>
-          More records are available. This timeline is showing a bounded sample.
-        </Text>
+      {timeline.isTruncated && onLoadMore ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button onClick={onLoadMore} disabled={isLoadingMore}>
+            {isLoadingMore ? (
+              <>
+                <Spinner />
+                Loading more
+              </>
+            ) : (
+              "Load more"
+            )}
+          </Button>
+          <Text as="p" intent="small" muted>
+            Loads the next {100} records while keeping this filter.
+          </Text>
+        </div>
       ) : null}
 
       {hasRecords ? (
@@ -370,6 +423,23 @@ function TimelineReady({
       ) : (
         <TimelineStatus title="No loaded records match this stream." />
       )}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+        {onResetDemo ? (
+          <Button variant="outline" onClick={onResetDemo}>
+            Reset Timeline demo
+          </Button>
+        ) : null}
+        <Text as="p" intent="small" muted>
+          Revokes this local Timeline approval and returns to the consent
+          screen.
+        </Text>
+      </div>
+      {resetError ? (
+        <Text as="p" intent="small" color="destructive">
+          {resetError}
+        </Text>
+      ) : null}
     </div>
   )
 }

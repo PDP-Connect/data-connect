@@ -188,6 +188,98 @@ describe("production Timeline PDPP data source", () => {
     ])
   })
 
+  it("loads the next bounded page from a saved stream cursor and dedupes records", async () => {
+    const dataSource = createProductionTimelineDataSource({
+      port: 3100,
+      devToken: "desktop-secret",
+    })
+    tauriFetch.mockImplementation((url, init) => {
+      const path = String(url).replace("http://127.0.0.1:3100", "")
+      if (path === "/v1/pdpp/local-timeline/consent-requests") {
+        return Promise.resolve(localConsent(init, "request-more"))
+      }
+      if (
+        path === "/v1/pdpp/local-timeline/consent-requests/request-more/approve"
+      ) {
+        return Promise.resolve(
+          response({ access_token: "pdpp-more", token_type: "Bearer" }, 201)
+        )
+      }
+      if (path === "/v1/streams") {
+        return Promise.resolve(
+          response({
+            data: [{ name: "repositories" }],
+          })
+        )
+      }
+      if (
+        path.startsWith("/v1/streams/repositories/records?") &&
+        !path.includes("cursor=")
+      ) {
+        return Promise.resolve(
+          response({
+            data: [{ id: "repo-1", data: { id: "repo-1" } }],
+            has_more: true,
+            next_cursor: "repo:2",
+          })
+        )
+      }
+      if (
+        path.startsWith("/v1/streams/repositories/records?") &&
+        path.includes("cursor=repo%3A2")
+      ) {
+        return Promise.resolve(
+          response({
+            data: [
+              { id: "repo-1", data: { id: "repo-1-duplicate" } },
+              { id: "repo-2", data: { id: "repo-2" } },
+            ],
+            has_more: false,
+          })
+        )
+      }
+      throw new Error(`unexpected URL ${path}`)
+    })
+
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
+    const first = await dataSource.read({
+      maxStreams: 24,
+      maxRecords: 1,
+      signal: new AbortController().signal,
+    })
+    expect(first).toMatchObject({
+      kind: "ready",
+      read: {
+        streams: [
+          { records: [{ id: "repo-1" }], hasMore: true, cursor: "repo:2" },
+        ],
+      },
+    })
+    if (first.kind !== "ready") throw new Error("expected ready")
+
+    const next = await dataSource.loadMore?.(first.read, {
+      maxStreams: 24,
+      maxRecords: 100,
+      signal: new AbortController().signal,
+    })
+    expect(next).toMatchObject({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            records: [{ id: "repo-1" }, { id: "repo-2" }],
+            hasMore: false,
+            cursor: null,
+          },
+        ],
+      },
+    })
+    expect(tauriFetch.mock.calls.at(-1)?.[0]).toBe(
+      "http://127.0.0.1:3100/v1/streams/repositories/records?limit=100&cursor=repo%3A2"
+    )
+  })
+
   it("fails closed after revocation or expiry and loses its in-memory handoff on renderer restart", async () => {
     const dataSource = createProductionTimelineDataSource({
       port: 3100,
