@@ -8,6 +8,7 @@
     "start": "node index.js",
     "start:cjs": "node index.cjs",
     "build": "node scripts/build.js",
+    "test": "node --test pdpp/**/*.test.js",
     "test:pdpp": "node --test pdpp/test/*.test.js"
   },
   "pkg": {
