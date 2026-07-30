@@ -31,8 +31,6 @@ const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
-const GITHUB_DATA_CONNECT_UAT_STREAMS: [&str; 3] = ["user", "repositories", "starred"];
-
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -651,16 +649,6 @@ fn build_start(
             ));
         }
     }
-    if manifest.connector_key.as_deref() == Some("github")
-        && selected
-            .iter()
-            .any(|stream| !GITHUB_DATA_CONNECT_UAT_STREAMS.contains(&stream.as_str()))
-    {
-        return Err(
-            "DataConnect's current GitHub storage projection supports user, repositories, and starred only"
-                .into(),
-        );
-    }
     let scope = json!({
         "streams": selected.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>()
     });
@@ -679,12 +667,6 @@ fn selected_streams(
 ) -> Vec<String> {
     if !request.streams.is_empty() {
         return request.streams.clone();
-    }
-    if manifest.connector_key.as_deref() == Some("github") {
-        return GITHUB_DATA_CONNECT_UAT_STREAMS
-            .iter()
-            .map(|stream| (*stream).to_owned())
-            .collect();
     }
     manifest
         .streams
@@ -920,26 +902,23 @@ fn build_export_data(
         let records = records_by_stream.get(stream).cloned().unwrap_or_default();
         record_count += records.len();
         stream_counts.insert(stream.clone(), json!(records.len()));
-        if stream == "user" && records.is_empty() {
-            continue;
-        }
-        let (scope, value) = match stream.as_str() {
+        let projection = match stream.as_str() {
             // The Personal Server's existing GitHub schemas deliberately use
             // these shapes. This is a DataConnect storage projection, not a
             // claim that the PDPP connector only supports three streams.
-            "user" => ("github.profile", project_github_profile(&records)?),
-            "repositories" => (
+            "user" if !records.is_empty() => {
+                Some(("github.profile", project_github_profile(&records)?))
+            }
+            "repositories" => Some((
                 "github.repositories",
                 project_github_repositories(&records)?,
-            ),
-            "starred" => ("github.starred", project_github_starred(&records)?),
-            unsupported => {
-                return Err(format!(
-                    "DataConnect does not have a GitHub storage projection for PDPP stream {unsupported}"
-                ));
-            }
+            )),
+            "starred" => Some(("github.starred", project_github_starred(&records)?)),
+            _ => None,
         };
-        projected_scopes.insert(scope.to_owned(), value);
+        if let Some((scope, value)) = projection {
+            projected_scopes.insert(scope.to_owned(), value);
+        }
     }
 
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -1507,6 +1486,23 @@ mod tests {
         })
     }
 
+    fn github_all_streams_manifest() -> Value {
+        json!({
+            "connector_id": "https://registry.pdpp.org/connectors/github",
+            "connector_key": "github",
+            "runtime_requirements": { "bindings": { "network": { "required": true } } },
+            "streams": [
+                { "name": "user" },
+                { "name": "user_stats" },
+                { "name": "repositories" },
+                { "name": "starred" },
+                { "name": "issues" },
+                { "name": "pull_requests" },
+                { "name": "gists" }
+            ]
+        })
+    }
+
     fn success_script() -> &'static str {
         r#"
 const readline = require('node:readline');
@@ -1715,6 +1711,62 @@ rl.on('line', (line) => {
     }
 
     #[test]
+    fn github_defaults_to_every_verified_manifest_stream() {
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "run-1".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec![],
+            connection_id: None,
+            github_token: None,
+            timeout_seconds: None,
+        };
+        let manifest: PdppConnectorManifest =
+            serde_json::from_value(github_all_streams_manifest()).unwrap();
+
+        let start = build_start(&request, &manifest, None).unwrap();
+
+        assert_eq!(
+            start.scope["streams"],
+            json!([
+                { "name": "user" },
+                { "name": "user_stats" },
+                { "name": "repositories" },
+                { "name": "starred" },
+                { "name": "issues" },
+                { "name": "pull_requests" },
+                { "name": "gists" }
+            ])
+        );
+    }
+
+    #[test]
+    fn github_accepts_explicit_verified_streams_and_rejects_unknown_ones() {
+        let mut request = StartInstalledPdppConnectorRequest {
+            run_id: "run-1".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["user_stats".into(), "pull_requests".into()],
+            connection_id: None,
+            github_token: None,
+            timeout_seconds: None,
+        };
+        let manifest: PdppConnectorManifest =
+            serde_json::from_value(github_all_streams_manifest()).unwrap();
+
+        let start = build_start(&request, &manifest, None).unwrap();
+        assert_eq!(
+            start.scope["streams"],
+            json!([{ "name": "user_stats" }, { "name": "pull_requests" }])
+        );
+
+        request.streams = vec!["not_verified".into()];
+        assert!(build_start(&request, &manifest, None)
+            .unwrap_err()
+            .contains("not in the connector manifest"));
+    }
+
+    #[test]
     fn incremental_start_uses_saved_checkpoint_while_full_refresh_starts_null() {
         let mut request = request_with_token("token");
         let saved = PdppCollectionConnectionState {
@@ -1771,18 +1823,10 @@ rl.on('line', (line) => {
     }
 
     #[test]
-    fn github_storage_projection_is_strict_while_raw_selected_streams_stay_lossless_locally() {
-        let manifest = json!({
-            "connector_key": "github",
-            "display_name": "GitHub",
-            "version": "0.5.0",
-            "runtime_requirements": { "bindings": { "network": { "required": true } } },
-            "streams": [
-                { "name": "user" },
-                { "name": "repositories" },
-                { "name": "starred" }
-            ]
-        });
+    fn github_legacy_projections_preserve_all_selected_streams_losslessly() {
+        let mut manifest = github_all_streams_manifest();
+        manifest["display_name"] = json!("GitHub");
+        manifest["version"] = json!("0.5.0");
         let (temp, mut install) = install_fixture(manifest, success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
@@ -1830,6 +1874,46 @@ rl.on('line', (line) => {
                     op: None,
                 }],
             ),
+            (
+                "user_stats".to_owned(),
+                vec![PdppRecord {
+                    stream: "user_stats".into(),
+                    key: json!("42"),
+                    data: json!({ "id": "42", "observed_on": "2026-07-29" }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
+            (
+                "issues".to_owned(),
+                vec![PdppRecord {
+                    stream: "issues".into(),
+                    key: json!("issue-1"),
+                    data: json!({ "id": "issue-1" }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
+            (
+                "pull_requests".to_owned(),
+                vec![PdppRecord {
+                    stream: "pull_requests".into(),
+                    key: json!("pull-request-2"),
+                    data: json!({ "id": "pull-request-2" }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
+            (
+                "gists".to_owned(),
+                vec![PdppRecord {
+                    stream: "gists".into(),
+                    key: json!("gist-3"),
+                    data: json!({ "id": "gist-3" }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
         ]);
         let collection_state = PdppCollectionConnectionState {
             snapshot_by_stream: records.clone(),
@@ -1840,7 +1924,7 @@ rl.on('line', (line) => {
             run_id: "run-1".into(),
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
-            streams: vec!["user".into(), "repositories".into(), "starred".into()],
+            streams: vec![],
             connection_id: None,
             github_token: None,
             timeout_seconds: None,
@@ -1880,7 +1964,29 @@ rl.on('line', (line) => {
             export["pdpp.recordsByStream"]["repositories"][0]["data"]["extra"],
             "kept only in raw export"
         );
-        assert_eq!(export["exportSummary"]["count"], 3);
+        assert_eq!(
+            export["pdpp.recordsByStream"]["user_stats"][0]["data"]["observed_on"],
+            "2026-07-29"
+        );
+        for stream in [
+            "user",
+            "user_stats",
+            "repositories",
+            "starred",
+            "issues",
+            "pull_requests",
+            "gists",
+        ] {
+            assert_eq!(
+                export["pdpp.recordsByStream"][stream]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert!(export.get("github.user_stats").is_none());
+        assert_eq!(export["exportSummary"]["count"], 7);
     }
 
     #[test]
