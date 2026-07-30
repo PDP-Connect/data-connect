@@ -107,6 +107,13 @@ describe("DataApps", () => {
     expect(router.state.location.pathname).toBe("/apps/timeline")
   })
 
+  it("labels PDPP and grant/session app access paths in Discover", () => {
+    renderDataApps()
+
+    expect(screen.getByText("Uses PDPP")).toBeTruthy()
+    expect(screen.getAllByText("Vana grant/session").length).toBeGreaterThan(0)
+  })
+
   it("wires page links to the configured docs targets", () => {
     const { container } = renderDataApps()
 

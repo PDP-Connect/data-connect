@@ -1,12 +1,14 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, RouterProvider } from "react-router-dom"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { RegistryAppCard } from "./registry-app-card"
 
 vi.mock("@/apps/external-url", () => ({
   openSubmittedAppExternalUrl: vi.fn(),
   parseSubmittedAppExternalUrl: (url: string) => new URL(url),
 }))
+
+afterEach(cleanup)
 
 function renderAppCard(
   app: React.ComponentProps<typeof RegistryAppCard>["app"]
@@ -34,6 +36,10 @@ describe("RegistryAppCard", () => {
       description: "Correlate sleep patterns with ChatGPT conversations.",
       category: "Health",
       dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       status: "live",
       externalUrl: "https://example.com",
       scopes: ["chatgpt.conversations"],
@@ -61,12 +67,17 @@ describe("RegistryAppCard", () => {
       description: "Correlate sleep patterns with ChatGPT conversations.",
       category: "Health",
       dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       status: "live",
       externalUrl: "https://example.com",
       scopes: ["chatgpt.conversations"],
     })
 
     expect(screen.getAllByText("Health").length).toBeGreaterThan(0)
+    expect(screen.getByText("Vana grant/session")).toBeTruthy()
     expect(screen.queryByText("ChatGPT")).toBeNull()
     expect(screen.queryByText("Open app")).toBeNull()
   })
@@ -81,6 +92,10 @@ describe("RegistryAppCard", () => {
       description: "Correlate sleep patterns with ChatGPT conversations.",
       category: "Health",
       dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       status: "live",
       externalUrl: "https://example.com",
       scopes: ["chatgpt.conversations"],
@@ -100,6 +115,10 @@ describe("RegistryAppCard", () => {
       description: "An upcoming app.",
       category: "AI",
       dataRequired: [{ token: "linkedin", label: "LinkedIn" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       status: "coming-soon",
       scopes: ["linkedin.profile"],
     })
@@ -119,6 +138,10 @@ describe("RegistryAppCard", () => {
         { token: "amazon", label: "Amazon" },
         { token: "shop", label: "Shop" },
       ],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       status: "live",
       externalUrl: "https://example.com",
       scopes: ["amazon.orders", "shop.orders"],
@@ -148,10 +171,15 @@ describe("RegistryAppCard", () => {
       description: "Browse dated records.",
       category: "First-party",
       dataRequired: [],
+      dataAccess: {
+        protocol: "pdpp",
+        capabilities: ["personal-data-read"],
+      },
       status: "live",
       route: "/apps/timeline",
     })
 
+    expect(screen.getByText("Uses PDPP")).toBeTruthy()
     screen.getByRole("button", { name: "Open Timeline" }).click()
 
     await waitFor(() => {

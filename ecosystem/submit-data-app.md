@@ -57,6 +57,7 @@ For `live` apps:
 - `category`
 - `externalUrl` (`https://` only)
 - `scopes`
+- `dataAccessProtocol` (optional; defaults to `vana-grant-session`, or use `pdpp` when applicable)
 
 For `coming-soon` apps:
 

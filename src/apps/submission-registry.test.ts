@@ -41,6 +41,10 @@ scopes:
       description: "Example app description.",
       category: "Assistant",
       dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
       scopes: ["chatgpt.conversations"],
     })
   })
@@ -65,6 +69,51 @@ scopes:
 
     expect(entry?.builderName).toBe("Example Builder")
     expect(entry?.builderUrl).toBe("https://example.com/about")
+  })
+
+  it("defaults submitted apps to the legacy Vana grant/session access path", () => {
+    const entry = parseAppSubmissionMarkdown(
+      "/virtual/ecosystem/app-submissions/example.md",
+      `---
+id: example
+name: Example App
+status: live
+externalUrl: https://example.com
+icon: E
+description: Example app description.
+category: Assistant
+scopes:
+  - chatgpt.conversations
+---`
+    )
+
+    expect(entry?.dataAccess).toEqual({
+      protocol: "vana-grant-session",
+      capabilities: ["grant-session"],
+    })
+  })
+
+  it("preserves an explicitly declared PDPP access path", () => {
+    const entry = parseAppSubmissionMarkdown(
+      "/virtual/ecosystem/app-submissions/example.md",
+      `---
+id: example
+name: Example App
+status: live
+externalUrl: https://example.com
+icon: E
+description: Example app description.
+category: Assistant
+dataAccessProtocol: pdpp
+scopes:
+  - chatgpt.conversations
+---`
+    )
+
+    expect(entry?.dataAccess).toEqual({
+      protocol: "pdpp",
+      capabilities: ["personal-data-read"],
+    })
   })
 
   it("parses an optional iconUrl override", () => {
@@ -146,7 +195,9 @@ scopes:
 ---`
     )
 
-    expect(entry?.dataRequired).toEqual([{ token: "chatgpt", label: "ChatGPT" }])
+    expect(entry?.dataRequired).toEqual([
+      { token: "chatgpt", label: "ChatGPT" },
+    ])
   })
 
   it("dedupes multiple scopes from the same platform into one label", () => {
@@ -166,7 +217,9 @@ scopes:
 ---`
     )
 
-    expect(entry?.dataRequired).toEqual([{ token: "linkedin", label: "LinkedIn" }])
+    expect(entry?.dataRequired).toEqual([
+      { token: "linkedin", label: "LinkedIn" },
+    ])
   })
 
   it("preserves canonical platform tokens for unknown platforms", () => {

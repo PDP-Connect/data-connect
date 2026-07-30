@@ -9,6 +9,8 @@ builderName: Your Name
 builderUrl: https://example.com
 description: One-line description for the app card.
 category: Assistant
+# Optional. Existing submissions default to vana-grant-session.
+dataAccessProtocol: vana-grant-session
 scopes:
   - chatgpt.conversations
 ---

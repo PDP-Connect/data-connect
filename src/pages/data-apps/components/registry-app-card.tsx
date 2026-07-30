@@ -6,6 +6,7 @@ import {
 } from "@/apps/external-url"
 import { deriveIconUrls } from "@/apps/icon-url"
 import {
+  getAppDataAccessLabel,
   isExternalAppRegistryEntry,
   type AppRegistryEntry,
 } from "@/apps/registry-types"
@@ -95,6 +96,9 @@ export function RegistryAppCard({ app }: { app: AppRegistryEntry }) {
           <div className="flex flex-wrap justify-end gap-2">
             <EyebrowBadge className="bg-dc/[0.05] text-dc border-transparent">
               {app.category}
+            </EyebrowBadge>
+            <EyebrowBadge className="border-transparent bg-muted text-muted-foreground">
+              {getAppDataAccessLabel(app.dataAccess)}
             </EyebrowBadge>
             {app.status === "coming-soon" ? (
               <Text

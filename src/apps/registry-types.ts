@@ -3,6 +3,16 @@ export type AppRequiredPlatform = {
   label: string
 }
 
+export type AppDataAccess =
+  | {
+      protocol: "pdpp"
+      capabilities: ["personal-data-read"]
+    }
+  | {
+      protocol: "vana-grant-session"
+      capabilities: ["grant-session"]
+    }
+
 export type BaseAppRegistryEntry = {
   id: string
   name: string
@@ -13,6 +23,7 @@ export type BaseAppRegistryEntry = {
   description: string
   category: string
   dataRequired: AppRequiredPlatform[]
+  dataAccess: AppDataAccess
   scopes?: string[]
 }
 
@@ -43,4 +54,8 @@ export function isExternalAppRegistryEntry(
   entry: AppRegistryEntry
 ): entry is ExternalAppRegistryEntry {
   return "externalUrl" in entry
+}
+
+export function getAppDataAccessLabel(dataAccess: AppDataAccess): string {
+  return dataAccess.protocol === "pdpp" ? "Uses PDPP" : "Vana grant/session"
 }

@@ -12,6 +12,10 @@ const FIRST_PARTY_APP_REGISTRY: AppRegistryEntry[] = [
     description: "See the dates and moments in your connected data.",
     category: "First-party",
     dataRequired: [],
+    dataAccess: {
+      protocol: "pdpp",
+      capabilities: ["personal-data-read"],
+    },
     status: "live",
     route: ROUTES.timeline,
   },
