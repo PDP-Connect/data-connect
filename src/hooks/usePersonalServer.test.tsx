@@ -94,18 +94,28 @@ describe("usePersonalServer", () => {
       await vi.runAllTimersAsync()
     })
 
-    // Phase 1 was removed; server should not auto-start without credentials.
-    expect(mockInvoke).not.toHaveBeenCalledWith(
+    expect(mockInvoke).toHaveBeenCalledWith(
       "start_personal_server",
-      expect.any(Object)
+      expect.objectContaining({
+        masterKeySignature: null,
+        ownerAddress: null,
+      })
     )
-    expect(result.current.status).toBe("stopped")
+    expect(result.current.status).toBe("starting")
   })
 
-  it("restarts with credentials when walletAddress changes (Phase 2)", async () => {
+  it("upgrades a local server when credentials become available", async () => {
     const usePersonalServer = await importHook()
 
     const { rerender } = renderHook(() => usePersonalServer())
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_personal_server",
+      expect.objectContaining({
+        masterKeySignature: null,
+        ownerAddress: null,
+      })
+    )
 
     // Sign in — set walletAddress + masterKeySignature
     authState = { walletAddress: "0xabc", masterKeySignature: "sig123" }
@@ -125,6 +135,22 @@ describe("usePersonalServer", () => {
         ownerAddress: "0xabc",
       })
     )
+  })
+
+  it("keeps local serving running when its optional tunnel fails", async () => {
+    const usePersonalServer = await importHook()
+
+    const { result } = renderHook(() => usePersonalServer())
+
+    act(() => {
+      emit("personal-server-ready", { port: 8080 })
+      emit("personal-server-tunnel-failed", { message: "not configured" })
+    })
+
+    expect(result.current.status).toBe("running")
+    expect(result.current.port).toBe(8080)
+    expect(result.current.tunnelUrl).toBeNull()
+    expect(result.current.tunnelFailed).toBe(true)
   })
 
   it("does not restart again after server-registered for tunnel", async () => {
