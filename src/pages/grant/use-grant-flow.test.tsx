@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook, waitFor } from "@testing-library/react"
-import { useGrantFlow } from "./use-grant-flow"
+import { isPendingApprovalRetryAllowed, useGrantFlow } from "./use-grant-flow"
 
 const mockNavigate = vi.fn()
 const mockClaimSession = vi.fn()
@@ -642,6 +642,9 @@ describe("useGrantFlow", () => {
   })
 
   it("shows error when grant creation fails", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {})
     authState = {
       isAuthenticated: true,
       isLoading: false,
@@ -661,7 +664,7 @@ describe("useGrantFlow", () => {
     const { PersonalServerError } =
       await import("../../services/personalServer")
     mockCreateGrant.mockRejectedValue(
-      new PersonalServerError("Server signer not available")
+      new PersonalServerError("Server signer not available CANARY_RELAY_SECRET")
     )
 
     const { result } = renderHook(() =>
@@ -682,7 +685,13 @@ describe("useGrantFlow", () => {
     await waitFor(() => {
       expect(result.current.flowState.status).toBe("error")
     })
-    expect(result.current.flowState.error).toBe("Server signer not available")
+    expect(result.current.flowState.error).toBe(
+      "Server signer not available CANARY_RELAY_SECRET"
+    )
+    expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain(
+      "CANARY_RELAY_SECRET"
+    )
+    consoleErrorSpy.mockRestore()
   })
 
   it("navigates away even when deny API call fails", async () => {
@@ -759,7 +768,27 @@ describe("useGrantFlow", () => {
     await waitFor(() => {
       expect(result.current.flowState.status).toBe("error")
     })
-    expect(result.current.flowState.error).toContain("secret is missing")
+    expect(result.current.flowState.error).toContain("secure handoff")
+  })
+
+  it("allows pending approval retry only for the same subject before expiry", () => {
+    const pending = {
+      sessionId: "sess-1",
+      secret: "CANARY_RELAY_SECRET",
+      grantId: "grant-1",
+      userAddress: "0xuser",
+      scopes: ["chatgpt.conversations"],
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    }
+
+    expect(isPendingApprovalRetryAllowed(pending, "0xuser")).toBe(true)
+    expect(isPendingApprovalRetryAllowed(pending, "0xother")).toBe(false)
+    expect(
+      isPendingApprovalRetryAllowed(
+        { ...pending, expiresAt: "2000-01-01T00:00:00.000Z" },
+        "0xuser"
+      )
+    ).toBe(false)
   })
 
   it("retries the flow from error state via handleRetry", async () => {

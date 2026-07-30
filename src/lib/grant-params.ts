@@ -1,4 +1,5 @@
 export type GrantParams = {
+  handoffId?: string
   sessionId?: string
   secret?: string
   appId?: string
@@ -100,6 +101,7 @@ export function getGrantParamsFromSearchParams(
   searchParams: URLSearchParams
 ): GrantParams {
   const sessionId = searchParams.get("sessionId") || undefined
+  const handoffId = searchParams.get("handoff") || undefined
   const secret = searchParams.get("secret") || undefined
   const appId = searchParams.get("appId") || undefined
   const scopes = parseScopesParam(searchParams.get("scopes"))
@@ -111,6 +113,7 @@ export function getGrantParamsFromSearchParams(
   )
 
   return {
+    handoffId,
     sessionId,
     secret,
     appId,
@@ -123,6 +126,11 @@ export function getGrantParamsFromSearchParams(
 
 export function buildGrantSearchParams(params: GrantParams): URLSearchParams {
   const searchParams = new URLSearchParams()
+
+  if (params.handoffId) {
+    searchParams.set("handoff", params.handoffId)
+    return searchParams
+  }
 
   if (params.sessionId) {
     searchParams.set("sessionId", params.sessionId)

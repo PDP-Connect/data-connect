@@ -7,7 +7,7 @@ import { useInitialize } from "./hooks/useInitialize"
 import { TopNav } from "./components/navigation/top-nav"
 import { useDeepLink } from "./hooks/use-deep-link"
 import { usePersonalServer } from "./hooks/usePersonalServer"
-import { usePendingApprovalRetry } from "./hooks/usePendingApproval"
+import { useClearLegacyPendingApproval } from "./hooks/usePendingApproval"
 import { AppUpdateProvider } from "./hooks/use-app-update"
 import { ROUTES } from "@/config/routes"
 import { dotPatternStyle } from "@/components/elements/dot-pattern"
@@ -46,7 +46,7 @@ function AppContent() {
   useInitialize()
   useDeepLink()
   const personalServer = usePersonalServer()
-  usePendingApprovalRetry()
+  useClearLegacyPendingApproval()
 
   useEffect(() => {
     // Host lifecycle: one "host run" per app launch. Mirrors the CLI's

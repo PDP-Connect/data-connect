@@ -7,6 +7,7 @@ import {
   getClaimedAuthorizationMismatch,
   getGrantParamsFromSearchParams,
 } from "@/lib/grant-params"
+import { resolveGrantHandoff } from "@/lib/grant-handoff"
 import {
   getPrimaryDataSourceLabel,
   getPrimaryScopeToken,
@@ -62,7 +63,7 @@ export function useConnectPage(): UseConnectPageResult {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const currentSearch = searchParams.toString()
-  const params = getGrantParamsFromSearchParams(searchParams)
+  const params = resolveGrantHandoff(getGrantParamsFromSearchParams(searchParams))
   const hasGrantSession = Boolean(params.sessionId)
   const [generatedSessionId] = useState(() => `grant-session-${Date.now()}`)
   const resolvedAppId = params.appId

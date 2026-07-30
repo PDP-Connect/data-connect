@@ -17,7 +17,10 @@ import {
 } from "../../services/pdppAuthorization"
 import { fetchServerIdentity } from "../../services/serverRegistration"
 import { usePersonalServer } from "../../hooks/usePersonalServer"
-import { savePendingApproval, clearPendingApproval } from "../../lib/storage"
+import {
+  clearGrantHandoff,
+  setGrantHandoffExpiry,
+} from "../../lib/grant-handoff"
 import type {
   BuilderManifest,
   GrantFlowParams,
@@ -41,8 +44,28 @@ import {
   trackSessionClaimFailed,
 } from "@/lib/telemetry/events"
 
-const ACCOUNT_URL =
-  import.meta.env.VITE_ACCOUNT_URL || "https://account.vana.org"
+export type PendingApproval = {
+  sessionId: string
+  secret: string
+  grantId: string
+  userAddress: string
+  serverAddress?: string
+  scopes: string[]
+  expiresAt: string
+}
+
+export function isPendingApprovalRetryAllowed(
+  pending: PendingApproval,
+  walletAddress: string | null
+): boolean {
+  const expiresAt = new Date(pending.expiresAt).getTime()
+  return Boolean(
+    walletAddress &&
+      walletAddress === pending.userAddress &&
+      !Number.isNaN(expiresAt) &&
+      Date.now() <= expiresAt
+  )
+}
 
 // Demo mode: sessions starting with "grant-session-" use mock data (dev only)
 function isDemoSession(sessionId: string): boolean {
@@ -86,9 +109,11 @@ export function useGrantFlow(
   const [isApproving, setIsApproving] = useState(false)
   const [authPending, setAuthPending] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
+  const pendingApprovalRef = useRef<PendingApproval | null>(null)
 
   const sessionId = params?.sessionId
   const secret = params?.secret
+  const handoffId = params?.handoffId
   const hasSuccessOverride = params?.status === "success"
   const pdppAuthorizationDetails = params?.authorizationDetails
   const pdppAuthorizationDetailsKey =
@@ -186,7 +211,7 @@ export function useGrantFlow(
         isDemoSession: isDemoSession(sessionId),
       })
       trackGrantFlowStarted({ sessionId, platform: telemetryPlatform })
-      setFlowState({ sessionId, secret, status: "loading" })
+      setFlowState({ sessionId, status: "loading" })
 
       // --- Demo mode ---
       if (isDemoSession(sessionId)) {
@@ -207,7 +232,6 @@ export function useGrantFlow(
       if (prefetchedAuthorizationMismatch) {
         setFlowState({
           sessionId,
-          secret,
           status: "error",
           error: prefetchedAuthorizationMismatch,
         })
@@ -215,6 +239,7 @@ export function useGrantFlow(
       }
 
       if (prefetched?.session && prefetched?.builderManifest) {
+        setGrantHandoffExpiry(handoffId, prefetched.session.expiresAt)
         console.log(
           "[GrantFlow] Using pre-fetched data (skipping claim + verify)",
           {
@@ -229,6 +254,7 @@ export function useGrantFlow(
 
       // --- Pre-fetched session only: claim done, builder verification still needed ---
       if (prefetched?.session) {
+        setGrantHandoffExpiry(handoffId, prefetched.session.expiresAt)
         console.log(
           "[GrantFlow] Using pre-fetched session (skipping claim, verifying builder)",
           {
@@ -260,12 +286,11 @@ export function useGrantFlow(
             "[GrantFlow] Builder verification failed (pre-fetched session)",
             {
               sessionId: prefetched.session.id,
-              message: error instanceof Error ? error.message : String(error),
+              type: error instanceof Error ? error.name : "unknown",
             }
           )
           setFlowState({
             sessionId,
-            secret,
             status: "error",
             error:
               error instanceof BuilderVerificationError
@@ -309,7 +334,6 @@ export function useGrantFlow(
         if (authorizationMismatch) {
           setFlowState({
             sessionId,
-            secret,
             status: "error",
             error: authorizationMismatch,
           })
@@ -323,6 +347,7 @@ export function useGrantFlow(
           webhookUrl: claimed.webhookUrl,
           appUserId: claimed.appUserId,
         }
+        setGrantHandoffExpiry(handoffId, claimed.expiresAt)
         console.log("[GrantFlow] Claim succeeded", {
           sessionId,
           granteeAddress: claimed.granteeAddress,
@@ -369,7 +394,6 @@ export function useGrantFlow(
               : error instanceof BuilderVerificationError
                 ? "BuilderVerificationError"
                 : "unknown",
-          message: error instanceof Error ? error.message : String(error),
           ...(error instanceof SessionRelayError && {
             errorCode: error.errorCode,
             statusCode: error.statusCode,
@@ -377,7 +401,6 @@ export function useGrantFlow(
         })
         setFlowState({
           sessionId,
-          secret,
           status: "error",
           error:
             error instanceof SessionRelayError ||
@@ -400,6 +423,7 @@ export function useGrantFlow(
     secret,
     retryCount,
     pdppAuthorizationDetailsKey,
+    handoffId,
     personalServer.devToken,
     personalServer.port,
   ])
@@ -418,15 +442,11 @@ export function useGrantFlow(
     // Auth should already be populated from the deep link (masterKeySig).
     // If missing, the user needs to sign in via account.vana.org first.
     if (!isAuthenticated || !walletAddress) {
-      const connectUrl = new URL("/connect", ACCOUNT_URL)
-      if (flowState.sessionId)
-        connectUrl.searchParams.set("sessionId", flowState.sessionId)
-      if (flowState.secret)
-        connectUrl.searchParams.set("secret", flowState.secret)
       setFlowState(prev => ({
         ...prev,
         status: "error",
-        error: `Not signed in. Please sign in at ${connectUrl.toString()} and relaunch Data Connect.`,
+        error:
+          "Not signed in. Sign in, then relaunch Data Connect from the requesting app.",
       }))
       return
     }
@@ -507,35 +527,32 @@ export function useGrantFlow(
       // Step: Approve session via Session Relay
       setFlowState(prev => ({ ...prev, status: "approving" }))
 
-      if (!flowState.secret) {
+      if (!secret) {
         throw new SessionRelayError(
-          "Cannot approve session: secret is missing from the flow state. " +
-            "The builder will not be notified of this grant."
+          "Cannot approve session because the secure handoff is no longer available. Relaunch from the requesting app."
         )
       }
 
-      // Persist pending approval so we can retry if approve fails.
-      // Without this, a split failure leaves the grant on Gateway
-      // but the builder never learns about it.
-      savePendingApproval({
+      pendingApprovalRef.current = {
         sessionId: flowState.sessionId,
         grantId,
-        secret: flowState.secret,
+        secret,
         userAddress: walletAddress,
         serverAddress,
         scopes: flowState.session.scopes,
-        createdAt: new Date().toISOString(),
-      })
+        expiresAt: flowState.session.expiresAt,
+      }
 
       await approveSession(flowState.sessionId, {
-        secret: flowState.secret,
+        secret,
         grantId,
         userAddress: walletAddress,
         serverAddress,
         scopes: flowState.session.scopes,
       })
 
-      clearPendingApproval()
+      pendingApprovalRef.current = null
+      clearGrantHandoff(handoffId)
 
       // Persist as connected app in Redux for immediate UI update
       dispatch(
@@ -562,7 +579,9 @@ export function useGrantFlow(
         platform: telemetryPlatform,
         error,
       })
-      console.error("[GrantFlow] Approve failed:", error)
+      console.error("[GrantFlow] Approve failed", {
+        type: error instanceof Error ? error.name : "unknown",
+      })
       setFlowState(prev => ({
         ...prev,
         status: "error",
@@ -578,7 +597,7 @@ export function useGrantFlow(
   }, [
     flowState.session,
     flowState.sessionId,
-    flowState.secret,
+    secret,
     flowState.builderManifest,
     flowState.githubPdppConsentRequest,
     isAuthenticated,
@@ -587,6 +606,7 @@ export function useGrantFlow(
     personalServer.tunnelUrl,
     personalServer.devToken,
     dispatch,
+    handoffId,
     telemetryPlatform,
   ])
 
@@ -676,13 +696,57 @@ export function useGrantFlow(
   ])
 
   // --- Retry from error ---
-  // Bumps retryCount which re-triggers the main flow effect (claim → verify → consent).
-  // For errors during grant creation/approval, the user returns to consent
-  // and can click Allow again.
+  // Retries approval only while this process still holds the relay capability,
+  // for the same authenticated subject and before session expiry.
   const handleRetry = useCallback(() => {
+    const pending = pendingApprovalRef.current
+    if (pending) {
+      if (!isAuthenticated || !isPendingApprovalRetryAllowed(pending, walletAddress)) {
+        pendingApprovalRef.current = null
+        setFlowState(prev => ({
+          ...prev,
+          status: "error",
+          error:
+            "This approval retry is no longer available. Relaunch from the requesting app.",
+        }))
+        return
+      }
+
+      void (async () => {
+        setIsApproving(true)
+        try {
+          await approveSession(pending.sessionId, {
+            secret: pending.secret,
+            grantId: pending.grantId,
+            userAddress: pending.userAddress,
+            ...(pending.serverAddress && { serverAddress: pending.serverAddress }),
+            scopes: pending.scopes,
+          })
+          pendingApprovalRef.current = null
+          clearGrantHandoff(handoffId)
+          setFlowState(prev => ({ ...prev, status: "success" }))
+        } catch (error) {
+          console.error("[GrantFlow] Approval retry failed", {
+            type: error instanceof Error ? error.name : "unknown",
+          })
+          setFlowState(prev => ({
+            ...prev,
+            status: "error",
+            error:
+              error instanceof SessionRelayError
+                ? error.message
+                : "Failed to notify the requesting app",
+          }))
+        } finally {
+          setIsApproving(false)
+        }
+      })()
+      return
+    }
+
     setAuthPending(false)
     setRetryCount(c => c + 1)
-  }, [])
+  }, [handoffId, isAuthenticated, walletAddress])
 
   // --- Deny flow ---
   // Fire-and-forget the deny call, then navigate away immediately.
@@ -694,22 +758,25 @@ export function useGrantFlow(
     })
     if (
       flowState.sessionId &&
-      flowState.secret &&
+      secret &&
       !isDemoSession(flowState.sessionId)
     ) {
       try {
         await denySession(flowState.sessionId, {
-          secret: flowState.secret,
+          secret,
           reason: "User declined",
         })
       } catch (error) {
         // Deny failure is non-fatal — still navigate away
-        console.warn("[GrantFlow] Deny call failed:", error)
+        console.warn("[GrantFlow] Deny call failed", {
+          type: error instanceof Error ? error.name : "unknown",
+        })
       }
     }
 
+    clearGrantHandoff(handoffId)
     navigate(ROUTES.home)
-  }, [flowState.sessionId, flowState.secret, navigate, telemetryPlatform])
+  }, [flowState.sessionId, handoffId, navigate, secret, telemetryPlatform])
 
   // Helper to get display name from builder manifest or session legacy fields
   const builderName =

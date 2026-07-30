@@ -44,6 +44,7 @@ export interface GrantFlowState {
 }
 
 export interface GrantFlowParams {
+  handoffId?: string
   sessionId?: string
   secret?: string
   appId?: string
