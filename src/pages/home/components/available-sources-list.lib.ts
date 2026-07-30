@@ -30,6 +30,18 @@ interface BuildAvailableCardsInput {
   onExport: (platform: Platform) => void
 }
 
+function canonicalPlatformKey(
+  platform: Pick<Platform, "id"> & Partial<Pick<Platform, "name" | "company">>
+) {
+  return getPlatformRegistryEntry(platform)?.id ?? platform.id
+}
+
+function isPreferredRuntime(candidate: Platform, current: Platform) {
+  return (
+    candidate.runtime === "pdpp-network" && current.runtime !== "pdpp-network"
+  )
+}
+
 export function buildAvailableCards({
   platforms,
   connectedPlatformIdSet,
@@ -38,13 +50,37 @@ export function buildAvailableCards({
 }: BuildAvailableCardsInput): AvailableSourceCard[] {
   const cards: AvailableSourceCard[] = []
 
-  platforms.forEach((platform, index) => {
-    if (connectedPlatformIdSet.has(platform.id)) return
+  // A registry source can have both a legacy runtime and a PDPP runtime
+  // installed. The Home surface is source-oriented, so choose one canonical
+  // runtime (PDPP when present) before applying connected/running state.
+  const canonicalPlatforms = new Map<string, { platform: Platform; index: number }>()
+  for (const [index, platform] of platforms.entries()) {
+    const canonicalKey = canonicalPlatformKey(platform)
+    const current = canonicalPlatforms.get(canonicalKey)
+    if (!current || isPreferredRuntime(platform, current.platform)) {
+      canonicalPlatforms.set(canonicalKey, { platform, index })
+    }
+  }
+
+  const connectedCanonicalKeys = new Set(
+    [...connectedPlatformIdSet].map(id => canonicalPlatformKey({ id }))
+  )
+  const connectingByCanonicalKey = new Map<string, Run>()
+  for (const [platformId, run] of connectingPlatforms) {
+    const canonicalKey = canonicalPlatformKey({ id: platformId })
+    if (!connectingByCanonicalKey.has(canonicalKey)) {
+      connectingByCanonicalKey.set(canonicalKey, run)
+    }
+  }
+
+  for (const { platform, index } of canonicalPlatforms.values()) {
+    const canonicalKey = canonicalPlatformKey(platform)
+    if (connectedCanonicalKeys.has(canonicalKey)) continue
 
     const entry = getPlatformRegistryEntry(platform)
     const displayName = entry?.displayName ?? platform.name
-    const baseConnectingRun = connectingPlatforms.get(platform.id)
-    const isConnecting = connectingPlatforms.has(platform.id)
+    const baseConnectingRun = connectingByCanonicalKey.get(canonicalKey)
+    const isConnecting = connectingByCanonicalKey.has(canonicalKey)
     const availability: CardAvailability = entry?.availability ?? "unknown"
     const isCardAvailable = availability !== "comingSoon"
 
@@ -63,7 +99,7 @@ export function buildAvailableCards({
       index,
       availability,
     })
-  })
+  }
 
   // Inject registry-only "comingSoon" entries that have no matching runtime platform
   const existingCardIds = new Set(cards.map(c => c.cardId))

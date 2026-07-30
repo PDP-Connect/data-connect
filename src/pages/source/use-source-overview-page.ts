@@ -7,6 +7,8 @@ import {
   getUserDataPath,
   loadLatestSourceExportFull,
   loadLatestSourceExportPreview,
+  loadSourceExportFullFromPath,
+  loadSourceExportPreviewFromPath,
   openPlatformExportFolder,
   type SourceExportPreview,
 } from "@/lib/tauri-paths"
@@ -50,11 +52,16 @@ export function useSourceOverviewPage(
   }, [platformId, runs, sourceEntry?.id])
 
   const sourcePlatform = useMemo(
-    () =>
-      platforms.find(
-        platform =>
-          getPlatformRegistryEntryById(platform.id)?.id === sourceEntry?.id
-      ) ?? null,
+    () => {
+      const matchingPlatforms = platforms.filter(
+        platform => getPlatformRegistryEntryById(platform.id)?.id === sourceEntry?.id
+      )
+      return (
+        matchingPlatforms.find(platform => platform.runtime === "pdpp-network") ??
+        matchingPlatforms[0] ??
+        null
+      )
+    },
     [platforms, sourceEntry?.id]
   )
 
@@ -77,7 +84,8 @@ export function useSourceOverviewPage(
   }, [])
 
   useEffect(() => {
-    if (!sourcePlatform) {
+    const latestExportPath = latestSourceRun?.exportPath
+    if (!latestExportPath && !sourcePlatform) {
       setPreview(null)
       setPreviewError(null)
       setIsPreviewLoading(false)
@@ -88,11 +96,15 @@ export function useSourceOverviewPage(
     setIsPreviewLoading(true)
     setPreviewError(null)
 
-    void loadLatestSourceExportPreview(
-      sourcePlatform.company,
-      sourcePlatform.name,
-      sourceScope
-    )
+    const previewRequest = latestExportPath
+      ? loadSourceExportPreviewFromPath(latestExportPath)
+      : loadLatestSourceExportPreview(
+          sourcePlatform!.company,
+          sourcePlatform!.name,
+          sourceScope
+        )
+
+    void previewRequest
       .then(result => {
         if (!cancelled) {
           setPreview(result)
@@ -119,7 +131,7 @@ export function useSourceOverviewPage(
     return () => {
       cancelled = true
     }
-  }, [sourcePlatform, sourceScope])
+  }, [latestSourceRun?.exportPath, sourcePlatform, sourceScope])
 
   useEffect(() => {
     if (copyStatus !== "copied" && copyStatus !== "error") {
@@ -147,6 +159,11 @@ export function useSourceOverviewPage(
   const handleOpenSourcePath = async () => {
     if (preview?.filePath) {
       await openExportFolderPath(preview.filePath)
+      return
+    }
+
+    if (latestSourceRun?.exportPath) {
+      await openExportFolderPath(latestSourceRun.exportPath)
       return
     }
 
@@ -180,7 +197,17 @@ export function useSourceOverviewPage(
     try {
       let copyPayload: string | null = null
 
-      if (sourcePlatform) {
+      if (latestSourceRun?.exportPath) {
+        try {
+          copyPayload = await loadSourceExportFullFromPath(
+            latestSourceRun.exportPath
+          )
+        } catch (error) {
+          console.error("Failed to load exact source export JSON:", error)
+        }
+      }
+
+      if (!copyPayload && sourcePlatform) {
         try {
           const fullJson = await loadLatestSourceExportFull(
             sourcePlatform.company,

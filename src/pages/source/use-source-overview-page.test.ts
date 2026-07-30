@@ -13,6 +13,8 @@ const mockGetUserDataPath = vi.fn()
 const mockOpenPlatformExportFolder = vi.fn()
 const mockLoadLatestSourceExportPreview = vi.fn()
 const mockLoadLatestSourceExportFull = vi.fn()
+const mockLoadSourceExportPreviewFromPath = vi.fn()
+const mockLoadSourceExportFullFromPath = vi.fn()
 const mockOpenExportFolderPath = vi.fn()
 const silenceConsoleError = () =>
   vi.spyOn(console, "error").mockImplementation(() => {})
@@ -30,6 +32,10 @@ vi.mock("@/lib/tauri-paths", () => ({
     mockLoadLatestSourceExportPreview(...args),
   loadLatestSourceExportFull: (...args: unknown[]) =>
     mockLoadLatestSourceExportFull(...args),
+  loadSourceExportPreviewFromPath: (...args: unknown[]) =>
+    mockLoadSourceExportPreviewFromPath(...args),
+  loadSourceExportFullFromPath: (...args: unknown[]) =>
+    mockLoadSourceExportFullFromPath(...args),
 }))
 
 vi.mock("@/lib/open-resource", () => ({
@@ -60,11 +66,62 @@ beforeEach(() => {
     exportedAt: "2026-02-11T10:00:00.000Z",
   })
   mockLoadLatestSourceExportFull.mockResolvedValue("{\"ok\":true}")
+  mockLoadSourceExportPreviewFromPath.mockResolvedValue({
+    previewJson: "{\n  \"from\": \"run\"\n}",
+    isTruncated: false,
+    filePath: "/tmp/dataconnect/exported_data/GitHub/GitHub/run-1/github.json",
+    fileSizeBytes: 2048,
+    exportedAt: "2026-02-11T10:00:00.000Z",
+  })
+  mockLoadSourceExportFullFromPath.mockResolvedValue("{\"from\":\"run\"}")
   mockOpenExportFolderPath.mockResolvedValue(true)
   mockOpenPlatformExportFolder.mockResolvedValue(undefined)
 })
 
 describe("useSourceOverviewPage", () => {
+  it("uses the latest canonical source run's bounded export preview", async () => {
+    mockState = {
+      app: {
+        runs: [
+          {
+            id: "github-pdpp-run",
+            platformId: "github-pdpp",
+            startDate: "2026-02-11T10:00:00.000Z",
+            exportPath:
+              "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run/github.json",
+          },
+        ],
+        platforms: [
+          { id: "github-playwright", company: "GitHub", name: "GitHub" },
+          {
+            id: "github-pdpp",
+            company: "GitHub",
+            name: "GitHub",
+            runtime: "pdpp-network",
+          },
+        ],
+      },
+    }
+
+    const { result } = renderHook(() => useSourceOverviewPage("github"))
+
+    await waitFor(() => {
+      expect(result.current.preview?.previewJson).toContain('"from": "run"')
+    })
+    expect(mockLoadSourceExportPreviewFromPath).toHaveBeenCalledWith(
+      "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run/github.json"
+    )
+    expect(mockLoadLatestSourceExportPreview).not.toHaveBeenCalled()
+    expect(result.current.sourcePlatform?.id).toBe("github-pdpp")
+
+    await act(async () => {
+      await result.current.handleCopyFullJson()
+    })
+    expect(mockLoadSourceExportFullFromPath).toHaveBeenCalledWith(
+      "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run/github.json"
+    )
+  })
+
   it("falls back to local path open when platform folder open fails", async () => {
     mockLoadLatestSourceExportPreview.mockResolvedValue(null)
     mockOpenPlatformExportFolder.mockRejectedValue(new Error("open failed"))

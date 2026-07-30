@@ -616,6 +616,71 @@ pub async fn load_latest_source_export_full(
     Ok(Some(raw_json))
 }
 
+fn resolve_export_json_path(app: &AppHandle, export_path: &str) -> Result<PathBuf, String> {
+    let exported_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?
+        .join("exported_data");
+    let exported_root = fs::canonicalize(&exported_root)
+        .map_err(|_| "No local export directory is available".to_string())?;
+    let requested = fs::canonicalize(export_path)
+        .map_err(|_| "Export path does not exist".to_string())?;
+    if !requested.starts_with(&exported_root) {
+        return Err("Refusing to read an export outside DataConnect storage".into());
+    }
+    if requested.is_file() {
+        if requested.extension().is_some_and(|extension| extension == "json") {
+            return Ok(requested);
+        }
+        return Err("Export path is not a JSON file".into());
+    }
+    let mut latest = None;
+    scan_latest_json_in_tree(&requested, &mut latest)?;
+    latest
+        .map(|(path, _)| path)
+        .ok_or_else(|| "No JSON export exists at this path".into())
+}
+
+/// Load a bounded preview from the exact export path recorded for a run.
+///
+/// Unlike the source-level lookup, this preserves a runtime's selected
+/// connector and avoids scanning sibling connector exports with the same
+/// canonical source identity.
+#[tauri::command]
+pub async fn load_source_export_preview_from_path(
+    app: AppHandle,
+    export_path: String,
+    max_bytes: Option<usize>,
+) -> Result<SourceExportPreview, String> {
+    let json_path = resolve_export_json_path(&app, &export_path)?;
+    let byte_limit = max_bytes.unwrap_or(65_536);
+    let file_size_bytes = fs::metadata(&json_path).map(|m| m.len()).unwrap_or(0);
+    let (preview_json, is_truncated) =
+        build_source_export_preview(&json_path, byte_limit, file_size_bytes)?;
+    let exported_at = chrono::DateTime::from_timestamp(json_timestamp(&json_path), 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    Ok(SourceExportPreview {
+        preview_json,
+        is_truncated,
+        file_path: json_path.to_string_lossy().to_string(),
+        file_size_bytes,
+        exported_at,
+    })
+}
+
+/// Load full JSON only after an explicit user action from an exact run path.
+#[tauri::command]
+pub async fn load_source_export_full_from_path(
+    app: AppHandle,
+    export_path: String,
+) -> Result<String, String> {
+    let json_path = resolve_export_json_path(&app, &export_path)?;
+    fs::read_to_string(&json_path)
+        .map_err(|e| format!("Failed to read full source export file: {e}"))
+}
+
 /// Open the platform export folder
 #[tauri::command]
 pub async fn open_platform_export_folder(

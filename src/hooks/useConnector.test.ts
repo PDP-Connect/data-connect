@@ -130,6 +130,36 @@ describe("useConnector.startImport", () => {
     )
   })
 
+  it("returns the PDPP run id before the host command reaches its terminal response", async () => {
+    let resolveHost: (() => void) | undefined
+    mockInvoke.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          resolveHost = resolve
+        })
+    )
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    let returnedRunId: string | null | undefined
+    await act(async () => {
+      returnedRunId = await result.current.startImport({
+        ...TEST_PLATFORM,
+        id: "github-pdpp",
+        runtime: "pdpp-network",
+      })
+    })
+
+    expect(returnedRunId).toBe("github-pdpp-1700000000000")
+    expect(startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "github-pdpp-1700000000000",
+        status: "running",
+      })
+    )
+    resolveHost?.()
+  })
+
   it("preserves the legacy connector command for non-PDPP platforms", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")
@@ -161,7 +191,7 @@ describe("useConnector.startImport", () => {
       await result.current.stopExport("github-pdpp-run")
     })
 
-    expect(stopRun).toHaveBeenCalledWith("github-pdpp-run")
+    expect(stopRun).not.toHaveBeenCalled()
     expect(mockInvoke).toHaveBeenCalledWith("stop_installed_pdpp_connector_run", {
       runId: "github-pdpp-run",
     })
