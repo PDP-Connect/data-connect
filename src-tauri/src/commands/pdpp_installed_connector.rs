@@ -6,8 +6,8 @@
 
 use super::connector_store::{get_active_connector_install, ActiveConnectorInstall};
 use super::pdpp_connector::{
-    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRunOptions, PdppRunResult,
-    PdppRunStatus, PdppScopeValidators, PdppStart,
+    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRunControl, PdppRunOptions,
+    PdppRunResult, PdppRunStatus, PdppScopeValidators, PdppStart,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,12 +15,20 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
+const MINIMUM_NODE_MAJOR: u64 = 22;
+const CLEANUP_WAIT: Duration = Duration::from_secs(2);
+
+static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, PdppRunControl>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +57,8 @@ pub struct InstalledPdppConnectorRunResponse {
     pub checkpoints: HashMap<String, Value>,
     pub event_summary: PdppEventSummary,
     pub progress: Vec<SanitizedConnectorMessage>,
+    pub records_truncated: bool,
+    pub events_truncated: bool,
     pub failure: Option<String>,
     pub stderr_bytes: usize,
     pub stderr_truncated: bool,
@@ -59,7 +69,8 @@ pub struct InstalledPdppConnectorRunResponse {
 #[serde(rename_all = "camelCase")]
 pub struct PdppEventSummary {
     pub records: u64,
-    pub states: u64,
+    pub checkpoint_updates: u64,
+    pub checkpoint_streams: u64,
     pub progress: u64,
     pub skip_results: u64,
     pub detail_coverage: u64,
@@ -89,6 +100,7 @@ struct ResolvedInstalledPdppConnector {
 struct CommandCustomization {
     node_imports: Vec<PathBuf>,
     max_retained_records: usize,
+    control: PdppRunControl,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,20 +136,31 @@ fn default_collection_mode() -> String {
 pub async fn start_installed_pdpp_connector_run(
     request: StartInstalledPdppConnectorRequest,
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
-    tokio::task::spawn_blocking(move || start_installed_pdpp_connector_run_impl(request))
-        .await
-        .map_err(|e| format!("PDPP connector host task failed: {e}"))?
+    validate_request(&request)?;
+    let run_id = request.run_id.clone();
+    let control = register_run(&run_id)?;
+    let result = tokio::task::spawn_blocking(move || {
+        start_installed_pdpp_connector_run_impl(request, control)
+    })
+    .await
+    .map_err(|e| format!("PDPP connector host task failed: {e}"));
+    unregister_run(&run_id);
+    result?
 }
 
 fn start_installed_pdpp_connector_run_impl(
     request: StartInstalledPdppConnectorRequest,
+    control: PdppRunControl,
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
     validate_request(&request)?;
     let resolved = resolve_active_installed_pdpp_connector(&request.connector_id)?;
     let result = run_resolved_installed_pdpp_connector(
         &resolved,
         &request,
-        CommandCustomization::default(),
+        CommandCustomization {
+            control,
+            ..Default::default()
+        },
     )?;
     Ok(to_response(
         request.run_id,
@@ -163,6 +186,7 @@ fn run_resolved_installed_pdpp_connector(
         max_retained_records: customization.max_retained_records,
         max_retained_events: 64,
         on_event: Some(std::sync::Arc::new(|_| Ok(()))),
+        control: customization.control,
         ..Default::default()
     };
     supervise_pdpp_connector(&command, &start, &options)
@@ -180,20 +204,67 @@ fn run_resolved_installed_pdpp_connector_for_test(
         CommandCustomization {
             node_imports,
             max_retained_records: 256,
+            ..Default::default()
         },
     )
 }
 
-fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
-    if request.run_id.is_empty()
-        || request.run_id.len() > MAX_RUN_ID_BYTES
-        || !request
-            .run_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
-        return Err("PDPP runId must be 1-128 URL-safe identifier characters".into());
+fn register_run(run_id: &str) -> Result<PdppRunControl, String> {
+    let mut runs = ACTIVE_PDPP_RUNS
+        .lock()
+        .map_err(|_| "PDPP run registry is unavailable")?;
+    if runs.contains_key(run_id) {
+        return Err(format!("PDPP runId {run_id} is already active"));
     }
+    let control = PdppRunControl::default();
+    runs.insert(run_id.to_owned(), control.clone());
+    Ok(control)
+}
+
+fn unregister_run(run_id: &str) {
+    if let Ok(mut runs) = ACTIVE_PDPP_RUNS.lock() {
+        runs.remove(run_id);
+    }
+}
+
+fn cancel_run(run_id: &str) -> Result<(), String> {
+    let control = ACTIVE_PDPP_RUNS
+        .lock()
+        .map_err(|_| "PDPP run registry is unavailable")?
+        .get(run_id)
+        .cloned()
+        .ok_or_else(|| format!("PDPP runId {run_id} is not active"))?;
+    control.cancel();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_installed_pdpp_connector_run(run_id: String) -> Result<(), String> {
+    validate_run_id(&run_id)?;
+    cancel_run(&run_id)
+}
+
+pub fn cleanup_installed_pdpp_connector_runs() {
+    let controls = ACTIVE_PDPP_RUNS
+        .lock()
+        .map(|runs| runs.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for control in controls {
+        control.cancel();
+    }
+
+    let deadline = Instant::now() + CLEANUP_WAIT;
+    while Instant::now() < deadline {
+        if ACTIVE_PDPP_RUNS.lock().map_or(true, |runs| runs.is_empty()) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    log::warn!("Timed out waiting for installed PDPP connector runs to stop");
+}
+
+fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
+    validate_run_id(&request.run_id)?;
     if !matches!(
         request.collection_mode.as_str(),
         "full_refresh" | "incremental"
@@ -207,6 +278,18 @@ fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), 
         return Err(format!(
             "PDPP timeoutSeconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
         ));
+    }
+    Ok(())
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), String> {
+    if run_id.is_empty()
+        || run_id.len() > MAX_RUN_ID_BYTES
+        || !run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err("PDPP runId must be 1-128 URL-safe identifier characters".into());
     }
     Ok(())
 }
@@ -494,10 +577,53 @@ fn resolve_node_program() -> Result<String, String> {
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
         if candidate.is_file() {
+            validate_node_program(&candidate)?;
             return Ok(candidate.to_string_lossy().into_owned());
         }
     }
     Err("node executable was not found on PATH".into())
+}
+
+fn validate_node_program(candidate: &Path) -> Result<(), String> {
+    let output = Command::new(candidate)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("Failed to inspect Node.js at {}: {e}", candidate.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Node.js at {} failed its version check",
+            candidate.display()
+        ));
+    }
+    let version = String::from_utf8(output.stdout).map_err(|_| {
+        format!(
+            "Node.js at {} returned a non-UTF-8 version",
+            candidate.display()
+        )
+    })?;
+    validate_node_version(version.trim(), candidate)
+}
+
+fn validate_node_version(version: &str, candidate: &Path) -> Result<(), String> {
+    let major = version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .ok_or_else(|| {
+            format!(
+                "Node.js at {} returned an invalid version: {version}",
+                candidate.display()
+            )
+        })?;
+    if major < MINIMUM_NODE_MAJOR {
+        return Err(format!(
+            "PDPP connectors require Node.js {MINIMUM_NODE_MAJOR} or newer; {} reports {version}",
+            candidate.display()
+        ));
+    }
+    Ok(())
 }
 
 fn to_response(
@@ -506,11 +632,17 @@ fn to_response(
     result: PdppRunResult,
     secret: Option<&str>,
 ) -> InstalledPdppConnectorRunResponse {
-    let (event_summary, progress) = summarize_events(result.events, secret);
+    let progress = sanitize_retained_events(result.events, secret);
     let event_summary = PdppEventSummary {
-        records: result.record_count,
-        states: result.checkpoints.len() as u64,
-        ..event_summary
+        records: result.event_counts.records,
+        checkpoint_updates: result.event_counts.checkpoint_updates,
+        checkpoint_streams: result.checkpoints.len() as u64,
+        progress: result.event_counts.progress,
+        skip_results: result.event_counts.skip_results,
+        detail_coverage: result.event_counts.detail_coverage,
+        detail_gaps: result.event_counts.detail_gaps,
+        detail_gaps_recovered: result.event_counts.detail_gaps_recovered,
+        interactions: result.event_counts.interactions,
     };
     let failure = result.failure.or_else(|| {
         result
@@ -533,6 +665,8 @@ fn to_response(
         checkpoints: result.checkpoints,
         event_summary,
         progress,
+        records_truncated: result.records_truncated,
+        events_truncated: result.events_truncated,
         failure: failure.map(|failure| redact_secret(&failure, secret)),
         stderr_bytes: result.stderr.len(),
         stderr_truncated: result.stderr_truncated,
@@ -540,18 +674,14 @@ fn to_response(
     }
 }
 
-fn summarize_events(
+fn sanitize_retained_events(
     events: Vec<PdppEvent>,
     secret: Option<&str>,
-) -> (PdppEventSummary, Vec<SanitizedConnectorMessage>) {
-    let mut summary = PdppEventSummary::default();
+) -> Vec<SanitizedConnectorMessage> {
     let mut messages = Vec::new();
     for event in events {
         match event {
-            PdppEvent::Record(_) => summary.records += 1,
-            PdppEvent::State(_) => summary.states += 1,
             PdppEvent::Progress(progress) => {
-                summary.progress += 1;
                 messages.push(SanitizedConnectorMessage {
                     message_type: "PROGRESS".into(),
                     stream: progress.stream,
@@ -559,27 +689,27 @@ fn summarize_events(
                 });
             }
             PdppEvent::SkipResult(skip) => {
-                summary.skip_results += 1;
                 messages.push(SanitizedConnectorMessage {
                     message_type: "SKIP_RESULT".into(),
                     stream: skip.stream,
                     message: skip.message.map(|message| redact_secret(&message, secret)),
                 });
             }
-            PdppEvent::DetailCoverage(_) => summary.detail_coverage += 1,
-            PdppEvent::DetailGap(_) => summary.detail_gaps += 1,
-            PdppEvent::DetailGapRecovered(_) => summary.detail_gaps_recovered += 1,
             PdppEvent::Interaction(interaction) => {
-                summary.interactions += 1;
                 messages.push(SanitizedConnectorMessage {
                     message_type: "INTERACTION".into(),
                     stream: None,
                     message: Some(redact_secret(&interaction.message, secret)),
                 });
             }
+            PdppEvent::Record(_)
+            | PdppEvent::State(_)
+            | PdppEvent::DetailCoverage(_)
+            | PdppEvent::DetailGap(_)
+            | PdppEvent::DetailGapRecovered(_) => {}
         }
     }
-    (summary, messages)
+    messages
 }
 
 fn redact_secret(value: &str, secret: Option<&str>) -> String {
@@ -910,6 +1040,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             CommandCustomization {
                 node_imports: Vec::new(),
                 max_retained_records: 4,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1028,6 +1159,119 @@ setInterval(() => {}, 1000);
         )
         .unwrap();
         assert_eq!(result.status, PdppRunStatus::TimedOut);
+    }
+
+    #[test]
+    fn active_run_registry_rejects_duplicates_and_stops_a_running_connector() {
+        let run_id = "registered-cancellation";
+        let control = register_run(run_id).unwrap();
+        assert!(register_run(run_id).unwrap_err().contains("already active"));
+
+        let hanging = r#"
+const readline = require('node:readline');
+readline.createInterface({ input: process.stdin }).on('line', () => {});
+setInterval(() => {}, 1000);
+"#;
+        let (temp, mut install) = install_fixture(github_manifest(), hanging);
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: run_id.into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["repositories".into()],
+            state: None,
+            github_token: None,
+            timeout_seconds: Some(30),
+        };
+        let handle = thread::spawn(move || {
+            run_resolved_installed_pdpp_connector(
+                &resolved,
+                &request,
+                CommandCustomization {
+                    max_retained_records: 1,
+                    control,
+                    ..Default::default()
+                },
+            )
+        });
+
+        stop_installed_pdpp_connector_run(run_id.into()).unwrap();
+        let result = handle.join().unwrap().unwrap();
+        unregister_run(run_id);
+        assert_eq!(result.status, PdppRunStatus::Cancelled);
+        assert!(cancel_run(run_id).unwrap_err().contains("not active"));
+    }
+
+    #[test]
+    fn app_cleanup_cancels_registered_runs_and_waits_for_unregistration() {
+        let run_id = "cleanup-cancellation";
+        let control = register_run(run_id).unwrap();
+        let worker = thread::spawn(move || {
+            while !control.is_cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            unregister_run(run_id);
+        });
+
+        cleanup_installed_pdpp_connector_runs();
+        worker.join().unwrap();
+        assert!(ACTIVE_PDPP_RUNS.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn validates_minimum_node_contract() {
+        let node = Path::new("/example/node");
+        validate_node_version("v22.0.0", node).unwrap();
+        validate_node_version("25.1.0", node).unwrap();
+        assert!(validate_node_version("v21.9.0", node)
+            .unwrap_err()
+            .contains("Node.js 22 or newer"));
+        assert!(validate_node_version("not-a-version", node)
+            .unwrap_err()
+            .contains("invalid version"));
+    }
+
+    #[test]
+    fn event_summary_counts_all_events_when_retained_messages_are_truncated() {
+        let script = r#"
+const readline = require('node:readline');
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  const start = JSON.parse(line);
+  const stream = start.scope.streams[0].name;
+  for (let i = 0; i < 80; i++) {
+    console.log(JSON.stringify({ type: 'PROGRESS', stream, message: `step ${i}` }));
+  }
+  console.log(JSON.stringify({ type: 'STATE', stream, cursor: { cursor: 'one' } }));
+  console.log(JSON.stringify({ type: 'STATE', stream, cursor: { cursor: 'two' } }));
+  console.log(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }));
+});
+"#;
+        let (temp, mut install) = install_fixture(github_manifest(), script);
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = request_with_token("token");
+        let result = run_resolved_installed_pdpp_connector(
+            &resolved,
+            &request,
+            CommandCustomization {
+                max_retained_records: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let response = to_response(
+            request.run_id,
+            resolved.connector_id,
+            result,
+            request.github_token.as_deref(),
+        );
+
+        assert_eq!(response.event_summary.progress, 80);
+        assert_eq!(response.event_summary.checkpoint_updates, 2);
+        assert_eq!(response.event_summary.checkpoint_streams, 1);
+        assert_eq!(response.progress.len(), 64);
+        assert!(response.events_truncated);
     }
 
     #[test]

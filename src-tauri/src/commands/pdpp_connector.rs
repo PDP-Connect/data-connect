@@ -120,6 +120,10 @@ impl PdppRunControl {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -202,11 +206,24 @@ pub struct PdppRunResult {
     pub checkpoints: HashMap<String, Value>,
     pub events: Vec<PdppEvent>,
     pub events_truncated: bool,
+    pub event_counts: PdppEventCounts,
     pub done: Option<PdppDone>,
     pub stderr: String,
     pub stderr_truncated: bool,
     pub exit_code: Option<i32>,
     pub failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PdppEventCounts {
+    pub records: u64,
+    pub checkpoint_updates: u64,
+    pub progress: u64,
+    pub skip_results: u64,
+    pub detail_coverage: u64,
+    pub detail_gaps: u64,
+    pub detail_gaps_recovered: u64,
+    pub interactions: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,6 +350,7 @@ pub fn supervise_pdpp_connector(
     let mut checkpoints = HashMap::new();
     let mut events = Vec::new();
     let mut events_truncated = false;
+    let mut event_counts = PdppEventCounts::default();
     let mut done = None;
     let mut stderr_text = String::new();
     let mut stderr_truncated = false;
@@ -342,7 +360,7 @@ pub fn supervise_pdpp_connector(
                 .try_wait()
                 .map_err(|e| format!("Failed to poll PDPP connector: {e}"))?;
         }
-        if termination.is_none() && options.control.cancelled.load(Ordering::SeqCst) {
+        if termination.is_none() && options.control.is_cancelled() {
             termination = Some(PdppRunStatus::Cancelled);
             set_failure(&mut failure, "PDPP connector was cancelled by the runtime");
             terminate_child(&mut child);
@@ -362,6 +380,7 @@ pub fn supervise_pdpp_connector(
                 match parse_message(&line, &scope) {
                     Ok(ConnectorMessage::Record(record)) => {
                         record_count += 1;
+                        event_counts.records += 1;
                         dispatch(
                             &options.on_event,
                             PdppEvent::Record(record.clone()),
@@ -380,6 +399,7 @@ pub fn supervise_pdpp_connector(
                         }
                     }
                     Ok(ConnectorMessage::State(state)) => {
+                        event_counts.checkpoint_updates += 1;
                         dispatch(
                             &options.on_event,
                             PdppEvent::State(state.clone()),
@@ -387,42 +407,58 @@ pub fn supervise_pdpp_connector(
                         );
                         checkpoints.insert(state.stream, state.cursor);
                     }
-                    Ok(ConnectorMessage::Progress(progress)) => retain_event(
-                        &options,
-                        PdppEvent::Progress(progress),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
-                    Ok(ConnectorMessage::SkipResult(skip)) => retain_event(
-                        &options,
-                        PdppEvent::SkipResult(skip),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
-                    Ok(ConnectorMessage::DetailCoverage(coverage)) => retain_event(
-                        &options,
-                        PdppEvent::DetailCoverage(coverage),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
-                    Ok(ConnectorMessage::DetailGap(gap)) => retain_event(
-                        &options,
-                        PdppEvent::DetailGap(gap),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
-                    Ok(ConnectorMessage::DetailGapRecovered(recovered)) => retain_event(
-                        &options,
-                        PdppEvent::DetailGapRecovered(recovered),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
+                    Ok(ConnectorMessage::Progress(progress)) => {
+                        event_counts.progress += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::Progress(progress),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::SkipResult(skip)) => {
+                        event_counts.skip_results += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::SkipResult(skip),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailCoverage(coverage)) => {
+                        event_counts.detail_coverage += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailCoverage(coverage),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailGap(gap)) => {
+                        event_counts.detail_gaps += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailGap(gap),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailGapRecovered(recovered)) => {
+                        event_counts.detail_gaps_recovered += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailGapRecovered(recovered),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
                     Ok(ConnectorMessage::Interaction(interaction)) => {
+                        event_counts.interactions += 1;
                         retain_event(
                             &options,
                             PdppEvent::Interaction(interaction),
@@ -524,6 +560,7 @@ pub fn supervise_pdpp_connector(
         checkpoints,
         events,
         events_truncated,
+        event_counts,
         done,
         stderr: stderr_text,
         stderr_truncated,
