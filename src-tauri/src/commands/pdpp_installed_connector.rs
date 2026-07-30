@@ -5,6 +5,10 @@
 //! capability, then delegates process supervision to the PDPP connector kernel.
 
 use super::connector_store::{get_active_connector_install, ActiveConnectorInstall};
+use super::pdpp_collection_state::{
+    commit_terminal_run, load_connection_state, stage_succeeded_run, PdppCollectionConnectionState,
+    DEFAULT_CONNECTION_ID,
+};
 use super::pdpp_connector::{
     supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRecord, PdppRunControl,
     PdppRunOptions, PdppRunResult, PdppRunStatus, PdppScopeValidators, PdppStart,
@@ -38,6 +42,7 @@ static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
 #[derive(Clone)]
 struct ActivePdppRun {
     connector_id: String,
+    connection_id: String,
     control: PdppRunControl,
 }
 
@@ -51,7 +56,7 @@ pub struct StartInstalledPdppConnectorRequest {
     #[serde(default)]
     pub streams: Vec<String>,
     #[serde(default)]
-    pub state: Option<Value>,
+    pub connection_id: Option<String>,
     #[serde(default)]
     pub github_token: Option<String>,
     #[serde(default)]
@@ -146,9 +151,11 @@ struct PdppManifestStream {
 /// the complete stream here is intentionally distinct from the kernel's small
 /// diagnostic retention buffers: the former is the user's export, the latter
 /// is bounded operational evidence for the command response.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct PdppExportAccumulator {
     records_by_stream: HashMap<String, Vec<PdppRecord>>,
+    skipped_streams: HashSet<String>,
+    has_streamless_skip: bool,
 }
 
 struct InstalledPdppRunCompletion {
@@ -167,7 +174,7 @@ pub async fn start_installed_pdpp_connector_run(
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
     validate_request(&request)?;
     let run_id = request.run_id.clone();
-    let control = register_run(&run_id, &request.connector_id)?;
+    let control = register_run(&run_id, &request.connector_id, request.connection_id())?;
     emit_running_status(&app, &run_id, "Starting PDPP connector...");
     let app_for_task = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -196,6 +203,8 @@ fn start_installed_pdpp_connector_run_impl(
     validate_request(&request)?;
     let resolved = resolve_active_installed_pdpp_connector(&request.connector_id)?;
     let credential = resolve_github_credential(&request, &resolved)?;
+    let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
+    let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
     let sink = event_sink_for_run(
         app,
@@ -203,7 +212,7 @@ fn start_installed_pdpp_connector_run_impl(
         export_accumulator.clone(),
         credential.clone(),
     );
-    let result = run_resolved_installed_pdpp_connector(
+    let result = run_resolved_installed_pdpp_connector_with_state(
         &resolved,
         &request,
         CommandCustomization {
@@ -212,9 +221,48 @@ fn start_installed_pdpp_connector_run_impl(
             ..Default::default()
         },
         credential.as_deref(),
+        start_state,
     )?;
     let export = if result.status == PdppRunStatus::Succeeded {
-        Some(build_export_data(&resolved, &request, &export_accumulator)?)
+        let accumulated = export_accumulator
+            .lock()
+            .map_err(|_| "PDPP export accumulator is unavailable")?
+            .clone();
+        let records_by_stream = accumulated.records_by_stream;
+        let selected_streams = selected_streams(&request, &resolved.manifest);
+        let snapshot_reset_streams = snapshot_reset_streams(
+            &request.collection_mode,
+            &selected_streams,
+            &accumulated.skipped_streams,
+            accumulated.has_streamless_skip,
+        );
+        let committed_checkpoints = checkpoints_for_commit(
+            &result.checkpoints,
+            &accumulated.skipped_streams,
+            accumulated.has_streamless_skip,
+        );
+        // Validate the new storage projection before writing its checkpoint.
+        // This leaves the prior checkpoint intact if the host cannot make the
+        // successfully collected data usable by its current local store.
+        let staged = stage_succeeded_run(
+            &saved_state,
+            &request.collection_mode,
+            &snapshot_reset_streams,
+            &records_by_stream,
+            &committed_checkpoints,
+        )?;
+        let export = build_export_data(&resolved, &request, &staged)?;
+        commit_terminal_run(
+            &result.status,
+            &resolved.connector_id,
+            request.connection_id(),
+            &request.collection_mode,
+            &snapshot_reset_streams,
+            &records_by_stream,
+            &committed_checkpoints,
+        )?
+        .ok_or("PDPP collection state was not committed after a successful run")?;
+        Some(export)
     } else {
         None
     };
@@ -229,14 +277,31 @@ fn start_installed_pdpp_connector_run_impl(
     })
 }
 
+#[cfg(test)]
 fn run_resolved_installed_pdpp_connector(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     customization: CommandCustomization,
     github_credential: Option<&str>,
 ) -> Result<PdppRunResult, String> {
+    run_resolved_installed_pdpp_connector_with_state(
+        resolved,
+        request,
+        customization,
+        github_credential,
+        None,
+    )
+}
+
+fn run_resolved_installed_pdpp_connector_with_state(
+    resolved: &ResolvedInstalledPdppConnector,
+    request: &StartInstalledPdppConnectorRequest,
+    customization: CommandCustomization,
+    github_credential: Option<&str>,
+    state: Option<Value>,
+) -> Result<PdppRunResult, String> {
     validate_request(request)?;
-    let start = build_start(request, &resolved.manifest)?;
+    let start = build_start(request, &resolved.manifest, state)?;
     let command = build_command(resolved, github_credential, &customization)?;
     let options = PdppRunOptions {
         timeout: Some(Duration::from_secs(
@@ -274,7 +339,11 @@ fn run_resolved_installed_pdpp_connector_for_test(
     )
 }
 
-fn register_run(run_id: &str, connector_id: &str) -> Result<PdppRunControl, String> {
+fn register_run(
+    run_id: &str,
+    connector_id: &str,
+    connection_id: &str,
+) -> Result<PdppRunControl, String> {
     let mut runs = ACTIVE_PDPP_RUNS
         .lock()
         .map_err(|_| "PDPP run registry is unavailable")?;
@@ -282,10 +351,11 @@ fn register_run(run_id: &str, connector_id: &str) -> Result<PdppRunControl, Stri
         return Err(format!("PDPP runId {run_id} is already active"));
     }
     if let Some(active_run_id) = runs.iter().find_map(|(active_run_id, run)| {
-        (run.connector_id == connector_id).then_some(active_run_id)
+        (run.connector_id == connector_id && run.connection_id == connection_id)
+            .then_some(active_run_id)
     }) {
         return Err(format!(
-            "PDPP connector {connector_id} is already active as runId {active_run_id}"
+            "PDPP connector {connector_id} connection {connection_id} is already active as runId {active_run_id}"
         ));
     }
     let control = PdppRunControl::default();
@@ -293,6 +363,7 @@ fn register_run(run_id: &str, connector_id: &str) -> Result<PdppRunControl, Stri
         run_id.to_owned(),
         ActivePdppRun {
             connector_id: connector_id.to_owned(),
+            connection_id: connection_id.to_owned(),
             control: control.clone(),
         },
     );
@@ -361,6 +432,7 @@ fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), 
             "PDPP timeoutSeconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
         ));
     }
+    validate_connection_id(request.connection_id())?;
     Ok(())
 }
 
@@ -374,6 +446,36 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
         return Err("PDPP runId must be 1-128 URL-safe identifier characters".into());
     }
     Ok(())
+}
+
+fn validate_connection_id(connection_id: &str) -> Result<(), String> {
+    if connection_id.is_empty()
+        || connection_id.len() > MAX_RUN_ID_BYTES
+        || !connection_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err("PDPP connectionId must be 1-128 URL-safe identifier characters".into());
+    }
+    Ok(())
+}
+
+fn persisted_start_state(
+    request: &StartInstalledPdppConnectorRequest,
+    saved_state: &PdppCollectionConnectionState,
+) -> Option<Value> {
+    (request.collection_mode == "incremental")
+        .then(|| (!saved_state.checkpoints.is_empty()).then(|| json!(saved_state.checkpoints)))
+        .flatten()
+}
+
+impl StartInstalledPdppConnectorRequest {
+    fn connection_id(&self) -> &str {
+        self.connection_id
+            .as_deref()
+            .filter(|connection_id| !connection_id.is_empty())
+            .unwrap_or(DEFAULT_CONNECTION_ID)
+    }
 }
 
 fn resolve_active_installed_pdpp_connector(
@@ -534,6 +636,7 @@ fn validate_manifest(connector_id: &str, manifest: &PdppConnectorManifest) -> Re
 fn build_start(
     request: &StartInstalledPdppConnectorRequest,
     manifest: &PdppConnectorManifest,
+    state: Option<Value>,
 ) -> Result<PdppStart, String> {
     let available: HashSet<&str> = manifest
         .streams
@@ -565,7 +668,7 @@ fn build_start(
         &request.run_id,
         &request.collection_mode,
         scope,
-        request.state.clone(),
+        state,
         json!({ "network": { "enabled": true } }),
     )
 }
@@ -587,6 +690,37 @@ fn selected_streams(
         .streams
         .iter()
         .map(|stream| stream.name.clone())
+        .collect()
+}
+
+fn snapshot_reset_streams(
+    collection_mode: &str,
+    selected_streams: &[String],
+    skipped_streams: &HashSet<String>,
+    has_streamless_skip: bool,
+) -> Vec<String> {
+    if collection_mode != "full_refresh" || has_streamless_skip {
+        return Vec::new();
+    }
+    selected_streams
+        .iter()
+        .filter(|stream| !skipped_streams.contains(*stream))
+        .cloned()
+        .collect()
+}
+
+fn checkpoints_for_commit(
+    checkpoints: &HashMap<String, Value>,
+    skipped_streams: &HashSet<String>,
+    has_streamless_skip: bool,
+) -> HashMap<String, Value> {
+    if has_streamless_skip {
+        return HashMap::new();
+    }
+    checkpoints
+        .iter()
+        .filter(|(stream, _)| !skipped_streams.contains(*stream))
+        .map(|(stream, checkpoint)| (stream.clone(), checkpoint.clone()))
         .collect()
 }
 
@@ -722,11 +856,21 @@ fn event_sink_for_run(
             );
             Ok(())
         }
+        PdppEvent::SkipResult(skip) => {
+            let mut collected = export_accumulator
+                .lock()
+                .map_err(|_| "PDPP export accumulator is unavailable")?;
+            if let Some(stream) = skip.stream {
+                collected.skipped_streams.insert(stream);
+            } else {
+                collected.has_streamless_skip = true;
+            }
+            Ok(())
+        }
         // States and detail envelopes are already reflected in the sanitized
         // command response. They are deliberately not copied to the export:
         // the export is the full validated data stream, keyed by scope.
         PdppEvent::State(_)
-        | PdppEvent::SkipResult(_)
         | PdppEvent::DetailCoverage(_)
         | PdppEvent::DetailGap(_)
         | PdppEvent::DetailGapRecovered(_)
@@ -743,9 +887,9 @@ fn value_contains_secret(value: &Value, secret: &str) -> bool {
         Value::Array(values) => values
             .iter()
             .any(|value| value_contains_secret(value, secret)),
-        Value::Object(values) => values.iter().any(|(key, value)| {
-            key.contains(secret) || value_contains_secret(value, secret)
-        }),
+        Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(secret) || value_contains_secret(value, secret)),
         _ => false,
     }
 }
@@ -753,7 +897,7 @@ fn value_contains_secret(value: &Value, secret: &str) -> bool {
 fn build_export_data(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
-    export_accumulator: &Arc<Mutex<PdppExportAccumulator>>,
+    collection_state: &PdppCollectionConnectionState,
 ) -> Result<Value, String> {
     let connector_key = resolved
         .manifest
@@ -766,11 +910,7 @@ fn build_export_data(
         );
     }
     let selected_streams = selected_streams(request, &resolved.manifest);
-    let records_by_stream = export_accumulator
-        .lock()
-        .map_err(|_| "PDPP export accumulator is unavailable")?
-        .records_by_stream
-        .clone();
+    let records_by_stream = &collection_state.snapshot_by_stream;
     let mut stream_counts = serde_json::Map::new();
     let mut record_count = 0usize;
     let mut projected_scopes = serde_json::Map::new();
@@ -779,6 +919,9 @@ fn build_export_data(
         let records = records_by_stream.get(stream).cloned().unwrap_or_default();
         record_count += records.len();
         stream_counts.insert(stream.clone(), json!(records.len()));
+        if stream == "user" && records.is_empty() {
+            continue;
+        }
         let (scope, value) = match stream.as_str() {
             // The Personal Server's existing GitHub schemas deliberately use
             // these shapes. This is a DataConnect storage projection, not a
@@ -807,7 +950,7 @@ fn build_export_data(
     // GitHub schemas require a deliberately lossy projection.
     export.insert(
         "pdpp.recordsByStream".into(),
-        serde_json::to_value(&records_by_stream)
+        serde_json::to_value(&collection_state.raw_records_by_stream)
             .map_err(|error| format!("Failed to serialize raw PDPP export: {error}"))?,
     );
     export.insert("requestedScopes".into(), json!(requested_scopes));
@@ -1365,7 +1508,7 @@ rl.on('line', (line) => {
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["repositories".into()],
-            state: None,
+            connection_id: None,
             github_token: Some(token.into()),
             timeout_seconds: Some(5),
         }
@@ -1525,19 +1668,75 @@ rl.on('line', (line) => {
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["repositories".into()],
-            state: None,
+            connection_id: None,
             github_token: None,
             timeout_seconds: None,
         };
         let manifest: PdppConnectorManifest = serde_json::from_value(github_manifest()).unwrap();
-        let start = build_start(&request, &manifest).unwrap();
+        let start = build_start(&request, &manifest, None).unwrap();
         assert_eq!(start.scope["streams"][0]["name"], "repositories");
 
         let mut bad = request;
         bad.streams = vec!["issues".into()];
-        assert!(build_start(&bad, &manifest)
+        assert!(build_start(&bad, &manifest, None)
             .unwrap_err()
             .contains("not in the connector manifest"));
+    }
+
+    #[test]
+    fn incremental_start_uses_saved_checkpoint_while_full_refresh_starts_null() {
+        let mut request = request_with_token("token");
+        let saved = PdppCollectionConnectionState {
+            checkpoints: HashMap::from([("repositories".into(), json!({ "cursor": "persisted" }))]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            persisted_start_state(&request, &saved),
+            Some(json!({ "repositories": { "cursor": "persisted" } }))
+        );
+        request.collection_mode = "full_refresh".into();
+        assert_eq!(persisted_start_state(&request, &saved), None);
+    }
+
+    #[test]
+    fn active_run_registry_allows_independent_connections() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let connector_id = "github-pdpp-connection-isolation";
+        let _first = register_run("connection-one", connector_id, "one").unwrap();
+        let _second = register_run("connection-two", connector_id, "two").unwrap();
+        assert!(register_run("connection-three", connector_id, "one").is_err());
+        unregister_run("connection-one");
+        unregister_run("connection-two");
+    }
+
+    #[test]
+    fn full_refresh_keeps_skipped_streams_out_of_snapshot_reset() {
+        let selected = vec!["repositories".into(), "starred".into()];
+        let skipped = HashSet::from(["starred".into()]);
+        assert_eq!(
+            snapshot_reset_streams("full_refresh", &selected, &skipped, false),
+            vec!["repositories"]
+        );
+        assert!(snapshot_reset_streams("incremental", &selected, &skipped, false).is_empty());
+        assert!(snapshot_reset_streams("full_refresh", &selected, &skipped, true).is_empty());
+        assert_eq!(
+            checkpoints_for_commit(
+                &HashMap::from([
+                    ("repositories".into(), json!({ "cursor": "one" })),
+                    ("starred".into(), json!({ "cursor": "two" })),
+                ]),
+                &skipped,
+                false,
+            ),
+            HashMap::from([("repositories".into(), json!({ "cursor": "one" }))])
+        );
+        assert!(checkpoints_for_commit(
+            &HashMap::from([("repositories".into(), json!({ "cursor": "one" }))]),
+            &skipped,
+            true,
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1601,20 +1800,22 @@ rl.on('line', (line) => {
                 }],
             ),
         ]);
-        let accumulator = Arc::new(Mutex::new(PdppExportAccumulator {
-            records_by_stream: records,
-        }));
+        let collection_state = PdppCollectionConnectionState {
+            snapshot_by_stream: records.clone(),
+            raw_records_by_stream: records,
+            ..Default::default()
+        };
         let request = StartInstalledPdppConnectorRequest {
             run_id: "run-1".into(),
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["user".into(), "repositories".into(), "starred".into()],
-            state: None,
+            connection_id: None,
             github_token: None,
             timeout_seconds: None,
         };
 
-        let export = build_export_data(&resolved, &request, &accumulator).unwrap();
+        let export = build_export_data(&resolved, &request, &collection_state).unwrap();
         assert_eq!(
             export["requestedScopes"],
             json!(["github.profile", "github.repositories", "github.starred"])
@@ -1658,7 +1859,7 @@ rl.on('line', (line) => {
         install.root_path = temp.path().to_string_lossy().into_owned();
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
         let request = request_with_token("test-token");
-        let start = build_start(&request, &resolved.manifest).unwrap();
+        let start = build_start(&request, &resolved.manifest, None).unwrap();
         let command = build_command(
             &resolved,
             request.github_token.as_deref(),
@@ -1817,13 +2018,13 @@ setInterval(() => {}, 1000);
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["repositories".into()],
-            state: None,
+            connection_id: None,
             github_token: None,
             timeout_seconds: Some(1),
         };
         let result = supervise_pdpp_connector(
             &build_command(&resolved, None, &CommandCustomization::default()).unwrap(),
-            &build_start(&request, &resolved.manifest).unwrap(),
+            &build_start(&request, &resolved.manifest, None).unwrap(),
             &PdppRunOptions {
                 timeout: Some(Duration::from_millis(50)),
                 scope_validators: validators_from_manifest(&resolved.manifest),
@@ -1840,13 +2041,15 @@ setInterval(() => {}, 1000);
         let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let run_id = "registered-cancellation";
         let connector_id = "github-pdpp-registry-cancellation";
-        let control = register_run(run_id, connector_id).unwrap();
-        assert!(register_run(run_id, connector_id)
+        let control = register_run(run_id, connector_id, DEFAULT_CONNECTION_ID).unwrap();
+        assert!(register_run(run_id, connector_id, DEFAULT_CONNECTION_ID)
             .unwrap_err()
             .contains("already active"));
-        assert!(register_run("another-run-id", connector_id)
-            .unwrap_err()
-            .contains("connector"));
+        assert!(
+            register_run("another-run-id", connector_id, DEFAULT_CONNECTION_ID)
+                .unwrap_err()
+                .contains("connector")
+        );
 
         let hanging = r#"
 const readline = require('node:readline');
@@ -1861,7 +2064,7 @@ setInterval(() => {}, 1000);
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["repositories".into()],
-            state: None,
+            connection_id: None,
             github_token: None,
             timeout_seconds: Some(30),
         };
@@ -1889,7 +2092,7 @@ setInterval(() => {}, 1000);
     fn app_cleanup_cancels_registered_runs_and_waits_for_unregistration() {
         let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let run_id = "cleanup-cancellation";
-        let control = register_run(run_id, "github-pdpp-cleanup").unwrap();
+        let control = register_run(run_id, "github-pdpp-cleanup", DEFAULT_CONNECTION_ID).unwrap();
         let worker = thread::spawn(move || {
             while !control.is_cancelled() {
                 thread::sleep(Duration::from_millis(1));
@@ -1907,15 +2110,17 @@ setInterval(() => {}, 1000);
         let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let connector_id = "github-pdpp-rapid-restart";
         let first_run_id = "rapid-restart-first";
-        let control = register_run(first_run_id, connector_id).unwrap();
+        let control = register_run(first_run_id, connector_id, DEFAULT_CONNECTION_ID).unwrap();
         control.cancel();
 
-        let error = register_run("rapid-restart-second", connector_id).unwrap_err();
+        let error =
+            register_run("rapid-restart-second", connector_id, DEFAULT_CONNECTION_ID).unwrap_err();
         assert!(error.contains("already active"));
         assert!(error.contains(first_run_id));
 
         unregister_run(first_run_id);
-        let _second = register_run("rapid-restart-second", connector_id).unwrap();
+        let _second =
+            register_run("rapid-restart-second", connector_id, DEFAULT_CONNECTION_ID).unwrap();
         unregister_run("rapid-restart-second");
     }
 
@@ -2029,7 +2234,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec!["user".into(), "repositories".into()],
-            state: None,
+            connection_id: None,
             github_token: Some(token.clone()),
             timeout_seconds: Some(120),
         };
