@@ -123,7 +123,7 @@ export function useConnector() {
 
       return runId;
     },
-    [dispatch, runs]
+    [dispatch]
   );
 
   const stopExport = useCallback(
@@ -141,7 +141,7 @@ export function useConnector() {
         console.log('Stop connector run (window may be closed):', error);
       }
     },
-    [dispatch]
+    [dispatch, runs]
   );
 
   const getRunById = useCallback(
