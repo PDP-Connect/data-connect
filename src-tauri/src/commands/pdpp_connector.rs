@@ -181,6 +181,9 @@ pub enum PdppEvent {
     State(PdppState),
     Progress(PdppProgress),
     SkipResult(PdppSkipResult),
+    DetailCoverage(Value),
+    DetailGap(Value),
+    DetailGapRecovered(Value),
     Interaction(PdppInteraction),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +244,9 @@ enum ConnectorMessage {
     Done(PdppDone),
     Progress(PdppProgress),
     SkipResult(PdppSkipResult),
+    DetailCoverage(Value),
+    DetailGap(Value),
+    DetailGapRecovered(Value),
     Interaction(PdppInteraction),
 }
 enum ReaderEvent {
@@ -391,6 +397,27 @@ pub fn supervise_pdpp_connector(
                     Ok(ConnectorMessage::SkipResult(skip)) => retain_event(
                         &options,
                         PdppEvent::SkipResult(skip),
+                        &mut events,
+                        &mut events_truncated,
+                        &mut failure,
+                    ),
+                    Ok(ConnectorMessage::DetailCoverage(coverage)) => retain_event(
+                        &options,
+                        PdppEvent::DetailCoverage(coverage),
+                        &mut events,
+                        &mut events_truncated,
+                        &mut failure,
+                    ),
+                    Ok(ConnectorMessage::DetailGap(gap)) => retain_event(
+                        &options,
+                        PdppEvent::DetailGap(gap),
+                        &mut events,
+                        &mut events_truncated,
+                        &mut failure,
+                    ),
+                    Ok(ConnectorMessage::DetailGapRecovered(recovered)) => retain_event(
+                        &options,
+                        PdppEvent::DetailGapRecovered(recovered),
                         &mut events,
                         &mut events_truncated,
                         &mut failure,
@@ -606,11 +633,80 @@ fn parse_message(line: &str, scope: &ScopePolicy) -> Result<ConnectorMessage, St
             validate_optional_stream(skip.stream.as_deref(), scope)?;
             Ok(ConnectorMessage::SkipResult(skip))
         }
+        "DETAIL_COVERAGE" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailCoverage(value))
+        }
+        "DETAIL_GAP" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailGap(value))
+        }
+        "DETAIL_GAP_RECOVERED" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailGapRecovered(value))
+        }
         "INTERACTION" => serde_json::from_value(value)
             .map(ConnectorMessage::Interaction)
             .map_err(|e| format!("Invalid PDPP INTERACTION: {e}")),
         _ => Err(format!("Unsupported PDPP connector message type: {ty}")),
     }
+}
+
+fn validate_reference_evidence(value: &Value, ty: &str, scope: &ScopePolicy) -> Result<(), String> {
+    let stream = value
+        .get("stream")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Invalid PDPP {ty}: stream is required"))?;
+    validate_optional_stream(Some(stream), scope)?;
+    if value.get("reference_only").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("Invalid PDPP {ty}: reference_only must be true"));
+    }
+    match ty {
+        "DETAIL_COVERAGE" => {
+            let state_stream = value
+                .get("state_stream")
+                .and_then(Value::as_str)
+                .ok_or("Invalid PDPP DETAIL_COVERAGE: state_stream is required")?;
+            validate_optional_stream(Some(state_stream), scope)?;
+            for field in ["required_keys", "hydrated_keys"] {
+                if !value.get(field).is_some_and(Value::is_array) {
+                    return Err(format!(
+                        "Invalid PDPP DETAIL_COVERAGE: {field} must be an array"
+                    ));
+                }
+            }
+            for field in ["considered", "covered"] {
+                if value
+                    .get(field)
+                    .is_some_and(|count| count.as_u64().is_none())
+                {
+                    return Err(format!(
+                        "Invalid PDPP DETAIL_COVERAGE: {field} must be a non-negative integer"
+                    ));
+                }
+            }
+        }
+        "DETAIL_GAP" => {
+            if !value.get("detail_locator").is_some_and(Value::is_object)
+                || value.get("record_key").is_none()
+                || value.get("retryable").and_then(Value::as_bool) != Some(true)
+                || value.get("status").and_then(Value::as_str) != Some("pending")
+            {
+                return Err("Invalid PDPP DETAIL_GAP envelope".into());
+            }
+        }
+        "DETAIL_GAP_RECOVERED" => {
+            if value
+                .get("gap_id")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err("Invalid PDPP DETAIL_GAP_RECOVERED: gap_id is required".into());
+            }
+        }
+        _ => unreachable!("reference evidence type was matched before validation"),
+    }
+    Ok(())
 }
 fn validate_optional_stream(stream: Option<&str>, scope: &ScopePolicy) -> Result<(), String> {
     if stream.is_some_and(|stream| !scope.streams.contains_key(stream)) {
@@ -1032,6 +1128,41 @@ mod tests {
             &scope,
         )
         .is_ok());
+    }
+    #[test]
+    fn accepts_scoped_reference_evidence_and_rejects_invalid_envelopes() {
+        let scope = scope_policy(&scoped(), &options().scope_validators).unwrap();
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_COVERAGE","stream":"items","state_stream":"items","required_keys":[],"hydrated_keys":[],"considered":1,"reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailCoverage(_))
+        ));
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_GAP","stream":"items","record_key":"item-1","detail_locator":{"kind":"api"},"reason":"temporary_unavailable","retryable":true,"status":"pending","reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailGap(_))
+        ));
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_GAP_RECOVERED","stream":"items","gap_id":"gap-1","reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailGapRecovered(_))
+        ));
+        assert!(parse_message(
+            r#"{"type":"DETAIL_COVERAGE","stream":"outside","state_stream":"items","required_keys":[],"hydrated_keys":[],"reference_only":true}"#,
+            &scope,
+        )
+        .is_err());
+        assert!(parse_message(
+            r#"{"type":"DETAIL_GAP","stream":"items","record_key":"item-1","detail_locator":{},"retryable":false,"status":"pending","reference_only":true}"#,
+            &scope,
+        )
+        .is_err());
     }
     #[test]
     fn strictly_decodes_stdout_and_lossily_decodes_stderr() {

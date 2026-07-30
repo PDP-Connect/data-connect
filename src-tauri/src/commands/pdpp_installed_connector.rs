@@ -62,6 +62,9 @@ pub struct PdppEventSummary {
     pub states: u64,
     pub progress: u64,
     pub skip_results: u64,
+    pub detail_coverage: u64,
+    pub detail_gaps: u64,
+    pub detail_gaps_recovered: u64,
     pub interactions: u64,
 }
 
@@ -131,7 +134,11 @@ fn start_installed_pdpp_connector_run_impl(
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
     validate_request(&request)?;
     let resolved = resolve_active_installed_pdpp_connector(&request.connector_id)?;
-    let result = run_resolved_installed_pdpp_connector(&resolved, &request, CommandCustomization::default())?;
+    let result = run_resolved_installed_pdpp_connector(
+        &resolved,
+        &request,
+        CommandCustomization::default(),
+    )?;
     Ok(to_response(
         request.run_id,
         resolved.connector_id,
@@ -237,7 +244,8 @@ fn resolve_installed_pdpp_connector(
         .provenance_path
         .as_deref()
         .ok_or("PDPP active install is missing provenancePath")?;
-    let provenance_path = confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
+    let provenance_path =
+        confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
     verify_file_hash(
         &manifest_path,
         Some(required_hash(
@@ -462,7 +470,9 @@ fn build_command(
 fn required_hash<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, String> {
     let value = value.ok_or_else(|| format!("PDPP active install is missing {field}"))?;
     if !value.starts_with("sha256:") || value.len() != "sha256:".len() + 64 {
-        return Err(format!("PDPP active install {field} must be a sha256 digest"));
+        return Err(format!(
+            "PDPP active install {field} must be a sha256 digest"
+        ));
     }
     Ok(value)
 }
@@ -556,6 +566,9 @@ fn summarize_events(
                     message: skip.message.map(|message| redact_secret(&message, secret)),
                 });
             }
+            PdppEvent::DetailCoverage(_) => summary.detail_coverage += 1,
+            PdppEvent::DetailGap(_) => summary.detail_gaps += 1,
+            PdppEvent::DetailGapRecovered(_) => summary.detail_gaps_recovered += 1,
             PdppEvent::Interaction(interaction) => {
                 summary.interactions += 1;
                 messages.push(SanitizedConnectorMessage {
@@ -901,7 +914,10 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         )
         .unwrap();
         assert!(result.stderr.contains(token));
-        assert!(result.records.iter().any(|record| record.data.to_string().contains(token)));
+        assert!(result
+            .records
+            .iter()
+            .any(|record| record.data.to_string().contains(token)));
         let response = to_response("run-1".into(), "github-pdpp".into(), result, Some(token));
         let serialized = serde_json::to_string(&response).unwrap();
         assert!(!serialized.contains(token));
@@ -1012,5 +1028,76 @@ setInterval(() => {}, 1000);
         )
         .unwrap();
         assert_eq!(result.status, PdppRunStatus::TimedOut);
+    }
+
+    #[test]
+    #[ignore = "requires a cross-repo github-pdpp install and credential"]
+    fn runs_external_installed_github_artifact_end_to_end() {
+        let token = std::env::var("PDPP_E2E_GITHUB_TOKEN")
+            .expect("PDPP_E2E_GITHUB_TOKEN must be set for the ignored E2E");
+        let node_imports = std::env::var_os("PDPP_E2E_NODE_IMPORT")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let resolved = resolve_active_installed_pdpp_connector("github-pdpp").unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "github-pdpp-cross-repo-e2e".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["user".into(), "repositories".into()],
+            state: None,
+            github_token: Some(token.clone()),
+            timeout_seconds: Some(120),
+        };
+        let result =
+            run_resolved_installed_pdpp_connector_for_test(&resolved, &request, node_imports)
+                .unwrap();
+
+        assert_eq!(
+            result.status,
+            PdppRunStatus::Succeeded,
+            "{:?}",
+            result.failure
+        );
+        assert!(result.record_count >= 2);
+        assert!(result.records.iter().any(|record| record.stream == "user"));
+        assert!(result
+            .records
+            .iter()
+            .any(|record| record.stream == "repositories"));
+        assert!(result.checkpoints.contains_key("user"));
+        assert!(result.checkpoints.contains_key("repositories"));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| matches!(event, PdppEvent::Progress(_))));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| matches!(event, PdppEvent::DetailCoverage(_))));
+        assert!(!result.stderr.contains(&token));
+        eprintln!(
+            "pdpp_e2e_summary records={} retained_records={} checkpoints={} progress={} detail_coverage={} stderr_bytes={} records_truncated={}",
+            result.record_count,
+            result.records.len(),
+            result.checkpoints.len(),
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, PdppEvent::Progress(_)))
+                .count(),
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, PdppEvent::DetailCoverage(_)))
+                .count(),
+            result.stderr.len(),
+            result.records_truncated,
+        );
+
+        let response = to_response(request.run_id, resolved.connector_id, result, Some(&token));
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains(&token));
+        assert!(!serialized.contains("\"data\""));
     }
 }
