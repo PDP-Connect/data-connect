@@ -4,8 +4,8 @@ import { dirname } from "node:path"
 import {
   CursorExpiredError,
   GrantScopedRecordsRepository,
-  GITHUB_STREAMS,
   RecordsRepositoryError,
+  createGithubStreamMetadata,
 } from "./grant-scoped-records-repository.js"
 import { importLatestGithubSnapshot } from "./github-snapshot.js"
 import { loadInstalledGithubManifest } from "./installed-manifest.js"
@@ -32,8 +32,8 @@ export async function createPdppResourceServer({
   }),
 } = {}) {
   const installed = loadInstalledGithubManifest({ activeManifestPath })
-  assertDurableManifestCompatibility(installed.manifest)
-  const repository = recordsRepository ?? createRepository(databasePath)
+  const streamMetadata = createGithubStreamMetadata(installed.manifest)
+  const repository = recordsRepository ?? createRepository(databasePath, streamMetadata)
   const refreshSnapshot = createSnapshotRefresher({
     exportRoot,
     manifest: installed.manifest,
@@ -66,14 +66,14 @@ export async function mountPdppResourceServer(app, options) {
   return resourceServer
 }
 
-function createRepository(databasePath) {
+function createRepository(databasePath, streamMetadata) {
   if (typeof databasePath !== "string" || databasePath.length === 0) {
     throw new TypeError(
       "createPdppResourceServer requires databasePath or recordsRepository"
     )
   }
   mkdirSync(dirname(databasePath), { recursive: true })
-  return new GrantScopedRecordsRepository({ databasePath })
+  return new GrantScopedRecordsRepository({ databasePath, streamMetadata })
 }
 
 function createGrantValidatedIntrospector(tokenIntrospector, connectorIds) {
@@ -228,31 +228,5 @@ async function translateRepositoryErrors(operation) {
       throw new CoreOperationError(status, error.code, error.message)
     }
     throw error
-  }
-}
-
-function assertDurableManifestCompatibility(manifest) {
-  for (const stream of manifest.streams) {
-    const durableStream = GITHUB_STREAMS[stream.name]
-    if (!durableStream) {
-      throw new TypeError(
-        `Installed manifest stream '${stream.name}' is not supported by the durable GitHub repository`
-      )
-    }
-    if (
-      stream.cursor_field !== durableStream.cursorField ||
-      stream.consent_time_field !== durableStream.consentTimeField
-    ) {
-      throw new TypeError(
-        `Installed manifest stream '${stream.name}' is incompatible with durable GitHub record timing`
-      )
-    }
-    for (const field of Object.keys(stream.schema?.properties ?? {})) {
-      if (!durableStream.fields.includes(field)) {
-        throw new TypeError(
-          `Installed manifest stream '${stream.name}' declares unsupported field '${field}'`
-        )
-      }
-    }
   }
 }

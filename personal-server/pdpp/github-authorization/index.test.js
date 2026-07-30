@@ -8,6 +8,7 @@ import {
   createGithubAuthorizationAdapter,
   PDPP_DATA_ACCESS_TYPE,
 } from "./index.js"
+import { createLocalTimelineAuthorizationRequest } from "./policy.js"
 
 function hash(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`
@@ -80,6 +81,23 @@ function details(
   ]
 }
 
+test("derives first-party Timeline consent from every verified manifest stream", () => {
+  const names = [
+    "user",
+    "user_stats",
+    "repositories",
+    "starred",
+    "issues",
+    "pull_requests",
+    "gists",
+  ]
+  const request = createLocalTimelineAuthorizationRequest({
+    streams: names.map(name => ({ name })),
+  })
+  assert.deepEqual(request.authorizationDetails[0].streams, names.map(name => ({ name })))
+  assert.deepEqual(request.scopes, names.map(name => `pdpp.local.github.${name}`))
+})
+
 test("persists an immutable verified-manifest grant and separates private from public resolution", () => {
   const fixtureData = fixture()
   const options = {
@@ -148,7 +166,7 @@ test("binds local Timeline grants to their session, subject, client, expiry, and
       subjectId: "timeline-subject",
     })
     assert.equal(consent.session_id, "timeline-session")
-    assert.deepEqual(consent.scopes, ["github.repositories"])
+    assert.deepEqual(consent.scopes, ["pdpp.local.github.repositories"])
     assert.throws(
       () =>
         adapter.issueLocalTimelineGrant({

@@ -66,6 +66,7 @@ export function createGithubAuthorizationAdapter({
       const terms = validateGithubAuthorizationDetails({
         ...local,
         manifest: manifest.manifest,
+        localTimeline: true,
       })
       return store.createRequest({
         sessionId,

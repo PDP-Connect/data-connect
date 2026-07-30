@@ -31,7 +31,7 @@ export const LOCAL_TIMELINE_CLIENT_ID = "dataconnect.timeline"
  */
 export function createLocalTimelineAuthorizationRequest(manifest) {
   const streams = (manifest?.streams ?? [])
-    .filter(stream => typeof GITHUB_STREAM_SCOPES[stream?.name] === "string")
+    .filter(stream => typeof stream?.name === "string" && stream.name)
     .map(stream => ({ name: stream.name }))
   if (!streams.length) {
     throw invalid(
@@ -39,7 +39,9 @@ export function createLocalTimelineAuthorizationRequest(manifest) {
     )
   }
   return {
-    scopes: streams.map(stream => GITHUB_STREAM_SCOPES[stream.name]),
+    // These are first-party consent labels, not Session Relay's legacy GitHub
+    // scopes. The grant itself remains bound to the verified manifest below.
+    scopes: streams.map(stream => `pdpp.local.github.${stream.name}`),
     authorizationDetails: [
       {
         type: PDPP_DATA_ACCESS_TYPE,
@@ -144,6 +146,7 @@ export function validateGithubAuthorizationDetails({
   authorizationDetails,
   manifest,
   scopes,
+  localTimeline = false,
 }) {
   if (
     !Array.isArray(authorizationDetails) ||
@@ -251,8 +254,10 @@ export function validateGithubAuthorizationDetails({
     return normalized
   })
 
-  const requestedScopes = normalizedStreams.map(
-    stream => GITHUB_STREAM_SCOPES[stream.name]
+  const requestedScopes = normalizedStreams.map(stream =>
+    localTimeline
+      ? `pdpp.local.github.${stream.name}`
+      : GITHUB_STREAM_SCOPES[stream.name]
   )
   if (
     requestedScopes.some(scope => !scope) ||

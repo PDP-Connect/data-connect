@@ -9,7 +9,10 @@ import test from "node:test"
 import { Hono } from "hono"
 
 import { registerProtectedRoutes } from "../protected-routes.js"
-import { GrantScopedRecordsRepository } from "./grant-scoped-records-repository.js"
+import {
+  createGithubStreamMetadata,
+  GrantScopedRecordsRepository,
+} from "./grant-scoped-records-repository.js"
 import {
   createGithubAuthorizationAdapter,
   PDPP_DATA_ACCESS_TYPE,
@@ -23,7 +26,7 @@ function hash(contents) {
   return `sha256:${createHash("sha256").update(contents).digest("hex")}`
 }
 
-function createInstalledGithubFixture() {
+function createInstalledGithubFixture({ allStreams = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dataconnect-pdpp-resource-server-"))
   tempRoots.push(root)
   const installRoot = join(root, "install")
@@ -38,7 +41,7 @@ function createInstalledGithubFixture() {
     connector_key: "github",
     version: "0.5.0",
     runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
+    streams: allStreams ? allGithubManifestStreams() : [
       {
         name: "repositories",
         primary_key: ["id"],
@@ -53,8 +56,8 @@ function createInstalledGithubFixture() {
             full_name: { type: "string" },
             name: { type: "string" },
             private: { type: "boolean" },
-            created_at: { type: "string" },
-            pushed_at: { type: "string" },
+            created_at: { type: "string", format: "date-time" },
+            pushed_at: { type: "string", format: "date-time" },
           },
         },
       },
@@ -101,7 +104,16 @@ function createInstalledGithubFixture() {
       content: {
         platform: "github",
         version: "0.5.0",
-        "pdpp.recordsByStream": {
+        "pdpp.recordsByStream": allStreams ? {
+          user_stats: [
+            {
+              stream: "user_stats",
+              key: "42:2026-07-30",
+              data: { id: "42:2026-07-30", user_id: "42", observed_on: "2026-07-30" },
+              emitted_at: "2026-07-30T00:00:00Z",
+            },
+          ],
+        } : {
           repositories: [
             record("allowed", "2026-02-01T00:00:00Z"),
             record("resource-excluded", "2026-02-01T00:00:00Z"),
@@ -136,6 +148,34 @@ function createInstalledGithubFixture() {
     exportRoot,
     databasePath: join(root, "records.sqlite"),
   }
+}
+
+function allGithubManifestStreams() {
+  return [
+    ["user", ["id", "login"], "updated_at", "created_at", "date-time"],
+    ["user_stats", ["id", "user_id", "observed_on"], "observed_on", "observed_on", "date"],
+    ["repositories", ["id", "full_name"], "pushed_at", "created_at", "date-time"],
+    ["starred", ["id", "full_name"], "starred_at", "starred_at", "date-time"],
+    ["issues", ["id"], "updated_at", "created_at", "date-time"],
+    ["pull_requests", ["id"], "updated_at", "created_at", "date-time"],
+    ["gists", ["id"], "updated_at", "created_at", "date-time"],
+  ].map(([name, required, cursorField, consentTimeField, format]) => ({
+    name,
+    primary_key: ["id"],
+    cursor_field: cursorField,
+    consent_time_field: consentTimeField,
+    selection: { fields: true, resources: true },
+    schema: {
+      type: "object",
+      properties: Object.fromEntries(
+        [...new Set([...required, cursorField, consentTimeField])].map(field => [
+          field,
+          { type: "string", ...(field === cursorField || field === consentTimeField ? { format } : {}) },
+        ])
+      ),
+      required,
+    },
+  }))
 }
 
 function record(id, createdAt) {
@@ -177,6 +217,102 @@ function activeToken(overrides = {}) {
     ...overrides,
   }
 }
+
+test("derives all installed GitHub streams and accepts date-only user_stats snapshots", () => {
+  const streams = [
+    ["user", ["id", "login"], "updated_at", "created_at", "date-time"],
+    ["user_stats", ["id", "user_id", "observed_on"], "observed_on", "observed_on", "date"],
+    ["repositories", ["id", "full_name"], "updated_at", "created_at", "date-time"],
+    ["starred", ["id", "full_name"], "starred_at", "starred_at", "date-time"],
+    ["issues", ["id"], "updated_at", "created_at", "date-time"],
+    ["pull_requests", ["id"], "updated_at", "created_at", "date-time"],
+    ["gists", ["id"], "updated_at", "created_at", "date-time"],
+  ].map(([name, required, cursorField, consentTimeField, format]) => ({
+    name,
+    primary_key: ["id"],
+    cursor_field: cursorField,
+    consent_time_field: consentTimeField,
+    schema: {
+      properties: Object.fromEntries(
+        [...new Set([...required, cursorField, consentTimeField])].map(field => [
+          field,
+          { type: "string", format: field === cursorField || field === consentTimeField ? format : undefined },
+        ])
+      ),
+      required,
+    },
+  }))
+  const metadata = createGithubStreamMetadata({ streams })
+  assert.deepEqual(Object.keys(metadata), streams.map(stream => stream.name))
+  const root = mkdtempSync(join(tmpdir(), "dataconnect-pdpp-all-streams-"))
+  tempRoots.push(root)
+  const repository = new GrantScopedRecordsRepository({
+    databasePath: join(root, "records.sqlite"),
+    streamMetadata: metadata,
+  })
+  repository.importSnapshot({
+    connectionId: "default",
+    recordsByStream: {
+      user_stats: [
+        {
+          stream: "user_stats",
+          key: "42:2026-07-30",
+          data: {
+            id: "42:2026-07-30",
+            user_id: "42",
+            observed_on: "2026-07-30",
+          },
+          emitted_at: "2026-07-30T12:00:00Z",
+        },
+      ],
+    },
+  })
+  assert.equal(
+    repository.listCurrent({ connectionId: "default", stream: "user_stats", grant: {} }).data.length,
+    1
+  )
+  assert.deepEqual(
+    repository.listCurrent({ connectionId: "default", stream: "issues", grant: {} }).data,
+    []
+  )
+  assert.throws(
+    () =>
+      repository.importSnapshot({
+        connectionId: "default",
+        recordsByStream: { arbitrary: [] },
+      }),
+    /Unsupported GitHub stream/
+  )
+  repository.close()
+})
+
+test("serves every verified GitHub stream while omitted export streams are empty", async () => {
+  const fixture = createInstalledGithubFixture({ allStreams: true })
+  const app = new Hono()
+  const streamNames = allGithubManifestStreams().map(stream => stream.name)
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    tokenIntrospector: {
+      introspect: async () => ({
+        active: true,
+        pdpp_token_kind: "client",
+        subject_id: "subject_123",
+        grant: {
+          source: { kind: "connector", id: "https://registry.pdpp.org/connectors/github" },
+          streams: streamNames.map(name => ({ name })),
+        },
+      }),
+    },
+  })
+  const headers = { authorization: "Bearer all-streams" }
+  const listed = await app.request("http://personal.example/v1/streams", { headers })
+  assert.equal(listed.status, 200, await listed.clone().text())
+  assert.deepEqual((await listed.json()).data.map(stream => stream.name), streamNames)
+  const stats = await app.request("http://personal.example/v1/streams/user_stats/records", { headers })
+  assert.deepEqual((await stats.json()).data.map(record => record.id), ["42:2026-07-30"])
+  const issues = await app.request("http://personal.example/v1/streams/issues/records", { headers })
+  assert.deepEqual((await issues.json()).data, [])
+})
 
 test.afterEach(async () => {
   await Promise.all(
@@ -591,7 +727,7 @@ test("serves Timeline only after local consent and fails closed after its bound 
     )
     assert.equal(consent.status, 201)
     const request = await consent.json()
-    assert.deepEqual(request.scopes, ["github.repositories"])
+    assert.deepEqual(request.scopes, ["pdpp.local.github.repositories"])
 
     const approval = await app.request(
       `http://personal.example/v1/pdpp/local-timeline/consent-requests/${request.request_id}/approve`,
