@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -251,8 +252,10 @@ describe("Timeline", () => {
     })
 
     const button = await screen.findByRole("button", { name: "Load more" })
-    fireEvent.click(button)
-    fireEvent.click(button)
+    act(() => {
+      button.click()
+      button.click()
+    })
 
     expect(loadMore).toHaveBeenCalledOnce()
     resolveMore({
@@ -278,7 +281,7 @@ describe("Timeline", () => {
     })
   })
 
-  it("resets the demo approval and returns to the consent prompt", async () => {
+  it("revokes Timeline access and returns to the consent prompt", async () => {
     const revokeConsent = vi.fn().mockResolvedValue(true)
     renderTimeline({
       ...readyDataSource,
@@ -287,7 +290,9 @@ describe("Timeline", () => {
     })
 
     await screen.findByText("2 records loaded")
-    fireEvent.click(screen.getByRole("button", { name: "Reset Timeline demo" }))
+    fireEvent.click(
+      screen.getByRole("button", { name: "Revoke Timeline access" })
+    )
 
     await waitFor(() => {
       expect(revokeConsent).toHaveBeenCalledOnce()

@@ -6,6 +6,7 @@ import { PageHeading } from "@/components/typography/page-heading"
 import { Text } from "@/components/typography/text"
 import {
   createProductionTimelineDataSource,
+  TIMELINE_MAX_RECORDS,
   type TimelineDataSource,
 } from "@/apps/timeline/timeline-data-source"
 import type {
@@ -64,7 +65,7 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
   const [consentError, setConsentError] = useState<string | null>(null)
   const [pendingConsent, setPendingConsent] =
     useState<LocalTimelineConsentRequest | null>(null)
-  const [resetError, setResetError] = useState<string | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const requestTerms = async () => {
     if (!requestConsent) return
@@ -96,18 +97,18 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
     }
   }
 
-  const resetTimelineDemo = async () => {
+  const revokeTimelineAccess = async () => {
     if (!revokeConsent) return
-    setResetError(null)
+    setRevokeError(null)
     try {
       await revokeConsent()
       setPendingConsent(null)
       setConsentError(null)
     } catch (error) {
-      setResetError(
+      setRevokeError(
         error instanceof Error
           ? error.message
-          : "Timeline access could not be reset."
+          : "Timeline access could not be revoked."
       )
     }
   }
@@ -154,8 +155,8 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
             visibleTimeline={visibleTimeline}
             onLoadMore={loadMore}
             isLoadingMore={isLoadingMore}
-            onResetDemo={revokeConsent ? resetTimelineDemo : undefined}
-            resetError={resetError}
+            onRevokeAccess={revokeConsent ? revokeTimelineAccess : undefined}
+            revokeError={revokeError}
           />
         ) : null}
       </section>
@@ -326,8 +327,8 @@ function TimelineReady({
   visibleTimeline,
   onLoadMore,
   isLoadingMore,
-  onResetDemo,
-  resetError,
+  onRevokeAccess,
+  revokeError,
 }: {
   activeStreamId: string | null
   onStreamChange: (streamId: string | null) => void
@@ -346,8 +347,8 @@ function TimelineReady({
   }
   onLoadMore?: () => void
   isLoadingMore: boolean
-  onResetDemo?: () => void
-  resetError: string | null
+  onRevokeAccess?: () => void
+  revokeError: string | null
 }) {
   const hasRecords = visibleTimeline.processedRecordCount > 0
 
@@ -406,7 +407,8 @@ function TimelineReady({
             )}
           </Button>
           <Text as="p" intent="small" muted>
-            Loads the next {100} records while keeping this filter.
+            Loads the next {TIMELINE_MAX_RECORDS} records while keeping this
+            filter.
           </Text>
         </div>
       ) : null}
@@ -425,9 +427,9 @@ function TimelineReady({
       )}
 
       <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-        {onResetDemo ? (
-          <Button variant="outline" onClick={onResetDemo}>
-            Reset Timeline demo
+        {onRevokeAccess ? (
+          <Button variant="outline" onClick={onRevokeAccess}>
+            Revoke Timeline access
           </Button>
         ) : null}
         <Text as="p" intent="small" muted>
@@ -435,9 +437,9 @@ function TimelineReady({
           screen.
         </Text>
       </div>
-      {resetError ? (
+      {revokeError ? (
         <Text as="p" intent="small" color="destructive">
-          {resetError}
+          {revokeError}
         </Text>
       ) : null}
     </div>

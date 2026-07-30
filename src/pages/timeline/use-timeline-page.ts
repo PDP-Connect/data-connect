@@ -19,12 +19,16 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
   const [readAttempt, setReadAttempt] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const loadMoreAttemptRef = useRef(0)
+  const loadMoreControllerRef = useRef<AbortController | null>(null)
   const mountedRef = useRef(true)
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
       loadMoreAttemptRef.current += 1
+      loadMoreControllerRef.current?.abort()
+      loadMoreControllerRef.current = null
     }
   }, [])
 
@@ -76,10 +80,15 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
   )
 
   const loadMore = useCallback(async () => {
-    if (!dataSource.loadMore || state.kind !== "ready" || isLoadingMore) {
+    if (
+      !dataSource.loadMore ||
+      state.kind !== "ready" ||
+      loadMoreControllerRef.current
+    ) {
       return
     }
     const controller = new AbortController()
+    loadMoreControllerRef.current = controller
     const attempt = loadMoreAttemptRef.current + 1
     loadMoreAttemptRef.current = attempt
     setIsLoadingMore(true)
@@ -102,14 +111,21 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
         })
       }
     } finally {
+      if (loadMoreControllerRef.current === controller) {
+        loadMoreControllerRef.current = null
+      }
       if (mountedRef.current && loadMoreAttemptRef.current === attempt) {
         setIsLoadingMore(false)
       }
     }
-  }, [dataSource, isLoadingMore, state])
+  }, [dataSource, state])
 
   const revokeConsent = useCallback(async () => {
     if (!dataSource.revokeConsent) return false
+    loadMoreAttemptRef.current += 1
+    loadMoreControllerRef.current?.abort()
+    loadMoreControllerRef.current = null
+    setIsLoadingMore(false)
     const revoked = await dataSource.revokeConsent()
     setState({ kind: "unauthorized" })
     setSelectedStreamId(null)
