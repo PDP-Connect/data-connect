@@ -9,6 +9,13 @@ describe("extractScopeKeys", () => {
         "pdpp.recordsByStream": {
           user: [{ type: "RECORD", stream: "user" }],
         },
+        "pdpp.recordHistoryByStream": {
+          user: [{ type: "RECORD", stream: "user" }],
+        },
+        "pdpp.snapshot": {
+          collection_mode: "full_refresh",
+          reset_streams: ["user"],
+        },
       })
     ).toEqual(["github.profile"])
   })

@@ -167,6 +167,170 @@ test("rejects malformed snapshot envelopes without retaining earlier records", (
   }
 })
 
+test("an authoritative full refresh removes absent records while incremental snapshots retain them", () => {
+  const harness = withRepository()
+  const connectionId = "github-account-a"
+  const completedAt = "2026-07-30T20:00:00.000Z"
+  try {
+    harness.repository.importSnapshot({
+      connectionId,
+      recordsByStream: {
+        repositories: [
+          {
+            stream: "repositories",
+            key: "present",
+            data: record("repositories", "present"),
+            emitted_at: TIMES.emitted,
+          },
+          {
+            stream: "repositories",
+            key: "removed-on-full-refresh",
+            data: record("repositories", "removed-on-full-refresh"),
+            emitted_at: TIMES.emitted,
+          },
+        ],
+      },
+      snapshot: {
+        collection_mode: "full_refresh",
+        reset_streams: ["repositories"],
+        completed_at: completedAt,
+      },
+    })
+
+    harness.repository.importSnapshot({
+      connectionId,
+      recordsByStream: {
+        repositories: [
+          {
+            stream: "repositories",
+            key: "present",
+            data: record("repositories", "present", { name: "new-value" }),
+            emitted_at: completedAt,
+          },
+        ],
+      },
+      snapshot: {
+        collection_mode: "incremental",
+        reset_streams: [],
+        completed_at: completedAt,
+      },
+    })
+    assert.notEqual(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "repositories",
+        key: "removed-on-full-refresh",
+      }),
+      null
+    )
+
+    harness.repository.importSnapshot({
+      connectionId,
+      recordsByStream: {
+        repositories: [
+          {
+            stream: "repositories",
+            key: "present",
+            data: record("repositories", "present", { name: "new-value" }),
+            emitted_at: completedAt,
+          },
+        ],
+      },
+      snapshot: {
+        collection_mode: "full_refresh",
+        reset_streams: ["repositories"],
+        completed_at: completedAt,
+      },
+    })
+    assert.equal(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "repositories",
+        key: "removed-on-full-refresh",
+      }),
+      null
+    )
+    assert.equal(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "repositories",
+        key: "present",
+      }).data.name,
+      "new-value"
+    )
+  } finally {
+    harness.dispose()
+  }
+})
+
+test("a malformed authoritative full refresh does not partially alter current records", () => {
+  const harness = withRepository()
+  const connectionId = "github-account-a"
+  try {
+    harness.repository.importSnapshot({
+      connectionId,
+      recordsByStream: {
+        repositories: [
+          {
+            stream: "repositories",
+            key: "existing",
+            data: record("repositories", "existing"),
+            emitted_at: TIMES.emitted,
+          },
+        ],
+      },
+    })
+    assert.throws(
+      () =>
+        harness.repository.importSnapshot({
+          connectionId,
+          recordsByStream: {
+            repositories: [
+              {
+                stream: "repositories",
+                key: "new-but-rolled-back",
+                data: record("repositories", "new-but-rolled-back"),
+                emitted_at: TIMES.emitted,
+              },
+              {
+                stream: "repositories",
+                key: "wrong-key",
+                data: record("repositories", "different-key"),
+                emitted_at: TIMES.emitted,
+              },
+            ],
+          },
+          snapshot: {
+            collection_mode: "full_refresh",
+            reset_streams: ["repositories"],
+            completed_at: "2026-07-30T20:00:00.000Z",
+          },
+        }),
+      error =>
+        error instanceof RecordsRepositoryError &&
+        error.code === "invalid_record_identity"
+    )
+    assert.notEqual(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "repositories",
+        key: "existing",
+      }),
+      null
+    )
+    assert.equal(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "repositories",
+        key: "new-but-rolled-back",
+      }),
+      null
+    )
+  } finally {
+    harness.dispose()
+  }
+})
+
 test("upserts and deletes are atomic, idempotent, and survive reopen", () => {
   const harness = withRepository()
   try {

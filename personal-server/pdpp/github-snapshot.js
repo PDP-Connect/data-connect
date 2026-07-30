@@ -37,7 +37,12 @@ export async function findGithubSnapshotCandidates({ exportRoot, manifest }) {
       )
         continue
       const timestamp = exportTimestamp(exportFile, content, await stat(path))
-      candidates.push({ path, recordsByStream, timestamp })
+      candidates.push({
+        path,
+        recordsByStream,
+        snapshot: content?.["pdpp.snapshot"],
+        timestamp,
+      })
     } catch {
       // Incomplete and unrelated exports must never become serving inputs.
     }
@@ -65,6 +70,7 @@ export async function importLatestGithubSnapshot({
       repository.importSnapshot({
         connectionId,
         recordsByStream: candidate.recordsByStream,
+        snapshot: candidate.snapshot,
       })
       return candidate
     } catch (error) {

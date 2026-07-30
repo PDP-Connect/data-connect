@@ -152,7 +152,7 @@ export class GrantScopedRecordsRepository {
    * The whole snapshot is one transaction, so malformed input cannot leave a
    * partially imported connector run behind.
    */
-  importSnapshot({ connectionId, recordsByStream }) {
+  importSnapshot({ connectionId, recordsByStream, snapshot }) {
     requireNonEmptyString(connectionId, "connectionId")
     if (!isPlainObject(recordsByStream)) {
       throw new RecordsRepositoryError(
@@ -160,9 +160,13 @@ export class GrantScopedRecordsRepository {
         "recordsByStream must be an object"
       )
     }
+    const snapshotMetadata = validateSnapshotMetadata(snapshot, recordsByStream)
 
     const apply = this.#db.transaction(() => {
       const results = []
+      const observedKeysByResetStream = new Map(
+        snapshotMetadata.resetStreams.map(stream => [stream, new Set()])
+      )
       for (const [stream, records] of Object.entries(recordsByStream)) {
         requireStream(stream)
         if (!Array.isArray(records)) {
@@ -180,21 +184,18 @@ export class GrantScopedRecordsRepository {
           }
           const op = envelope.op ?? "upsert"
           if (op === "upsert") {
-            results.push(
-              this.#mutate(
-                validateLiveRecord({
-                  connectionId,
-                  stream,
-                  key: envelope.key,
-                  data: envelope.data,
-                  emittedAt: envelope.emitted_at,
-                }),
-                "upsert"
-              )
-            )
+            const record = validateLiveRecord({
+              connectionId,
+              stream,
+              key: envelope.key,
+              data: envelope.data,
+              emittedAt: envelope.emitted_at,
+            })
+            observedKeysByResetStream.get(stream)?.add(record.key)
+            results.push(this.#mutateInTransaction(record, "upsert"))
           } else if (op === "delete") {
             results.push(
-              this.#mutate(
+              this.#mutateInTransaction(
                 validateDelete({
                   connectionId,
                   stream,
@@ -211,6 +212,16 @@ export class GrantScopedRecordsRepository {
             )
           }
         }
+      }
+      for (const stream of snapshotMetadata.resetStreams) {
+        results.push(
+          ...this.#reconcileAuthoritativeFullRefreshInTransaction({
+            connectionId,
+            stream,
+            presentKeys: observedKeysByResetStream.get(stream),
+            emittedAt: snapshotMetadata.completedAt,
+          })
+        )
       }
       return results
     })
@@ -533,6 +544,37 @@ export class GrantScopedRecordsRepository {
     return { changed: true, version }
   }
 
+  /**
+   * Turn records absent from a completed, authoritative full refresh into
+   * ordinary durable delete changes. Incremental imports never call this;
+   * their omitted records are deliberately ambiguous and remain current.
+   */
+  #reconcileAuthoritativeFullRefreshInTransaction({
+    connectionId,
+    stream,
+    presentKeys,
+    emittedAt,
+  }) {
+    const currentKeys = this.#db
+      .prepare(
+        `
+      SELECT record_key
+      FROM current_records
+      WHERE connection_id = ? AND stream = ? AND deleted = 0
+    `
+      )
+      .all(connectionId, stream)
+      .map(row => row.record_key)
+    return currentKeys
+      .filter(key => !presentKeys.has(key))
+      .map(key =>
+        this.#mutateInTransaction(
+          validateDelete({ connectionId, stream, key, emittedAt }),
+          "delete"
+        )
+      )
+  }
+
   #mutationStep(step, context) {
     if (this.#onMutationStep) this.#onMutationStep(step, context)
   }
@@ -734,6 +776,66 @@ function validateDelete({ connectionId, stream, key, emittedAt }) {
     )
   }
   return { connectionId, stream, key, emittedAt }
+}
+
+/**
+ * Legacy exports carry no snapshot metadata and therefore retain the
+ * historical merge-only behavior. A reset is opt-in, fully described, and
+ * only accepted with an explicit completed-at timestamp for durable deletes.
+ */
+function validateSnapshotMetadata(snapshot, recordsByStream) {
+  if (snapshot === undefined) {
+    return { resetStreams: [], completedAt: null }
+  }
+  if (!isPlainObject(snapshot)) {
+    throw new RecordsRepositoryError(
+      "invalid_snapshot",
+      "snapshot metadata must be an object"
+    )
+  }
+  const mode = snapshot.collection_mode
+  if (mode !== "full_refresh" && mode !== "incremental") {
+    throw new RecordsRepositoryError(
+      "invalid_snapshot",
+      "snapshot.collection_mode must be full_refresh or incremental"
+    )
+  }
+  const resetStreams = snapshot.reset_streams
+  if (
+    !Array.isArray(resetStreams) ||
+    resetStreams.some(
+      stream => typeof stream !== "string" || stream.length === 0
+    ) ||
+    new Set(resetStreams).size !== resetStreams.length
+  ) {
+    throw new RecordsRepositoryError(
+      "invalid_snapshot",
+      "snapshot.reset_streams must be unique non-empty stream names"
+    )
+  }
+  if (mode === "incremental" && resetStreams.length > 0) {
+    throw new RecordsRepositoryError(
+      "invalid_snapshot",
+      "incremental snapshots cannot reset streams"
+    )
+  }
+  for (const stream of resetStreams) {
+    requireStream(stream)
+    if (!Object.hasOwn(recordsByStream, stream)) {
+      throw new RecordsRepositoryError(
+        "invalid_snapshot",
+        `Authoritative snapshot must include an array for reset stream '${stream}'`
+      )
+    }
+  }
+  if (resetStreams.length === 0) return { resetStreams, completedAt: null }
+  if (!isIsoTimestamp(snapshot.completed_at)) {
+    throw new RecordsRepositoryError(
+      "invalid_snapshot",
+      "snapshot.completed_at must be an ISO-8601 timestamp when resetting streams"
+    )
+  }
+  return { resetStreams, completedAt: snapshot.completed_at }
 }
 
 function validateLocation({ connectionId, stream, key }) {

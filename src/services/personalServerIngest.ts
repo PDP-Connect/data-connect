@@ -6,6 +6,8 @@ const METADATA_KEYS = [
   "version",
   "platform",
   "pdpp.recordsByStream",
+  "pdpp.recordHistoryByStream",
+  "pdpp.snapshot",
 ]
 
 /**

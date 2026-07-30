@@ -251,7 +251,7 @@ fn start_installed_pdpp_connector_run_impl(
             &records_by_stream,
             &committed_checkpoints,
         )?;
-        let export = build_export_data(&resolved, &request, &staged)?;
+        let export = build_export_data(&resolved, &request, &staged, &snapshot_reset_streams)?;
         commit_terminal_run(
             &result.status,
             &resolved.connector_id,
@@ -898,6 +898,7 @@ fn build_export_data(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     collection_state: &PdppCollectionConnectionState,
+    snapshot_reset_streams: &[String],
 ) -> Result<Value, String> {
     let connector_key = resolved
         .manifest
@@ -945,17 +946,32 @@ fn build_export_data(
     let requested_scopes = projected_scopes.keys().cloned().collect::<Vec<_>>();
     let mut export = projected_scopes;
     // This is not a serving scope (see METADATA_KEYS in
-    // personalServerIngest.ts). It preserves the complete, validated PDPP
-    // envelopes on local disk even where the current Personal Server's legacy
-    // GitHub schemas require a deliberately lossy projection.
+    // personalServerIngest.ts). It is the lossless *current* PDPP snapshot.
+    // A successful full refresh may authoritatively remove a record, so the
+    // serving input cannot be the append-only history below.
     export.insert(
         "pdpp.recordsByStream".into(),
+        snapshot_for_export(collection_state, snapshot_reset_streams)?,
+    );
+    // Preserve the complete validated envelope history for local export and
+    // inspection. The Personal Server deliberately serves the current
+    // snapshot above, then maintains its own durable read change history.
+    export.insert(
+        "pdpp.recordHistoryByStream".into(),
         serde_json::to_value(&collection_state.raw_records_by_stream)
-            .map_err(|error| format!("Failed to serialize raw PDPP export: {error}"))?,
+            .map_err(|error| format!("Failed to serialize PDPP record history: {error}"))?,
     );
     export.insert("requestedScopes".into(), json!(requested_scopes));
     export.insert("timestamp".into(), json!(timestamp));
     export.insert("exportedAt".into(), json!(timestamp));
+    export.insert(
+        "pdpp.snapshot".into(),
+        json!({
+            "collection_mode": request.collection_mode,
+            "reset_streams": snapshot_reset_streams,
+            "completed_at": timestamp,
+        }),
+    );
     export.insert(
         "version".into(),
         json!(resolved
@@ -986,6 +1002,21 @@ fn build_export_data(
     );
     export.insert("errors".into(), json!([]));
     Ok(Value::Object(export))
+}
+
+/// An authoritative full refresh must carry an explicit, empty stream entry
+/// when it found no records. Without it, a receiver cannot distinguish an
+/// empty successful scan from a partially omitted stream.
+fn snapshot_for_export(
+    collection_state: &PdppCollectionConnectionState,
+    snapshot_reset_streams: &[String],
+) -> Result<Value, String> {
+    let mut snapshot = collection_state.snapshot_by_stream.clone();
+    for stream in snapshot_reset_streams {
+        snapshot.entry(stream.clone()).or_default();
+    }
+    serde_json::to_value(snapshot)
+        .map_err(|error| format!("Failed to serialize current PDPP snapshot: {error}"))
 }
 
 fn project_github_profile(records: &[PdppRecord]) -> Result<Value, String> {
@@ -1815,7 +1846,7 @@ rl.on('line', (line) => {
             timeout_seconds: None,
         };
 
-        let export = build_export_data(&resolved, &request, &collection_state).unwrap();
+        let export = build_export_data(&resolved, &request, &collection_state, &[]).unwrap();
         assert_eq!(
             export["requestedScopes"],
             json!(["github.profile", "github.repositories", "github.starred"])
@@ -1850,6 +1881,55 @@ rl.on('line', (line) => {
             "kept only in raw export"
         );
         assert_eq!(export["exportSummary"]["count"], 3);
+    }
+
+    #[test]
+    fn full_refresh_export_marks_an_empty_stream_authoritative_without_losing_history() {
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "run-full-refresh".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "full_refresh".into(),
+            streams: vec!["repositories".into()],
+            connection_id: None,
+            github_token: None,
+            timeout_seconds: None,
+        };
+        let removed = PdppRecord {
+            stream: "repositories".into(),
+            key: json!("removed"),
+            data: json!({
+                "id": "removed", "full_name": "octocat/removed",
+                "created_at": "2026-07-01T00:00:00Z",
+                "pushed_at": "2026-07-01T00:00:00Z",
+            }),
+            emitted_at: "2026-07-30T00:00:00Z".into(),
+            op: Some("upsert".into()),
+        };
+        let state = PdppCollectionConnectionState {
+            raw_records_by_stream: HashMap::from([("repositories".into(), vec![removed])]),
+            ..Default::default()
+        };
+
+        let export =
+            build_export_data(&resolved, &request, &state, &["repositories".into()]).unwrap();
+
+        assert_eq!(export["pdpp.recordsByStream"]["repositories"], json!([]));
+        assert_eq!(
+            export["pdpp.recordHistoryByStream"]["repositories"][0]["key"],
+            json!("removed")
+        );
+        assert_eq!(
+            export["pdpp.snapshot"]["collection_mode"],
+            json!("full_refresh")
+        );
+        assert_eq!(
+            export["pdpp.snapshot"]["reset_streams"],
+            json!(["repositories"])
+        );
+        assert!(export["pdpp.snapshot"]["completed_at"].is_string());
     }
 
     #[test]

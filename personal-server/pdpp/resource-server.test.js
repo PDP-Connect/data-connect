@@ -373,6 +373,49 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
   }
 })
 
+test("a successful authoritative full refresh removes records absent from the next PDPP read", async () => {
+  const fixture = createInstalledGithubFixture()
+  const app = new Hono()
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    tokenIntrospector: { introspect: async () => activeToken() },
+  })
+  const headers = { authorization: "Bearer opaque" }
+  const before = await app.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers }
+  )
+  assert.equal(before.status, 200)
+  assert.deepEqual(
+    (await before.json()).data.map(record => record.id),
+    ["allowed"]
+  )
+
+  writeFileSync(
+    join(fixture.exportRoot, "authoritative-empty-full-refresh.json"),
+    JSON.stringify({
+      timestamp: 1785715200000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.recordsByStream": { repositories: [] },
+        "pdpp.snapshot": {
+          collection_mode: "full_refresh",
+          reset_streams: ["repositories"],
+          completed_at: "2026-07-31T00:00:00.000Z",
+        },
+      },
+    })
+  )
+
+  const after = await app.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers }
+  )
+  assert.equal(after.status, 200)
+  assert.deepEqual((await after.json()).data, [])
+})
+
 test("composes local GitHub authorization with imported PDPP reads and legacy revocation", async () => {
   const fixture = createInstalledGithubFixture()
   const adapter = createGithubAuthorizationAdapter({

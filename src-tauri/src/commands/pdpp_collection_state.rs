@@ -399,6 +399,76 @@ mod tests {
     }
 
     #[test]
+    fn successful_full_refresh_replaces_current_snapshot_but_keeps_lossless_history() {
+        let current = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([(
+                "repositories".into(),
+                vec![record("removed", Some("upsert"), "old")],
+            )]),
+            raw_records_by_stream: HashMap::from([(
+                "repositories".into(),
+                vec![record("removed", Some("upsert"), "old")],
+            )]),
+            ..Default::default()
+        };
+        let next = stage_succeeded_run(
+            &current,
+            "full_refresh",
+            &["repositories".into()],
+            &HashMap::from([(
+                "repositories".into(),
+                vec![record("present", Some("upsert"), "new")],
+            )]),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(next.snapshot_by_stream["repositories"].len(), 1);
+        assert_eq!(
+            next.snapshot_by_stream["repositories"][0].key,
+            json!("present")
+        );
+        assert_eq!(next.raw_records_by_stream["repositories"].len(), 2);
+        assert_eq!(
+            next.raw_records_by_stream["repositories"][0].key,
+            json!("removed")
+        );
+        assert_eq!(
+            next.raw_records_by_stream["repositories"][1].key,
+            json!("present")
+        );
+    }
+
+    #[test]
+    fn successful_incremental_run_never_removes_prior_snapshot_records() {
+        let current = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([(
+                "repositories".into(),
+                vec![record("first", Some("upsert"), "old")],
+            )]),
+            raw_records_by_stream: HashMap::from([(
+                "repositories".into(),
+                vec![record("first", Some("upsert"), "old")],
+            )]),
+            ..Default::default()
+        };
+        let next = stage_succeeded_run(
+            &current,
+            "incremental",
+            &["repositories".into()],
+            &HashMap::from([(
+                "repositories".into(),
+                vec![record("second", Some("upsert"), "new")],
+            )]),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(next.snapshot_by_stream["repositories"].len(), 2);
+        assert_eq!(next.raw_records_by_stream["repositories"].len(), 2);
+    }
+
+    #[test]
     fn full_refresh_does_not_erase_checkpoint_when_no_state_is_emitted() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state.json");
