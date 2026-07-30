@@ -37,6 +37,7 @@ export async function createPdppResourceServer({
   const refreshSnapshot = createSnapshotRefresher({
     exportRoot,
     manifest: installed.manifest,
+    manifestDigest: installed.manifestDigest,
     repository,
     connectionId,
   })

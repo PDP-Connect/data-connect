@@ -16,6 +16,10 @@ describe("extractScopeKeys", () => {
           collection_mode: "full_refresh",
           reset_streams: ["user"],
         },
+        "pdpp.provenance": {
+          connector_key: "github",
+          connector_id: "https://registry.pdpp.org/connectors/github",
+        },
       })
     ).toEqual(["github.profile"])
   })

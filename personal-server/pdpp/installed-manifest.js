@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-const CONNECTOR_ID = "github-pdpp";
+const ACTIVE_CONNECTOR_ID = "github-pdpp";
+const CONNECTOR_ID = "https://registry.pdpp.org/connectors/github";
 const CONNECTOR_KEY = "github";
 const ARTIFACT_KIND = "pdpp-collection-profile";
 
@@ -45,7 +46,10 @@ function validateManifest(install, manifest) {
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
     fail("manifest must be an object");
   }
-  if (manifest.connector_key !== CONNECTOR_KEY && manifest.connector_id !== CONNECTOR_ID) {
+  if (
+    manifest.connector_key !== CONNECTOR_KEY ||
+    manifest.connector_id !== CONNECTOR_ID
+  ) {
     fail("manifest identity does not match the active install");
   }
   if (manifest.version !== install.version) {
@@ -77,9 +81,9 @@ function validateManifest(install, manifest) {
  */
 export function loadInstalledGithubManifest({
   activeManifestPath = join(homedir(), ".dataconnect", "connectors-active.json"),
-  connectorId = CONNECTOR_ID,
+  connectorId = ACTIVE_CONNECTOR_ID,
 } = {}) {
-  if (connectorId !== CONNECTOR_ID) fail(`unsupported connector ${connectorId}`);
+  if (connectorId !== ACTIVE_CONNECTOR_ID) fail(`unsupported connector ${connectorId}`);
 
   const active = readJson(activeManifestPath, "active connector manifest");
   const install = active?.connectors?.[connectorId];
@@ -102,6 +106,7 @@ export function loadInstalledGithubManifest({
   return Object.freeze({
     connectorId,
     version: install.version,
+    manifestDigest: install.manifestSha256,
     manifest,
     provenance,
     manifestPath,

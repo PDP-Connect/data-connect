@@ -60,6 +60,7 @@ describe("loadInstalledGithubManifest", () => {
     const { activePath } = fixture();
     const loaded = loadInstalledGithubManifest({ activeManifestPath: activePath });
     assert.equal(loaded.version, "0.5.0");
+    assert.equal(loaded.manifestDigest.startsWith("sha256:"), true);
     assert.equal(loaded.manifest.connector_key, "github");
     assert.equal(loaded.manifest.streams[0].name, "user");
     assert.deepEqual(loaded.provenance, { source: "fixture", version: "0.5.0" });
@@ -67,6 +68,11 @@ describe("loadInstalledGithubManifest", () => {
 
   for (const [label, overrides] of [
     ["manifest version", { manifest: { version: "0.6.0" } }],
+    [
+      "manifest canonical connector id",
+      { manifest: { connector_id: "github-pdpp" } },
+    ],
+    ["manifest connector key", { manifest: { connector_key: "not-github" } }],
     ["manifest digest", { install: { manifestSha256: "sha256:bad" } }],
     ["provenance digest", { install: { provenanceSha256: "sha256:bad" } }],
   ]) {

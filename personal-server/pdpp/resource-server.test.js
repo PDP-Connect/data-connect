@@ -64,6 +64,7 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
     ],
   }
   const manifestBytes = Buffer.from(JSON.stringify(manifest))
+  const manifestDigest = hash(manifestBytes)
   const entrypointBytes = Buffer.from("export default {};")
   const provenanceBytes = Buffer.from(
     JSON.stringify({ source: "fixture", version: "0.5.0" })
@@ -90,7 +91,7 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
           manifestPath: "profile/collection-profile.json",
           entrypointPath: "dist/collection-profile.mjs",
           provenancePath: "provenance.json",
-          manifestSha256: hash(manifestBytes),
+          manifestSha256: manifestDigest,
           entrypointSha256: hash(entrypointBytes),
           provenanceSha256: hash(provenanceBytes),
         },
@@ -104,6 +105,7 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
       content: {
         platform: "github",
         version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({ manifestDigest }),
         "pdpp.recordsByStream": allStreams ? {
           user_stats: [
             {
@@ -147,6 +149,24 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
     activeManifestPath,
     exportRoot,
     databasePath: join(root, "records.sqlite"),
+    manifestDigest,
+  }
+}
+
+function githubSnapshotProvenance({
+  manifestDigest,
+  connectionId = "default",
+  runId = "github-run-1",
+  overrides = {},
+}) {
+  return {
+    connector_key: "github",
+    connector_id: "https://registry.pdpp.org/connectors/github",
+    manifest_version: "0.5.0",
+    manifest_sha256: manifestDigest,
+    run_id: runId,
+    connection_id: connectionId,
+    ...overrides,
   }
 }
 
@@ -410,6 +430,10 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
       content: {
         platform: "github",
         version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: fixture.manifestDigest,
+          runId: "github-run-2",
+        }),
         "pdpp.recordsByStream": {
           repositories: [record("allowed", "2026-03-01T00:00:00Z")],
         },
@@ -537,6 +561,10 @@ test("a successful authoritative full refresh removes records absent from the ne
       content: {
         platform: "github",
         version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: fixture.manifestDigest,
+          runId: "github-run-full-refresh",
+        }),
         "pdpp.recordsByStream": { repositories: [] },
         "pdpp.snapshot": {
           collection_mode: "full_refresh",
@@ -553,6 +581,107 @@ test("a successful authoritative full refresh removes records absent from the ne
   )
   assert.equal(after.status, 200)
   assert.deepEqual((await after.json()).data, [])
+})
+
+test("serves only the requested connection's verified installed snapshot", async () => {
+  const fixture = createInstalledGithubFixture()
+  writeFileSync(
+    join(fixture.exportRoot, "newest-other-connection.json"),
+    JSON.stringify({
+      timestamp: 1785801600000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: fixture.manifestDigest,
+          connectionId: "other-account",
+          runId: "github-other-account",
+        }),
+        "pdpp.recordsByStream": {
+          repositories: [record("other-account", "2026-04-01T00:00:00Z")],
+        },
+      },
+    })
+  )
+  writeFileSync(
+    join(fixture.exportRoot, "newest-wrong-manifest.json"),
+    JSON.stringify({
+      timestamp: 1785888000000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: "sha256:not-the-installed-artifact",
+          runId: "github-wrong-manifest",
+        }),
+        "pdpp.recordsByStream": {
+          repositories: [record("untrusted", "2026-05-01T00:00:00Z")],
+        },
+      },
+    })
+  )
+  writeFileSync(
+    join(fixture.exportRoot, "newest-missing-run-id.json"),
+    JSON.stringify({
+      timestamp: 1785974400000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: fixture.manifestDigest,
+          overrides: { run_id: "" },
+        }),
+        "pdpp.recordsByStream": {
+          repositories: [record("missing-run-id", "2026-06-01T00:00:00Z")],
+        },
+      },
+    })
+  )
+
+  const defaultApp = new Hono()
+  await mountPdppResourceServer(defaultApp, {
+    ...fixture,
+    tokenIntrospector: { introspect: async () => activeToken() },
+  })
+  const defaultRead = await defaultApp.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers: { authorization: "Bearer opaque" } }
+  )
+  assert.equal(defaultRead.status, 200)
+  assert.deepEqual(
+    (await defaultRead.json()).data.map(record => record.id),
+    ["allowed"]
+  )
+
+  const otherApp = new Hono()
+  await mountPdppResourceServer(otherApp, {
+    ...fixture,
+    databasePath: join(dirname(fixture.databasePath), "other-account.sqlite"),
+    connectionId: "other-account",
+    tokenIntrospector: {
+      introspect: async () =>
+        activeToken({
+          grant: {
+            ...activeToken().grant,
+            streams: [
+              {
+                ...activeToken().grant.streams[0],
+                resources: ["other-account"],
+              },
+            ],
+          },
+        }),
+    },
+  })
+  const otherRead = await otherApp.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers: { authorization: "Bearer opaque" } }
+  )
+  assert.equal(otherRead.status, 200)
+  assert.deepEqual(
+    (await otherRead.json()).data.map(record => record.id),
+    ["other-account"]
+  )
 })
 
 test("composes local GitHub authorization with imported PDPP reads and legacy revocation", async () => {

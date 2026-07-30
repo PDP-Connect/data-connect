@@ -20,6 +20,7 @@ function fixture() {
   mkdirSync(join(root, "profile"))
   mkdirSync(join(root, "dist"))
   const manifest = {
+    connector_id: "https://registry.pdpp.org/connectors/github",
     connector_key: "github",
     version: "0.5.0",
     runtime_requirements: { bindings: { network: { required: true } } },

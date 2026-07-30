@@ -15,7 +15,12 @@ async function visitJsonFiles(directory, files) {
  * Return lossless GitHub export candidates newest first. The repository validates
  * their record envelopes transactionally before one is accepted for serving.
  */
-export async function findGithubSnapshotCandidates({ exportRoot, manifest }) {
+export async function findGithubSnapshotCandidates({
+  exportRoot,
+  manifest,
+  manifestDigest,
+  connectionId,
+}) {
   if (!exportRoot) return []
   const files = []
   try {
@@ -33,6 +38,12 @@ export async function findGithubSnapshotCandidates({ exportRoot, manifest }) {
       if (
         content?.platform !== "github" ||
         content?.version !== manifest.version ||
+        !hasVerifiedSnapshotProvenance({
+          provenance: content?.["pdpp.provenance"],
+          manifest,
+          manifestDigest,
+          connectionId,
+        }) ||
         !isPlainObject(recordsByStream)
       )
         continue
@@ -58,12 +69,15 @@ export async function findGithubSnapshotCandidates({ exportRoot, manifest }) {
 export async function importLatestGithubSnapshot({
   exportRoot,
   manifest,
+  manifestDigest,
   repository,
   connectionId,
 }) {
   const candidates = await findGithubSnapshotCandidates({
     exportRoot,
     manifest,
+    manifestDigest,
+    connectionId,
   })
   for (const candidate of candidates) {
     try {
@@ -78,6 +92,28 @@ export async function importLatestGithubSnapshot({
     }
   }
   return null
+}
+
+/**
+ * The export is a local hand-off, not an authority in its own right. It may
+ * only serve the specific installed artifact and connection that produced it.
+ */
+function hasVerifiedSnapshotProvenance({
+  provenance,
+  manifest,
+  manifestDigest,
+  connectionId,
+}) {
+  return (
+    isPlainObject(provenance) &&
+    provenance.connector_key === manifest.connector_key &&
+    provenance.connector_id === manifest.connector_id &&
+    provenance.manifest_version === manifest.version &&
+    provenance.manifest_sha256 === manifestDigest &&
+    typeof provenance.run_id === "string" &&
+    provenance.run_id.length > 0 &&
+    provenance.connection_id === connectionId
+  )
 }
 
 function exportTimestamp(exportFile, content, metadata) {

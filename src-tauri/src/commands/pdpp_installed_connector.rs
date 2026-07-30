@@ -31,6 +31,8 @@ const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
+const GITHUB_CONNECTOR_KEY: &str = "github";
+const GITHUB_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/github";
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -104,6 +106,7 @@ pub struct SanitizedConnectorMessage {
 #[derive(Debug)]
 struct ResolvedInstalledPdppConnector {
     connector_id: String,
+    manifest_sha256: String,
     root: PathBuf,
     manifest_path: PathBuf,
     entrypoint_path: PathBuf,
@@ -511,12 +514,10 @@ fn resolve_installed_pdpp_connector(
         .ok_or("PDPP active install is missing provenancePath")?;
     let provenance_path =
         confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
+    let manifest_sha256 = required_hash(install.manifest_sha256.as_deref(), "manifestSha256")?;
     verify_file_hash(
         &manifest_path,
-        Some(required_hash(
-            install.manifest_sha256.as_deref(),
-            "manifestSha256",
-        )?),
+        Some(manifest_sha256),
         "PDPP manifest",
     )?;
     verify_file_hash(
@@ -540,9 +541,10 @@ fn resolve_installed_pdpp_connector(
             .map_err(|e| format!("Failed to read PDPP connector manifest: {e}"))?,
     )
     .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
-    validate_manifest(&install.connector_id, &manifest)?;
+    validate_manifest(&install.connector_id, &install.version, &manifest)?;
     Ok(ResolvedInstalledPdppConnector {
         connector_id: install.connector_id.clone(),
+        manifest_sha256: manifest_sha256.to_owned(),
         root,
         manifest_path,
         entrypoint_path,
@@ -592,17 +594,24 @@ fn validate_relative_path(path: &str, label: &str) -> Result<PathBuf, String> {
     Ok(rel.to_path_buf())
 }
 
-fn validate_manifest(connector_id: &str, manifest: &PdppConnectorManifest) -> Result<(), String> {
+fn validate_manifest(
+    connector_id: &str,
+    active_version: &str,
+    manifest: &PdppConnectorManifest,
+) -> Result<(), String> {
     if manifest.streams.is_empty() {
         return Err("PDPP connector manifest must declare at least one stream".into());
     }
-    let expected_manifest_key = connector_id.strip_suffix("-pdpp").unwrap_or(connector_id);
-    let declared_id_matches = manifest.connector_key.as_deref() == Some(expected_manifest_key)
-        || manifest.connector_id.as_deref() == Some(connector_id);
-    if !declared_id_matches {
+    if connector_id != "github-pdpp"
+        || manifest.connector_key.as_deref() != Some(GITHUB_CONNECTOR_KEY)
+        || manifest.connector_id.as_deref() != Some(GITHUB_CONNECTOR_ID)
+    {
         return Err(format!(
             "PDPP connector manifest does not match active install id {connector_id}"
         ));
+    }
+    if manifest.version.as_deref() != Some(active_version) {
+        return Err("PDPP connector manifest version does not match active install".into());
     }
     let bindings = manifest
         .runtime_requirements
@@ -886,8 +895,13 @@ fn build_export_data(
         .manifest
         .connector_key
         .as_deref()
-        .unwrap_or(&resolved.connector_id);
-    if connector_key != "github" {
+        .ok_or("PDPP connector manifest is missing connector_key")?;
+    let connector_id = resolved
+        .manifest
+        .connector_id
+        .as_deref()
+        .ok_or("PDPP connector manifest is missing connector_id")?;
+    if connector_key != GITHUB_CONNECTOR_KEY {
         return Err(
             "DataConnect does not yet have a storage projection for this PDPP connector".into(),
         );
@@ -949,6 +963,17 @@ fn build_export_data(
             "collection_mode": request.collection_mode,
             "reset_streams": snapshot_reset_streams,
             "completed_at": timestamp,
+        }),
+    );
+    export.insert(
+        "pdpp.provenance".into(),
+        json!({
+            "connector_key": connector_key,
+            "connector_id": connector_id,
+            "manifest_version": resolved.manifest.version,
+            "manifest_sha256": resolved.manifest_sha256,
+            "run_id": request.run_id,
+            "connection_id": request.connection_id(),
         }),
     );
     export.insert(
@@ -1450,7 +1475,7 @@ mod tests {
         (
             temp,
             ActiveConnectorInstall {
-                connector_id: "github".into(),
+                connector_id: "github-pdpp".into(),
                 company: "GitHub".into(),
                 version: "1.0.0".into(),
                 root_path: String::new(),
@@ -1469,8 +1494,9 @@ mod tests {
 
     fn github_manifest() -> Value {
         json!({
-            "connector_id": "https://registry.pdpp.org/connectors/github",
-            "connector_key": "github",
+            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_key": GITHUB_CONNECTOR_KEY,
+            "version": "1.0.0",
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 {
@@ -1488,8 +1514,9 @@ mod tests {
 
     fn github_all_streams_manifest() -> Value {
         json!({
-            "connector_id": "https://registry.pdpp.org/connectors/github",
-            "connector_key": "github",
+            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_key": GITHUB_CONNECTOR_KEY,
+            "version": "1.0.0",
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 { "name": "user" },
@@ -1546,7 +1573,7 @@ rl.on('line', (line) => {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
-        assert_eq!(resolved.connector_id, "github");
+        assert_eq!(resolved.connector_id, "github-pdpp");
         install.artifact_kind = None;
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
@@ -1588,7 +1615,9 @@ rl.on('line', (line) => {
             .contains("does not match"));
 
         let no_network = json!({
-            "connector_key": "github",
+            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_key": GITHUB_CONNECTOR_KEY,
+            "version": "1.0.0",
             "runtime_requirements": { "bindings": { } },
             "streams": [{ "name": "repositories" }]
         });
@@ -1597,12 +1626,22 @@ rl.on('line', (line) => {
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
             .contains("network binding"));
+
+        let mut wrong_version = github_manifest();
+        wrong_version["version"] = json!("2.0.0");
+        let (temp, mut install) = install_fixture(wrong_version, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("version does not match"));
     }
 
     #[test]
     fn rejects_unsupported_browser_binding_for_network_only_host() {
         let manifest = json!({
-            "connector_key": "github",
+            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_key": GITHUB_CONNECTOR_KEY,
+            "version": "1.0.0",
             "runtime_requirements": {
                 "bindings": {
                     "network": { "required": true },
@@ -1621,7 +1660,9 @@ rl.on('line', (line) => {
     #[test]
     fn allows_optional_future_bindings() {
         let manifest = json!({
-            "connector_key": "github",
+            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_key": GITHUB_CONNECTOR_KEY,
+            "version": "1.0.0",
             "runtime_requirements": {
                 "bindings": {
                     "network": { "required": true },
@@ -1826,7 +1867,6 @@ rl.on('line', (line) => {
     fn github_legacy_projections_preserve_all_selected_streams_losslessly() {
         let mut manifest = github_all_streams_manifest();
         manifest["display_name"] = json!("GitHub");
-        manifest["version"] = json!("0.5.0");
         let (temp, mut install) = install_fixture(manifest, success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
@@ -1925,7 +1965,7 @@ rl.on('line', (line) => {
             connector_id: "github-pdpp".into(),
             collection_mode: "incremental".into(),
             streams: vec![],
-            connection_id: None,
+            connection_id: Some("account-one".into()),
             github_token: None,
             timeout_seconds: None,
         };
@@ -1986,6 +2026,17 @@ rl.on('line', (line) => {
             );
         }
         assert!(export.get("github.user_stats").is_none());
+        assert_eq!(
+            export["pdpp.provenance"],
+            json!({
+                "connector_key": GITHUB_CONNECTOR_KEY,
+                "connector_id": GITHUB_CONNECTOR_ID,
+                "manifest_version": "1.0.0",
+                "manifest_sha256": resolved.manifest_sha256,
+                "run_id": "run-1",
+                "connection_id": "account-one",
+            })
+        );
         assert_eq!(export["exportSummary"]["count"], 7);
     }
 
@@ -2165,7 +2216,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     }
 
     #[test]
-    fn rejects_github_token_for_non_github_manifest() {
+    fn rejects_non_github_manifest_identity() {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let manifest = json!({
@@ -2183,10 +2234,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             "sha256:{:x}",
             Sha256::digest(&serde_json::to_vec_pretty(&manifest).unwrap())
         ));
-        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
-        let err =
-            build_command(&resolved, Some("secret"), &CommandCustomization::default()).unwrap_err();
-        assert!(err.contains("GitHub PDPP connector"));
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("does not match"));
     }
 
     #[test]
