@@ -6,8 +6,8 @@
 
 use super::connector_store::{get_active_connector_install, ActiveConnectorInstall};
 use super::pdpp_connector::{
-    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRunControl, PdppRunOptions,
-    PdppRunResult, PdppRunStatus, PdppScopeValidators, PdppStart,
+    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRecord, PdppRunControl,
+    PdppRunOptions, PdppRunResult, PdppRunStatus, PdppScopeValidators, PdppStart,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,9 +16,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
@@ -26,11 +27,12 @@ const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
+const GITHUB_DATA_CONNECT_UAT_STREAMS: [&str; 3] = ["user", "repositories", "starred"];
 
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, PdppRunControl>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartInstalledPdppConnectorRequest {
     pub run_id: String,
@@ -96,17 +98,20 @@ struct ResolvedInstalledPdppConnector {
     manifest: PdppConnectorManifest,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CommandCustomization {
     node_imports: Vec<PathBuf>,
     max_retained_records: usize,
     control: PdppRunControl,
+    on_event: Option<super::pdpp_connector::PdppEventSink>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PdppConnectorManifest {
     connector_id: Option<String>,
     connector_key: Option<String>,
+    display_name: Option<String>,
+    version: Option<String>,
     runtime_requirements: Option<RuntimeRequirements>,
     streams: Vec<PdppManifestStream>,
 }
@@ -128,56 +133,102 @@ struct PdppManifestStream {
     consent_time_field: Option<String>,
 }
 
+/// The kernel validates every record before this accumulator sees it. Keeping
+/// the complete stream here is intentionally distinct from the kernel's small
+/// diagnostic retention buffers: the former is the user's export, the latter
+/// is bounded operational evidence for the command response.
+#[derive(Debug, Default)]
+struct PdppExportAccumulator {
+    records_by_stream: HashMap<String, Vec<PdppRecord>>,
+}
+
+struct InstalledPdppRunCompletion {
+    response: InstalledPdppConnectorRunResponse,
+    export: Option<Value>,
+}
+
 fn default_collection_mode() -> String {
     "incremental".into()
 }
 
 #[tauri::command]
 pub async fn start_installed_pdpp_connector_run(
+    app: AppHandle,
     request: StartInstalledPdppConnectorRequest,
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
     validate_request(&request)?;
     let run_id = request.run_id.clone();
     let control = register_run(&run_id)?;
+    emit_running_status(&app, &run_id, "Starting PDPP connector...");
+    let app_for_task = app.clone();
     let result = tokio::task::spawn_blocking(move || {
-        start_installed_pdpp_connector_run_impl(request, control)
+        start_installed_pdpp_connector_run_impl(app_for_task, request, control)
     })
     .await
     .map_err(|e| format!("PDPP connector host task failed: {e}"));
     unregister_run(&run_id);
-    result?
+    match result? {
+        Ok(completion) => {
+            emit_terminal_status(&app, &completion.response, completion.export.as_ref());
+            Ok(completion.response)
+        }
+        Err(error) => {
+            emit_failed_terminal_status(&app, &run_id, &error);
+            Err(error)
+        }
+    }
 }
 
 fn start_installed_pdpp_connector_run_impl(
+    app: AppHandle,
     request: StartInstalledPdppConnectorRequest,
     control: PdppRunControl,
-) -> Result<InstalledPdppConnectorRunResponse, String> {
+) -> Result<InstalledPdppRunCompletion, String> {
     validate_request(&request)?;
     let resolved = resolve_active_installed_pdpp_connector(&request.connector_id)?;
+    let credential = resolve_github_credential(&request, &resolved)?;
+    let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
+    let sink = event_sink_for_run(
+        app,
+        request.run_id.clone(),
+        export_accumulator.clone(),
+        credential.clone(),
+    );
     let result = run_resolved_installed_pdpp_connector(
         &resolved,
         &request,
         CommandCustomization {
             control,
+            on_event: Some(sink),
             ..Default::default()
         },
+        credential.as_deref(),
     )?;
-    Ok(to_response(
-        request.run_id,
-        resolved.connector_id,
-        result,
-        request.github_token.as_deref(),
-    ))
+    let export = if result.status == PdppRunStatus::Succeeded {
+        Some(build_export_data(&resolved, &request, &export_accumulator)?)
+    } else {
+        None
+    };
+    Ok(InstalledPdppRunCompletion {
+        response: to_response(
+            request.run_id,
+            resolved.connector_id,
+            result,
+            credential.as_deref(),
+        ),
+        export,
+    })
 }
 
 fn run_resolved_installed_pdpp_connector(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     customization: CommandCustomization,
+    github_credential: Option<&str>,
 ) -> Result<PdppRunResult, String> {
     validate_request(request)?;
     let start = build_start(request, &resolved.manifest)?;
-    let command = build_command(resolved, request, &customization)?;
+    let command = build_command(resolved, github_credential, &customization)?;
     let options = PdppRunOptions {
         timeout: Some(Duration::from_secs(
             request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
@@ -185,7 +236,11 @@ fn run_resolved_installed_pdpp_connector(
         scope_validators: validators_from_manifest(&resolved.manifest),
         max_retained_records: customization.max_retained_records,
         max_retained_events: 64,
-        on_event: Some(std::sync::Arc::new(|_| Ok(()))),
+        on_event: Some(
+            customization
+                .on_event
+                .unwrap_or_else(|| Arc::new(|_| Ok(()))),
+        ),
         control: customization.control,
         ..Default::default()
     };
@@ -206,6 +261,7 @@ fn run_resolved_installed_pdpp_connector_for_test(
             max_retained_records: 256,
             ..Default::default()
         },
+        request.github_token.as_deref(),
     )
 }
 
@@ -458,21 +514,23 @@ fn build_start(
         .iter()
         .map(|stream| stream.name.as_str())
         .collect();
-    let selected = if request.streams.is_empty() {
-        manifest
-            .streams
-            .iter()
-            .map(|stream| stream.name.clone())
-            .collect::<Vec<_>>()
-    } else {
-        request.streams.clone()
-    };
+    let selected = selected_streams(request, manifest);
     for stream in &selected {
         if !available.contains(stream.as_str()) {
             return Err(format!(
                 "Requested PDPP stream {stream} is not in the connector manifest"
             ));
         }
+    }
+    if manifest.connector_key.as_deref() == Some("github")
+        && selected
+            .iter()
+            .any(|stream| !GITHUB_DATA_CONNECT_UAT_STREAMS.contains(&stream.as_str()))
+    {
+        return Err(
+            "DataConnect's current GitHub storage projection supports user, repositories, and starred only"
+                .into(),
+        );
     }
     let scope = json!({
         "streams": selected.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>()
@@ -484,6 +542,26 @@ fn build_start(
         request.state.clone(),
         json!({ "network": { "enabled": true } }),
     )
+}
+
+fn selected_streams(
+    request: &StartInstalledPdppConnectorRequest,
+    manifest: &PdppConnectorManifest,
+) -> Vec<String> {
+    if !request.streams.is_empty() {
+        return request.streams.clone();
+    }
+    if manifest.connector_key.as_deref() == Some("github") {
+        return GITHUB_DATA_CONNECT_UAT_STREAMS
+            .iter()
+            .map(|stream| (*stream).to_owned())
+            .collect();
+    }
+    manifest
+        .streams
+        .iter()
+        .map(|stream| stream.name.clone())
+        .collect()
 }
 
 fn validators_from_manifest(manifest: &PdppConnectorManifest) -> PdppScopeValidators {
@@ -513,19 +591,55 @@ fn validators_from_manifest(manifest: &PdppConnectorManifest) -> PdppScopeValida
     validators
 }
 
+fn resolve_github_credential(
+    request: &StartInstalledPdppConnectorRequest,
+    resolved: &ResolvedInstalledPdppConnector,
+) -> Result<Option<String>, String> {
+    let manifest_key = resolved.manifest.connector_key.as_deref().unwrap_or("");
+    if manifest_key != "github" {
+        if request.github_token.is_some() {
+            return Err("githubToken can only be passed to the GitHub PDPP connector".into());
+        }
+        return Ok(None);
+    }
+
+    if let Some(token) = request
+        .github_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    {
+        return Ok(Some(token.to_owned()));
+    }
+
+    // A local desktop UAT may use a shell-provided credential, but release
+    // builds cannot silently acquire one. It is only read into the scoped
+    // child-process environment and never enters the response or export.
+    #[cfg(debug_assertions)]
+    if let Ok(token) = std::env::var("PDPP_E2E_GITHUB_TOKEN") {
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+
+    Err(
+        "GitHub PDPP connector requires githubToken (or PDPP_E2E_GITHUB_TOKEN in a debug build)"
+            .into(),
+    )
+}
+
 fn build_command(
     resolved: &ResolvedInstalledPdppConnector,
-    request: &StartInstalledPdppConnectorRequest,
+    github_credential: Option<&str>,
     customization: &CommandCustomization,
 ) -> Result<PdppConnectorCommand, String> {
     let mut env = HashMap::new();
-    if let Some(token) = &request.github_token {
+    if let Some(token) = github_credential {
         let manifest_key = resolved.manifest.connector_key.as_deref().unwrap_or("");
         if manifest_key != "github" {
             return Err("githubToken can only be passed to the GitHub PDPP connector".into());
         }
-        env.insert("GITHUB_TOKEN".into(), token.clone());
-        env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token.clone());
+        env.insert("GITHUB_TOKEN".into(), token.to_owned());
+        env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token.to_owned());
     }
     env.insert("PDPP_CONNECTOR_NETWORK".into(), "1".into());
     env.insert(
@@ -548,6 +662,377 @@ fn build_command(
         env,
         clear_env: true,
     })
+}
+
+fn event_sink_for_run(
+    app: AppHandle,
+    run_id: String,
+    export_accumulator: Arc<Mutex<PdppExportAccumulator>>,
+    secret: Option<String>,
+) -> super::pdpp_connector::PdppEventSink {
+    Arc::new(move |event| match event {
+        PdppEvent::Record(record) => {
+            if secret.as_deref().is_some_and(|credential| {
+                value_contains_secret(&record.key, credential)
+                    || value_contains_secret(&record.data, credential)
+            }) {
+                return Err("PDPP connector attempted to emit its credential as data".into());
+            }
+            let mut collected = export_accumulator
+                .lock()
+                .map_err(|_| "PDPP export accumulator is unavailable")?;
+            collected
+                .records_by_stream
+                .entry(record.stream.clone())
+                .or_default()
+                .push(record);
+            Ok(())
+        }
+        PdppEvent::Progress(progress) => {
+            emit_running_status(
+                &app,
+                &run_id,
+                &redact_secret(&progress.message, secret.as_deref()),
+            );
+            Ok(())
+        }
+        // States and detail envelopes are already reflected in the sanitized
+        // command response. They are deliberately not copied to the export:
+        // the export is the full validated data stream, keyed by scope.
+        PdppEvent::State(_)
+        | PdppEvent::SkipResult(_)
+        | PdppEvent::DetailCoverage(_)
+        | PdppEvent::DetailGap(_)
+        | PdppEvent::DetailGapRecovered(_)
+        | PdppEvent::Interaction(_) => Ok(()),
+    })
+}
+
+fn value_contains_secret(value: &Value, secret: &str) -> bool {
+    if secret.is_empty() {
+        return false;
+    }
+    match value {
+        Value::String(value) => value.contains(secret),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_secret(value, secret)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_secret(value, secret)),
+        _ => false,
+    }
+}
+
+fn build_export_data(
+    resolved: &ResolvedInstalledPdppConnector,
+    request: &StartInstalledPdppConnectorRequest,
+    export_accumulator: &Arc<Mutex<PdppExportAccumulator>>,
+) -> Result<Value, String> {
+    let connector_key = resolved
+        .manifest
+        .connector_key
+        .as_deref()
+        .unwrap_or(&resolved.connector_id);
+    if connector_key != "github" {
+        return Err(
+            "DataConnect does not yet have a storage projection for this PDPP connector".into(),
+        );
+    }
+    let selected_streams = selected_streams(request, &resolved.manifest);
+    let records_by_stream = export_accumulator
+        .lock()
+        .map_err(|_| "PDPP export accumulator is unavailable")?
+        .records_by_stream
+        .clone();
+    let mut stream_counts = serde_json::Map::new();
+    let mut record_count = 0usize;
+    let mut projected_scopes = serde_json::Map::new();
+
+    for stream in &selected_streams {
+        let records = records_by_stream.get(stream).cloned().unwrap_or_default();
+        record_count += records.len();
+        stream_counts.insert(stream.clone(), json!(records.len()));
+        let (scope, value) = match stream.as_str() {
+            // The Personal Server's existing GitHub schemas deliberately use
+            // these shapes. This is a DataConnect storage projection, not a
+            // claim that the PDPP connector only supports three streams.
+            "user" => ("github.profile", project_github_profile(&records)?),
+            "repositories" => (
+                "github.repositories",
+                project_github_repositories(&records)?,
+            ),
+            "starred" => ("github.starred", project_github_starred(&records)?),
+            unsupported => {
+                return Err(format!(
+                    "DataConnect does not have a GitHub storage projection for PDPP stream {unsupported}"
+                ));
+            }
+        };
+        projected_scopes.insert(scope.to_owned(), value);
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let requested_scopes = projected_scopes.keys().cloned().collect::<Vec<_>>();
+    let mut export = projected_scopes;
+    // This is not a serving scope (see METADATA_KEYS in
+    // personalServerIngest.ts). It preserves the complete, validated PDPP
+    // envelopes on local disk even where the current Personal Server's legacy
+    // GitHub schemas require a deliberately lossy projection.
+    export.insert(
+        "pdpp.recordsByStream".into(),
+        serde_json::to_value(&records_by_stream)
+            .map_err(|error| format!("Failed to serialize raw PDPP export: {error}"))?,
+    );
+    export.insert("requestedScopes".into(), json!(requested_scopes));
+    export.insert("timestamp".into(), json!(timestamp));
+    export.insert("exportedAt".into(), json!(timestamp));
+    export.insert(
+        "version".into(),
+        json!(resolved
+            .manifest
+            .version
+            .as_deref()
+            .unwrap_or("pdpp-collection-profile")),
+    );
+    export.insert("platform".into(), json!(connector_key));
+    export.insert(
+        "company".into(),
+        json!(resolved
+            .manifest
+            .display_name
+            .as_deref()
+            .unwrap_or(connector_key)),
+    );
+    export.insert(
+        "exportSummary".into(),
+        json!({
+            "count": record_count,
+            "label": format!("{record_count} {connector_key} records exported"),
+            "details": {
+                "pdppStorageProjection": "github-v1",
+                "pdppStreamRecords": stream_counts,
+            }
+        }),
+    );
+    export.insert("errors".into(), json!([]));
+    Ok(Value::Object(export))
+}
+
+fn project_github_profile(records: &[PdppRecord]) -> Result<Value, String> {
+    let record = records
+        .last()
+        .ok_or("GitHub profile projection requires a user record")?;
+    let data = record_data_object(record, "user")?;
+    let login = required_string(data, "login", "user")?;
+    let mut profile = serde_json::Map::new();
+    profile.insert("username".into(), json!(login));
+    profile.insert(
+        "profileUrl".into(),
+        json!(format!("https://github.com/{login}")),
+    );
+    insert_optional_string(&mut profile, "fullName", data.get("name"));
+    insert_optional_string(&mut profile, "bio", data.get("bio"));
+    insert_optional_string(&mut profile, "company", data.get("company"));
+    insert_optional_string(&mut profile, "location", data.get("location"));
+    insert_optional_string(&mut profile, "website", data.get("blog"));
+    insert_optional_string(&mut profile, "avatarUrl", data.get("avatar_url"));
+    Ok(Value::Object(profile))
+}
+
+fn project_github_repositories(records: &[PdppRecord]) -> Result<Value, String> {
+    let repositories = records
+        .iter()
+        .map(|record| project_github_repository(record, "repositories", false))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "repositories": repositories }))
+}
+
+fn project_github_starred(records: &[PdppRecord]) -> Result<Value, String> {
+    let starred = records
+        .iter()
+        .map(|record| project_github_repository(record, "starred", true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "starred": starred }))
+}
+
+fn project_github_repository(
+    record: &PdppRecord,
+    stream: &str,
+    starred: bool,
+) -> Result<Value, String> {
+    let data = record_data_object(record, stream)?;
+    let full_name = required_string(data, "full_name", stream)?;
+    let url = optional_string(data.get("html_url"))
+        .unwrap_or_else(|| format!("https://github.com/{full_name}"));
+    let mut projected = serde_json::Map::new();
+    if starred {
+        projected.insert("fullName".into(), json!(full_name));
+    } else {
+        let name = optional_string(data.get("name")).unwrap_or_else(|| {
+            full_name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&full_name)
+                .to_owned()
+        });
+        projected.insert("name".into(), json!(name));
+    }
+    projected.insert("url".into(), json!(url));
+    insert_optional_string(&mut projected, "description", data.get("description"));
+    insert_optional_string(&mut projected, "language", data.get("language"));
+    insert_optional_number(&mut projected, "stars", data.get("stargazers_count"));
+    insert_optional_string(&mut projected, "updatedAt", data.get("updated_at"));
+    if !starred {
+        insert_optional_number(&mut projected, "forks", data.get("forks_count"));
+        if let Some(private) = data.get("private").and_then(Value::as_bool) {
+            projected.insert(
+                "visibility".into(),
+                json!(if private { "private" } else { "public" }),
+            );
+        }
+        if let Some(topics) = data.get("topics").and_then(Value::as_array) {
+            projected.insert(
+                "topics".into(),
+                json!(topics.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+            );
+        }
+    }
+    Ok(Value::Object(projected))
+}
+
+fn record_data_object<'a>(
+    record: &'a PdppRecord,
+    stream: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    record
+        .data
+        .as_object()
+        .ok_or_else(|| format!("PDPP {stream} record data is not an object"))
+}
+
+fn required_string(
+    data: &serde_json::Map<String, Value>,
+    field: &str,
+    stream: &str,
+) -> Result<String, String> {
+    optional_string(data.get(field)).ok_or_else(|| {
+        format!("PDPP {stream} record is missing required {field} for storage projection")
+    })
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn insert_optional_string(
+    target: &mut serde_json::Map<String, Value>,
+    field: &str,
+    value: Option<&Value>,
+) {
+    if let Some(value) = optional_string(value) {
+        target.insert(field.into(), json!(value));
+    }
+}
+
+fn insert_optional_number(
+    target: &mut serde_json::Map<String, Value>,
+    field: &str,
+    value: Option<&Value>,
+) {
+    if let Some(value) = value.and_then(Value::as_number) {
+        target.insert(field.into(), Value::Number(value.clone()));
+    }
+}
+
+fn emit_running_status(app: &AppHandle, run_id: &str, message: &str) {
+    let _ = app.emit(
+        "connector-status",
+        json!({
+            "runId": run_id,
+            "status": { "type": "RUNNING", "message": message },
+            "timestamp": chrono_timestamp(),
+        }),
+    );
+}
+
+fn emit_terminal_status(
+    app: &AppHandle,
+    response: &InstalledPdppConnectorRunResponse,
+    export: Option<&Value>,
+) {
+    let successful = response.status == "succeeded";
+    let data = successful.then_some(export).flatten();
+    let requested = data
+        .and_then(|value| value.get("requestedScopes"))
+        .and_then(Value::as_array)
+        .map_or(0, |scopes| scopes.len());
+    let produced = data.map_or(0, |value| {
+        value
+            .get("requestedScopes")
+            .and_then(Value::as_array)
+            .map(|scopes| {
+                scopes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|scope| value.get(*scope).is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    });
+    let status_type = if successful { "COMPLETE" } else { "ERROR" };
+    let message = if successful {
+        "Collection completed successfully"
+    } else {
+        response
+            .failure
+            .as_deref()
+            .unwrap_or("PDPP connector failed")
+    };
+    let _ = app.emit(
+        "connector-status",
+        json!({
+            "runId": response.run_id,
+            "status": {
+                "type": status_type,
+                "message": message,
+                "outcome": if successful { "success" } else { "failure" },
+                "errorClass": if successful { Value::Null } else { json!("runtime_error") },
+                "recordCount": response.record_count,
+                "scopeSummary": {
+                    "requested": requested,
+                    "produced": produced,
+                    "degraded": 0,
+                    "omitted": requested.saturating_sub(produced),
+                },
+                "data": data,
+            },
+            "timestamp": chrono_timestamp(),
+        }),
+    );
+}
+
+fn emit_failed_terminal_status(app: &AppHandle, run_id: &str, error: &str) {
+    let _ = app.emit(
+        "connector-status",
+        json!({
+            "runId": run_id,
+            "status": {
+                "type": "ERROR",
+                "message": error,
+                "outcome": "failure",
+                "errorClass": "runtime_error",
+            },
+            "timestamp": chrono_timestamp(),
+        }),
+    );
+}
+
+fn chrono_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 fn required_hash<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, String> {
@@ -988,6 +1473,117 @@ rl.on('line', (line) => {
     }
 
     #[test]
+    fn github_storage_projection_is_strict_while_raw_selected_streams_stay_lossless_locally() {
+        let manifest = json!({
+            "connector_key": "github",
+            "display_name": "GitHub",
+            "version": "0.5.0",
+            "runtime_requirements": { "bindings": { "network": { "required": true } } },
+            "streams": [
+                { "name": "user" },
+                { "name": "repositories" },
+                { "name": "starred" }
+            ]
+        });
+        let (temp, mut install) = install_fixture(manifest, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let records = HashMap::from([
+            (
+                "user".to_owned(),
+                vec![PdppRecord {
+                    stream: "user".into(),
+                    key: json!("42"),
+                    data: json!({
+                        "id": "42", "login": "octocat", "name": "The Octocat",
+                        "blog": "https://octo.example", "avatar_url": "https://img.example/octo.png",
+                        "unexpected_api_field": "kept only in raw export"
+                    }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
+            (
+                "repositories".to_owned(),
+                vec![PdppRecord {
+                    stream: "repositories".into(),
+                    key: json!("42/repo"),
+                    data: json!({
+                        "id": "7", "name": "repo", "full_name": "octocat/repo",
+                        "html_url": "https://github.com/octocat/repo", "description": null,
+                        "language": "Rust", "stargazers_count": 4, "forks_count": 2,
+                        "private": false, "topics": ["pdpp", 123], "updated_at": "2026-07-29T00:00:00Z",
+                        "extra": "kept only in raw export"
+                    }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: Some("upsert".into()),
+                }],
+            ),
+            (
+                "starred".to_owned(),
+                vec![PdppRecord {
+                    stream: "starred".into(),
+                    key: json!("upstream/project"),
+                    data: json!({
+                        "id": "8", "full_name": "upstream/project", "html_url": null,
+                        "description": "Useful", "language": null, "stargazers_count": 9
+                    }),
+                    emitted_at: "2026-07-30T00:00:00Z".into(),
+                    op: None,
+                }],
+            ),
+        ]);
+        let accumulator = Arc::new(Mutex::new(PdppExportAccumulator {
+            records_by_stream: records,
+        }));
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "run-1".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["user".into(), "repositories".into(), "starred".into()],
+            state: None,
+            github_token: None,
+            timeout_seconds: None,
+        };
+
+        let export = build_export_data(&resolved, &request, &accumulator).unwrap();
+        assert_eq!(
+            export["requestedScopes"],
+            json!(["github.profile", "github.repositories", "github.starred"])
+        );
+        assert_eq!(
+            export["github.profile"],
+            json!({
+                "username": "octocat",
+                "profileUrl": "https://github.com/octocat",
+                "fullName": "The Octocat",
+                "website": "https://octo.example",
+                "avatarUrl": "https://img.example/octo.png"
+            })
+        );
+        assert_eq!(
+            export["github.repositories"]["repositories"][0],
+            json!({
+                "name": "repo", "url": "https://github.com/octocat/repo", "language": "Rust",
+                "stars": 4, "updatedAt": "2026-07-29T00:00:00Z", "forks": 2,
+                "visibility": "public", "topics": ["pdpp"]
+            })
+        );
+        assert_eq!(
+            export["github.starred"]["starred"][0],
+            json!({
+                "fullName": "upstream/project", "url": "https://github.com/upstream/project",
+                "description": "Useful", "stars": 9
+            })
+        );
+        assert_eq!(
+            export["pdpp.recordsByStream"]["repositories"][0]["data"]["extra"],
+            "kept only in raw export"
+        );
+        assert_eq!(export["exportSummary"]["count"], 3);
+    }
+
+    #[test]
     fn scopes_environment_and_runs_synthetic_network_connector() {
         std::env::set_var("SHOULD_NOT_LEAK", "sentinel");
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
@@ -995,7 +1591,12 @@ rl.on('line', (line) => {
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
         let request = request_with_token("test-token");
         let start = build_start(&request, &resolved.manifest).unwrap();
-        let command = build_command(&resolved, &request, &CommandCustomization::default()).unwrap();
+        let command = build_command(
+            &resolved,
+            request.github_token.as_deref(),
+            &CommandCustomization::default(),
+        )
+        .unwrap();
         assert!(command.clear_env);
         assert_eq!(command.cwd.as_deref(), Some(resolved.root.as_path()));
         let result = supervise_pdpp_connector(
@@ -1042,6 +1643,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
                 max_retained_records: 4,
                 ..Default::default()
             },
+            request.github_token.as_deref(),
         )
         .unwrap();
         assert!(result.stderr.contains(token));
@@ -1056,6 +1658,19 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         assert!(serialized.contains("[REDACTED]"));
         assert_eq!(response.event_summary.records, 1);
         assert!(response.stderr_bytes > 0);
+    }
+
+    #[test]
+    fn detects_a_credential_anywhere_in_a_record_before_local_export() {
+        let secret = "ghp_never_write_this";
+        assert!(value_contains_secret(
+            &json!({ "nested": [{ "credential": secret }] }),
+            secret
+        ));
+        assert!(!value_contains_secret(
+            &json!({ "safe": "public repository metadata" }),
+            secret
+        ));
     }
 
     #[test]
@@ -1111,20 +1726,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             Sha256::digest(&serde_json::to_vec_pretty(&manifest).unwrap())
         ));
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
-        let err = build_command(
-            &resolved,
-            &StartInstalledPdppConnectorRequest {
-                run_id: "run-1".into(),
-                connector_id: "not-github".into(),
-                collection_mode: "incremental".into(),
-                streams: vec!["repositories".into()],
-                state: None,
-                github_token: Some("secret".into()),
-                timeout_seconds: None,
-            },
-            &CommandCustomization::default(),
-        )
-        .unwrap_err();
+        let err =
+            build_command(&resolved, Some("secret"), &CommandCustomization::default()).unwrap_err();
         assert!(err.contains("GitHub PDPP connector"));
     }
 
@@ -1148,7 +1751,7 @@ setInterval(() => {}, 1000);
             timeout_seconds: Some(1),
         };
         let result = supervise_pdpp_connector(
-            &build_command(&resolved, &request, &CommandCustomization::default()).unwrap(),
+            &build_command(&resolved, None, &CommandCustomization::default()).unwrap(),
             &build_start(&request, &resolved.manifest).unwrap(),
             &PdppRunOptions {
                 timeout: Some(Duration::from_millis(50)),
@@ -1193,6 +1796,7 @@ setInterval(() => {}, 1000);
                     control,
                     ..Default::default()
                 },
+                None,
             )
         });
 
@@ -1258,6 +1862,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
                 max_retained_records: 1,
                 ..Default::default()
             },
+            request.github_token.as_deref(),
         )
         .unwrap();
         let response = to_response(

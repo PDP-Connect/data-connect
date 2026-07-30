@@ -455,15 +455,16 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
 
                             let resolved_icon = metadata
                                 .icon_url
-                                .or(metadata.icon_url_legacy)
-                                .or(metadata.icon);
+                                .clone()
+                                .or(metadata.icon_url_legacy.clone())
+                                .or(metadata.icon.clone());
                             let logo_url = resolved_icon
                                 .as_ref()
                                 .and_then(|icon_path| {
                                     let svg_path = resolve_icon_path(dir, icon_path)?;
                                     fs::read_to_string(&svg_path).ok().map(|svg| {
                                         use base64::{
-                                            Engine as _, engine::general_purpose::STANDARD,
+                                            engine::general_purpose::STANDARD, Engine as _,
                                         };
                                         let encoded = STANDARD.encode(svg.as_bytes());
                                         format!("data:image/svg+xml;base64,{}", encoded)
@@ -2054,7 +2055,7 @@ async fn poll_connector_result(
 
 /// Decode base64 string using the base64 crate
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     STANDARD
         .decode(input)
         .map_err(|e| format!("Base64 decode error: {}", e))
@@ -2707,7 +2708,7 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectorMetadata, manifest_looks_like_connector, resolve_icon_path};
+    use super::{manifest_looks_like_connector, resolve_icon_path, ConnectorMetadata};
     use tempfile::tempdir;
 
     fn connector_metadata() -> ConnectorMetadata {
