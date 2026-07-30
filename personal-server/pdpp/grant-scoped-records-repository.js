@@ -1044,11 +1044,14 @@ function discloseSnapshot(row, stream, grant, streams) {
     Date.parse(time) >= Date.parse(grant.timeRange.until)
   )
     return null
+  const manifestData = Object.fromEntries(
+    Object.entries(data).filter(([field]) => metadata.fields.includes(field))
+  )
   const projected = grant.fields
     ? Object.fromEntries(
-        Object.entries(data).filter(([field]) => grant.fields.includes(field))
+        Object.entries(manifestData).filter(([field]) => grant.fields.includes(field))
       )
-    : data
+    : manifestData
   return {
     object: "record",
     id: row.record_key,

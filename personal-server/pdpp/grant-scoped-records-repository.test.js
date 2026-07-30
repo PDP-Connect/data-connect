@@ -615,6 +615,73 @@ test("grant constraints project current state and reject hidden-field filters", 
   }
 })
 
+test("manifest fields bound every disclosure while retaining lossless extension changes", () => {
+  const harness = withRepository()
+  const base = {
+    connectionId: "github-account-a",
+    stream: "repositories",
+    key: "1",
+  }
+  try {
+    harness.repository.upsert({
+      ...base,
+      data: record("repositories", "1", { extra: "first" }),
+      emittedAt: TIMES.emitted,
+    })
+
+    const unrestrictedCurrent = harness.repository.listCurrent({ ...base, grant: {} })
+    assert.equal(unrestrictedCurrent.data[0].data.extra, undefined)
+    assert.equal(
+      harness.repository.getCurrent({ ...base, grant: {} }).data.extra,
+      undefined
+    )
+    const unrestrictedChanges = harness.repository.listChanges({
+      ...base,
+      grant: {},
+      changesSince: "beginning",
+    })
+    assert.equal(unrestrictedChanges.data[0].data.extra, undefined)
+
+    const narrowGrant = { fields: ["full_name"] }
+    assert.deepEqual(
+      harness.repository.listCurrent({ ...base, grant: narrowGrant }).data[0].data,
+      { id: "1", full_name: "owner/repo-1" }
+    )
+    assert.deepEqual(
+      harness.repository.getCurrent({ ...base, grant: narrowGrant }).data,
+      { id: "1", full_name: "owner/repo-1" }
+    )
+    assert.deepEqual(
+      harness.repository.listChanges({
+        ...base,
+        grant: narrowGrant,
+        changesSince: "beginning",
+      }).data[0].data,
+      { id: "1", full_name: "owner/repo-1" }
+    )
+
+    const watermark = unrestrictedChanges.next_changes_since
+    assert.deepEqual(
+      harness.repository.upsert({
+        ...base,
+        data: record("repositories", "1", { extra: "second" }),
+        emittedAt: "2026-07-30T20:00:00.000Z",
+      }),
+      { changed: true, version: 2 }
+    )
+    assert.deepEqual(
+      harness.repository.listChanges({
+        ...base,
+        grant: {},
+        changesSince: watermark,
+      }).data,
+      []
+    )
+  } finally {
+    harness.dispose()
+  }
+})
+
 test("changes pin a horizon, suppress hidden-only updates, and emit authorized tombstones", () => {
   const harness = withRepository()
   try {
