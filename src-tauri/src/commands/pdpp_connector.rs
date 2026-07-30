@@ -191,6 +191,7 @@ pub struct PdppRunResult {
     pub status: PdppRunStatus,
     pub record_count: u64,
     pub records: Vec<PdppRecord>,
+    pub records_truncated: bool,
     pub checkpoints: HashMap<String, Value>,
     pub events: Vec<PdppEvent>,
     pub events_truncated: bool,
@@ -257,6 +258,12 @@ pub fn supervise_pdpp_connector(
 ) -> Result<PdppRunResult, String> {
     start.validate()?;
     let scope = scope_policy(start, &options.scope_validators)?;
+    if options.on_event.is_none() && options.max_retained_records == 0 {
+        return Err(
+            "PDPP connector requires an event sink or positive record retention before spawning"
+                .into(),
+        );
+    }
     let mut process = Command::new(&command.program);
     process
         .args(&command.args)
@@ -304,6 +311,7 @@ pub fn supervise_pdpp_connector(
     let mut failure = None;
     let mut termination = None;
     let mut records = Vec::new();
+    let mut records_truncated = false;
     let mut record_count = 0;
     let mut checkpoints = HashMap::new();
     let mut events = Vec::new();
@@ -344,6 +352,14 @@ pub fn supervise_pdpp_connector(
                         );
                         if records.len() < options.max_retained_records {
                             records.push(record);
+                        } else if options.on_event.is_some() {
+                            records_truncated = true;
+                        } else {
+                            set_failure(
+                                &mut failure,
+                                "PDPP record retention limit exceeded without an event sink",
+                            );
+                            terminate_child(&mut child);
                         }
                     }
                     Ok(ConnectorMessage::State(state)) => {
@@ -466,6 +482,7 @@ pub fn supervise_pdpp_connector(
         status,
         record_count,
         records,
+        records_truncated,
         checkpoints,
         events,
         events_truncated,
@@ -702,7 +719,7 @@ fn spawn_reader<R: Read + Send + 'static>(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         loop {
-            match read_line(&mut reader, limit) {
+            match read_line(&mut reader, limit, stdout) {
                 Ok(Line::Text(line)) => {
                     let event = if stdout {
                         ReaderEvent::Stdout(Ok(line))
@@ -744,7 +761,7 @@ fn spawn_reader<R: Read + Send + 'static>(
         });
     })
 }
-fn read_line<R: Read>(reader: &mut R, limit: usize) -> std::io::Result<Line> {
+fn read_line<R: Read>(reader: &mut R, limit: usize, strict_utf8: bool) -> std::io::Result<Line> {
     let mut bytes = Vec::new();
     let mut over = false;
     let mut byte = [0u8; 1];
@@ -756,19 +773,32 @@ fn read_line<R: Read>(reader: &mut R, limit: usize) -> std::io::Result<Line> {
                 } else if over {
                     Ok(Line::TooLong)
                 } else {
-                    Ok(Line::Text(String::from_utf8_lossy(&bytes).into_owned()))
+                    decode_line(bytes, strict_utf8)
                 }
             }
             _ if byte[0] == b'\n' => {
                 return if over {
                     Ok(Line::TooLong)
                 } else {
-                    Ok(Line::Text(String::from_utf8_lossy(&bytes).into_owned()))
+                    decode_line(bytes, strict_utf8)
                 }
             }
             _ if bytes.len() < limit => bytes.push(byte[0]),
             _ => over = true,
         }
+    }
+}
+
+fn decode_line(bytes: Vec<u8>, strict_utf8: bool) -> std::io::Result<Line> {
+    if strict_utf8 {
+        String::from_utf8(bytes).map(Line::Text).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PDPP stdout is not valid UTF-8",
+            )
+        })
+    } else {
+        Ok(Line::Text(String::from_utf8_lossy(&bytes).into_owned()))
     }
 }
 
@@ -793,10 +823,10 @@ mod tests {
     }
     fn fixture(mode: &str) -> PdppConnectorCommand {
         PdppConnectorCommand {
-            program: "sh".into(),
+            program: "node".into(),
             args: vec![
                 format!(
-                    "{}/tests/fixtures/pdpp-connector-fixture.sh",
+                    "{}/tests/fixtures/pdpp-connector-fixture.mjs",
                     env!("CARGO_MANIFEST_DIR")
                 ),
                 mode.into(),
@@ -881,12 +911,61 @@ mod tests {
             .contains("INTERACTION_RESPONSE"));
     }
     #[test]
+    fn requires_a_sink_or_positive_record_retention_before_spawning() {
+        let result = supervise_pdpp_connector(
+            &fixture("success"),
+            &scoped(),
+            &PdppRunOptions {
+                max_retained_records: 0,
+                ..options()
+            },
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("event sink or positive record retention"));
+    }
+    #[test]
+    fn fails_when_unsunk_record_retention_is_exceeded() {
+        let result = supervise_pdpp_connector(
+            &fixture("two-records"),
+            &scoped(),
+            &PdppRunOptions {
+                max_retained_records: 1,
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Failed);
+        assert!(result.failure.unwrap().contains("retention limit exceeded"));
+    }
+    #[test]
+    fn reports_record_truncation_when_a_sink_consumes_records() {
+        let sink: PdppEventSink = Arc::new(|_| Ok(()));
+        let result = supervise_pdpp_connector(
+            &fixture("two-records"),
+            &scoped(),
+            &PdppRunOptions {
+                max_retained_records: 1,
+                on_event: Some(sink),
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert!(result.records_truncated);
+    }
+    #[test]
     fn bounds_stdout_stderr_and_handles_terminal_exit_statuses() {
         let mut limits = options();
         limits.max_stdout_line_bytes = 32;
         let oversized =
             supervise_pdpp_connector(&fixture("oversized-stdout"), &scoped(), &limits).unwrap();
         assert_eq!(oversized.status, PdppRunStatus::Failed);
+        let invalid_utf8 =
+            supervise_pdpp_connector(&fixture("invalid-utf8-stdout"), &scoped(), &options())
+                .unwrap();
+        assert_eq!(invalid_utf8.status, PdppRunStatus::Failed);
+        assert!(invalid_utf8.failure.unwrap().contains("not valid UTF-8"));
         let mut stderr = options();
         stderr.max_stderr_bytes = 16;
         let bounded =
@@ -925,5 +1004,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(timed_out.status, PdppRunStatus::TimedOut);
+    }
+    #[test]
+    fn preserves_optional_skip_result_fields() {
+        let scope = scope_policy(&scoped(), &options().scope_validators).unwrap();
+        assert!(parse_message(
+            r#"{"type":"SKIP_RESULT","stream":"items","reason":"rate_limited","message":"retry later"}"#,
+            &scope,
+        )
+        .is_ok());
+        assert!(parse_message(
+            r#"{"type":"SKIP_RESULT","stream":"items","reason":"rate_limited"}"#,
+            &scope,
+        )
+        .is_ok());
+    }
+    #[test]
+    fn strictly_decodes_stdout_and_lossily_decodes_stderr() {
+        assert!(read_line(&mut &b"\xff\n"[..], 16, true).is_err());
+        assert!(matches!(
+            read_line(&mut &b"\xff\n"[..], 16, false).unwrap(),
+            Line::Text(_)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_group_termination_kills_a_grandchild() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_string_lossy().into_owned();
+        let command = PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                format!(
+                    "{}/tests/fixtures/pdpp-connector-fixture.mjs",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+                "grandchild-sleep".into(),
+                marker_path.clone(),
+            ],
+        };
+        let result = supervise_pdpp_connector(
+            &command,
+            &scoped(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_millis(100)),
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::TimedOut);
+        thread::sleep(Duration::from_millis(300));
+        assert!(std::fs::read_to_string(marker.path()).unwrap().is_empty());
     }
 }
