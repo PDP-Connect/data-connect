@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { getAllAvailableScopes, getPlatformRegistryEntryById } from "./utils"
+import {
+  getAllAvailableScopes,
+  getPlatformRegistryEntryById,
+  resolvePlatformForEntry,
+} from "./utils"
 import { PLATFORM_REGISTRY } from "./registry"
 import type { Platform } from "@/types"
 
@@ -121,5 +125,21 @@ describe("getPlatformRegistryEntryById", () => {
     expect(getPlatformRegistryEntryById("instagram-ads-playwright")?.id).toBe(
       "instagram-ads"
     )
+  })
+
+  it("resolves github-pdpp to the GitHub registry entry", () => {
+    expect(getPlatformRegistryEntryById("github-pdpp")?.id).toBe("github")
+  })
+})
+
+describe("resolvePlatformForEntry", () => {
+  it("prefers installed PDPP GitHub over legacy GitHub when both are present", () => {
+    const entry = getPlatformRegistryEntryById("github")
+    expect(entry).toBeTruthy()
+
+    const legacy = makePlatform({ id: "github-playwright", runtime: "playwright" })
+    const pdpp = makePlatform({ id: "github-pdpp", runtime: "pdpp-network" })
+
+    expect(resolvePlatformForEntry([legacy, pdpp], entry!)).toBe(pdpp)
   })
 })

@@ -27,6 +27,7 @@ export interface Run {
   id: string;
   platformId: string;
   filename: string;
+  runtime?: string | null;
   isConnected: boolean;
   startDate: string;
   endDate?: string;

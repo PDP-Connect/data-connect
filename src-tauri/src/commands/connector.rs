@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use super::connector_store::{
-    get_active_connector_install, get_legacy_user_connectors_dir,
+    get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
 };
 
 // Chromium download constants
@@ -102,6 +102,20 @@ pub struct Platform {
     pub scopes: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ActivePdppPlatformManifest {
+    connector_key: Option<String>,
+    display_name: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    streams: Vec<ActivePdppStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivePdppStream {
+    name: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorResultScopeSummary {
@@ -155,7 +169,10 @@ fn manifest_looks_like_connector(metadata: &ConnectorMetadata) -> bool {
         .as_deref()
         .or(metadata.id.as_deref())
         .is_some()
-        && metadata.scopes.as_ref().is_some_and(|scopes| !scopes.is_empty())
+        && metadata
+            .scopes
+            .as_ref()
+            .is_some_and(|scopes| !scopes.is_empty())
 }
 
 fn resolve_icon_path(dir: &Path, icon_path: &str) -> Option<PathBuf> {
@@ -349,6 +366,40 @@ pub async fn debug_connector_paths(app: AppHandle) -> Result<serde_json::Value, 
 }
 
 /// Load platforms from a single directory
+fn platform_from_metadata(
+    metadata: ConnectorMetadata,
+    company: String,
+    filename: String,
+    logo_url: String,
+    runtime_override: Option<String>,
+) -> Platform {
+    let scopes = metadata
+        .scopes
+        .map(|s| s.into_iter().map(|cs| cs.scope).collect());
+
+    Platform {
+        id: metadata
+            .connector_id
+            .or(metadata.id)
+            .unwrap_or_else(|| format!("{}-001", filename)),
+        company: metadata.company.unwrap_or(company),
+        name: metadata.name.clone(),
+        filename,
+        description: metadata.description,
+        is_updated: false,
+        logo_url,
+        needs_connection: true,
+        connect_url: metadata.connect_url.or(metadata.connect_url_legacy),
+        connect_selector: metadata
+            .connect_selector
+            .or(metadata.connect_selector_legacy),
+        export_frequency: metadata.export_frequency,
+        vectorize_config: metadata.vectorize_config,
+        runtime: runtime_override.or(metadata.runtime),
+        scopes,
+    }
+}
+
 fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
     let mut platforms = Vec::new();
 
@@ -412,7 +463,7 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
                                     let svg_path = resolve_icon_path(dir, icon_path)?;
                                     fs::read_to_string(&svg_path).ok().map(|svg| {
                                         use base64::{
-                                            engine::general_purpose::STANDARD, Engine as _,
+                                            Engine as _, engine::general_purpose::STANDARD,
                                         };
                                         let encoded = STANDARD.encode(svg.as_bytes());
                                         format!("data:image/svg+xml;base64,{}", encoded)
@@ -420,31 +471,13 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
                                 })
                                 .unwrap_or_else(|| filename.to_string());
 
-                            let scopes = metadata
-                                .scopes
-                                .map(|s| s.into_iter().map(|cs| cs.scope).collect());
-
-                            platforms.push(Platform {
-                                id: metadata
-                                    .connector_id
-                                    .or(metadata.id)
-                                    .unwrap_or_else(|| format!("{}-001", filename)),
-                                company: metadata.company.unwrap_or(company),
-                                name: metadata.name.clone(),
-                                filename: filename.to_string(),
-                                description: metadata.description,
-                                is_updated: false,
+                            platforms.push(platform_from_metadata(
+                                metadata,
+                                company,
+                                filename.to_string(),
                                 logo_url,
-                                needs_connection: true,
-                                connect_url: metadata.connect_url.or(metadata.connect_url_legacy),
-                                connect_selector: metadata
-                                    .connect_selector
-                                    .or(metadata.connect_selector_legacy),
-                                export_frequency: metadata.export_frequency,
-                                vectorize_config: metadata.vectorize_config,
-                                runtime: metadata.runtime,
-                                scopes,
-                            });
+                                None,
+                            ));
                         }
                         Err(e) => {
                             log::error!("Failed to parse metadata {:?}: {}", path, e);
@@ -459,6 +492,90 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
     }
 
     platforms
+}
+
+fn load_active_pdpp_platforms() -> Vec<Platform> {
+    let Some(manifest) = read_active_connector_manifest() else {
+        return Vec::new();
+    };
+
+    let mut platforms = Vec::new();
+    for install in manifest.connectors.into_values() {
+        if install.artifact_kind.as_deref() != Some("pdpp-collection-profile") {
+            continue;
+        }
+        let Some(path) = active_install_path(&install.root_path, &install.metadata_relative_path)
+        else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
+            continue;
+        };
+
+        let connector_key = manifest
+            .connector_key
+            .clone()
+            .unwrap_or_else(|| install.connector_id.replace("-pdpp", ""));
+        let filename = install.connector_id.clone();
+        let company = if install.company.is_empty() {
+            connector_key.clone()
+        } else {
+            install.company.clone()
+        };
+        let scopes = pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams);
+        if scopes.is_empty() {
+            continue;
+        }
+
+        platforms.push(Platform {
+            id: install.connector_id,
+            company,
+            name: manifest
+                .display_name
+                .or(manifest.name)
+                .unwrap_or_else(|| connector_key.clone()),
+            filename,
+            description: manifest
+                .description
+                .unwrap_or_else(|| format!("{} PDPP connector", connector_key)),
+            is_updated: false,
+            logo_url: connector_key,
+            needs_connection: true,
+            connect_url: None,
+            connect_selector: None,
+            export_frequency: None,
+            vectorize_config: None,
+            runtime: Some("pdpp-network".to_string()),
+            scopes: Some(scopes),
+        });
+    }
+
+    platforms
+}
+
+fn pdpp_streams_to_dataconnect_scopes(
+    connector_key: &str,
+    streams: &[ActivePdppStream],
+) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for stream in streams {
+        let scope = match (connector_key, stream.name.as_str()) {
+            ("github", "user") => Some("github.profile"),
+            ("github", "repositories") => Some("github.repositories"),
+            ("github", "starred") => Some("github.starred"),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            let scope = scope.to_string();
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
+    }
+    scopes
 }
 
 /// Load all platform connectors from both user and bundled connectors directories
@@ -484,6 +601,13 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
                 // Remove the bundled version
                 platforms.retain(|p| p.id != platform.id);
             }
+            seen_ids.insert(platform.id.clone());
+            platforms.push(platform);
+        }
+    }
+
+    for platform in load_active_pdpp_platforms() {
+        if !seen_ids.contains(&platform.id) {
             seen_ids.insert(platform.id.clone());
             platforms.push(platform);
         }
@@ -562,8 +686,9 @@ fn load_connector_metadata(
     let json_name = format!("{}.json", filename);
 
     let candidates: Vec<PathBuf> = [
-        get_active_connector_install(filename)
-            .and_then(|install| active_install_path(&install.root_path, &install.metadata_relative_path)),
+        get_active_connector_install(filename).and_then(|install| {
+            active_install_path(&install.root_path, &install.metadata_relative_path)
+        }),
         get_user_connectors_dir().map(|d| d.join(&company_lower).join(&json_name)),
         Some(
             get_connectors_dir(app)
@@ -703,8 +828,13 @@ fn load_connector_script(app: &AppHandle, company: &str, filename: &str) -> Opti
     let company_lower = company.to_lowercase();
 
     if let Some(install) = get_active_connector_install(filename) {
-        if let Some(script_path) = active_install_path(&install.root_path, &install.script_relative_path) {
-            log::info!("Loaded connector script from active install: {:?}", script_path);
+        if let Some(script_path) =
+            active_install_path(&install.root_path, &install.script_relative_path)
+        {
+            log::info!(
+                "Loaded connector script from active install: {:?}",
+                script_path
+            );
             if let Ok(content) = fs::read_to_string(&script_path) {
                 return Some(content);
             }
@@ -1158,7 +1288,10 @@ async fn start_playwright_run(
             .ok_or("Could not find playwright-runner directory")?;
 
         if !runner_dir.exists() {
-            return Err(format!("Playwright runner not found: {:?}. Run 'npm install' in playwright-runner directory.", runner_dir));
+            return Err(format!(
+                "Playwright runner not found: {:?}. Run 'npm install' in playwright-runner directory.",
+                runner_dir
+            ));
         }
 
         let mut cmd = Command::new("node");
@@ -1498,8 +1631,14 @@ pub async fn start_connector_run(
         let connector_version = load_connector_metadata(&app, &company, &filename)
             .and_then(|m| m.version)
             .unwrap_or_else(|| "unknown".to_string());
-        log::info!("Starting connector run for {} (platform: {}, company: {}, filename: {}, connector v{})",
-            run_id, platform_id, company, filename, connector_version);
+        log::info!(
+            "Starting connector run for {} (platform: {}, company: {}, filename: {}, connector v{})",
+            run_id,
+            platform_id,
+            company,
+            filename,
+            connector_version
+        );
 
         let window_label = format!("connector-{}", run_id);
         let use_network_capture = runtime.as_deref() == Some("network-capture");
@@ -1915,7 +2054,7 @@ async fn poll_connector_result(
 
 /// Decode base64 string using the base64 crate
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     STANDARD
         .decode(input)
         .map_err(|e| format!("Base64 decode error: {}", e))
@@ -2221,7 +2360,10 @@ fn get_downloaded_chromium_path() -> Option<PathBuf> {
 fn get_chromium_download_info() -> Option<(&'static str, &'static str)> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        Some(("chromium-mac-arm64.zip", "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"))
+        Some((
+            "chromium-mac-arm64.zip",
+            "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ))
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
@@ -2565,7 +2707,7 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_looks_like_connector, resolve_icon_path, ConnectorMetadata};
+    use super::{ConnectorMetadata, manifest_looks_like_connector, resolve_icon_path};
     use tempfile::tempdir;
 
     fn connector_metadata() -> ConnectorMetadata {

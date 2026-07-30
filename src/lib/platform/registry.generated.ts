@@ -43,7 +43,7 @@ export const PLATFORM_REGISTRY_GENERATED: PlatformRegistryEntry[] = [
     displayName: "GitHub",
     brandDomain: "github.com",
     iconKey: "github",
-    platformIds: ["github-playwright", "github"],
+    platformIds: ["github-pdpp", "github-playwright", "github"],
     availability: "requiresConnector",
     showInConnectList: true,
     ingestScope: "github.profile"

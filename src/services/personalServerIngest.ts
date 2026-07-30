@@ -1,6 +1,12 @@
 import { getPlatformIngestScope } from "@/lib/platform/utils"
 
-const METADATA_KEYS = ["exportSummary", "timestamp", "version", "platform"]
+const METADATA_KEYS = [
+  "exportSummary",
+  "timestamp",
+  "version",
+  "platform",
+  "pdpp.recordsByStream",
+]
 
 /**
  * Where to send ingest. Either a local port (Tauri-bundled PS) or a

@@ -19,6 +19,11 @@
     },
     {
       "connectorId": "github-playwright",
+      "platformIds": [
+        "github-pdpp",
+        "github-playwright",
+        "github"
+      ],
       "showInConnectList": true
     },
     {

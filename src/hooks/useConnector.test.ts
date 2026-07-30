@@ -4,6 +4,7 @@ import type { Platform } from "../types"
 
 const mockInvoke = vi.fn()
 const mockDispatch = vi.fn()
+let currentRuns: Array<Record<string, unknown>> = []
 
 const startRun = vi.fn(payload => ({ type: "startRun", payload }))
 const updateRunStatus = vi.fn(payload => ({ type: "updateRunStatus", payload }))
@@ -17,7 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("react-redux", () => ({
   useDispatch: () => mockDispatch,
   useSelector: (selector: (state: unknown) => unknown) =>
-    selector({ app: { runs: [] } }),
+    selector({ app: { runs: currentRuns } }),
 }))
 
 vi.mock("../state/store", () => ({
@@ -48,6 +49,7 @@ describe("useConnector.startImport", () => {
     vi.spyOn(Date, "now").mockReturnValue(1700000000000)
     mockInvoke.mockReset()
     mockDispatch.mockReset()
+    currentRuns = []
     startRun.mockClear()
     updateRunStatus.mockClear()
     stopRun.mockClear()
@@ -94,5 +96,75 @@ describe("useConnector.startImport", () => {
       })
     )
     expect(deleteRun).not.toHaveBeenCalled()
+  })
+
+  it("uses the installed PDPP connector command for pdpp-network platforms", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport({
+        ...TEST_PLATFORM,
+        id: "github-pdpp",
+        company: "GitHub",
+        name: "GitHub",
+        filename: "github-pdpp",
+        runtime: "pdpp-network",
+        scopes: ["github.profile", "github.repositories"],
+      })
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("start_installed_pdpp_connector_run", {
+      request: {
+        runId: "github-pdpp-1700000000000",
+        connectorId: "github-pdpp",
+        collectionMode: "incremental",
+        streams: ["user", "repositories"],
+        githubToken: null,
+      },
+    })
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "start_connector_run",
+      expect.anything()
+    )
+  })
+
+  it("preserves the legacy connector command for non-PDPP platforms", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(TEST_PLATFORM)
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("start_connector_run", {
+      runId: "chatgpt-1700000000000",
+      platformId: "chatgpt",
+      filename: "chatgpt",
+      company: "OpenAI",
+      name: "ChatGPT",
+      connectUrl: "https://chatgpt.com",
+      runtime: "playwright",
+      simulateNoChrome: false,
+    })
+  })
+
+  it("uses the installed PDPP stop command for pdpp-network runs", async () => {
+    currentRuns = [{ id: "github-pdpp-run", runtime: "pdpp-network" }]
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.stopExport("github-pdpp-run")
+    })
+
+    expect(stopRun).toHaveBeenCalledWith("github-pdpp-run")
+    expect(mockInvoke).toHaveBeenCalledWith("stop_installed_pdpp_connector_run", {
+      runId: "github-pdpp-run",
+    })
+    expect(mockInvoke).not.toHaveBeenCalledWith("stop_connector_run", expect.anything())
   })
 })
