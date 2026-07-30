@@ -1,9 +1,11 @@
+import { useMemo, useState } from "react"
+import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/elements/spinner"
 import { PageContainer } from "@/components/elements/page-container"
 import { PageHeading } from "@/components/typography/page-heading"
 import { Text } from "@/components/typography/text"
 import {
-  productionTimelineDataSource,
+  createProductionTimelineDataSource,
   type TimelineDataSource,
 } from "@/apps/timeline/timeline-data-source"
 import type {
@@ -18,21 +20,57 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useTimelinePage } from "./use-timeline-page"
+import { usePersonalServer } from "@/hooks/usePersonalServer"
 
 type TimelineProps = {
   dataSource?: TimelineDataSource
 }
 
-export function Timeline({
-  dataSource = productionTimelineDataSource,
-}: TimelineProps) {
+export function Timeline({ dataSource: providedDataSource }: TimelineProps) {
+  return providedDataSource ? (
+    <TimelineContent dataSource={providedDataSource} />
+  ) : (
+    <ConnectedTimeline />
+  )
+}
+
+function ConnectedTimeline() {
+  const personalServer = usePersonalServer()
+  const dataSource = useMemo(
+    () =>
+      createProductionTimelineDataSource({
+        port: personalServer.port,
+        devToken: personalServer.devToken,
+      }),
+    [personalServer.devToken, personalServer.port]
+  )
+  return <TimelineContent dataSource={dataSource} />
+}
+
+function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
   const {
     activeStreamId,
     setSelectedStreamId,
     state,
     timeline,
     visibleTimeline,
+    requestConsent,
   } = useTimelinePage(dataSource)
+  const [consentError, setConsentError] = useState<string | null>(null)
+
+  const approveConsent = async () => {
+    if (!requestConsent) return
+    setConsentError(null)
+    try {
+      await requestConsent()
+    } catch (error) {
+      setConsentError(
+        error instanceof Error
+          ? error.message
+          : "Timeline consent could not be approved."
+      )
+    }
+  }
 
   return (
     <PageContainer>
@@ -45,7 +83,12 @@ export function Timeline({
         </div>
 
         {state.kind === "loading" ? <TimelineLoading /> : null}
-        {state.kind === "unauthorized" ? <TimelineUnauthorized /> : null}
+        {state.kind === "unauthorized" ? (
+          <TimelineUnauthorized
+            onApprove={requestConsent ? approveConsent : undefined}
+            error={consentError}
+          />
+        ) : null}
         {state.kind === "revoked" ? <TimelineRevoked /> : null}
         {state.kind === "error" ? (
           <TimelineError message={state.message} />
@@ -73,12 +116,36 @@ function TimelineLoading() {
   )
 }
 
-function TimelineUnauthorized() {
-  return <TimelineStatus title="Sign in to view your timeline." />
+function TimelineUnauthorized({
+  onApprove,
+  error,
+}: {
+  onApprove?: () => void
+  error: string | null
+}) {
+  if (!onApprove)
+    return <TimelineStatus title="Sign in to view your timeline." />
+  return (
+    <section aria-live="polite" className="space-y-3">
+      <Text as="h2" intent="heading">
+        Allow Timeline to read your connected data
+      </Text>
+      <Text as="p" intent="small" muted>
+        Timeline will request read access to the GitHub records available from
+        your local Personal Server.
+      </Text>
+      <Button onClick={onApprove}>Allow local Timeline access</Button>
+      {error ? (
+        <Text as="p" intent="small" color="destructive">
+          {error}
+        </Text>
+      ) : null}
+    </section>
+  )
 }
 
 function TimelineRevoked() {
-  return <TimelineStatus title="Timeline access has been revoked." />
+  return <TimelineStatus title="Timeline access has expired or been revoked." />
 }
 
 function TimelineError({ message }: { message: string }) {

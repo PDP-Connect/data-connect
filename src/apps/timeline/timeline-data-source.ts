@@ -1,3 +1,5 @@
+import type { LocalTimelineCapability } from "@/services/pdppTimeline"
+
 export const TIMELINE_MAX_RECORDS = 100
 export const TIMELINE_MAX_STREAMS = 24
 
@@ -48,21 +50,178 @@ export type TimelineReadResult =
       retryable: boolean
     }
 
-/**
- * A future adapter owns PDPP stream discovery and opaque cursor pagination.
- * The timeline only receives a bounded, transport-independent read result.
- */
+/** A bounded PDPP read result keeps rendering independent of transport details. */
 export interface TimelineDataSource {
   read(options: TimelineReadOptions): Promise<TimelineReadResult>
+  requestConsent?(): Promise<void>
 }
 
-export const productionTimelineDataSource: TimelineDataSource = {
-  async read() {
-    return {
-      kind: "error",
-      code: "unavailable",
-      message: "Timeline reads are not connected to your Personal Server yet.",
-      retryable: false,
+type PdppStreamList = {
+  data: Array<{ name: string; record_count?: number }>
+}
+
+type PdppRecordList = {
+  data: Array<{ id: string; data: Record<string, unknown> }>
+  has_more: boolean
+  next_cursor?: string
+}
+
+export function createProductionTimelineDataSource({
+  port,
+  devToken,
+}: {
+  port: number | null
+  devToken: string | null
+}): TimelineDataSource {
+  return {
+    async requestConsent() {
+      if (!port || !devToken) {
+        throw new Error(
+          "Personal Server is still starting. Try again in a moment."
+        )
+      }
+      const { approveLocalTimelineConsent } =
+        await import("@/services/pdppTimeline")
+      await approveLocalTimelineConsent(port, devToken)
+    },
+    async read({ maxStreams, maxRecords, signal }) {
+      if (!port || !devToken) {
+        return {
+          kind: "error",
+          code: "unavailable",
+          message: "Timeline is waiting for your local Personal Server.",
+          retryable: true,
+        }
+      }
+      const {
+        getLocalTimelineCapability,
+        PdppTimelineRequestError,
+        readLocalTimeline,
+      } = await import("@/services/pdppTimeline")
+      const capability = getLocalTimelineCapability()
+      if (!capability) return { kind: "unauthorized" }
+      try {
+        const streams = await readLocalTimeline<PdppStreamList>(
+          port,
+          "/v1/streams",
+          capability,
+          signal
+        )
+        const selected = streams.data.slice(0, maxStreams)
+        const reads = await readAllTimelinePages({
+          port,
+          streams: selected,
+          capability,
+          maxRecords,
+          signal,
+          read: readLocalTimeline,
+        })
+        return { kind: "ready", read: { streams: reads } }
+      } catch (error) {
+        if (error instanceof PdppTimelineRequestError) {
+          if (
+            error.code === "grant_revoked" ||
+            error.code === "grant_expired"
+          ) {
+            return { kind: "revoked" }
+          }
+          if (error.status === 401) return { kind: "unauthorized" }
+        }
+        return {
+          kind: "error",
+          code: "failed",
+          message: "Timeline records could not be loaded.",
+          retryable: true,
+        }
+      }
+    },
+  }
+}
+
+async function readAllTimelinePages({
+  port,
+  streams,
+  capability,
+  maxRecords,
+  signal,
+  read,
+}: {
+  port: number
+  streams: PdppStreamList["data"]
+  capability: LocalTimelineCapability
+  maxRecords: number
+  signal: AbortSignal
+  read: <T>(
+    port: number,
+    path: string,
+    capability: LocalTimelineCapability,
+    signal: AbortSignal
+  ) => Promise<T>
+}): Promise<TimelineRead["streams"]> {
+  const pending = streams.map(stream => ({
+    stream,
+    cursor: null as string | null,
+    records: [] as TimelineRecord[],
+    hasMore: true,
+  }))
+  let remaining = Math.max(0, maxRecords)
+
+  while (remaining > 0) {
+    const active = pending.filter(entry => entry.hasMore)
+    if (!active.length) break
+    const pageLimit = Math.max(
+      1,
+      Math.min(100, Math.floor(remaining / active.length))
+    )
+    const pages = await Promise.all(
+      active.map(async entry => ({
+        entry,
+        page: await read<PdppRecordList>(
+          port,
+          `/v1/streams/${encodeURIComponent(entry.stream.name)}/records?limit=${pageLimit}${entry.cursor ? `&cursor=${encodeURIComponent(entry.cursor)}` : ""}`,
+          capability,
+          signal
+        ),
+      }))
+    )
+    let added = 0
+    for (const { entry, page } of pages) {
+      const pageRecords = page.data.slice(0, remaining - added)
+      entry.records.push(...pageRecords)
+      added += pageRecords.length
+      entry.hasMore = page.has_more && pageRecords.length === page.data.length
+      entry.cursor =
+        typeof page.next_cursor === "string" ? page.next_cursor : null
+      if (entry.hasMore && !entry.cursor) entry.hasMore = false
     }
-  },
+    if (added === 0) break
+    remaining -= added
+  }
+
+  return pending.map(entry => {
+    const fieldNames = new Set<string>()
+    for (const record of entry.records) {
+      Object.keys(record.data).forEach(field => fieldNames.add(field))
+    }
+    return {
+      stream: {
+        id: entry.stream.name,
+        label: humanizeStreamName(entry.stream.name),
+        fields: Array.from(fieldNames, name => ({ name })),
+        primaryKey: [],
+        timestampFields: [],
+        recordCount: entry.stream.record_count,
+      },
+      records: entry.records,
+      hasMore: entry.hasMore,
+    }
+  })
+}
+
+function humanizeStreamName(value: string) {
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
 }

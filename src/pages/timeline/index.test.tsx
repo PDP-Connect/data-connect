@@ -118,18 +118,47 @@ describe("Timeline", () => {
     rerender(<RouterProvider router={router} />)
 
     await waitFor(() => {
-      expect(screen.getByText("Timeline access has been revoked.")).toBeTruthy()
+      expect(
+        screen.getByText("Timeline access has expired or been revoked.")
+      ).toBeTruthy()
     })
   })
 
-  it("keeps production free of fixtures by showing the unavailable state", async () => {
-    renderTimeline()
+  it("offers an explicit consent action before the built-in Timeline reads", async () => {
+    const requestConsent = vi.fn().mockResolvedValue(undefined)
+    const source: TimelineDataSource = {
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ kind: "unauthorized" })
+        .mockResolvedValueOnce({ kind: "ready", read: { streams: [] } }),
+      requestConsent,
+    }
+    renderTimeline(source)
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "Timeline reads are not connected to your Personal Server yet."
-        )
+        screen.getByRole("button", { name: /allow local timeline access/i })
+      ).toBeTruthy()
+    })
+    fireEvent.click(
+      screen.getByRole("button", { name: /allow local timeline access/i })
+    )
+    await waitFor(() => expect(requestConsent).toHaveBeenCalledOnce())
+  })
+
+  it("shows an honest unavailable state without using fixtures", async () => {
+    renderTimeline({
+      read: vi.fn().mockResolvedValue({
+        kind: "error",
+        code: "unavailable",
+        message: "Timeline is waiting for your local Personal Server.",
+        retryable: true,
+      }),
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Timeline is waiting for your local Personal Server.")
       ).toBeTruthy()
     })
     expect(screen.getByText("No records are shown.")).toBeTruthy()

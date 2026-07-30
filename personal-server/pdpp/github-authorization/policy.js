@@ -22,6 +22,38 @@ const GITHUB_STREAM_SCOPES = {
   starred: "github.starred",
 }
 
+export const LOCAL_TIMELINE_CLIENT_ID = "dataconnect.timeline"
+
+/**
+ * The built-in Timeline is a first-party PDPP client, not a bypass around
+ * authorization. Its request is deliberately derived from the installed,
+ * verified profile rather than accepting a broader set of terms from the UI.
+ */
+export function createLocalTimelineAuthorizationRequest(manifest) {
+  const streams = (manifest?.streams ?? [])
+    .filter(stream => typeof GITHUB_STREAM_SCOPES[stream?.name] === "string")
+    .map(stream => ({ name: stream.name }))
+  if (!streams.length) {
+    throw invalid(
+      "The installed GitHub profile has no Timeline-compatible streams"
+    )
+  }
+  return {
+    scopes: streams.map(stream => GITHUB_STREAM_SCOPES[stream.name]),
+    authorizationDetails: [
+      {
+        type: PDPP_DATA_ACCESS_TYPE,
+        source: { kind: "connector", id: "github" },
+        access_mode: "continuous",
+        purpose_code: "https://dataconnect.app/purposes/timeline",
+        purpose_description:
+          "Show your connected records in DataConnect's local Timeline.",
+        streams,
+      },
+    ],
+  }
+}
+
 function invalid(message) {
   const error = new Error(message)
   error.code = "invalid_request"

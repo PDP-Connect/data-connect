@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   TIMELINE_MAX_RECORDS,
   TIMELINE_MAX_STREAMS,
@@ -15,6 +15,7 @@ type TimelinePageState = { kind: "loading" } | TimelineReadResult
 export function useTimelinePage(dataSource: TimelineDataSource) {
   const [state, setState] = useState<TimelinePageState>({ kind: "loading" })
   const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null)
+  const [readAttempt, setReadAttempt] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -47,6 +48,12 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
       isCurrent = false
       controller.abort()
     }
+  }, [dataSource, readAttempt])
+
+  const requestConsent = useCallback(async () => {
+    if (!dataSource.requestConsent) return
+    await dataSource.requestConsent()
+    setReadAttempt(attempt => attempt + 1)
   }, [dataSource])
 
   const timeline = useMemo(() => {
@@ -81,5 +88,6 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
     state,
     timeline,
     visibleTimeline,
+    requestConsent: dataSource.requestConsent ? requestConsent : undefined,
   }
 }

@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS pdpp_github_consent_requests (
   terms_json TEXT NOT NULL,
   manifest_version TEXT NOT NULL,
   manifest_digest TEXT NOT NULL,
+  subject_id TEXT,
+  client_id TEXT,
   created_at TEXT NOT NULL,
   consumed_at TEXT
 );
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS pdpp_github_tokens (
   token_hash TEXT NOT NULL UNIQUE,
   grant_id TEXT NOT NULL REFERENCES pdpp_github_grants(grant_id),
   issued_at TEXT NOT NULL,
+  expires_at TEXT,
   revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS pdpp_github_grants_legacy_idx ON pdpp_github_grants(legacy_grant_id);
@@ -51,9 +54,29 @@ export function openGithubAuthorizationStore({
   const db = new Database(databasePath)
   db.pragma("foreign_keys = ON")
   db.exec(SCHEMA)
+  // These columns were added after the first UAT database layout. Existing
+  // external Relay requests intentionally remain unbound/indefinite.
+  for (const statement of [
+    "ALTER TABLE pdpp_github_consent_requests ADD COLUMN subject_id TEXT",
+    "ALTER TABLE pdpp_github_consent_requests ADD COLUMN client_id TEXT",
+    "ALTER TABLE pdpp_github_tokens ADD COLUMN expires_at TEXT",
+  ]) {
+    try {
+      db.exec(statement)
+    } catch (error) {
+      if (!String(error?.message).includes("duplicate column name")) throw error
+    }
+  }
   const timestamp = () => now().toISOString()
 
-  function createRequest({ sessionId, scopes, terms, manifest }) {
+  function createRequest({
+    sessionId,
+    scopes,
+    terms,
+    manifest,
+    subjectId,
+    clientId,
+  }) {
     const request = {
       request_id: `pdpp_request_${randomUUID()}`,
       session_id: requiredString(sessionId, "session_id"),
@@ -61,10 +84,16 @@ export function openGithubAuthorizationStore({
       authorization_details: terms,
       manifest_version: manifest.version,
       manifest_digest: manifest.digest,
+      subject_id:
+        subjectId === undefined
+          ? null
+          : requiredString(subjectId, "subject_id"),
+      client_id:
+        clientId === undefined ? null : requiredString(clientId, "client_id"),
     }
     db.prepare(
-      `INSERT INTO pdpp_github_consent_requests(request_id, session_id, scopes_json, terms_json, manifest_version, manifest_digest, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO pdpp_github_consent_requests(request_id, session_id, scopes_json, terms_json, manifest_version, manifest_digest, subject_id, client_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       request.request_id,
       request.session_id,
@@ -72,6 +101,8 @@ export function openGithubAuthorizationStore({
       JSON.stringify(terms),
       manifest.version,
       manifest.digest,
+      request.subject_id,
+      request.client_id,
       timestamp()
     )
     return request
@@ -82,7 +113,9 @@ export function openGithubAuthorizationStore({
     legacyGrantId,
     subjectId,
     clientId,
+    sessionId,
     manifest,
+    expiresAt,
   }) {
     const request = db
       .prepare(
@@ -100,12 +133,28 @@ export function openGithubAuthorizationStore({
       )
     }
     const authorizationDetails = JSON.parse(request.terms_json)
+    const effectiveSubjectId = requiredString(subjectId, "subject_id")
+    const effectiveClientId = requiredString(clientId, "client_id")
+    if (request.subject_id && request.subject_id !== effectiveSubjectId) {
+      throw new Error("Authorization request subject does not match approval")
+    }
+    if (request.client_id && request.client_id !== effectiveClientId) {
+      throw new Error("Authorization request client does not match approval")
+    }
+    if (
+      sessionId !== undefined &&
+      request.session_id !== requiredString(sessionId, "session_id")
+    ) {
+      throw new Error("Authorization request session does not match approval")
+    }
+    const normalizedExpiry =
+      expiresAt === undefined ? null : normalizeFutureTimestamp(expiresAt, now)
     const grant = Object.freeze({
       version: "0.1.0",
       grant_id: `pdpp_grant_${randomUUID()}`,
       issued_at: timestamp(),
-      subject_id: requiredString(subjectId, "subject_id"),
-      client_id: requiredString(clientId, "client_id"),
+      subject_id: effectiveSubjectId,
+      client_id: effectiveClientId,
       session_id: request.session_id,
       scopes: JSON.parse(request.scopes_json),
       source: authorizationDetails.source,
@@ -113,6 +162,7 @@ export function openGithubAuthorizationStore({
       manifest_version: request.manifest_version,
       manifest_digest: request.manifest_digest,
       authorization_details: authorizationDetails,
+      ...(normalizedExpiry ? { expires_at: normalizedExpiry } : {}),
     })
     const accessToken = `pdpp_at_${random(32).toString("base64url")}`
     db.transaction(() => {
@@ -126,12 +176,13 @@ export function openGithubAuthorizationStore({
         grant.issued_at
       )
       db.prepare(
-        "INSERT INTO pdpp_github_tokens(token_id, token_hash, grant_id, issued_at) VALUES (?, ?, ?, ?)"
+        "INSERT INTO pdpp_github_tokens(token_id, token_hash, grant_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)"
       ).run(
         `pdpp_token_${randomUUID()}`,
         tokenHash(accessToken),
         grant.grant_id,
-        grant.issued_at
+        grant.issued_at,
+        normalizedExpiry
       )
       db.prepare(
         "UPDATE pdpp_github_consent_requests SET consumed_at = ? WHERE request_id = ?"
@@ -149,11 +200,17 @@ export function openGithubAuthorizationStore({
     if (typeof token !== "string" || !token) return null
     const row = db
       .prepare(
-        `SELECT g.grant_id, g.grant_json, g.revoked_at AS grant_revoked_at, t.revoked_at AS token_revoked_at
+        `SELECT g.grant_id, g.grant_json, g.revoked_at AS grant_revoked_at, t.revoked_at AS token_revoked_at, t.expires_at
       FROM pdpp_github_tokens t JOIN pdpp_github_grants g ON g.grant_id = t.grant_id WHERE t.token_hash = ?`
       )
       .get(tokenHash(token))
-    if (!row || row.grant_revoked_at || row.token_revoked_at) return null
+    if (!row) return null
+    if (row.grant_revoked_at || row.token_revoked_at) {
+      return { inactiveReason: "grant_revoked" }
+    }
+    if (row.expires_at && Date.parse(row.expires_at) <= now().getTime()) {
+      return { inactiveReason: "grant_expired" }
+    }
     try {
       const grant = JSON.parse(row.grant_json)
       return grant.manifest_version === manifest.version &&
@@ -175,11 +232,43 @@ export function openGithubAuthorizationStore({
     )
   }
 
+  function revokeBoundSession({ sessionId, subjectId, clientId }) {
+    return (
+      db
+        .prepare(
+          `UPDATE pdpp_github_grants SET revoked_at = ?
+           WHERE revoked_at IS NULL AND grant_id IN (
+             SELECT g.grant_id FROM pdpp_github_grants g
+             JOIN pdpp_github_consent_requests r ON r.request_id = g.request_id
+             WHERE r.session_id = ? AND r.subject_id = ? AND r.client_id = ?
+           )`
+        )
+        .run(
+          timestamp(),
+          requiredString(sessionId, "session_id"),
+          requiredString(subjectId, "subject_id"),
+          requiredString(clientId, "client_id")
+        ).changes > 0
+    )
+  }
+
   return {
     createRequest,
     issueGrant,
     findActiveGrant,
     revokeByLegacyGrantId,
+    revokeBoundSession,
     close: () => db.close(),
   }
+}
+
+function normalizeFutureTimestamp(value, now) {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error("expires_at must be an ISO timestamp")
+  }
+  const normalized = new Date(value).toISOString()
+  if (Date.parse(normalized) <= now().getTime()) {
+    throw new Error("expires_at must be in the future")
+  }
+  return normalized
 }

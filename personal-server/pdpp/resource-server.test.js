@@ -10,7 +10,10 @@ import { Hono } from "hono"
 
 import { registerProtectedRoutes } from "../protected-routes.js"
 import { GrantScopedRecordsRepository } from "./grant-scoped-records-repository.js"
-import { createGithubAuthorizationAdapter, PDPP_DATA_ACCESS_TYPE } from "./github-authorization/index.js"
+import {
+  createGithubAuthorizationAdapter,
+  PDPP_DATA_ACCESS_TYPE,
+} from "./github-authorization/index.js"
 import { registerGithubAuthorizationRoutes } from "./github-authorization/http-routes.js"
 import { mountPdppResourceServer } from "./resource-server.js"
 
@@ -439,7 +442,8 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     serverSigner: {
       signGrantRevocation: async () => "signature",
     },
-    onLegacyGrantRevoked: legacyGrantId => adapter.revokeByLegacyGrantId(legacyGrantId),
+    onLegacyGrantRevoked: legacyGrantId =>
+      adapter.revokeByLegacyGrantId(legacyGrantId),
   })
   registerGithubAuthorizationRoutes({ app, devToken: desktopToken, adapter })
   await mountPdppResourceServer(app, {
@@ -449,27 +453,35 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     },
   })
 
-  assert.deepEqual(await (await app.request("http://personal.example/v1/data")).json(), { legacy: true })
+  assert.deepEqual(
+    await (await app.request("http://personal.example/v1/data")).json(),
+    { legacy: true }
+  )
 
-  const authorizationDetails = [{
-    type: PDPP_DATA_ACCESS_TYPE,
-    source: { kind: "connector", id: "github" },
-    access_mode: "continuous",
-    purpose_code: "https://example.test/purpose/research",
-    streams: [{ name: "repositories", resources: ["allowed"] }],
-  }]
-  const consent = await app.request("http://personal.example/v1/pdpp/consent-requests", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${desktopToken}`,
-      "content-type": "application/json",
+  const authorizationDetails = [
+    {
+      type: PDPP_DATA_ACCESS_TYPE,
+      source: { kind: "connector", id: "github" },
+      access_mode: "continuous",
+      purpose_code: "https://example.test/purpose/research",
+      streams: [{ name: "repositories", resources: ["allowed"] }],
     },
-    body: JSON.stringify({
-      session_id: "legacy-session",
-      scopes: ["github.repositories"],
-      authorization_details: authorizationDetails,
-    }),
-  })
+  ]
+  const consent = await app.request(
+    "http://personal.example/v1/pdpp/consent-requests",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${desktopToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: "legacy-session",
+        scopes: ["github.repositories"],
+        authorization_details: authorizationDetails,
+      }),
+    }
+  )
   assert.equal(consent.status, 201)
   const request = await consent.json()
 
@@ -495,7 +507,9 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
   assert.equal(identity.active, true)
   assert.equal(Array.isArray(identity.grant.streams), true)
 
-  const streams = await app.request("http://personal.example/v1/streams", { headers: bearer })
+  const streams = await app.request("http://personal.example/v1/streams", {
+    headers: bearer,
+  })
   assert.equal(streams.status, 200, await streams.clone().text())
   assert.equal((await streams.json()).data[0].name, "repositories")
   const records = await app.request(
@@ -503,18 +517,139 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     { headers: bearer }
   )
   assert.equal(records.status, 200)
-  assert.deepEqual((await records.json()).data.map(record => record.data.id), ["allowed"])
+  assert.deepEqual(
+    (await records.json()).data.map(record => record.data.id),
+    ["allowed"]
+  )
 
-  const revoke = await app.request("http://personal.example/v1/grants/legacy-grant-1", {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${desktopToken}` },
-  })
+  const revoke = await app.request(
+    "http://personal.example/v1/grants/legacy-grant-1",
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${desktopToken}` },
+    }
+  )
   assert.equal(revoke.status, 204)
   assert.deepEqual(legacyRevocations, ["legacy-grant-1"])
 
-  const inactive = await app.request("http://personal.example/v1/streams", { headers: bearer })
-  assert.equal(inactive.status, 401)
+  const inactive = await app.request("http://personal.example/v1/streams", {
+    headers: bearer,
+  })
+  assert.equal(inactive.status, 403)
+  assert.equal((await inactive.json()).error.code, "grant_revoked")
   adapter.close()
+})
+
+test("serves Timeline only after local consent and fails closed after its bound session is revoked", async () => {
+  const fixture = createInstalledGithubFixture()
+  const adapter = createGithubAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    databasePath: join(
+      dirname(fixture.databasePath),
+      "timeline-authorization.sqlite"
+    ),
+  })
+  const app = new Hono()
+  const desktopToken = "desktop-token"
+  try {
+    registerGithubAuthorizationRoutes({ app, devToken: desktopToken, adapter })
+    await mountPdppResourceServer(app, {
+      ...fixture,
+      tokenIntrospector: {
+        introspect: token => adapter.resolveForResourceServer(token),
+      },
+    })
+
+    const missingGrant = await app.request("http://personal.example/v1/streams")
+    assert.equal(missingGrant.status, 401)
+
+    const anonymousConsent = await app.request(
+      "http://personal.example/v1/pdpp/local-timeline/consent-requests",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: "timeline-session",
+          subject_id: "timeline-subject",
+        }),
+      }
+    )
+    assert.equal(anonymousConsent.status, 401)
+
+    const consent = await app.request(
+      "http://personal.example/v1/pdpp/local-timeline/consent-requests",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: "timeline-session",
+          subject_id: "timeline-subject",
+        }),
+      }
+    )
+    assert.equal(consent.status, 201)
+    const request = await consent.json()
+    assert.deepEqual(request.scopes, ["github.repositories"])
+
+    const approval = await app.request(
+      `http://personal.example/v1/pdpp/local-timeline/consent-requests/${request.request_id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: "timeline-session",
+          subject_id: "timeline-subject",
+        }),
+      }
+    )
+    assert.equal(approval.status, 201)
+    const issued = await approval.json()
+    assert.equal(issued.grant.client_id, "dataconnect.timeline")
+    assert.equal(issued.grant.subject_id, "timeline-subject")
+    const bearer = { authorization: `Bearer ${issued.access_token}` }
+
+    const streams = await app.request("http://personal.example/v1/streams", {
+      headers: bearer,
+    })
+    assert.equal(streams.status, 200)
+    const records = await app.request(
+      "http://personal.example/v1/streams/repositories/records?limit=100",
+      { headers: bearer }
+    )
+    assert.equal(records.status, 200)
+    assert.equal(
+      (await records.json()).data.some(record => record.id === "allowed"),
+      true
+    )
+
+    const revoke = await app.request(
+      "http://personal.example/v1/pdpp/local-timeline/revoke",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: "timeline-session",
+          subject_id: "timeline-subject",
+        }),
+      }
+    )
+    assert.deepEqual(await revoke.json(), { revoked: true })
+    const revoked = await app.request("http://personal.example/v1/streams", {
+      headers: bearer,
+    })
+    assert.equal(revoked.status, 403)
+    assert.equal((await revoked.json()).error.code, "grant_revoked")
+  } finally {
+    adapter.close()
+  }
 })
 
 test("maps durable cursor errors to stable resource-server responses", async () => {

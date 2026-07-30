@@ -126,9 +126,77 @@ test("persists an immutable verified-manifest grant and separates private from p
     assert.equal(reopened.revokeByLegacyGrantId("legacy-1"), true)
     assert.deepEqual(reopened.resolveForResourceServer(token), {
       active: false,
+      inactive_reason: "grant_revoked",
     })
     reopened.close()
   } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("binds local Timeline grants to their session, subject, client, expiry, and revocation", () => {
+  const fixtureData = fixture()
+  let time = new Date("2026-07-30T12:00:00Z")
+  const adapter = createGithubAuthorizationAdapter({
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+    now: () => time,
+  })
+  try {
+    const consent = adapter.createLocalTimelineConsentRequest({
+      sessionId: "timeline-session",
+      subjectId: "timeline-subject",
+    })
+    assert.equal(consent.session_id, "timeline-session")
+    assert.deepEqual(consent.scopes, ["github.repositories"])
+    assert.throws(
+      () =>
+        adapter.issueLocalTimelineGrant({
+          requestId: consent.request_id,
+          sessionId: "other-session",
+          subjectId: "timeline-subject",
+        }),
+      /session does not match/
+    )
+    const issued = adapter.issueLocalTimelineGrant({
+      requestId: consent.request_id,
+      sessionId: "timeline-session",
+      subjectId: "timeline-subject",
+    })
+    assert.equal(issued.grant.client_id, "dataconnect.timeline")
+    assert.equal(issued.grant.subject_id, "timeline-subject")
+    assert.equal(
+      adapter.resolveForResourceServer(issued.access_token).active,
+      true
+    )
+    assert.equal(
+      adapter.revokeLocalTimelineSession({
+        sessionId: "timeline-session",
+        subjectId: "timeline-subject",
+      }),
+      true
+    )
+    assert.deepEqual(adapter.resolveForResourceServer(issued.access_token), {
+      active: false,
+      inactive_reason: "grant_revoked",
+    })
+
+    const expiringConsent = adapter.createLocalTimelineConsentRequest({
+      sessionId: "expiring-session",
+      subjectId: "timeline-subject",
+    })
+    const expiring = adapter.issueLocalTimelineGrant({
+      requestId: expiringConsent.request_id,
+      sessionId: "expiring-session",
+      subjectId: "timeline-subject",
+    })
+    time = new Date("2026-07-30T21:00:01Z")
+    assert.deepEqual(adapter.resolveForResourceServer(expiring.access_token), {
+      active: false,
+      inactive_reason: "grant_expired",
+    })
+  } finally {
+    adapter.close()
     rmSync(fixtureData.root, { recursive: true, force: true })
   }
 })
