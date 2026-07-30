@@ -11,6 +11,8 @@
  * - CONFIG_DIR - override ~/.vana config directory
  * - ACCOUNT_URL - account signing service (default: https://account.vana.org)
  * - CHAIN_ID - EIP-712 chain ID override (default: from config)
+ * - PDPP_SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS - lifetime for external PDPP
+ *   single-use client tokens (default: 28800)
  */
 
 // Set NODE_ENV=production before imports to prevent pino-pretty transport loading
@@ -47,6 +49,16 @@ function send(msg) {
     });
   }
   process.stdout.write(json + '\n');
+}
+
+function optionalPositiveIntegerEnv(name) {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive whole number of seconds`);
+  }
+  return parsed;
 }
 
 async function importRuntimeModule(specifier) {
@@ -337,6 +349,9 @@ async function main() {
   const tunnelServerPort = process.env.TUNNEL_SERVER_PORT ? parseInt(process.env.TUNNEL_SERVER_PORT, 10) : undefined;
 
   try {
+    const singleUseAccessExpiresInSeconds = optionalPositiveIntegerEnv(
+      'PDPP_SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS'
+    );
     const [{ loadConfig }, { createServer }, { serve }] = await Promise.all([
       importRuntimeModule('@opendatalabs/personal-server-ts-core/config'),
       importRuntimeModule('@opendatalabs/personal-server-ts-server'),
@@ -386,6 +401,7 @@ async function main() {
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
     const pdppAuthorization = createGithubAuthorizationAdapter({
       databasePath: join(configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server'), 'pdpp-github-authorization.sqlite'),
+      singleUseAccessExpiresInSeconds,
     });
 
     // PDPP reads are additive: unavailable or invalid local connector state

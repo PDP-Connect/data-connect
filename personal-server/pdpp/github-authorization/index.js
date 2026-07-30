@@ -9,6 +9,10 @@ import {
 import { openGithubAuthorizationStore } from "./store.js"
 
 const LOCAL_TIMELINE_ACCESS_EXPIRES_IN_SECONDS = 8 * 60 * 60
+// `single_use` authorizes exactly one token issuance (the persisted consent
+// request enforces that). It does not consume a record read. The token remains
+// usable only for this server-chosen, bounded lifetime.
+const SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS = 8 * 60 * 60
 
 function inactive() {
   return { active: false }
@@ -31,8 +35,14 @@ export function createGithubAuthorizationAdapter({
   activeManifestPath,
   now,
   random,
+  singleUseAccessExpiresInSeconds = SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS,
 } = {}) {
-  const store = openGithubAuthorizationStore({ databasePath, now, random })
+  const store = openGithubAuthorizationStore({
+    databasePath,
+    now,
+    random,
+    singleUseAccessExpiresInSeconds,
+  })
   const clock = now ?? (() => new Date())
   const currentManifest = () => readVerifiedManifest(activeManifestPath)
   const publicIdentity = token => {

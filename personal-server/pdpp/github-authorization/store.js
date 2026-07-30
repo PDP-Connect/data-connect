@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS pdpp_github_grants (
   legacy_grant_id TEXT NOT NULL UNIQUE,
   grant_json TEXT NOT NULL,
   issued_at TEXT NOT NULL,
+  expires_at TEXT,
   revoked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS pdpp_github_tokens (
@@ -49,6 +50,7 @@ export function openGithubAuthorizationStore({
   databasePath,
   now = () => new Date(),
   random = randomBytes,
+  singleUseAccessExpiresInSeconds,
 }) {
   mkdirSync(dirname(databasePath), { recursive: true })
   const db = new Database(databasePath)
@@ -59,6 +61,7 @@ export function openGithubAuthorizationStore({
   for (const statement of [
     "ALTER TABLE pdpp_github_consent_requests ADD COLUMN subject_id TEXT",
     "ALTER TABLE pdpp_github_consent_requests ADD COLUMN client_id TEXT",
+    "ALTER TABLE pdpp_github_grants ADD COLUMN expires_at TEXT",
     "ALTER TABLE pdpp_github_tokens ADD COLUMN expires_at TEXT",
   ]) {
     try {
@@ -147,8 +150,12 @@ export function openGithubAuthorizationStore({
     ) {
       throw new Error("Authorization request session does not match approval")
     }
-    const normalizedExpiry =
-      expiresAt === undefined ? null : normalizeFutureTimestamp(expiresAt, now)
+    const normalizedExpiry = normalizeGrantExpiry({
+      authorizationDetails,
+      expiresAt,
+      now,
+      singleUseAccessExpiresInSeconds,
+    })
     const grant = Object.freeze({
       version: "0.1.0",
       grant_id: `pdpp_grant_${randomUUID()}`,
@@ -167,13 +174,14 @@ export function openGithubAuthorizationStore({
     const accessToken = `pdpp_at_${random(32).toString("base64url")}`
     db.transaction(() => {
       db.prepare(
-        "INSERT INTO pdpp_github_grants(grant_id, request_id, legacy_grant_id, grant_json, issued_at) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO pdpp_github_grants(grant_id, request_id, legacy_grant_id, grant_json, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
       ).run(
         grant.grant_id,
         request.request_id,
         requiredString(legacyGrantId, "legacy_grant_id"),
         JSON.stringify(grant),
-        grant.issued_at
+        grant.issued_at,
+        normalizedExpiry
       )
       db.prepare(
         "INSERT INTO pdpp_github_tokens(token_id, token_hash, grant_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)"
@@ -200,7 +208,7 @@ export function openGithubAuthorizationStore({
     if (typeof token !== "string" || !token) return null
     const row = db
       .prepare(
-        `SELECT g.grant_id, g.grant_json, g.revoked_at AS grant_revoked_at, t.revoked_at AS token_revoked_at, t.expires_at
+        `SELECT g.grant_id, g.grant_json, g.revoked_at AS grant_revoked_at, g.expires_at AS grant_expires_at, t.revoked_at AS token_revoked_at, t.expires_at AS token_expires_at
       FROM pdpp_github_tokens t JOIN pdpp_github_grants g ON g.grant_id = t.grant_id WHERE t.token_hash = ?`
       )
       .get(tokenHash(token))
@@ -208,7 +216,11 @@ export function openGithubAuthorizationStore({
     if (row.grant_revoked_at || row.token_revoked_at) {
       return { inactiveReason: "grant_revoked" }
     }
-    if (row.expires_at && Date.parse(row.expires_at) <= now().getTime()) {
+    if (
+      [row.grant_expires_at, row.token_expires_at].some(
+        expiresAt => expiresAt && Date.parse(expiresAt) <= now().getTime()
+      )
+    ) {
       return { inactiveReason: "grant_expired" }
     }
     try {
@@ -260,6 +272,27 @@ export function openGithubAuthorizationStore({
     revokeBoundSession,
     close: () => db.close(),
   }
+}
+
+function normalizeGrantExpiry({
+  authorizationDetails,
+  expiresAt,
+  now,
+  singleUseAccessExpiresInSeconds,
+}) {
+  if (expiresAt !== undefined) return normalizeFutureTimestamp(expiresAt, now)
+  if (authorizationDetails.access_mode !== "single_use") return null
+  if (!Number.isInteger(singleUseAccessExpiresInSeconds)) {
+    throw new Error(
+      "single_use access expiry must be a whole number of seconds"
+    )
+  }
+  if (singleUseAccessExpiresInSeconds <= 0) {
+    throw new Error("single_use access expiry must be positive")
+  }
+  return new Date(
+    now().getTime() + singleUseAccessExpiresInSeconds * 1000
+  ).toISOString()
 }
 
 function normalizeFutureTimestamp(value, now) {

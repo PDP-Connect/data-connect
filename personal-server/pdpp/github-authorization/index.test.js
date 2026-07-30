@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import Database from "better-sqlite3"
 import {
   createGithubAuthorizationAdapter,
   PDPP_DATA_ACCESS_TYPE,
@@ -94,8 +95,14 @@ test("derives first-party Timeline consent from every verified manifest stream",
   const request = createLocalTimelineAuthorizationRequest({
     streams: names.map(name => ({ name })),
   })
-  assert.deepEqual(request.authorizationDetails[0].streams, names.map(name => ({ name })))
-  assert.deepEqual(request.scopes, names.map(name => `pdpp.local.github.${name}`))
+  assert.deepEqual(
+    request.authorizationDetails[0].streams,
+    names.map(name => ({ name }))
+  )
+  assert.deepEqual(
+    request.scopes,
+    names.map(name => `pdpp.local.github.${name}`)
+  )
 })
 
 test("persists an immutable verified-manifest grant and separates private from public resolution", () => {
@@ -147,6 +154,210 @@ test("persists an immutable verified-manifest grant and separates private from p
       inactive_reason: "grant_revoked",
     })
     reopened.close()
+  } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("expires external single-use grants across restart without exposing their grant", () => {
+  const fixtureData = fixture()
+  let time = new Date("2026-07-30T12:00:00Z")
+  const options = {
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+    now: () => time,
+  }
+  try {
+    const adapter = createGithubAuthorizationAdapter(options)
+    const request = adapter.createConsentRequest({
+      sessionId: "single-use-session",
+      scopes: ["github.repositories"],
+      authorizationDetails: [
+        {
+          ...details()[0],
+          access_mode: "single_use",
+        },
+      ],
+    })
+    const issued = adapter.issueApprovedGrant({
+      requestId: request.request_id,
+      legacyGrantId: "single-use-legacy-grant",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.equal(issued.grant.expires_at, "2026-07-30T20:00:00.000Z")
+    assert.equal(
+      adapter.resolveForResourceServer(issued.access_token).active,
+      true
+    )
+    assert.deepEqual(adapter.introspectPublic(issued.access_token), {
+      active: true,
+      pdpp_token_kind: "client",
+      subject_id: "subject-1",
+      client_id: "client-1",
+    })
+    adapter.close()
+
+    time = new Date("2026-07-30T20:00:00Z")
+    const reopened = createGithubAuthorizationAdapter(options)
+    assert.deepEqual(reopened.resolveForResourceServer(issued.access_token), {
+      active: false,
+      inactive_reason: "grant_expired",
+    })
+    assert.deepEqual(reopened.introspectPublic(issued.access_token), {
+      active: false,
+      inactive_reason: "grant_expired",
+    })
+    reopened.close()
+  } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("allows the Personal Server to configure the external single-use lifetime", () => {
+  const fixtureData = fixture()
+  const adapter = createGithubAuthorizationAdapter({
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+    now: () => new Date("2026-07-30T12:00:00Z"),
+    singleUseAccessExpiresInSeconds: 60,
+  })
+  try {
+    const request = adapter.createConsentRequest({
+      sessionId: "configured-single-use-session",
+      scopes: ["github.repositories"],
+      authorizationDetails: [{ ...details()[0], access_mode: "single_use" }],
+    })
+    const issued = adapter.issueApprovedGrant({
+      requestId: request.request_id,
+      legacyGrantId: "configured-single-use-legacy-grant",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.equal(issued.grant.expires_at, "2026-07-30T12:01:00.000Z")
+  } finally {
+    adapter.close()
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("keeps continuous external grants active until explicit revocation", () => {
+  const fixtureData = fixture()
+  let time = new Date("2026-07-30T12:00:00Z")
+  const options = {
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+    now: () => time,
+  }
+  try {
+    const adapter = createGithubAuthorizationAdapter(options)
+    const request = adapter.createConsentRequest({
+      sessionId: "continuous-session",
+      scopes: ["github.repositories"],
+      authorizationDetails: details(),
+    })
+    const issued = adapter.issueApprovedGrant({
+      requestId: request.request_id,
+      legacyGrantId: "continuous-legacy-grant",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.equal("expires_at" in issued.grant, false)
+    adapter.close()
+
+    time = new Date("2026-08-30T12:00:00Z")
+    const reopened = createGithubAuthorizationAdapter(options)
+    assert.equal(
+      reopened.resolveForResourceServer(issued.access_token).active,
+      true
+    )
+    assert.equal(
+      reopened.revokeByLegacyGrantId("continuous-legacy-grant"),
+      true
+    )
+    assert.deepEqual(reopened.resolveForResourceServer(issued.access_token), {
+      active: false,
+      inactive_reason: "grant_revoked",
+    })
+    assert.deepEqual(reopened.introspectPublic(issued.access_token), {
+      active: false,
+      inactive_reason: "grant_revoked",
+    })
+    reopened.close()
+  } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("migrates existing authorization databases before persisting external expiry", () => {
+  const fixtureData = fixture()
+  const oldDatabase = new Database(fixtureData.databasePath)
+  oldDatabase.exec(`
+    CREATE TABLE pdpp_github_consent_requests (
+      request_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      scopes_json TEXT NOT NULL,
+      terms_json TEXT NOT NULL,
+      manifest_version TEXT NOT NULL,
+      manifest_digest TEXT NOT NULL,
+      subject_id TEXT,
+      client_id TEXT,
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE TABLE pdpp_github_grants (
+      grant_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE REFERENCES pdpp_github_consent_requests(request_id),
+      legacy_grant_id TEXT NOT NULL UNIQUE,
+      grant_json TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      revoked_at TEXT
+    );
+    CREATE TABLE pdpp_github_tokens (
+      token_id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      grant_id TEXT NOT NULL REFERENCES pdpp_github_grants(grant_id),
+      issued_at TEXT NOT NULL,
+      revoked_at TEXT
+    );
+  `)
+  oldDatabase.close()
+  try {
+    const adapter = createGithubAuthorizationAdapter({
+      databasePath: fixtureData.databasePath,
+      activeManifestPath: fixtureData.activePath,
+    })
+    const database = new Database(fixtureData.databasePath, { readonly: true })
+    assert.equal(
+      database
+        .prepare(
+          "SELECT name FROM pragma_table_info('pdpp_github_grants') WHERE name = 'expires_at'"
+        )
+        .get()?.name,
+      "expires_at"
+    )
+    assert.equal(
+      database
+        .prepare(
+          "SELECT name FROM pragma_table_info('pdpp_github_tokens') WHERE name = 'expires_at'"
+        )
+        .get()?.name,
+      "expires_at"
+    )
+    database.close()
+    const request = adapter.createConsentRequest({
+      sessionId: "migrated-single-use-session",
+      scopes: ["github.repositories"],
+      authorizationDetails: [{ ...details()[0], access_mode: "single_use" }],
+    })
+    const issued = adapter.issueApprovedGrant({
+      requestId: request.request_id,
+      legacyGrantId: "migrated-single-use-legacy-grant",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.equal(typeof issued.grant.expires_at, "string")
+    adapter.close()
   } finally {
     rmSync(fixtureData.root, { recursive: true, force: true })
   }
