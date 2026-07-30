@@ -27,6 +27,7 @@ import { registerProtectedRoutes } from './protected-routes.js';
 import { mountPdppResourceServer } from './pdpp/resource-server.js';
 import { createGithubAuthorizationAdapter } from './pdpp/github-authorization/index.js';
 import { registerGithubAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
+import { createPersonalServerServeOptions } from './listener-options.cjs';
 
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
   '@opendatalabs/personal-server-ts-core/config': '@opendatalabs/personal-server-ts-core/dist/config/index.js',
@@ -454,7 +455,7 @@ async function main() {
 
     // Start HTTP server first so the desktop app can connect immediately.
     // Background services (gateway check, tunnel) run afterwards.
-    const server = serve({ fetch: app.fetch, port }, info => {
+    const server = serve(createPersonalServerServeOptions(app.fetch, port), info => {
       send({ type: 'ready', port: info.port });
 
       if (devToken) {

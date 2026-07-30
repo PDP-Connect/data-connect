@@ -9,6 +9,7 @@ const { join } = require('node:path');
 const { readFileSync, writeFileSync } = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { createPersonalServerServeOptions } = require('./listener-options.cjs');
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
@@ -113,7 +114,7 @@ async function main() {
       port,
     }));
 
-    const server = serve({ fetch: app.fetch, port }, (info) => {
+    const server = serve(createPersonalServerServeOptions(app.fetch, port), (info) => {
       send({ type: 'ready', port: info.port });
 
       if (effectiveTunnelUrl) {
