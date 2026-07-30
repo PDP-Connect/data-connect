@@ -63,7 +63,9 @@ export function useConnectPage(): UseConnectPageResult {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const currentSearch = searchParams.toString()
-  const params = resolveGrantHandoff(getGrantParamsFromSearchParams(searchParams))
+  const urlParams = getGrantParamsFromSearchParams(searchParams)
+  const handoffId = urlParams.handoffId
+  const params = resolveGrantHandoff(urlParams)
   const hasGrantSession = Boolean(params.sessionId)
   const [generatedSessionId] = useState(() => `grant-session-${Date.now()}`)
   const resolvedAppId = params.appId
@@ -235,8 +237,12 @@ export function useConnectPage(): UseConnectPageResult {
 
   // Keep dependencies primitive and deterministic for query serialization.
   const grantSearch = useMemo(
-    () =>
-      buildGrantSearchParams({
+    () => {
+      if (handoffId) {
+        return buildGrantSearchParams({ handoffId }).toString()
+      }
+
+      return buildGrantSearchParams({
         sessionId,
         secret: params.secret,
         appId: resolvedAppId,
@@ -244,9 +250,11 @@ export function useConnectPage(): UseConnectPageResult {
         authorizationDetails: authorizationDetailsKey
           ? JSON.parse(authorizationDetailsKey)
           : undefined,
-      }).toString(),
+      }).toString()
+    },
     [
       authorizationDetailsKey,
+      handoffId,
       params.secret,
       resolvedAppId,
       scopesKey,
