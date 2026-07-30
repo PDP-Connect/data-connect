@@ -347,8 +347,8 @@ export function Home() {
               </AlertDialogTitle>
               <AlertDialogDescription className="text-left">
                 Enter a GitHub personal access token with the permissions needed
-                for this import. DataConnect keeps it in memory only for this
-                run and does not save it.
+                for this import. DataConnect uses it for this run and does not
+                save it.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="grid gap-1.5">
