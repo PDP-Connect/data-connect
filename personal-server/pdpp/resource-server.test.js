@@ -1,0 +1,418 @@
+import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import test from "node:test"
+
+import { Hono } from "hono"
+
+import { GrantScopedRecordsRepository } from "./grant-scoped-records-repository.js"
+import { mountPdppResourceServer } from "./resource-server.js"
+
+const tempRoots = []
+
+function hash(contents) {
+  return `sha256:${createHash("sha256").update(contents).digest("hex")}`
+}
+
+function createInstalledGithubFixture() {
+  const root = mkdtempSync(join(tmpdir(), "dataconnect-pdpp-resource-server-"))
+  tempRoots.push(root)
+  const installRoot = join(root, "install")
+  const exportRoot = join(root, "exports")
+  mkdirSync(join(installRoot, "profile"), { recursive: true })
+  mkdirSync(join(installRoot, "dist"), { recursive: true })
+  mkdirSync(exportRoot)
+
+  const manifest = {
+    protocol_version: "0.1.0",
+    connector_id: "https://registry.pdpp.org/connectors/github",
+    connector_key: "github",
+    version: "0.5.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    streams: [
+      {
+        name: "repositories",
+        primary_key: ["id"],
+        cursor_field: "pushed_at",
+        consent_time_field: "created_at",
+        selection: { fields: true, resources: true },
+        schema: {
+          type: "object",
+          required: ["id", "full_name"],
+          properties: {
+            id: { type: "string" },
+            full_name: { type: "string" },
+            name: { type: "string" },
+            private: { type: "boolean" },
+            created_at: { type: "string" },
+            pushed_at: { type: "string" },
+          },
+        },
+      },
+    ],
+  }
+  const manifestBytes = Buffer.from(JSON.stringify(manifest))
+  const entrypointBytes = Buffer.from("export default {};")
+  const provenanceBytes = Buffer.from(
+    JSON.stringify({ source: "fixture", version: "0.5.0" })
+  )
+  writeFileSync(
+    join(installRoot, "profile/collection-profile.json"),
+    manifestBytes
+  )
+  writeFileSync(
+    join(installRoot, "dist/collection-profile.mjs"),
+    entrypointBytes
+  )
+  writeFileSync(join(installRoot, "provenance.json"), provenanceBytes)
+  const activeManifestPath = join(root, "connectors-active.json")
+  writeFileSync(
+    activeManifestPath,
+    JSON.stringify({
+      connectors: {
+        "github-pdpp": {
+          connectorId: "github-pdpp",
+          version: "0.5.0",
+          rootPath: installRoot,
+          artifactKind: "pdpp-collection-profile",
+          manifestPath: "profile/collection-profile.json",
+          entrypointPath: "dist/collection-profile.mjs",
+          provenancePath: "provenance.json",
+          manifestSha256: hash(manifestBytes),
+          entrypointSha256: hash(entrypointBytes),
+          provenanceSha256: hash(provenanceBytes),
+        },
+      },
+    })
+  )
+  writeFileSync(
+    join(exportRoot, "github.json"),
+    JSON.stringify({
+      timestamp: 1785456000000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.recordsByStream": {
+          repositories: [
+            record("allowed", "2026-02-01T00:00:00Z"),
+            record("resource-excluded", "2026-02-01T00:00:00Z"),
+            record("time-excluded", "2025-02-01T00:00:00Z"),
+          ],
+        },
+      },
+    })
+  )
+  writeFileSync(
+    join(exportRoot, "newer-invalid-github.json"),
+    JSON.stringify({
+      timestamp: 1785542400000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.recordsByStream": {
+          repositories: [
+            {
+              stream: "repositories",
+              key: "missing-required-field",
+              data: { id: "missing-required-field" },
+              emitted_at: "2026-07-30T00:00:00Z",
+            },
+          ],
+        },
+      },
+    })
+  )
+  return {
+    activeManifestPath,
+    exportRoot,
+    databasePath: join(root, "records.sqlite"),
+  }
+}
+
+function record(id, createdAt) {
+  return {
+    stream: "repositories",
+    key: id,
+    data: {
+      id,
+      full_name: `octo/${id}`,
+      name: id,
+      private: false,
+      extra: "must not leak",
+      created_at: createdAt,
+      pushed_at: createdAt,
+    },
+    emitted_at: "2026-07-30T00:00:00Z",
+  }
+}
+
+function activeToken(overrides = {}) {
+  return {
+    active: true,
+    pdpp_token_kind: "client",
+    subject_id: "subject_123",
+    grant: {
+      source: {
+        kind: "connector",
+        id: "https://registry.pdpp.org/connectors/github",
+      },
+      streams: [
+        {
+          name: "repositories",
+          fields: ["id", "full_name", "name", "created_at", "pushed_at"],
+          resources: ["allowed", "time-excluded"],
+          time_range: { since: "2026-01-01T00:00:00Z" },
+        },
+      ],
+    },
+    ...overrides,
+  }
+}
+
+test.afterEach(async () => {
+  await Promise.all(
+    tempRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))
+  )
+})
+
+test("mounts installed GitHub PDPP streams beside legacy routes with opaque grant enforcement", async () => {
+  const fixture = createInstalledGithubFixture()
+  const opaqueTokens = []
+  const app = new Hono()
+  app.get("/v1/data", context => context.json({ legacy: true }))
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    requestId: () => "req_resource_server",
+    tokenIntrospector: {
+      introspect: async token => {
+        opaqueTokens.push(token)
+        if (token === "revoked")
+          return { active: false, inactive_reason: "grant_revoked" }
+        if (token === "expired")
+          return { active: false, inactive_reason: "grant_expired" }
+        if (token === "wrong-connector") {
+          return activeToken({
+            grant: {
+              source: {
+                kind: "connector",
+                id: "https://registry.pdpp.org/connectors/slack",
+              },
+              streams: [],
+            },
+          })
+        }
+        if (token === "unrestricted-fields") {
+          return activeToken({
+            grant: {
+              source: {
+                kind: "connector",
+                id: "https://registry.pdpp.org/connectors/github",
+              },
+              streams: [
+                {
+                  name: "repositories",
+                  resources: ["allowed"],
+                  time_range: { since: "2026-01-01T00:00:00Z" },
+                },
+              ],
+            },
+          })
+        }
+        if (token === "name-only") {
+          return activeToken({
+            grant: {
+              source: {
+                kind: "connector",
+                id: "https://registry.pdpp.org/connectors/github",
+              },
+              streams: [
+                {
+                  name: "repositories",
+                  fields: ["name"],
+                  resources: ["allowed"],
+                  time_range: { since: "2026-01-01T00:00:00Z" },
+                },
+              ],
+            },
+          })
+        }
+        return activeToken()
+      },
+    },
+  })
+
+  assert.deepEqual(
+    await (await app.request("http://personal.example/v1/data")).json(),
+    { legacy: true }
+  )
+  const streams = await app.request("http://personal.example/v1/streams", {
+    headers: { authorization: "Bearer not-a-jwt" },
+  })
+  assert.equal(streams.status, 200)
+  assert.deepEqual((await streams.json()).data, [
+    {
+      object: "stream",
+      name: "repositories",
+      record_count: 1,
+      last_updated: "2026-02-01T00:00:00Z",
+    },
+  ])
+
+  writeFileSync(
+    join(fixture.exportRoot, "after-mount.json"),
+    JSON.stringify({
+      timestamp: 1785628800000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.recordsByStream": {
+          repositories: [record("allowed", "2026-03-01T00:00:00Z")],
+        },
+      },
+    })
+  )
+  const refreshedStreams = await app.request(
+    "http://personal.example/v1/streams",
+    { headers: { authorization: "Bearer not-a-jwt" } }
+  )
+  assert.equal(
+    (await refreshedStreams.json()).data[0].last_updated,
+    "2026-03-01T00:00:00Z"
+  )
+
+  const records = await app.request(
+    "http://personal.example/v1/streams/repositories/records",
+    {
+      headers: { authorization: "Bearer not-a-jwt" },
+    }
+  )
+  assert.equal(records.status, 200)
+  assert.deepEqual(
+    (await records.json()).data.map(({ id }) => id),
+    ["allowed"]
+  )
+  assert.deepEqual(opaqueTokens, ["not-a-jwt", "not-a-jwt", "not-a-jwt"])
+
+  const unrestrictedFields = await app.request(
+    "http://personal.example/v1/streams/repositories/records",
+    { headers: { authorization: "Bearer unrestricted-fields" } }
+  )
+  assert.equal(unrestrictedFields.status, 200)
+  assert.equal((await unrestrictedFields.json()).data[0].data.extra, undefined)
+
+  const requiredFields = await app.request(
+    "http://personal.example/v1/streams/repositories/records/allowed",
+    { headers: { authorization: "Bearer name-only" } }
+  )
+  assert.equal(requiredFields.status, 200)
+  assert.deepEqual((await requiredFields.json()).data, {
+    id: "allowed",
+    full_name: "octo/allowed",
+    name: "allowed",
+  })
+  const streamWithHiddenCursor = await app.request(
+    "http://personal.example/v1/streams",
+    { headers: { authorization: "Bearer name-only" } }
+  )
+  assert.equal(
+    (await streamWithHiddenCursor.json()).data[0].last_updated,
+    "2026-03-01T00:00:00Z"
+  )
+
+  const filteredChanges = await app.request(
+    "http://personal.example/v1/streams/repositories/records?changes_since=beginning&filter%5Bname%5D=allowed",
+    { headers: { authorization: "Bearer not-a-jwt" } }
+  )
+  assert.equal(filteredChanges.status, 400)
+  assert.equal((await filteredChanges.json()).error.code, "invalid_request")
+
+  for (const id of ["resource-excluded", "time-excluded"]) {
+    const response = await app.request(
+      `http://personal.example/v1/streams/repositories/records/${id}`,
+      {
+        headers: { authorization: "Bearer not-a-jwt" },
+      }
+    )
+    assert.equal(response.status, 404)
+    assert.equal((await response.json()).error.code, "not_found")
+  }
+
+  for (const [token, code] of [
+    ["revoked", "grant_revoked"],
+    ["expired", "grant_expired"],
+    ["wrong-connector", "grant_invalid"],
+  ]) {
+    const response = await app.request("http://personal.example/v1/streams", {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    assert.equal(response.status, 403)
+    assert.equal((await response.json()).error.code, code)
+  }
+
+  const malformedPath = await app.request(
+    "http://personal.example/v1/streams/%E0%A4%A/records",
+    {
+      headers: { authorization: "Bearer not-a-jwt" },
+    }
+  )
+  assert.equal(malformedPath.status, 400)
+  assert.equal((await malformedPath.json()).error.code, "invalid_request")
+
+  for (const authorization of [undefined, "Basic nope", "Bearer"]) {
+    const response = await app.request("http://personal.example/v1/streams", {
+      headers: authorization ? { authorization } : undefined,
+    })
+    assert.equal(response.status, 401)
+    assert.equal((await response.json()).error.code, "authentication_error")
+  }
+})
+
+test("maps durable cursor errors to stable resource-server responses", async () => {
+  const fixture = createInstalledGithubFixture()
+  const repository = new GrantScopedRecordsRepository({
+    databasePath: fixture.databasePath,
+    changeHistoryLimit: 1,
+  })
+  const app = new Hono()
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    recordsRepository: repository,
+    tokenIntrospector: { introspect: async () => activeToken() },
+  })
+  const headers = { authorization: "Bearer opaque" }
+  const initial = await app.request(
+    "http://personal.example/v1/streams/repositories/records?changes_since=beginning",
+    { headers }
+  )
+  const staleCursor = (await initial.json()).next_changes_since
+  repository.upsert({
+    connectionId: "default",
+    stream: "repositories",
+    key: "allowed",
+    data: record("allowed", "2026-04-01T00:00:00Z").data,
+    emittedAt: "2026-07-30T00:00:01Z",
+  })
+  repository.upsert({
+    connectionId: "default",
+    stream: "repositories",
+    key: "allowed",
+    data: record("allowed", "2026-05-01T00:00:00Z").data,
+    emittedAt: "2026-07-30T00:00:02Z",
+  })
+  const expired = await app.request(
+    `http://personal.example/v1/streams/repositories/records?changes_since=${encodeURIComponent(staleCursor)}`,
+    { headers }
+  )
+  assert.equal(expired.status, 410)
+  assert.equal((await expired.json()).error.code, "cursor_expired")
+  const malformed = await app.request(
+    "http://personal.example/v1/streams/repositories/records?cursor=not-a-cursor",
+    { headers }
+  )
+  assert.equal(malformed.status, 400)
+  assert.equal((await malformed.json()).error.code, "invalid_cursor")
+  repository.close()
+})

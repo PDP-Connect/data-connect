@@ -233,6 +233,34 @@ export class GrantScopedRecordsRepository {
     return discloseLiveRow(row, stream, effectiveGrant)
   }
 
+  summarizeCurrent({ connectionId, stream, grant }) {
+    validateLocation({ connectionId, stream })
+    const effectiveGrant = normalizeGrant(stream, grant)
+    const metadata = GITHUB_STREAMS[stream]
+    const visible = this.#db
+      .prepare(
+        `
+      SELECT record_key, payload, emitted_at
+      FROM current_records
+      WHERE connection_id = ? AND stream = ? AND deleted = 0
+    `
+      )
+      .all(connectionId, stream)
+      .map(row => {
+        const record = discloseLiveRow(row, stream, effectiveGrant)
+        return record === null
+          ? null
+          : { cursorValue: JSON.parse(row.payload)[metadata.cursorField], record }
+      })
+      .filter(entry => entry !== null)
+    const updated = visible
+      .map(entry => entry.cursorValue)
+      .filter(value => typeof value === "string")
+      .sort()
+      .at(-1) ?? null
+    return { record_count: visible.length, last_updated: updated }
+  }
+
   listCurrent({
     connectionId,
     stream,
@@ -751,7 +779,9 @@ function normalizeGrant(stream, grant = {}, requestedFields) {
   if (
     requestFields &&
     grantFields &&
-    requestFields.some(field => !grantFields.includes(field))
+    requestFields.some(
+      field => !grantFields.includes(field) && !metadata.requiredFields.includes(field)
+    )
   ) {
     throw new RecordsRepositoryError(
       "field_not_granted",

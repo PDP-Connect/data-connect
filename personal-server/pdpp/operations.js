@@ -28,6 +28,9 @@ export function executeStreamsList({ subjectId, grant, manifest }, repository) {
 
 export async function executeRecordsList(input, repository) {
   const context = resolveReadContext(input);
+  if (input.query.changesSince !== null && Object.keys(input.query.filters).length > 0) {
+    throw new CoreOperationError(400, 'invalid_request', 'filter cannot be used with changes_since');
+  }
   const result = await repository.listRecords({
     subjectId: input.subjectId,
     stream: context.stream.name,
@@ -107,8 +110,7 @@ function resolveRequestedFields(stream, grantStream, query) {
     }
   }
 
-  if (!requested && !authorized) return null;
-  const fields = new Set(requested ?? authorized);
+  const fields = new Set(requested ?? authorized ?? Object.keys(properties));
   for (const field of stream.schema?.required ?? []) fields.add(field);
   return [...fields];
 }

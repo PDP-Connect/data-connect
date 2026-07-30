@@ -35,7 +35,7 @@ const CORE_VERSION = '0.1.0';
  *
  * @param {{manifest: object, tokenIntrospector: TokenIntrospector, recordsRepository: GrantScopedRecordsRepository, requestId?: () => string}} dependencies
  */
-export function createCoreApp({ manifest, tokenIntrospector, recordsRepository, requestId = crypto.randomUUID }) {
+export function createCoreApp({ manifest, tokenIntrospector, recordsRepository, requestId = () => crypto.randomUUID() }) {
   const hasInjectedManifest = Array.isArray(manifest?.streams);
   if (!hasInjectedManifest) {
     throw new TypeError('createCoreApp requires an injected validated manifest');
@@ -71,8 +71,8 @@ export function createCoreApp({ manifest, tokenIntrospector, recordsRepository, 
           subjectId: identity.subject_id,
           grant: identity.grant,
           manifest,
-          streamName: decodeURIComponent(path[2]),
-          recordId: decodeURIComponent(path[4]),
+          streamName: decodePathSegment(path[2]),
+          recordId: decodePathSegment(path[4]),
           query,
         }, recordsRepository);
         return respond(200, record, id);
@@ -84,7 +84,7 @@ export function createCoreApp({ manifest, tokenIntrospector, recordsRepository, 
           subjectId: identity.subject_id,
           grant: identity.grant,
           manifest,
-          streamName: decodeURIComponent(path[2]),
+          streamName: decodePathSegment(path[2]),
           query,
         }, recordsRepository);
         const body = { ...result };
@@ -189,6 +189,14 @@ function splitFields(value) {
   const fields = [...new Set(value.split(',').map((field) => field.trim()).filter(Boolean))];
   if (!fields.length) throw new CoreOperationError(400, 'invalid_request', 'fields must name at least one field');
   return fields;
+}
+
+function decodePathSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new CoreOperationError(400, 'invalid_request', 'Path parameter is not valid percent encoding');
+  }
 }
 
 function respond(status, body, requestId) {

@@ -19,10 +19,13 @@ process.env.NODE_ENV = 'production';
 
 import { dirname, join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { registerProtectedRoutes } from './protected-routes.js';
+import { mountPdppResourceServer } from './pdpp/resource-server.js';
+import { createHttpTokenIntrospector } from './pdpp/token-introspector.js';
 
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
   '@opendatalabs/personal-server-ts-core/config':
@@ -324,6 +327,28 @@ async function main() {
     // Keep as a reference — startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
+
+    // PDPP reads are additive: unavailable or invalid local connector state
+    // leaves the established Personal Server routes running without a fallback
+    // manifest or lossy data source.
+    try {
+      const pdppStorageRoot = process.env.PDPP_STORAGE_DIR
+        || configDir
+        || join(homedir(), '.dataconnect', 'personal-server');
+      await mountPdppResourceServer(app, {
+        activeManifestPath: process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH,
+        databasePath: join(pdppStorageRoot, 'pdpp-github-records.sqlite'),
+        exportRoot: process.env.DATACONNECT_EXPORT_ROOT,
+        connectionId: process.env.PDPP_GITHUB_CONNECTION_ID || 'default',
+        tokenIntrospector: createHttpTokenIntrospector({
+          url: process.env.PDPP_TOKEN_INTROSPECTION_URL,
+          authorization: process.env.PDPP_INTROSPECTION_AUTHORIZATION,
+        }),
+      });
+      send({ type: 'log', message: '[pdpp] mounted installed GitHub resource routes' });
+    } catch (error) {
+      send({ type: 'log', message: `[pdpp] resource routes unavailable: ${error instanceof Error ? error.message : String(error)}` });
+    }
 
     // --- Request logging ---
     // Wrap app.fetch to log all incoming requests (including routes registered
