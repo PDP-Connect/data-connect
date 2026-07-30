@@ -16,10 +16,17 @@ export type BaseAppRegistryEntry = {
   scopes?: string[]
 }
 
-export type LiveAppRegistryEntry = BaseAppRegistryEntry & {
+export type ExternalAppRegistryEntry = BaseAppRegistryEntry & {
   status: "live"
   externalUrl: string
   scopes: string[]
+}
+
+export type InternalAppRegistryEntry = BaseAppRegistryEntry & {
+  status: "live"
+  route: string
+  externalUrl?: never
+  scopes?: never
 }
 
 export type ComingSoonAppRegistryEntry = BaseAppRegistryEntry & {
@@ -27,4 +34,13 @@ export type ComingSoonAppRegistryEntry = BaseAppRegistryEntry & {
   externalUrl?: never
 }
 
-export type AppRegistryEntry = LiveAppRegistryEntry | ComingSoonAppRegistryEntry
+export type AppRegistryEntry =
+  | ExternalAppRegistryEntry
+  | InternalAppRegistryEntry
+  | ComingSoonAppRegistryEntry
+
+export function isExternalAppRegistryEntry(
+  entry: AppRegistryEntry
+): entry is ExternalAppRegistryEntry {
+  return "externalUrl" in entry
+}

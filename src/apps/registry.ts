@@ -1,9 +1,26 @@
 import type { AppRegistryEntry } from "./registry-types"
 import { getSubmittedAppRegistryEntries } from "./submission-registry"
+import { ROUTES } from "@/config/routes"
 
 export type { AppRegistryEntry } from "./registry-types"
 
-const APP_REGISTRY_LIST: AppRegistryEntry[] = getSubmittedAppRegistryEntries()
+const FIRST_PARTY_APP_REGISTRY: AppRegistryEntry[] = [
+  {
+    id: "timeline",
+    name: "Timeline",
+    icon: "T",
+    description: "See the dates and moments in your connected data.",
+    category: "First-party",
+    dataRequired: [],
+    status: "live",
+    route: ROUTES.timeline,
+  },
+]
+
+const APP_REGISTRY_LIST: AppRegistryEntry[] = [
+  ...FIRST_PARTY_APP_REGISTRY,
+  ...getSubmittedAppRegistryEntries(),
+]
 
 const APP_REGISTRY = createAppRegistry(APP_REGISTRY_LIST)
 

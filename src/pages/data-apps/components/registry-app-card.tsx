@@ -1,10 +1,14 @@
 import { ClockIcon } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import {
   openSubmittedAppExternalUrl,
   parseSubmittedAppExternalUrl,
 } from "@/apps/external-url"
 import { deriveIconUrls } from "@/apps/icon-url"
-import type { AppRegistryEntry } from "@/apps/registry-types"
+import {
+  isExternalAppRegistryEntry,
+  type AppRegistryEntry,
+} from "@/apps/registry-types"
 import { IconFlow } from "@/components/elements/icon-flow"
 import { PlatformIconGroup } from "@/components/elements/platform-icon-group"
 import { AdaptiveIcon } from "@/components/icons/adaptive-icon"
@@ -15,8 +19,10 @@ import { getPlatformLogoUrlForToken } from "@/lib/platform/logo-provider"
 import { AppCard } from "./app-card"
 
 export function RegistryAppCard({ app }: { app: AppRegistryEntry }) {
+  const navigate = useNavigate()
+  const isExternalApp = isExternalAppRegistryEntry(app)
   const appIconImageSources = deriveIconUrls(
-    app.status === "live" ? app.externalUrl : null,
+    isExternalApp ? app.externalUrl : null,
     app.iconUrl
   )
   const requiredPlatformItems = app.dataRequired.map(data => ({
@@ -30,6 +36,11 @@ export function RegistryAppCard({ app }: { app: AppRegistryEntry }) {
 
   const handleOpenApp = () => {
     if (app.status !== "live") {
+      return
+    }
+
+    if (!isExternalApp) {
+      navigate(app.route)
       return
     }
 
