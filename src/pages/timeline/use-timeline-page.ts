@@ -9,6 +9,7 @@ import {
   deriveTimeline,
   filterTimeline,
 } from "@/apps/timeline/timeline-derivation"
+import type { LocalTimelineConsentRequest } from "@/services/pdppTimeline"
 
 type TimelinePageState = { kind: "loading" } | TimelineReadResult
 
@@ -52,9 +53,17 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
 
   const requestConsent = useCallback(async () => {
     if (!dataSource.requestConsent) return
-    await dataSource.requestConsent()
-    setReadAttempt(attempt => attempt + 1)
+    return dataSource.requestConsent()
   }, [dataSource])
+
+  const approveConsent = useCallback(
+    async (consent: LocalTimelineConsentRequest) => {
+      if (!dataSource.approveConsent) return
+      await dataSource.approveConsent(consent)
+      setReadAttempt(attempt => attempt + 1)
+    },
+    [dataSource]
+  )
 
   const timeline = useMemo(() => {
     if (state.kind !== "ready") {
@@ -89,5 +98,6 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
     timeline,
     visibleTimeline,
     requestConsent: dataSource.requestConsent ? requestConsent : undefined,
+    approveConsent: dataSource.approveConsent ? approveConsent : undefined,
   }
 }

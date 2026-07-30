@@ -18,6 +18,26 @@ function response(body: unknown, status = 200): Response {
   } as Response
 }
 
+function localConsent(init: RequestInit, requestId: string) {
+  const body = JSON.parse(String(init.body))
+  return response({
+    request_id: requestId,
+    session_id: body.session_id,
+    subject_id: body.subject_id,
+    scopes: ["pdpp.local.github.repositories"],
+    access_expires_in_seconds: 28_800,
+    authorization_details: {
+      type: "https://pdpp.org/data-access",
+      source: { kind: "connector", id: "github" },
+      access_mode: "continuous",
+      purpose_code: "https://dataconnect.app/purposes/timeline",
+      purpose_description:
+        "Show your connected records in DataConnect's local Timeline.",
+      streams: [{ name: "repositories" }],
+    },
+  })
+}
+
 beforeEach(() => {
   tauriFetch.mockReset()
   clearLocalTimelineCapability()
@@ -42,20 +62,13 @@ describe("production Timeline PDPP data source", () => {
     expect(tauriFetch).not.toHaveBeenCalled()
   })
 
-  it("approves a bound local consent then reads streams and paginated records over PDPP", async () => {
+  it("loads normalized local terms before explicit approval, then reads over PDPP", async () => {
     const dataSource = createProductionTimelineDataSource({
       port: 3100,
       devToken: "desktop-secret",
     })
     tauriFetch
-      .mockImplementationOnce((_url, init) =>
-        response({
-          request_id: "request-1",
-          session_id: JSON.parse(init.body).session_id,
-          scopes: ["github.repositories"],
-          authorization_details: {},
-        })
-      )
+      .mockImplementationOnce((_url, init) => localConsent(init, "request-1"))
       .mockResolvedValueOnce(
         response({ access_token: "pdpp-bearer", token_type: "Bearer" }, 201)
       )
@@ -78,7 +91,15 @@ describe("production Timeline PDPP data source", () => {
         })
       )
 
-    await dataSource.requestConsent?.()
+    const consent = await dataSource.requestConsent?.()
+    expect(consent?.authorization_details.streams).toEqual([
+      { name: "repositories" },
+    ])
+    expect(tauriFetch).toHaveBeenCalledOnce()
+    expect(getLocalTimelineCapability()).toBeNull()
+    expect(tauriFetch.mock.calls[0][0]).not.toContain("desktop-secret")
+
+    await dataSource.approveConsent?.(consent!)
     const capability = getLocalTimelineCapability()
     expect(capability).toMatchObject({
       clientId: "dataconnect.timeline",
@@ -127,12 +148,7 @@ describe("production Timeline PDPP data source", () => {
     })
     tauriFetch
       .mockImplementationOnce((_url, init) =>
-        response({
-          request_id: "request-pages",
-          session_id: JSON.parse(init.body).session_id,
-          scopes: [],
-          authorization_details: {},
-        })
+        localConsent(init, "request-pages")
       )
       .mockResolvedValueOnce(
         response({ access_token: "pdpp-pages", token_type: "Bearer" }, 201)
@@ -152,7 +168,8 @@ describe("production Timeline PDPP data source", () => {
           next_cursor: "opaque:3",
         })
       )
-    await dataSource.requestConsent?.()
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
     const result = await dataSource.read({
       maxStreams: 24,
       maxRecords: 2,
@@ -177,14 +194,7 @@ describe("production Timeline PDPP data source", () => {
       devToken: "desktop-secret",
     })
     tauriFetch
-      .mockImplementationOnce((_url, init) =>
-        response({
-          request_id: "request-2",
-          session_id: JSON.parse(init.body).session_id,
-          scopes: [],
-          authorization_details: {},
-        })
-      )
+      .mockImplementationOnce((_url, init) => localConsent(init, "request-2"))
       .mockResolvedValueOnce(
         response({ access_token: "pdpp-bearer-2", token_type: "Bearer" }, 201)
       )
@@ -199,7 +209,8 @@ describe("production Timeline PDPP data source", () => {
           403
         )
       )
-    await dataSource.requestConsent?.()
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
     await expect(
       dataSource.read({
         maxStreams: 24,
@@ -224,19 +235,13 @@ describe("production Timeline PDPP data source", () => {
       devToken: "desktop-secret",
     })
     tauriFetch
-      .mockImplementationOnce((_url, init) =>
-        response({
-          request_id: "request-3",
-          session_id: JSON.parse(init.body).session_id,
-          scopes: [],
-          authorization_details: {},
-        })
-      )
+      .mockImplementationOnce((_url, init) => localConsent(init, "request-3"))
       .mockResolvedValueOnce(
         response({ access_token: "pdpp-bearer-3", token_type: "Bearer" }, 201)
       )
       .mockResolvedValueOnce(response({ revoked: true }))
-    await dataSource.requestConsent?.()
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
     await expect(
       revokeLocalTimelineConsent(3100, "desktop-secret")
     ).resolves.toBe(true)

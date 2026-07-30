@@ -166,7 +166,19 @@ test("binds local Timeline grants to their session, subject, client, expiry, and
       subjectId: "timeline-subject",
     })
     assert.equal(consent.session_id, "timeline-session")
+    assert.equal(consent.subject_id, "timeline-subject")
     assert.deepEqual(consent.scopes, ["pdpp.local.github.repositories"])
+    assert.deepEqual(consent.authorization_details, {
+      type: PDPP_DATA_ACCESS_TYPE,
+      source: { kind: "connector", id: "github" },
+      access_mode: "continuous",
+      purpose_code: "https://dataconnect.app/purposes/timeline",
+      purpose_description:
+        "Show your connected records in DataConnect's local Timeline.",
+      retention: undefined,
+      streams: [{ name: "repositories" }],
+    })
+    assert.equal(consent.access_expires_in_seconds, 8 * 60 * 60)
     assert.throws(
       () =>
         adapter.issueLocalTimelineGrant({

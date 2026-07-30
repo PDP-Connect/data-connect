@@ -1,4 +1,7 @@
-import type { LocalTimelineCapability } from "@/services/pdppTimeline"
+import type {
+  LocalTimelineCapability,
+  LocalTimelineConsentRequest,
+} from "@/services/pdppTimeline"
 
 export const TIMELINE_MAX_RECORDS = 100
 export const TIMELINE_MAX_STREAMS = 24
@@ -53,7 +56,8 @@ export type TimelineReadResult =
 /** A bounded PDPP read result keeps rendering independent of transport details. */
 export interface TimelineDataSource {
   read(options: TimelineReadOptions): Promise<TimelineReadResult>
-  requestConsent?(): Promise<void>
+  requestConsent?(): Promise<LocalTimelineConsentRequest>
+  approveConsent?(consent: LocalTimelineConsentRequest): Promise<void>
 }
 
 type PdppStreamList = {
@@ -80,9 +84,19 @@ export function createProductionTimelineDataSource({
           "Personal Server is still starting. Try again in a moment."
         )
       }
+      const { createLocalTimelineConsentRequest } =
+        await import("@/services/pdppTimeline")
+      return createLocalTimelineConsentRequest(port, devToken)
+    },
+    async approveConsent(consent) {
+      if (!port || !devToken) {
+        throw new Error(
+          "Personal Server is still starting. Try again in a moment."
+        )
+      }
       const { approveLocalTimelineConsent } =
         await import("@/services/pdppTimeline")
-      await approveLocalTimelineConsent(port, devToken)
+      await approveLocalTimelineConsent(port, devToken, consent)
     },
     async read({ maxStreams, maxRecords, signal }) {
       if (!port || !devToken) {

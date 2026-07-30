@@ -9,6 +9,7 @@ import { createMemoryRouter, RouterProvider } from "react-router-dom"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ROUTES } from "@/config/routes"
 import type { TimelineDataSource } from "@/apps/timeline/timeline-data-source"
+import type { LocalTimelineConsentRequest } from "@/services/pdppTimeline"
 import { Timeline } from "./index"
 
 function renderTimeline(dataSource?: TimelineDataSource) {
@@ -61,6 +62,24 @@ const readyDataSource: TimelineDataSource = {
       ],
     },
   }),
+}
+
+const localTimelineTerms: LocalTimelineConsentRequest = {
+  request_id: "request-1",
+  session_id: "timeline-session",
+  subject_id: "timeline-subject",
+  scopes: ["pdpp.local.github.repositories", "pdpp.local.github.gists"],
+  access_expires_in_seconds: 28_800,
+  authorization_details: {
+    type: "https://pdpp.org/data-access",
+    source: { kind: "connector", id: "github" },
+    access_mode: "continuous",
+    purpose_code: "https://dataconnect.app/purposes/timeline",
+    purpose_description:
+      "Show your connected records in DataConnect's local Timeline.",
+    retention: { max_duration: "P30D", on_expiry: "delete" },
+    streams: [{ name: "repositories" }, { name: "gists" }],
+  },
 }
 
 afterEach(() => {
@@ -124,26 +143,73 @@ describe("Timeline", () => {
     })
   })
 
-  it("offers an explicit consent action before the built-in Timeline reads", async () => {
-    const requestConsent = vi.fn().mockResolvedValue(undefined)
+  it("shows normalized terms before explicit approval and cancellation issues no grant", async () => {
+    const requestConsent = vi.fn().mockResolvedValue(localTimelineTerms)
+    const approveConsent = vi.fn().mockResolvedValue(undefined)
     const source: TimelineDataSource = {
       read: vi
         .fn()
         .mockResolvedValueOnce({ kind: "unauthorized" })
         .mockResolvedValueOnce({ kind: "ready", read: { streams: [] } }),
       requestConsent,
+      approveConsent,
     }
     renderTimeline(source)
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /allow local timeline access/i })
+        screen.getByRole("button", { name: /review local timeline access/i })
       ).toBeTruthy()
     })
     fireEvent.click(
-      screen.getByRole("button", { name: /allow local timeline access/i })
+      screen.getByRole("button", { name: /review local timeline access/i })
     )
     await waitFor(() => expect(requestConsent).toHaveBeenCalledOnce())
+    expect(screen.getByText("Review Timeline access")).toBeTruthy()
+    expect(screen.getByText("repositories")).toBeTruthy()
+    expect(screen.getByText("gists")).toBeTruthy()
+    expect(screen.getByText(/continuous access/i)).toBeTruthy()
+    expect(screen.getByText(/P30D; delete on expiry/i)).toBeTruthy()
+    expect(screen.getByText(/expires 8 hours after approval/i)).toBeTruthy()
+    expect(approveConsent).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(approveConsent).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("button", { name: /review local timeline access/i })
+    ).toBeTruthy()
+  })
+
+  it("issues the local grant only after the owner approves loaded terms", async () => {
+    const requestConsent = vi.fn().mockResolvedValue(localTimelineTerms)
+    const approveConsent = vi.fn().mockResolvedValue(undefined)
+    renderTimeline({
+      read: vi
+        .fn()
+        .mockResolvedValueOnce({ kind: "unauthorized" })
+        .mockResolvedValueOnce({ kind: "ready", read: { streams: [] } }),
+      requestConsent,
+      approveConsent,
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /review local timeline access/i })
+      ).toBeTruthy()
+    })
+    fireEvent.click(
+      screen.getByRole("button", { name: /review local timeline access/i })
+    )
+    await screen.findByRole("button", {
+      name: /approve local timeline access/i,
+    })
+    expect(approveConsent).not.toHaveBeenCalled()
+    fireEvent.click(
+      screen.getByRole("button", { name: /approve local timeline access/i })
+    )
+    await waitFor(() => {
+      expect(approveConsent).toHaveBeenCalledWith(localTimelineTerms)
+    })
   })
 
   it("shows an honest unavailable state without using fixtures", async () => {

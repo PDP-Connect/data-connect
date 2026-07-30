@@ -8,6 +8,8 @@ import {
 } from "./policy.js"
 import { openGithubAuthorizationStore } from "./store.js"
 
+const LOCAL_TIMELINE_ACCESS_EXPIRES_IN_SECONDS = 8 * 60 * 60
+
 function inactive() {
   return { active: false }
 }
@@ -68,14 +70,17 @@ export function createGithubAuthorizationAdapter({
         manifest: manifest.manifest,
         localTimeline: true,
       })
-      return store.createRequest({
-        sessionId,
-        subjectId,
-        clientId: LOCAL_TIMELINE_CLIENT_ID,
-        scopes: local.scopes,
-        terms,
-        manifest,
-      })
+      return {
+        ...store.createRequest({
+          sessionId,
+          subjectId,
+          clientId: LOCAL_TIMELINE_CLIENT_ID,
+          scopes: local.scopes,
+          terms,
+          manifest,
+        }),
+        access_expires_in_seconds: LOCAL_TIMELINE_ACCESS_EXPIRES_IN_SECONDS,
+      }
     },
     issueApprovedGrant({ requestId, legacyGrantId, subjectId, clientId }) {
       return store.issueGrant({
@@ -96,7 +101,7 @@ export function createGithubAuthorizationAdapter({
         subjectId,
         clientId: LOCAL_TIMELINE_CLIENT_ID,
         expiresAt: new Date(
-          clock().getTime() + 8 * 60 * 60 * 1000
+          clock().getTime() + LOCAL_TIMELINE_ACCESS_EXPIRES_IN_SECONDS * 1000
         ).toISOString(),
         manifest: currentManifest(),
       })

@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select"
 import { useTimelinePage } from "./use-timeline-page"
 import { usePersonalServer } from "@/hooks/usePersonalServer"
+import type { LocalTimelineConsentRequest } from "@/services/pdppTimeline"
 
 type TimelineProps = {
   dataSource?: TimelineDataSource
@@ -55,14 +56,33 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
     timeline,
     visibleTimeline,
     requestConsent,
+    approveConsent,
   } = useTimelinePage(dataSource)
   const [consentError, setConsentError] = useState<string | null>(null)
+  const [pendingConsent, setPendingConsent] =
+    useState<LocalTimelineConsentRequest | null>(null)
 
-  const approveConsent = async () => {
+  const requestTerms = async () => {
     if (!requestConsent) return
     setConsentError(null)
     try {
-      await requestConsent()
+      const consent = await requestConsent()
+      if (consent) setPendingConsent(consent)
+    } catch (error) {
+      setConsentError(
+        error instanceof Error
+          ? error.message
+          : "Timeline consent terms could not be loaded."
+      )
+    }
+  }
+
+  const approvePendingConsent = async () => {
+    if (!approveConsent || !pendingConsent) return
+    setConsentError(null)
+    try {
+      await approveConsent(pendingConsent)
+      setPendingConsent(null)
     } catch (error) {
       setConsentError(
         error instanceof Error
@@ -84,10 +104,22 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
 
         {state.kind === "loading" ? <TimelineLoading /> : null}
         {state.kind === "unauthorized" ? (
-          <TimelineUnauthorized
-            onApprove={requestConsent ? approveConsent : undefined}
-            error={consentError}
-          />
+          pendingConsent ? (
+            <TimelineConsentTerms
+              consent={pendingConsent}
+              error={consentError}
+              onApprove={approveConsent ? approvePendingConsent : undefined}
+              onCancel={() => {
+                setConsentError(null)
+                setPendingConsent(null)
+              }}
+            />
+          ) : (
+            <TimelineUnauthorized
+              onRequestTerms={requestConsent ? requestTerms : undefined}
+              error={consentError}
+            />
+          )
         ) : null}
         {state.kind === "revoked" ? <TimelineRevoked /> : null}
         {state.kind === "error" ? (
@@ -117,13 +149,13 @@ function TimelineLoading() {
 }
 
 function TimelineUnauthorized({
-  onApprove,
+  onRequestTerms,
   error,
 }: {
-  onApprove?: () => void
+  onRequestTerms?: () => void
   error: string | null
 }) {
-  if (!onApprove)
+  if (!onRequestTerms)
     return <TimelineStatus title="Sign in to view your timeline." />
   return (
     <section aria-live="polite" className="space-y-3">
@@ -134,7 +166,7 @@ function TimelineUnauthorized({
         Timeline will request read access to the GitHub records available from
         your local Personal Server.
       </Text>
-      <Button onClick={onApprove}>Allow local Timeline access</Button>
+      <Button onClick={onRequestTerms}>Review local Timeline access</Button>
       {error ? (
         <Text as="p" intent="small" color="destructive">
           {error}
@@ -142,6 +174,103 @@ function TimelineUnauthorized({
       ) : null}
     </section>
   )
+}
+
+function TimelineConsentTerms({
+  consent,
+  error,
+  onApprove,
+  onCancel,
+}: {
+  consent: LocalTimelineConsentRequest
+  error: string | null
+  onApprove?: () => void
+  onCancel: () => void
+}) {
+  const terms = consent.authorization_details
+  const retention = terms.retention
+  const expiry = formatTimelineExpiry(consent.access_expires_in_seconds)
+
+  return (
+    <section aria-live="polite" className="space-y-3">
+      <Text as="h2" intent="heading">
+        Review Timeline access
+      </Text>
+      <Text as="p" intent="small" muted>
+        Timeline is asking your local Personal Server for the following access.
+      </Text>
+      <dl className="space-y-2">
+        <div>
+          <Text as="dt" intent="fine" muted>
+            Purpose
+          </Text>
+          <Text as="dd" intent="small">
+            {terms.purpose_description ?? terms.purpose_code}
+          </Text>
+        </div>
+        <div>
+          <Text as="dt" intent="fine" muted>
+            Verified GitHub streams
+          </Text>
+          <Text as="dd" intent="small">
+            <ul className="list-disc pl-5">
+              {terms.streams.map(stream => (
+                <li key={stream.name}>{stream.name}</li>
+              ))}
+            </ul>
+          </Text>
+        </div>
+        <div>
+          <Text as="dt" intent="fine" muted>
+            Access mode
+          </Text>
+          <Text as="dd" intent="small">
+            {terms.access_mode === "continuous"
+              ? "Continuous access while this approval remains active."
+              : "Single-use access."}
+          </Text>
+        </div>
+        {retention ? (
+          <div>
+            <Text as="dt" intent="fine" muted>
+              Retention
+            </Text>
+            <Text as="dd" intent="small">
+              {retention.max_duration}; {retention.on_expiry} on expiry.
+            </Text>
+          </div>
+        ) : null}
+      </dl>
+      <Text as="p" intent="small" muted>
+        This approval applies only to the local Personal Server on this device.
+        {expiry} You can revoke it sooner.
+      </Text>
+      <div className="flex gap-2">
+        <Button variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        {onApprove ? (
+          <Button onClick={onApprove}>Approve local Timeline access</Button>
+        ) : null}
+      </div>
+      {error ? (
+        <Text as="p" intent="small" color="destructive">
+          {error}
+        </Text>
+      ) : null}
+    </section>
+  )
+}
+
+function formatTimelineExpiry(seconds: number | undefined) {
+  if (!seconds || seconds < 1) {
+    return " Expiry is set by your local Personal Server when you approve."
+  }
+  const hours = seconds / 60 / 60
+  if (Number.isInteger(hours)) {
+    return ` It expires ${hours} ${hours === 1 ? "hour" : "hours"} after approval.`
+  }
+  return ` It expires ${Math.ceil(seconds / 60)} minutes after approval.`
 }
 
 function TimelineRevoked() {

@@ -5,8 +5,20 @@ const LOCAL_TIMELINE_CLIENT_ID = "dataconnect.timeline"
 export type LocalTimelineConsentRequest = {
   request_id: string
   session_id: string
+  subject_id: string
   scopes: string[]
-  authorization_details: unknown
+  authorization_details: LocalTimelineAuthorizationDetails
+  access_expires_in_seconds?: number
+}
+
+export type LocalTimelineAuthorizationDetails = {
+  type: string
+  source: { kind: string; id: string }
+  access_mode: "single_use" | "continuous"
+  purpose_code: string
+  purpose_description?: string
+  retention?: { max_duration: string; on_expiry: "delete" | "anonymize" }
+  streams: Array<{ name: string }>
 }
 
 export type LocalTimelineCapability = {
@@ -37,7 +49,7 @@ export function clearLocalTimelineCapability() {
   localTimelineCapability = null
 }
 
-export async function approveLocalTimelineConsent(
+export async function createLocalTimelineConsentRequest(
   port: number,
   devToken: string,
   signal?: AbortSignal
@@ -59,12 +71,33 @@ export async function approveLocalTimelineConsent(
       "Personal Server returned a mismatched Timeline session."
     )
   }
+  if (consent.subject_id !== subjectId) {
+    throw new PersonalServerError(
+      "Personal Server returned a mismatched Timeline subject."
+    )
+  }
+  return consent
+}
+
+/**
+ * Issues the memory-only Timeline capability only after the owner has reviewed
+ * the server-normalized terms returned by createLocalTimelineConsentRequest.
+ */
+export async function approveLocalTimelineConsent(
+  port: number,
+  devToken: string,
+  consent: LocalTimelineConsentRequest,
+  signal?: AbortSignal
+): Promise<void> {
   const issued = await request<{ access_token: string; token_type: string }>(
     port,
     `/v1/pdpp/local-timeline/consent-requests/${encodeURIComponent(consent.request_id)}/approve`,
     {
       method: "POST",
-      body: { session_id: sessionId, subject_id: subjectId },
+      body: {
+        session_id: consent.session_id,
+        subject_id: consent.subject_id,
+      },
       devToken,
       signal,
     }
@@ -76,11 +109,10 @@ export async function approveLocalTimelineConsent(
   }
   localTimelineCapability = {
     accessToken: issued.access_token,
-    sessionId,
-    subjectId,
+    sessionId: consent.session_id,
+    subjectId: consent.subject_id,
     clientId: LOCAL_TIMELINE_CLIENT_ID,
   }
-  return consent
 }
 
 export async function revokeLocalTimelineConsent(
