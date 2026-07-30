@@ -41,6 +41,7 @@ function isStale() {
   // Files that, when changed, mean we need to rebuild
   const inputs = [
     join(serverDir, "index.js"),
+    join(serverDir, "protected-routes.js"),
     join(serverDir, "package.json"),
     join(serverDir, "package-lock.json"),
     // Library code — if npm updated the dependency, this will be newer

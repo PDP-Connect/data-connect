@@ -125,15 +125,22 @@ export async function listGrants(
 
 export async function revokeGrant(
   port: number,
-  grantId: string
+  grantId: string,
+  devToken?: string | null
 ): Promise<void> {
   const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (devToken) {
+    headers["Authorization"] = `Bearer ${devToken}`;
+  }
 
   let response: Response;
   try {
     response = await tauriFetch(
       `${baseUrl(port)}/v1/grants/${encodeURIComponent(grantId)}`,
-      { method: "DELETE", headers: { "Content-Type": "application/json" } }
+      { method: "DELETE", headers }
     );
   } catch {
     throw new PersonalServerError(

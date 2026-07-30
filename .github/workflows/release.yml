@@ -129,6 +129,10 @@ jobs:
         working-directory: personal-server
         run: npm ci
 
+      - name: Test personal-server security boundary
+        working-directory: personal-server
+        run: npm run test:security
+
       - name: Build personal-server binary
         working-directory: personal-server
         run: npm run build

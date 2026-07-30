@@ -74,7 +74,7 @@ All P0, P1, and P2 items have been implemented, tested, and verified.
 - The spec's `exporting` state was removed from `GrantFlowState` type — data export happens on the `/connect` route (Screen 1-2), not the `/grant` route (Screen 3-5). The grant page starts at `consent` after receiving pre-fetched data from the connect page.
 - Demo mode (`sessionId.startsWith("grant-session-")`) is gated behind `import.meta.env.DEV`.
 - Builder verification is fatal per protocol spec — if manifest discovery or signature verification fails, the flow errors out. No fallback metadata is used. This means builders must maintain their `appUrl` availability and provide valid EIP-191 signatures.
-- Grant creation uses the library's authenticated `POST /v1/grants` route with `web3Auth` middleware — the client authenticates via the `devToken` bypass (Bearer token). Only the custom `DELETE /v1/grants/:grantId` route is unauthenticated. Both run on localhost only, managed by Tauri — no external access possible.
+- Grant creation uses the library's authenticated `POST /v1/grants` route with `web3Auth` middleware — the client authenticates via the `devToken` bypass (Bearer token). The custom `DELETE /v1/grants/:grantId` and owner-bearing `/status` routes require that same token; tunnel and forwarded headers are not authorization.
 - The `createServer()` bootstrap returns `gatewayClient` and `serverSigner` alongside `app` — we destructure these to add custom routes without modifying the library.
 
 ## Validation

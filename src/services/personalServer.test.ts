@@ -255,6 +255,22 @@ describe("revokeGrant", () => {
     const [url, init] = tauriFetchSpy.mock.calls[0];
     expect(url).toBe("http://localhost:3100/v1/grants/grant-abc");
     expect(init.method).toBe("DELETE");
+    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+  });
+
+  it("includes Authorization header when devToken is provided", async () => {
+    tauriFetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+    } as Response);
+
+    await revokeGrant(3100, "grant-abc", "test-dev-token");
+
+    const [, init] = tauriFetchSpy.mock.calls[0];
+    expect(init.headers).toEqual({
+      "Content-Type": "application/json",
+      Authorization: "Bearer test-dev-token",
+    });
   });
 
   it("succeeds on 200 with JSON body", async () => {

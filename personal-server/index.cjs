@@ -81,6 +81,7 @@ async function main() {
     const { loadConfig } = await import('@opendatalabs/personal-server-ts-core/config');
     const { createServer } = await import('@opendatalabs/personal-server-ts-server');
     const { serve } = await import('@hono/node-server');
+    const { requireDesktopAuth } = await import('./protected-routes.js');
 
     const configPath = configDir ? join(configDir, 'server.json') : undefined;
     const config = await loadConfig({ configPath });
@@ -105,8 +106,8 @@ async function main() {
       ? await fixTunnelProxyName(tunnelManager, storageRoot)
       : tunnelUrl;
 
-    // Custom status endpoint exposing owner
-    app.get('/status', (c) => c.json({
+    // Keep the legacy entrypoint on the same desktop auth boundary as index.js.
+    app.get('/status', requireDesktopAuth(devToken), (c) => c.json({
       status: 'healthy',
       owner: config.server.address || null,
       port,

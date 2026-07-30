@@ -64,7 +64,7 @@ export function useConnectedApps() {
   )
 
   const removeApp = useCallback(
-    async (appId: string, port: number | null) => {
+    async (appId: string, port: number | null, devToken?: string | null) => {
       // Snapshot the app before removing so we can roll back on failure
       const appToRemove = connectedApps.find(app => app.id === appId)
 
@@ -73,7 +73,7 @@ export function useConnectedApps() {
 
       if (port) {
         try {
-          await revokeGrant(port, appId)
+          await revokeGrant(port, appId, devToken)
         } catch (error) {
           console.warn("[useConnectedApps] Failed to revoke grant on server:", error)
           // Roll back: re-add the app so UI reflects the true state

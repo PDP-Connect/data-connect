@@ -242,9 +242,9 @@ export function useSettingsPage() {
 
   const handleRevokeApp = useCallback(
     (appId: string) => {
-      removeApp(appId, personalServer.port)
+      removeApp(appId, personalServer.port, personalServer.devToken)
     },
-    [removeApp, personalServer.port]
+    [removeApp, personalServer.devToken, personalServer.port]
   )
 
   const handleLogout = useCallback(async () => {
