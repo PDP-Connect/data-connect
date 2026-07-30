@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
-import { rm } from "node:fs/promises"
+import { readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
@@ -18,7 +18,10 @@ import {
   PDPP_DATA_ACCESS_TYPE,
 } from "./github-authorization/index.js"
 import { registerGithubAuthorizationRoutes } from "./github-authorization/http-routes.js"
-import { mountPdppResourceServer } from "./resource-server.js"
+import {
+  createSnapshotRefresher,
+  mountPdppResourceServer,
+} from "./resource-server.js"
 
 const tempRoots = []
 
@@ -132,6 +135,10 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
       content: {
         platform: "github",
         version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest,
+          runId: "github-newer-malformed-record",
+        }),
         "pdpp.recordsByStream": {
           repositories: [
             {
@@ -149,6 +156,7 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
     activeManifestPath,
     exportRoot,
     databasePath: join(root, "records.sqlite"),
+    manifest,
     manifestDigest,
   }
 }
@@ -682,6 +690,90 @@ test("serves only the requested connection's verified installed snapshot", async
     (await otherRead.json()).data.map(record => record.id),
     ["other-account"]
   )
+})
+
+test("snapshot refresh caches scans and parses while promptly importing a new generation once", async () => {
+  const fixture = createInstalledGithubFixture()
+  const nestedExportRoot = join(
+    fixture.exportRoot,
+    "GitHub",
+    "github",
+    "runs"
+  )
+  mkdirSync(nestedExportRoot, { recursive: true })
+  let scanCalls = 0
+  let parseCalls = 0
+  const imports = []
+  const refresh = createSnapshotRefresher(
+    {
+      exportRoot: fixture.exportRoot,
+      manifest: fixture.manifest,
+      manifestDigest: fixture.manifestDigest,
+      connectionId: "default",
+      repository: {
+        importSnapshot: snapshot => imports.push(snapshot),
+      },
+      fileOperations: {
+        readdir: (...args) => {
+          scanCalls += 1
+          return readdir(...args)
+        },
+        readFile: (...args) => {
+          parseCalls += 1
+          return readFile(...args)
+        },
+        stat,
+      },
+    }
+  )
+
+  await refresh()
+  const initialScanCalls = scanCalls
+  const initialParseCalls = parseCalls
+  assert.equal(imports.length, 1)
+
+  await refresh()
+  assert.equal(scanCalls, initialScanCalls)
+  assert.equal(parseCalls, initialParseCalls)
+  assert.equal(imports.length, 1)
+
+  writeFileSync(
+    join(nestedExportRoot, "new-authoritative-generation.json"),
+    JSON.stringify({
+      timestamp: 1786060800000,
+      content: {
+        platform: "github",
+        version: "0.5.0",
+        "pdpp.provenance": githubSnapshotProvenance({
+          manifestDigest: fixture.manifestDigest,
+          runId: "github-new-generation",
+        }),
+        "pdpp.recordsByStream": {
+          repositories: [record("new-generation", "2026-07-01T00:00:00Z")],
+        },
+      },
+    })
+  )
+  writeFileSync(
+    join(nestedExportRoot, "newer-malformed-generation.json"),
+    "{ definitely not JSON"
+  )
+
+  await refresh()
+  assert.ok(scanCalls > initialScanCalls)
+  assert.ok(parseCalls > initialParseCalls)
+  assert.equal(imports.length, 2)
+  assert.equal(
+    imports[1].recordsByStream.repositories[0].data.id,
+    "new-generation"
+  )
+  const refreshedParseCalls = parseCalls
+  const refreshedScanCalls = scanCalls
+
+  await refresh()
+  assert.equal(scanCalls, refreshedScanCalls)
+  assert.equal(parseCalls, refreshedParseCalls)
+  assert.equal(imports.length, 2)
 })
 
 test("composes local GitHub authorization with imported PDPP reads and legacy revocation", async () => {

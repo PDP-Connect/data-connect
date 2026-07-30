@@ -124,14 +124,23 @@ function createGrantValidatedIntrospector(tokenIntrospector, connectorIds) {
   }
 }
 
-function createSnapshotRefresher(dependencies) {
+export function createSnapshotRefresher(dependencies) {
   let inFlight = null
+  const snapshotCache = {
+    files: new Map(),
+    directories: new Map(),
+    importedGeneration: null,
+    importedPath: null,
+    rejectedGenerations: new Set(),
+  }
   return async () => {
-    if (inFlight === null) {
-      inFlight = importLatestGithubSnapshot(dependencies).finally(() => {
-        inFlight = null
-      })
-    }
+    if (inFlight !== null) return inFlight
+    inFlight = importLatestGithubSnapshot({
+      ...dependencies,
+      snapshotCache,
+    }).finally(() => {
+      inFlight = null
+    })
     return inFlight
   }
 }
