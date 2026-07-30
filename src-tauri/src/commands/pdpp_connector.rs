@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,6 +22,9 @@ use std::time::{Duration, Instant};
 pub struct PdppConnectorCommand {
     pub program: String,
     pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: HashMap<String, String>,
+    pub clear_env: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +129,7 @@ pub enum PdppDoneStatus {
     Failed,
     Cancelled,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppRecord {
     pub stream: String,
     pub key: Value,
@@ -133,7 +137,7 @@ pub struct PdppRecord {
     pub emitted_at: String,
     pub op: Option<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppState {
     pub stream: String,
     pub cursor: Value,
@@ -149,20 +153,20 @@ pub struct PdppDoneError {
     pub message: String,
     pub retryable: bool,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppProgress {
     pub stream: Option<String>,
     pub message: String,
     pub count: Option<u64>,
     pub total: Option<u64>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppSkipResult {
     pub stream: Option<String>,
     pub reason: Option<String>,
     pub message: Option<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppInteraction {
     pub request_id: String,
     pub kind: String,
@@ -265,8 +269,15 @@ pub fn supervise_pdpp_connector(
         );
     }
     let mut process = Command::new(&command.program);
+    if command.clear_env {
+        process.env_clear();
+    }
+    if let Some(cwd) = &command.cwd {
+        process.current_dir(cwd);
+    }
     process
         .args(&command.args)
+        .envs(&command.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -831,6 +842,9 @@ mod tests {
                 ),
                 mode.into(),
             ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
         }
     }
     fn options() -> PdppRunOptions {
@@ -1042,6 +1056,9 @@ mod tests {
                 "grandchild-sleep".into(),
                 marker_path.clone(),
             ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
         };
         let result = supervise_pdpp_connector(
             &command,

@@ -799,6 +799,13 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
         root_path: install_root.to_string_lossy().to_string(),
         metadata_relative_path: metadata_relative.to_string_lossy().to_string(),
         script_relative_path: script_relative.to_string_lossy().to_string(),
+        artifact_kind: None,
+        manifest_path: None,
+        entrypoint_path: None,
+        entrypoint_sha256: None,
+        manifest_sha256: None,
+        provenance_path: None,
+        provenance_sha256: None,
     })?;
 
     log::info!(
