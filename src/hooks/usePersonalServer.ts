@@ -24,6 +24,8 @@ const isTauriRuntime = () =>
 const MAX_RESTART_ATTEMPTS = 3;
 let _restartCount = 0;
 let _restartTimer: ReturnType<typeof setTimeout> | null = null;
+let _credentialStartTimer: ReturnType<typeof setTimeout> | null = null;
+let _downgradePending = false;
 let _lastStartedCredentialKey: string | null = null;
 let _lastMasterKeySignature: string | null = null;
 const FALLBACK_START_ERROR = 'Failed to start Personal Server';
@@ -32,6 +34,13 @@ function cancelScheduledRestart() {
   if (_restartTimer !== null) {
     clearTimeout(_restartTimer);
     _restartTimer = null;
+  }
+}
+
+function cancelScheduledCredentialStart() {
+  if (_credentialStartTimer !== null) {
+    clearTimeout(_credentialStartTimer);
+    _credentialStartTimer = null;
   }
 }
 
@@ -158,8 +167,9 @@ export function usePersonalServer() {
   startServerRef.current = startServer;
 
   const stopServer = useCallback(async () => {
-    if (!isTauriRuntime()) return;
+    if (!isTauriRuntime()) return false;
     cancelScheduledRestart();
+    cancelScheduledCredentialStart();
     running.current = false;
     try {
       await invoke('stop_personal_server');
@@ -174,15 +184,17 @@ export function usePersonalServer() {
       setTunnelFailed(false);
       setDevToken(null);
       _notifyAll();
+      return true;
     } catch (err) {
       console.error('[PersonalServer] Failed to stop:', err);
+      return false;
     }
   }, []);
 
   const restartServer = useCallback(async (wallet?: string | null) => {
     console.log('[PersonalServer] Restarting with wallet:', wallet ?? 'none');
     _restartCount = 0;
-    await stopServer();
+    if (!(await stopServer())) return;
     // Brief wait for port release (stop_personal_server already waits up to 3s,
     // but add a small buffer for OS-level cleanup)
     await new Promise((r) => setTimeout(r, 500));
@@ -307,9 +319,33 @@ export function usePersonalServer() {
   // registration and tunneling without a master key, while retaining HTTP
   // authentication and PDPP consent at the route level.
   useEffect(() => {
-    if (credentialKey || _sharedStatus !== 'stopped') return;
+    if (credentialKey || _downgradePending || _sharedStatus !== 'stopped') return;
     void startServerRef.current(null);
   }, [credentialKey]);
+
+  // Signing out must give up the remote identity and tunnel, not merely hide
+  // them in UI state. Clear the credential snapshots before restarting so a
+  // stale upgrade timer cannot launch a signed server after auth is gone.
+  useEffect(() => {
+    if (credentialKey || !_lastStartedCredentialKey) return;
+
+    _downgradePending = true;
+    cancelScheduledCredentialStart();
+    _lastStartedCredentialKey = null;
+    _lastMasterKeySignature = null;
+    _restartCount = 0;
+    void stopServer().then((didStop) => {
+      if (!didStop) {
+        _downgradePending = false;
+        return;
+      }
+      _credentialStartTimer = setTimeout(() => {
+        _credentialStartTimer = null;
+        _downgradePending = false;
+        void startServerRef.current(null);
+      }, 500);
+    });
+  }, [credentialKey, stopServer]);
 
   // When credentials arrive later, restart so the Personal Server can derive
   // its stable identity, register, and opt into the remote tunnel. The tunnel
@@ -330,8 +366,13 @@ export function usePersonalServer() {
     _lastMasterKeySignature = masterKeySignature;
     console.log('[PersonalServer] Credentials available, starting server...');
     _restartCount = 0;
-    void stopServer().then(() => {
-      setTimeout(() => startServerRef.current(walletAddress), 500);
+    void stopServer().then((didStop) => {
+      if (!didStop || _lastStartedCredentialKey !== credentialKey) return;
+      cancelScheduledCredentialStart();
+      _credentialStartTimer = setTimeout(() => {
+        _credentialStartTimer = null;
+        void startServerRef.current(walletAddress);
+      }, 500);
     });
   }, [credentialKey, walletAddress, masterKeySignature, stopServer]);
 

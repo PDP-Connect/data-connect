@@ -137,6 +137,80 @@ describe("usePersonalServer", () => {
     )
   })
 
+  it("downgrades a credentialed server to local-only mode on sign-out", async () => {
+    const usePersonalServer = await importHook()
+
+    authState = { walletAddress: "0xabc", masterKeySignature: "sig123" }
+    const { result, rerender } = renderHook(() => usePersonalServer())
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+    act(() => {
+      emit("personal-server-ready", { port: 9090 })
+      emit("personal-server-tunnel", { url: "https://owner.server.vana.org" })
+      emit("personal-server-tunnel-failed", { message: "temporary failure" })
+      emit("personal-server-dev-token", { token: "credentialed-dev-token" })
+    })
+    expect(result.current.tunnelUrl).toBe("https://owner.server.vana.org")
+    expect(result.current.tunnelFailed).toBe(true)
+    expect(result.current.devToken).toBe("credentialed-dev-token")
+
+    mockInvoke.mockClear()
+    authState = { walletAddress: null, masterKeySignature: null }
+    rerender()
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("stop_personal_server")
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_personal_server",
+      expect.objectContaining({
+        ownerAddress: null,
+        masterKeySignature: null,
+      })
+    )
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "start_personal_server",
+      expect.objectContaining({ masterKeySignature: "sig123" })
+    )
+    expect(result.current.tunnelUrl).toBeNull()
+    expect(result.current.tunnelFailed).toBe(false)
+    expect(result.current.devToken).toBeNull()
+  })
+
+  it("coordinates a single local downgrade across hook instances", async () => {
+    const usePersonalServer = await importHook()
+
+    authState = { walletAddress: "0xabc", masterKeySignature: "sig123" }
+    const first = renderHook(() => usePersonalServer())
+    const second = renderHook(() => usePersonalServer())
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    mockInvoke.mockClear()
+    authState = { walletAddress: null, masterKeySignature: null }
+    first.rerender()
+    second.rerender()
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "stop_personal_server")
+    ).toHaveLength(1)
+    expect(
+      mockInvoke.mock.calls.filter(
+        ([command, options]) =>
+          command === "start_personal_server" &&
+          (options as { masterKeySignature?: string | null }).masterKeySignature === null
+      )
+    ).toHaveLength(1)
+  })
+
   it("keeps local serving running when its optional tunnel fails", async () => {
     const usePersonalServer = await importHook()
 
