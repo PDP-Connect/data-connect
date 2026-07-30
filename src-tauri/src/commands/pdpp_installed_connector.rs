@@ -29,8 +29,17 @@ const MINIMUM_NODE_MAJOR: u64 = 22;
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_DATA_CONNECT_UAT_STREAMS: [&str; 3] = ["user", "repositories", "starred"];
 
-static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, PdppRunControl>>> =
+static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A run remains registered until its child-supervision task has returned.
+/// Keeping connector identity alongside the cancellation control makes the
+/// one-live-run-per-installed-connector policy atomic with registration.
+#[derive(Clone)]
+struct ActivePdppRun {
+    connector_id: String,
+    control: PdppRunControl,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,7 +167,7 @@ pub async fn start_installed_pdpp_connector_run(
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
     validate_request(&request)?;
     let run_id = request.run_id.clone();
-    let control = register_run(&run_id)?;
+    let control = register_run(&run_id, &request.connector_id)?;
     emit_running_status(&app, &run_id, "Starting PDPP connector...");
     let app_for_task = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -265,15 +274,28 @@ fn run_resolved_installed_pdpp_connector_for_test(
     )
 }
 
-fn register_run(run_id: &str) -> Result<PdppRunControl, String> {
+fn register_run(run_id: &str, connector_id: &str) -> Result<PdppRunControl, String> {
     let mut runs = ACTIVE_PDPP_RUNS
         .lock()
         .map_err(|_| "PDPP run registry is unavailable")?;
     if runs.contains_key(run_id) {
         return Err(format!("PDPP runId {run_id} is already active"));
     }
+    if let Some(active_run_id) = runs.iter().find_map(|(active_run_id, run)| {
+        (run.connector_id == connector_id).then_some(active_run_id)
+    }) {
+        return Err(format!(
+            "PDPP connector {connector_id} is already active as runId {active_run_id}"
+        ));
+    }
     let control = PdppRunControl::default();
-    runs.insert(run_id.to_owned(), control.clone());
+    runs.insert(
+        run_id.to_owned(),
+        ActivePdppRun {
+            connector_id: connector_id.to_owned(),
+            control: control.clone(),
+        },
+    );
     Ok(control)
 }
 
@@ -288,7 +310,7 @@ fn cancel_run(run_id: &str) -> Result<(), String> {
         .lock()
         .map_err(|_| "PDPP run registry is unavailable")?
         .get(run_id)
-        .cloned()
+        .map(|run| run.control.clone())
         .ok_or_else(|| format!("PDPP runId {run_id} is not active"))?;
     control.cancel();
     Ok(())
@@ -303,7 +325,11 @@ pub fn stop_installed_pdpp_connector_run(run_id: String) -> Result<(), String> {
 pub fn cleanup_installed_pdpp_connector_runs() {
     let controls = ACTIVE_PDPP_RUNS
         .lock()
-        .map(|runs| runs.values().cloned().collect::<Vec<_>>())
+        .map(|runs| {
+            runs.values()
+                .map(|run| run.control.clone())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     for control in controls {
         control.cancel();
@@ -980,24 +1006,16 @@ fn emit_terminal_status(
             })
             .unwrap_or(0)
     });
-    let status_type = if successful { "COMPLETE" } else { "ERROR" };
-    let message = if successful {
-        "Collection completed successfully"
-    } else {
-        response
-            .failure
-            .as_deref()
-            .unwrap_or("PDPP connector failed")
-    };
+    let terminal = terminal_status(response);
     let _ = app.emit(
         "connector-status",
         json!({
             "runId": response.run_id,
             "status": {
-                "type": status_type,
-                "message": message,
-                "outcome": if successful { "success" } else { "failure" },
-                "errorClass": if successful { Value::Null } else { json!("runtime_error") },
+                "type": terminal.status_type,
+                "message": terminal.message,
+                "outcome": terminal.outcome,
+                "errorClass": terminal.error_class,
                 "recordCount": response.record_count,
                 "scopeSummary": {
                     "requested": requested,
@@ -1010,6 +1028,51 @@ fn emit_terminal_status(
             "timestamp": chrono_timestamp(),
         }),
     );
+}
+
+/// Translate kernel outcomes into the pre-existing connector UI vocabulary.
+/// Cancellation is an intentional stop, rather than an error. Timeout is a
+/// failure with a distinct outcome so callers can decide whether to retry.
+struct TerminalStatus<'a> {
+    status_type: &'static str,
+    outcome: &'static str,
+    error_class: Option<&'static str>,
+    message: &'a str,
+}
+
+fn terminal_status(response: &InstalledPdppConnectorRunResponse) -> TerminalStatus<'_> {
+    match response.status.as_str() {
+        "succeeded" => TerminalStatus {
+            status_type: "COMPLETE",
+            outcome: "success",
+            error_class: None,
+            message: "Collection completed successfully",
+        },
+        "cancelled" => TerminalStatus {
+            status_type: "STOPPED",
+            outcome: "cancelled",
+            error_class: None,
+            message: "Collection cancelled",
+        },
+        "timed_out" => TerminalStatus {
+            status_type: "ERROR",
+            outcome: "timed_out",
+            error_class: Some("timeout"),
+            message: response
+                .failure
+                .as_deref()
+                .unwrap_or("PDPP connector exceeded its runtime timeout"),
+        },
+        _ => TerminalStatus {
+            status_type: "ERROR",
+            outcome: "failure",
+            error_class: Some("runtime_error"),
+            message: response
+                .failure
+                .as_deref()
+                .unwrap_or("PDPP connector failed"),
+        },
+    }
 }
 
 fn emit_failed_terminal_status(app: &AppHandle, run_id: &str, error: &str) {
@@ -1208,6 +1271,11 @@ fn redact_secret(value: &str, secret: Option<&str>) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // The production registry is process-global. Serialize the small set of
+    // tests that intentionally exercise its lifecycle so cleanup cannot race
+    // an unrelated registry assertion under Rust's parallel test runner.
+    static RUN_REGISTRY_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn install_fixture(manifest: Value, script: &str) -> (TempDir, ActiveConnectorInstall) {
         let temp = tempfile::tempdir().unwrap();
@@ -1766,9 +1834,16 @@ setInterval(() => {}, 1000);
 
     #[test]
     fn active_run_registry_rejects_duplicates_and_stops_a_running_connector() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let run_id = "registered-cancellation";
-        let control = register_run(run_id).unwrap();
-        assert!(register_run(run_id).unwrap_err().contains("already active"));
+        let connector_id = "github-pdpp-registry-cancellation";
+        let control = register_run(run_id, connector_id).unwrap();
+        assert!(register_run(run_id, connector_id)
+            .unwrap_err()
+            .contains("already active"));
+        assert!(register_run("another-run-id", connector_id)
+            .unwrap_err()
+            .contains("connector"));
 
         let hanging = r#"
 const readline = require('node:readline');
@@ -1809,8 +1884,9 @@ setInterval(() => {}, 1000);
 
     #[test]
     fn app_cleanup_cancels_registered_runs_and_waits_for_unregistration() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let run_id = "cleanup-cancellation";
-        let control = register_run(run_id).unwrap();
+        let control = register_run(run_id, "github-pdpp-cleanup").unwrap();
         let worker = thread::spawn(move || {
             while !control.is_cancelled() {
                 thread::sleep(Duration::from_millis(1));
@@ -1821,6 +1897,62 @@ setInterval(() => {}, 1000);
         cleanup_installed_pdpp_connector_runs();
         worker.join().unwrap();
         assert!(ACTIVE_PDPP_RUNS.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn registry_blocks_rapid_restart_until_the_cancelled_child_unregisters() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let connector_id = "github-pdpp-rapid-restart";
+        let first_run_id = "rapid-restart-first";
+        let control = register_run(first_run_id, connector_id).unwrap();
+        control.cancel();
+
+        let error = register_run("rapid-restart-second", connector_id).unwrap_err();
+        assert!(error.contains("already active"));
+        assert!(error.contains(first_run_id));
+
+        unregister_run(first_run_id);
+        let _second = register_run("rapid-restart-second", connector_id).unwrap();
+        unregister_run("rapid-restart-second");
+    }
+
+    fn response_with_status(status: &str) -> InstalledPdppConnectorRunResponse {
+        InstalledPdppConnectorRunResponse {
+            run_id: "run-1".into(),
+            connector_id: "github-pdpp".into(),
+            status: status.into(),
+            record_count: 0,
+            checkpoints: HashMap::new(),
+            event_summary: PdppEventSummary::default(),
+            progress: Vec::new(),
+            records_truncated: false,
+            events_truncated: false,
+            failure: Some("specific failure".into()),
+            stderr_bytes: 0,
+            stderr_truncated: false,
+            exit_code: None,
+        }
+    }
+
+    #[test]
+    fn cancelled_terminal_status_is_stopped_not_an_error() {
+        let cancelled = response_with_status("cancelled");
+        let terminal = terminal_status(&cancelled);
+        assert_eq!(terminal.status_type, "STOPPED");
+        assert_eq!(terminal.outcome, "cancelled");
+        assert_eq!(terminal.error_class, None);
+
+        let timed_out_response = response_with_status("timed_out");
+        let timed_out = terminal_status(&timed_out_response);
+        assert_eq!(timed_out.status_type, "ERROR");
+        assert_eq!(timed_out.outcome, "timed_out");
+        assert_eq!(timed_out.error_class, Some("timeout"));
+
+        let failed_response = response_with_status("failed");
+        let failed = terminal_status(&failed_response);
+        assert_eq!(failed.status_type, "ERROR");
+        assert_eq!(failed.outcome, "failure");
+        assert_eq!(failed.error_class, Some("runtime_error"));
     }
 
     #[test]
