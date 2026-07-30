@@ -120,13 +120,46 @@ describe("useConnector.startImport", () => {
         runId: "github-pdpp-1700000000000",
         connectorId: "github-pdpp",
         collectionMode: "incremental",
-        streams: ["user", "repositories"],
+        streams: [],
         githubToken: null,
       },
     })
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "start_connector_run",
       expect.anything()
+    )
+  })
+
+  it("passes a GitHub PAT only to the installed GitHub PDPP connector invoke", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          runtime: "pdpp-network",
+        },
+        { githubToken: "ghp_transient" }
+      )
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("start_installed_pdpp_connector_run", {
+      request: {
+        runId: "github-pdpp-1700000000000",
+        connectorId: "github-pdpp",
+        collectionMode: "incremental",
+        streams: [],
+        githubToken: "ghp_transient",
+      },
+    })
+    expect(startRun).toHaveBeenCalledWith(
+      expect.not.objectContaining({ githubToken: "ghp_transient" })
     )
   })
 

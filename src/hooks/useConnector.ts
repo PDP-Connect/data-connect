@@ -13,11 +13,10 @@ import { durationSince } from '@/lib/telemetry/client';
 
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = 'DUPLICATE_ACTIVE_RUN';
 const PDPP_NETWORK_RUNTIME = 'pdpp-network';
-const GITHUB_PDPP_STREAM_BY_SCOPE: Record<string, string> = {
-  'github.profile': 'user',
-  'github.repositories': 'repositories',
-  'github.starred': 'starred',
-};
+
+interface StartImportOptions {
+  githubToken?: string | null;
+}
 
 function isDuplicateStartError(error: unknown): boolean {
   const message =
@@ -29,24 +28,19 @@ function isDuplicateStartError(error: unknown): boolean {
   return message.includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE);
 }
 
-function getPdppStreams(platform: Platform): string[] {
-  if (platform.id !== 'github-pdpp') return [];
-  return (platform.scopes ?? [])
-    .map(scope => GITHUB_PDPP_STREAM_BY_SCOPE[scope])
-    .filter((stream): stream is string => Boolean(stream));
-}
-
 async function startInstalledPdppConnectorRun(
   runId: string,
-  platform: Platform
+  platform: Platform,
+  options: StartImportOptions = {}
 ): Promise<void> {
   await invoke('start_installed_pdpp_connector_run', {
     request: {
       runId,
       connectorId: platform.id,
       collectionMode: 'incremental',
-      streams: getPdppStreams(platform),
-      githubToken: null,
+      streams: [],
+      githubToken:
+        platform.id === 'github-pdpp' ? options.githubToken ?? null : null,
     },
   });
 }
@@ -56,7 +50,7 @@ export function useConnector() {
   const runs = useSelector((state: RootState) => state.app.runs);
 
   const startImport = useCallback(
-    async (platform: Platform) => {
+    async (platform: Platform, options: StartImportOptions = {}) => {
       const runId = `${platform.id}-${Date.now()}`;
       const source = getPlatformRegistryEntry(platform)?.id ?? platform.id;
 
@@ -86,7 +80,7 @@ export function useConnector() {
       // subprocess finishes, so waiting here would leave /connect without a
       // run id (and therefore without live busy/progress UI).
       if (platform.runtime === PDPP_NETWORK_RUNTIME) {
-        void startInstalledPdppConnectorRun(runId, platform).catch((error) => {
+        void startInstalledPdppConnectorRun(runId, platform, options).catch((error) => {
           if (isDuplicateStartError(error)) {
             dispatch(deleteRun(runId));
             return;

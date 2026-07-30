@@ -192,6 +192,93 @@ describe("Home", () => {
     expect(screen.queryByText("Settings Route")).toBeNull()
   })
 
+  it("prompts for a GitHub PAT before starting the GitHub PDPP import", async () => {
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          description: "GitHub PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: false,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+
+    expect(mockStartImport).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("heading", { name: /connect github/i })
+    ).toBeTruthy()
+    const tokenInput = screen.getByLabelText(/personal access token/i)
+    expect(tokenInput.getAttribute("type")).toBe("password")
+
+    fireEvent.change(tokenInput, { target: { value: "ghp_transient" } })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" }),
+        { githubToken: "ghp_transient" }
+      )
+    })
+    expect(screen.queryByLabelText(/personal access token/i)).toBeNull()
+  })
+
+  it("cancels the GitHub PAT prompt without starting import", () => {
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          description: "GitHub PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: false,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+    fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      target: { value: "ghp_transient" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }))
+
+    expect(mockStartImport).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText(/personal access token/i)).toBeNull()
+  })
+
   it("moves a source from available to connected after successful import", async () => {
     const platform = {
       id: "chatgpt",
@@ -416,8 +503,15 @@ describe("Home", () => {
       fireEvent.click(
         screen.getByRole("button", { name: /fetch latest data for github/i })
       )
+      expect(mockStartImport).not.toHaveBeenCalled()
+
+      fireEvent.change(screen.getByLabelText(/personal access token/i), {
+        target: { value: "ghp_sync_transient" },
+      })
+      fireEvent.click(screen.getByRole("button", { name: /start import/i }))
       expect(mockStartImport).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" })
+        expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" }),
+        { githubToken: "ghp_sync_transient" }
       )
     }
   )
