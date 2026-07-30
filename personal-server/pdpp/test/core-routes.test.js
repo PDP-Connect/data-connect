@@ -127,6 +127,34 @@ test('Core stream list exposes only GitHub streams authorized by the introspecte
   assert.equal(response.headers.get('Request-Id'), 'req_test_123');
 });
 
+test('Core stream list carries installed manifest schema metadata for empty streams', async () => {
+  const response = await request(makeApp({
+    repository: {
+      ...makeRepository(),
+      listStreams: async () => [
+        { object: 'stream', name: 'starred', record_count: 0, last_updated: null },
+      ],
+    },
+  }), '/v1/streams');
+
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data, [
+    {
+      object: 'stream',
+      name: 'starred',
+      record_count: 0,
+      last_updated: null,
+      fields: [
+        { name: 'id', type: 'string' },
+        { name: 'name', type: 'string' },
+        { name: 'starred_at', type: 'string' },
+      ],
+      primary_key: ['id'],
+      timestamp_fields: ['starred_at'],
+    },
+  ]);
+});
+
 test('Core record list clamps limit and preserves cursor, order, grant resources, and time range for the repository port', async () => {
   let received;
   const app = makeApp({

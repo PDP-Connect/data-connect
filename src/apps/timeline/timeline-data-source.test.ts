@@ -141,6 +141,156 @@ describe("production Timeline PDPP data source", () => {
     expect(calls.map(([url]) => url).join("\n")).not.toContain("pdpp-bearer")
   })
 
+  it("uses stream-list metadata when the first page is projected", async () => {
+    const dataSource = createProductionTimelineDataSource({
+      port: 3100,
+      devToken: "desktop-secret",
+    })
+    tauriFetch.mockImplementation((url, init) => {
+      const path = String(url).replace("http://127.0.0.1:3100", "")
+      if (path === "/v1/pdpp/local-timeline/consent-requests") {
+        return Promise.resolve(localConsent(init, "request-metadata"))
+      }
+      if (
+        path ===
+        "/v1/pdpp/local-timeline/consent-requests/request-metadata/approve"
+      ) {
+        return Promise.resolve(
+          response({ access_token: "pdpp-metadata", token_type: "Bearer" }, 201)
+        )
+      }
+      if (path === "/v1/streams") {
+        return Promise.resolve(
+          response({
+            data: [
+              {
+                name: "repositories",
+                record_count: 1,
+                fields: [
+                  { name: "id", type: "string" },
+                  {
+                    name: "source_created_at",
+                    type: "string",
+                    format: "date-time",
+                  },
+                  {
+                    name: "source_updated_at",
+                    type: "string",
+                    format: "date-time",
+                  },
+                  { name: "name", type: "string" },
+                ],
+                primary_key: ["id"],
+                timestamp_fields: ["source_created_at", "source_updated_at"],
+              },
+            ],
+          })
+        )
+      }
+      if (path.startsWith("/v1/streams/repositories/records?")) {
+        return Promise.resolve(
+          response({
+            data: [{ id: "repo-1", data: { id: "repo-1", name: "projected" } }],
+            has_more: false,
+          })
+        )
+      }
+      throw new Error(`unexpected URL ${path}`)
+    })
+
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
+    const result = await dataSource.read({
+      maxStreams: 24,
+      maxRecords: 100,
+      signal: new AbortController().signal,
+    })
+    expect(result).toMatchObject({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            stream: {
+              id: "repositories",
+              primaryKey: ["id"],
+              timestampFields: ["source_created_at", "source_updated_at"],
+              fields: expect.arrayContaining([
+                {
+                  name: "source_created_at",
+                  type: "string",
+                  format: "date-time",
+                },
+              ]),
+            },
+            records: [{ id: "repo-1" }],
+          },
+        ],
+      },
+    })
+  })
+
+  it("keeps empty stream metadata without record-derived fields", async () => {
+    const dataSource = createProductionTimelineDataSource({
+      port: 3100,
+      devToken: "desktop-secret",
+    })
+    tauriFetch
+      .mockImplementationOnce((_url, init) =>
+        localConsent(init, "request-empty-metadata")
+      )
+      .mockResolvedValueOnce(
+        response({ access_token: "pdpp-empty", token_type: "Bearer" }, 201)
+      )
+      .mockResolvedValueOnce(
+        response({
+          data: [
+            {
+              name: "empty_stream",
+              record_count: 0,
+              fields: [
+                { name: "id", type: "string" },
+                { name: "created_at", type: "string", format: "date-time" },
+              ],
+              primary_key: ["id"],
+              timestamp_fields: ["created_at"],
+            },
+          ],
+        })
+      )
+
+    const consent = await dataSource.requestConsent?.()
+    await dataSource.approveConsent?.(consent!)
+    const result = await dataSource.read({
+      maxStreams: 24,
+      maxRecords: 0,
+      signal: new AbortController().signal,
+    })
+
+    expect(result).toMatchObject({
+      kind: "ready",
+      read: {
+        streams: [
+          {
+            stream: {
+              id: "empty_stream",
+              primaryKey: ["id"],
+              timestampFields: ["created_at"],
+              fields: expect.arrayContaining([
+                { name: "created_at", type: "string", format: "date-time" },
+              ]),
+            },
+            records: [],
+          },
+        ],
+      },
+    })
+    expect(tauriFetch.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:3100/v1/pdpp/local-timeline/consent-requests",
+      "http://127.0.0.1:3100/v1/pdpp/local-timeline/consent-requests/request-empty-metadata/approve",
+      "http://127.0.0.1:3100/v1/streams",
+    ])
+  })
+
   it("follows opaque cursors without exceeding the global record bound", async () => {
     const dataSource = createProductionTimelineDataSource({
       port: 3100,

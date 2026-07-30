@@ -67,7 +67,13 @@ export interface TimelineDataSource {
 }
 
 type PdppStreamList = {
-  data: Array<{ name: string; record_count?: number }>
+  data: Array<{
+    name: string
+    record_count?: number
+    fields?: readonly TimelineField[]
+    primary_key?: readonly string[]
+    timestamp_fields?: readonly string[]
+  }>
 }
 
 type PdppRecordList = {
@@ -269,17 +275,14 @@ async function readAllTimelinePages({
   }
 
   return pending.map(entry => {
-    const fieldNames = new Set<string>()
-    for (const record of entry.records) {
-      Object.keys(record.data).forEach(field => fieldNames.add(field))
-    }
+    const fields = normalizeTimelineFields(entry.stream.fields, entry.records)
     return {
       stream: {
         id: entry.stream.name,
         label: humanizeStreamName(entry.stream.name),
-        fields: Array.from(fieldNames, name => ({ name })),
-        primaryKey: [],
-        timestampFields: [],
+        fields,
+        primaryKey: entry.stream.primary_key ?? [],
+        timestampFields: entry.stream.timestamp_fields ?? [],
         recordCount: entry.stream.record_count,
       },
       records: entry.records,
@@ -287,6 +290,18 @@ async function readAllTimelinePages({
       cursor: entry.cursor,
     }
   })
+}
+
+function normalizeTimelineFields(
+  manifestFields: readonly TimelineField[] | undefined,
+  records: readonly TimelineRecord[]
+) {
+  if (manifestFields?.length) return manifestFields
+  const fieldNames = new Set<string>()
+  for (const record of records) {
+    Object.keys(record.data).forEach(field => fieldNames.add(field))
+  }
+  return Array.from(fieldNames, name => ({ name }))
 }
 
 async function readNextTimelinePages({

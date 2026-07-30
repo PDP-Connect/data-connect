@@ -428,6 +428,16 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
       name: "repositories",
       record_count: 1,
       last_updated: "2026-02-01T00:00:00Z",
+      fields: [
+        { name: "id", type: "string" },
+        { name: "full_name", type: "string" },
+        { name: "name", type: "string" },
+        { name: "private", type: "boolean" },
+        { name: "created_at", type: "string", format: "date-time" },
+        { name: "pushed_at", type: "string", format: "date-time" },
+      ],
+      primary_key: ["id"],
+      timestamp_fields: ["created_at", "pushed_at"],
     },
   ])
 

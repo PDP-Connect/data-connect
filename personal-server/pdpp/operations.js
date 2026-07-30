@@ -21,9 +21,27 @@ export class CoreOperationError extends Error {
 
 export function executeStreamsList({ subjectId, grant, manifest }, repository) {
   const allowed = new Set((grant.streams ?? []).map((stream) => stream.name));
-  const declared = new Set(manifest.streams.map((stream) => stream.name));
+  const declared = new Map(manifest.streams.map((stream) => [stream.name, stream]));
   return Promise.resolve(repository.listStreams({ subjectId, grant, manifest }))
-    .then((streams) => streams.filter((stream) => allowed.has(stream.name) && declared.has(stream.name)));
+    .then((streams) => streams
+      .filter((stream) => allowed.has(stream.name) && declared.has(stream.name))
+      .map((stream) => ({ ...stream, ...manifestStreamMetadata(declared.get(stream.name)) })));
+}
+
+function manifestStreamMetadata(stream) {
+  const properties = stream.schema?.properties ?? {};
+  const fields = Object.entries(properties).map(([name, schema]) => ({
+    name,
+    ...(schema?.type === undefined ? {} : { type: schema.type }),
+    ...(schema?.format === undefined ? {} : { format: schema.format }),
+  }));
+  return {
+    fields,
+    primary_key: Array.isArray(stream.primary_key) ? stream.primary_key : [],
+    timestamp_fields: [
+      ...new Set([stream.consent_time_field, stream.cursor_field].filter((field) => typeof field === 'string')),
+    ],
+  };
 }
 
 export async function executeRecordsList(input, repository) {
