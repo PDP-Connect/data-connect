@@ -743,9 +743,9 @@ fn value_contains_secret(value: &Value, secret: &str) -> bool {
         Value::Array(values) => values
             .iter()
             .any(|value| value_contains_secret(value, secret)),
-        Value::Object(values) => values
-            .values()
-            .any(|value| value_contains_secret(value, secret)),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            key.contains(secret) || value_contains_secret(value, secret)
+        }),
         _ => false,
     }
 }
@@ -1735,6 +1735,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             &json!({ "nested": [{ "credential": secret }] }),
             secret
         ));
+        let mut secret_key = serde_json::Map::new();
+        secret_key.insert(secret.into(), json!("ordinary metadata"));
+        assert!(value_contains_secret(&Value::Object(secret_key), secret));
         assert!(!value_contains_secret(
             &json!({ "safe": "public repository metadata" }),
             secret

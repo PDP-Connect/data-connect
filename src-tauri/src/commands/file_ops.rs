@@ -139,6 +139,49 @@ fn scan_latest_json_in_tree(dir: &Path, latest: &mut Option<(PathBuf, i64)>) -> 
     Ok(())
 }
 
+/// Scan a recorded export directory without following links outside the
+/// DataConnect export root. Unlike the source-level discovery helper above,
+/// this is used for a path supplied by the frontend and therefore must retain
+/// the confinement established by its caller for every descendant.
+fn scan_latest_json_in_confined_tree(
+    dir: &Path,
+    exported_root: &Path,
+    latest: &mut Option<(PathBuf, i64)>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            return Err("Refusing to follow a symlink in DataConnect export storage".into());
+        }
+
+        let canonical = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(exported_root) {
+            return Err("Refusing to read an export outside DataConnect storage".into());
+        }
+        if file_type.is_dir() {
+            scan_latest_json_in_confined_tree(&canonical, exported_root, latest)?;
+            continue;
+        }
+        if !file_type.is_file()
+            || !canonical.extension().map_or(false, |extension| extension == "json")
+        {
+            continue;
+        }
+
+        let timestamp = json_timestamp(&canonical);
+        if latest
+            .as_ref()
+            .map_or(true, |(_, current_timestamp)| timestamp > *current_timestamp)
+        {
+            *latest = Some((canonical, timestamp));
+        }
+    }
+
+    Ok(())
+}
+
 fn find_latest_source_json(
     app: &AppHandle,
     company: &str,
@@ -636,7 +679,7 @@ fn resolve_export_json_path(app: &AppHandle, export_path: &str) -> Result<PathBu
         return Err("Export path is not a JSON file".into());
     }
     let mut latest = None;
-    scan_latest_json_in_tree(&requested, &mut latest)?;
+    scan_latest_json_in_confined_tree(&requested, &exported_root, &mut latest)?;
     latest
         .map(|(path, _)| path)
         .ok_or_else(|| "No JSON export exists at this path".into())
@@ -969,6 +1012,7 @@ mod tests {
     use super::build_source_export_preview;
     use super::read_export_content;
     use super::sanitize_path_component;
+    use super::scan_latest_json_in_confined_tree;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -1054,5 +1098,29 @@ mod tests {
             "linkedinprofiledata"
         );
         assert_eq!(sanitize_path_component(".."), "unknown");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_export_scan_rejects_a_nested_symlink_to_outside_storage() {
+        let export_root = tempfile::tempdir().expect("export root");
+        let run_dir = export_root.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run directory");
+
+        let external = tempfile::tempdir().expect("external directory");
+        fs::write(external.path().join("secret.json"), "{\"outside\":true}")
+            .expect("external JSON");
+        std::os::unix::fs::symlink(external.path(), run_dir.join("outside"))
+            .expect("nested symlink");
+
+        let root = fs::canonicalize(export_root.path()).expect("canonical export root");
+        let mut latest = None;
+        let result = scan_latest_json_in_confined_tree(&run_dir, &root, &mut latest);
+
+        assert!(result.is_err(), "must not follow an external symlink");
+        assert!(
+            result.unwrap_err().contains("symlink"),
+            "error should explain why the exact export was rejected"
+        );
     }
 }
