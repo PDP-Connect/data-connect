@@ -9,6 +9,11 @@ export type GrantParams = {
 
 export type GrantStatusParam = "success"
 
+export type ClaimedAuthorization = {
+  sessionId: string
+  scopes: string[]
+}
+
 function isValidScopes(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === "string")
 }
@@ -43,6 +48,35 @@ export function parseScopesParam(
   }
 
   return undefined
+}
+
+function hasSameScopeTerms(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false
+
+  const sortedLeft = [...left].sort()
+  const sortedRight = [...right].sort()
+  return sortedLeft.every((scope, index) => scope === sortedRight[index])
+}
+
+/**
+ * URL parameters are only an untrusted request until Session Relay returns the
+ * claimed authorization. Keep this check at both the collection and consent
+ * boundaries so navigation state cannot substitute another session's terms.
+ */
+export function getClaimedAuthorizationMismatch(
+  canonicalSessionId: string,
+  requestedScopes: string[] | undefined,
+  claimed: ClaimedAuthorization
+): string | null {
+  if (claimed.sessionId !== canonicalSessionId) {
+    return "The claimed session does not match this authorization URL. Please restart the flow from the app."
+  }
+
+  if (requestedScopes && !hasSameScopeTerms(requestedScopes, claimed.scopes)) {
+    return "The requested scopes do not match the session authorization. Please restart the flow from the app."
+  }
+
+  return null
 }
 
 export function getGrantParamsFromSearchParams(

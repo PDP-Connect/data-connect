@@ -87,6 +87,7 @@ const REAL_SESSION_SEARCH =
   "?sessionId=sess-123&secret=my-secret&scopes=%5B%22chatgpt.conversations%22%5D"
 
 const CLAIMED_SESSION = {
+  sessionId: "sess-123",
   granteeAddress: "0xBuilderAddress",
   scopes: ["chatgpt.conversations"],
   expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -328,7 +329,7 @@ describe("Connect", () => {
       expect(mockClaimSession).not.toHaveBeenCalled()
     })
 
-    it("pre-fetch failure is non-fatal — does not crash UI", async () => {
+    it("blocks collection when relay authorization cannot be confirmed", async () => {
       mockClaimSession.mockRejectedValue(new Error("Network error"))
       mockUsePlatforms.mockReturnValue(defaultPlatforms())
 
@@ -338,8 +339,27 @@ describe("Connect", () => {
         expect(mockClaimSession).toHaveBeenCalled()
       })
 
-      // UI should still be functional
-      expect(await screen.findByText("Connect your ChatGPT")).toBeTruthy()
+      expect(
+        await screen.findByText(/could not confirm the requested session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
+    })
+
+    it("blocks collection when claimed scopes differ from the URL", async () => {
+      mockClaimSession.mockResolvedValue({
+        ...CLAIMED_SESSION,
+        scopes: ["instagram.posts"],
+      })
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({ platforms: [CHATGPT_PLATFORM] })
+      )
+
+      renderConnect(REAL_SESSION_SEARCH)
+
+      expect(
+        await screen.findByText(/requested scopes do not match the session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
     })
 
     it("deduplicates pre-fetch for same session ID across re-renders", async () => {
@@ -358,6 +378,50 @@ describe("Connect", () => {
 
       // Should still be called only once (deduplicated by ref)
       expect(mockClaimSession).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not let a stale session claim authorize a replacement URL", async () => {
+      let resolveFirstClaim: ((value: typeof CLAIMED_SESSION) => void) | undefined
+      const firstClaim = new Promise<typeof CLAIMED_SESSION>(resolve => {
+        resolveFirstClaim = resolve
+      })
+      mockClaimSession.mockImplementation(({ sessionId }: { sessionId: string }) =>
+        sessionId === "session-a"
+          ? firstClaim
+          : Promise.resolve({ ...CLAIMED_SESSION, sessionId: "session-b" })
+      )
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({ platforms: [CHATGPT_PLATFORM] })
+      )
+
+      const { router } = renderConnect(
+        "?sessionId=session-a&secret=a&scopes=%5B%22instagram.posts%22%5D"
+      )
+
+      await act(async () => {
+        await router.navigate(
+          "?sessionId=session-b&secret=b&scopes=%5B%22chatgpt.conversations%22%5D"
+        )
+      })
+      await waitFor(() => {
+        expect(mockVerifyBuilder).toHaveBeenCalledTimes(1)
+      })
+
+      await act(async () => {
+        resolveFirstClaim?.({
+          ...CLAIMED_SESSION,
+          sessionId: "session-a",
+          scopes: ["instagram.posts"],
+        })
+      })
+
+      const connectButton = await screen.findByRole("button", {
+        name: /connect chatgpt/i,
+      })
+      await act(async () => {
+        fireEvent.click(connectButton)
+      })
+      expect(mockStartImport).toHaveBeenCalledWith(CHATGPT_PLATFORM)
     })
   })
 
@@ -477,7 +541,7 @@ describe("Connect", () => {
       })
     })
 
-    it("navigates without prefetched state when pre-fetch failed", async () => {
+    it("does not collect or navigate when pre-fetch authorization fails", async () => {
       // Pre-fetch fails
       mockClaimSession.mockRejectedValue(new Error("Network error"))
       vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -488,31 +552,18 @@ describe("Connect", () => {
 
       const { router } = renderConnect(REAL_SESSION_SEARCH)
 
-      // Wait for pre-fetch to fail
+      // Wait for pre-fetch to fail.
       await waitFor(() => {
         expect(mockClaimSession).toHaveBeenCalled()
       })
 
-      // Start import and simulate success
-      const connectButton = await screen.findByRole("button", {
-        name: /connect chatgpt/i,
-      })
-      await act(async () => {
-        fireEvent.click(connectButton)
-      })
-
-      await act(async () => {
-        mockRuns = [{ id: "run-1", status: "success" }]
-        router.navigate(`${ROUTES.connect}${REAL_SESSION_SEARCH}`)
-      })
-
-      await waitFor(() => {
-        expect(router.state.location.pathname).toBe(ROUTES.grant)
-      })
-
-      // Navigation state should not have prefetched data (pre-fetch failed)
-      // The grant page will retry claim + verify on its own
-      vi.restoreAllMocks()
+      expect(
+        await screen.findByText(/could not confirm the requested session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
+      expect(router.state.location.pathname).toBe(ROUTES.connect)
+      // Navigation state stays empty because the flow must not proceed to grant.
+      expect(router.state.location.state).toBeNull()
     })
 
     it("shows connector status message while run is active", async () => {
@@ -525,7 +576,6 @@ describe("Connect", () => {
       const connectButton = await screen.findByRole("button", {
         name: /connect chatgpt/i,
       })
-
       await act(async () => {
         fireEvent.click(connectButton)
       })

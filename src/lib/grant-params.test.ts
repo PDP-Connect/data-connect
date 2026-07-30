@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   buildGrantSearchParams,
+  getClaimedAuthorizationMismatch,
   getGrantParamsFromSearchParams,
   parseScopesParam,
 } from "./grant-params"
@@ -21,6 +22,30 @@ describe("grant-params", () => {
   it("returns undefined for invalid scopes", () => {
     expect(parseScopesParam("")).toBeUndefined()
     expect(parseScopesParam("[1]")).toBeUndefined()
+  })
+
+  it("rejects a claim for another session or different scope terms", () => {
+    expect(
+      getClaimedAuthorizationMismatch("session-a", ["read:a"], {
+        sessionId: "session-b",
+        scopes: ["read:a"],
+      })
+    ).toContain("does not match this authorization URL")
+    expect(
+      getClaimedAuthorizationMismatch("session-a", ["read:a"], {
+        sessionId: "session-a",
+        scopes: ["read:b"],
+      })
+    ).toContain("requested scopes do not match")
+  })
+
+  it("accepts the same scope terms regardless of serialization order", () => {
+    expect(
+      getClaimedAuthorizationMismatch("session-a", ["read:b", "read:a"], {
+        sessionId: "session-a",
+        scopes: ["read:a", "read:b"],
+      })
+    ).toBeNull()
   })
 
   it("builds and reads grant search params", () => {

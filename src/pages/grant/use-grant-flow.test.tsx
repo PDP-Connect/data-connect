@@ -388,8 +388,77 @@ describe("useGrantFlow", () => {
     expect(result.current.builderName).toBe("Pre-fetched Builder")
   })
 
+  it("rejects prefetched data from another session before consent or approval", async () => {
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      walletAddress: "0xuser",
+    }
+    const prefetched = {
+      session: {
+        id: "session-a",
+        granteeAddress: "0xbuilder-a",
+        scopes: ["chatgpt.conversations"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "Builder A",
+        appUrl: "https://builder-a.example.com",
+      },
+    }
+
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "session-b",
+          secret: "session-b-secret",
+          scopes: ["chatgpt.conversations"],
+        },
+        prefetched
+      )
+    )
+
+    await waitFor(() => {
+      expect(result.current.flowState.status).toBe("error")
+    })
+    expect(result.current.flowState.error).toContain("does not match this authorization URL")
+    expect(mockClaimSession).not.toHaveBeenCalled()
+    expect(mockVerifyBuilder).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await result.current.handleApprove()
+    })
+    expect(mockCreateGrant).not.toHaveBeenCalled()
+    expect(mockApproveSession).not.toHaveBeenCalled()
+  })
+
+  it("rejects claimed scopes that differ from the URL before consent", async () => {
+    mockClaimSession.mockResolvedValue({
+      sessionId: "scope-mismatch-session",
+      granteeAddress: "0xbuilder",
+      scopes: ["instagram.posts"],
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    })
+
+    const { result } = renderHook(() =>
+      useGrantFlow({
+        sessionId: "scope-mismatch-session",
+        secret: "scope-mismatch-secret",
+        scopes: ["chatgpt.conversations"],
+      })
+    )
+
+    await waitFor(() => {
+      expect(result.current.flowState.status).toBe("error")
+    })
+    expect(result.current.flowState.error).toContain("requested scopes do not match")
+    expect(mockVerifyBuilder).not.toHaveBeenCalled()
+    expect(mockCreateGrant).not.toHaveBeenCalled()
+  })
+
   it("handles deny flow — calls deny API and navigates to home", async () => {
     mockClaimSession.mockResolvedValue({
+      sessionId: "deny-session-1",
       granteeAddress: "0xbuilder",
       scopes: ["chatgpt.conversations"],
       expiresAt: "2030-01-01T00:00:00.000Z",
@@ -443,6 +512,7 @@ describe("useGrantFlow", () => {
   it("errors when builder verification fails (protocol spec MUST)", async () => {
     const { BuilderVerificationError } = await import("../../services/builder")
     mockClaimSession.mockResolvedValue({
+      sessionId: "verify-fail-1",
       granteeAddress: "0xfailbuilder",
       scopes: ["chatgpt.conversations"],
       expiresAt: "2030-01-01T00:00:00.000Z",
@@ -474,6 +544,7 @@ describe("useGrantFlow", () => {
     }
 
     mockClaimSession.mockResolvedValue({
+      sessionId: "grant-fail-1",
       granteeAddress: "0xbuilder",
       scopes: ["chatgpt.conversations"],
       expiresAt: "2030-01-01T00:00:00.000Z",
@@ -514,6 +585,7 @@ describe("useGrantFlow", () => {
 
   it("navigates away even when deny API call fails", async () => {
     mockClaimSession.mockResolvedValue({
+      sessionId: "deny-fail-1",
       granteeAddress: "0xbuilder",
       scopes: ["chatgpt.conversations"],
       expiresAt: "2030-01-01T00:00:00.000Z",
@@ -592,6 +664,7 @@ describe("useGrantFlow", () => {
     mockClaimSession
       .mockRejectedValueOnce(new Error("Network timeout"))
       .mockResolvedValueOnce({
+        sessionId: "retry-session-1",
         granteeAddress: "0xbuilder",
         scopes: ["chatgpt.conversations"],
         expiresAt: "2030-01-01T00:00:00.000Z",
@@ -684,6 +757,7 @@ describe("useGrantFlow", () => {
     }
 
     mockClaimSession.mockResolvedValue({
+      sessionId: "no-server-1",
       granteeAddress: "0xbuilder",
       scopes: ["chatgpt.conversations"],
       expiresAt: "2030-01-01T00:00:00.000Z",

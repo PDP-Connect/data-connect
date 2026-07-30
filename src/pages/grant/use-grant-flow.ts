@@ -28,6 +28,7 @@ import type {
   PrefetchedGrantData,
 } from "./types"
 import { ROUTES } from "@/config/routes"
+import { getClaimedAuthorizationMismatch } from "@/lib/grant-params"
 import { getPrimaryScopeToken } from "@/lib/scope-labels"
 import { getPlatformRegistryEntryById } from "@/lib/platform/utils"
 import {
@@ -141,6 +142,22 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
       }
 
       // --- Pre-fetched path: connect page already claimed + verified in background ---
+      const prefetchedAuthorizationMismatch = prefetched?.session
+        ? getClaimedAuthorizationMismatch(sessionId, params.scopes, {
+            sessionId: prefetched.session.id,
+            scopes: prefetched.session.scopes,
+          })
+        : null
+      if (prefetchedAuthorizationMismatch) {
+        setFlowState({
+          sessionId,
+          secret,
+          status: "error",
+          error: prefetchedAuthorizationMismatch,
+        })
+        return
+      }
+
       if (prefetched?.session && prefetched?.builderManifest) {
         console.log("[GrantFlow] Using pre-fetched data (skipping claim + verify)", {
           sessionId: prefetched.session.id,
@@ -222,8 +239,22 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
           platform: telemetryPlatform,
         })
         if (cancelled) return
+        const authorizationMismatch = getClaimedAuthorizationMismatch(
+          sessionId,
+          params.scopes,
+          claimed,
+        )
+        if (authorizationMismatch) {
+          setFlowState({
+            sessionId,
+            secret,
+            status: "error",
+            error: authorizationMismatch,
+          })
+          return
+        }
         const session: GrantSession = {
-          id: sessionId,
+          id: claimed.sessionId,
           granteeAddress: claimed.granteeAddress,
           scopes: claimed.scopes,
           expiresAt: claimed.expiresAt,
