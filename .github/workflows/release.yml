@@ -32,6 +32,8 @@ jobs:
             target: aarch64-apple-darwin
             artifact_key: macos-arm64
             expected_arch: arm64
+            node_platform: darwin
+            node_arch: arm64
             pkg_target: node22-macos-arm64
             binary_name: playwright-runner
             ps_binary_name: personal-server
@@ -40,6 +42,8 @@ jobs:
             target: x86_64-apple-darwin
             artifact_key: macos-x64
             expected_arch: x86_64
+            node_platform: darwin
+            node_arch: x64
             pkg_target: node22-macos-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
@@ -47,6 +51,8 @@ jobs:
             os_family: linux
             target: x86_64-unknown-linux-gnu
             artifact_key: linux-x64
+            node_platform: linux
+            node_arch: x64
             pkg_target: node22-linux-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
@@ -54,6 +60,8 @@ jobs:
             os_family: windows
             target: x86_64-pc-windows-msvc
             artifact_key: windows-x64
+            node_platform: win32
+            node_arch: x64
             pkg_target: node22-win-x64
             binary_name: playwright-runner.exe
             ps_binary_name: personal-server.exe
@@ -79,7 +87,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "22.23.1"
           cache: npm
 
       - name: Setup Rust
@@ -87,6 +95,10 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Stage Node.js runtime sidecar
+        shell: bash
+        run: node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}" --expected-platform "${{ matrix.node_platform }}" --expected-arch "${{ matrix.node_arch }}"
 
       - name: Install Linux bundle dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -136,6 +148,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}
           codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;

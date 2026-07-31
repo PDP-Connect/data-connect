@@ -40,6 +40,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
+    "externalBin": ["binaries/pdpp-node"],
     "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "icon": [
       "icons/32x32.png",
@@ -62,7 +63,8 @@
       "../playwright-runner/dist/": "playwright-runner/dist/",
       "../personal-server/dist/personal-server*": "personal-server/dist/",
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/",
-      "../pdpp-runtime/": "pdpp-runtime/"
+      "../pdpp-runtime/": "pdpp-runtime/",
+      "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE"
     },
     "linux": {
       "deb": {

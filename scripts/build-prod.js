@@ -20,6 +20,7 @@ import { existsSync, cpSync, readdirSync, mkdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { nativeTauriTarget, stagePdppNode } from './stage-pdpp-node.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -71,6 +72,10 @@ function findAppBundle() {
 
 async function build() {
   log('Building DataConnect for production...');
+
+  // Keep local production builds on the same fail-closed Node 22 sidecar
+  // contract as the release workflow.
+  stagePdppNode({ ...nativeTauriTarget(PLAT, arch()), projectRoot: ROOT });
 
   // 1. Install playwright-runner dependencies
   log('Installing playwright-runner dependencies...');

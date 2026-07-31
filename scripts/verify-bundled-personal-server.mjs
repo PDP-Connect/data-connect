@@ -8,6 +8,7 @@ import { createInterface } from "node:readline"
 import { isMainModule } from "./is-main-module.js"
 
 const REQUIRED_PATH_FRAGMENTS = [
+  "licenses/pdpp-node-license",
   "personal-server/dist/personal-server",
   "personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
   "playwright-runner/dist/playwright-runner",
@@ -52,6 +53,20 @@ export function assertPackagedRuntime(entries, artifactName) {
     fail(
       `${artifactName} is missing packaged runtime files: ${missing.join(", ")}`
     )
+  }
+}
+
+export function assertPackagedNode(entries, artifactName, platform) {
+  const expectedSuffix = {
+    linux: "usr/bin/pdpp-node",
+    macos: "contents/macos/pdpp-node",
+    windows: "pdpp-node.exe",
+  }[platform]
+  if (!expectedSuffix) fail(`Unsupported Node sidecar platform: ${platform}`)
+  if (
+    !entries.map(normalizeEntry).some(entry => entry.endsWith(expectedSuffix))
+  ) {
+    fail(`${artifactName} is missing its packaged Node.js sidecar`)
   }
 }
 
@@ -125,8 +140,10 @@ function listAppImageEntries(artifact) {
 
 const WINDOWS_BROWSER_FRAGMENT = "playwright-runner/dist/browsers/chromium-"
 const WINDOWS_BROWSER_EXECUTABLE = "/chrome.exe"
+const WINDOWS_NODE_FRAGMENT = "/pdpp-node.exe"
 const WINDOWS_RELEVANT_FRAGMENTS = [
   ...REQUIRED_PATH_FRAGMENTS,
+  WINDOWS_NODE_FRAGMENT,
   WINDOWS_BROWSER_FRAGMENT,
 ].map(normalizeEntry)
 const COMMAND_ERROR_OUTPUT_LIMIT = 64 * 1024
@@ -207,6 +224,7 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   }
   const entries = listDirectoryEntries(app)
   assertPackagedRuntime(entries, artifactName)
+  assertPackagedNode(entries, artifactName, "macos")
   assertPackagedBrowser(entries, artifactName, "macos")
 
   const executableDirectory = join(app, "Contents", "MacOS")
@@ -219,6 +237,7 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
 
   const binaries = [
     join(executableDirectory, appExecutables[0].name),
+    join(executableDirectory, "pdpp-node"),
     join(
       app,
       "Contents",
@@ -323,9 +342,11 @@ function verifyLinuxArtifacts(bundleRoot) {
   }
   const debEntries = listDebEntries(debArtifacts[0])
   assertPackagedRuntime(debEntries, basename(debArtifacts[0]))
+  assertPackagedNode(debEntries, basename(debArtifacts[0]), "linux")
   assertPackagedBrowser(debEntries, basename(debArtifacts[0]), "linux")
   const appImageEntries = listAppImageEntries(appImageArtifacts[0])
   assertPackagedRuntime(appImageEntries, basename(appImageArtifacts[0]))
+  assertPackagedNode(appImageEntries, basename(appImageArtifacts[0]), "linux")
   assertPackagedBrowser(
     appImageEntries,
     basename(appImageArtifacts[0]),
@@ -340,6 +361,7 @@ async function verifyWindowsArtifacts(bundleRoot) {
   if (installers.length !== 1) fail("Expected exactly one NSIS installer")
   const entries = await listWindowsInstallerEntries(installers[0])
   assertPackagedRuntime(entries, basename(installers[0]))
+  assertPackagedNode(entries, basename(installers[0]), "windows")
   assertPackagedBrowser(entries, basename(installers[0]), "windows")
 }
 

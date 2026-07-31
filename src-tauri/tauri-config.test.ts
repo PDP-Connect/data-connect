@@ -3,6 +3,21 @@ import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 describe("tauri manual-install config", () => {
+  it("bundles the target-native Node runtime as a Tauri sidecar", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: {
+        externalBin?: string[]
+        resources?: Record<string, string>
+      }
+    }
+
+    expect(document.bundle?.externalBin).toEqual(["binaries/pdpp-node"])
+    expect(document.bundle?.resources?.["binaries/pdpp-node-LICENSE"]).toBe(
+      "licenses/pdpp-node-LICENSE"
+    )
+  })
+
   it("preserves the packaged Playwright browser directory tree", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {

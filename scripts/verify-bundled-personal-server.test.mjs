@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest"
 import {
   assertBinaryArchitecture,
   assertPackagedBrowser,
+  assertPackagedNode,
   assertPackagedRuntime,
   collectRelevantWindowsInstallerEntries,
   listDebEntries,
@@ -20,6 +21,8 @@ import {
 } from "./verify-bundled-personal-server.mjs"
 
 const runtimeEntries = [
+  "usr/bin/pdpp-node",
+  "usr/lib/data-connect/licenses/pdpp-node-LICENSE",
   "usr/lib/data-connect/resources/personal-server/dist/personal-server",
   "usr/lib/data-connect/resources/personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
   "usr/lib/data-connect/resources/playwright-runner/dist/playwright-runner",
@@ -57,6 +60,29 @@ describe("bundled personal-server verifier", () => {
         "DataConnect.deb"
       )
     ).toThrow("p-queue")
+  })
+
+  it("requires the platform-native Node sidecar path", () => {
+    expect(() =>
+      assertPackagedNode(runtimeEntries, "DataConnect.deb", "linux")
+    ).not.toThrow()
+    expect(() =>
+      assertPackagedNode(
+        ["resources/pdpp-node.exe"],
+        "DataConnect.exe",
+        "windows"
+      )
+    ).not.toThrow()
+    expect(() =>
+      assertPackagedNode(
+        ["Contents/MacOS/pdpp-node"],
+        "DataConnect.dmg",
+        "macos"
+      )
+    ).not.toThrow()
+    expect(() =>
+      assertPackagedNode(runtimeEntries, "DataConnect.exe", "windows")
+    ).toThrow("packaged Node.js sidecar")
   })
 
   it("requires a real packaged browser executable", () => {
@@ -116,6 +142,7 @@ describe("bundled personal-server verifier", () => {
           }
           for (const entry of ${JSON.stringify([
             ...runtimeEntries,
+            "resources/pdpp-node.exe",
             "usr/lib/data-connect/resources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe",
           ])}) {
             console.log(\`2026-07-31 ..... \${entry.replaceAll("/", "\\\\")}\`)
@@ -124,7 +151,7 @@ describe("bundled personal-server verifier", () => {
       ]
     )
 
-    expect(entries).toHaveLength(10)
+    expect(entries).toHaveLength(12)
     expect(() =>
       assertPackagedRuntime(entries, "DataConnect.exe")
     ).not.toThrow()
@@ -157,12 +184,12 @@ describe("bundled personal-server verifier", () => {
     child.emit("close", 0)
     setImmediate(() => {
       child.stdout.end(
-        "resources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
+        "resources/pdpp-node.exe\nresources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
       )
     })
 
     const entries = await entriesPromise
-    expect(entries).toHaveLength(10)
+    expect(entries).toHaveLength(12)
     expect(() =>
       assertPackagedBrowser(entries, "DataConnect.exe", "windows")
     ).not.toThrow()

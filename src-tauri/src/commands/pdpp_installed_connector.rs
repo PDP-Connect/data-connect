@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -33,6 +34,11 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
+const BUNDLED_NODE_NAME: &str = if cfg!(windows) {
+    "pdpp-node.exe"
+} else {
+    "pdpp-node"
+};
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_CONNECTOR_KEY: &str = "github";
 const GITHUB_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/github";
@@ -1882,7 +1888,29 @@ fn verify_file_hash(path: &Path, expected: Option<&str>, label: &str) -> Result<
 }
 
 fn resolve_node_program() -> Result<String, String> {
-    let path = std::env::var_os("PATH").ok_or("PATH is unavailable; cannot resolve node")?;
+    let executable = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the DataConnect executable: {e}"))?;
+    resolve_node_program_from(&executable, std::env::var_os("PATH").as_deref())
+}
+
+fn resolve_node_program_from(executable: &Path, path: Option<&OsStr>) -> Result<String, String> {
+    let executable_dir = executable
+        .parent()
+        .ok_or("DataConnect executable has no parent directory")?;
+    let bundled = executable_dir.join(BUNDLED_NODE_NAME);
+    if bundled.exists() {
+        if !bundled.is_file() {
+            return Err(format!(
+                "Bundled Node.js path is not a file: {}",
+                bundled.display()
+            ));
+        }
+        validate_node_program(&bundled)?;
+        return Ok(bundled.to_string_lossy().into_owned());
+    }
+
+    let path = path
+        .ok_or("Bundled Node.js is unavailable and PATH cannot resolve a development fallback")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
         if candidate.is_file() {
@@ -1890,7 +1918,7 @@ fn resolve_node_program() -> Result<String, String> {
             return Ok(candidate.to_string_lossy().into_owned());
         }
     }
-    Err("node executable was not found on PATH".into())
+    Err("Bundled Node.js is unavailable and node was not found on PATH".into())
 }
 
 fn validate_node_program(candidate: &Path) -> Result<(), String> {
@@ -3650,6 +3678,70 @@ setInterval(() => {}, 1000);
         assert!(validate_node_version("not-a-version", node)
             .unwrap_err()
             .contains("invalid version"));
+    }
+
+    #[test]
+    fn uses_path_node_only_when_bundled_node_is_absent() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let app_dir = tempfile::tempdir().unwrap();
+        let fake_app = app_dir.path().join("dataconnect");
+        fs::write(&fake_app, b"fixture app").unwrap();
+        let path = std::env::join_paths([ambient_node.parent().unwrap()]).unwrap();
+
+        let fallback = resolve_node_program_from(&fake_app, Some(&path)).unwrap();
+        assert_eq!(Path::new(&fallback), ambient_node);
+
+        fs::write(app_dir.path().join(BUNDLED_NODE_NAME), b"not node").unwrap();
+        let error = resolve_node_program_from(&fake_app, Some(&path)).unwrap_err();
+        assert!(error.contains("Failed to inspect Node.js"));
+    }
+
+    #[test]
+    fn starts_connector_with_bundled_node_and_no_node_on_path() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let app_dir = tempfile::tempdir().unwrap();
+        let fake_app = app_dir.path().join(if cfg!(windows) {
+            "dataconnect.exe"
+        } else {
+            "dataconnect"
+        });
+        fs::write(&fake_app, b"fixture app").unwrap();
+        let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
+        fs::copy(&ambient_node, &bundled_node).unwrap();
+
+        let resolved_node =
+            resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
+        assert_eq!(Path::new(&resolved_node), bundled_node);
+
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = request_with_token("test-token");
+        let start = build_start(&request, &resolved.manifest, None).unwrap();
+        let mut command = build_command(
+            &resolved,
+            &resolve_child_secrets(&request, &resolved).unwrap(),
+            &CommandCustomization::default(),
+            None,
+        )
+        .unwrap();
+        command.program = resolved_node;
+        assert!(command.clear_env);
+        assert!(!command.env.contains_key("PATH"));
+
+        let result = supervise_pdpp_connector(
+            &command,
+            &start,
+            &PdppRunOptions {
+                timeout: Some(Duration::from_secs(5)),
+                scope_validators: validators_from_manifest(&resolved.manifest),
+                max_retained_records: 8,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.record_count, 1);
     }
 
     #[test]

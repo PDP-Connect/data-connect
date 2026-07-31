@@ -63,6 +63,11 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
+    expect(workflow).toContain('node-version: "22.23.1"')
+    expect(workflow).toContain("Stage Node.js runtime sidecar")
+    expect(workflow).toContain(
+      'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'
+    )
     expect(workflow).toContain(
       "npm run build -- --require-browser --target ${{ matrix.pkg_target }}"
     )
@@ -98,6 +103,9 @@ describe("release workflow", () => {
       "env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || ''"
     )
     expect(workflow).toContain("verification_args+=(--verify-code-signature)")
+    expect(workflow).toContain(
+      'codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}'
+    )
     expect(workflow).toContain("codesign --force --deep --options runtime")
     expect(workflow).toContain(
       "node scripts/create-macos-dmg.mjs --volume-name DataConnect"
