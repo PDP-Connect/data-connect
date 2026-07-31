@@ -924,7 +924,6 @@ function validateLiveRecord(
   }
   if (
     metadata.consentTimeField &&
-    data[metadata.consentTimeField] != null &&
     !validTemporalValue(
       data[metadata.consentTimeField],
       metadata.fieldFormats?.[metadata.consentTimeField] ?? "date-time"

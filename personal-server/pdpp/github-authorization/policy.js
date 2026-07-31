@@ -191,6 +191,10 @@ export function validateAuthorizationDetails({
   ) {
     throw invalid("source must identify the selected connector")
   }
+  const canonicalSourceId = string(
+    manifest.connector_key,
+    "manifest.connector_key is required"
+  )
   if (!["single_use", "continuous"].includes(detail.access_mode)) {
     throw invalid('access_mode must be "single_use" or "continuous"')
   }
@@ -279,7 +283,7 @@ export function validateAuthorizationDetails({
   }
   return {
     type: PDPP_DATA_ACCESS_TYPE,
-    source: { kind: "connector", id: detail.source.id },
+    source: { kind: "connector", id: canonicalSourceId },
     access_mode: detail.access_mode,
     purpose_code: detail.purpose_code,
     purpose_description: detail.purpose_description,

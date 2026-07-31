@@ -69,11 +69,15 @@ export async function createPdppResourceServer({
 /** Add PDPP reads without taking ownership of legacy Personal Server routes. */
 export async function mountPdppResourceServer(app, options) {
   const resourceServer = await createPdppResourceServer(options)
+  mountPdppResourceRoutes(app, resourceServer)
+  return resourceServer
+}
+
+export function mountPdppResourceRoutes(app, resourceServer) {
   const serve = context => resourceServer.fetch(context.req.raw)
   app.get("/v1/streams", serve)
   app.get("/v1/streams/:stream/records", serve)
   app.get("/v1/streams/:stream/records/:recordId", serve)
-  return resourceServer
 }
 
 function createRepository(databasePath, streamMetadata) {

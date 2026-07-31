@@ -36,6 +36,9 @@ export function registerProtectedRoutes({
     if (!gatewayClient) {
       return c.json({ error: "Gateway client not initialized" }, 500)
     }
+    if (typeof onLegacyGrantRevoked !== "function") {
+      return c.json({ error: "Local revocation store not initialized" }, 500)
+    }
 
     const grantId = c.req.param("grantId")
 
@@ -45,7 +48,7 @@ export function registerProtectedRoutes({
         grantId,
       })
 
-      await onLegacyGrantRevoked?.(grantId)
+      await onLegacyGrantRevoked(grantId)
 
       await gatewayClient.revokeGrant({
         grantId,

@@ -378,6 +378,81 @@ test("a malformed authoritative full refresh does not partially alter current re
   }
 })
 
+test("rejects missing, null, and invalid declared consent time atomically", () => {
+  const harness = withRepository()
+  const connectionId = "github-account-a"
+  try {
+    harness.repository.importSnapshot({
+      connectionId,
+      recordsByStream: {
+        repositories: [
+          {
+            stream: "repositories",
+            key: "existing",
+            data: record("repositories", "existing"),
+            emitted_at: TIMES.emitted,
+          },
+        ],
+      },
+    })
+
+    for (const [name, extra] of [
+      ["missing", { created_at: undefined }],
+      ["null", { created_at: null }],
+      ["invalid", { created_at: "not-a-date" }],
+    ]) {
+      assert.throws(
+        () =>
+          harness.repository.importSnapshot({
+            connectionId,
+            recordsByStream: {
+              repositories: [
+                {
+                  stream: "repositories",
+                  key: "new-but-rolled-back",
+                  data: record("repositories", "new-but-rolled-back"),
+                  emitted_at: TIMES.emitted,
+                },
+                {
+                  stream: "repositories",
+                  key: name,
+                  data: record("repositories", name, extra),
+                  emitted_at: TIMES.emitted,
+                },
+              ],
+            },
+            snapshot: {
+              collection_mode: "full_refresh",
+              reset_streams: ["repositories"],
+              completed_at: "2026-07-30T20:00:00.000Z",
+            },
+          }),
+        error =>
+          error instanceof RecordsRepositoryError &&
+          error.code === "invalid_record"
+      )
+      assert.notEqual(
+        harness.repository.getCurrent({
+          connectionId,
+          stream: "repositories",
+          key: "existing",
+        }),
+        null
+      )
+      assert.equal(
+        harness.repository.getCurrent({
+          connectionId,
+          stream: "repositories",
+          key: "new-but-rolled-back",
+        }),
+        null
+      )
+    }
+  } finally {
+    harness.dispose()
+  }
+})
+
 test("upserts and deletes are atomic, idempotent, and survive reopen", () => {
   const harness = withRepository()
   try {
