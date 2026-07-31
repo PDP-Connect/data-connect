@@ -15,10 +15,11 @@ const githubManifest = {
       selection: { fields: true, resources: true },
       schema: {
         type: 'object',
-        required: ['id'],
+        required: ['id', 'login'],
         properties: {
           id: { type: 'string' },
           login: { type: 'string' },
+          email: { type: 'string' },
           source_created_at: { type: 'string' },
           source_updated_at: { type: 'string' },
         },
@@ -262,6 +263,92 @@ test('Core record list enforces fields/view exclusivity and projects the manifes
   const unknownField = await request(app, '/v1/streams/repositories/records?fields=nope');
   assert.equal(unknownField.status, 400);
   assert.equal((await unknownField.json()).error.code, 'unknown_field');
+});
+
+test('Core list and detail disclose exactly the explicitly granted fields', async () => {
+  const data = {
+    id: 'user-1',
+    login: 'alice',
+    email: 'alice@example.com',
+    source_created_at: '2026-01-01T00:00:00Z',
+    source_updated_at: '2026-02-01T00:00:00Z',
+  };
+  const record = { object: 'record', id: 'user-1', data };
+  const receivedFields = [];
+  const app = makeApp({
+    grant: { streams: [{ name: 'user', fields: ['id', 'login', 'email'] }] },
+    repository: {
+      ...makeRepository(),
+      listRecords: async (query) => {
+        receivedFields.push(query.fields);
+        return { object: 'list', data: [record], has_more: false };
+      },
+      getRecord: async (query) => {
+        receivedFields.push(query.fields);
+        return record;
+      },
+    },
+  });
+
+  const list = await request(app, '/v1/streams/user/records?fields=email');
+  const detail = await request(app, '/v1/streams/user/records/user-1?fields=email');
+
+  assert.equal(list.status, 200);
+  assert.equal(detail.status, 200);
+  assert.deepEqual((await list.json()).data[0].data, {
+    id: 'user-1',
+    login: 'alice',
+    email: 'alice@example.com',
+  });
+  assert.deepEqual((await detail.json()).data, {
+    id: 'user-1',
+    login: 'alice',
+    email: 'alice@example.com',
+  });
+  assert.deepEqual(receivedFields, [
+    ['id', 'login', 'email'],
+    ['id', 'login', 'email'],
+  ]);
+});
+
+test('Core rejects existing grants that omit schema-required fields', async () => {
+  const app = makeApp({
+    grant: { streams: [{ name: 'user', fields: ['email'] }] },
+  });
+
+  const list = await request(app, '/v1/streams/user/records');
+  const detail = await request(app, '/v1/streams/user/records/user-1');
+
+  assert.equal(list.status, 403);
+  assert.equal(detail.status, 403);
+  assert.equal((await list.json()).error.code, 'grant_invalid');
+  assert.equal((await detail.json()).error.code, 'grant_invalid');
+});
+
+test('Core keeps full-record behavior when a grant has no explicit fields', async () => {
+  const data = {
+    id: 'user-1',
+    login: 'alice',
+    email: 'alice@example.com',
+    source_created_at: '2026-01-01T00:00:00Z',
+    source_updated_at: '2026-02-01T00:00:00Z',
+  };
+  const app = makeApp({
+    grant: { streams: [{ name: 'user' }] },
+    repository: {
+      ...makeRepository(),
+      listRecords: async () => ({
+        object: 'list',
+        data: [{ object: 'record', id: 'user-1', data }],
+        has_more: false,
+      }),
+    },
+  });
+
+  const response = await request(app, '/v1/streams/user/records');
+
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data[0].data, data);
 });
 
 test('Core keeps page and changes_since cursor values in separate repository inputs', async () => {

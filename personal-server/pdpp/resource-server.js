@@ -234,7 +234,10 @@ async function translateRepositoryErrors(operation) {
       throw new CoreOperationError(410, error.code, error.message)
     }
     if (error instanceof RecordsRepositoryError) {
-      const status = error.code === "field_not_granted" ? 403 : 400
+      const status =
+        error.code === "field_not_granted" || error.code === "grant_invalid"
+          ? 403
+          : 400
       throw new CoreOperationError(status, error.code, error.message)
     }
     throw error

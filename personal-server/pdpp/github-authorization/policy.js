@@ -137,6 +137,21 @@ function sameScopeSet(requested, actual) {
   )
 }
 
+function normalizeSelectedFields(stream, selected) {
+  const required = Array.isArray(stream.schema?.required)
+    ? stream.schema.required
+    : []
+  const fields = [...new Set([...required, ...selected])]
+  const allowed = new Set(Object.keys(stream.schema?.properties ?? {}))
+  const unknown = fields.filter(field => !allowed.has(field))
+  if (unknown.length) {
+    throw invalid(
+      `Unknown fields on stream '${stream.name}': ${unknown.join(", ")}`
+    )
+  }
+  return fields
+}
+
 /**
  * Validate and normalize the single GitHub RFC 9396 detail against the
  * currently hash-verified installed manifest. The stream-to-scope check binds
@@ -207,7 +222,7 @@ export function validateGithubAuthorizationDetails({
       if (!view || !Array.isArray(view.fields))
         throw invalid(`Unknown view '${request.view}' on stream '${name}'`)
       normalized.view = view.id
-      normalized.fields = [...view.fields]
+      normalized.fields = normalizeSelectedFields(stream, view.fields)
     }
     if (request.fields !== undefined) {
       if (
@@ -220,13 +235,7 @@ export function validateGithubAuthorizationDetails({
       const fields = request.fields.map(field =>
         string(field, `Invalid field on '${name}'`)
       )
-      const allowed = new Set(Object.keys(stream.schema?.properties ?? {}))
-      const unknown = fields.filter(field => !allowed.has(field))
-      if (unknown.length)
-        throw invalid(
-          `Unknown fields on stream '${name}': ${unknown.join(", ")}`
-        )
-      normalized.fields = [...new Set(fields)]
+      normalized.fields = normalizeSelectedFields(stream, fields)
     }
     if (request.resources !== undefined) {
       if (

@@ -95,10 +95,27 @@ function resolveReadContext({ manifest, grant, streamName, query }) {
   if (!grantStream) {
     throw new CoreOperationError(403, 'grant_stream_not_allowed', `Grant does not include stream '${streamName}'.`);
   }
+  validateGrantFields(stream, grantStream);
 
   const requestedFields = resolveRequestedFields(stream, grantStream, query);
   validateFilters(stream, grantStream, query.filters);
   return { stream, grant: grantStream, fields: requestedFields };
+}
+
+function validateGrantFields(stream, grantStream) {
+  if (grantStream.fields === undefined) return;
+  const properties = stream.schema?.properties ?? {};
+  if (
+    !Array.isArray(grantStream.fields) ||
+    grantStream.fields.some((field) => typeof field !== 'string' || !Object.hasOwn(properties, field)) ||
+    (stream.schema?.required ?? []).some((field) => !grantStream.fields.includes(field))
+  ) {
+    throw new CoreOperationError(
+      403,
+      'grant_invalid',
+      `Grant fields for stream '${stream.name}' are not a valid resolved allowlist`,
+    );
+  }
 }
 
 function resolveRequestedFields(stream, grantStream, query) {
@@ -128,9 +145,13 @@ function resolveRequestedFields(stream, grantStream, query) {
     }
   }
 
-  const fields = new Set(requested ?? authorized ?? Object.keys(properties));
-  for (const field of stream.schema?.required ?? []) fields.add(field);
-  return [...fields];
+  return [
+    ...new Set(
+      requested
+        ? [...(stream.schema?.required ?? []), ...requested]
+        : authorized ?? Object.keys(properties),
+    ),
+  ];
 }
 
 function validateFilters(stream, grantStream, filters) {

@@ -401,7 +401,7 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
               streams: [
                 {
                   name: "repositories",
-                  fields: ["name"],
+                  fields: ["id", "full_name", "name"],
                   resources: ["allowed"],
                   time_range: { since: "2026-01-01T00:00:00Z" },
                 },
@@ -831,7 +831,13 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
       source: { kind: "connector", id: "github" },
       access_mode: "continuous",
       purpose_code: "https://example.test/purpose/research",
-      streams: [{ name: "repositories", resources: ["allowed"] }],
+      streams: [
+        {
+          name: "repositories",
+          fields: ["name"],
+          resources: ["allowed"],
+        },
+      ],
     },
   ]
   const consent = await app.request(
@@ -851,6 +857,11 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
   )
   assert.equal(consent.status, 201)
   const request = await consent.json()
+  assert.deepEqual(request.authorization_details.streams[0].fields, [
+    "id",
+    "full_name",
+    "name",
+  ])
 
   const approval = await app.request(
     `http://personal.example/v1/pdpp/consent-requests/${request.request_id}/approve`,
@@ -872,7 +883,11 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
   const bearer = { authorization: `Bearer ${issued.access_token}` }
   const identity = adapter.resolveForResourceServer(issued.access_token)
   assert.equal(identity.active, true)
-  assert.equal(Array.isArray(identity.grant.streams), true)
+  assert.deepEqual(identity.grant.streams[0].fields, [
+    "id",
+    "full_name",
+    "name",
+  ])
 
   const streams = await app.request("http://personal.example/v1/streams", {
     headers: bearer,
@@ -884,10 +899,11 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     { headers: bearer }
   )
   assert.equal(records.status, 200)
-  assert.deepEqual(
-    (await records.json()).data.map(record => record.data.id),
-    ["allowed"]
-  )
+  assert.deepEqual((await records.json()).data[0].data, {
+    id: "allowed",
+    full_name: "octo/allowed",
+    name: "allowed",
+  })
 
   const revoke = await app.request(
     "http://personal.example/v1/grants/legacy-grant-1",

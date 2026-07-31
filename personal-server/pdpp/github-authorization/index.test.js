@@ -15,7 +15,7 @@ function hash(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`
 }
 
-function fixture() {
+function fixture(additionalStreams = []) {
   const root = mkdtempSync(join(tmpdir(), "pdpp-github-auth-"))
   mkdirSync(join(root, "profile"))
   mkdirSync(join(root, "dist"))
@@ -25,6 +25,7 @@ function fixture() {
     version: "0.5.0",
     runtime_requirements: { bindings: { network: { required: true } } },
     streams: [
+      ...additionalStreams,
       {
         name: "repositories",
         consent_time_field: "updated_at",
@@ -483,6 +484,67 @@ test("rejects widening and fails closed when the active verified manifest disapp
     })
     adapter.close()
   } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
+test("persists exactly the explicit fields shown in consent", () => {
+  const fixtureData = fixture([
+    {
+      name: "user",
+      consent_time_field: "updated_at",
+      selection: { fields: true, resources: true },
+      schema: {
+        required: ["id", "login"],
+        properties: { id: {}, login: {}, email: {}, updated_at: {} },
+      },
+      views: [{ id: "contact", fields: ["email"] }],
+    },
+  ])
+  const adapter = createGithubAuthorizationAdapter({
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+  })
+  try {
+    const request = adapter.createConsentRequest({
+      sessionId: "session-1",
+      scopes: ["github.profile"],
+      authorizationDetails: details({
+        name: "user",
+        fields: ["email"],
+      }),
+    })
+    assert.deepEqual(request.authorization_details.streams, [
+      { name: "user", fields: ["id", "login", "email"] },
+    ])
+
+    const issued = adapter.issueApprovedGrant({
+      requestId: request.request_id,
+      legacyGrantId: "legacy-1",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.deepEqual(issued.grant.streams, [
+      { name: "user", fields: ["id", "login", "email"] },
+    ])
+
+    const viewRequest = adapter.createConsentRequest({
+      sessionId: "session-2",
+      scopes: ["github.profile"],
+      authorizationDetails: details({
+        name: "user",
+        view: "contact",
+      }),
+    })
+    assert.deepEqual(viewRequest.authorization_details.streams, [
+      {
+        name: "user",
+        view: "contact",
+        fields: ["id", "login", "email"],
+      },
+    ])
+  } finally {
+    adapter.close()
     rmSync(fixtureData.root, { recursive: true, force: true })
   }
 })

@@ -960,6 +960,15 @@ function normalizeGrant(stream, grant = {}, requestedFields, streams) {
     grant.fields === undefined
       ? null
       : normalizeFields(stream, grant.fields, "grant.fields", streams)
+  if (
+    grantFields &&
+    metadata.requiredFields.some(field => !grantFields.includes(field))
+  ) {
+    throw new RecordsRepositoryError(
+      "grant_invalid",
+      "Grant fields are not a valid resolved allowlist"
+    )
+  }
   const requestFields =
     requestedFields === undefined
       ? null
@@ -967,9 +976,7 @@ function normalizeGrant(stream, grant = {}, requestedFields, streams) {
   if (
     requestFields &&
     grantFields &&
-    requestFields.some(
-      field => !grantFields.includes(field) && !metadata.requiredFields.includes(field)
-    )
+    requestFields.some(field => !grantFields.includes(field))
   ) {
     throw new RecordsRepositoryError(
       "field_not_granted",
@@ -977,9 +984,7 @@ function normalizeGrant(stream, grant = {}, requestedFields, streams) {
     )
   }
   const selected = requestFields ?? grantFields
-  const fields = selected
-    ? [...new Set([...metadata.requiredFields, ...selected])]
-    : null
+  const fields = selected ? [...new Set(selected)] : null
   const resources =
     grant.resources === undefined
       ? null

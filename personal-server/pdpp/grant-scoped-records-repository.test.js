@@ -642,7 +642,7 @@ test("manifest fields bound every disclosure while retaining lossless extension 
     })
     assert.equal(unrestrictedChanges.data[0].data.extra, undefined)
 
-    const narrowGrant = { fields: ["full_name"] }
+    const narrowGrant = { fields: ["id", "full_name"] }
     assert.deepEqual(
       harness.repository.listCurrent({ ...base, grant: narrowGrant }).data[0].data,
       { id: "1", full_name: "owner/repo-1" }
@@ -676,6 +676,88 @@ test("manifest fields bound every disclosure while retaining lossless extension 
         changesSince: watermark,
       }).data,
       []
+    )
+  } finally {
+    harness.dispose()
+  }
+})
+
+test("explicit user fields remain exact across detail, current pagination, and change history", () => {
+  const harness = withRepository()
+  const connectionId = "github-account-a"
+  const grant = { fields: ["id", "login", "email"] }
+  try {
+    for (const [id, email] of [
+      ["1", "alice@example.com"],
+      ["2", "bob@example.com"],
+    ]) {
+      harness.repository.upsert({
+        connectionId,
+        stream: "user",
+        key: id,
+        data: record("user", id, { email }),
+        emittedAt: TIMES.emitted,
+      })
+    }
+
+    const first = harness.repository.listCurrent({
+      connectionId,
+      stream: "user",
+      grant,
+      limit: 1,
+    })
+    const second = harness.repository.listCurrent({
+      connectionId,
+      stream: "user",
+      grant,
+      limit: 1,
+      cursor: first.next_cursor,
+    })
+    assert.deepEqual(first.data[0].data, {
+      id: "1",
+      login: "user-1",
+      email: "alice@example.com",
+    })
+    assert.deepEqual(second.data[0].data, {
+      id: "2",
+      login: "user-2",
+      email: "bob@example.com",
+    })
+    assert.deepEqual(
+      harness.repository.getCurrent({
+        connectionId,
+        stream: "user",
+        key: "1",
+        grant,
+      }).data,
+      {
+        id: "1",
+        login: "user-1",
+        email: "alice@example.com",
+      }
+    )
+    assert.deepEqual(
+      harness.repository
+        .listChanges({
+          connectionId,
+          stream: "user",
+          grant,
+          changesSince: "beginning",
+        })
+        .data.map(entry => entry.data),
+      [
+        { id: "1", login: "user-1", email: "alice@example.com" },
+        { id: "2", login: "user-2", email: "bob@example.com" },
+      ]
+    )
+    assert.throws(
+      () =>
+        harness.repository.listCurrent({
+          connectionId,
+          stream: "user",
+          grant: { fields: ["email"] },
+        }),
+      error => error.code === "grant_invalid"
     )
   } finally {
     harness.dispose()
