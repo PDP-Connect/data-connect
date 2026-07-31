@@ -6,9 +6,9 @@
  * This script:
  * 1. Builds the playwright-runner into a standalone binary
  * 2. Builds the personal-server into a standalone binary
- * 3. Builds the Tauri .app bundle
- * 4. Injects personal-server native addons (node_modules/) into the .app
- * 5. Creates the DMG from the complete .app
+ * 3. Builds the platform Tauri bundle
+ * 4. Finalizes personal-server runtime dependencies in that bundle
+ * 5. Creates the platform distributable
  *
  * Tauri's resource glob flattens subdirectories, so we can't include
  * node_modules/ via tauri.conf.json. Instead we build the .app first,
@@ -101,6 +101,15 @@ async function build() {
   // 5. Build frontend
   log('Building frontend...');
   exec('npm run build');
+
+  if (PLAT === 'linux') {
+    log('Building Tauri AppImage...');
+    exec('npx tauri build --bundles appimage');
+    log('Finalizing AppImage personal-server resources...');
+    exec('node scripts/finalize-linux-appimage.js');
+    log('Build complete! Check src-tauri/target/release/bundle for the output.');
+    return;
+  }
 
   // 6. Build the .app bundle only (no DMG).
   // Tauri's resource glob flattens directory structures, so node_modules/

@@ -338,25 +338,11 @@ jobs:
             done
           fi
 
-          # Copy node_modules for Linux AppImage (extract, modify, repack)
+          # Restore the pkg binary after Tauri's Linux bundler mutates ELF
+          # resources, then repack from the corrected AppDir.
           if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            for appimage in src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage; do
-              [ -e "$appimage" ] || continue
-              # Extract AppImage
-              chmod +x "$appimage"
-              "$appimage" --appimage-extract
-              # Copy node_modules
-              dest="squashfs-root/usr/lib/personal-server/dist/node_modules"
-              mkdir -p "$dest"
-              cp -R personal-server/dist/node_modules/* "$dest/"
-              # Repack (requires appimagetool)
-              if command -v appimagetool &> /dev/null; then
-                rm "$appimage"
-                ARCH=x86_64 appimagetool squashfs-root "$appimage"
-              fi
-              rm -rf squashfs-root
-              echo "Updated AppImage with node_modules"
-            done
+            node scripts/finalize-linux-appimage.js \
+              --appimage-dir src-tauri/target/${{ matrix.target }}/release/bundle/appimage
           fi
 
           # Copy node_modules for Windows (into the installation directory structure)
