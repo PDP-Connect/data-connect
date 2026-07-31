@@ -2,6 +2,7 @@ pub mod connector;
 pub mod connector_store;
 pub mod download;
 pub mod file_ops;
+pub mod pdpp_connector;
 pub mod server;
 pub mod updates;
 
