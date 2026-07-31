@@ -37,3 +37,44 @@ describe("legacy pending approval cleanup", () => {
     expect(JSON.stringify(localStorage)).not.toContain("CANARY_RELAY_SECRET")
   })
 })
+
+describe("PDPP grant compensation recovery", () => {
+  it("persists only non-secret identifiers needed to retry a revocation", () => {
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-123",
+      grantId: "grant-456",
+      userAddress: "0x123",
+    })
+
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([
+      { sessionId: "sess-123", grantId: "grant-456", userAddress: "0x123" },
+    ])
+    expect(JSON.stringify(localStorage)).not.toContain("secret")
+    expect(JSON.stringify(localStorage)).not.toContain("pdpp_at_")
+
+    storage.clearPendingPdppGrantCompensation()
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([])
+  })
+
+  it("keeps recovery records for independent failed sessions", () => {
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-a",
+      grantId: "grant-a",
+      userAddress: "0xa",
+    })
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-b",
+      grantId: "grant-b",
+      userAddress: "0xb",
+    })
+
+    storage.clearPendingPdppGrantCompensation({
+      sessionId: "sess-b",
+      grantId: "grant-b",
+    })
+
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([
+      { sessionId: "sess-a", grantId: "grant-a", userAddress: "0xa" },
+    ])
+  })
+})

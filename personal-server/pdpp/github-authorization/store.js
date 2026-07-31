@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS pdpp_github_tokens (
   expires_at TEXT,
   revoked_at TEXT
 );
+CREATE TABLE IF NOT EXISTS pdpp_github_credential_handoffs (
+  session_id TEXT PRIMARY KEY,
+  grant_id TEXT NOT NULL UNIQUE REFERENCES pdpp_github_grants(grant_id),
+  client_id TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  redeemed_at TEXT
+);
 CREATE INDEX IF NOT EXISTS pdpp_github_grants_legacy_idx ON pdpp_github_grants(legacy_grant_id);
 `
 
@@ -46,11 +54,19 @@ function requiredString(value, label) {
   return value.trim()
 }
 
+function sameClientId(left, right) {
+  const ethereumAddress = /^0x[0-9a-f]{40}$/i
+  return ethereumAddress.test(left) && ethereumAddress.test(right)
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right
+}
+
 export function openGithubAuthorizationStore({
   databasePath,
   now = () => new Date(),
   random = randomBytes,
   singleUseAccessExpiresInSeconds,
+  credentialHandoffExpiresInSeconds,
 }) {
   mkdirSync(dirname(databasePath), { recursive: true })
   const db = new Database(databasePath)
@@ -119,6 +135,7 @@ export function openGithubAuthorizationStore({
     sessionId,
     manifest,
     expiresAt,
+    issueToken = true,
   }) {
     const request = db
       .prepare(
@@ -171,7 +188,14 @@ export function openGithubAuthorizationStore({
       authorization_details: authorizationDetails,
       ...(normalizedExpiry ? { expires_at: normalizedExpiry } : {}),
     })
-    const accessToken = `pdpp_at_${random(32).toString("base64url")}`
+    const accessToken = issueToken
+      ? `pdpp_at_${random(32).toString("base64url")}`
+      : null
+    const handoffExpiry = issueToken
+      ? null
+      : new Date(
+          now().getTime() + credentialHandoffExpiresInSeconds * 1000
+        ).toISOString()
     db.transaction(() => {
       db.prepare(
         "INSERT INTO pdpp_github_grants(grant_id, request_id, legacy_grant_id, grant_json, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
@@ -183,21 +207,101 @@ export function openGithubAuthorizationStore({
         grant.issued_at,
         normalizedExpiry
       )
+      if (accessToken) {
+        db.prepare(
+          "INSERT INTO pdpp_github_tokens(token_id, token_hash, grant_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+        ).run(
+          `pdpp_token_${randomUUID()}`,
+          tokenHash(accessToken),
+          grant.grant_id,
+          grant.issued_at,
+          normalizedExpiry
+        )
+      } else {
+        db.prepare(
+          "INSERT INTO pdpp_github_credential_handoffs(session_id, grant_id, client_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+        ).run(
+          grant.session_id,
+          grant.grant_id,
+          grant.client_id,
+          grant.issued_at,
+          handoffExpiry
+        )
+      }
+      db.prepare(
+        "UPDATE pdpp_github_consent_requests SET consumed_at = ? WHERE request_id = ?"
+      ).run(timestamp(), request.request_id)
+    })()
+    return accessToken
+      ? {
+          grant,
+          access_token: accessToken,
+          token_type: "Bearer",
+          pdpp_token_kind: "client",
+        }
+      : {
+          grant,
+          session_id: grant.session_id,
+          handoff_expires_at: handoffExpiry,
+        }
+  }
+
+  function redeemSessionCredential({ sessionId, clientId, manifest }) {
+    const effectiveSessionId = requiredString(sessionId, "session_id")
+    const effectiveClientId = requiredString(clientId, "client_id")
+    const handoff = db
+      .prepare(
+        `SELECT h.*, g.grant_json, g.revoked_at AS grant_revoked_at, g.expires_at AS grant_expires_at
+         FROM pdpp_github_credential_handoffs h
+         JOIN pdpp_github_grants g ON g.grant_id = h.grant_id
+         WHERE h.session_id = ?`
+      )
+      .get(effectiveSessionId)
+    if (!handoff) throw new Error("Credential handoff is missing")
+    if (!sameClientId(handoff.client_id, effectiveClientId)) {
+      throw new Error("Credential handoff client does not match requester")
+    }
+    if (handoff.redeemed_at)
+      throw new Error("Credential handoff was already redeemed")
+    if (handoff.grant_revoked_at)
+      throw new Error("Credential handoff grant is revoked")
+    if (
+      [handoff.expires_at, handoff.grant_expires_at].some(
+        expiresAt => expiresAt && Date.parse(expiresAt) <= now().getTime()
+      )
+    ) {
+      throw new Error("Credential handoff has expired")
+    }
+    const grant = JSON.parse(handoff.grant_json)
+    if (
+      grant.manifest_version !== manifest.version ||
+      grant.manifest_digest !== manifest.digest
+    ) {
+      throw new Error(
+        "The verified installed GitHub manifest changed before redemption"
+      )
+    }
+    const accessToken = `pdpp_at_${random(32).toString("base64url")}`
+    db.transaction(() => {
+      const claimed = db
+        .prepare(
+          "UPDATE pdpp_github_credential_handoffs SET redeemed_at = ? WHERE session_id = ? AND redeemed_at IS NULL"
+        )
+        .run(timestamp(), effectiveSessionId)
+      if (claimed.changes !== 1) {
+        throw new Error("Credential handoff was already redeemed")
+      }
       db.prepare(
         "INSERT INTO pdpp_github_tokens(token_id, token_hash, grant_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)"
       ).run(
         `pdpp_token_${randomUUID()}`,
         tokenHash(accessToken),
-        grant.grant_id,
-        grant.issued_at,
-        normalizedExpiry
+        handoff.grant_id,
+        timestamp(),
+        handoff.grant_expires_at
       )
-      db.prepare(
-        "UPDATE pdpp_github_consent_requests SET consumed_at = ? WHERE request_id = ?"
-      ).run(timestamp(), request.request_id)
     })()
     return {
-      grant,
       access_token: accessToken,
       token_type: "Bearer",
       pdpp_token_kind: "client",
@@ -267,6 +371,7 @@ export function openGithubAuthorizationStore({
   return {
     createRequest,
     issueGrant,
+    redeemSessionCredential,
     findActiveGrant,
     revokeByLegacyGrantId,
     revokeBoundSession,

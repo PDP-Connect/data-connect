@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { isPendingApprovalRetryAllowed, useGrantFlow } from "./use-grant-flow"
+import { clearPendingPdppGrantCompensation } from "../../lib/storage"
 
 const mockNavigate = vi.fn()
 const mockClaimSession = vi.fn()
@@ -8,6 +9,7 @@ const mockApproveSession = vi.fn()
 const mockDenySession = vi.fn()
 const mockVerifyBuilder = vi.fn()
 const mockCreateGrant = vi.fn()
+const mockRevokeGrant = vi.fn()
 const mockFetchServerIdentity = vi.fn()
 const mockCreateGithubPdppConsentRequest = vi.fn()
 const mockIssueGithubPdppGrant = vi.fn()
@@ -69,6 +71,7 @@ vi.mock("../../services/builder", () => ({
 
 vi.mock("../../services/personalServer", () => ({
   createGrant: (...args: unknown[]) => mockCreateGrant.apply(null, args as []),
+  revokeGrant: (...args: unknown[]) => mockRevokeGrant.apply(null, args as []),
   PersonalServerError: class PersonalServerError extends Error {},
 }))
 
@@ -85,12 +88,14 @@ vi.mock("../../services/serverRegistration", () => ({
 }))
 
 beforeEach(() => {
+  clearPendingPdppGrantCompensation()
   mockNavigate.mockReset()
   mockClaimSession.mockReset()
   mockApproveSession.mockReset()
   mockDenySession.mockReset()
   mockVerifyBuilder.mockReset()
   mockCreateGrant.mockReset()
+  mockRevokeGrant.mockReset()
   mockFetchServerIdentity.mockReset()
   mockCreateGithubPdppConsentRequest.mockReset()
   mockIssueGithubPdppGrant.mockReset()
@@ -112,6 +117,7 @@ beforeEach(() => {
     },
   })
   mockIssueGithubPdppGrant.mockResolvedValue({})
+  mockRevokeGrant.mockResolvedValue(undefined)
   authState = {
     isAuthenticated: false,
     isLoading: false,
@@ -197,6 +203,174 @@ describe("useGrantFlow", () => {
       "pdpp-session",
       expect.objectContaining({ grantId: "legacy-1" })
     )
+  })
+
+  it("revokes the legacy grant when PDPP credential handoff issuance fails", async () => {
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      walletAddress: "subject-1",
+    }
+    const prefetched = {
+      session: {
+        id: "pdpp-session",
+        granteeAddress: "client-1",
+        scopes: ["github.repositories"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "GitHub builder",
+        appUrl: "https://builder.example.com",
+      },
+    }
+    mockCreateGrant.mockResolvedValue({ grantId: "legacy-1" })
+    mockIssueGithubPdppGrant.mockRejectedValue(
+      new Error("credential handoff unavailable")
+    )
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "pdpp-session",
+          secret: "secret",
+          scopes: ["github.repositories"],
+          authorizationDetails: [
+            {
+              type: "https://pdpp.org/data-access",
+              source: { kind: "connector", id: "github" },
+              access_mode: "single_use",
+              purpose_code: "https://example.test/purpose",
+              streams: [{ name: "repositories", fields: ["name"] }],
+            },
+          ],
+        },
+        prefetched
+      )
+    )
+    await waitFor(() => expect(result.current.flowState.status).toBe("consent"))
+
+    await act(async () => {
+      await result.current.handleApprove()
+    })
+
+    expect(mockRevokeGrant).toHaveBeenCalledWith(
+      8080,
+      "legacy-1",
+      "test-dev-token"
+    )
+    expect(mockApproveSession).not.toHaveBeenCalled()
+  })
+
+  it("persists a failed compensation and retries revocation without approving the relay", async () => {
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      walletAddress: "subject-1",
+    }
+    const prefetched = {
+      session: {
+        id: "pdpp-session",
+        granteeAddress: "client-1",
+        scopes: ["github.repositories"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "GitHub builder",
+        appUrl: "https://builder.example.com",
+      },
+    }
+    mockCreateGrant.mockResolvedValue({ grantId: "legacy-1" })
+    mockIssueGithubPdppGrant.mockRejectedValue(new Error("handoff unavailable"))
+    mockRevokeGrant.mockRejectedValueOnce(new Error("server unavailable"))
+
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "pdpp-session",
+          secret: "secret",
+          scopes: ["github.repositories"],
+          authorizationDetails: [
+            {
+              type: "https://pdpp.org/data-access",
+              source: { kind: "connector", id: "github" },
+              access_mode: "single_use",
+              purpose_code: "https://example.test/purpose",
+              streams: [{ name: "repositories", fields: ["name"] }],
+            },
+          ],
+        },
+        prefetched
+      )
+    )
+    await waitFor(() => expect(result.current.flowState.status).toBe("consent"))
+
+    await act(async () => {
+      await result.current.handleApprove()
+    })
+    expect(mockRevokeGrant).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      result.current.handleRetry()
+    })
+    await waitFor(() => expect(mockRevokeGrant).toHaveBeenCalledTimes(2))
+    expect(mockApproveSession).not.toHaveBeenCalled()
+  })
+
+  it("does not issue a PDPP handoff when durable compensation storage is unavailable", async () => {
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      walletAddress: "subject-1",
+    }
+    const setItem = vi
+      .spyOn(window.localStorage, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota exceeded")
+      })
+    mockCreateGrant.mockResolvedValue({ grantId: "legacy-1" })
+    const prefetched = {
+      session: {
+        id: "pdpp-session",
+        granteeAddress: "client-1",
+        scopes: ["github.repositories"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "GitHub builder",
+        appUrl: "https://builder.example.com",
+      },
+    }
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "pdpp-session",
+          secret: "secret",
+          scopes: ["github.repositories"],
+          authorizationDetails: [
+            {
+              type: "https://pdpp.org/data-access",
+              source: { kind: "connector", id: "github" },
+              access_mode: "single_use",
+              purpose_code: "https://example.test/purpose",
+              streams: [{ name: "repositories", fields: ["name"] }],
+            },
+          ],
+        },
+        prefetched
+      )
+    )
+    await waitFor(() => expect(result.current.flowState.status).toBe("consent"))
+
+    await act(async () => {
+      await result.current.handleApprove()
+    })
+
+    expect(mockIssueGithubPdppGrant).not.toHaveBeenCalled()
+    expect(mockRevokeGrant).toHaveBeenCalledWith(
+      8080,
+      "legacy-1",
+      "test-dev-token"
+    )
+    setItem.mockRestore()
   })
 
   it("uses demo session data for grant-session-* IDs", async () => {

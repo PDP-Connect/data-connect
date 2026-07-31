@@ -10,7 +10,11 @@ import {
   SessionRelayError,
 } from "../../services/sessionRelay"
 import { verifyBuilder, BuilderVerificationError } from "../../services/builder"
-import { createGrant, PersonalServerError } from "../../services/personalServer"
+import {
+  createGrant,
+  PersonalServerError,
+  revokeGrant,
+} from "../../services/personalServer"
 import {
   createGithubPdppConsentRequest,
   issueGithubPdppGrant,
@@ -21,6 +25,11 @@ import {
   clearGrantHandoff,
   setGrantHandoffExpiry,
 } from "../../lib/grant-handoff"
+import {
+  clearPendingPdppGrantCompensation,
+  getPendingPdppGrantCompensations,
+  savePendingPdppGrantCompensation,
+} from "../../lib/storage"
 import type {
   BuilderManifest,
   GrantFlowParams,
@@ -61,9 +70,9 @@ export function isPendingApprovalRetryAllowed(
   const expiresAt = new Date(pending.expiresAt).getTime()
   return Boolean(
     walletAddress &&
-      walletAddress === pending.userAddress &&
-      !Number.isNaN(expiresAt) &&
-      Date.now() <= expiresAt
+    walletAddress === pending.userAddress &&
+    !Number.isNaN(expiresAt) &&
+    Date.now() <= expiresAt
   )
 }
 
@@ -488,6 +497,25 @@ export function useGrantFlow(
         }
       }
 
+      // A failed PDPP issuance may have left a legacy grant active. Retry its
+      // persisted, non-secret compensation before creating another grant.
+      const pendingCompensation = getPendingPdppGrantCompensations().find(
+        pending => pending.sessionId === flowState.sessionId
+      )
+      if (pendingCompensation) {
+        if (pendingCompensation.userAddress !== walletAddress) {
+          throw new PersonalServerError(
+            "Sign in with the account that started this approval before retrying it."
+          )
+        }
+        await revokeGrant(
+          personalServer.port,
+          pendingCompensation.grantId,
+          personalServer.devToken
+        )
+        clearPendingPdppGrantCompensation(pendingCompensation)
+      }
+
       // Step: Create grant via Personal Server
       setFlowState(prev => ({ ...prev, status: "creating-grant" }))
 
@@ -504,16 +532,57 @@ export function useGrantFlow(
       )
 
       if (flowState.githubPdppConsentRequest) {
-        await issueGithubPdppGrant(
-          personalServer.port,
-          {
-            requestId: flowState.githubPdppConsentRequest.request_id,
-            legacyGrantId: grantId,
-            subjectId: walletAddress,
-            clientId: flowState.session.granteeAddress,
-          },
-          personalServer.devToken
-        )
+        const pendingCompensation = {
+          sessionId: flowState.sessionId,
+          grantId,
+          userAddress: walletAddress,
+        }
+        if (!savePendingPdppGrantCompensation(pendingCompensation)) {
+          try {
+            await revokeGrant(
+              personalServer.port,
+              grantId,
+              personalServer.devToken
+            )
+          } catch (revokeError) {
+            console.error("[GrantFlow] Unrecorded PDPP compensation failed", {
+              type: revokeError instanceof Error ? revokeError.name : "unknown",
+            })
+          }
+          throw new PersonalServerError(
+            "Could not securely record grant recovery. The incomplete grant was revoked when possible; restart Data Connect before trying again."
+          )
+        }
+        try {
+          await issueGithubPdppGrant(
+            personalServer.port,
+            {
+              requestId: flowState.githubPdppConsentRequest.request_id,
+              legacyGrantId: grantId,
+              subjectId: walletAddress,
+              clientId: flowState.session.granteeAddress,
+            },
+            personalServer.devToken
+          )
+        } catch (error) {
+          // The legacy grant would otherwise authorize a completed-looking
+          // session without its required PDPP credential. Keep the two grants
+          // atomic from the requester's perspective when the local issuance
+          // step rejects before Session Relay approval.
+          try {
+            await revokeGrant(
+              personalServer.port,
+              grantId,
+              personalServer.devToken
+            )
+            clearPendingPdppGrantCompensation(pendingCompensation)
+          } catch (revokeError) {
+            console.error("[GrantFlow] PDPP grant compensation failed", {
+              type: revokeError instanceof Error ? revokeError.name : "unknown",
+            })
+          }
+          throw error
+        }
       }
 
       setFlowState(prev => ({ ...prev, grantId }))
@@ -701,7 +770,10 @@ export function useGrantFlow(
   const handleRetry = useCallback(() => {
     const pending = pendingApprovalRef.current
     if (pending) {
-      if (!isAuthenticated || !isPendingApprovalRetryAllowed(pending, walletAddress)) {
+      if (
+        !isAuthenticated ||
+        !isPendingApprovalRetryAllowed(pending, walletAddress)
+      ) {
         pendingApprovalRef.current = null
         setFlowState(prev => ({
           ...prev,
@@ -719,7 +791,9 @@ export function useGrantFlow(
             secret: pending.secret,
             grantId: pending.grantId,
             userAddress: pending.userAddress,
-            ...(pending.serverAddress && { serverAddress: pending.serverAddress }),
+            ...(pending.serverAddress && {
+              serverAddress: pending.serverAddress,
+            }),
             scopes: pending.scopes,
           })
           pendingApprovalRef.current = null
@@ -744,9 +818,61 @@ export function useGrantFlow(
       return
     }
 
+    const pendingCompensation = getPendingPdppGrantCompensations().find(
+      pending => pending.sessionId === flowState.sessionId
+    )
+    if (pendingCompensation) {
+      const personalServerPort = personalServer.port
+      if (
+        !isAuthenticated ||
+        pendingCompensation.userAddress !== walletAddress ||
+        !personalServerPort
+      ) {
+        setFlowState(prev => ({
+          ...prev,
+          status: "error",
+          error:
+            "Sign in with the account that started this approval and restart the Personal Server before retrying it.",
+        }))
+        return
+      }
+
+      void (async () => {
+        setIsApproving(true)
+        try {
+          await revokeGrant(
+            personalServerPort,
+            pendingCompensation.grantId,
+            personalServer.devToken
+          )
+          clearPendingPdppGrantCompensation(pendingCompensation)
+          setRetryCount(c => c + 1)
+        } catch (error) {
+          console.error("[GrantFlow] PDPP grant compensation retry failed", {
+            type: error instanceof Error ? error.name : "unknown",
+          })
+          setFlowState(prev => ({
+            ...prev,
+            status: "error",
+            error: "Could not revoke the incomplete grant. Please retry.",
+          }))
+        } finally {
+          setIsApproving(false)
+        }
+      })()
+      return
+    }
+
     setAuthPending(false)
     setRetryCount(c => c + 1)
-  }, [handoffId, isAuthenticated, walletAddress])
+  }, [
+    flowState.sessionId,
+    handoffId,
+    isAuthenticated,
+    walletAddress,
+    personalServer.port,
+    personalServer.devToken,
+  ])
 
   // --- Deny flow ---
   // Fire-and-forget the deny call, then navigate away immediately.
@@ -756,11 +882,7 @@ export function useGrantFlow(
       sessionId: flowState.sessionId,
       platform: telemetryPlatform,
     })
-    if (
-      flowState.sessionId &&
-      secret &&
-      !isDemoSession(flowState.sessionId)
-    ) {
+    if (flowState.sessionId && secret && !isDemoSession(flowState.sessionId)) {
       try {
         await denySession(flowState.sessionId, {
           secret,

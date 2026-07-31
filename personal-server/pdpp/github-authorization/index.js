@@ -13,6 +13,7 @@ const LOCAL_TIMELINE_ACCESS_EXPIRES_IN_SECONDS = 8 * 60 * 60
 // request enforces that). It does not consume a record read. The token remains
 // usable only for this server-chosen, bounded lifetime.
 const SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS = 8 * 60 * 60
+const CREDENTIAL_HANDOFF_EXPIRES_IN_SECONDS = 15 * 60
 
 function inactive() {
   return { active: false }
@@ -36,12 +37,14 @@ export function createGithubAuthorizationAdapter({
   now,
   random,
   singleUseAccessExpiresInSeconds = SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS,
+  credentialHandoffExpiresInSeconds = CREDENTIAL_HANDOFF_EXPIRES_IN_SECONDS,
 } = {}) {
   const store = openGithubAuthorizationStore({
     databasePath,
     now,
     random,
     singleUseAccessExpiresInSeconds,
+    credentialHandoffExpiresInSeconds,
   })
   const clock = now ?? (() => new Date())
   const currentManifest = () => readVerifiedManifest(activeManifestPath)
@@ -97,6 +100,33 @@ export function createGithubAuthorizationAdapter({
         requestId,
         legacyGrantId,
         subjectId,
+        clientId,
+        manifest: currentManifest(),
+      })
+    },
+    issueApprovedGrantForRedemption({
+      requestId,
+      legacyGrantId,
+      subjectId,
+      clientId,
+    }) {
+      const issued = store.issueGrant({
+        requestId,
+        legacyGrantId,
+        subjectId,
+        clientId,
+        issueToken: false,
+        manifest: currentManifest(),
+      })
+      return {
+        grant_id: issued.grant.grant_id,
+        session_id: issued.session_id,
+        token_type: "Bearer",
+      }
+    },
+    redeemSessionCredential({ sessionId, clientId }) {
+      return store.redeemSessionCredential({
+        sessionId,
         clientId,
         manifest: currentManifest(),
       })

@@ -5,6 +5,7 @@ import { readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
+import { privateKeyToAccount } from "viem/accounts"
 
 import { Hono } from "hono"
 
@@ -25,8 +26,39 @@ import {
 
 const tempRoots = []
 
+const TEST_BUILDER = privateKeyToAccount(
+  "0x0123456789012345678901234567890123456789012345678901234567890123"
+)
+const TEST_ATTACKER = privateKeyToAccount(
+  "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+)
+
 function hash(contents) {
   return `sha256:${createHash("sha256").update(contents).digest("hex")}`
+}
+
+async function redemptionAuthorization({
+  account,
+  origin,
+  sessionId,
+  iat,
+  exp,
+}) {
+  const path = `/v1/pdpp/credentials/${encodeURIComponent(sessionId)}/redeem`
+  const now = Math.floor(Date.now() / 1000)
+  const payloadBase64 = Buffer.from(
+    JSON.stringify({
+      aud: origin,
+      bodyHash:
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      exp: exp ?? now + 60,
+      iat: iat ?? now,
+      method: "POST",
+      uri: path,
+    })
+  ).toString("base64url")
+  const signature = await account.signMessage({ message: payloadBase64 })
+  return `Web3Signed ${payloadBase64}.${signature}`
 }
 
 function createInstalledGithubFixture({ allStreams = false } = {}) {
@@ -44,27 +76,29 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
     connector_key: "github",
     version: "0.5.0",
     runtime_requirements: { bindings: { network: { required: true } } },
-    streams: allStreams ? allGithubManifestStreams() : [
-      {
-        name: "repositories",
-        primary_key: ["id"],
-        cursor_field: "pushed_at",
-        consent_time_field: "created_at",
-        selection: { fields: true, resources: true },
-        schema: {
-          type: "object",
-          required: ["id", "full_name"],
-          properties: {
-            id: { type: "string" },
-            full_name: { type: "string" },
-            name: { type: "string" },
-            private: { type: "boolean" },
-            created_at: { type: "string", format: "date-time" },
-            pushed_at: { type: "string", format: "date-time" },
+    streams: allStreams
+      ? allGithubManifestStreams()
+      : [
+          {
+            name: "repositories",
+            primary_key: ["id"],
+            cursor_field: "pushed_at",
+            consent_time_field: "created_at",
+            selection: { fields: true, resources: true },
+            schema: {
+              type: "object",
+              required: ["id", "full_name"],
+              properties: {
+                id: { type: "string" },
+                full_name: { type: "string" },
+                name: { type: "string" },
+                private: { type: "boolean" },
+                created_at: { type: "string", format: "date-time" },
+                pushed_at: { type: "string", format: "date-time" },
+              },
+            },
           },
-        },
-      },
-    ],
+        ],
   }
   const manifestBytes = Buffer.from(JSON.stringify(manifest))
   const manifestDigest = hash(manifestBytes)
@@ -109,22 +143,28 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
         platform: "github",
         version: "0.5.0",
         "pdpp.provenance": githubSnapshotProvenance({ manifestDigest }),
-        "pdpp.recordsByStream": allStreams ? {
-          user_stats: [
-            {
-              stream: "user_stats",
-              key: "42:2026-07-30",
-              data: { id: "42:2026-07-30", user_id: "42", observed_on: "2026-07-30" },
-              emitted_at: "2026-07-30T00:00:00Z",
+        "pdpp.recordsByStream": allStreams
+          ? {
+              user_stats: [
+                {
+                  stream: "user_stats",
+                  key: "42:2026-07-30",
+                  data: {
+                    id: "42:2026-07-30",
+                    user_id: "42",
+                    observed_on: "2026-07-30",
+                  },
+                  emitted_at: "2026-07-30T00:00:00Z",
+                },
+              ],
+            }
+          : {
+              repositories: [
+                record("allowed", "2026-02-01T00:00:00Z"),
+                record("resource-excluded", "2026-02-01T00:00:00Z"),
+                record("time-excluded", "2025-02-01T00:00:00Z"),
+              ],
             },
-          ],
-        } : {
-          repositories: [
-            record("allowed", "2026-02-01T00:00:00Z"),
-            record("resource-excluded", "2026-02-01T00:00:00Z"),
-            record("time-excluded", "2025-02-01T00:00:00Z"),
-          ],
-        },
       },
     })
   )
@@ -181,8 +221,20 @@ function githubSnapshotProvenance({
 function allGithubManifestStreams() {
   return [
     ["user", ["id", "login"], "updated_at", "created_at", "date-time"],
-    ["user_stats", ["id", "user_id", "observed_on"], "observed_on", "observed_on", "date"],
-    ["repositories", ["id", "full_name"], "pushed_at", "created_at", "date-time"],
+    [
+      "user_stats",
+      ["id", "user_id", "observed_on"],
+      "observed_on",
+      "observed_on",
+      "date",
+    ],
+    [
+      "repositories",
+      ["id", "full_name"],
+      "pushed_at",
+      "created_at",
+      "date-time",
+    ],
     ["starred", ["id", "full_name"], "starred_at", "starred_at", "date-time"],
     ["issues", ["id"], "updated_at", "created_at", "date-time"],
     ["pull_requests", ["id"], "updated_at", "created_at", "date-time"],
@@ -196,10 +248,17 @@ function allGithubManifestStreams() {
     schema: {
       type: "object",
       properties: Object.fromEntries(
-        [...new Set([...required, cursorField, consentTimeField])].map(field => [
-          field,
-          { type: "string", ...(field === cursorField || field === consentTimeField ? { format } : {}) },
-        ])
+        [...new Set([...required, cursorField, consentTimeField])].map(
+          field => [
+            field,
+            {
+              type: "string",
+              ...(field === cursorField || field === consentTimeField
+                ? { format }
+                : {}),
+            },
+          ]
+        )
       ),
       required,
     },
@@ -249,8 +308,20 @@ function activeToken(overrides = {}) {
 test("derives all installed GitHub streams and accepts date-only user_stats snapshots", () => {
   const streams = [
     ["user", ["id", "login"], "updated_at", "created_at", "date-time"],
-    ["user_stats", ["id", "user_id", "observed_on"], "observed_on", "observed_on", "date"],
-    ["repositories", ["id", "full_name"], "updated_at", "created_at", "date-time"],
+    [
+      "user_stats",
+      ["id", "user_id", "observed_on"],
+      "observed_on",
+      "observed_on",
+      "date",
+    ],
+    [
+      "repositories",
+      ["id", "full_name"],
+      "updated_at",
+      "created_at",
+      "date-time",
+    ],
     ["starred", ["id", "full_name"], "starred_at", "starred_at", "date-time"],
     ["issues", ["id"], "updated_at", "created_at", "date-time"],
     ["pull_requests", ["id"], "updated_at", "created_at", "date-time"],
@@ -262,16 +333,27 @@ test("derives all installed GitHub streams and accepts date-only user_stats snap
     consent_time_field: consentTimeField,
     schema: {
       properties: Object.fromEntries(
-        [...new Set([...required, cursorField, consentTimeField])].map(field => [
-          field,
-          { type: "string", format: field === cursorField || field === consentTimeField ? format : undefined },
-        ])
+        [...new Set([...required, cursorField, consentTimeField])].map(
+          field => [
+            field,
+            {
+              type: "string",
+              format:
+                field === cursorField || field === consentTimeField
+                  ? format
+                  : undefined,
+            },
+          ]
+        )
       ),
       required,
     },
   }))
   const metadata = createGithubStreamMetadata({ streams })
-  assert.deepEqual(Object.keys(metadata), streams.map(stream => stream.name))
+  assert.deepEqual(
+    Object.keys(metadata),
+    streams.map(stream => stream.name)
+  )
   const root = mkdtempSync(join(tmpdir(), "dataconnect-pdpp-all-streams-"))
   tempRoots.push(root)
   const repository = new GrantScopedRecordsRepository({
@@ -296,11 +378,19 @@ test("derives all installed GitHub streams and accepts date-only user_stats snap
     },
   })
   assert.equal(
-    repository.listCurrent({ connectionId: "default", stream: "user_stats", grant: {} }).data.length,
+    repository.listCurrent({
+      connectionId: "default",
+      stream: "user_stats",
+      grant: {},
+    }).data.length,
     1
   )
   assert.deepEqual(
-    repository.listCurrent({ connectionId: "default", stream: "issues", grant: {} }).data,
+    repository.listCurrent({
+      connectionId: "default",
+      stream: "issues",
+      grant: {},
+    }).data,
     []
   )
   assert.throws(
@@ -326,19 +416,36 @@ test("serves every verified GitHub stream while omitted export streams are empty
         pdpp_token_kind: "client",
         subject_id: "subject_123",
         grant: {
-          source: { kind: "connector", id: "https://registry.pdpp.org/connectors/github" },
+          source: {
+            kind: "connector",
+            id: "https://registry.pdpp.org/connectors/github",
+          },
           streams: streamNames.map(name => ({ name })),
         },
       }),
     },
   })
   const headers = { authorization: "Bearer all-streams" }
-  const listed = await app.request("http://personal.example/v1/streams", { headers })
+  const listed = await app.request("http://personal.example/v1/streams", {
+    headers,
+  })
   assert.equal(listed.status, 200, await listed.clone().text())
-  assert.deepEqual((await listed.json()).data.map(stream => stream.name), streamNames)
-  const stats = await app.request("http://personal.example/v1/streams/user_stats/records", { headers })
-  assert.deepEqual((await stats.json()).data.map(record => record.id), ["42:2026-07-30"])
-  const issues = await app.request("http://personal.example/v1/streams/issues/records", { headers })
+  assert.deepEqual(
+    (await listed.json()).data.map(stream => stream.name),
+    streamNames
+  )
+  const stats = await app.request(
+    "http://personal.example/v1/streams/user_stats/records",
+    { headers }
+  )
+  assert.deepEqual(
+    (await stats.json()).data.map(record => record.id),
+    ["42:2026-07-30"]
+  )
+  const issues = await app.request(
+    "http://personal.example/v1/streams/issues/records",
+    { headers }
+  )
   assert.deepEqual((await issues.json()).data, [])
 })
 
@@ -704,38 +811,31 @@ test("serves only the requested connection's verified installed snapshot", async
 
 test("snapshot refresh caches scans and parses while promptly importing a new generation once", async () => {
   const fixture = createInstalledGithubFixture()
-  const nestedExportRoot = join(
-    fixture.exportRoot,
-    "GitHub",
-    "github",
-    "runs"
-  )
+  const nestedExportRoot = join(fixture.exportRoot, "GitHub", "github", "runs")
   mkdirSync(nestedExportRoot, { recursive: true })
   let scanCalls = 0
   let parseCalls = 0
   const imports = []
-  const refresh = createSnapshotRefresher(
-    {
-      exportRoot: fixture.exportRoot,
-      manifest: fixture.manifest,
-      manifestDigest: fixture.manifestDigest,
-      connectionId: "default",
-      repository: {
-        importSnapshot: snapshot => imports.push(snapshot),
+  const refresh = createSnapshotRefresher({
+    exportRoot: fixture.exportRoot,
+    manifest: fixture.manifest,
+    manifestDigest: fixture.manifestDigest,
+    connectionId: "default",
+    repository: {
+      importSnapshot: snapshot => imports.push(snapshot),
+    },
+    fileOperations: {
+      readdir: (...args) => {
+        scanCalls += 1
+        return readdir(...args)
       },
-      fileOperations: {
-        readdir: (...args) => {
-          scanCalls += 1
-          return readdir(...args)
-        },
-        readFile: (...args) => {
-          parseCalls += 1
-          return readFile(...args)
-        },
-        stat,
+      readFile: (...args) => {
+        parseCalls += 1
+        return readFile(...args)
       },
-    }
-  )
+      stat,
+    },
+  })
 
   await refresh()
   const initialScanCalls = scanCalls
@@ -874,14 +974,111 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
       body: JSON.stringify({
         legacy_grant_id: "legacy-grant-1",
         subject_id: "subject-1",
-        client_id: "client-1",
+        client_id: TEST_BUILDER.address,
       }),
     }
   )
   assert.equal(approval.status, 201)
   const issued = await approval.json()
-  const bearer = { authorization: `Bearer ${issued.access_token}` }
-  const identity = adapter.resolveForResourceServer(issued.access_token)
+  assert.equal("access_token" in issued, false)
+  assert.equal("redemption_code" in issued, false)
+
+  adapter.close()
+  const restartedAdapter = createGithubAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    databasePath: join(dirname(fixture.databasePath), "authorization.sqlite"),
+  })
+  const restartedApp = new Hono()
+  registerProtectedRoutes({
+    app: restartedApp,
+    devToken: desktopToken,
+    gatewayClient: {
+      revokeGrant: async ({ grantId }) => legacyRevocations.push(grantId),
+    },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: {
+      signGrantRevocation: async () => "signature",
+    },
+    onLegacyGrantRevoked: legacyGrantId =>
+      restartedAdapter.revokeByLegacyGrantId(legacyGrantId),
+  })
+  registerGithubAuthorizationRoutes({
+    app: restartedApp,
+    devToken: desktopToken,
+    adapter: restartedAdapter,
+  })
+  await mountPdppResourceServer(restartedApp, {
+    ...fixture,
+    tokenIntrospector: {
+      introspect: token => restartedAdapter.resolveForResourceServer(token),
+    },
+  })
+
+  const redeemPath = "/v1/pdpp/credentials/legacy-session/redeem"
+  const rejected = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST" }
+  )
+  assert.equal(rejected.status, 403)
+  assert.equal((await rejected.text()).includes("pdpp_at_"), false)
+
+  const forgedAuthorization = await redemptionAuthorization({
+    account: TEST_ATTACKER,
+    origin: "http://personal.example",
+    sessionId: "legacy-session",
+  })
+  const forged = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST", headers: { authorization: forgedAuthorization } }
+  )
+  assert.equal(forged.status, 403)
+  assert.equal((await forged.text()).includes("pdpp_at_"), false)
+
+  const staleAuthorization = await redemptionAuthorization({
+    account: TEST_BUILDER,
+    origin: "http://personal.example",
+    sessionId: "legacy-session",
+    iat: Math.floor(Date.now() / 1000) - 61,
+    exp: Math.floor(Date.now() / 1000) + 1,
+  })
+  const stale = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST", headers: { authorization: staleAuthorization } }
+  )
+  assert.equal(stale.status, 403)
+  assert.equal((await stale.text()).includes("pdpp_at_"), false)
+
+  const longLivedAuthorization = await redemptionAuthorization({
+    account: TEST_BUILDER,
+    origin: "http://personal.example",
+    sessionId: "legacy-session",
+    exp: Math.floor(Date.now() / 1000) + 301,
+  })
+  const longLived = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST", headers: { authorization: longLivedAuthorization } }
+  )
+  assert.equal(longLived.status, 403)
+  assert.equal((await longLived.text()).includes("pdpp_at_"), false)
+
+  const authorization = await redemptionAuthorization({
+    account: TEST_BUILDER,
+    origin: "http://personal.example",
+    sessionId: "legacy-session",
+  })
+  const credential = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST", headers: { authorization } }
+  )
+  assert.equal(credential.status, 200)
+  const redeemed = await credential.json()
+  assert.equal(typeof redeemed.access_token, "string")
+  const bearer = { authorization: `Bearer ${redeemed.access_token}` }
+  const identity = restartedAdapter.resolveForResourceServer(
+    redeemed.access_token
+  )
   assert.equal(identity.active, true)
   assert.deepEqual(identity.grant.streams[0].fields, [
     "id",
@@ -889,12 +1086,22 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     "name",
   ])
 
-  const streams = await app.request("http://personal.example/v1/streams", {
-    headers: bearer,
-  })
+  const replay = await restartedApp.request(
+    `http://personal.example${redeemPath}`,
+    { method: "POST", headers: { authorization } }
+  )
+  assert.equal(replay.status, 403)
+  assert.equal((await replay.text()).includes("pdpp_at_"), false)
+
+  const streams = await restartedApp.request(
+    "http://personal.example/v1/streams",
+    {
+      headers: bearer,
+    }
+  )
   assert.equal(streams.status, 200, await streams.clone().text())
   assert.equal((await streams.json()).data[0].name, "repositories")
-  const records = await app.request(
+  const records = await restartedApp.request(
     "http://personal.example/v1/streams/repositories/records",
     { headers: bearer }
   )
@@ -905,7 +1112,7 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
     name: "allowed",
   })
 
-  const revoke = await app.request(
+  const revoke = await restartedApp.request(
     "http://personal.example/v1/grants/legacy-grant-1",
     {
       method: "DELETE",
@@ -915,12 +1122,15 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
   assert.equal(revoke.status, 204)
   assert.deepEqual(legacyRevocations, ["legacy-grant-1"])
 
-  const inactive = await app.request("http://personal.example/v1/streams", {
-    headers: bearer,
-  })
+  const inactive = await restartedApp.request(
+    "http://personal.example/v1/streams",
+    {
+      headers: bearer,
+    }
+  )
   assert.equal(inactive.status, 403)
   assert.equal((await inactive.json()).error.code, "grant_revoked")
-  adapter.close()
+  restartedAdapter.close()
 })
 
 test("serves Timeline only after local consent and fails closed after its bound session is revoked", async () => {

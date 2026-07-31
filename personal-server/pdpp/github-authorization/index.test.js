@@ -161,6 +161,59 @@ test("persists an immutable verified-manifest grant and separates private from p
   }
 })
 
+test("redeems an external session credential once after restart without exposing it at approval", () => {
+  const fixtureData = fixture()
+  const options = {
+    databasePath: fixtureData.databasePath,
+    activeManifestPath: fixtureData.activePath,
+  }
+  try {
+    const adapter = createGithubAuthorizationAdapter(options)
+    const request = adapter.createConsentRequest({
+      sessionId: "external-session-1",
+      scopes: ["github.repositories"],
+      authorizationDetails: details(),
+    })
+    const approval = adapter.issueApprovedGrantForRedemption({
+      requestId: request.request_id,
+      legacyGrantId: "external-legacy-1",
+      subjectId: "subject-1",
+      clientId: "client-1",
+    })
+    assert.equal("access_token" in approval, false)
+    assert.equal("redemption_code" in approval, false)
+    assert.deepEqual(approval, {
+      grant_id: approval.grant_id,
+      session_id: "external-session-1",
+      token_type: "Bearer",
+    })
+    adapter.close()
+
+    const reopened = createGithubAuthorizationAdapter(options)
+    const redeemed = reopened.redeemSessionCredential({
+      sessionId: "external-session-1",
+      clientId: "client-1",
+    })
+    assert.equal(typeof redeemed.access_token, "string")
+    assert.equal(redeemed.token_type, "Bearer")
+    assert.equal(
+      reopened.resolveForResourceServer(redeemed.access_token).active,
+      true
+    )
+    assert.throws(
+      () =>
+        reopened.redeemSessionCredential({
+          sessionId: "external-session-1",
+          clientId: "client-1",
+        }),
+      /already redeemed/
+    )
+    reopened.close()
+  } finally {
+    rmSync(fixtureData.root, { recursive: true, force: true })
+  }
+})
+
 test("expires external single-use grants across restart without exposing their grant", () => {
   const fixtureData = fixture()
   let time = new Date("2026-07-30T12:00:00Z")
