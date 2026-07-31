@@ -218,6 +218,47 @@ function findAppBundles(root) {
   })
 }
 
+export function readMacBundleExecutable(infoPlist, runCommand = run) {
+  const executable = runCommand("plutil", [
+    "-extract",
+    "CFBundleExecutable",
+    "raw",
+    "-o",
+    "-",
+    infoPlist,
+  ]).trim()
+  if (!executable) fail(`${infoPlist} has an empty CFBundleExecutable`)
+  return executable
+}
+
+export function selectMacAppExecutables(
+  executableNames,
+  declaredExecutable,
+  artifactName
+) {
+  const mainMatches = executableNames.filter(
+    name => name === declaredExecutable
+  )
+  if (mainMatches.length !== 1) {
+    fail(
+      `${artifactName} CFBundleExecutable ${declaredExecutable} must identify exactly one app executable`
+    )
+  }
+
+  const nodeMatches = executableNames.filter(name => name === "pdpp-node")
+  if (nodeMatches.length !== 1) {
+    fail(`${artifactName} must contain exactly one pdpp-node sidecar`)
+  }
+  if (declaredExecutable === "pdpp-node") {
+    fail(`${artifactName} app executable must be distinct from pdpp-node`)
+  }
+
+  return {
+    appExecutable: declaredExecutable,
+    nodeSidecar: nodeMatches[0],
+  }
+}
+
 function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   if (verifyCodeSignature) {
     run("codesign", ["--verify", "--deep", "--strict", app])
@@ -228,16 +269,23 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   assertPackagedBrowser(entries, artifactName, "macos")
 
   const executableDirectory = join(app, "Contents", "MacOS")
-  const appExecutables = readdirSync(executableDirectory, {
+  const executableNames = readdirSync(executableDirectory, {
     withFileTypes: true,
-  }).filter(entry => entry.isFile())
-  if (appExecutables.length !== 1) {
-    fail(`${artifactName} must contain exactly one app executable`)
-  }
+  })
+    .filter(entry => entry.isFile())
+    .map(entry => entry.name)
+  const declaredExecutable = readMacBundleExecutable(
+    join(app, "Contents", "Info.plist")
+  )
+  const { appExecutable, nodeSidecar } = selectMacAppExecutables(
+    executableNames,
+    declaredExecutable,
+    artifactName
+  )
 
   const binaries = [
-    join(executableDirectory, appExecutables[0].name),
-    join(executableDirectory, "pdpp-node"),
+    join(executableDirectory, appExecutable),
+    join(executableDirectory, nodeSidecar),
     join(
       app,
       "Contents",

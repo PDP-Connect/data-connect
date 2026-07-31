@@ -18,6 +18,8 @@ import {
   collectRelevantWindowsInstallerEntries,
   listDebEntries,
   parseArgs,
+  readMacBundleExecutable,
+  selectMacAppExecutables,
 } from "./verify-bundled-personal-server.mjs"
 
 const runtimeEntries = [
@@ -113,6 +115,72 @@ describe("bundled personal-server verifier", () => {
         "playwright-runner"
       )
     ).toThrow("expected x86_64")
+  })
+
+  it("uses CFBundleExecutable when the macOS app contains its Node sidecar", () => {
+    const invocation = []
+    expect(
+      readMacBundleExecutable(
+        "DataConnect.app/Contents/Info.plist",
+        (command, args) => {
+          invocation.push(command, args)
+          return "DataConnect\n"
+        }
+      )
+    ).toBe("DataConnect")
+    expect(invocation).toEqual([
+      "plutil",
+      [
+        "-extract",
+        "CFBundleExecutable",
+        "raw",
+        "-o",
+        "-",
+        "DataConnect.app/Contents/Info.plist",
+      ],
+    ])
+    expect(() =>
+      readMacBundleExecutable("DataConnect.app/Contents/Info.plist", () => "\n")
+    ).toThrow("empty CFBundleExecutable")
+    expect(
+      selectMacAppExecutables(
+        ["DataConnect", "pdpp-node"],
+        "DataConnect",
+        "DataConnect.app"
+      )
+    ).toEqual({
+      appExecutable: "DataConnect",
+      nodeSidecar: "pdpp-node",
+    })
+  })
+
+  it("rejects a missing or ambiguous CFBundleExecutable file", () => {
+    expect(() =>
+      selectMacAppExecutables(["pdpp-node"], "DataConnect", "DataConnect.app")
+    ).toThrow("must identify exactly one app executable")
+    expect(() =>
+      selectMacAppExecutables(
+        ["DataConnect", "DataConnect", "pdpp-node"],
+        "DataConnect",
+        "DataConnect.app"
+      )
+    ).toThrow("must identify exactly one app executable")
+  })
+
+  it("requires a distinct, exact Node sidecar beside the macOS app executable", () => {
+    expect(() =>
+      selectMacAppExecutables(["DataConnect"], "DataConnect", "DataConnect.app")
+    ).toThrow("exactly one pdpp-node sidecar")
+    expect(() =>
+      selectMacAppExecutables(["pdpp-node"], "pdpp-node", "DataConnect.app")
+    ).toThrow("must be distinct from pdpp-node")
+    expect(() =>
+      assertBinaryArchitecture(
+        "Mach-O 64-bit executable arm64",
+        "arm64",
+        "pdpp-node"
+      )
+    ).not.toThrow()
   })
 
   it("enables strict signature checks only when explicitly requested", () => {
