@@ -24,6 +24,14 @@ const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY: &str =
     "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
 const VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY: &str =
     "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+const VANA_LEGACY_ARTIFACT_URLS: [&str; 6] = [
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/chatgpt-playwright-2.0.0.tgz",
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/github-playwright-1.1.4.tgz",
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/instagram-ads-playwright-1.0.0.tgz",
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/instagram-playwright-1.1.0.tgz",
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/oura-playwright-1.0.1.tgz",
+    "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/youtube-playwright-1.0.0.tgz",
+];
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -384,12 +392,12 @@ async fn verify_sigstore_bundle_async(
 }
 
 fn artifact_certificate_identity_for_url(artifact_url: &str) -> Option<&'static str> {
+    if VANA_LEGACY_ARTIFACT_URLS.contains(&artifact_url) {
+        return Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY);
+    }
     if artifact_url.starts_with("https://github.com/PDP-Connect/data-connectors/releases/download/")
     {
         return Some(DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
-    }
-    if artifact_url.starts_with("https://github.com/vana-com/data-connectors/releases/download/") {
-        return Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY);
     }
     None
 }
@@ -1280,6 +1288,7 @@ mod tests {
         verify_sigstore_bundle_async, verify_sigstore_bundle_blocking, ConnectorFiles,
         ConnectorIndex, IndexedConnector, IndexedConnectorCommon, LegacyIndexedConnector,
         DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY,
+        VANA_LEGACY_ARTIFACT_URLS,
     };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
@@ -1568,15 +1577,27 @@ mod tests {
             ),
             Some(DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY)
         );
-        assert_eq!(
-            artifact_certificate_identity_for_url(
-                "https://github.com/vana-com/data-connectors/releases/download/connectors-legacy/chatgpt-playwright-2.0.0.tgz"
-            ),
-            Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY)
-        );
+        for artifact_url in VANA_LEGACY_ARTIFACT_URLS {
+            assert_eq!(
+                artifact_certificate_identity_for_url(artifact_url),
+                Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY)
+            );
+        }
         assert_eq!(
             artifact_certificate_identity_for_url(
                 "https://github.com/attacker/data-connectors/releases/download/x/github-pdpp-0.5.0.tgz"
+            ),
+            None
+        );
+        assert_eq!(
+            artifact_certificate_identity_for_url(
+                "https://github.com/vana-com/data-connectors/releases/download/connectors-3f944c668395/chatgpt-playwright-2.0.0.tgz.extra"
+            ),
+            None
+        );
+        assert_eq!(
+            artifact_certificate_identity_for_url(
+                "https://github.com/attacker/data-connectors/releases/download/connectors-3f944c668395/chatgpt-playwright-2.0.0.tgz"
             ),
             None
         );

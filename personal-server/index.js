@@ -9,7 +9,7 @@
  * - VANA_MASTER_KEY_SIGNATURE - hex signature for key derivation
  * - GATEWAY_URL - DP RPC gateway URL
  * - CONFIG_DIR - override ~/.vana config directory
- * - ACCOUNT_URL - account signing service (default: https://account.vana.org)
+ * - ACCOUNT_URL - account signing service (optional; required for registration)
  * - CHAIN_ID - EIP-712 chain ID override (default: from config)
  * - PDPP_SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS - lifetime for external PDPP
  *   single-use client tokens (default: 28800)
@@ -62,8 +62,8 @@ function optionalPositiveIntegerEnv(name) {
 }
 
 function personalServerExternalOrigin(serverAddress, tunnelServerAddr) {
-  if (!serverAddress) return undefined;
-  const tunnelDomain = (tunnelServerAddr || 'frpc.server.vana.org').replace(/^frpc\./, '');
+  if (!serverAddress || !tunnelServerAddr) return undefined;
+  const tunnelDomain = tunnelServerAddr.replace(/^frpc\./, '');
   return `https://${serverAddress.toLowerCase()}.${tunnelDomain}`;
 }
 
@@ -89,7 +89,7 @@ function killStaleFrpc(storageRoot) {
       execSync(`pkill -f "${frpcPath}" 2>/dev/null`, { stdio: 'ignore' });
     }
   } catch {
-    // No stale process — expected on clean starts
+    // No stale process is expected on clean starts.
   }
 }
 
@@ -151,9 +151,12 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
     send({ type: 'tunnel-failed', message: 'No subdomain in tunnel config' });
     return;
   }
-  // Derive the public URL domain from the FRP server address
-  // frpc.server.vana.org → server.vana.org, frpc.server-dev.vana.org → server-dev.vana.org
-  const tunnelDomain = serverAddrMatch ? serverAddrMatch[1].replace(/^frpc\./, '') : 'server.vana.org';
+  // A configured FRP server determines the public URL domain.
+  if (!serverAddrMatch) {
+    send({ type: 'tunnel-failed', message: 'No FRP server address in tunnel config' });
+    return;
+  }
+  const tunnelDomain = serverAddrMatch[1].replace(/^frpc\./, '');
   const publicUrl = `https://${subdomainMatch[1]}.${tunnelDomain}`;
   send({ type: 'log', message: `[tunnel] Subdomain: ${subdomainMatch[1]}` });
   send({ type: 'log', message: `[tunnel] Public URL will be: ${publicUrl}` });
@@ -222,14 +225,14 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
       tunnelManager.connectedSince = new Date();
       send({
         type: 'log',
-        message: `[tunnel] Connected to ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'} — ${publicUrl}`,
+        message: `[tunnel] Connected to ${serverAddrMatch ? serverAddrMatch[1] : 'unknown'}: ${publicUrl}`,
       });
       send({ type: 'tunnel', url: publicUrl });
     }
     // The FRP server auth token has a short TTL. If the wrapper kills the
     // library's tunnel and respawns frpc, the original token may have been
     // consumed or expired. Both "Token expired" and "Signer is not a
-    // registered server" indicate stale auth — retry with a fresh claim.
+    // registered server" indicate stale auth, so retry with a fresh claim.
     if (!connected && !retrying && (text.includes('Token expired') || text.includes('Signer is not a registered server'))) {
       retry();
     }
@@ -267,7 +270,7 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
  * Register the server with the Data Gateway via the account signing service.
  *
  * Signs an EIP-712 ServerRegistration using the master key (Privy server
- * wallet) and POSTs to the gateway. Idempotent — 409 means already registered.
+ * wallet) and POSTs to the gateway. A 409 means already registered.
  */
 async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignature, ownerAddress, serverAddress, publicKey, tunnelServerAddr, send }) {
   const serverUrl = personalServerExternalOrigin(serverAddress, tunnelServerAddr);
@@ -347,7 +350,7 @@ async function main() {
   const configDir = process.env.CONFIG_DIR || undefined;
   const gatewayUrl = process.env.GATEWAY_URL || undefined;
   const ownerAddress = process.env.OWNER_ADDRESS || undefined;
-  const accountUrl = process.env.ACCOUNT_URL || 'https://account.vana.org';
+  const accountUrl = process.env.ACCOUNT_URL || undefined;
   const chainId = process.env.CHAIN_ID ? parseInt(process.env.CHAIN_ID, 10) : undefined;
   const masterKeySignature = process.env.VANA_MASTER_KEY_SIGNATURE || undefined;
   const tunnelServerAddr = process.env.TUNNEL_SERVER_ADDR || undefined;
@@ -401,7 +404,7 @@ async function main() {
       message: `[init] tunnel config: serverAddr=${config.tunnel?.serverAddr}, enabled=${config.tunnel?.enabled}`,
     });
 
-    // Keep as a reference — startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
+    // Keep as a reference because startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
     const pdppAuthorization = createGithubAuthorizationAdapter({
@@ -500,14 +503,23 @@ async function main() {
     // Ensure the server is registered with the gateway BEFORE starting
     // background services. This way the library's startBackgroundServices()
     // finds the registration on its first check and connects the tunnel
-    // immediately — no restart cycle needed.
+    // immediately, with no restart cycle needed.
     const hasMasterKey = !!masterKeySignature;
     send({
       type: 'log',
       message: `[bg] hasMasterKey: ${hasMasterKey}, gatewayUrl: ${config.gateway?.url || 'none'}`,
     });
 
-    if (hasMasterKey && context.serverAccount && gatewayClient) {
+    const hasExternalServiceConfiguration = Boolean(
+      hasMasterKey && gatewayUrl && accountUrl && tunnelServerAddr
+    );
+
+    if (!hasExternalServiceConfiguration) {
+      send({
+        type: 'log',
+        message: '[bg] Protocol service endpoints are not configured; skipping registration and tunnel startup',
+      });
+    } else if (context.serverAccount && gatewayClient) {
       // Check if already registered
       let serverId = null;
       try {
@@ -551,76 +563,78 @@ async function main() {
       }
     }
 
-    // Now start background services — the library will find the registration
-    // and connect the tunnel in a single pass.
-    send({ type: 'log', message: `[bg] Starting background services...` });
-    try {
-      await context.startBackgroundServices();
-      send({ type: 'log', message: '[bg] Background services started' });
-    } catch (bgErr) {
-      send({
-        type: 'log',
-        message: `[bg] Background services FAILED: ${bgErr.message || bgErr}`,
-      });
-    }
-
-    send({
-      type: 'log',
-      message: `[bg] tunnelManager: ${!!context.tunnelManager}, tunnelUrl: ${context.tunnelUrl || 'none'}`,
-    });
-
-    if (context.tunnelManager && context.tunnelManager.status === 'connected' && context.tunnelManager.publicUrl) {
-      send({
-        type: 'log',
-        message: `[bg] Library tunnel reports connected — verifying...`,
-      });
-      const verifyUrl = `${context.tunnelManager.publicUrl}/health`;
+    if (hasExternalServiceConfiguration) {
+      // Now start background services. The library will find the registration
+      // and connect the tunnel in a single pass.
+      send({ type: 'log', message: `[bg] Starting background services...` });
       try {
-        const resp = await fetch(verifyUrl, {
-          signal: AbortSignal.timeout(5000),
+        await context.startBackgroundServices();
+        send({ type: 'log', message: '[bg] Background services started' });
+      } catch (bgErr) {
+        send({
+          type: 'log',
+          message: `[bg] Background services FAILED: ${bgErr.message || bgErr}`,
         });
-        if (resp.ok) {
-          send({
-            type: 'log',
-            message: `[bg] Tunnel verified on ${tunnelServerAddr || 'frpc.server.vana.org'} (status ${resp.status})`,
+      }
+
+      send({
+        type: 'log',
+        message: `[bg] tunnelManager: ${!!context.tunnelManager}, tunnelUrl: ${context.tunnelUrl || 'none'}`,
+      });
+
+      if (context.tunnelManager && context.tunnelManager.status === 'connected' && context.tunnelManager.publicUrl) {
+        send({
+          type: 'log',
+          message: `[bg] Library tunnel reports connected; verifying...`,
+        });
+        const verifyUrl = `${context.tunnelManager.publicUrl}/health`;
+        try {
+          const resp = await fetch(verifyUrl, {
+            signal: AbortSignal.timeout(5000),
           });
-          send({ type: 'tunnel', url: context.tunnelManager.publicUrl });
-        } else {
+          if (resp.ok) {
+            send({
+              type: 'log',
+              message: `[bg] Tunnel verified on ${tunnelServerAddr} (status ${resp.status})`,
+            });
+            send({ type: 'tunnel', url: context.tunnelManager.publicUrl });
+          } else {
+            send({
+              type: 'log',
+              message: `[bg] Tunnel verify failed (status ${resp.status}); reconnecting`,
+            });
+            connectTunnel(context.tunnelManager, storageRoot, send, {
+              refreshAuth: () => context.startBackgroundServices(),
+            });
+          }
+        } catch (err) {
           send({
             type: 'log',
-            message: `[bg] Tunnel verify failed (status ${resp.status}) — reconnecting`,
+            message: `[bg] Tunnel verify failed (${err.message}); reconnecting`,
           });
           connectTunnel(context.tunnelManager, storageRoot, send, {
             refreshAuth: () => context.startBackgroundServices(),
           });
         }
-      } catch (err) {
-        send({
-          type: 'log',
-          message: `[bg] Tunnel verify failed (${err.message}) — reconnecting`,
-        });
+      } else if (context.tunnelManager) {
+        // Library set up tunnel infra (TOML + frpc binary) but didn't connect.
+        // Reconnect with a unique proxy name to avoid FRP server collisions.
         connectTunnel(context.tunnelManager, storageRoot, send, {
           refreshAuth: () => context.startBackgroundServices(),
         });
+      } else if (context.tunnelUrl) {
+        send({ type: 'tunnel', url: context.tunnelUrl });
+      } else if (hasMasterKey) {
+        send({
+          type: 'tunnel-failed',
+          message: 'Tunnel could not be established',
+        });
+      } else {
+        send({
+          type: 'log',
+          message: '[bg] No master key; skipping tunnel (expected for Phase 1)',
+        });
       }
-    } else if (context.tunnelManager) {
-      // Library set up tunnel infra (TOML + frpc binary) but didn't connect.
-      // Reconnect with a unique proxy name to avoid FRP server collisions.
-      connectTunnel(context.tunnelManager, storageRoot, send, {
-        refreshAuth: () => context.startBackgroundServices(),
-      });
-    } else if (context.tunnelUrl) {
-      send({ type: 'tunnel', url: context.tunnelUrl });
-    } else if (hasMasterKey) {
-      send({
-        type: 'tunnel-failed',
-        message: 'Tunnel could not be established',
-      });
-    } else {
-      send({
-        type: 'log',
-        message: '[bg] No master key — skipping tunnel (expected for Phase 1)',
-      });
     }
 
     function shutdown(signal) {

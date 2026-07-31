@@ -153,7 +153,7 @@ function getOrCreateLocalId(key: string, storage: Storage | null) {
 
 export function getTelemetryEnabled() {
   if (ENV_DISABLED) return false;
-  return safeGetItem(TELEMETRY_ENABLED_KEY) !== "false";
+  return safeGetItem(TELEMETRY_ENABLED_KEY) === "true";
 }
 
 export function setTelemetryEnabled(enabled: boolean) {

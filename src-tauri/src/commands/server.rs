@@ -217,16 +217,20 @@ pub async fn start_personal_server(
     if let Some(ref addr) = owner_address {
         env_vars.push(("OWNER_ADDRESS", addr.clone()));
     }
-    // Self-registration needs account.vana.org URL and the chain ID.
-    // Default to production values matching the frontend's VITE_* env vars.
-    env_vars.push(("ACCOUNT_URL", std::env::var("VITE_ACCOUNT_URL")
-        .unwrap_or_else(|_| "https://account.vana.org".to_string())));
-    env_vars.push(("CHAIN_ID", std::env::var("VITE_CHAIN_ID")
-        .unwrap_or_else(|_| "1480".to_string())));
-    env_vars.push(("TUNNEL_SERVER_ADDR", std::env::var("VITE_TUNNEL_SERVER_ADDR")
-        .unwrap_or_else(|_| "frpc.server.vana.org".to_string())));
-    env_vars.push(("TUNNEL_SERVER_PORT", std::env::var("VITE_TUNNEL_SERVER_PORT")
-        .unwrap_or_else(|_| "7000".to_string())));
+    // Protocol services are opt-in. Do not substitute a vendor endpoint when
+    // a manual-install build has not been configured for one.
+    for (target_name, source_name) in [
+        ("ACCOUNT_URL", "VITE_ACCOUNT_URL"),
+        ("CHAIN_ID", "VITE_CHAIN_ID"),
+        ("TUNNEL_SERVER_ADDR", "VITE_TUNNEL_SERVER_ADDR"),
+        ("TUNNEL_SERVER_PORT", "VITE_TUNNEL_SERVER_PORT"),
+    ] {
+        if let Ok(value) = std::env::var(source_name) {
+            if !value.trim().is_empty() {
+                env_vars.push((target_name, value));
+            }
+        }
+    }
 
     // Get config dir (~/data-connect/personal-server)
     if let Some(home) = dirs::home_dir() {
@@ -242,8 +246,8 @@ pub async fn start_personal_server(
 
     let mut child = if let Some(binary_path) = get_bundled_personal_server(&app) {
         // On macOS, only ad-hoc sign if the binary lacks a valid signature.
-        // Production builds are already signed by CI with Developer ID —
-        // re-signing would downgrade to ad-hoc and trigger
+        // Optionally signed production builds already have a Developer ID
+        // signature. Re-signing would downgrade them to ad-hoc and trigger
         // "was prevented from modifying apps" Gatekeeper warnings.
         #[cfg(target_os = "macos")]
         {

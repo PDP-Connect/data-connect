@@ -10,7 +10,7 @@
     "build": "node scripts/build.js",
     "test": "node --test pdpp/*.test.js pdpp/github-authorization/*.test.js pdpp/test/*.test.js test/*.test.js",
     "test:pdpp": "node --test pdpp/test/*.test.js",
-    "test:security": "node --test test/protected-routes.test.js"
+    "test:security": "node --test test/protected-routes.test.js scripts/*.test.js"
   },
   "pkg": {
     "assets": [

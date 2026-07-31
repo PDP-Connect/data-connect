@@ -41,3 +41,11 @@ function installStoragePolyfill(target: "localStorage" | "sessionStorage") {
 
 installStoragePolyfill("localStorage")
 installStoragePolyfill("sessionStorage")
+
+// Networked protocol integrations are opt-in in production. Tests that cover
+// their request shape use neutral, non-routable example origins instead.
+process.env.VITE_SESSION_RELAY_URL ??= "https://session-relay.test"
+process.env.VITE_GATEWAY_URL ??= "https://gateway.test"
+process.env.VITE_ACCOUNT_URL ??= "https://account.test"
+process.env.VITE_HYDRA_PUBLIC_URL ??= "https://oauth.test"
+process.env.VITE_TUNNEL_SERVER_ADDR ??= "frpc.tunnel.test"

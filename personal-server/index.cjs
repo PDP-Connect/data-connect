@@ -40,7 +40,10 @@ async function fixTunnelProxyName(tunnelManager, storageRoot) {
   const subdomain = match?.[1];
   if (!subdomain) return null;
 
-  const publicUrl = `https://${subdomain}.server.vana.org`;
+  const serverAddrMatch = toml.match(/serverAddr = "([^"]+)"/);
+  if (!serverAddrMatch) return null;
+  const tunnelDomain = serverAddrMatch[1].replace(/^frpc\./, '');
+  const publicUrl = `https://${subdomain}.${tunnelDomain}`;
 
   // Spawn frpc with fixed config
   const frpc = spawn(frpcPath, ['-c', tomlPath], {

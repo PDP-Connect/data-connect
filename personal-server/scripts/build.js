@@ -7,10 +7,11 @@
 
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, lstatSync, readlinkSync, cpSync, writeFileSync, readFileSync } from 'fs';
-import { join, dirname, resolve, relative } from 'path';
+import { join, dirname, posix, resolve, relative, win32 } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { createRequire } from 'module';
+import { isMainModule } from '../../scripts/is-main-module.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -191,6 +192,51 @@ function rewriteCopiedPackageImports() {
   }
 }
 
+export function listProductionDependencyPaths({
+  root = ROOT,
+  platformName = PLATFORM,
+  nodePath = process.execPath,
+  npmCliPath = process.env.npm_execpath,
+  spawn = spawnSync,
+} = {}) {
+  const pathApi = platformName === 'win32' ? win32 : posix;
+  const command = npmCliPath
+    ? nodePath
+    : platformName === 'win32'
+      ? 'npm.cmd'
+      : 'npm';
+  const args = [
+    ...(npmCliPath ? [npmCliPath] : []),
+    'ls',
+    '--omit=dev',
+    '--all',
+    '--parseable',
+  ];
+  const productionTree = spawn(command, args, {
+    cwd: root,
+    encoding: 'utf8',
+    shell: !npmCliPath && platformName === 'win32',
+  });
+  if (productionTree.error) {
+    throw new Error(
+      `Failed to list production dependencies: ${productionTree.error.message}`
+    );
+  }
+  if (productionTree.status !== 0) {
+    throw new Error(
+      `Failed to list production dependencies: ${productionTree.stderr || productionTree.stdout || `exit ${productionTree.status}`}`
+    );
+  }
+
+  const nodeModulesRoot = pathApi.join(root, 'node_modules');
+  return productionTree.stdout
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => line !== root)
+    .filter(line => line.startsWith(nodeModulesRoot));
+}
+
 async function build() {
   log('Starting personal-server build...');
 
@@ -321,19 +367,7 @@ async function build() {
   // Copy the full production dependency tree beside the binary.
   // The pkg snapshot cannot host native addons, and the external runtime
   // packages we intentionally leave on disk need their transitive deps too.
-  const productionTree = spawnSync('npm', ['ls', '--omit=dev', '--all', '--parseable'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-  });
-  if (productionTree.status !== 0) {
-    throw new Error(`Failed to list production dependencies: ${productionTree.stderr || productionTree.stdout}`);
-  }
-  const dependencyPaths = productionTree.stdout
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .filter(line => line !== ROOT)
-    .filter(line => line.startsWith(join(ROOT, 'node_modules')));
+  const dependencyPaths = listProductionDependencyPaths();
 
   for (const src of dependencyPaths) {
     const relative = src.slice(ROOT.length + 1);
@@ -374,7 +408,9 @@ async function build() {
   }
 }
 
-build().catch(err => {
-  console.error('Build failed:', err);
-  process.exit(1);
-});
+if (isMainModule(import.meta.url, process.argv[1])) {
+  build().catch(err => {
+    console.error('Build failed:', err);
+    process.exit(1);
+  });
+}

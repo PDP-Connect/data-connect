@@ -35,14 +35,6 @@ import { SettingsRow } from "./settings-row"
 interface SettingsAboutProps {
   appVersion: string
   logPath: string
-  appUpdateCheckStatus?:
-    | "idle"
-    | "checking"
-    | "downloading"
-    | "restartReady"
-    | "upToDate"
-    | "updateAvailable"
-    | "unknown"
   nodeTestStatus: "idle" | "testing" | "success" | "error"
   nodeTestResult: NodeJsTestResult | null
   nodeTestError: string | null
@@ -60,7 +52,6 @@ interface SettingsAboutProps {
   onOpenLogFolder: () => void
   telemetryEnabled: boolean
   onTelemetryEnabledChange: (value: boolean) => void
-  onCheckAppUpdate?: () => void
   clearPersonalServerDataStatus: "idle" | "deleting" | "success" | "error"
   clearPersonalServerDataError: string | null
   onClearPersonalServerData: () => void
@@ -71,7 +62,6 @@ const BROWSER_REFRESH_FEEDBACK_MS = 700
 export function SettingsAbout({
   appVersion,
   logPath,
-  appUpdateCheckStatus = "idle",
   nodeTestStatus,
   nodeTestResult,
   nodeTestError,
@@ -89,7 +79,6 @@ export function SettingsAbout({
   onOpenLogFolder,
   telemetryEnabled,
   onTelemetryEnabledChange,
-  onCheckAppUpdate,
   clearPersonalServerDataStatus,
   clearPersonalServerDataError,
   onClearPersonalServerData,
@@ -151,24 +140,6 @@ export function SettingsAbout({
           ? { tone: "accent" as const, label: "Testing…" }
           : { tone: "muted" as const, label: "Test bundled Node.js runtime" }
 
-  const appUpdateStatusDescription =
-    appUpdateCheckStatus === "upToDate"
-      ? { tone: "success" as const, label: "Up to date" }
-      : appUpdateCheckStatus === "restartReady"
-        ? { tone: "warning" as const, label: "Restart to update" }
-        : appUpdateCheckStatus === "downloading"
-          ? { tone: "accent" as const, label: "Downloading update…" }
-      : appUpdateCheckStatus === "updateAvailable"
-        ? { tone: "warning" as const, label: "Update available" }
-        : appUpdateCheckStatus === "unknown"
-          ? { tone: "destructive" as const, label: "Check failed" }
-          : appUpdateCheckStatus === "checking"
-            ? { tone: "accent" as const, label: "Checking…" }
-            : {
-                tone: "muted" as const,
-                label: "Check if a newer app version exists",
-              }
-
   const personalServerStatusDescription =
     personalServer.status === "running"
       ? {
@@ -193,7 +164,9 @@ export function SettingsAbout({
             label:
               browserStatus.browser_type === "system"
                 ? "System Chrome/Edge found"
-                : "Downloaded Chromium found",
+                : browserStatus.browser_type === "bundled"
+                  ? "Bundled Chromium found"
+                  : "Downloaded Chromium found",
           }
         : { tone: "destructive" as const, label: "No browser found" }
 
@@ -229,25 +202,9 @@ export function SettingsAbout({
               icon={<InfoIcon aria-hidden="true" />}
               title="Version"
               description={
-                <div className="flex items-center gap-2">
-                  <Text as="span" intent="fine" dim>
-                    {appVersion || "…"}
-                  </Text>
-                  <SettingsRowDescriptionStatus
-                    tone={appUpdateStatusDescription.tone}
-                  >
-                    {appUpdateStatusDescription.label}
-                  </SettingsRowDescriptionStatus>
-                </div>
-              }
-              right={
-                <SettingsRowAction
-                  onClick={onCheckAppUpdate}
-                  isLoading={appUpdateCheckStatus === "checking"}
-                  loadingLabel="Checking…"
-                >
-                  Check for updates
-                </SettingsRowAction>
+                <Text as="span" intent="fine" dim>
+                  {appVersion || "…"}
+                </Text>
               }
             />
             <SettingsRow

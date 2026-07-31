@@ -7,7 +7,7 @@
  *   2. Open the verification URL in the user's browser (Tauri shell-open).
  *   3. Poll {hydraPublic}/oauth2/token with grant_type=device_code.
  *   4. On success, store the access + refresh tokens and call
- *      account.vana.org/api/servers (Bearer) to discover the user's
+ *      configured account service's /api/servers endpoint (Bearer) to discover the user's
  *      personal_servers.url, which becomes remoteServerUrl.
  *
  * Refresh: refreshAccessToken trades the refresh token for a new access
@@ -19,11 +19,21 @@
  */
 
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
+import { configuredServiceUrl } from "@/config/service-endpoints"
 
-const HYDRA_PUBLIC_URL =
-  import.meta.env.VITE_HYDRA_PUBLIC_URL || "https://oauth-dev.vana.org"
-const ACCOUNT_URL =
-  import.meta.env.VITE_ACCOUNT_URL || "https://account-dev.vana.org"
+function hydraPublicUrl(): string {
+  return configuredServiceUrl(
+    "VITE_HYDRA_PUBLIC_URL",
+    import.meta.env.VITE_HYDRA_PUBLIC_URL
+  )
+}
+
+function accountUrl(): string {
+  return configuredServiceUrl(
+    "VITE_ACCOUNT_URL",
+    import.meta.env.VITE_ACCOUNT_URL
+  )
+}
 const DATA_CONNECT_CLIENT_ID =
   import.meta.env.VITE_HYDRA_DATA_CONNECT_CLIENT_ID || "data-connect"
 // Default scope. The 'offline' scope is required for Hydra to return a
@@ -74,17 +84,14 @@ export async function startDeviceAuthorization(opts?: {
   if (opts?.audience && opts.audience.length > 0) {
     body.set("audience", opts.audience.join(" "))
   }
-  const res = await tauriFetch(
-    `${HYDRA_PUBLIC_URL.replace(/\/+$/, "")}/oauth2/device/auth`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        accept: "application/json",
-      },
-      body: body.toString(),
-    }
-  )
+  const res = await tauriFetch(`${hydraPublicUrl()}/oauth2/device/auth`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    },
+    body: body.toString(),
+  })
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     throw new VanaDeviceFlowError(
@@ -129,17 +136,14 @@ export async function pollForTokens(input: {
     body.set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
     body.set("device_code", input.deviceCode)
     body.set("client_id", DATA_CONNECT_CLIENT_ID)
-    const res = await tauriFetch(
-      `${HYDRA_PUBLIC_URL.replace(/\/+$/, "")}/oauth2/token`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          accept: "application/json",
-        },
-        body: body.toString(),
-      }
-    )
+    const res = await tauriFetch(`${hydraPublicUrl()}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+      body: body.toString(),
+    })
     if (res.ok) {
       return (await res.json()) as VanaTokenBundle
     }
@@ -171,12 +175,9 @@ export async function pollForTokens(input: {
 
     input.onTick?.({
       status: "pending",
-      secondsRemaining: Math.max(
-        0,
-        Math.floor((expiresAtMs - now()) / 1000)
-      ),
+      secondsRemaining: Math.max(0, Math.floor((expiresAtMs - now()) / 1000)),
     })
-    await new Promise((r) => setTimeout(r, intervalMs))
+    await new Promise(r => setTimeout(r, intervalMs))
   }
 }
 
@@ -192,17 +193,14 @@ export async function refreshAccessToken(
   body.set("grant_type", "refresh_token")
   body.set("refresh_token", refreshToken)
   body.set("client_id", DATA_CONNECT_CLIENT_ID)
-  const res = await tauriFetch(
-    `${HYDRA_PUBLIC_URL.replace(/\/+$/, "")}/oauth2/token`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        accept: "application/json",
-      },
-      body: body.toString(),
-    }
-  )
+  const res = await tauriFetch(`${hydraPublicUrl()}/oauth2/token`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    },
+    body: body.toString(),
+  })
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     throw new VanaDeviceFlowError(
@@ -216,26 +214,23 @@ export async function refreshAccessToken(
 
 /**
  * After a successful Login with Vana, discover the user's PS URL by
- * querying account.vana.org's /api/servers with the access token.
+ * querying the configured account service's /api/servers endpoint with the access token.
  * Returns the URL of the user's running PS, or null if none.
  */
 export async function discoverUserPersonalServer(
   accessToken: string
 ): Promise<{ id: string; url: string } | null> {
-  const res = await tauriFetch(
-    `${ACCOUNT_URL.replace(/\/+$/, "")}/api/servers`,
-    {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${accessToken}`,
-      },
-    }
-  )
+  const res = await tauriFetch(`${accountUrl()}/api/servers`, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${accessToken}`,
+    },
+  })
   if (!res.ok) {
     throw new VanaDeviceFlowError(
       "server_discovery_failed",
-      `account.vana.org /api/servers returned ${res.status}`,
+      `Configured account service /api/servers returned ${res.status}`,
       res.status
     )
   }
@@ -244,8 +239,8 @@ export async function discoverUserPersonalServer(
   }
   const servers = body.data ?? []
   const running =
-    servers.find((s) => s.state === "running" && s.url) ??
-    servers.find((s) => s.url)
+    servers.find(s => s.state === "running" && s.url) ??
+    servers.find(s => s.url)
   if (!running || !running.url) return null
   return { id: running.id, url: running.url }
 }

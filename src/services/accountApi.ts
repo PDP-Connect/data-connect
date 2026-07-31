@@ -1,13 +1,18 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
+import { configuredServiceUrl } from "@/config/service-endpoints"
 
-const ACCOUNT_URL =
-  import.meta.env.VITE_ACCOUNT_URL || "https://account.vana.org"
+function accountUrl(): string {
+  return configuredServiceUrl(
+    "VITE_ACCOUNT_URL",
+    import.meta.env.VITE_ACCOUNT_URL
+  )
+}
 
 export async function signMessage(
   masterKeySignature: string,
   message: string
 ): Promise<string> {
-  const res = await tauriFetch(`${ACCOUNT_URL}/api/sign`, {
+  const res = await tauriFetch(`${accountUrl()}/api/sign`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -29,7 +34,7 @@ export async function signTypedData(
   masterKeySignature: string,
   typedData: Record<string, unknown>
 ): Promise<string> {
-  const res = await tauriFetch(`${ACCOUNT_URL}/api/sign`, {
+  const res = await tauriFetch(`${accountUrl()}/api/sign`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

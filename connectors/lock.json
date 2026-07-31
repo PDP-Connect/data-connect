@@ -1,14 +1,14 @@
 {
   "lockVersion": "1.0",
   "dependencyFile": "connectors/connector-dependencies.json",
-  "generatedAt": "2026-07-31T05:20:10.855Z",
+  "generatedAt": "2026-07-31T19:53:29.208Z",
   "sourceRepo": "https://github.com/PDP-Connect/data-connectors",
   "sourceTag": "mixed",
   "sourceCommit": "mixed",
   "index": {
     "mode": "remote",
     "path": null,
-    "url": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json",
+    "url": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/connector-index.json",
     "version": "2.0",
     "signatureVerified": true
   },
@@ -63,19 +63,19 @@
         "script": "anthropic/claude-export-playwright.js",
         "metadata": "anthropic/claude-export-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/claude-export-playwright-2.0.1.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/claude-export-playwright-2.0.1.tgz",
       "artifactPath": "artifacts/claude-export-playwright/claude-export-playwright-2.0.1.tgz",
       "artifactSha256": "sha256:23c8b63a91e3ea3bafce80aa1a6efd5afb79625cdc65719776480fa1b2f8e320",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "claude-export-playwright-2.0.1.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/claude-export-playwright-2.0.1.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/claude-export-playwright-2.0.1.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:7213ef42d1bcbde91db4972ae22a8f0b445f2ff47d85c95548b34ce20054c315",
       "scriptSha256": "sha256:12a068a5186aececdd13e999b84f14a281d8e3d256c1eec70b812afd17142152",
       "sourceTag": "chore/apache-license-and-neutralize",
       "sourceCommit": "37b45c33d159281f718bf2f1da325520ce0f50c4",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-07-13T00:00:00Z",
       "name": "Claude",
       "description": "Exports your Claude conversations and projects via Anthropic's official data export (one complete archive, no per-conversation rate limiting)."
@@ -85,13 +85,13 @@
       "company": "github",
       "version": "0.5.0",
       "resolvedFrom": "0.5.0",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/github-pdpp-0.5.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/github-pdpp-0.5.0.tgz",
       "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.0.tgz",
-      "artifactSha256": "sha256:9c57424f0b361003e31f4b2af1667dcfef617505ce29d0c0a02f837f75880e57",
+      "artifactSha256": "sha256:685b35ee84e84c287cf4bd6df548b984699de84db7bf69966b5bda54a94aa47b",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "github-pdpp-0.5.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/github-pdpp-0.5.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/github-pdpp-0.5.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
       "artifactKind": "pdpp-collection-profile",
@@ -99,10 +99,10 @@
       "entrypointPath": "dist/collection-profile.mjs",
       "entrypointSha256": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
       "provenancePath": "provenance.json",
-      "provenanceSha256": "sha256:ac2ba7e10ea364ea897881bd63b9b18116ee238289269badfe6a17bc16beaf9f",
+      "provenanceSha256": "sha256:3a33cd545496a19508efd520fcf03de226d80ddbf1122fea61bc4bcfe5b0eca3",
       "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
       "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-07-30T00:00:00Z",
       "name": "GitHub (PDPP Collection Profile)",
       "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol."
@@ -142,19 +142,19 @@
         "script": "heb/heb-playwright.js",
         "metadata": "heb/heb-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/heb-playwright-1.1.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/heb-playwright-1.1.0.tgz",
       "artifactPath": "artifacts/heb-playwright/heb-playwright-1.1.0.tgz",
       "artifactSha256": "sha256:7ca896ad6e9ffdb7f54b1ba9f4dd4cf05aa4498f12527fa66970db699525bc71",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "heb-playwright-1.1.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/heb-playwright-1.1.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/heb-playwright-1.1.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:74e49dd5cd606d584f59c1c35efe8772c1e859d4aa22ec8e03ddc1cd15858f51",
       "scriptSha256": "sha256:83919643aaebe8e59386acc2868fd89e1ac94dc3464e26f5afedb570e96a7b9f",
       "sourceTag": "github-events-contributions",
       "sourceCommit": "27585aab07b35521c961de8d7cb5ccffe81af533",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-04-13T00:00:00Z",
       "name": "H-E-B",
       "description": "Exports your H-E-B account profile, order history, and product nutrition data."
@@ -220,19 +220,19 @@
         "script": "linkedin/linkedin-playwright.js",
         "metadata": "linkedin/linkedin-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/linkedin-playwright-5.0.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/linkedin-playwright-5.0.0.tgz",
       "artifactPath": "artifacts/linkedin-playwright/linkedin-playwright-5.0.0.tgz",
       "artifactSha256": "sha256:744b69e19045209c763e71a99fad9b3ee081604c6b99b69f3387e0880d813ed6",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "linkedin-playwright-5.0.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/linkedin-playwright-5.0.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/linkedin-playwright-5.0.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:7e0a1f8ff7d4572a7e09f507011025bbe8c84c59f550628879aacf8900a4624e",
       "scriptSha256": "sha256:351a1a6706903bfbd7055c332f8baa118faa1ccb556cf019005f77cde422480b",
       "sourceTag": "github-events-contributions",
       "sourceCommit": "27585aab07b35521c961de8d7cb5ccffe81af533",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-04-13T00:00:00Z",
       "name": "LinkedIn",
       "description": "Exports your LinkedIn profile, work experience, education, skills, languages, and connections."
@@ -272,19 +272,19 @@
         "script": "shopify/shop-playwright.js",
         "metadata": "shopify/shop-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/shop-playwright-1.0.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/shop-playwright-1.0.0.tgz",
       "artifactPath": "artifacts/shop-playwright/shop-playwright-1.0.0.tgz",
       "artifactSha256": "sha256:5b3cd873b15a68ef13dd1ef2b6057a0aea2dc6fbcffdd2e85bd55a7bd8a77608",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "shop-playwright-1.0.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/shop-playwright-1.0.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/shop-playwright-1.0.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:5eded7e19e3381743d2935a4f6ee41b3ef77524357bcade27bad754791b5cf4c",
       "scriptSha256": "sha256:d9364d7cbaf95fbf0e3130b9221195099b33afe3bb700f411d336e40a705d37f",
       "sourceTag": "github-events-contributions",
       "sourceCommit": "27585aab07b35521c961de8d7cb5ccffe81af533",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-04-13T00:00:00Z",
       "name": "Shop",
       "description": "Exports your Shop app order history."
@@ -298,19 +298,19 @@
         "script": "spotify/spotify-playwright.js",
         "metadata": "spotify/spotify-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/spotify-playwright-1.0.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/spotify-playwright-1.0.0.tgz",
       "artifactPath": "artifacts/spotify-playwright/spotify-playwright-1.0.0.tgz",
       "artifactSha256": "sha256:61b4e428826f22575062a4118310478ee93620b369e95307798933d83d34f169",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "spotify-playwright-1.0.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/spotify-playwright-1.0.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/spotify-playwright-1.0.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:1803a12843e4b5bb022d1dfea580c830db9b1267e0d8b75855a5499d6760515b",
       "scriptSha256": "sha256:35d879b28c1e3b2bb7c84e97985b8edb4e80dbd61d2dae17c969ad02ff5e3e37",
       "sourceTag": "github-events-contributions",
       "sourceCommit": "27585aab07b35521c961de8d7cb5ccffe81af533",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-04-13T00:00:00Z",
       "name": "Spotify",
       "description": "Exports your Spotify library, playlists, listening history, and preferences."
@@ -324,19 +324,19 @@
         "script": "wholefoods/wholefoods-playwright.js",
         "metadata": "wholefoods/wholefoods-playwright.json"
       },
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/wholefoods-playwright-1.0.0.tgz",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/wholefoods-playwright-1.0.0.tgz",
       "artifactPath": "artifacts/wholefoods-playwright/wholefoods-playwright-1.0.0.tgz",
       "artifactSha256": "sha256:3becba5a27ab369e2ca50a7eba5ac47189c72dde91028a10a263664a4befeb04",
       "artifactSignature": {
         "type": "sigstoreBundle",
         "bundlePath": "wholefoods-playwright-1.0.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-a91377a8f645/wholefoods-playwright-1.0.0.tgz.sigstore.json"
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/wholefoods-playwright-1.0.0.tgz.sigstore.json"
       },
       "manifestSha256": "sha256:dbb149de15f1757bc4353d2ee423b5188b0545d35c1674dd0471660027fffcb0",
       "scriptSha256": "sha256:2ebb4426258b87a8e3699b9609c36ff69b03f050e747ed530c54ee1e7f84c59b",
       "sourceTag": "github-events-contributions",
       "sourceCommit": "27585aab07b35521c961de8d7cb5ccffe81af533",
-      "releaseId": "github-a91377a8f64547a47378ee77e12ae306299bc16e",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
       "publishedAt": "2026-04-13T00:00:00Z",
       "name": "Whole Foods Market",
       "description": "Exports your Whole Foods Market order history (via Amazon) and product nutrition data."

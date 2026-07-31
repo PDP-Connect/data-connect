@@ -11,7 +11,7 @@ Download the latest release from [Releases](../../releases).
 
 ### macOS
 
-The app is not code-signed yet. After installing, run:
+macOS artifacts may be unsigned. For an unsigned build, run this after installing:
 
 ```bash
 xattr -cr /Applications/DataConnect.app
@@ -27,12 +27,15 @@ Run the `.exe` installer and follow the prompts.
 
 Use the `.deb` or `.AppImage` package.
 
+Every installer bundles and runs a local Personal Server. It gives the desktop app loopback-only access to imported and exported data, and it enables local PDPP and MCP integrations. Remote registration and tunneling stay disabled unless you explicitly configure service endpoints.
+
 ## Browser Requirements
 
-DataConnect uses browser automation to export your data. On first launch:
+DataConnect uses browser automation to export your data. Release installers include a compatible Chromium build. At runtime:
 
 1. **If you have Chrome/Edge installed:** The app uses your existing browser (recommended)
-2. **If no browser is found:** The app downloads Chromium (~160 MB) automatically
+2. **If no system browser is found:** The app uses the Chromium bundled with the installer
+3. **For local builds without bundled Chromium:** The app downloads Chromium automatically when needed
 
 The downloaded browser is stored in `~/.dataconnect/browsers/` and persists across app updates.
 
@@ -106,21 +109,18 @@ npm run skills:watch
 ### Building for production
 
 ```bash
-# Build the playwright-runner binary first
-cd playwright-runner
-npm install
-npx pkg index.js -t node20-macos-arm64 -o dist/playwright-runner
-
-# Build the app
-cd ..
-npm run tauri build
+# Install the locked dependencies, then build helpers and the native bundle
+npm ci
+npm run tauri:build
 ```
+
+Local installs and builds do not download Chromium as an npm lifecycle step. A local build bundles a compatible Playwright Chromium already present in its cache when available. Otherwise, the app uses a supported system browser or provisions Chromium at runtime. Release CI explicitly provisions Chromium and fails verification if the browser executable is absent from an installer.
 
 The built app will be in `src-tauri/target/release/bundle/`.
 
 ### Releasing
 
-Releases are created via the release script, which bumps the version in `tauri.conf.json`, commits, pushes, and creates a GitHub release that triggers CI builds across all platforms.
+Releases are created via the release script, which bumps the version in `tauri.conf.json`, commits, pushes, and creates a GitHub release that triggers CI builds across macOS, Linux, and Windows.
 
 ```bash
 # Check current and suggested versions
@@ -134,6 +134,10 @@ npm run release:github -- --version X.Y.Z
 ```
 
 > **Do not** create releases manually via `gh release create` or the GitHub UI — the CI workflow will fail if `tauri.conf.json` version doesn't match the release tag.
+
+Release artifacts are manual installs: macOS DMGs, Linux `.deb` and AppImage files, and Windows NSIS installers. This build does not include an in-app auto-updater. macOS artifacts are unsigned unless the optional `APPLE_BUILD_CERTIFICATE_BASE64`, `APPLE_BUILD_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` GitHub secrets are configured. Signed builds are not notarized.
+
+The workflow can also be run manually without uploading artifacts (`workflow_dispatch` with `upload: false`) to validate all platform build legs.
 
 ## Architecture
 
