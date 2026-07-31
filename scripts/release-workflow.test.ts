@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 const releaseWorkflowPath = resolve(
@@ -26,6 +26,19 @@ function readWorkflowStep(workflow: string, name: string) {
   if (start === -1) throw new Error(`Missing workflow step: ${name}`)
   const next = workflow.indexOf("\n      - name: ", start + marker.length)
   return workflow.slice(start, next === -1 ? workflow.length : next)
+}
+
+function readWorkflowRunScript(workflow: string, name: string) {
+  const step = readWorkflowStep(workflow, name)
+  const marker = "        run: |\n"
+  const start = step.indexOf(marker)
+  if (start === -1)
+    throw new Error(`Missing run script for workflow step: ${name}`)
+  return step
+    .slice(start + marker.length)
+    .split("\n")
+    .map(line => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n")
 }
 
 describe("release workflow", () => {
@@ -154,13 +167,63 @@ describe("release workflow", () => {
       "manual-install-${{ matrix.artifact_key }}"
     )
     expect(downloadArtifacts).toContain("pattern: manual-install-*")
-    expect(publishArtifacts).toContain("manual-install-macos-arm64")
-    expect(publishArtifacts).toContain("manual-install-macos-x64")
-    expect(publishArtifacts).toContain("manual-install-linux-x64 '*.deb'")
-    expect(publishArtifacts).toContain("manual-install-linux-x64 '*.AppImage'")
-    expect(publishArtifacts).toContain("manual-install-windows-x64 '*.exe'")
+    expect(publishArtifacts).toContain("manual-install-macos-arm64 'dmg/*.dmg'")
+    expect(publishArtifacts).toContain("manual-install-macos-x64 'dmg/*.dmg'")
+    expect(publishArtifacts).toContain("manual-install-linux-x64 'deb/*.deb'")
+    expect(publishArtifacts).toContain(
+      "manual-install-linux-x64 'appimage/*.AppImage'"
+    )
+    expect(publishArtifacts).toContain(
+      "manual-install-windows-x64 'nsis/*.exe'"
+    )
+    expect(publishArtifacts).toContain('${#artifacts[@]}" -ne 5')
     expect(publishArtifacts).toContain(
       'gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber'
     )
+  })
+
+  it("publishes five files from upload-artifact's preserved subdirectories", () => {
+    const publishScript = readWorkflowRunScript(
+      readReleaseWorkflow(),
+      "Publish complete platform set"
+    )
+    const root = mkdtempSync(join(tmpdir(), "data-connect-publish-layout-"))
+    const expectedAssets = [
+      "manual-install-macos-arm64/dmg/DataConnect_0.7.54_arm64.dmg",
+      "manual-install-macos-x64/dmg/DataConnect_0.7.54_x86_64.dmg",
+      "manual-install-linux-x64/deb/DataConnect_0.7.54_amd64.deb",
+      "manual-install-linux-x64/appimage/DataConnect_0.7.54_amd64.AppImage",
+      "manual-install-windows-x64/nsis/DataConnect_0.7.54_x64-setup.exe",
+    ]
+
+    try {
+      for (const asset of expectedAssets) {
+        const path = join(root, "release-artifacts", asset)
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, "verified artifact")
+      }
+
+      const output = execFileSync(
+        "bash",
+        ["-c", `gh() { printf 'GH_ARG=%s\\n' "$@"; }\n${publishScript}`],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: { ...process.env, RELEASE_TAG: "v0.7.54" },
+        }
+      )
+      const uploadArgs = output
+        .split("\n")
+        .filter(line => line.startsWith("GH_ARG="))
+        .map(line => line.slice("GH_ARG=".length))
+
+      expect(uploadArgs.slice(0, 3)).toEqual(["release", "upload", "v0.7.54"])
+      expect(uploadArgs.slice(3, -1).sort()).toEqual(
+        expectedAssets.map(asset => `release-artifacts/${asset}`).sort()
+      )
+      expect(uploadArgs.at(-1)).toBe("--clobber")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

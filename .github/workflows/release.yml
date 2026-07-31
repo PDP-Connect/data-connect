@@ -246,11 +246,15 @@ jobs:
             fi
           }
 
-          require_artifact manual-install-macos-arm64 '*.dmg'
-          require_artifact manual-install-macos-x64 '*.dmg'
-          require_artifact manual-install-linux-x64 '*.deb'
-          require_artifact manual-install-linux-x64 '*.AppImage'
-          require_artifact manual-install-windows-x64 '*.exe'
+          require_artifact manual-install-macos-arm64 'dmg/*.dmg'
+          require_artifact manual-install-macos-x64 'dmg/*.dmg'
+          require_artifact manual-install-linux-x64 'deb/*.deb'
+          require_artifact manual-install-linux-x64 'appimage/*.AppImage'
+          require_artifact manual-install-windows-x64 'nsis/*.exe'
 
           mapfile -d '' artifacts < <(find release-artifacts -type f -print0)
+          if [ "${#artifacts[@]}" -ne 5 ]; then
+            echo "::error::Expected exactly five verified release artifacts, found ${#artifacts[@]}."
+            exit 1
+          fi
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
