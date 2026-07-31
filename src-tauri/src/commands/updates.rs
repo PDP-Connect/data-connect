@@ -18,10 +18,10 @@ use super::connector_store::{
 };
 
 const DEFAULT_INDEX_URL: &str =
-    "https://github.com/vana-com/data-connectors/releases/download/connectors-latest/connector-index.json";
+    "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
 const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY: &str =
-    "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+    "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
