@@ -1,38 +1,59 @@
-name: Release
+name: Release manual-install artifacts
 
 on:
+  pull_request:
   release:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        required: false
+        default: main
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    env:
+      APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
+      APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-15
+            os_family: macos
             target: aarch64-apple-darwin
+            artifact_key: macos-arm64
+            expected_arch: arm64
             pkg_target: node22-macos-arm64
             binary_name: playwright-runner
             ps_binary_name: personal-server
-          - platform: macos-latest
+          - platform: macos-15-intel
+            os_family: macos
             target: x86_64-apple-darwin
+            artifact_key: macos-x64
+            expected_arch: x86_64
             pkg_target: node22-macos-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
           - platform: ubuntu-22.04
+            os_family: linux
             target: x86_64-unknown-linux-gnu
+            artifact_key: linux-x64
             pkg_target: node22-linux-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
           - platform: windows-latest
+            os_family: windows
             target: x86_64-pc-windows-msvc
+            artifact_key: windows-x64
             pkg_target: node22-win-x64
             binary_name: playwright-runner.exe
             ps_binary_name: personal-server.exe
@@ -42,25 +63,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
 
-      - name: Verify version matches release tag
+      - name: Verify checked-out release identity
+        if: github.event_name == 'release'
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          tag="${{ github.ref_name }}"
-          conf_version=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
-          tag_version="${tag#v}"
-          if [ "$conf_version" != "$tag_version" ]; then
-            echo "::error::Version mismatch: tauri.conf.json has '$conf_version' but release tag is '$tag' ($tag_version)."
-            echo "::error::Run 'npm run release:github -- --version $tag_version' instead of creating a release manually."
-            exit 1
-          fi
-          echo "Version check passed: $conf_version matches tag $tag"
+          set -euo pipefail
+          node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: "22"
+          cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -68,400 +88,169 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies (Ubuntu)
+      - name: Install Linux bundle dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install Apple certificate and API key
-        if: matrix.platform == 'macos-latest'
+      - name: Install optional Apple signing certificate
+        if: matrix.os_family == 'macos' && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_BUILD_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_ASC_API_KEY_KEY_BASE64 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_ASC_API_KEY_ID }}
         run: |
-          # Create variables
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          API_KEY_PATH=$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8
-
-          # Decode certificate
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
-
-          # Decode API key for notarization
-          echo -n "$APPLE_API_KEY" | base64 --decode -o $API_KEY_PATH
-          echo "APPLE_API_KEY_PATH=$API_KEY_PATH" >> $GITHUB_ENV
-
-          # Create temporary keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # Import certificate to keychain
-          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/build_certificate.p12"
+          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$certificate_path"
+          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install playwright-runner dependencies
-        working-directory: playwright-runner
-        run: npm ci
-
-      - name: Build playwright-runner binary
+      - name: Install and build playwright-runner
         working-directory: playwright-runner
         run: |
-          npx pkg index.cjs -t ${{ matrix.pkg_target }} -o dist/${{ matrix.binary_name }} --no-bytecode --public-packages '*' --public
+          npm ci
+          npm run build -- --require-browser --target ${{ matrix.pkg_target }} --output dist/${{ matrix.binary_name }}
 
-      - name: Sign playwright-runner binary (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          codesign --force --options runtime --timestamp \
-            --entitlements playwright-runner/entitlements.plist \
-            --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-            playwright-runner/dist/${{ matrix.binary_name }}
-
-      - name: Install personal-server dependencies
+      - name: Install, test, and build personal-server
         working-directory: personal-server
-        run: npm ci
-
-      - name: Test personal-server security boundary
-        working-directory: personal-server
-        run: npm run test:security
-
-      - name: Build personal-server binary
-        working-directory: personal-server
-        run: npm run build
-
-      - name: Sign personal-server binary (macOS)
-        if: matrix.platform == 'macos-latest'
         run: |
-          codesign --force --options runtime --timestamp \
-            --entitlements personal-server/entitlements.plist \
-            --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-            personal-server/dist/${{ matrix.ps_binary_name }}
+          npm ci
+          npm run test:security
+          npm run build
 
-      - name: Sign personal-server native modules (macOS)
-        if: matrix.platform == 'macos-latest'
+      - name: Optionally sign macOS helper binaries
+        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          echo "=== Signing native .node binaries in personal-server/dist/node_modules ==="
-          find personal-server/dist/node_modules -name "*.node" -type f | while read node_binary; do
-            echo "Signing: $node_binary"
-            codesign --force --options runtime --timestamp \
-              --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-              "$node_binary"
-          done
+          set -euo pipefail
+          codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
+          codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
+          find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
 
-      - name: Build Tauri app
+      - name: Build signed Tauri app
+        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
-          VITE_PRIVY_APP_ID: ${{ secrets.VITE_PRIVY_APP_ID }}
-          VITE_PRIVY_CLIENT_ID: ${{ secrets.VITE_PRIVY_CLIENT_ID }}
-          VITE_SESSION_RELAY_URL: ${{ secrets.VITE_SESSION_RELAY_URL }}
-          VITE_GATEWAY_URL: ${{ secrets.VITE_GATEWAY_URL }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_BUILD_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})"
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-          APPLE_API_KEY: ${{ secrets.APPLE_ASC_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_ASC_API_KEY_ISSUER_UUID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           args: --target ${{ matrix.target }}
 
-      - name: Free disk space before finalization
-        run: |
-          echo "=== Disk usage before cleanup ==="
-          df -h / || true
-          # Remove Rust build artifacts (no longer needed after Tauri build)
-          rm -rf src-tauri/target/${{ matrix.target }}/release/deps
-          rm -rf src-tauri/target/${{ matrix.target }}/release/build
-          rm -rf src-tauri/target/${{ matrix.target }}/release/.fingerprint
-          rm -rf src-tauri/target/${{ matrix.target }}/release/incremental
-          # Remove npm caches no longer needed
-          rm -rf node_modules
-          rm -rf playwright-runner/node_modules
-          rm -rf ~/.cargo/registry/cache
-          echo "=== Disk usage after cleanup ==="
-          df -h / || true
-        shell: bash
-
-      - name: Copy native modules and finalize bundles
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -x  # Enable verbose debugging
-
-          # Copy node_modules into macOS .app bundles (preserving directory structure)
-          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            # Debug: Show what's in personal-server/dist
-            echo "=== Contents of personal-server/dist ==="
-            ls -la personal-server/dist/ || echo "dist not found"
-            echo "=== Contents of personal-server/dist/node_modules ==="
-            ls -la personal-server/dist/node_modules/ || echo "node_modules not found in dist"
-
-            # Sign all native .node binaries BEFORE copying to app bundle
-            # This is required for Apple notarization to succeed
-            echo "=== Signing native .node binaries ==="
-            find personal-server/dist/node_modules -name "*.node" -type f | while read node_binary; do
-              echo "Signing: $node_binary"
-              codesign --force --options runtime --timestamp \
-                --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-                "$node_binary"
-            done
-
-            for app in src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app; do
-              [ -e "$app" ] || { echo "No .app found at $app"; continue; }
-              echo "=== Processing $app ==="
-
-              # Show current state
-              echo "Before copy - Resources contents:"
-              ls -la "$app/Contents/Resources/personal-server/dist/" || echo "personal-server/dist not in Resources"
-
-              dest="$app/Contents/Resources/personal-server/dist/node_modules"
-              mkdir -p "$dest"
-
-              # Copy with verbose output
-              if [ -d "personal-server/dist/node_modules" ]; then
-                cp -Rv personal-server/dist/node_modules/* "$dest/"
-                echo "=== After copy - node_modules contents ==="
-                ls -la "$dest/" || echo "copy failed"
-              else
-                echo "ERROR: personal-server/dist/node_modules does not exist!"
-                exit 1
-              fi
-
-              echo "Copied node_modules to $dest"
-            done
-
-            # Re-sign nested binaries with their entitlements, then re-sign the .app
-            for app in src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app; do
-              [ -e "$app" ] || continue
-
-              # Sign personal-server binary with JIT entitlements (--deep would strip them)
-              ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
-              if [ -f "$ps_bin" ]; then
-                codesign --force --options runtime --timestamp \
-                  --entitlements personal-server/entitlements.plist \
-                  --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-                  "$ps_bin"
-                echo "Signed personal-server binary with JIT entitlements"
-              fi
-
-              # Sign native .node addons inside the app bundle
-              find "$app/Contents/Resources/personal-server/dist/node_modules" -name "*.node" -type f | while read node_binary; do
-                codesign --force --options runtime --timestamp \
-                  --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-                  "$node_binary"
-              done
-
-              # Sign the outer .app (without --deep to preserve nested entitlements)
-              codesign --force --options runtime --timestamp \
-                --sign "Developer ID Application: Corsali, Inc (${{ secrets.APPLE_TEAM_ID }})" \
-                "$app"
-              echo "Re-signed $app"
-            done
-
-            # Recreate DMG with updated .app (including Applications symlink)
-            for app in src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app; do
-              [ -e "$app" ] || continue
-              app_name=$(basename "$app" .app)
-              version=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
-              arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
-              dmg_name="${app_name}_${version}_${arch}.dmg"
-              dmg_path="src-tauri/target/${{ matrix.target }}/release/bundle/dmg/${dmg_name}"
-
-              # Create temp folder with app and Applications symlink
-              dmg_temp="dmg_temp_${arch}"
-              rm -rf "$dmg_temp"
-              mkdir -p "$dmg_temp"
-              cp -R "$app" "$dmg_temp/"
-              ln -s /Applications "$dmg_temp/Applications"
-
-              # Verify node_modules is in the temp folder before creating DMG
-              echo "=== Verifying temp folder contents ==="
-              ls -la "$dmg_temp/"
-              ls -la "$dmg_temp/$(basename $app)/Contents/Resources/personal-server/dist/" || echo "WARNING: personal-server dist not found in temp"
-              ls -la "$dmg_temp/$(basename $app)/Contents/Resources/personal-server/dist/node_modules/" || { echo "ERROR: node_modules NOT in temp folder app!"; exit 1; }
-
-              # Create DMG (two-step: writable image with padding, then convert to compressed)
-              # Single-step -srcfolder -format UDZO can underestimate temp volume size
-              rm -f "$dmg_path"
-              folder_size_mb=$(du -sm "$dmg_temp" | cut -f1)
-              image_size_mb=$(( folder_size_mb + 50 ))
-              echo "Source folder: ${folder_size_mb}MB, image size: ${image_size_mb}MB"
-              hdiutil create -volname "$app_name" -srcfolder "$dmg_temp" -ov -format UDRW -size "${image_size_mb}m" "${dmg_path}.rw.dmg"
-              rm -rf "$dmg_temp"
-              hdiutil convert "${dmg_path}.rw.dmg" -format UDZO -o "$dmg_path"
-              rm -f "${dmg_path}.rw.dmg"
-              echo "Created $dmg_path"
-
-              # Verify DMG contents by mounting and checking
-              echo "=== Verifying DMG contents ==="
-              mount_point="/tmp/verify_dmg_${arch}"
-              mkdir -p "$mount_point"
-              hdiutil attach "$dmg_path" -mountpoint "$mount_point" -nobrowse -quiet
-              ls -la "$mount_point/"
-              ls -la "$mount_point/DataConnect.app/Contents/Resources/personal-server/dist/" || echo "WARNING: dist not in mounted DMG"
-              ls -la "$mount_point/DataConnect.app/Contents/Resources/personal-server/dist/node_modules/" || { hdiutil detach "$mount_point" -quiet; echo "ERROR: node_modules NOT in final DMG!"; exit 1; }
-              hdiutil detach "$mount_point" -quiet
-              echo "=== DMG verification passed ==="
-
-              # Notarize the DMG using App Store Connect API key
-              echo "=== Notarizing $dmg_path ==="
-              if xcrun notarytool submit "$dmg_path" \
-                --key "${{ env.APPLE_API_KEY_PATH }}" \
-                --key-id "${{ secrets.APPLE_ASC_API_KEY_ID }}" \
-                --issuer "${{ secrets.APPLE_ASC_API_KEY_ISSUER_UUID }}" \
-                --wait 2>&1 | tee /tmp/notarize_${arch}.log; then
-                # Staple the notarization ticket
-                xcrun stapler staple "$dmg_path" && echo "Notarized and stapled $dmg_path"
-              else
-                echo "::error::Notarization FAILED for $dmg_path"
-                cat /tmp/notarize_${arch}.log || true
-                # Get detailed log from Apple
-                submission_id=$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' /tmp/notarize_${arch}.log | head -1)
-                if [ -n "$submission_id" ]; then
-                  echo "=== Fetching notarization log for $submission_id ==="
-                  xcrun notarytool log "$submission_id" \
-                    --key "${{ env.APPLE_API_KEY_PATH }}" \
-                    --key-id "${{ secrets.APPLE_ASC_API_KEY_ID }}" \
-                    --issuer "${{ secrets.APPLE_ASC_API_KEY_ISSUER_UUID }}" || true
-                fi
-                exit 1
-              fi
-            done
-          fi
-
-          # Restore the pkg binary after Tauri's Linux bundler mutates ELF
-          # resources, then repack from the corrected AppDir.
-          if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            node scripts/finalize-linux-appimage.js \
-              --appimage-dir src-tauri/target/${{ matrix.target }}/release/bundle/appimage
-          fi
-
-          # Copy node_modules for Windows (into the installation directory structure)
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            # For NSIS, we need to modify the installer or include in resources
-            # The simpler approach is to ensure node_modules is included in the bundle
-            echo "Windows: node_modules should be handled by resource bundling"
-          fi
-        shell: bash
-
-      - name: Upload release artifacts
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Upload macOS DMG
-          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            version=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
-            arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
-
-            for tarball in src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz; do
-              if [ -f "$tarball" ]; then
-                canonical_tarball="src-tauri/target/${{ matrix.target }}/release/bundle/macos/DataConnect_${version}_${arch}.app.tar.gz"
-                canonical_signature="${canonical_tarball}.sig"
-                signature_path="${tarball}.sig"
-
-                if [ "$tarball" != "$canonical_tarball" ]; then
-                  cp "$tarball" "$canonical_tarball"
-                fi
-
-                if [ ! -f "$signature_path" ]; then
-                  echo "::error::Missing updater signature for $tarball"
-                  exit 1
-                fi
-
-                if [ "$signature_path" != "$canonical_signature" ]; then
-                  cp "$signature_path" "$canonical_signature"
-                fi
-
-                gh release upload "${{ github.ref_name }}" "$canonical_tarball" --clobber
-                gh release upload "${{ github.ref_name }}" "$canonical_signature" --clobber
-                echo "Uploaded $(basename "$canonical_tarball")"
-                echo "Uploaded $(basename "$canonical_signature")"
-              fi
-            done
-
-            for f in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
-              if [ -f "$f" ]; then
-                gh release upload "${{ github.ref_name }}" "$f" --clobber
-                echo "Uploaded $(basename "$f")"
-              fi
-            done
-          fi
-
-          # Upload Linux artifacts
-          if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            for f in src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb \
-                     src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage; do
-              if [ -f "$f" ]; then
-                gh release upload "${{ github.ref_name }}" "$f" --clobber
-                echo "Uploaded $(basename "$f")"
-              fi
-            done
-          fi
-
-          # Upload Windows artifacts
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            for f in src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe \
-                     src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi; do
-              if [ -f "$f" ]; then
-                gh release upload "${{ github.ref_name }}" "$f" --clobber
-                echo "Uploaded $(basename "$f")"
-              fi
-            done
-          fi
-        shell: bash
-
-      - name: Cleanup keychain
-        if: matrix.platform == 'macos-latest' && always()
-        run: |
-          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
-
-  publish_updater_manifest:
-    runs-on: ubuntu-22.04
-    needs: build
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Build unsigned Tauri app
+        if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
-          node-version: '22'
+          args: --target ${{ matrix.target }}
 
-      - name: Fetch release metadata
+      - name: Finalize platform bundles
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: |
-          gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
+          set -euo pipefail
+          bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ "${{ matrix.os_family }}" = "macos" ]; then
+            for app in "$bundle_root"/macos/*.app; do
+              [ -e "$app" ] || { echo "No macOS app bundle found"; exit 1; }
+              destination="$app/Contents/Resources/personal-server/dist/node_modules"
+              mkdir -p "$destination"
+              cp -R personal-server/dist/node_modules/. "$destination/"
 
-      - name: Download updater signatures
+              if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+                ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
+                codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
+                find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+                codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+              fi
+
+              version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+              arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
+              dmg_path="$bundle_root/dmg/DataConnect_${version}_${arch}.dmg"
+              staging_dir="$RUNNER_TEMP/dmg-${arch}"
+              rm -rf "$staging_dir"
+              find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -delete
+              mkdir -p "$staging_dir"
+              cp -R "$app" "$staging_dir/"
+              ln -s /Applications "$staging_dir/Applications"
+              node scripts/create-macos-dmg.mjs --volume-name DataConnect --source-folder "$staging_dir" --output "$dmg_path"
+            done
+            verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
+            if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+              verification_args+=(--verify-code-signature)
+            fi
+            node scripts/verify-bundled-personal-server.mjs "${verification_args[@]}"
+          fi
+
+          if [ "${{ matrix.os_family }}" = "linux" ]; then
+            node scripts/finalize-linux-appimage.js --appimage-dir "$bundle_root/appimage"
+            node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root"
+          fi
+
+          if [ "${{ matrix.os_family }}" = "windows" ]; then
+            node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
+          fi
+
+      - name: Stage verified release artifacts
+        if: github.event_name == 'release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: manual-install-${{ matrix.artifact_key }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Cleanup optional Apple keychain
+        if: matrix.os_family == 'macos' && always() && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: manual-install-*
+          path: release-artifacts
+
+      - name: Publish complete platform set
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          mkdir -p updater-signatures
-          gh release download "${{ github.ref_name }}" \
-            --pattern "*.sig" \
-            --dir updater-signatures \
-            --clobber
+          set -euo pipefail
 
-      - name: Build updater manifest
-        run: |
-          node scripts/build-updater-manifest.mjs \
-            --release-json release.json \
-            --signatures-dir updater-signatures \
-            --output latest.json
+          require_artifact() {
+            local directory="$1"
+            local pattern="$2"
+            if ! compgen -G "release-artifacts/$directory/$pattern" >/dev/null; then
+              echo "::error::Missing $pattern artifact for $directory."
+              exit 1
+            fi
+          }
 
-      - name: Upload updater manifest
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ github.ref_name }}" latest.json --clobber
+          require_artifact manual-install-macos-arm64 '*.dmg'
+          require_artifact manual-install-macos-x64 '*.dmg'
+          require_artifact manual-install-linux-x64 '*.deb'
+          require_artifact manual-install-linux-x64 '*.AppImage'
+          require_artifact manual-install-windows-x64 '*.exe'
+
+          mapfile -d '' artifacts < <(find release-artifacts -type f -print0)
+          gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber

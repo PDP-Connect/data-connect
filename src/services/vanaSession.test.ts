@@ -16,7 +16,7 @@ import {
   VanaDeviceFlowError,
 } from "./vanaSession"
 
-const HYDRA_PUBLIC = "https://oauth-dev.vana.org"
+const HYDRA_PUBLIC = import.meta.env.VITE_HYDRA_PUBLIC_URL
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -221,9 +221,9 @@ describe("discoverUserPersonalServer", () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response("nope", { status: 500 })
     )
-    await expect(discoverUserPersonalServer("ory_at_test")).rejects.toBeInstanceOf(
-      VanaDeviceFlowError
-    )
+    await expect(
+      discoverUserPersonalServer("ory_at_test")
+    ).rejects.toBeInstanceOf(VanaDeviceFlowError)
   })
 })
 

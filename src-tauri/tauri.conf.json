@@ -33,28 +33,14 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": [
-          "vana"
-        ]
+        "schemes": ["vana"]
       }
-    },
-    "updater": {
-      "endpoints": [
-        "https://github.com/vana-com/data-connect/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBNjk0QzI5MUI4MTE2NzMKUldSekZvRWJLVXhwbW91MG50WHpxTVFzR1dsWmErUGtOQVlEZ2IwVWRKVGR6L2swd0Vrc3k2TlUK"
     }
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
-    "targets": [
-      "dmg",
-      "app",
-      "nsis",
-      "appimage",
-      "deb"
-    ],
+    "createUpdaterArtifacts": false,
+    "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -73,7 +59,7 @@
       "../connectors/oura/**/*": "connectors/oura/",
       "../connectors/shopify/**/*": "connectors/shopify/",
       "../connectors/wholefoods/**/*": "connectors/wholefoods/",
-      "../playwright-runner/dist/*": "playwright-runner/dist/",
+      "../playwright-runner/dist/": "playwright-runner/dist/",
       "../personal-server/dist/personal-server*": "personal-server/dist/",
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/"
     },

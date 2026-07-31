@@ -45,11 +45,6 @@ import {
   isHomeImportSourcesDebugEnabled,
   resolveHomeImportSourcesUiDebugState,
 } from "./home-import-sources-ui-debug"
-import {
-  APP_UPDATE_UI_DEBUG_SCENARIO_VALUES,
-  getAppUpdateUiDebugScenario,
-  isAppUpdateUiDebugEnabled,
-} from "@/hooks/app-update/app-update-ui-debug"
 
 export function Home() {
   const homeDebugScenarioLabel: Record<string, string> = {
@@ -87,14 +82,6 @@ export function Home() {
   )
   const currentConnectedSourcesUiDebugScenario = useMemo(
     () => new URLSearchParams(location.search).get("connectedSourcesScenario"),
-    [location.search]
-  )
-  const appUpdateUiDebugEnabled = useMemo(
-    () => isAppUpdateUiDebugEnabled(location.search),
-    [location.search]
-  )
-  const currentAppUpdateUiDebugScenario = useMemo(
-    () => getAppUpdateUiDebugScenario(location.search),
     [location.search]
   )
   const displayPlatforms = platforms
@@ -217,21 +204,16 @@ export function Home() {
     },
     [location.search, navigate]
   )
-  const setAppUpdateUiDebugScenario = useCallback(
-    (scenario: string | null) => {
-      const nextParams = new URLSearchParams(location.search)
-      if (scenario) nextParams.set("appUpdateScenario", scenario)
-      else nextParams.delete("appUpdateScenario")
-      navigate({ search: `?${nextParams.toString()}` }, { replace: true })
-    },
-    [location.search, navigate]
-  )
 
   const connectedCanonicalIdsFromRuns = useMemo(
     () =>
       new Set(
         runs
-          .filter(run => (run.status === "success" || run.status === "partial") && Boolean(run.exportPath))
+          .filter(
+            run =>
+              (run.status === "success" || run.status === "partial") &&
+              Boolean(run.exportPath)
+          )
           .map(
             run =>
               getPlatformRegistryEntry({
@@ -454,32 +436,6 @@ export function Home() {
                       "none"}
                   </p>
                 ) : null}
-              </div>
-              <div className="space-y-2 pt-1">
-                <p className="text-xs font-medium">App update toast</p>
-                <div className="flex flex-wrap gap-2">
-                  {APP_UPDATE_UI_DEBUG_SCENARIO_VALUES.map(scenario => (
-                    <Button
-                      key={scenario}
-                      size="xs"
-                      variant={
-                        currentAppUpdateUiDebugScenario === scenario
-                          ? "default"
-                          : "outline"
-                      }
-                      onClick={() => setAppUpdateUiDebugScenario(scenario)}
-                    >
-                      {scenario}
-                    </Button>
-                  ))}
-                  <Button
-                    size="xs"
-                    variant={appUpdateUiDebugEnabled ? "outline" : "default"}
-                    onClick={() => setAppUpdateUiDebugScenario(null)}
-                  >
-                    real
-                  </Button>
-                </div>
               </div>
             </div>
             <div className="col-span-5 space-y-2">

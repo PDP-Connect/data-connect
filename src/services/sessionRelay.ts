@@ -2,36 +2,42 @@
 // Endpoints: claim, approve, deny
 // All calls require `secret` from deep link for authorization
 
-const SESSION_RELAY_URL =
-  import.meta.env.VITE_SESSION_RELAY_URL || "https://session-relay.vana.org";
+import { configuredServiceUrl } from "@/config/service-endpoints"
+
+function sessionRelayUrl(): string {
+  return configuredServiceUrl(
+    "VITE_SESSION_RELAY_URL",
+    import.meta.env.VITE_SESSION_RELAY_URL
+  )
+}
 
 // --- Request/Response types ---
 
 export interface ClaimSessionRequest {
-  sessionId: string;
-  secret: string;
+  sessionId: string
+  secret: string
 }
 
 export interface ClaimSessionResponse {
-  sessionId: string;
-  granteeAddress: string;
-  scopes: string[];
-  expiresAt: string;
-  webhookUrl?: string;
-  appUserId?: string;
+  sessionId: string
+  granteeAddress: string
+  scopes: string[]
+  expiresAt: string
+  webhookUrl?: string
+  appUserId?: string
 }
 
 export interface ApproveSessionRequest {
-  secret: string;
-  grantId: string;
-  userAddress: string;
-  serverAddress?: string;
-  scopes: string[];
+  secret: string
+  grantId: string
+  userAddress: string
+  serverAddress?: string
+  scopes: string[]
 }
 
 export interface DenySessionRequest {
-  secret: string;
-  reason?: string;
+  secret: string
+  reason?: string
 }
 
 // --- Error types ---
@@ -41,30 +47,30 @@ export type SessionRelayErrorCode =
   | "SESSION_EXPIRED"
   | "INVALID_SESSION_STATE"
   | "INVALID_CLAIM_SECRET"
-  | "VALIDATION_ERROR";
+  | "VALIDATION_ERROR"
 
 interface SessionRelayErrorBody {
   error: {
-    code: number;
-    errorCode: SessionRelayErrorCode;
-    message: string;
-    details?: unknown;
-  };
+    code: number
+    errorCode: SessionRelayErrorCode
+    message: string
+    details?: unknown
+  }
 }
 
 export class SessionRelayError extends Error {
-  errorCode?: SessionRelayErrorCode;
-  statusCode?: number;
+  errorCode?: SessionRelayErrorCode
+  statusCode?: number
 
   constructor(
     message: string,
     errorCode?: SessionRelayErrorCode,
     statusCode?: number
   ) {
-    super(message);
-    this.name = "SessionRelayError";
-    this.errorCode = errorCode;
-    this.statusCode = statusCode;
+    super(message)
+    this.name = "SessionRelayError"
+    this.errorCode = errorCode
+    this.statusCode = statusCode
   }
 }
 
@@ -77,50 +83,49 @@ function parseErrorBody(data: unknown): SessionRelayErrorBody["error"] | null {
     "error" in data &&
     typeof (data as SessionRelayErrorBody).error === "object"
   ) {
-    return (data as SessionRelayErrorBody).error;
+    return (data as SessionRelayErrorBody).error
   }
-  return null;
+  return null
 }
 
-async function relayFetch<T>(
-  url: string,
-  init: RequestInit
-): Promise<T> {
-  let response: Response;
+async function relayFetch<T>(url: string, init: RequestInit): Promise<T> {
+  let response: Response
   try {
-    response = await fetch(url, init);
+    response = await fetch(url, init)
   } catch {
-    throw new SessionRelayError("Network error communicating with Session Relay");
+    throw new SessionRelayError(
+      "Network error communicating with Session Relay"
+    )
   }
 
-  let data: unknown;
+  let data: unknown
   try {
-    data = await response.json();
+    data = await response.json()
   } catch {
     throw new SessionRelayError(
       `Session Relay returned non-JSON response (HTTP ${response.status})`
-    );
+    )
   }
 
   if (!response.ok) {
-    const errBody = parseErrorBody(data);
+    const errBody = parseErrorBody(data)
     console.error("[SessionRelay] Non-OK response", {
       status: response.status,
       errorCode: errBody?.errorCode,
-    });
+    })
     if (errBody) {
       throw new SessionRelayError(
         errBody.message,
         errBody.errorCode,
         errBody.code
-      );
+      )
     }
     throw new SessionRelayError(
       `Session Relay request failed (HTTP ${response.status})`
-    );
+    )
   }
 
-  return data as T;
+  return data as T
 }
 
 // --- API functions ---
@@ -129,41 +134,45 @@ async function relayFetch<T>(
 // A session can only be claimed once — concurrent calls (React StrictMode
 // double-mount, Connect pre-fetch + Grant flow racing) share a single
 // HTTP request to avoid 409 "already claimed" errors.
-const claimInflight = new Map<string, Promise<ClaimSessionResponse>>();
+const claimInflight = new Map<string, Promise<ClaimSessionResponse>>()
 
 /** @internal Reset claim dedup cache (for testing). */
 export function _resetClaimCache() {
-  claimInflight.clear();
+  claimInflight.clear()
 }
 
 export async function claimSession(
   request: ClaimSessionRequest
 ): Promise<ClaimSessionResponse> {
-  const existing = claimInflight.get(request.sessionId);
+  const existing = claimInflight.get(request.sessionId)
   if (existing) {
-    console.log("[SessionRelay] claimSession deduped (in-flight)", { sessionId: request.sessionId });
-    return existing;
+    console.log("[SessionRelay] claimSession deduped (in-flight)", {
+      sessionId: request.sessionId,
+    })
+    return existing
   }
 
-  console.log("[SessionRelay] claimSession called", { sessionId: request.sessionId });
+  console.log("[SessionRelay] claimSession called", {
+    sessionId: request.sessionId,
+  })
   const promise = relayFetch<ClaimSessionResponse>(
-    `${SESSION_RELAY_URL}/v1/session/claim`,
+    `${sessionRelayUrl()}/v1/session/claim`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     }
-  );
+  )
 
-  claimInflight.set(request.sessionId, promise);
+  claimInflight.set(request.sessionId, promise)
 
   // Keep successful results cached (claim is idempotent for the session lifetime).
   // Clear failures so retries can make a fresh request.
   promise.catch(() => {
-    claimInflight.delete(request.sessionId);
-  });
+    claimInflight.delete(request.sessionId)
+  })
 
-  return promise;
+  return promise
 }
 
 export async function approveSession(
@@ -171,13 +180,13 @@ export async function approveSession(
   request: ApproveSessionRequest
 ): Promise<void> {
   await relayFetch<unknown>(
-    `${SESSION_RELAY_URL}/v1/session/${encodeURIComponent(sessionId)}/approve`,
+    `${sessionRelayUrl()}/v1/session/${encodeURIComponent(sessionId)}/approve`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     }
-  );
+  )
 }
 
 export async function denySession(
@@ -185,11 +194,11 @@ export async function denySession(
   request: DenySessionRequest
 ): Promise<void> {
   await relayFetch<unknown>(
-    `${SESSION_RELAY_URL}/v1/session/${encodeURIComponent(sessionId)}/deny`,
+    `${sessionRelayUrl()}/v1/session/${encodeURIComponent(sessionId)}/deny`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     }
-  );
+  )
 }

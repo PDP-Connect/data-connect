@@ -1,11 +1,12 @@
 export const LINKS = {
-  docs: "https://github.com/vana-com/data-connect",
-  appBuilderDocs: "https://github.com/vana-com/data-connect",
-  appBuilderExample: "https://github.com/vana-com/vana-connect-starter",
-  appBuilderRegistration: "https://connect.vana.org/admin",
+  docs: "https://github.com/PDP-Connect/data-connect",
+  appBuilderDocs: "https://github.com/PDP-Connect/data-connect",
+  appBuilderExample: "https://github.com/PDP-Connect/data-connect",
+  appBuilderRegistration:
+    "https://github.com/PDP-Connect/data-connect/issues/new",
   appSubmissionGuide:
-    "https://github.com/vana-com/data-connect/blob/main/ecosystem/submit-data-app.md",
-  githubRepo: "https://github.com/vana-com/data-connect",
+    "https://github.com/PDP-Connect/data-connect/blob/main/ecosystem/submit-data-app.md",
+  githubRepo: "https://github.com/PDP-Connect/data-connect",
   vanaDocs: "https://docs.vana.org",
   vanaDocsProtocol: "https://docs.vana.org/data-portability-protocol",
   vanaDocsPersonalServers:
@@ -15,8 +16,7 @@ export const LINKS = {
   vana: "https://www.vana.org/",
   openDataLabs: "https://opendatalabs.xyz/",
   legalDataExtractionRiskResponsibilityDisclosure:
-    "https://github.com/vana-com/data-connect/blob/main/LEGAL.md",
-  passportSignInStub: "https://account.vana.org",
+    "https://github.com/PDP-Connect/data-connect/blob/main/LEGAL.md",
   // Prefills an email to callum+apps@opendatalabs.xyz with:
   // Subject: "DataConnect App Submission - [App Name]"
   // Body fields: app URL, one-sentence user value, demo URL, builder identity/contact, repo or verifiable profile link, and optional extra notes (signed "Callum at Vana").

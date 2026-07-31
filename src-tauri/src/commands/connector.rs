@@ -1128,7 +1128,7 @@ async fn start_playwright_run(
         }),
     );
 
-    let browser_status = check_browser_available(simulate_no_chrome).await?;
+    let browser_status = check_browser_available(app.clone(), simulate_no_chrome).await?;
     if !browser_status.available {
         log::info!("No browser available, downloading Chromium...");
         let _ = app.emit(
@@ -2161,37 +2161,22 @@ pub fn get_user_data_path(app: AppHandle) -> Result<String, String> {
 /// Check if a browser is available for automation
 #[tauri::command]
 pub async fn check_browser_available(
+    app: AppHandle,
     simulate_no_chrome: Option<bool>,
 ) -> Result<BrowserStatus, String> {
-    // Skip system browser check if simulating no Chrome
-    if !simulate_no_chrome.unwrap_or(false) {
-        // Check for system Chrome/Edge first
-        let system_browser = get_system_browser_path();
-        if system_browser.is_some() {
-            return Ok(BrowserStatus {
-                available: true,
-                browser_type: "system".to_string(),
-                needs_download: false,
-            });
-        }
-    }
-
-    // Check for downloaded Chromium
+    let system_browser = if simulate_no_chrome.unwrap_or(false) {
+        None
+    } else {
+        get_system_browser_path()
+    };
     let downloaded = get_downloaded_chromium_path();
-    if downloaded.is_some() {
-        return Ok(BrowserStatus {
-            available: true,
-            browser_type: "downloaded".to_string(),
-            needs_download: false,
-        });
-    }
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .and_then(|resource_dir| get_bundled_chromium_path(&resource_dir));
 
-    // No browser available
-    Ok(BrowserStatus {
-        available: false,
-        browser_type: "none".to_string(),
-        needs_download: true,
-    })
+    Ok(resolve_browser_status(system_browser, downloaded, bundled))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2199,6 +2184,28 @@ pub struct BrowserStatus {
     pub available: bool,
     pub browser_type: String,
     pub needs_download: bool,
+}
+
+fn resolve_browser_status(
+    system_browser: Option<PathBuf>,
+    downloaded_browser: Option<PathBuf>,
+    bundled_browser: Option<PathBuf>,
+) -> BrowserStatus {
+    let browser_type = if system_browser.is_some() {
+        Some("system")
+    } else if downloaded_browser.is_some() {
+        Some("downloaded")
+    } else if bundled_browser.is_some() {
+        Some("bundled")
+    } else {
+        None
+    };
+
+    BrowserStatus {
+        available: browser_type.is_some(),
+        browser_type: browser_type.unwrap_or("none").to_string(),
+        needs_download: browser_type.is_none(),
+    }
 }
 
 /// Get system browser path (Chrome/Edge)
@@ -2300,55 +2307,74 @@ fn get_downloaded_chromium_path() -> Option<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
 
-    let browsers_dir = PathBuf::from(&home).join(".dataconnect").join("browsers");
+    get_downloaded_chromium_path_in_home(Path::new(&home), current_browser_platform())
+}
+
+fn get_downloaded_chromium_path_in_home(home: &Path, platform: &str) -> Option<PathBuf> {
+    let browsers_dir = home.join(".dataconnect").join("browsers");
+    find_chromium_executable(&browsers_dir, platform)
+}
+
+fn get_bundled_chromium_path(resource_dir: &Path) -> Option<PathBuf> {
+    get_bundled_chromium_path_for_platform(resource_dir, current_browser_platform())
+}
+
+fn get_bundled_chromium_path_for_platform(resource_dir: &Path, platform: &str) -> Option<PathBuf> {
+    let browser_roots = [
+        resource_dir
+            .join("playwright-runner")
+            .join("dist")
+            .join("browsers"),
+        resource_dir.join("binaries").join("browsers"),
+        resource_dir
+            .join("_up_")
+            .join("playwright-runner")
+            .join("dist")
+            .join("browsers"),
+    ];
+
+    browser_roots
+        .iter()
+        .find_map(|root| find_chromium_executable(root, platform))
+}
+
+fn current_browser_platform() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return "macos";
+    #[cfg(target_os = "windows")]
+    return "windows";
+    #[cfg(target_os = "linux")]
+    return "linux";
+    #[allow(unreachable_code)]
+    "unsupported"
+}
+
+fn find_chromium_executable(browsers_dir: &Path, platform: &str) -> Option<PathBuf> {
     if !browsers_dir.exists() {
         return None;
     }
 
-    // Find chromium directory
     let entries = std::fs::read_dir(&browsers_dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with("chromium-") && !name.contains("headless") {
             let chromium_dir = entry.path();
-
-            #[cfg(target_os = "macos")]
-            {
-                // Try arm64 first, then x64
-                let paths = [
-                    chromium_dir.join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
-                    chromium_dir.join("chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
-                ];
-                for p in paths {
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                let paths = [
-                    chromium_dir.join("chrome-win/chrome.exe"),
-                    chromium_dir.join("chrome-win64/chrome.exe"),
-                ];
-                for p in paths {
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                let paths = [
-                    chromium_dir.join("chrome-linux/chrome"),
-                    chromium_dir.join("chrome-linux64/chrome"),
-                ];
-                for p in paths {
-                    if p.exists() {
-                        return Some(p);
-                    }
+            let relative_paths: &[&str] = match platform {
+                "macos" => &[
+                    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                    "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                    "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                    "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+                    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+                ],
+                "windows" => &["chrome-win/chrome.exe", "chrome-win64/chrome.exe"],
+                "linux" => &["chrome-linux/chrome", "chrome-linux64/chrome"],
+                _ => &[],
+            };
+            for relative_path in relative_paths {
+                let executable = chromium_dir.join(relative_path);
+                if executable.exists() {
+                    return Some(executable);
                 }
             }
         }
@@ -2708,8 +2734,20 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_looks_like_connector, resolve_icon_path, ConnectorMetadata};
+    use super::{
+        get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
+        manifest_looks_like_connector, resolve_browser_status, resolve_icon_path,
+        ConnectorMetadata,
+    };
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    fn create_file(root: &Path, relative_path: &str) -> PathBuf {
+        let path = root.join(relative_path);
+        std::fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
+        std::fs::write(&path, "fixture").expect("write fixture");
+        path
+    }
 
     fn connector_metadata() -> ConnectorMetadata {
         ConnectorMetadata {
@@ -2769,5 +2807,67 @@ mod tests {
             resolve_icon_path(temp.path(), "icons/github.svg").expect("resolved flattened icon");
 
         assert_eq!(resolved, flattened);
+    }
+
+    #[test]
+    fn fresh_install_preflight_recognizes_browser_in_resource_directory() {
+        let temp = tempdir().expect("tempdir");
+        let executable = create_file(
+            temp.path(),
+            "playwright-runner/dist/browsers/chromium-1200/chrome-linux64/chrome",
+        );
+
+        let bundled = get_bundled_chromium_path_for_platform(temp.path(), "linux");
+        let status = resolve_browser_status(None, None, bundled.clone());
+
+        assert_eq!(bundled, Some(executable));
+        assert!(status.available);
+        assert_eq!(status.browser_type, "bundled");
+        assert!(!status.needs_download);
+    }
+
+    #[test]
+    fn browser_preflight_preserves_system_then_user_download_priority() {
+        let system = PathBuf::from("system-browser");
+        let downloaded = PathBuf::from("downloaded-browser");
+        let bundled = PathBuf::from("bundled-browser");
+
+        let system_status = resolve_browser_status(
+            Some(system),
+            Some(downloaded.clone()),
+            Some(bundled.clone()),
+        );
+        let downloaded_status = resolve_browser_status(None, Some(downloaded), Some(bundled));
+
+        assert_eq!(system_status.browser_type, "system");
+        assert_eq!(downloaded_status.browser_type, "downloaded");
+    }
+
+    #[test]
+    fn downloaded_browser_lookup_supports_intel_mac_layout() {
+        let temp = tempdir().expect("tempdir");
+        let executable = create_file(
+            temp.path(),
+            ".dataconnect/browsers/chromium-1200/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        );
+
+        assert_eq!(
+            get_downloaded_chromium_path_in_home(temp.path(), "macos"),
+            Some(executable)
+        );
+    }
+
+    #[test]
+    fn bundled_browser_lookup_supports_intel_mac_layout() {
+        let temp = tempdir().expect("tempdir");
+        let executable = create_file(
+            temp.path(),
+            "playwright-runner/dist/browsers/chromium-1200/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        );
+
+        assert_eq!(
+            get_bundled_chromium_path_for_platform(temp.path(), "macos"),
+            Some(executable)
+        );
     }
 }

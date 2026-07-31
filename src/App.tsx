@@ -8,7 +8,6 @@ import { TopNav } from "./components/navigation/top-nav"
 import { useDeepLink } from "./hooks/use-deep-link"
 import { usePersonalServer } from "./hooks/usePersonalServer"
 import { useClearLegacyPendingApproval } from "./hooks/usePendingApproval"
-import { AppUpdateProvider } from "./hooks/use-app-update"
 import { ROUTES } from "@/config/routes"
 import { dotPatternStyle } from "@/components/elements/dot-pattern"
 import { LoadingState } from "@/components/elements/loading-state"
@@ -74,7 +73,7 @@ function AppContent() {
   }, [])
 
   return (
-    <AppUpdateProvider>
+    <>
       <div className="flex h-screen">
         {/* Tauri app shell layout: fixed header, scrollable main */}
         <div className="flex flex-1 flex-col overflow-hidden">
@@ -102,7 +101,7 @@ function AppContent() {
         </div>
       </div>
       <Toaster position="bottom-right" richColors />
-    </AppUpdateProvider>
+    </>
   )
 }
 

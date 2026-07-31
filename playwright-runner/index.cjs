@@ -104,6 +104,7 @@ function getDownloadedChromiumPath() {
     // Try arm64 first, then x64
     const paths = [
       path.join(chromiumPath, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+      path.join(chromiumPath, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
       path.join(chromiumPath, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
       // Legacy paths
       path.join(chromiumPath, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),

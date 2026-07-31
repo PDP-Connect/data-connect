@@ -4,13 +4,16 @@ import { useCallback, useEffect, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { PERSONAL_SERVER_AUTH_SESSION_ID } from "@/config/account-auth"
 import { useAuth } from "@/hooks/useAuth"
-import { useAppUpdate } from "@/hooks/use-app-update"
 import { useLoadConnectedAppsWhenReady } from "@/hooks/use-load-connected-apps-when-ready"
 import { usePersonalServer } from "@/hooks/usePersonalServer"
 import { useConnectedApps } from "@/hooks/useConnectedApps"
 import { ROUTES } from "@/config/routes"
 import { openLocalPath, openExternalUrl } from "@/lib/open-resource"
-import { getTelemetryEnabled, setTelemetryEnabled } from "@/lib/telemetry/client"
+import { configuredServiceUrl } from "@/config/service-endpoints"
+import {
+  getTelemetryEnabled,
+  setTelemetryEnabled,
+} from "@/lib/telemetry/client"
 import { getPersonalServerDataPath, getUserDataPath } from "@/lib/tauri-paths"
 import type {
   BrowserSession,
@@ -30,7 +33,6 @@ export function useSettingsPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { user, logout, isAuthenticated, walletAddress } = useAuth()
-  const { checkForUpdates, lastStatus: appUpdateCheckStatus } = useAppUpdate()
   const personalServer = usePersonalServer()
   const { connectedApps, fetchConnectedApps, removeApp } = useConnectedApps()
   const sectionParam = searchParams.get(SETTINGS_SECTION_PARAM)
@@ -253,14 +255,29 @@ export function useSettingsPage() {
   }, [logout, navigate])
 
   const handleSignIn = useCallback(() => {
-    const accountUrl =
-      import.meta.env.VITE_ACCOUNT_URL || "https://account.vana.org"
-    openExternalUrl(accountUrl)
+    try {
+      openExternalUrl(
+        configuredServiceUrl(
+          "VITE_ACCOUNT_URL",
+          import.meta.env.VITE_ACCOUNT_URL
+        )
+      )
+    } catch (error) {
+      console.error("Account sign-in is not configured:", error)
+    }
   }, [])
 
   const handleSignInToStart = useCallback(async () => {
-    const accountUrl =
-      import.meta.env.VITE_ACCOUNT_URL || "https://account.vana.org"
+    let accountUrl: string
+    try {
+      accountUrl = configuredServiceUrl(
+        "VITE_ACCOUNT_URL",
+        import.meta.env.VITE_ACCOUNT_URL
+      )
+    } catch (error) {
+      console.error("Account sign-in is not configured:", error)
+      return
+    }
     const params = new URLSearchParams({
       sessionId: PERSONAL_SERVER_AUTH_SESSION_ID,
       appName: "DataConnect",
@@ -297,10 +314,6 @@ export function useSettingsPage() {
     setTelemetryEnabledState(enabled)
   }, [])
 
-  const checkAppUpdate = useCallback(() => {
-    void checkForUpdates({ ignoreDismissedVersion: true })
-  }, [checkForUpdates])
-
   const setActiveSection = useCallback(
     (nextSection: SettingsSection) => {
       const nextSearchParams = new URLSearchParams(searchParams)
@@ -324,7 +337,6 @@ export function useSettingsPage() {
     personalServerDataPath,
     appVersion,
     logPath,
-    appUpdateCheckStatus,
     nodeTestStatus,
     nodeTestResult,
     nodeTestError,
@@ -340,7 +352,6 @@ export function useSettingsPage() {
     onOpenDataFolder: openDataFolder,
     onOpenPersonalServerFolder: openPersonalServerFolder,
     onOpenLogFolder: openLogFolder,
-    onCheckAppUpdate: checkAppUpdate,
     onTestNodeJs: testNodeJs,
     onDebugPaths: debugPaths,
     onClearDebugPaths: clearDebugPaths,

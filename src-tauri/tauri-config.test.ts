@@ -2,23 +2,71 @@ import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
-describe("tauri updater config", () => {
-  it("points at the stable latest manifest with a public key", () => {
+describe("tauri manual-install config", () => {
+  it("preserves the packaged Playwright browser directory tree", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { resources?: Record<string, string> }
+    }
+
+    expect(document.bundle?.resources?.["../playwright-runner/dist/"]).toBe(
+      "playwright-runner/dist/"
+    )
+    expect(
+      document.bundle?.resources?.["../playwright-runner/dist/**/*"]
+    ).toBeUndefined()
+  })
+
+  it("disables updater artifacts and ships no updater endpoint", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
       bundle?: { createUpdaterArtifacts?: boolean }
       plugins?: {
-        updater?: {
-          endpoints?: string[]
-          pubkey?: string
-        }
+        updater?: unknown
       }
     }
 
-    expect(document.bundle?.createUpdaterArtifacts).toBe(true)
-    expect(document.plugins?.updater?.endpoints).toEqual([
-      "https://github.com/vana-com/data-connect/releases/latest/download/latest.json",
-    ])
-    expect(document.plugins?.updater?.pubkey).toBeTruthy()
+    expect(document.bundle?.createUpdaterArtifacts).toBe(false)
+    expect(document.plugins?.updater).toBeUndefined()
+  })
+
+  it("has no active Vana service or update endpoint in shipped defaults", () => {
+    const defaultConfigPaths = [
+      "src-tauri/tauri.conf.json",
+      ".env.prod.example",
+      ".env.example",
+      ".env.dev.example",
+    ]
+
+    for (const relativePath of defaultConfigPaths) {
+      const contents = readFileSync(
+        resolve(process.cwd(), relativePath),
+        "utf-8"
+      )
+      expect(contents).not.toMatch(/https?:\/\/[^\s"']*vana\.(?:com|org)/i)
+    }
+  })
+
+  it("has no hard-coded Vana protocol service in default runtime paths", () => {
+    const runtimePaths = [
+      "src/services/accountApi.ts",
+      "src/services/builder.ts",
+      "src/services/serverRegistration.ts",
+      "src/services/sessionRelay.ts",
+      "src/services/vanaSession.ts",
+      "src-tauri/src/commands/server.rs",
+      "personal-server/index.js",
+      "personal-server/index.cjs",
+    ]
+
+    for (const relativePath of runtimePaths) {
+      const contents = readFileSync(
+        resolve(process.cwd(), relativePath),
+        "utf-8"
+      )
+      expect(contents).not.toMatch(
+        /(?:session-relay|data-gateway|account|hydra|frpc\.server|server)\S*\.vana\.org/i
+      )
+    }
   })
 })

@@ -30,7 +30,7 @@ try {
   })
   if (check.error) throw check.error
   if (check.status !== 0) {
-    run(resolveScript)
+    run(resolveScript, ["--install-locked"])
   }
   run(generateScript)
 } catch (error) {
