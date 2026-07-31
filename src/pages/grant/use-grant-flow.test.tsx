@@ -3,6 +3,15 @@ import { act, renderHook, waitFor } from "@testing-library/react"
 import { isPendingApprovalRetryAllowed, useGrantFlow } from "./use-grant-flow"
 import { clearPendingPdppGrantCompensation } from "../../lib/storage"
 
+const { MockPdppAuthorizationProofError } = vi.hoisted(() => ({
+  MockPdppAuthorizationProofError: class PdppAuthorizationProofError extends Error {
+    constructor(message: string) {
+      super(message)
+      this.name = "PdppAuthorizationProofError"
+    }
+  },
+}))
+
 const mockNavigate = vi.fn()
 const mockClaimSession = vi.fn()
 const mockApproveSession = vi.fn()
@@ -13,6 +22,7 @@ const mockRevokeGrant = vi.fn()
 const mockFetchServerIdentity = vi.fn()
 const mockCreateGithubPdppConsentRequest = vi.fn()
 const mockIssueGithubPdppGrant = vi.fn()
+const mockVerifyPdppAuthorizationProof = vi.fn()
 
 let authState = {
   isAuthenticated: false,
@@ -82,6 +92,12 @@ vi.mock("../../services/pdppAuthorization", () => ({
     mockIssueGithubPdppGrant.apply(null, args as []),
 }))
 
+vi.mock("../../services/pdppAuthorizationProof", () => ({
+  verifyPdppAuthorizationProof: (...args: unknown[]) =>
+    mockVerifyPdppAuthorizationProof.apply(null, args as []),
+  PdppAuthorizationProofError: MockPdppAuthorizationProofError,
+}))
+
 vi.mock("../../services/serverRegistration", () => ({
   fetchServerIdentity: (...args: unknown[]) =>
     mockFetchServerIdentity.apply(null, args as []),
@@ -99,6 +115,7 @@ beforeEach(() => {
   mockFetchServerIdentity.mockReset()
   mockCreateGithubPdppConsentRequest.mockReset()
   mockIssueGithubPdppGrant.mockReset()
+  mockVerifyPdppAuthorizationProof.mockReset()
   mockFetchServerIdentity.mockResolvedValue({
     address: "0xserver",
     publicKey: "pk",
@@ -117,6 +134,7 @@ beforeEach(() => {
     },
   })
   mockIssueGithubPdppGrant.mockResolvedValue({})
+  mockVerifyPdppAuthorizationProof.mockResolvedValue(undefined)
   mockRevokeGrant.mockResolvedValue(undefined)
   authState = {
     isAuthenticated: false,
@@ -172,12 +190,19 @@ describe("useGrantFlow", () => {
           sessionId: "pdpp-session",
           secret: "secret",
           scopes: ["github.repositories"],
+          authorizationDetailsSignature: "0xbuilder-proof",
           authorizationDetails: details,
         },
         prefetched
       )
     )
     await waitFor(() => expect(result.current.flowState.status).toBe("consent"))
+    expect(mockVerifyPdppAuthorizationProof).toHaveBeenCalledWith({
+      sessionId: "pdpp-session",
+      authorizationDetails: details,
+      signature: "0xbuilder-proof",
+      builderAddress: "client-1",
+    })
     expect(result.current.flowState.githubPdppConsentRequest?.request_id).toBe(
       "pdpp_request_1"
     )
@@ -203,6 +228,52 @@ describe("useGrantFlow", () => {
       "pdpp-session",
       expect.objectContaining({ grantId: "legacy-1" })
     )
+  })
+
+  it("does not render PDPP consent when the builder proof is missing", async () => {
+    mockVerifyPdppAuthorizationProof.mockRejectedValue(
+      new MockPdppAuthorizationProofError(
+        "The PDPP authorization request is missing the builder signature."
+      )
+    )
+    const prefetched = {
+      session: {
+        id: "pdpp-session",
+        granteeAddress: "client-1",
+        scopes: ["github.repositories"],
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      builderManifest: {
+        name: "GitHub builder",
+        appUrl: "https://builder.example.com",
+      },
+    }
+
+    const { result } = renderHook(() =>
+      useGrantFlow(
+        {
+          sessionId: "pdpp-session",
+          secret: "secret",
+          scopes: ["github.repositories"],
+          authorizationDetails: [
+            {
+              type: "https://pdpp.org/data-access",
+              source: { kind: "connector", id: "github" },
+              access_mode: "single_use",
+              purpose_code: "https://example.test/purpose",
+              streams: [{ name: "repositories", fields: ["name"] }],
+            },
+          ],
+        },
+        prefetched
+      )
+    )
+
+    await waitFor(() => expect(result.current.flowState.status).toBe("error"))
+    expect(result.current.flowState.error).toContain(
+      "missing the builder signature"
+    )
+    expect(mockCreateGithubPdppConsentRequest).not.toHaveBeenCalled()
   })
 
   it("revokes the legacy grant when PDPP credential handoff issuance fails", async () => {

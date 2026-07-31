@@ -50,6 +50,7 @@ export interface GrantFlowParams {
   appId?: string
   scopes?: string[]
   status?: "success"
+  authorizationDetailsSignature?: string
   authorizationDetails?:
     | import("@/services/pdppAuthorization").PdppAuthorizationDetail[]
     | null

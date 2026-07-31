@@ -19,6 +19,10 @@ import {
   createGithubPdppConsentRequest,
   issueGithubPdppGrant,
 } from "../../services/pdppAuthorization"
+import {
+  PdppAuthorizationProofError,
+  verifyPdppAuthorizationProof,
+} from "../../services/pdppAuthorizationProof"
 import { fetchServerIdentity } from "../../services/serverRegistration"
 import { usePersonalServer } from "../../hooks/usePersonalServer"
 import {
@@ -125,6 +129,8 @@ export function useGrantFlow(
   const handoffId = params?.handoffId
   const hasSuccessOverride = params?.status === "success"
   const pdppAuthorizationDetails = params?.authorizationDetails
+  const pdppAuthorizationDetailsSignature =
+    params?.authorizationDetailsSignature
   const pdppAuthorizationDetailsKey =
     pdppAuthorizationDetails === undefined
       ? "absent"
@@ -169,6 +175,25 @@ export function useGrantFlow(
         throw new PersonalServerError(
           "The GitHub authorization details are invalid."
         )
+      }
+      if (pdppAuthorizationDetails) {
+        try {
+          await verifyPdppAuthorizationProof({
+            sessionId: session.id,
+            authorizationDetails: pdppAuthorizationDetails,
+            signature: pdppAuthorizationDetailsSignature,
+            builderAddress: session.granteeAddress,
+          })
+        } catch (error) {
+          if (!(error instanceof PdppAuthorizationProofError)) throw error
+          if (cancelled) return
+          setFlowState({
+            sessionId: session.id,
+            status: "error",
+            error: error.message,
+          })
+          return
+        }
       }
       const githubPdppConsentRequest = pdppAuthorizationDetails
         ? await (() => {
@@ -414,6 +439,7 @@ export function useGrantFlow(
           error:
             error instanceof SessionRelayError ||
             error instanceof BuilderVerificationError ||
+            error instanceof PdppAuthorizationProofError ||
             error instanceof PersonalServerError
               ? error.message
               : "Failed to load session",
@@ -432,6 +458,7 @@ export function useGrantFlow(
     secret,
     retryCount,
     pdppAuthorizationDetailsKey,
+    pdppAuthorizationDetailsSignature,
     handoffId,
     personalServer.devToken,
     personalServer.port,

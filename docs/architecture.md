@@ -70,6 +70,11 @@ Runtime boundaries:
 - Deep links use `vana://connect?sessionId={id}&secret={secret}` via Tauri deep-link plugin.
 - `useDeepLink` normalizes the URL then redirects to `/connect` using `replace`.
 - Grant flow parameters are canonical in the URL (`sessionId`, `secret`, `scopes`).
+- PDPP grant links also carry `authorizationDetails` and
+  `authorizationDetailsSig`. The latter is an EIP-191 builder signature over the
+  recursively key-sorted JSON object containing the exact
+  `authorization_details` and `session_id`. The signer must match the
+  Session Relay claim's `granteeAddress`.
 - Pre-fetched data (`session` + `builderManifest`) is passed via `location.state`
   from `/connect` to `/grant` as a performance optimization — not a canonical input.
 - `status=success` in the grant URL forces success UI and should replace history.

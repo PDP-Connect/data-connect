@@ -92,6 +92,19 @@ describe("grant-params", () => {
     )
   })
 
+  it("round-trips the builder signature for PDPP authorization details", () => {
+    const searchParams = buildGrantSearchParams({
+      sessionId: "sess-1",
+      authorizationDetailsSignature: "0xsigned",
+      authorizationDetails: [],
+    })
+
+    expect(searchParams.get("authorizationDetailsSig")).toBe("0xsigned")
+    expect(
+      getGrantParamsFromSearchParams(searchParams).authorizationDetailsSignature
+    ).toBe("0xsigned")
+  })
+
   it("omits secret from search params when not provided", () => {
     const searchParams = buildGrantSearchParams({
       sessionId: "sess-1",

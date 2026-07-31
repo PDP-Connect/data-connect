@@ -6,6 +6,7 @@ export type GrantParams = {
   scopes?: string[]
   status?: GrantStatusParam
   masterKeySignature?: string
+  authorizationDetailsSignature?: string
   authorizationDetails?:
     | import("@/services/pdppAuthorization").PdppAuthorizationDetail[]
     | null
@@ -108,6 +109,8 @@ export function getGrantParamsFromSearchParams(
   const status =
     searchParams.get("status") === "success" ? ("success" as const) : undefined
   const masterKeySignature = searchParams.get("masterKeySig") || undefined
+  const authorizationDetailsSignature =
+    searchParams.get("authorizationDetailsSig") || undefined
   const authorizationDetails = parseAuthorizationDetails(
     searchParams.get("authorizationDetails")
   )
@@ -120,6 +123,7 @@ export function getGrantParamsFromSearchParams(
     scopes,
     status,
     masterKeySignature,
+    authorizationDetailsSignature,
     authorizationDetails,
   }
 }
@@ -154,6 +158,13 @@ export function buildGrantSearchParams(params: GrantParams): URLSearchParams {
 
   if (params.masterKeySignature) {
     searchParams.set("masterKeySig", params.masterKeySignature)
+  }
+
+  if (params.authorizationDetailsSignature) {
+    searchParams.set(
+      "authorizationDetailsSig",
+      params.authorizationDetailsSignature
+    )
   }
 
   if (params.authorizationDetails !== undefined) {

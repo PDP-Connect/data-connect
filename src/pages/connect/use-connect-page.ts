@@ -247,6 +247,7 @@ export function useConnectPage(): UseConnectPageResult {
         secret: params.secret,
         appId: resolvedAppId,
         scopes: grantScopes,
+        authorizationDetailsSignature: params.authorizationDetailsSignature,
         authorizationDetails: authorizationDetailsKey
           ? JSON.parse(authorizationDetailsKey)
           : undefined,
@@ -256,6 +257,7 @@ export function useConnectPage(): UseConnectPageResult {
       authorizationDetailsKey,
       handoffId,
       params.secret,
+      params.authorizationDetailsSignature,
       resolvedAppId,
       scopesKey,
       sessionId,
