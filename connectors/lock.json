@@ -25,9 +25,37 @@
     "wholefoods-playwright": "1.0.0",
     "youtube-playwright": "1.0.0",
     "claude-export-playwright": "2.0.1",
+    "chatgpt-pdpp": "0.1.0",
     "github-pdpp": "0.5.0"
   },
   "connectors": [
+    {
+      "connectorId": "chatgpt-pdpp",
+      "company": "openai",
+      "version": "0.1.0",
+      "resolvedFrom": "0.1.0",
+      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/chatgpt-pdpp-0.1.0.tgz",
+      "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.0.tgz",
+      "artifactSha256": "sha256:0188385dbb782cf23a5331f0b05a4dddbab422cc21113b0ba8b5c1f72b42772f",
+      "artifactSignature": {
+        "type": "sigstoreBundle",
+        "bundlePath": "chatgpt-pdpp-0.1.0.tgz.sigstore.json",
+        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/chatgpt-pdpp-0.1.0.tgz.sigstore.json"
+      },
+      "manifestSha256": "sha256:e2c66b9d584ff935b31790e3a698a5576168002988ccc8076ded327f189beff0",
+      "artifactKind": "pdpp-collection-profile",
+      "manifestPath": "profile/collection-profile.json",
+      "entrypointPath": "dist/collection-profile.mjs",
+      "entrypointSha256": "sha256:2c813fb3ae7fb6cc94af327a17ea17347a43b78aa4a401718a660b2edd6a25cc",
+      "provenancePath": "provenance.json",
+      "provenanceSha256": "sha256:95635fdd7865401deeecde499621d181397b301cc266a7fdf659c175ec04e4cf",
+      "sourceTag": "pdpp-cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
+      "sourceCommit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
+      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
+      "publishedAt": "2026-07-31T00:00:00Z",
+      "name": "ChatGPT (PDPP Collection Profile)",
+      "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol."
+    },
     {
       "connectorId": "chatgpt-playwright",
       "company": "openai",

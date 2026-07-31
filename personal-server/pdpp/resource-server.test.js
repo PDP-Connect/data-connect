@@ -1747,10 +1747,7 @@ test("default records root preserves the legacy standalone fallback path", () =>
     roots.authorizationRoot,
     "/tmp/fake-home/.data-connect/personal-server"
   )
-  assert.equal(
-    roots.recordsRoot,
-    "/tmp/fake-home/.dataconnect/personal-server"
-  )
+  assert.equal(roots.recordsRoot, "/tmp/fake-home/.dataconnect/personal-server")
   assert.equal(
     pdppDefaultStorageRoots({
       homeDir: "/tmp/fake-home",
