@@ -233,6 +233,12 @@ pub async fn start_personal_server(
         let config_dir = home.join("data-connect").join("personal-server");
         env_vars.push(("CONFIG_DIR", config_dir.to_string_lossy().to_string()));
     }
+    if let Ok(app_data_dir) = app.path().app_data_dir() {
+        env_vars.push((
+            "DATACONNECT_EXPORT_ROOT",
+            app_data_dir.join("exported_data").to_string_lossy().to_string(),
+        ));
+    }
 
     let mut child = if let Some(binary_path) = get_bundled_personal_server(&app) {
         // On macOS, only ad-hoc sign if the binary lacks a valid signature.

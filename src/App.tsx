@@ -7,7 +7,7 @@ import { useInitialize } from "./hooks/useInitialize"
 import { TopNav } from "./components/navigation/top-nav"
 import { useDeepLink } from "./hooks/use-deep-link"
 import { usePersonalServer } from "./hooks/usePersonalServer"
-import { usePendingApprovalRetry } from "./hooks/usePendingApproval"
+import { useClearLegacyPendingApproval } from "./hooks/usePendingApproval"
 import { AppUpdateProvider } from "./hooks/use-app-update"
 import { ROUTES } from "@/config/routes"
 import { dotPatternStyle } from "@/components/elements/dot-pattern"
@@ -23,6 +23,9 @@ import { trackHostStarted, trackHostCompleted } from "@/lib/telemetry/events"
 const Home = lazy(() => import("./pages/home").then(m => ({ default: m.Home })))
 const DataApps = lazy(() =>
   import("./pages/data-apps").then(m => ({ default: m.DataApps }))
+)
+const Timeline = lazy(() =>
+  import("./pages/timeline").then(m => ({ default: m.Timeline }))
 )
 const PersonalServer = lazy(() =>
   import("./pages/personal-server").then(m => ({ default: m.PersonalServer }))
@@ -45,8 +48,8 @@ function AppContent() {
   useEvents()
   useInitialize()
   useDeepLink()
-  const personalServer = usePersonalServer()
-  usePendingApprovalRetry()
+  usePersonalServer()
+  useClearLegacyPendingApproval()
 
   useEffect(() => {
     // Host lifecycle: one "host run" per app launch. Mirrors the CLI's
@@ -75,7 +78,7 @@ function AppContent() {
       <div className="flex h-screen">
         {/* Tauri app shell layout: fixed header, scrollable main */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          <TopNav personalServerStatus={personalServer.status} />
+          <TopNav />
           <main className="flex-1 overflow-auto">
             <Suspense fallback={<LoadingState />}>
               {/* Routes config: keep @/config/routes.ts in sync when adding/removing routes */}
@@ -83,6 +86,7 @@ function AppContent() {
                 <Route path={ROUTES.debugLoading} element={<LoadingState />} />
                 <Route path={ROUTES.home} element={<Home />} />
                 <Route path={ROUTES.apps} element={<DataApps />} />
+                <Route path={ROUTES.timeline} element={<Timeline />} />
                 <Route
                   path={ROUTES.personalServer}
                   element={<PersonalServer />}

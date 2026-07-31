@@ -3,6 +3,16 @@ export type AppRequiredPlatform = {
   label: string
 }
 
+export type AppDataAccess =
+  | {
+      protocol: "pdpp"
+      capabilities: ["personal-data-read"]
+    }
+  | {
+      protocol: "vana-grant-session"
+      capabilities: ["grant-session"]
+    }
+
 export type BaseAppRegistryEntry = {
   id: string
   name: string
@@ -13,13 +23,21 @@ export type BaseAppRegistryEntry = {
   description: string
   category: string
   dataRequired: AppRequiredPlatform[]
+  dataAccess: AppDataAccess
   scopes?: string[]
 }
 
-export type LiveAppRegistryEntry = BaseAppRegistryEntry & {
+export type ExternalAppRegistryEntry = BaseAppRegistryEntry & {
   status: "live"
   externalUrl: string
   scopes: string[]
+}
+
+export type InternalAppRegistryEntry = BaseAppRegistryEntry & {
+  status: "live"
+  route: string
+  externalUrl?: never
+  scopes?: never
 }
 
 export type ComingSoonAppRegistryEntry = BaseAppRegistryEntry & {
@@ -27,4 +45,17 @@ export type ComingSoonAppRegistryEntry = BaseAppRegistryEntry & {
   externalUrl?: never
 }
 
-export type AppRegistryEntry = LiveAppRegistryEntry | ComingSoonAppRegistryEntry
+export type AppRegistryEntry =
+  | ExternalAppRegistryEntry
+  | InternalAppRegistryEntry
+  | ComingSoonAppRegistryEntry
+
+export function isExternalAppRegistryEntry(
+  entry: AppRegistryEntry
+): entry is ExternalAppRegistryEntry {
+  return "externalUrl" in entry
+}
+
+export function getAppDataAccessLabel(dataAccess: AppDataAccess): string {
+  return dataAccess.protocol === "pdpp" ? "Uses PDPP" : "Vana grant/session"
+}

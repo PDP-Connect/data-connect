@@ -9,18 +9,18 @@ function renderTopNav(initialEntry: string) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <TooltipProvider delayDuration={0}>
-        <TopNav personalServerStatus="running" />
+        <TopNav />
       </TooltipProvider>
     </MemoryRouter>
   )
 }
 
 describe("TopNav", () => {
-  it("marks the server item active on the personal server route", () => {
+  it("keeps the Personal Server route out of primary navigation", () => {
     renderTopNav(ROUTES.personalServer)
 
-    expect(screen.getByRole("link", { name: "Server" }).getAttribute("aria-current")).toBe(
-      "page"
-    )
+    expect(screen.queryByRole("link", { name: "Server" })).toBeNull()
+    expect(screen.getByRole("link", { name: "Home" })).toBeTruthy()
+    expect(screen.getByRole("link", { name: "Apps" })).toBeTruthy()
   })
 })

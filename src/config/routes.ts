@@ -2,6 +2,7 @@ export const ROUTES = {
   home: "/",
   debugLoading: "/__loading",
   apps: "/apps",
+  timeline: "/apps/timeline",
   personalServer: "/personal-server",
   docs: "/docs",
   source: "/sources/:platformId",

@@ -245,7 +245,7 @@ describe("useConnectedApps", () => {
       const { result } = renderHook(() => useConnectedApps())
 
       await act(async () => {
-        await result.current.removeApp("grant-to-revoke", 8080)
+        await result.current.removeApp("grant-to-revoke", 8080, "dev-token")
       })
 
       // Should optimistically remove
@@ -254,7 +254,11 @@ describe("useConnectedApps", () => {
         payload: "grant-to-revoke",
       })
       // Should call server
-      expect(mockRevokeGrant).toHaveBeenCalledWith(8080, "grant-to-revoke")
+      expect(mockRevokeGrant).toHaveBeenCalledWith(
+        8080,
+        "grant-to-revoke",
+        "dev-token"
+      )
     })
 
     it("rolls back optimistic removal when revokeGrant fails", async () => {

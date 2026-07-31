@@ -23,9 +23,26 @@ const isTauriRuntime = () =>
 
 const MAX_RESTART_ATTEMPTS = 3;
 let _restartCount = 0;
-let _lastStartedWallet: string | null = null;
+let _restartTimer: ReturnType<typeof setTimeout> | null = null;
+let _credentialStartTimer: ReturnType<typeof setTimeout> | null = null;
+let _downgradePending = false;
+let _lastStartedCredentialKey: string | null = null;
 let _lastMasterKeySignature: string | null = null;
 const FALLBACK_START_ERROR = 'Failed to start Personal Server';
+
+function cancelScheduledRestart() {
+  if (_restartTimer !== null) {
+    clearTimeout(_restartTimer);
+    _restartTimer = null;
+  }
+}
+
+function cancelScheduledCredentialStart() {
+  if (_credentialStartTimer !== null) {
+    clearTimeout(_credentialStartTimer);
+    _credentialStartTimer = null;
+  }
+}
 
 // Cross-instance notification: when any hook instance updates the module-level
 // shared state, it calls _notifyAll() so every mounted instance syncs its
@@ -76,7 +93,10 @@ export function usePersonalServer() {
   const [error, setError] = useState<string | null>(_sharedError);
   const running = useRef(_sharedStatus === 'starting' || _sharedStatus === 'running');
   const restartingRef = useRef(false);
-  const startServerRef = useRef<(wallet?: string | null) => Promise<void>>(null!);
+  const startServerRef = useRef<(
+    wallet?: string | null,
+    allowScheduledRestart?: boolean,
+  ) => Promise<void>>(null!);
 
   // Subscribe to cross-instance state changes so this hook instance
   // picks up updates made by other instances (e.g. App.tsx calling startServer
@@ -96,9 +116,15 @@ export function usePersonalServer() {
     return () => { _subscribers.delete(sync); };
   }, []);
 
-  const startServer = useCallback(async (wallet?: string | null) => {
+  const startServer = useCallback(async (
+    wallet?: string | null,
+    allowScheduledRestart = false,
+  ) => {
     if (!isTauriRuntime()) return;
-    if (running.current) return;
+    // The hook is mounted by the app shell and several pages. A scheduled
+    // start blocks another mounted instance from spawning a duplicate process.
+    // Crash recovery is the sole caller allowed to replace that attempt.
+    if (running.current || (_sharedStatus === 'starting' && !allowScheduledRestart)) return;
     running.current = true;
     _sharedStatus = 'starting';
     _sharedError = null;
@@ -111,7 +137,11 @@ export function usePersonalServer() {
       // Prefer the closure value, but fall back to the module-level snapshot
       // stored during Phase 2 — the closure can go stale if the component
       // remounts or React StrictMode recreates the callback between phases.
-      const masterKey = masterKeySignature ?? _lastMasterKeySignature;
+      // An unauthenticated local server must never inherit a prior session's
+      // signing credential merely because the hook remounted after sign-out.
+      const masterKey = owner
+        ? masterKeySignature ?? _lastMasterKeySignature
+        : null;
       console.log('[PersonalServer] Starting with wallet:', owner ?? 'none', 'masterKey:', masterKey ? 'present' : 'null');
       await invoke<PersonalServerStatus>('start_personal_server', {
         port: null,
@@ -137,7 +167,9 @@ export function usePersonalServer() {
   startServerRef.current = startServer;
 
   const stopServer = useCallback(async () => {
-    if (!isTauriRuntime()) return;
+    if (!isTauriRuntime()) return false;
+    cancelScheduledRestart();
+    cancelScheduledCredentialStart();
     running.current = false;
     try {
       await invoke('stop_personal_server');
@@ -152,15 +184,17 @@ export function usePersonalServer() {
       setTunnelFailed(false);
       setDevToken(null);
       _notifyAll();
+      return true;
     } catch (err) {
       console.error('[PersonalServer] Failed to stop:', err);
+      return false;
     }
   }, []);
 
   const restartServer = useCallback(async (wallet?: string | null) => {
     console.log('[PersonalServer] Restarting with wallet:', wallet ?? 'none');
     _restartCount = 0;
-    await stopServer();
+    if (!(await stopServer())) return;
     // Brief wait for port release (stop_personal_server already waits up to 3s,
     // but add a small buffer for OS-level cleanup)
     await new Promise((r) => setTimeout(r, 500));
@@ -177,6 +211,7 @@ export function usePersonalServer() {
       _sharedStatus = 'running';
       _sharedPort = event.payload.port;
       _restartCount = 0;
+      cancelScheduledRestart();
       setStatus('running');
       setPort(event.payload.port);
 
@@ -186,6 +221,7 @@ export function usePersonalServer() {
 
     listen<{ message: string }>('personal-server-error', (event) => {
       console.error('[PersonalServer] Error:', event.payload.message);
+      cancelScheduledRestart();
       running.current = false;
       _sharedStatus = 'error';
       _sharedError = getSafeErrorMessage(event.payload.message);
@@ -209,6 +245,7 @@ export function usePersonalServer() {
       setPort(null);
 
       if (crashed) {
+        if (_restartTimer !== null) return;
         _restartCount++;
         if (_restartCount <= MAX_RESTART_ATTEMPTS) {
           const delay = Math.pow(2, _restartCount) * 1000; // 2s, 4s, 8s
@@ -216,7 +253,10 @@ export function usePersonalServer() {
           _sharedStatus = 'starting';
           setStatus('starting');
           _notifyAll();
-          setTimeout(() => startServerRef.current(), delay);
+          _restartTimer = setTimeout(() => {
+            _restartTimer = null;
+            void startServerRef.current(null, true);
+          }, delay);
         } else {
           console.error('[PersonalServer] Max restart attempts reached, giving up');
           _sharedStatus = 'error';
@@ -226,6 +266,7 @@ export function usePersonalServer() {
           _notifyAll();
         }
       } else {
+        cancelScheduledRestart();
         _sharedStatus = 'stopped';
         setStatus('stopped');
         _notifyAll();
@@ -270,31 +311,70 @@ export function usePersonalServer() {
     };
   }, []);
 
-  // Phase 1 removed — starting without a wallet was ~3s of throwaway work
-  // (random keypair, no registration, no tunnel). The server now starts
-  // only in Phase 2 when credentials are available, so it can derive the
-  // real identity, self-register, and connect the tunnel in a single pass.
+  const credentialKey = walletAddress && masterKeySignature
+    ? `${walletAddress}\u0000${masterKeySignature}`
+    : null;
 
-  // Phase 2 — restart with credentials so the server derives its keypair.
+  // Local serving is the default. The wrapper intentionally skips gateway
+  // registration and tunneling without a master key, while retaining HTTP
+  // authentication and PDPP consent at the route level.
+  useEffect(() => {
+    if (credentialKey || _downgradePending || _sharedStatus !== 'stopped') return;
+    void startServerRef.current(null);
+  }, [credentialKey]);
+
+  // Signing out must give up the remote identity and tunnel, not merely hide
+  // them in UI state. Clear the credential snapshots before restarting so a
+  // stale upgrade timer cannot launch a signed server after auth is gone.
+  useEffect(() => {
+    if (credentialKey || !_lastStartedCredentialKey) return;
+
+    _downgradePending = true;
+    cancelScheduledCredentialStart();
+    _lastStartedCredentialKey = null;
+    _lastMasterKeySignature = null;
+    _restartCount = 0;
+    void stopServer().then((didStop) => {
+      if (!didStop) {
+        _downgradePending = false;
+        return;
+      }
+      _credentialStartTimer = setTimeout(() => {
+        _credentialStartTimer = null;
+        _downgradePending = false;
+        void startServerRef.current(null);
+      }, 500);
+    });
+  }, [credentialKey, stopServer]);
+
+  // When credentials arrive later, restart so the Personal Server can derive
+  // its stable identity, register, and opt into the remote tunnel. The tunnel
+  // remains optional reachability; local loopback serving was already ready.
+  //
   // The auth page needs the server identity (keypair address) to register
   // with the gateway, so we must restart before registration can proceed.
   //
   // Set restartingRef synchronously during render so child effects (e.g.
   // auto-approve in grant flow) see it before they fire.
-  if (walletAddress && masterKeySignature && _lastStartedWallet !== walletAddress) {
+  if (credentialKey && _lastStartedCredentialKey !== credentialKey) {
     restartingRef.current = true;
   }
   useEffect(() => {
-    if (!walletAddress || !masterKeySignature) return;
-    if (_lastStartedWallet === walletAddress) return;
-    _lastStartedWallet = walletAddress;
+    if (!credentialKey || !walletAddress || !masterKeySignature) return;
+    if (_lastStartedCredentialKey === credentialKey) return;
+    _lastStartedCredentialKey = credentialKey;
     _lastMasterKeySignature = masterKeySignature;
     console.log('[PersonalServer] Credentials available, starting server...');
     _restartCount = 0;
-    void stopServer().then(() => {
-      setTimeout(() => startServerRef.current(walletAddress), 500);
+    void stopServer().then((didStop) => {
+      if (!didStop || _lastStartedCredentialKey !== credentialKey) return;
+      cancelScheduledCredentialStart();
+      _credentialStartTimer = setTimeout(() => {
+        _credentialStartTimer = null;
+        void startServerRef.current(walletAddress);
+      }, 500);
     });
-  }, [walletAddress, masterKeySignature, stopServer]);
+  }, [credentialKey, walletAddress, masterKeySignature, stopServer]);
 
   // Phase 2.5 removed — the wrapper now self-registers with the gateway
   // before startBackgroundServices(), so frontend registration + restart

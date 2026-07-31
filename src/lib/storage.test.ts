@@ -1,83 +1,80 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PendingApproval } from './storage';
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-type StorageModule = typeof import('./storage');
+type StorageModule = typeof import("./storage")
 
-let storage: StorageModule;
+let storage: StorageModule
+
+const pendingApprovalKey = "v1_pending_approval"
 
 beforeEach(async () => {
-  localStorage.clear();
-  vi.resetModules();
-  storage = await import('./storage');
-});
+  localStorage.clear()
+  vi.resetModules()
+  storage = await import("./storage")
+})
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  localStorage.clear();
-});
+  vi.restoreAllMocks()
+  localStorage.clear()
+})
 
-const pendingApprovalKey = 'v1_pending_approval';
-
-const basePending: PendingApproval = {
-  sessionId: 'sess-123',
-  grantId: 'grant-456',
-  secret: 'secret-abc',
-  userAddress: '0x1234567890abcdef1234567890abcdef12345678',
-  scopes: ['chatgpt.conversations'],
-  createdAt: '2025-01-15T12:00:00Z',
-};
-
-describe('pendingApproval', () => {
-  it('saves and retrieves a pending approval', () => {
-    storage.savePendingApproval(basePending);
-
-    const retrieved = storage.getPendingApproval();
-    expect(retrieved).toEqual(basePending);
-  });
-
-  it('returns null when no pending approval exists', () => {
-    expect(storage.getPendingApproval()).toBeNull();
-  });
-
-  it('clears the pending approval', () => {
-    storage.savePendingApproval(basePending);
-    expect(storage.getPendingApproval()).not.toBeNull();
-
-    storage.clearPendingApproval();
-    expect(storage.getPendingApproval()).toBeNull();
-  });
-
-  it('returns null for corrupt stored data', () => {
-    localStorage.setItem(pendingApprovalKey, '{not json');
-    expect(storage.getPendingApproval()).toBeNull();
-  });
-
-  it('round-trips a pending approval with serverAddress', () => {
-    const withServer: PendingApproval = {
-      ...basePending,
-      serverAddress: '0xserveraddress',
-    };
-    storage.savePendingApproval(withServer);
-
-    const retrieved = storage.getPendingApproval();
-    expect(retrieved).toEqual(withServer);
-    expect(retrieved?.serverAddress).toBe('0xserveraddress');
-  });
-
-  it('round-trips a pending approval without serverAddress (backward compat)', () => {
-    // Old records stored before serverAddress was added should still parse
-    storage.savePendingApproval(basePending);
-
-    const retrieved = storage.getPendingApproval();
-    expect(retrieved).toEqual(basePending);
-    expect(retrieved?.serverAddress).toBeUndefined();
-  });
-
-  it('returns null for data that fails schema validation', () => {
+describe("legacy pending approval cleanup", () => {
+  it("removes relay-secret recovery records instead of replaying them", () => {
     localStorage.setItem(
       pendingApprovalKey,
-      JSON.stringify({ sessionId: '', grantId: '' })
-    );
-    expect(storage.getPendingApproval()).toBeNull();
-  });
-});
+      JSON.stringify({
+        sessionId: "sess-123",
+        grantId: "grant-456",
+        secret: "CANARY_RELAY_SECRET",
+        userAddress: "0x123",
+        scopes: ["chatgpt.conversations"],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })
+    )
+
+    storage.clearLegacyPendingApproval()
+
+    expect(localStorage.getItem(pendingApprovalKey)).toBeNull()
+    expect(JSON.stringify(localStorage)).not.toContain("CANARY_RELAY_SECRET")
+  })
+})
+
+describe("PDPP grant compensation recovery", () => {
+  it("persists only non-secret identifiers needed to retry a revocation", () => {
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-123",
+      grantId: "grant-456",
+      userAddress: "0x123",
+    })
+
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([
+      { sessionId: "sess-123", grantId: "grant-456", userAddress: "0x123" },
+    ])
+    expect(JSON.stringify(localStorage)).not.toContain("secret")
+    expect(JSON.stringify(localStorage)).not.toContain("pdpp_at_")
+
+    storage.clearPendingPdppGrantCompensation()
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([])
+  })
+
+  it("keeps recovery records for independent failed sessions", () => {
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-a",
+      grantId: "grant-a",
+      userAddress: "0xa",
+    })
+    storage.savePendingPdppGrantCompensation({
+      sessionId: "sess-b",
+      grantId: "grant-b",
+      userAddress: "0xb",
+    })
+
+    storage.clearPendingPdppGrantCompensation({
+      sessionId: "sess-b",
+      grantId: "grant-b",
+    })
+
+    expect(storage.getPendingPdppGrantCompensations()).toEqual([
+      { sessionId: "sess-a", grantId: "grant-a", userAddress: "0xa" },
+    ])
+  })
+})

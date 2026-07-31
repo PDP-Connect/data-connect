@@ -164,8 +164,8 @@ describe("useDeepLink", () => {
     })
 
     const searchParams = new URLSearchParams(latestSearch)
-    expect(searchParams.get("sessionId")).toBe("sess-123")
-    expect(searchParams.get("secret")).toBe("sec-abc")
+    expect(searchParams.get("handoff")).toBeTruthy()
+    expect(latestSearch).not.toContain("sec-abc")
   })
 
   it("handles onOpenUrl callback for deep links while app is running", async () => {
@@ -215,9 +215,8 @@ describe("useDeepLink", () => {
     })
 
     const searchParams = new URLSearchParams(latestSearch)
-    expect(searchParams.get("sessionId")).toBe("live-sess")
-    expect(searchParams.get("secret")).toBe("live-sec")
-    expect(searchParams.get("scopes")).toBe('["chatgpt.conversations"]')
+    expect(searchParams.get("handoff")).toBeTruthy()
+    expect(latestSearch).not.toContain("live-sec")
   })
 
   it("derives wallet address from masterKeySig and dispatches auth", async () => {
@@ -275,6 +274,7 @@ describe("useDeepLink", () => {
     ;(deepLink.onOpenUrl as Mock).mockResolvedValue(() => {})
 
     let latestPathname = ""
+    let latestSearch = ""
 
     const router = createMemoryRouter(
       [
@@ -282,8 +282,9 @@ describe("useDeepLink", () => {
           path: "*",
           element: (
             <DeepLinkHarness
-              onChange={(pathname) => {
+              onChange={(pathname, search) => {
                 latestPathname = pathname
+                latestSearch = search
               }}
             />
           ),
@@ -302,6 +303,8 @@ describe("useDeepLink", () => {
     await waitFor(() => {
       expect(latestPathname).toBe(ROUTES.connect)
     })
+    expect(latestSearch).not.toContain("0xfallbacksig")
+    expect(new URLSearchParams(latestSearch).get("handoff")).toBeTruthy()
 
     const { recoverAddress } = await import("viem")
     expect(recoverAddress).toHaveBeenCalledWith({

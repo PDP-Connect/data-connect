@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
-import type { Platform } from "@/types"
+import type { Platform, Run } from "@/types"
 import { buildAvailableCards } from "./available-sources-list.lib"
 
 vi.mock("@/lib/platform/utils", () => ({
   getPlatformRegistryEntry: (platform: { id?: string }) => {
-    const entries: Record<string, { displayName: string; availability?: string; brandDomain?: string }> = {
+    const entries: Record<string, { id?: string; displayName: string; availability?: string; brandDomain?: string }> = {
       chatgpt: {
         displayName: "ChatGPT",
         availability: "requiresConnector",
@@ -19,6 +19,18 @@ vi.mock("@/lib/platform/utils", () => ({
         displayName: "Spotify",
         availability: "available",
         brandDomain: "spotify.com",
+      },
+      "github-pdpp": {
+        id: "github",
+        displayName: "GitHub",
+        availability: "requiresConnector",
+        brandDomain: "github.com",
+      },
+      "github-playwright": {
+        id: "github",
+        displayName: "GitHub",
+        availability: "requiresConnector",
+        brandDomain: "github.com",
       },
     }
     return platform.id ? entries[platform.id] ?? null : null
@@ -196,5 +208,57 @@ describe("buildAvailableCards — availability", () => {
 
     const matchingCards = cards.filter(c => c.cardId === "test-coming-soon")
     expect(matchingCards).toHaveLength(1)
+  })
+
+  it.each([
+    ["legacy first", [makePlatform("github-playwright"), makePlatform("github-pdpp", { runtime: "pdpp-network" })]],
+    ["PDPP first", [makePlatform("github-pdpp", { runtime: "pdpp-network" }), makePlatform("github-playwright")]],
+  ])("deduplicates canonical sources and prefers PDPP runtime when %s", (_order, platforms) => {
+    const cards = buildAvailableCards({
+      platforms,
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+    })
+
+    expect(cards.filter(card => card.iconName === "GitHub")).toHaveLength(1)
+    cards.find(card => card.iconName === "GitHub")?.onClick?.()
+    expect(onExport).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" })
+    )
+  })
+
+  it("canonicalizes legacy connected and running state onto the PDPP card", () => {
+    const legacyRun = {
+      id: "github-playwright-run",
+      platformId: "github-playwright",
+      status: "running",
+    } as Run
+    const cards = buildAvailableCards({
+      platforms: [
+        makePlatform("github-playwright"),
+        makePlatform("github-pdpp", { runtime: "pdpp-network" }),
+      ],
+      connectedPlatformIdSet: new Set(["github-playwright"]),
+      connectingPlatforms: new Map([["github-playwright", legacyRun]]),
+      onExport,
+    })
+
+    expect(cards.find(card => card.iconName === "GitHub")).toBeUndefined()
+
+    const runningCards = buildAvailableCards({
+      platforms: [
+        makePlatform("github-playwright"),
+        makePlatform("github-pdpp", { runtime: "pdpp-network" }),
+      ],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: new Map([["github-playwright", legacyRun]]),
+      onExport,
+    })
+    expect(runningCards.find(card => card.iconName === "GitHub")).toMatchObject({
+      cardId: "github-pdpp",
+      isConnecting: true,
+      connectingRun: legacyRun,
+    })
   })
 })

@@ -20,6 +20,20 @@ pub struct ActiveConnectorInstall {
     pub root_path: String,
     pub metadata_relative_path: String,
     pub script_relative_path: String,
+    #[serde(default)]
+    pub artifact_kind: Option<String>,
+    #[serde(default)]
+    pub manifest_path: Option<String>,
+    #[serde(default)]
+    pub entrypoint_path: Option<String>,
+    #[serde(default)]
+    pub entrypoint_sha256: Option<String>,
+    #[serde(default)]
+    pub manifest_sha256: Option<String>,
+    #[serde(default)]
+    pub provenance_path: Option<String>,
+    #[serde(default)]
+    pub provenance_sha256: Option<String>,
 }
 
 pub fn get_dataconnect_dir() -> Option<PathBuf> {

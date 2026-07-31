@@ -59,10 +59,12 @@ export const resolvePlatformForEntry = (
 ) => {
   const entryPlatformIds = entry.platformIds?.map(normalizeToken) ?? []
   const entryTokens = [entry.id, ...(entry.aliases ?? [])].map(normalizeToken)
+  const matchingPlatformById = platforms.filter(platform =>
+    entryPlatformIds.includes(normalizeToken(platform.id))
+  )
   return (
-    platforms.find(platform =>
-      entryPlatformIds.includes(normalizeToken(platform.id))
-    ) ??
+    matchingPlatformById.find(platform => platform.runtime === "pdpp-network") ??
+    matchingPlatformById[0] ??
     platforms.find(platform =>
       entryTokens.some(token =>
         [platform.id, platform.name, platform.company]

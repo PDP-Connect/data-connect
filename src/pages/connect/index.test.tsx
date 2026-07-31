@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, screen, fireEvent, act, waitFor } from "@testing-library/react"
 import { createMemoryRouter, RouterProvider } from "react-router-dom"
 import { ROUTES } from "@/config/routes"
+import { _resetGrantHandoffs, createGrantHandoff } from "@/lib/grant-handoff"
 import type { Run } from "@/types"
 import { Connect } from "./index"
 
@@ -87,6 +88,7 @@ const REAL_SESSION_SEARCH =
   "?sessionId=sess-123&secret=my-secret&scopes=%5B%22chatgpt.conversations%22%5D"
 
 const CLAIMED_SESSION = {
+  sessionId: "sess-123",
   granteeAddress: "0xBuilderAddress",
   scopes: ["chatgpt.conversations"],
   expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -103,6 +105,35 @@ const BUILDER_MANIFEST = {
   privacyPolicyUrl: "https://builder.example.com/privacy",
 }
 
+const URL_SECRET_CANARY = "CANARY_RELAY_SECRET"
+const URL_MASTER_KEY_CANARY = "CANARY_MASTER_KEY_SIGNATURE"
+
+function createSensitiveHandoff(): string {
+  return createGrantHandoff({
+    sessionId: "sess-123",
+    secret: URL_SECRET_CANARY,
+    masterKeySignature: URL_MASTER_KEY_CANARY,
+    scopes: ["chatgpt.conversations"],
+  })
+}
+
+function expectSecureGrantNavigation(
+  router: ReturnType<typeof createMemoryRouter>,
+  handoffId: string
+) {
+  const { location } = router.state
+  const searchParams = new URLSearchParams(location.search)
+
+  expect(location.pathname).toBe(ROUTES.grant)
+  expect(searchParams.get("handoff")).toBe(handoffId)
+  expect(searchParams.get("secret")).toBeNull()
+  expect(searchParams.get("masterKeySig")).toBeNull()
+  expect(location.search).not.toContain(URL_SECRET_CANARY)
+  expect(location.search).not.toContain(URL_MASTER_KEY_CANARY)
+  expect(JSON.stringify(location)).not.toContain(URL_SECRET_CANARY)
+  expect(JSON.stringify(location)).not.toContain(URL_MASTER_KEY_CANARY)
+}
+
 // ---------- tests ----------
 
 describe("Connect", () => {
@@ -115,10 +146,12 @@ describe("Connect", () => {
     mockClaimSession.mockResolvedValue(CLAIMED_SESSION)
     mockVerifyBuilder.mockResolvedValue(BUILDER_MANIFEST)
     mockRuns = []
+    _resetGrantHandoffs()
   })
 
   afterEach(() => {
     cleanup()
+    _resetGrantHandoffs()
   })
 
   // -------- rendering / copy --------
@@ -158,6 +191,19 @@ describe("Connect", () => {
       await waitFor(() => {
         expect(router.state.location.pathname).toBe(ROUTES.grant)
       })
+    })
+
+    it("keeps sensitive handoff values out of the already-connected grant URL and history state", async () => {
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({
+          platforms: [CHATGPT_PLATFORM],
+          isPlatformConnected: vi.fn(() => true),
+        })
+      )
+      const handoffId = createSensitiveHandoff()
+      const { router } = renderConnect(`?handoff=${handoffId}`)
+
+      await waitFor(() => expectSecureGrantNavigation(router, handoffId))
     })
 
     it("stays on connect when platform is connected but no grant session exists", async () => {
@@ -328,7 +374,7 @@ describe("Connect", () => {
       expect(mockClaimSession).not.toHaveBeenCalled()
     })
 
-    it("pre-fetch failure is non-fatal — does not crash UI", async () => {
+    it("blocks collection when relay authorization cannot be confirmed", async () => {
       mockClaimSession.mockRejectedValue(new Error("Network error"))
       mockUsePlatforms.mockReturnValue(defaultPlatforms())
 
@@ -338,8 +384,27 @@ describe("Connect", () => {
         expect(mockClaimSession).toHaveBeenCalled()
       })
 
-      // UI should still be functional
-      expect(await screen.findByText("Connect your ChatGPT")).toBeTruthy()
+      expect(
+        await screen.findByText(/could not confirm the requested session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
+    })
+
+    it("blocks collection when claimed scopes differ from the URL", async () => {
+      mockClaimSession.mockResolvedValue({
+        ...CLAIMED_SESSION,
+        scopes: ["instagram.posts"],
+      })
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({ platforms: [CHATGPT_PLATFORM] })
+      )
+
+      renderConnect(REAL_SESSION_SEARCH)
+
+      expect(
+        await screen.findByText(/requested scopes do not match the session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
     })
 
     it("deduplicates pre-fetch for same session ID across re-renders", async () => {
@@ -358,6 +423,50 @@ describe("Connect", () => {
 
       // Should still be called only once (deduplicated by ref)
       expect(mockClaimSession).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not let a stale session claim authorize a replacement URL", async () => {
+      let resolveFirstClaim: ((value: typeof CLAIMED_SESSION) => void) | undefined
+      const firstClaim = new Promise<typeof CLAIMED_SESSION>(resolve => {
+        resolveFirstClaim = resolve
+      })
+      mockClaimSession.mockImplementation(({ sessionId }: { sessionId: string }) =>
+        sessionId === "session-a"
+          ? firstClaim
+          : Promise.resolve({ ...CLAIMED_SESSION, sessionId: "session-b" })
+      )
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({ platforms: [CHATGPT_PLATFORM] })
+      )
+
+      const { router } = renderConnect(
+        "?sessionId=session-a&secret=a&scopes=%5B%22instagram.posts%22%5D"
+      )
+
+      await act(async () => {
+        await router.navigate(
+          "?sessionId=session-b&secret=b&scopes=%5B%22chatgpt.conversations%22%5D"
+        )
+      })
+      await waitFor(() => {
+        expect(mockVerifyBuilder).toHaveBeenCalledTimes(1)
+      })
+
+      await act(async () => {
+        resolveFirstClaim?.({
+          ...CLAIMED_SESSION,
+          sessionId: "session-a",
+          scopes: ["instagram.posts"],
+        })
+      })
+
+      const connectButton = await screen.findByRole("button", {
+        name: /connect chatgpt/i,
+      })
+      await act(async () => {
+        fireEvent.click(connectButton)
+      })
+      expect(mockStartImport).toHaveBeenCalledWith(CHATGPT_PLATFORM)
     })
   })
 
@@ -423,6 +532,28 @@ describe("Connect", () => {
       expect(search).toContain("secret=my-secret")
     })
 
+    it("keeps sensitive handoff values out of the import-complete grant URL and history state", async () => {
+      mockStartImport.mockResolvedValue("run-1")
+      mockUsePlatforms.mockReturnValue(
+        defaultPlatforms({ platforms: [CHATGPT_PLATFORM] })
+      )
+      const handoffId = createSensitiveHandoff()
+      const { router } = renderConnect(`?handoff=${handoffId}`)
+
+      const connectButton = await screen.findByRole("button", {
+        name: /connect chatgpt/i,
+      })
+      await act(async () => {
+        fireEvent.click(connectButton)
+      })
+      await act(async () => {
+        mockRuns = [{ id: "run-1", status: "success" }]
+        await router.navigate(`${ROUTES.connect}?handoff=${handoffId}`)
+      })
+
+      await waitFor(() => expectSecureGrantNavigation(router, handoffId))
+    })
+
     it("resets connect state when run errors", async () => {
       mockStartImport.mockResolvedValue("run-1")
       mockUsePlatforms.mockReturnValue(
@@ -477,7 +608,7 @@ describe("Connect", () => {
       })
     })
 
-    it("navigates without prefetched state when pre-fetch failed", async () => {
+    it("does not collect or navigate when pre-fetch authorization fails", async () => {
       // Pre-fetch fails
       mockClaimSession.mockRejectedValue(new Error("Network error"))
       vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -488,31 +619,18 @@ describe("Connect", () => {
 
       const { router } = renderConnect(REAL_SESSION_SEARCH)
 
-      // Wait for pre-fetch to fail
+      // Wait for pre-fetch to fail.
       await waitFor(() => {
         expect(mockClaimSession).toHaveBeenCalled()
       })
 
-      // Start import and simulate success
-      const connectButton = await screen.findByRole("button", {
-        name: /connect chatgpt/i,
-      })
-      await act(async () => {
-        fireEvent.click(connectButton)
-      })
-
-      await act(async () => {
-        mockRuns = [{ id: "run-1", status: "success" }]
-        router.navigate(`${ROUTES.connect}${REAL_SESSION_SEARCH}`)
-      })
-
-      await waitFor(() => {
-        expect(router.state.location.pathname).toBe(ROUTES.grant)
-      })
-
-      // Navigation state should not have prefetched data (pre-fetch failed)
-      // The grant page will retry claim + verify on its own
-      vi.restoreAllMocks()
+      expect(
+        await screen.findByText(/could not confirm the requested session authorization/i)
+      ).toBeTruthy()
+      expect(mockStartImport).not.toHaveBeenCalled()
+      expect(router.state.location.pathname).toBe(ROUTES.connect)
+      // Navigation state stays empty because the flow must not proceed to grant.
+      expect(router.state.location.state).toBeNull()
     })
 
     it("shows connector status message while run is active", async () => {
@@ -525,7 +643,6 @@ describe("Connect", () => {
       const connectButton = await screen.findByRole("button", {
         name: /connect chatgpt/i,
       })
-
       await act(async () => {
         fireEvent.click(connectButton)
       })
@@ -601,6 +718,19 @@ describe("Connect", () => {
         expect(search).toContain("scopes=")
         expect(search).toContain("chatgpt.conversations")
       }
+    })
+
+    it("keeps sensitive handoff values out of the debug grant URL and history state", async () => {
+      mockUsePlatforms.mockReturnValue(defaultPlatforms())
+      const handoffId = createSensitiveHandoff()
+      const { router } = renderConnect(`?handoff=${handoffId}`)
+
+      const skipLink = await screen.findByText("Skip to grant step")
+      await act(async () => {
+        fireEvent.click(skipLink)
+      })
+
+      await waitFor(() => expectSecureGrantNavigation(router, handoffId))
     })
   })
 

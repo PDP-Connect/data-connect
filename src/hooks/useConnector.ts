@@ -12,6 +12,11 @@ import {
 import { durationSince } from '@/lib/telemetry/client';
 
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = 'DUPLICATE_ACTIVE_RUN';
+const PDPP_NETWORK_RUNTIME = 'pdpp-network';
+
+interface StartImportOptions {
+  githubToken?: string | null;
+}
 
 function isDuplicateStartError(error: unknown): boolean {
   const message =
@@ -23,12 +28,29 @@ function isDuplicateStartError(error: unknown): boolean {
   return message.includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE);
 }
 
+async function startInstalledPdppConnectorRun(
+  runId: string,
+  platform: Platform,
+  options: StartImportOptions = {}
+): Promise<void> {
+  await invoke('start_installed_pdpp_connector_run', {
+    request: {
+      runId,
+      connectorId: platform.id,
+      collectionMode: 'incremental',
+      streams: [],
+      githubToken:
+        platform.id === 'github-pdpp' ? options.githubToken ?? null : null,
+    },
+  });
+}
+
 export function useConnector() {
   const dispatch = useDispatch();
   const runs = useSelector((state: RootState) => state.app.runs);
 
   const startImport = useCallback(
-    async (platform: Platform) => {
+    async (platform: Platform, options: StartImportOptions = {}) => {
       const runId = `${platform.id}-${Date.now()}`;
       const source = getPlatformRegistryEntry(platform)?.id ?? platform.id;
 
@@ -36,6 +58,7 @@ export function useConnector() {
         id: runId,
         platformId: platform.id,
         filename: platform.filename,
+        runtime: platform.runtime,
         isConnected: false,
         startDate: new Date().toISOString(),
         status: 'running',
@@ -51,6 +74,32 @@ export function useConnector() {
         source,
         authMode: 'interactive',
       });
+
+      // The installed PDPP host streams progress and terminal state through
+      // `connector-status`. Its command response arrives only after the
+      // subprocess finishes, so waiting here would leave /connect without a
+      // run id (and therefore without live busy/progress UI).
+      if (platform.runtime === PDPP_NETWORK_RUNTIME) {
+        void startInstalledPdppConnectorRun(runId, platform, options).catch((error) => {
+          if (isDuplicateStartError(error)) {
+            dispatch(deleteRun(runId));
+            return;
+          }
+
+          console.error('Failed to start installed PDPP connector run:', error);
+          // A host-side failure normally emits its own terminal event. This
+          // only closes the UI state when no event has already done so.
+          dispatch(
+            updateRunStatus({
+              runId,
+              status: 'error',
+              endDate: new Date().toISOString(),
+              onlyIfRunning: true,
+            })
+          );
+        });
+        return runId;
+      }
 
       try {
         const simulateNoChrome =
@@ -95,15 +144,21 @@ export function useConnector() {
 
   const stopExport = useCallback(
     async (runId: string) => {
-      dispatch(stopRun(runId));
-
       try {
-        await invoke('stop_connector_run', { runId });
+        const run = runs.find(candidate => candidate.id === runId);
+        if (run?.runtime === PDPP_NETWORK_RUNTIME) {
+          await invoke('stop_installed_pdpp_connector_run', { runId });
+          // The PDPP host emits STOPPED after its subprocess is actually
+          // reaped. Keep the source card active until then.
+        } else {
+          dispatch(stopRun(runId));
+          await invoke('stop_connector_run', { runId });
+        }
       } catch (error) {
         console.log('Stop connector run (window may be closed):', error);
       }
     },
-    [dispatch]
+    [dispatch, runs]
   );
 
   const getRunById = useCallback(

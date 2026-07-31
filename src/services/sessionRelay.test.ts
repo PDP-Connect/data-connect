@@ -125,6 +125,9 @@ describe("claimSession", () => {
   });
 
   it("throws SessionRelayError with INVALID_CLAIM_SECRET", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {})
     fetchSpy.mockResolvedValueOnce(
       jsonResponse(
         {
@@ -144,6 +147,11 @@ describe("claimSession", () => {
       errorCode: "INVALID_CLAIM_SECRET",
       statusCode: 403,
     });
+    const logged = JSON.stringify(consoleErrorSpy.mock.calls)
+    expect(logged).not.toContain("wrong")
+    expect(logged).not.toContain("/v1/session/claim")
+    expect(logged).not.toContain("Secret does not match")
+    consoleErrorSpy.mockRestore()
   });
 
   it("throws SessionRelayError on non-JSON response", async () => {

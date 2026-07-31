@@ -22,11 +22,34 @@ const PLATFORM: Platform = {
 }
 
 describe("ConnectedSourcesList sync click guard", () => {
+  it("describes the local Personal Server without linking to its legacy page", () => {
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByRole("paragraph").textContent).toContain(
+      "Your Personal Server is ready"
+    )
+    expect(screen.queryByRole("link", { name: "Personal Server" })).toBeNull()
+    expect(screen.getByRole("link", { name: "run apps" })).toBeTruthy()
+  })
+
   it("releases in-flight guard when onSyncSource throws synchronously", () => {
     const onSyncSource = vi.fn(() => {
       throw new Error("sync start failed")
     })
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined)
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
 
     render(
       <MemoryRouter>

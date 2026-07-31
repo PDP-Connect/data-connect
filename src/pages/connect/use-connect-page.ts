@@ -4,9 +4,14 @@ import { useSelector } from "react-redux"
 import { getAppRegistryEntry } from "@/apps/registry"
 import {
   buildGrantSearchParams,
+  getClaimedAuthorizationMismatch,
   getGrantParamsFromSearchParams,
 } from "@/lib/grant-params"
-import { getPrimaryDataSourceLabel, getPrimaryScopeToken } from "@/lib/scope-labels"
+import { resolveGrantHandoff } from "@/lib/grant-handoff"
+import {
+  getPrimaryDataSourceLabel,
+  getPrimaryScopeToken,
+} from "@/lib/scope-labels"
 import { ROUTES } from "@/config/routes"
 import {
   trackBuilderVerificationCompleted,
@@ -58,33 +63,50 @@ export function useConnectPage(): UseConnectPageResult {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const currentSearch = searchParams.toString()
-  const params = getGrantParamsFromSearchParams(searchParams)
+  const urlParams = getGrantParamsFromSearchParams(searchParams)
+  const handoffId = urlParams.handoffId
+  const params = resolveGrantHandoff(urlParams)
   const hasGrantSession = Boolean(params.sessionId)
   const [generatedSessionId] = useState(() => `grant-session-${Date.now()}`)
   const resolvedAppId = params.appId
   const appEntry = getAppRegistryEntry(resolvedAppId)
   const sessionId = params.sessionId ?? generatedSessionId
 
-  const prefetchedSessionRef = useRef<string | null>(null)
+  const prefetchRequestRef = useRef<string | null>(null)
   const prefetchedDataRef = useRef<PrefetchedGrantData | null>(null)
   const [prefetched, setPrefetched] = useState<PrefetchedGrantData | null>(null)
   const [prefetchDone, setPrefetchDone] = useState(false)
+  const [prefetchError, setPrefetchError] = useState<string | null>(null)
   const requestedScopes =
     params.scopes && params.scopes.length > 0 ? params.scopes : undefined
+  const requestedScopesKey = requestedScopes?.join("|") ?? ""
+  const authorizationDetailsKey =
+    params.authorizationDetails === undefined
+      ? ""
+      : JSON.stringify(params.authorizationDetails)
+  const requestedTelemetryPlatform = useMemo(() => {
+    const scopeToken = getPrimaryScopeToken(requestedScopes)
+    return scopeToken
+      ? (getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken)
+      : null
+  }, [requestedScopesKey])
   const claimedScopes = prefetched?.session.scopes
   // Grant sessions must remain canonical to URL/claimed session inputs.
   // Do not infer app-default scopes when sessionId is present.
   const fallbackAppScopes = hasGrantSession ? undefined : appEntry?.scopes
-  const grantScopes = requestedScopes ?? claimedScopes ?? fallbackAppScopes
+  const grantScopes = hasGrantSession
+    ? claimedScopes
+    : (requestedScopes ?? fallbackAppScopes)
   const scopesKey = grantScopes?.join("|") ?? ""
-  const telemetryPlatform = useMemo(() => {
-    const scopeToken = getPrimaryScopeToken(grantScopes)
-    return scopeToken ? getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken : null
-  }, [scopesKey])
-
   useEffect(() => {
     const sessionIdParam = params.sessionId
     const secretParam = params.secret
+    const prefetchRequestKey = `${sessionIdParam ?? ""}\u0000${secretParam ?? ""}\u0000${requestedScopesKey}`
+
+    setPrefetched(null)
+    setPrefetchError(null)
+    prefetchedDataRef.current = null
+    setPrefetchDone(false)
 
     if (!sessionIdParam || !secretParam) {
       setPrefetchDone(true)
@@ -94,11 +116,14 @@ export function useConnectPage(): UseConnectPageResult {
       setPrefetchDone(true)
       return
     }
-    if (prefetchedSessionRef.current === sessionIdParam) return
+    if (prefetchRequestRef.current === prefetchRequestKey) return
 
-    prefetchedSessionRef.current = sessionIdParam
+    prefetchRequestRef.current = prefetchRequestKey
 
-    // No isMounted guard needed: the prefetchedSessionRef dedup above prevents
+    const isCurrentPrefetch = () =>
+      prefetchRequestRef.current === prefetchRequestKey
+
+    // No isMounted guard needed: the prefetchRequestRef dedup above prevents
     // duplicate claims, and React 18+ safely ignores setState on unmounted
     // components. Removing the isMounted pattern fixes a StrictMode bug where
     // the first mount's cleanup set isMounted=false, the remount skipped the
@@ -111,12 +136,23 @@ export function useConnectPage(): UseConnectPageResult {
           sessionId: sessionIdParam,
           secret: secretParam,
         })
+        if (!isCurrentPrefetch()) return
         trackSessionClaimCompleted({
           sessionId: sessionIdParam,
-          platform: telemetryPlatform,
+          platform: requestedTelemetryPlatform,
         })
+        const authorizationMismatch = getClaimedAuthorizationMismatch(
+          sessionIdParam,
+          requestedScopes,
+          claimed
+        )
+        if (authorizationMismatch) {
+          setPrefetchError(authorizationMismatch)
+          setPrefetchDone(true)
+          return
+        }
         session = {
-          id: sessionIdParam,
+          id: claimed.sessionId,
           granteeAddress: claimed.granteeAddress,
           scopes: claimed.scopes,
           expiresAt: claimed.expiresAt,
@@ -124,11 +160,15 @@ export function useConnectPage(): UseConnectPageResult {
           appUserId: claimed.appUserId,
         }
       } catch (error) {
+        if (!isCurrentPrefetch()) return
         trackSessionClaimFailed({
           sessionId: sessionIdParam,
           error,
-          platform: telemetryPlatform,
+          platform: requestedTelemetryPlatform,
         })
+        setPrefetchError(
+          "Could not confirm the requested session authorization. Please restart the flow from the app."
+        )
         setPrefetchDone(true)
         return
       }
@@ -138,26 +178,34 @@ export function useConnectPage(): UseConnectPageResult {
           session.granteeAddress,
           session.webhookUrl
         )
+        if (!isCurrentPrefetch()) return
         trackBuilderVerificationCompleted({
           sessionId: sessionIdParam,
-          platform: telemetryPlatform,
+          platform: requestedTelemetryPlatform,
         })
         const result: PrefetchedGrantData = { session, builderManifest }
         prefetchedDataRef.current = result
         setPrefetched(result)
       } catch (error) {
+        if (!isCurrentPrefetch()) return
         trackBuilderVerificationFailed({
           sessionId: sessionIdParam,
           error,
-          platform: telemetryPlatform,
+          platform: requestedTelemetryPlatform,
         })
         const result: PrefetchedGrantData = { session }
         prefetchedDataRef.current = result
         setPrefetched(result)
       }
+      if (!isCurrentPrefetch()) return
       setPrefetchDone(true)
     })()
-  }, [params.secret, params.sessionId, telemetryPlatform])
+  }, [
+    params.secret,
+    params.sessionId,
+    requestedScopesKey,
+    requestedTelemetryPlatform,
+  ])
 
   const { platforms, isPlatformConnected, platformsLoaded, platformLoadError } =
     usePlatforms()
@@ -189,40 +237,59 @@ export function useConnectPage(): UseConnectPageResult {
 
   // Keep dependencies primitive and deterministic for query serialization.
   const grantSearch = useMemo(
-    () =>
-      buildGrantSearchParams({
+    () => {
+      if (handoffId) {
+        return buildGrantSearchParams({ handoffId }).toString()
+      }
+
+      return buildGrantSearchParams({
         sessionId,
         secret: params.secret,
         appId: resolvedAppId,
         scopes: grantScopes,
-      }).toString(),
-    [params.secret, resolvedAppId, scopesKey, sessionId]
+        authorizationDetailsSignature: params.authorizationDetailsSignature,
+        authorizationDetails: authorizationDetailsKey
+          ? JSON.parse(authorizationDetailsKey)
+          : undefined,
+      }).toString()
+    },
+    [
+      authorizationDetailsKey,
+      handoffId,
+      params.secret,
+      params.authorizationDetailsSignature,
+      resolvedAppId,
+      scopesKey,
+      sessionId,
+    ]
   )
 
   const isConnecting = Boolean(connectRunId)
   const scopeSummary =
     grantScopes && grantScopes.length > 0 ? grantScopes.join(", ") : null
   const isMissingAppSelection =
-    platformsLoaded && !resolvedAppId && (!grantScopes || grantScopes.length === 0)
+    platformsLoaded &&
+    !resolvedAppId &&
+    (!grantScopes || grantScopes.length === 0)
   const isMissingRegistryEntry = platformsLoaded && !registryEntry
   const isMissingConnector =
     platformsLoaded && Boolean(registryEntry) && !connectPlatform
 
   const connectorErrorMessage = platformLoadError
     ? `Could not load connectors.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}`
-    : isMissingAppSelection
-      ? "Missing app or scopes. Open Connect from a data app, or include scopes in the URL."
-      : isMissingRegistryEntry
-      ? `Invalid scope: ${scopeSummary ?? "unknown"}. Available scopes: ${getAllAvailableScopes(platforms).join(", ")}.`
-      : isMissingConnector
-        ? `No connector installed for ${
-            dataSourceLabel ?? "requested scope"
-          }.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}${
-            platforms.length > 0
-              ? ` Installed connectors: ${platforms.map(p => p.name ?? p.id).join(", ")}.`
-              : ""
-          }`
-        : null
+    : prefetchError
+      ? prefetchError
+      : isMissingAppSelection
+        ? "Missing app or scopes. Open Connect from a data app, or include scopes in the URL."
+        : isMissingRegistryEntry
+          ? `Invalid scope: ${scopeSummary ?? "unknown"}. Available scopes: ${getAllAvailableScopes(platforms).join(", ")}.`
+          : isMissingConnector
+            ? `No connector installed for ${dataSourceLabel ?? "requested scope"}.${scopeSummary ? ` Scope: ${scopeSummary}.` : ""}${
+                platforms.length > 0
+                  ? ` Installed connectors: ${platforms.map(p => p.name ?? p.id).join(", ")}.`
+                  : ""
+              }`
+            : null
 
   const isBusy = isCheckingPlatforms || isConnecting
   // Show loading while prefetch is resolving scopes (avoids a brief
@@ -267,7 +334,9 @@ export function useConnectPage(): UseConnectPageResult {
     if (isDebugging) return
     if (!hasGrantSession || !platformsLoaded || !isAlreadyConnected) return
 
-    const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+    const grantHref = grantSearch
+      ? `${ROUTES.grant}?${grantSearch}`
+      : ROUTES.grant
     navigate(grantHref, {
       replace: true,
       state: prefetchedDataRef.current
@@ -288,7 +357,9 @@ export function useConnectPage(): UseConnectPageResult {
     if (!activeRun) return
 
     if (activeRun.status === "success" || activeRun.status === "partial") {
-      const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+      const grantHref = grantSearch
+        ? `${ROUTES.grant}?${grantSearch}`
+        : ROUTES.grant
       setConnectRunId(null)
       navigate(grantHref, {
         state: prefetchedDataRef.current
@@ -304,14 +375,22 @@ export function useConnectPage(): UseConnectPageResult {
   }, [activeRun, grantSearch, isDebugging, navigate])
 
   const handleConnect = async () => {
-    if (isDebugging || !connectPlatform || isBusy) return
+    if (
+      isDebugging ||
+      !connectPlatform ||
+      isBusy ||
+      (hasGrantSession && !prefetched)
+    )
+      return
     const runId = await startImport(connectPlatform)
     if (!runId) return
     setConnectRunId(runId)
   }
 
   const handleDebugGrant = () => {
-    const grantHref = grantSearch ? `${ROUTES.grant}?${grantSearch}` : ROUTES.grant
+    const grantHref = grantSearch
+      ? `${ROUTES.grant}?${grantSearch}`
+      : ROUTES.grant
     navigate(grantHref, {
       state: prefetched ? { prefetched } : undefined,
     })

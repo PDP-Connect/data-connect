@@ -1,98 +1,102 @@
-/**
- * Centralized localStorage access for app-level persistence.
- *
- * Connected apps are NO LONGER stored in localStorage — the Gateway (via
- * Personal Server GET /v1/grants) is the single source of truth. The old
- * per-key + index scheme and its migration helper have been removed.
- *
- * What remains: pending-approval recovery for split-failure scenarios.
- */
+/** Centralized localStorage cleanup for removed app-level persistence. */
 
-import { z } from 'zod';
-
-const STORAGE_VERSION = 'v1';
+const STORAGE_VERSION = "v1"
 
 /**
  * Safe localStorage write that handles quota/blocked failures.
  * Returns true if write succeeded, false otherwise.
  */
 function getStorage() {
-  return typeof window !== "undefined" ? window.localStorage : null;
-}
-
-function safeSetItem(key: string, value: string): boolean {
-  const storage = getStorage();
-  if (!storage || typeof storage.setItem !== "function") return false;
-  try {
-    storage.setItem(key, value);
-    return true;
-  } catch (error) {
-    console.warn(`storage: failed to write ${key}`, error);
-    return false;
-  }
-}
-
-function safeGetItem(key: string): string | null {
-  const storage = getStorage();
-  if (!storage || typeof storage.getItem !== "function") return null;
-  try {
-    return storage.getItem(key);
-  } catch {
-    return null;
-  }
+  return typeof window !== "undefined" ? window.localStorage : null
 }
 
 function safeRemoveItem(key: string): void {
-  const storage = getStorage();
-  if (!storage || typeof storage.removeItem !== "function") return;
+  const storage = getStorage()
+  if (!storage || typeof storage.removeItem !== "function") return
   try {
-    storage.removeItem(key);
+    storage.removeItem(key)
   } catch {}
 }
 
-// --- Pending approval recovery ---
-// When grant creation succeeds but session approval fails, we persist the
-// pending approval so it can be retried on next app open. Without this,
-// the grant exists on Gateway but the builder never learns about it.
+const PENDING_APPROVAL_KEY = `${STORAGE_VERSION}_pending_approval`
+const PDPP_GRANT_COMPENSATION_KEY = `${STORAGE_VERSION}_pdpp_grant_compensation`
 
-const PENDING_APPROVAL_KEY = `${STORAGE_VERSION}_pending_approval`;
-
-export interface PendingApproval {
-  sessionId: string;
-  grantId: string;
-  secret: string;
-  userAddress: string;
-  serverAddress?: string;
-  scopes: string[];
-  createdAt: string;
+export type PendingPdppGrantCompensation = {
+  sessionId: string
+  grantId: string
+  userAddress: string
 }
 
-const PendingApprovalSchema = z.object({
-  sessionId: z.string().min(1),
-  grantId: z.string().min(1),
-  secret: z.string().min(1),
-  userAddress: z.string().min(1),
-  serverAddress: z.string().optional(),
-  scopes: z.array(z.string()),
-  createdAt: z.string(),
-});
-
-export function savePendingApproval(approval: PendingApproval): void {
-  safeSetItem(PENDING_APPROVAL_KEY, JSON.stringify(approval));
+export function clearLegacyPendingApproval(): void {
+  safeRemoveItem(PENDING_APPROVAL_KEY)
 }
 
-export function getPendingApproval(): PendingApproval | null {
-  const raw = safeGetItem(PENDING_APPROVAL_KEY);
-  if (!raw) return null;
+/**
+ * Records only the identifiers needed to retry revocation after PDPP handoff
+ * creation fails. In particular, this must never contain a relay secret or a
+ * PDPP bearer credential.
+ */
+export function savePendingPdppGrantCompensation(
+  pending: PendingPdppGrantCompensation
+): boolean {
+  const storage = getStorage()
+  if (!storage || typeof storage.setItem !== "function") return false
   try {
-    const parsed = JSON.parse(raw);
-    const result = PendingApprovalSchema.safeParse(parsed);
-    return result.success ? result.data : null;
+    const existing = getPendingPdppGrantCompensations()
+    const withoutCurrent = existing.filter(
+      candidate =>
+        candidate.sessionId !== pending.sessionId ||
+        candidate.grantId !== pending.grantId
+    )
+    storage.setItem(
+      PDPP_GRANT_COMPENSATION_KEY,
+      JSON.stringify([...withoutCurrent, pending])
+    )
+    return true
   } catch {
-    return null;
+    return false
   }
 }
 
-export function clearPendingApproval(): void {
-  safeRemoveItem(PENDING_APPROVAL_KEY);
+export function getPendingPdppGrantCompensations(): PendingPdppGrantCompensation[] {
+  const storage = getStorage()
+  if (!storage || typeof storage.getItem !== "function") return []
+  try {
+    const value = storage.getItem(PDPP_GRANT_COMPENSATION_KEY)
+    if (!value) return []
+    const pending = JSON.parse(value)
+    return Array.isArray(pending)
+      ? pending.filter(
+          candidate =>
+            typeof candidate?.sessionId === "string" &&
+            typeof candidate?.grantId === "string" &&
+            typeof candidate?.userAddress === "string"
+        )
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function clearPendingPdppGrantCompensation(
+  pending?: Pick<PendingPdppGrantCompensation, "sessionId" | "grantId">
+): void {
+  if (!pending) {
+    safeRemoveItem(PDPP_GRANT_COMPENSATION_KEY)
+    return
+  }
+  const storage = getStorage()
+  if (!storage || typeof storage.setItem !== "function") return
+  try {
+    const remaining = getPendingPdppGrantCompensations().filter(
+      candidate =>
+        candidate.sessionId !== pending.sessionId ||
+        candidate.grantId !== pending.grantId
+    )
+    if (remaining.length === 0) {
+      storage.removeItem(PDPP_GRANT_COMPENSATION_KEY)
+    } else {
+      storage.setItem(PDPP_GRANT_COMPENSATION_KEY, JSON.stringify(remaining))
+    }
+  } catch {}
 }

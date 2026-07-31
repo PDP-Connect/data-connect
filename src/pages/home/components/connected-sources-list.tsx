@@ -249,31 +249,31 @@ interface PersonalServerOnboardingCopyProps {
 const ONBOARDING_COPY: Record<
   OnboardingMessageState,
   {
-    serverLinkText: string
-    beforeServerLink: string
-    afterServerLink: string
+    serverText: string
+    beforeServer: string
+    afterServer: string
     appsCtaLink: string
     afterAppsLink: string
   }
 > = {
   empty: {
-    beforeServerLink: "Your ",
-    serverLinkText: "Personal Server",
-    afterServerLink: " is ready. Connect a source to ",
+    beforeServer: "Your ",
+    serverText: "Personal Server",
+    afterServer: " is ready. Connect a source to ",
     appsCtaLink: "run apps",
     afterAppsLink: " on it.",
   },
   early: {
-    beforeServerLink: "Your data lives in your ",
-    serverLinkText: "Personal Server",
-    afterServerLink: ". You can now ",
+    beforeServer: "Your data lives in your ",
+    serverText: "Personal Server",
+    afterServer: ". You can now ",
     appsCtaLink: "run apps",
     afterAppsLink: " on it.",
   },
   mature: {
-    beforeServerLink: "Managed by your ",
-    serverLinkText: "Personal Server",
-    afterServerLink: ". You can ",
+    beforeServer: "Managed by your ",
+    serverText: "Personal Server",
+    afterServer: ". You can ",
     appsCtaLink: "run apps",
     afterAppsLink: " on it.",
   },
@@ -286,14 +286,9 @@ function PersonalServerOnboardingCopy({
 
   return (
     <Text as="p" intent="small" muted>
-      {copy.beforeServerLink}
-      <Link
-        to={ROUTES.personalServer}
-        className="link hover:text-foreground"
-      >
-        {copy.serverLinkText}
-      </Link>
-      {copy.afterServerLink}
+      {copy.beforeServer}
+      {copy.serverText}
+      {copy.afterServer}
       <Link to={ROUTES.apps} className="link hover:text-foreground">
         {copy.appsCtaLink}
       </Link>

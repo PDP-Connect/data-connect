@@ -8,12 +8,18 @@ import {
   getGrantParamsFromSearchParams,
   type GrantParams,
 } from "../lib/grant-params"
+import {
+  createGrantHandoff,
+  getGrantHandoff,
+  resolveGrantHandoff,
+} from "../lib/grant-handoff"
 import { setAuthenticated } from "../state/store"
 import { ROUTES } from "@/config/routes"
 
 /**
  * Parse a vana:// deep link URL into GrantParams.
- * Accepts URLs like: vana://connect?sessionId=abc&secret=xyz
+ * Accepts URLs like: vana://connect?sessionId=abc&secret=xyz. Credentials are
+ * immediately moved into an in-memory handoff before navigation.
  */
 function parseDeepLinkUrl(url: string): GrantParams | null {
   try {
@@ -53,8 +59,13 @@ export function useDeepLink() {
   dispatchRef.current = dispatch
 
   // Navigate to the appropriate route based on grant params
-  const handleGrantParams = (params: GrantParams) => {
-    setDeepLinkParams(params)
+  const handleGrantParams = (incomingParams: GrantParams) => {
+    const handoffId =
+      incomingParams.handoffId ?? createGrantHandoff(incomingParams)
+    const params = getGrantHandoff(handoffId)
+    if (!params) return
+
+    setDeepLinkParams({ handoffId })
     setIsDeepLink(true)
 
     // Derive wallet address from masterKeySignature and populate auth state
@@ -72,18 +83,18 @@ export function useDeepLink() {
             })
           )
         })
-        .catch(err => {
-          console.error("[DeepLink] Failed to recover address from masterKeySig:", err)
+        .catch(() => {
+          console.error("[DeepLink] Failed to recover address from secure handoff")
         })
     }
 
     const authRedirectRoute = getAuthRedirectRoute(params.sessionId)
     if (authRedirectRoute) {
-      navigateRef.current(authRedirectRoute, { replace: true })
+      navigateRef.current(`${authRedirectRoute}?handoff=${handoffId}`, { replace: true })
       return
     }
 
-    const normalizedSearch = buildGrantSearchParams(params).toString()
+    const normalizedSearch = buildGrantSearchParams({ handoffId }).toString()
     const targetSearch = normalizedSearch ? `?${normalizedSearch}` : ""
     const targetRoute =
       params.status === "success" ? ROUTES.grant : ROUTES.connect
@@ -135,10 +146,17 @@ export function useDeepLink() {
   // Fallback: check URL query params (dev mode, direct navigation)
   useEffect(() => {
     const urlParams = new URLSearchParams(location.search)
-    const params = getGrantParamsFromSearchParams(urlParams)
+    const routeParams = getGrantParamsFromSearchParams(urlParams)
+    const hasSensitiveParams = Boolean(
+      routeParams.secret || routeParams.masterKeySignature
+    )
+    const handoffId =
+      routeParams.handoffId ??
+      (hasSensitiveParams ? createGrantHandoff(routeParams) : undefined)
+    const params = resolveGrantHandoff(handoffId ? { handoffId } : routeParams)
 
     if (params.sessionId || params.appId) {
-      setDeepLinkParams(params)
+      setDeepLinkParams(handoffId ? { handoffId } : params)
       setIsDeepLink(true)
 
       // Derive wallet address from masterKeySignature and populate auth state
@@ -156,30 +174,29 @@ export function useDeepLink() {
               })
             )
           })
-          .catch(err => {
-            console.error("[DeepLink] Failed to recover address from masterKeySig:", err)
+          .catch(() => {
+            console.error("[DeepLink] Failed to recover address from secure handoff")
           })
       }
 
       const authRedirectRoute = getAuthRedirectRoute(params.sessionId)
       if (authRedirectRoute) {
-        if (location.pathname !== authRedirectRoute) {
-          navigate(authRedirectRoute, { replace: true })
+        const search = buildGrantSearchParams(handoffId ? { handoffId } : params).toString()
+        if (location.pathname !== authRedirectRoute || location.search !== `?${search}`) {
+          navigate(`${authRedirectRoute}?${search}`, { replace: true })
         }
         return
       }
 
-      const normalizedSearch = buildGrantSearchParams(params).toString()
+      const normalizedSearch = buildGrantSearchParams(handoffId ? { handoffId } : params).toString()
       const targetSearch = normalizedSearch ? `?${normalizedSearch}` : ""
       const targetRoute =
-        params.status === "success" ? ROUTES.grant : ROUTES.connect
+        params.status === "success" || location.pathname === ROUTES.grant
+          ? ROUTES.grant
+          : ROUTES.connect
       const isAlreadyOnTarget =
         location.pathname === targetRoute && location.search === targetSearch
-      const shouldRedirect =
-        location.pathname !== ROUTES.connect &&
-        location.pathname !== ROUTES.grant
-
-      if (shouldRedirect && !isAlreadyOnTarget) {
+      if (!isAlreadyOnTarget) {
         navigate(`${targetRoute}${targetSearch}`, { replace: true })
       }
     }

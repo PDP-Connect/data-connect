@@ -17,6 +17,12 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    include: [
+      "src/**/*.test.{ts,tsx}",
+      "src-tauri/**/*.test.ts",
+      "scripts/build-updater-manifest.test.mjs",
+      "scripts/release-workflow.test.ts",
+    ],
     setupFiles: ["./src/test/setup.ts"],
   },
   define: {

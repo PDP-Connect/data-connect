@@ -254,4 +254,86 @@ describe("useEvents", () => {
     })
     expect(trackCollectionFailed).not.toHaveBeenCalled()
   })
+
+  it("persists PDPP COMPLETE status payloads through the normal export path", async () => {
+    const useEvents = await importHook()
+    const exportPath = "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run-1"
+    currentRuns = [
+      {
+        id: "github-pdpp-run-1",
+        platformId: "github-pdpp",
+        company: "GitHub",
+        name: "GitHub",
+        startDate: "2026-04-14T12:00:00.000Z",
+        status: "running",
+      },
+    ]
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "write_export_data") {
+        return Promise.resolve(exportPath)
+      }
+      return Promise.resolve(null)
+    })
+
+    renderHook(() => useEvents())
+
+    await act(async () => {
+      emit("connector-status", {
+        runId: "github-pdpp-run-1",
+        status: {
+          type: "COMPLETE",
+          message: "Exported 2 records",
+          recordCount: 2,
+          data: {
+            platform: "github-pdpp",
+            company: "GitHub",
+            exportSummary: { count: 2, label: "records" },
+            pdpp: {
+              connectorId: "github-pdpp",
+              status: "succeeded",
+              recordCount: 2,
+            },
+            "pdpp.recordsByStream": {
+              user: [{ type: "RECORD", stream: "user", data: { login: "octocat" } }],
+            },
+          },
+        },
+        timestamp: Date.now(),
+      })
+      await Promise.resolve()
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("write_export_data", {
+      runId: "github-pdpp-run-1",
+      platformId: "github-pdpp",
+      company: "GitHub",
+      name: "github-pdpp",
+      data: expect.any(String),
+    })
+    const writeCall = mockInvoke.mock.calls.find(
+      ([command]) => command === "write_export_data"
+    )
+    expect(JSON.parse(writeCall?.[1].data)).toEqual(
+      expect.objectContaining({
+        "pdpp.recordsByStream": {
+          user: [{ type: "RECORD", stream: "user", data: { login: "octocat" } }],
+        },
+      })
+    )
+    expect(mockDispatch).toHaveBeenCalledWith({
+      type: "app/updateRunStatus",
+      payload: {
+        runId: "github-pdpp-run-1",
+        status: "success",
+        endDate: expect.any(String),
+      },
+    })
+    expect(trackCollectionCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        collectionRunId: "github-pdpp-run-1",
+        source: "github",
+        recordCount: 2,
+      })
+    )
+  })
 })

@@ -13,12 +13,26 @@ import { verifyBuilder, BuilderVerificationError } from "../../services/builder"
 import {
   createGrant,
   PersonalServerError,
+  revokeGrant,
 } from "../../services/personalServer"
+import {
+  createGithubPdppConsentRequest,
+  issueGithubPdppGrant,
+} from "../../services/pdppAuthorization"
+import {
+  PdppAuthorizationProofError,
+  verifyPdppAuthorizationProof,
+} from "../../services/pdppAuthorizationProof"
 import { fetchServerIdentity } from "../../services/serverRegistration"
 import { usePersonalServer } from "../../hooks/usePersonalServer"
 import {
-  savePendingApproval,
-  clearPendingApproval,
+  clearGrantHandoff,
+  setGrantHandoffExpiry,
+} from "../../lib/grant-handoff"
+import {
+  clearPendingPdppGrantCompensation,
+  getPendingPdppGrantCompensations,
+  savePendingPdppGrantCompensation,
 } from "../../lib/storage"
 import type {
   BuilderManifest,
@@ -28,6 +42,7 @@ import type {
   PrefetchedGrantData,
 } from "./types"
 import { ROUTES } from "@/config/routes"
+import { getClaimedAuthorizationMismatch } from "@/lib/grant-params"
 import { getPrimaryScopeToken } from "@/lib/scope-labels"
 import { getPlatformRegistryEntryById } from "@/lib/platform/utils"
 import {
@@ -42,8 +57,28 @@ import {
   trackSessionClaimFailed,
 } from "@/lib/telemetry/events"
 
-const ACCOUNT_URL =
-  import.meta.env.VITE_ACCOUNT_URL || "https://account.vana.org"
+export type PendingApproval = {
+  sessionId: string
+  secret: string
+  grantId: string
+  userAddress: string
+  serverAddress?: string
+  scopes: string[]
+  expiresAt: string
+}
+
+export function isPendingApprovalRetryAllowed(
+  pending: PendingApproval,
+  walletAddress: string | null
+): boolean {
+  const expiresAt = new Date(pending.expiresAt).getTime()
+  return Boolean(
+    walletAddress &&
+    walletAddress === pending.userAddress &&
+    !Number.isNaN(expiresAt) &&
+    Date.now() <= expiresAt
+  )
+}
 
 // Demo mode: sessions starting with "grant-session-" use mock data (dev only)
 function isDemoSession(sessionId: string): boolean {
@@ -72,7 +107,10 @@ function createDemoBuilderManifest(): BuilderManifest {
   }
 }
 
-export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGrantData) {
+export function useGrantFlow(
+  params: GrantFlowParams,
+  prefetched?: PrefetchedGrantData
+) {
   const navigate = useNavigate()
   const dispatch = useDispatch()
   const { isAuthenticated, isLoading: authLoading, walletAddress } = useAuth()
@@ -84,13 +122,28 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
   const [isApproving, setIsApproving] = useState(false)
   const [authPending, setAuthPending] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
+  const pendingApprovalRef = useRef<PendingApproval | null>(null)
 
   const sessionId = params?.sessionId
   const secret = params?.secret
+  const handoffId = params?.handoffId
   const hasSuccessOverride = params?.status === "success"
+  const pdppAuthorizationDetails = params?.authorizationDetails
+  const pdppAuthorizationDetailsSignature =
+    params?.authorizationDetailsSignature
+  const pdppAuthorizationDetailsKey =
+    pdppAuthorizationDetails === undefined
+      ? "absent"
+      : pdppAuthorizationDetails === null
+        ? "invalid"
+        : JSON.stringify(pdppAuthorizationDetails)
   const telemetryPlatform = (() => {
-    const scopeToken = getPrimaryScopeToken(prefetched?.session?.scopes ?? params?.scopes)
-    return scopeToken ? getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken : null
+    const scopeToken = getPrimaryScopeToken(
+      prefetched?.session?.scopes ?? params?.scopes
+    )
+    return scopeToken
+      ? (getPlatformRegistryEntryById(scopeToken)?.id ?? scopeToken)
+      : null
   })()
 
   // Reset auth state when sessionId changes
@@ -114,6 +167,74 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
     // so the first mount's in-flight async ops don't clobber the second mount's state.
     let cancelled = false
 
+    const enterConsent = async (
+      session: GrantSession,
+      builderManifest: BuilderManifest
+    ) => {
+      if (pdppAuthorizationDetails === null) {
+        throw new PersonalServerError(
+          "The GitHub authorization details are invalid."
+        )
+      }
+      if (pdppAuthorizationDetails) {
+        try {
+          await verifyPdppAuthorizationProof({
+            sessionId: session.id,
+            authorizationDetails: pdppAuthorizationDetails,
+            signature: pdppAuthorizationDetailsSignature,
+            builderAddress: session.granteeAddress,
+          })
+        } catch (error) {
+          if (!(error instanceof PdppAuthorizationProofError)) throw error
+          if (cancelled) return
+          setFlowState({
+            sessionId: session.id,
+            status: "error",
+            error: error.message,
+          })
+          return
+        }
+      }
+      const githubPdppConsentRequest = pdppAuthorizationDetails
+        ? await (() => {
+            if (!personalServer.port) {
+              throw new PersonalServerError(
+                "Personal Server is not ready to validate the GitHub authorization request."
+              )
+            }
+            return createGithubPdppConsentRequest(
+              personalServer.port,
+              {
+                sessionId: session.id,
+                scopes: session.scopes,
+                authorizationDetails: pdppAuthorizationDetails,
+              },
+              personalServer.devToken
+            )
+          })()
+        : undefined
+      if (
+        githubPdppConsentRequest &&
+        (githubPdppConsentRequest.session_id !== session.id ||
+          githubPdppConsentRequest.scopes.length !== session.scopes.length ||
+          !githubPdppConsentRequest.scopes.every(scope =>
+            session.scopes.includes(scope)
+          ))
+      ) {
+        throw new PersonalServerError(
+          "The normalized GitHub authorization does not match the claimed session."
+        )
+      }
+      if (cancelled) return
+      setFlowState(prev => ({
+        ...prev,
+        status: "consent",
+        session,
+        builderManifest,
+        githubPdppConsentRequest,
+      }))
+    }
+
     const runFlow = async () => {
       console.log("[GrantFlow] runFlow starting", {
         sessionId,
@@ -122,60 +243,72 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
         prefetchedSessionId: prefetched?.session?.id,
         prefetchedHasBuilder: Boolean(prefetched?.builderManifest),
         isDemoSession: isDemoSession(sessionId),
-      });
+      })
       trackGrantFlowStarted({ sessionId, platform: telemetryPlatform })
-      setFlowState({ sessionId, secret, status: "loading" })
+      setFlowState({ sessionId, status: "loading" })
 
       // --- Demo mode ---
       if (isDemoSession(sessionId)) {
         const session = createDemoSession(sessionId)
         const builderManifest = createDemoBuilderManifest()
-        setFlowState(prev => ({
-          ...prev,
-          status: "consent",
-          session,
-          builderManifest,
-        }))
+        await enterConsent(session, builderManifest)
 
         return
       }
 
       // --- Pre-fetched path: connect page already claimed + verified in background ---
+      const prefetchedAuthorizationMismatch = prefetched?.session
+        ? getClaimedAuthorizationMismatch(sessionId, params.scopes, {
+            sessionId: prefetched.session.id,
+            scopes: prefetched.session.scopes,
+          })
+        : null
+      if (prefetchedAuthorizationMismatch) {
+        setFlowState({
+          sessionId,
+          status: "error",
+          error: prefetchedAuthorizationMismatch,
+        })
+        return
+      }
+
       if (prefetched?.session && prefetched?.builderManifest) {
-        console.log("[GrantFlow] Using pre-fetched data (skipping claim + verify)", {
-          sessionId: prefetched.session.id,
-          builderName: prefetched.builderManifest.name,
-        });
-        setFlowState(prev => ({
-          ...prev,
-          status: "consent",
-          session: prefetched.session,
-          builderManifest: prefetched.builderManifest,
-        }))
+        setGrantHandoffExpiry(handoffId, prefetched.session.expiresAt)
+        console.log(
+          "[GrantFlow] Using pre-fetched data (skipping claim + verify)",
+          {
+            sessionId: prefetched.session.id,
+            builderName: prefetched.builderManifest.name,
+          }
+        )
+        await enterConsent(prefetched.session, prefetched.builderManifest)
 
         return
       }
 
       // --- Pre-fetched session only: claim done, builder verification still needed ---
       if (prefetched?.session) {
-        console.log("[GrantFlow] Using pre-fetched session (skipping claim, verifying builder)", {
-          sessionId: prefetched.session.id,
-        });
+        setGrantHandoffExpiry(handoffId, prefetched.session.expiresAt)
+        console.log(
+          "[GrantFlow] Using pre-fetched session (skipping claim, verifying builder)",
+          {
+            sessionId: prefetched.session.id,
+          }
+        )
         setFlowState(prev => ({ ...prev, session: prefetched.session }))
 
         try {
           setFlowState(prev => ({ ...prev, status: "verifying-builder" }))
           const builderManifest = await verifyBuilder(
             prefetched.session.granteeAddress,
-            prefetched.session.webhookUrl,
+            prefetched.session.webhookUrl
           )
           trackBuilderVerificationCompleted({
             sessionId: prefetched.session.id,
             platform: telemetryPlatform,
           })
           if (cancelled) return
-          setFlowState(prev => ({ ...prev, builderManifest }))
-          setFlowState(prev => ({ ...prev, status: "consent" }))
+          await enterConsent(prefetched.session, builderManifest)
         } catch (error) {
           trackBuilderVerificationFailed({
             sessionId: prefetched.session.id,
@@ -183,13 +316,15 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
             platform: telemetryPlatform,
           })
           if (cancelled) return
-          console.error("[GrantFlow] Builder verification failed (pre-fetched session)", {
-            sessionId: prefetched.session.id,
-            message: error instanceof Error ? error.message : String(error),
-          });
+          console.error(
+            "[GrantFlow] Builder verification failed (pre-fetched session)",
+            {
+              sessionId: prefetched.session.id,
+              type: error instanceof Error ? error.name : "unknown",
+            }
+          )
           setFlowState({
             sessionId,
-            secret,
             status: "error",
             error:
               error instanceof BuilderVerificationError
@@ -214,7 +349,10 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
 
       // Step 1: Claim session
       try {
-        console.log("[GrantFlow] Falling back to fresh claim (no pre-fetched data)", { sessionId });
+        console.log(
+          "[GrantFlow] Falling back to fresh claim (no pre-fetched data)",
+          { sessionId }
+        )
         setFlowState(prev => ({ ...prev, status: "claiming" }))
         const claimed = await claimSession({ sessionId, secret })
         trackSessionClaimCompleted({
@@ -222,19 +360,33 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
           platform: telemetryPlatform,
         })
         if (cancelled) return
+        const authorizationMismatch = getClaimedAuthorizationMismatch(
+          sessionId,
+          params.scopes,
+          claimed
+        )
+        if (authorizationMismatch) {
+          setFlowState({
+            sessionId,
+            status: "error",
+            error: authorizationMismatch,
+          })
+          return
+        }
         const session: GrantSession = {
-          id: sessionId,
+          id: claimed.sessionId,
           granteeAddress: claimed.granteeAddress,
           scopes: claimed.scopes,
           expiresAt: claimed.expiresAt,
           webhookUrl: claimed.webhookUrl,
           appUserId: claimed.appUserId,
         }
+        setGrantHandoffExpiry(handoffId, claimed.expiresAt)
         console.log("[GrantFlow] Claim succeeded", {
           sessionId,
           granteeAddress: claimed.granteeAddress,
           scopes: claimed.scopes,
-        });
+        })
         setFlowState(prev => ({ ...prev, session }))
 
         // Step 2: Verify builder
@@ -243,41 +395,52 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
         setFlowState(prev => ({ ...prev, status: "verifying-builder" }))
         const builderManifest = await verifyBuilder(
           claimed.granteeAddress,
-          claimed.webhookUrl,
+          claimed.webhookUrl
         )
         trackBuilderVerificationCompleted({
           sessionId,
           platform: telemetryPlatform,
         })
         if (cancelled) return
-        setFlowState(prev => ({ ...prev, builderManifest }))
-
-        // Advance to consent (data export already completed on the connect page)
-        setFlowState(prev => ({ ...prev, status: "consent" }))
-
+        // Advance to consent only after any GitHub terms have been normalized
+        // and bound to the claimed session by the Personal Server.
+        await enterConsent(session, builderManifest)
       } catch (error) {
         if (error instanceof SessionRelayError) {
-          trackSessionClaimFailed({ sessionId, error, platform: telemetryPlatform })
+          trackSessionClaimFailed({
+            sessionId,
+            error,
+            platform: telemetryPlatform,
+          })
         } else if (error instanceof BuilderVerificationError) {
-          trackBuilderVerificationFailed({ sessionId, error, platform: telemetryPlatform })
+          trackBuilderVerificationFailed({
+            sessionId,
+            error,
+            platform: telemetryPlatform,
+          })
         }
         if (cancelled) return
         console.error("[GrantFlow] Flow error", {
           sessionId,
-          errorType: error instanceof SessionRelayError ? "SessionRelayError" : error instanceof BuilderVerificationError ? "BuilderVerificationError" : "unknown",
-          message: error instanceof Error ? error.message : String(error),
+          errorType:
+            error instanceof SessionRelayError
+              ? "SessionRelayError"
+              : error instanceof BuilderVerificationError
+                ? "BuilderVerificationError"
+                : "unknown",
           ...(error instanceof SessionRelayError && {
             errorCode: error.errorCode,
             statusCode: error.statusCode,
           }),
-        });
+        })
         setFlowState({
           sessionId,
-          secret,
           status: "error",
           error:
             error instanceof SessionRelayError ||
-            error instanceof BuilderVerificationError
+            error instanceof BuilderVerificationError ||
+            error instanceof PdppAuthorizationProofError ||
+            error instanceof PersonalServerError
               ? error.message
               : "Failed to load session",
         })
@@ -286,9 +449,20 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
 
     runFlow()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- prefetched is stable from navigation state
-  }, [sessionId, secret, retryCount])
+  }, [
+    sessionId,
+    secret,
+    retryCount,
+    pdppAuthorizationDetailsKey,
+    pdppAuthorizationDetailsSignature,
+    handoffId,
+    personalServer.devToken,
+    personalServer.port,
+  ])
 
   // Handle success override (when returning from connect page)
   useEffect(() => {
@@ -304,13 +478,11 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
     // Auth should already be populated from the deep link (masterKeySig).
     // If missing, the user needs to sign in via account.vana.org first.
     if (!isAuthenticated || !walletAddress) {
-      const connectUrl = new URL("/connect", ACCOUNT_URL)
-      if (flowState.sessionId) connectUrl.searchParams.set("sessionId", flowState.sessionId)
-      if (flowState.secret) connectUrl.searchParams.set("secret", flowState.secret)
       setFlowState(prev => ({
         ...prev,
         status: "error",
-        error: `Not signed in. Please sign in at ${connectUrl.toString()} and relaunch Data Connect.`,
+        error:
+          "Not signed in. Sign in, then relaunch Data Connect from the requesting app.",
       }))
       return
     }
@@ -329,8 +501,11 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
     try {
       // Skip grant creation + session approval for demo sessions
       if (isDemoSession(flowState.sessionId)) {
-        trackGrantFlowCompleted({ sessionId: flowState.sessionId, platform: telemetryPlatform })
-      setFlowState(prev => ({ ...prev, status: "success" }))
+        trackGrantFlowCompleted({
+          sessionId: flowState.sessionId,
+          platform: telemetryPlatform,
+        })
+        setFlowState(prev => ({ ...prev, status: "success" }))
         return
       }
 
@@ -344,9 +519,28 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
             platform: telemetryPlatform,
           })
           throw new SessionRelayError(
-            "This session has expired. Please start a new request from the app.",
+            "This session has expired. Please start a new request from the app."
           )
         }
+      }
+
+      // A failed PDPP issuance may have left a legacy grant active. Retry its
+      // persisted, non-secret compensation before creating another grant.
+      const pendingCompensation = getPendingPdppGrantCompensations().find(
+        pending => pending.sessionId === flowState.sessionId
+      )
+      if (pendingCompensation) {
+        if (pendingCompensation.userAddress !== walletAddress) {
+          throw new PersonalServerError(
+            "Sign in with the account that started this approval before retrying it."
+          )
+        }
+        await revokeGrant(
+          personalServer.port,
+          pendingCompensation.grantId,
+          personalServer.devToken
+        )
+        clearPendingPdppGrantCompensation(pendingCompensation)
       }
 
       // Step: Create grant via Personal Server
@@ -355,49 +549,106 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
       // Grant expiresAt is intentionally omitted (defaults to 0 = no expiration).
       // The session's expiresAt is an approval-window timeout, not a grant lifetime.
       // Grants live until explicitly revoked by the user.
-      const { grantId } = await createGrant(personalServer.port, {
-        granteeAddress: flowState.session.granteeAddress,
-        scopes: flowState.session.scopes,
-      }, personalServer.devToken)
+      const { grantId } = await createGrant(
+        personalServer.port,
+        {
+          granteeAddress: flowState.session.granteeAddress,
+          scopes: flowState.session.scopes,
+        },
+        personalServer.devToken
+      )
+
+      if (flowState.githubPdppConsentRequest) {
+        const pendingCompensation = {
+          sessionId: flowState.sessionId,
+          grantId,
+          userAddress: walletAddress,
+        }
+        if (!savePendingPdppGrantCompensation(pendingCompensation)) {
+          try {
+            await revokeGrant(
+              personalServer.port,
+              grantId,
+              personalServer.devToken
+            )
+          } catch (revokeError) {
+            console.error("[GrantFlow] Unrecorded PDPP compensation failed", {
+              type: revokeError instanceof Error ? revokeError.name : "unknown",
+            })
+          }
+          throw new PersonalServerError(
+            "Could not securely record grant recovery. The incomplete grant was revoked when possible; restart Data Connect before trying again."
+          )
+        }
+        try {
+          await issueGithubPdppGrant(
+            personalServer.port,
+            {
+              requestId: flowState.githubPdppConsentRequest.request_id,
+              legacyGrantId: grantId,
+              subjectId: walletAddress,
+              clientId: flowState.session.granteeAddress,
+            },
+            personalServer.devToken
+          )
+        } catch (error) {
+          // The legacy grant would otherwise authorize a completed-looking
+          // session without its required PDPP credential. Keep the two grants
+          // atomic from the requester's perspective when the local issuance
+          // step rejects before Session Relay approval.
+          try {
+            await revokeGrant(
+              personalServer.port,
+              grantId,
+              personalServer.devToken
+            )
+            clearPendingPdppGrantCompensation(pendingCompensation)
+          } catch (revokeError) {
+            console.error("[GrantFlow] PDPP grant compensation failed", {
+              type: revokeError instanceof Error ? revokeError.name : "unknown",
+            })
+          }
+          throw error
+        }
+      }
 
       setFlowState(prev => ({ ...prev, grantId }))
 
       // Fetch the Personal Server's own address so the builder can resolve
       // the server via Gateway (registered under this address, not the user's).
-      const { address: serverAddress } = await fetchServerIdentity(personalServer.port)
+      const { address: serverAddress } = await fetchServerIdentity(
+        personalServer.port
+      )
 
       // Step: Approve session via Session Relay
       setFlowState(prev => ({ ...prev, status: "approving" }))
 
-      if (!flowState.secret) {
+      if (!secret) {
         throw new SessionRelayError(
-          "Cannot approve session: secret is missing from the flow state. " +
-          "The builder will not be notified of this grant.",
+          "Cannot approve session because the secure handoff is no longer available. Relaunch from the requesting app."
         )
       }
 
-      // Persist pending approval so we can retry if approve fails.
-      // Without this, a split failure leaves the grant on Gateway
-      // but the builder never learns about it.
-      savePendingApproval({
+      pendingApprovalRef.current = {
         sessionId: flowState.sessionId,
         grantId,
-        secret: flowState.secret,
+        secret,
         userAddress: walletAddress,
         serverAddress,
         scopes: flowState.session.scopes,
-        createdAt: new Date().toISOString(),
-      })
+        expiresAt: flowState.session.expiresAt,
+      }
 
       await approveSession(flowState.sessionId, {
-        secret: flowState.secret,
+        secret,
         grantId,
         userAddress: walletAddress,
         serverAddress,
         scopes: flowState.session.scopes,
       })
 
-      clearPendingApproval()
+      pendingApprovalRef.current = null
+      clearGrantHandoff(handoffId)
 
       // Persist as connected app in Redux for immediate UI update
       dispatch(
@@ -413,11 +664,20 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
         })
       )
 
-      trackGrantFlowCompleted({ sessionId: flowState.sessionId, platform: telemetryPlatform })
+      trackGrantFlowCompleted({
+        sessionId: flowState.sessionId,
+        platform: telemetryPlatform,
+      })
       setFlowState(prev => ({ ...prev, status: "success" }))
     } catch (error) {
-      trackGrantFlowFailed({ sessionId: flowState.sessionId, platform: telemetryPlatform, error })
-      console.error("[GrantFlow] Approve failed:", error)
+      trackGrantFlowFailed({
+        sessionId: flowState.sessionId,
+        platform: telemetryPlatform,
+        error,
+      })
+      console.error("[GrantFlow] Approve failed", {
+        type: error instanceof Error ? error.name : "unknown",
+      })
       setFlowState(prev => ({
         ...prev,
         status: "error",
@@ -433,14 +693,16 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
   }, [
     flowState.session,
     flowState.sessionId,
-    flowState.secret,
+    secret,
     flowState.builderManifest,
+    flowState.githubPdppConsentRequest,
     isAuthenticated,
     walletAddress,
     personalServer.port,
     personalServer.tunnelUrl,
     personalServer.devToken,
     dispatch,
+    handoffId,
     telemetryPlatform,
   ])
 
@@ -488,7 +750,11 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
     // restartingRef is set synchronously during render so we see it
     // before any stale tunnelFailed state from Phase 1.
     if (!isDemo && personalServer.restartingRef.current) {
-      setFlowState(prev => prev.status === "preparing-server" ? prev : { ...prev, status: "preparing-server" })
+      setFlowState(prev =>
+        prev.status === "preparing-server"
+          ? prev
+          : { ...prev, status: "preparing-server" }
+      )
       return
     }
     // If the tunnel timed out (90s), surface the error.
@@ -497,46 +763,169 @@ export function useGrantFlow(params: GrantFlowParams, prefetched?: PrefetchedGra
       setFlowState(prev => ({
         ...prev,
         status: "error",
-        error: "Could not establish a public tunnel for the Personal Server. The requesting app won't be able to access your data.",
+        error:
+          "Could not establish a public tunnel for the Personal Server. The requesting app won't be able to access your data.",
       }))
       return
     }
     if (!isDemo && (!personalServer.port || !personalServer.tunnelUrl)) {
-      setFlowState(prev => prev.status === "preparing-server" ? prev : { ...prev, status: "preparing-server" })
+      setFlowState(prev =>
+        prev.status === "preparing-server"
+          ? prev
+          : { ...prev, status: "preparing-server" }
+      )
       return
     }
     setAuthPending(false)
     void handleApprove()
-  }, [authPending, handleApprove, isAuthenticated, walletAddress, personalServer.port, personalServer.tunnelUrl, tunnelTimedOut, personalServer.status, personalServer.error, flowState.sessionId])
+  }, [
+    authPending,
+    handleApprove,
+    isAuthenticated,
+    walletAddress,
+    personalServer.port,
+    personalServer.tunnelUrl,
+    tunnelTimedOut,
+    personalServer.status,
+    personalServer.error,
+    flowState.sessionId,
+  ])
 
   // --- Retry from error ---
-  // Bumps retryCount which re-triggers the main flow effect (claim → verify → consent).
-  // For errors during grant creation/approval, the user returns to consent
-  // and can click Allow again.
+  // Retries approval only while this process still holds the relay capability,
+  // for the same authenticated subject and before session expiry.
   const handleRetry = useCallback(() => {
+    const pending = pendingApprovalRef.current
+    if (pending) {
+      if (
+        !isAuthenticated ||
+        !isPendingApprovalRetryAllowed(pending, walletAddress)
+      ) {
+        pendingApprovalRef.current = null
+        setFlowState(prev => ({
+          ...prev,
+          status: "error",
+          error:
+            "This approval retry is no longer available. Relaunch from the requesting app.",
+        }))
+        return
+      }
+
+      void (async () => {
+        setIsApproving(true)
+        try {
+          await approveSession(pending.sessionId, {
+            secret: pending.secret,
+            grantId: pending.grantId,
+            userAddress: pending.userAddress,
+            ...(pending.serverAddress && {
+              serverAddress: pending.serverAddress,
+            }),
+            scopes: pending.scopes,
+          })
+          pendingApprovalRef.current = null
+          clearGrantHandoff(handoffId)
+          setFlowState(prev => ({ ...prev, status: "success" }))
+        } catch (error) {
+          console.error("[GrantFlow] Approval retry failed", {
+            type: error instanceof Error ? error.name : "unknown",
+          })
+          setFlowState(prev => ({
+            ...prev,
+            status: "error",
+            error:
+              error instanceof SessionRelayError
+                ? error.message
+                : "Failed to notify the requesting app",
+          }))
+        } finally {
+          setIsApproving(false)
+        }
+      })()
+      return
+    }
+
+    const pendingCompensation = getPendingPdppGrantCompensations().find(
+      pending => pending.sessionId === flowState.sessionId
+    )
+    if (pendingCompensation) {
+      const personalServerPort = personalServer.port
+      if (
+        !isAuthenticated ||
+        pendingCompensation.userAddress !== walletAddress ||
+        !personalServerPort
+      ) {
+        setFlowState(prev => ({
+          ...prev,
+          status: "error",
+          error:
+            "Sign in with the account that started this approval and restart the Personal Server before retrying it.",
+        }))
+        return
+      }
+
+      void (async () => {
+        setIsApproving(true)
+        try {
+          await revokeGrant(
+            personalServerPort,
+            pendingCompensation.grantId,
+            personalServer.devToken
+          )
+          clearPendingPdppGrantCompensation(pendingCompensation)
+          setRetryCount(c => c + 1)
+        } catch (error) {
+          console.error("[GrantFlow] PDPP grant compensation retry failed", {
+            type: error instanceof Error ? error.name : "unknown",
+          })
+          setFlowState(prev => ({
+            ...prev,
+            status: "error",
+            error: "Could not revoke the incomplete grant. Please retry.",
+          }))
+        } finally {
+          setIsApproving(false)
+        }
+      })()
+      return
+    }
+
     setAuthPending(false)
     setRetryCount(c => c + 1)
-  }, [])
+  }, [
+    flowState.sessionId,
+    handoffId,
+    isAuthenticated,
+    walletAddress,
+    personalServer.port,
+    personalServer.devToken,
+  ])
 
   // --- Deny flow ---
   // Fire-and-forget the deny call, then navigate away immediately.
   // The user clicked Cancel — they don't need to see a confirmation screen.
   const handleDeny = useCallback(async () => {
-    trackGrantFlowDenied({ sessionId: flowState.sessionId, platform: telemetryPlatform })
-    if (flowState.sessionId && flowState.secret && !isDemoSession(flowState.sessionId)) {
+    trackGrantFlowDenied({
+      sessionId: flowState.sessionId,
+      platform: telemetryPlatform,
+    })
+    if (flowState.sessionId && secret && !isDemoSession(flowState.sessionId)) {
       try {
         await denySession(flowState.sessionId, {
-          secret: flowState.secret,
+          secret,
           reason: "User declined",
         })
       } catch (error) {
         // Deny failure is non-fatal — still navigate away
-        console.warn("[GrantFlow] Deny call failed:", error)
+        console.warn("[GrantFlow] Deny call failed", {
+          type: error instanceof Error ? error.name : "unknown",
+        })
       }
     }
 
+    clearGrantHandoff(handoffId)
     navigate(ROUTES.home)
-  }, [flowState.sessionId, flowState.secret, navigate, telemetryPlatform])
+  }, [flowState.sessionId, handoffId, navigate, secret, telemetryPlatform])
 
   // Helper to get display name from builder manifest or session legacy fields
   const builderName =

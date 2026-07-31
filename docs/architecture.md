@@ -70,6 +70,11 @@ Runtime boundaries:
 - Deep links use `vana://connect?sessionId={id}&secret={secret}` via Tauri deep-link plugin.
 - `useDeepLink` normalizes the URL then redirects to `/connect` using `replace`.
 - Grant flow parameters are canonical in the URL (`sessionId`, `secret`, `scopes`).
+- PDPP grant links also carry `authorizationDetails` and
+  `authorizationDetailsSig`. The latter is an EIP-191 builder signature over the
+  recursively key-sorted JSON object containing the exact
+  `authorization_details` and `session_id`. The signer must match the
+  Session Relay claim's `granteeAddress`.
 - Pre-fetched data (`session` + `builderManifest`) is passed via `location.state`
   from `/connect` to `/grant` as a performance optimization — not a canonical input.
 - `status=success` in the grant URL forces success UI and should replace history.
@@ -82,11 +87,11 @@ Runtime boundaries:
   `GET /v1/grants` (list — proxies Gateway), `DELETE /v1/grants/{grantId}` (revoke).
 - Grant creation uses the library's authenticated `POST /v1/grants` route — the desktop
   client authenticates via the `devToken` bypass in the library's `web3Auth` middleware
-  (`Authorization: Bearer {devToken}`). The `DELETE /v1/grants/:grantId` revoke route is
-  unauthenticated. Both operate on localhost only, managed by Tauri — no external access
-  is possible.
+  (`Authorization: Bearer {devToken}`). The custom `DELETE /v1/grants/:grantId` and
+  owner-bearing `/status` routes require that same Bearer token; tunnel and forwarded
+  headers are not an authorization boundary.
 - Emits `dev-token` on stdout → Rust forwards via `personal-server-dev-token` event
-  → `usePersonalServer` hook captures for `GET /v1/grants` auth header.
+  → `usePersonalServer` hook captures for authenticated grant list and revoke requests.
 - `GET /server-identity` proxies `http://localhost:{PERSONAL_SERVER_PORT}/health`.
 - `POST /register-server` forwards to the gateway and treats `200/201/409` as success.
 

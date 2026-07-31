@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,6 +22,9 @@ use std::time::{Duration, Instant};
 pub struct PdppConnectorCommand {
     pub program: String,
     pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: HashMap<String, String>,
+    pub clear_env: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +120,10 @@ impl PdppRunControl {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -125,7 +133,7 @@ pub enum PdppDoneStatus {
     Failed,
     Cancelled,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppRecord {
     pub stream: String,
     pub key: Value,
@@ -133,7 +141,7 @@ pub struct PdppRecord {
     pub emitted_at: String,
     pub op: Option<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppState {
     pub stream: String,
     pub cursor: Value,
@@ -149,20 +157,20 @@ pub struct PdppDoneError {
     pub message: String,
     pub retryable: bool,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppProgress {
     pub stream: Option<String>,
     pub message: String,
     pub count: Option<u64>,
     pub total: Option<u64>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppSkipResult {
     pub stream: Option<String>,
     pub reason: Option<String>,
     pub message: Option<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PdppInteraction {
     pub request_id: String,
     pub kind: String,
@@ -177,6 +185,9 @@ pub enum PdppEvent {
     State(PdppState),
     Progress(PdppProgress),
     SkipResult(PdppSkipResult),
+    DetailCoverage(Value),
+    DetailGap(Value),
+    DetailGapRecovered(Value),
     Interaction(PdppInteraction),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,11 +206,24 @@ pub struct PdppRunResult {
     pub checkpoints: HashMap<String, Value>,
     pub events: Vec<PdppEvent>,
     pub events_truncated: bool,
+    pub event_counts: PdppEventCounts,
     pub done: Option<PdppDone>,
     pub stderr: String,
     pub stderr_truncated: bool,
     pub exit_code: Option<i32>,
     pub failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PdppEventCounts {
+    pub records: u64,
+    pub checkpoint_updates: u64,
+    pub progress: u64,
+    pub skip_results: u64,
+    pub detail_coverage: u64,
+    pub detail_gaps: u64,
+    pub detail_gaps_recovered: u64,
+    pub interactions: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +261,9 @@ enum ConnectorMessage {
     Done(PdppDone),
     Progress(PdppProgress),
     SkipResult(PdppSkipResult),
+    DetailCoverage(Value),
+    DetailGap(Value),
+    DetailGapRecovered(Value),
     Interaction(PdppInteraction),
 }
 enum ReaderEvent {
@@ -265,8 +292,15 @@ pub fn supervise_pdpp_connector(
         );
     }
     let mut process = Command::new(&command.program);
+    if command.clear_env {
+        process.env_clear();
+    }
+    if let Some(cwd) = &command.cwd {
+        process.current_dir(cwd);
+    }
     process
         .args(&command.args)
+        .envs(&command.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -316,6 +350,7 @@ pub fn supervise_pdpp_connector(
     let mut checkpoints = HashMap::new();
     let mut events = Vec::new();
     let mut events_truncated = false;
+    let mut event_counts = PdppEventCounts::default();
     let mut done = None;
     let mut stderr_text = String::new();
     let mut stderr_truncated = false;
@@ -325,7 +360,7 @@ pub fn supervise_pdpp_connector(
                 .try_wait()
                 .map_err(|e| format!("Failed to poll PDPP connector: {e}"))?;
         }
-        if termination.is_none() && options.control.cancelled.load(Ordering::SeqCst) {
+        if termination.is_none() && options.control.is_cancelled() {
             termination = Some(PdppRunStatus::Cancelled);
             set_failure(&mut failure, "PDPP connector was cancelled by the runtime");
             terminate_child(&mut child);
@@ -345,6 +380,7 @@ pub fn supervise_pdpp_connector(
                 match parse_message(&line, &scope) {
                     Ok(ConnectorMessage::Record(record)) => {
                         record_count += 1;
+                        event_counts.records += 1;
                         dispatch(
                             &options.on_event,
                             PdppEvent::Record(record.clone()),
@@ -363,6 +399,7 @@ pub fn supervise_pdpp_connector(
                         }
                     }
                     Ok(ConnectorMessage::State(state)) => {
+                        event_counts.checkpoint_updates += 1;
                         dispatch(
                             &options.on_event,
                             PdppEvent::State(state.clone()),
@@ -370,21 +407,58 @@ pub fn supervise_pdpp_connector(
                         );
                         checkpoints.insert(state.stream, state.cursor);
                     }
-                    Ok(ConnectorMessage::Progress(progress)) => retain_event(
-                        &options,
-                        PdppEvent::Progress(progress),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
-                    Ok(ConnectorMessage::SkipResult(skip)) => retain_event(
-                        &options,
-                        PdppEvent::SkipResult(skip),
-                        &mut events,
-                        &mut events_truncated,
-                        &mut failure,
-                    ),
+                    Ok(ConnectorMessage::Progress(progress)) => {
+                        event_counts.progress += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::Progress(progress),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::SkipResult(skip)) => {
+                        event_counts.skip_results += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::SkipResult(skip),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailCoverage(coverage)) => {
+                        event_counts.detail_coverage += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailCoverage(coverage),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailGap(gap)) => {
+                        event_counts.detail_gaps += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailGap(gap),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
+                    Ok(ConnectorMessage::DetailGapRecovered(recovered)) => {
+                        event_counts.detail_gaps_recovered += 1;
+                        retain_event(
+                            options,
+                            PdppEvent::DetailGapRecovered(recovered),
+                            &mut events,
+                            &mut events_truncated,
+                            &mut failure,
+                        )
+                    }
                     Ok(ConnectorMessage::Interaction(interaction)) => {
+                        event_counts.interactions += 1;
                         retain_event(
                             &options,
                             PdppEvent::Interaction(interaction),
@@ -486,6 +560,7 @@ pub fn supervise_pdpp_connector(
         checkpoints,
         events,
         events_truncated,
+        event_counts,
         done,
         stderr: stderr_text,
         stderr_truncated,
@@ -595,11 +670,80 @@ fn parse_message(line: &str, scope: &ScopePolicy) -> Result<ConnectorMessage, St
             validate_optional_stream(skip.stream.as_deref(), scope)?;
             Ok(ConnectorMessage::SkipResult(skip))
         }
+        "DETAIL_COVERAGE" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailCoverage(value))
+        }
+        "DETAIL_GAP" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailGap(value))
+        }
+        "DETAIL_GAP_RECOVERED" => {
+            validate_reference_evidence(&value, ty, scope)?;
+            Ok(ConnectorMessage::DetailGapRecovered(value))
+        }
         "INTERACTION" => serde_json::from_value(value)
             .map(ConnectorMessage::Interaction)
             .map_err(|e| format!("Invalid PDPP INTERACTION: {e}")),
         _ => Err(format!("Unsupported PDPP connector message type: {ty}")),
     }
+}
+
+fn validate_reference_evidence(value: &Value, ty: &str, scope: &ScopePolicy) -> Result<(), String> {
+    let stream = value
+        .get("stream")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Invalid PDPP {ty}: stream is required"))?;
+    validate_optional_stream(Some(stream), scope)?;
+    if value.get("reference_only").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("Invalid PDPP {ty}: reference_only must be true"));
+    }
+    match ty {
+        "DETAIL_COVERAGE" => {
+            let state_stream = value
+                .get("state_stream")
+                .and_then(Value::as_str)
+                .ok_or("Invalid PDPP DETAIL_COVERAGE: state_stream is required")?;
+            validate_optional_stream(Some(state_stream), scope)?;
+            for field in ["required_keys", "hydrated_keys"] {
+                if !value.get(field).is_some_and(Value::is_array) {
+                    return Err(format!(
+                        "Invalid PDPP DETAIL_COVERAGE: {field} must be an array"
+                    ));
+                }
+            }
+            for field in ["considered", "covered"] {
+                if value
+                    .get(field)
+                    .is_some_and(|count| count.as_u64().is_none())
+                {
+                    return Err(format!(
+                        "Invalid PDPP DETAIL_COVERAGE: {field} must be a non-negative integer"
+                    ));
+                }
+            }
+        }
+        "DETAIL_GAP" => {
+            if !value.get("detail_locator").is_some_and(Value::is_object)
+                || value.get("record_key").is_none()
+                || value.get("retryable").and_then(Value::as_bool) != Some(true)
+                || value.get("status").and_then(Value::as_str) != Some("pending")
+            {
+                return Err("Invalid PDPP DETAIL_GAP envelope".into());
+            }
+        }
+        "DETAIL_GAP_RECOVERED" => {
+            if value
+                .get("gap_id")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err("Invalid PDPP DETAIL_GAP_RECOVERED: gap_id is required".into());
+            }
+        }
+        _ => unreachable!("reference evidence type was matched before validation"),
+    }
+    Ok(())
 }
 fn validate_optional_stream(stream: Option<&str>, scope: &ScopePolicy) -> Result<(), String> {
     if stream.is_some_and(|stream| !scope.streams.contains_key(stream)) {
@@ -831,6 +975,9 @@ mod tests {
                 ),
                 mode.into(),
             ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
         }
     }
     fn options() -> PdppRunOptions {
@@ -1020,6 +1167,41 @@ mod tests {
         .is_ok());
     }
     #[test]
+    fn accepts_scoped_reference_evidence_and_rejects_invalid_envelopes() {
+        let scope = scope_policy(&scoped(), &options().scope_validators).unwrap();
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_COVERAGE","stream":"items","state_stream":"items","required_keys":[],"hydrated_keys":[],"considered":1,"reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailCoverage(_))
+        ));
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_GAP","stream":"items","record_key":"item-1","detail_locator":{"kind":"api"},"reason":"temporary_unavailable","retryable":true,"status":"pending","reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailGap(_))
+        ));
+        assert!(matches!(
+            parse_message(
+                r#"{"type":"DETAIL_GAP_RECOVERED","stream":"items","gap_id":"gap-1","reference_only":true}"#,
+                &scope,
+            ),
+            Ok(ConnectorMessage::DetailGapRecovered(_))
+        ));
+        assert!(parse_message(
+            r#"{"type":"DETAIL_COVERAGE","stream":"outside","state_stream":"items","required_keys":[],"hydrated_keys":[],"reference_only":true}"#,
+            &scope,
+        )
+        .is_err());
+        assert!(parse_message(
+            r#"{"type":"DETAIL_GAP","stream":"items","record_key":"item-1","detail_locator":{},"retryable":false,"status":"pending","reference_only":true}"#,
+            &scope,
+        )
+        .is_err());
+    }
+    #[test]
     fn strictly_decodes_stdout_and_lossily_decodes_stderr() {
         assert!(read_line(&mut &b"\xff\n"[..], 16, true).is_err());
         assert!(matches!(
@@ -1042,6 +1224,9 @@ mod tests {
                 "grandchild-sleep".into(),
                 marker_path.clone(),
             ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
         };
         let result = supervise_pdpp_connector(
             &command,

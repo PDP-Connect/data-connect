@@ -139,6 +139,49 @@ fn scan_latest_json_in_tree(dir: &Path, latest: &mut Option<(PathBuf, i64)>) -> 
     Ok(())
 }
 
+/// Scan a recorded export directory without following links outside the
+/// DataConnect export root. Unlike the source-level discovery helper above,
+/// this is used for a path supplied by the frontend and therefore must retain
+/// the confinement established by its caller for every descendant.
+fn scan_latest_json_in_confined_tree(
+    dir: &Path,
+    exported_root: &Path,
+    latest: &mut Option<(PathBuf, i64)>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            return Err("Refusing to follow a symlink in DataConnect export storage".into());
+        }
+
+        let canonical = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(exported_root) {
+            return Err("Refusing to read an export outside DataConnect storage".into());
+        }
+        if file_type.is_dir() {
+            scan_latest_json_in_confined_tree(&canonical, exported_root, latest)?;
+            continue;
+        }
+        if !file_type.is_file()
+            || !canonical.extension().map_or(false, |extension| extension == "json")
+        {
+            continue;
+        }
+
+        let timestamp = json_timestamp(&canonical);
+        if latest
+            .as_ref()
+            .map_or(true, |(_, current_timestamp)| timestamp > *current_timestamp)
+        {
+            *latest = Some((canonical, timestamp));
+        }
+    }
+
+    Ok(())
+}
+
 fn find_latest_source_json(
     app: &AppHandle,
     company: &str,
@@ -616,6 +659,71 @@ pub async fn load_latest_source_export_full(
     Ok(Some(raw_json))
 }
 
+fn resolve_export_json_path(app: &AppHandle, export_path: &str) -> Result<PathBuf, String> {
+    let exported_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?
+        .join("exported_data");
+    let exported_root = fs::canonicalize(&exported_root)
+        .map_err(|_| "No local export directory is available".to_string())?;
+    let requested = fs::canonicalize(export_path)
+        .map_err(|_| "Export path does not exist".to_string())?;
+    if !requested.starts_with(&exported_root) {
+        return Err("Refusing to read an export outside DataConnect storage".into());
+    }
+    if requested.is_file() {
+        if requested.extension().is_some_and(|extension| extension == "json") {
+            return Ok(requested);
+        }
+        return Err("Export path is not a JSON file".into());
+    }
+    let mut latest = None;
+    scan_latest_json_in_confined_tree(&requested, &exported_root, &mut latest)?;
+    latest
+        .map(|(path, _)| path)
+        .ok_or_else(|| "No JSON export exists at this path".into())
+}
+
+/// Load a bounded preview from the exact export path recorded for a run.
+///
+/// Unlike the source-level lookup, this preserves a runtime's selected
+/// connector and avoids scanning sibling connector exports with the same
+/// canonical source identity.
+#[tauri::command]
+pub async fn load_source_export_preview_from_path(
+    app: AppHandle,
+    export_path: String,
+    max_bytes: Option<usize>,
+) -> Result<SourceExportPreview, String> {
+    let json_path = resolve_export_json_path(&app, &export_path)?;
+    let byte_limit = max_bytes.unwrap_or(65_536);
+    let file_size_bytes = fs::metadata(&json_path).map(|m| m.len()).unwrap_or(0);
+    let (preview_json, is_truncated) =
+        build_source_export_preview(&json_path, byte_limit, file_size_bytes)?;
+    let exported_at = chrono::DateTime::from_timestamp(json_timestamp(&json_path), 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    Ok(SourceExportPreview {
+        preview_json,
+        is_truncated,
+        file_path: json_path.to_string_lossy().to_string(),
+        file_size_bytes,
+        exported_at,
+    })
+}
+
+/// Load full JSON only after an explicit user action from an exact run path.
+#[tauri::command]
+pub async fn load_source_export_full_from_path(
+    app: AppHandle,
+    export_path: String,
+) -> Result<String, String> {
+    let json_path = resolve_export_json_path(&app, &export_path)?;
+    fs::read_to_string(&json_path)
+        .map_err(|e| format!("Failed to read full source export file: {e}"))
+}
+
 /// Open the platform export folder
 #[tauri::command]
 pub async fn open_platform_export_folder(
@@ -904,6 +1012,7 @@ mod tests {
     use super::build_source_export_preview;
     use super::read_export_content;
     use super::sanitize_path_component;
+    use super::scan_latest_json_in_confined_tree;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -989,5 +1098,29 @@ mod tests {
             "linkedinprofiledata"
         );
         assert_eq!(sanitize_path_component(".."), "unknown");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_export_scan_rejects_a_nested_symlink_to_outside_storage() {
+        let export_root = tempfile::tempdir().expect("export root");
+        let run_dir = export_root.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run directory");
+
+        let external = tempfile::tempdir().expect("external directory");
+        fs::write(external.path().join("secret.json"), "{\"outside\":true}")
+            .expect("external JSON");
+        std::os::unix::fs::symlink(external.path(), run_dir.join("outside"))
+            .expect("nested symlink");
+
+        let root = fs::canonicalize(export_root.path()).expect("canonical export root");
+        let mut latest = None;
+        let result = scan_latest_json_in_confined_tree(&run_dir, &root, &mut latest);
+
+        assert!(result.is_err(), "must not follow an external symlink");
+        assert!(
+            result.unwrap_err().contains("symlink"),
+            "error should explain why the exact export was rejected"
+        );
     }
 }

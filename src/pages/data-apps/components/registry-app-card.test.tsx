@@ -1,5 +1,6 @@
-import { render, screen } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { createMemoryRouter, RouterProvider } from "react-router-dom"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { RegistryAppCard } from "./registry-app-card"
 
 vi.mock("@/apps/external-url", () => ({
@@ -7,23 +8,42 @@ vi.mock("@/apps/external-url", () => ({
   parseSubmittedAppExternalUrl: (url: string) => new URL(url),
 }))
 
+afterEach(cleanup)
+
+function renderAppCard(
+  app: React.ComponentProps<typeof RegistryAppCard>["app"]
+) {
+  const router = createMemoryRouter(
+    [
+      { path: "/apps", element: <RegistryAppCard app={app} /> },
+      { path: "/apps/timeline", element: <div>Timeline route</div> },
+    ],
+    { initialEntries: ["/apps"] }
+  )
+
+  return {
+    ...render(<RouterProvider router={router} />),
+    router,
+  }
+}
+
 describe("RegistryAppCard", () => {
   it("uses the same outer icon footprint on both sides of the flow", () => {
-    const { container } = render(
-      <RegistryAppCard
-        app={{
-          id: "peak-think",
-          name: "Peak Think",
-          icon: "P",
-          description: "Correlate sleep patterns with ChatGPT conversations.",
-          category: "Health",
-          dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
-          status: "live",
-          externalUrl: "https://example.com",
-          scopes: ["chatgpt.conversations"],
-        }}
-      />
-    )
+    const { container } = renderAppCard({
+      id: "peak-think",
+      name: "Peak Think",
+      icon: "P",
+      description: "Correlate sleep patterns with ChatGPT conversations.",
+      category: "Health",
+      dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
+      status: "live",
+      externalUrl: "https://example.com",
+      scopes: ["chatgpt.conversations"],
+    })
 
     const flow = container.querySelector('[data-slot="icon-flow"]')
     expect(flow).toBeTruthy()
@@ -40,45 +60,46 @@ describe("RegistryAppCard", () => {
   })
 
   it("shows the category badge without repeating platform badges", () => {
-    render(
-      <RegistryAppCard
-        app={{
-          id: "peak-think",
-          name: "Peak Think",
-          icon: "P",
-          description: "Correlate sleep patterns with ChatGPT conversations.",
-          category: "Health",
-          dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
-          status: "live",
-          externalUrl: "https://example.com",
-          scopes: ["chatgpt.conversations"],
-        }}
-      />
-    )
+    renderAppCard({
+      id: "peak-think",
+      name: "Peak Think",
+      icon: "P",
+      description: "Correlate sleep patterns with ChatGPT conversations.",
+      category: "Health",
+      dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
+      status: "live",
+      externalUrl: "https://example.com",
+      scopes: ["chatgpt.conversations"],
+    })
 
     expect(screen.getAllByText("Health").length).toBeGreaterThan(0)
+    expect(screen.getByText("Vana grant/session")).toBeTruthy()
     expect(screen.queryByText("ChatGPT")).toBeNull()
     expect(screen.queryByText("Open app")).toBeNull()
   })
 
   it("renders builder attribution when provided", () => {
-    render(
-      <RegistryAppCard
-        app={{
-          id: "peak-think",
-          name: "Peak Think",
-          icon: "P",
-          builderName: "Ada Lovelace",
-          builderUrl: "https://example.com/ada",
-          description: "Correlate sleep patterns with ChatGPT conversations.",
-          category: "Health",
-          dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
-          status: "live",
-          externalUrl: "https://example.com",
-          scopes: ["chatgpt.conversations"],
-        }}
-      />
-    )
+    renderAppCard({
+      id: "peak-think",
+      name: "Peak Think",
+      icon: "P",
+      builderName: "Ada Lovelace",
+      builderUrl: "https://example.com/ada",
+      description: "Correlate sleep patterns with ChatGPT conversations.",
+      category: "Health",
+      dataRequired: [{ token: "chatgpt", label: "ChatGPT" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
+      status: "live",
+      externalUrl: "https://example.com",
+      scopes: ["chatgpt.conversations"],
+    })
 
     expect(screen.getByText(/by/i)).toBeTruthy()
     expect(
@@ -87,55 +108,83 @@ describe("RegistryAppCard", () => {
   })
 
   it("shows the coming soon badge in the top metadata row", () => {
-    render(
-      <RegistryAppCard
-        app={{
-          id: "future-think",
-          name: "Future Think",
-          icon: "F",
-          description: "An upcoming app.",
-          category: "AI",
-          dataRequired: [{ token: "linkedin", label: "LinkedIn" }],
-          status: "coming-soon",
-          scopes: ["linkedin.profile"],
-        }}
-      />
-    )
+    renderAppCard({
+      id: "future-think",
+      name: "Future Think",
+      icon: "F",
+      description: "An upcoming app.",
+      category: "AI",
+      dataRequired: [{ token: "linkedin", label: "LinkedIn" }],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
+      status: "coming-soon",
+      scopes: ["linkedin.profile"],
+    })
 
     expect(screen.getAllByText("AI").length).toBeGreaterThan(0)
     expect(screen.getAllByText("Coming Soon").length).toBeGreaterThan(0)
   })
 
   it("derives provider-backed platform logos from scope tokens", () => {
-    const { container } = render(
-      <RegistryAppCard
-        app={{
-          id: "macrocart",
-          name: "MacroCart",
-          icon: "M",
-          description: "Track nutrition from Amazon and Shop orders.",
-          category: "Nutrition",
-          dataRequired: [
-            { token: "amazon", label: "Amazon" },
-            { token: "shop", label: "Shop" },
-          ],
-          status: "live",
-          externalUrl: "https://example.com",
-          scopes: ["amazon.orders", "shop.orders"],
-        }}
-      />
-    )
+    const { container } = renderAppCard({
+      id: "macrocart",
+      name: "MacroCart",
+      icon: "M",
+      description: "Track nutrition from Amazon and Shop orders.",
+      category: "Nutrition",
+      dataRequired: [
+        { token: "amazon", label: "Amazon" },
+        { token: "shop", label: "Shop" },
+      ],
+      dataAccess: {
+        protocol: "vana-grant-session",
+        capabilities: ["grant-session"],
+      },
+      status: "live",
+      externalUrl: "https://example.com",
+      scopes: ["amazon.orders", "shop.orders"],
+    })
 
-    const imageSources = Array.from(container.querySelectorAll("img")).map(image =>
-      image.getAttribute("src")
+    const imageSources = Array.from(container.querySelectorAll("img")).map(
+      image => image.getAttribute("src")
     )
 
     expect(
-      imageSources.some(src => src?.startsWith("https://img.logo.dev/amazon.com?"))
+      imageSources.some(src =>
+        src?.startsWith("https://img.logo.dev/amazon.com?")
+      )
     ).toBe(true)
     expect(
-      imageSources.some(src => src?.startsWith("https://img.logo.dev/shop.app?"))
-    )
-      .toBe(true)
+      imageSources.some(src =>
+        src?.startsWith("https://img.logo.dev/shop.app?")
+      )
+    ).toBe(true)
+  })
+
+  it("navigates to an internal first-party app route", async () => {
+    const { router } = renderAppCard({
+      id: "timeline",
+      name: "Timeline",
+      icon: "T",
+      description: "Browse dated records.",
+      category: "First-party",
+      dataRequired: [],
+      dataAccess: {
+        protocol: "pdpp",
+        capabilities: ["personal-data-read"],
+      },
+      status: "live",
+      route: "/apps/timeline",
+    })
+
+    expect(screen.getByText("Uses PDPP")).toBeTruthy()
+    screen.getByRole("button", { name: "Open Timeline" }).click()
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/apps/timeline")
+    })
+    expect(screen.getByText("Timeline route")).toBeTruthy()
   })
 })

@@ -54,3 +54,6 @@
 - For non-grant connect entries (no `sessionId`), app default scopes may be used
 - `appId` is supplemental routing/context data, not the grant-session authority
 - External apps should deep-link grant sessions with `sessionId`, `secret`, and `scopes`
+- External PDPP apps must also include `authorizationDetails` and
+  `authorizationDetailsSig`. The signature contract is documented in
+  `src/pages/grant/README.md`.

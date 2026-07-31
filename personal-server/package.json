@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "start:cjs": "node index.cjs",
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "test": "node --test pdpp/*.test.js pdpp/github-authorization/*.test.js pdpp/test/*.test.js test/*.test.js",
+    "test:pdpp": "node --test pdpp/test/*.test.js",
+    "test:security": "node --test test/protected-routes.test.js"
   },
   "pkg": {
     "assets": [
@@ -32,7 +35,8 @@
     "@opendatalabs/personal-server-ts-mcp": "0.0.1-canary.92ee4d6",
     "@opendatalabs/personal-server-ts-server": "0.0.1-canary.92ee4d6",
     "better-sqlite3": "^12.6.2",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "viem": "^2.45.1"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^5.12.0",

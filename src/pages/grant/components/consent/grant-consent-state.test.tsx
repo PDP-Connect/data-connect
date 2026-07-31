@@ -10,7 +10,11 @@ afterEach(() => {
 
 function renderConsent(
   scopes: string[],
-  options: { builderManifest?: BuilderManifest; appName?: string } = {}
+  options: {
+    builderManifest?: BuilderManifest
+    appName?: string
+    githubPdppTerms?: Parameters<typeof GrantConsentState>[0]["githubPdppTerms"]
+  } = {}
 ) {
   return render(
     <GrantConsentState
@@ -18,6 +22,7 @@ function renderConsent(
       appName={options.appName ?? "Demo App"}
       builderManifest={options.builderManifest}
       isApproving={false}
+      githubPdppTerms={options.githubPdppTerms}
       onApprove={vi.fn()}
       onDeny={vi.fn()}
     />
@@ -48,10 +53,7 @@ describe("GrantConsentState scope action label", () => {
   })
 
   it("compiles multiple ChatGPT scopes into one sentence", () => {
-    renderConsent([
-      "chatgpt.conversations",
-      "chatgpt.memories",
-    ])
+    renderConsent(["chatgpt.conversations", "chatgpt.memories"])
 
     expect(
       screen.getByText("See your ChatGPT conversations and memories")
@@ -109,6 +111,24 @@ describe("GrantConsentState scope action label", () => {
     expect((allowButton as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it("keeps legacy actions while adding normalized GitHub terms", () => {
+    renderConsent(["github.repositories"], {
+      githubPdppTerms: {
+        type: "https://pdpp.org/data-access",
+        source: { kind: "connector", id: "github" },
+        access_mode: "single_use",
+        purpose_code: "https://example.test/purpose",
+        streams: [{ name: "repositories", fields: ["name"] }],
+      },
+    })
+
+    expect(
+      screen.getByRole("heading", { name: "GitHub authorization request" })
+    ).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Agree and Allow" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy()
+  })
+
   it("renders compact clickwrap disclosure with legal doc link", () => {
     renderConsent(["chatgpt.conversations"])
 
@@ -137,14 +157,18 @@ describe("GrantConsentState scope action label", () => {
       builderManifest: {
         name: "Qapp",
         appUrl: "https://qapp.example.com",
-        icons: [{ src: "https://qapp.example.com/broken-icon.png", sizes: "64x64" }],
+        icons: [
+          { src: "https://qapp.example.com/broken-icon.png", sizes: "64x64" },
+        ],
       },
     })
 
     const image = container.querySelector("img")
     expect(image).toBeTruthy()
     expect(
-      container.querySelector('img[src="https://qapp.example.com/broken-icon.png"]')
+      container.querySelector(
+        'img[src="https://qapp.example.com/broken-icon.png"]'
+      )
     ).toBeTruthy()
   })
 })

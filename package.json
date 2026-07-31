@@ -24,6 +24,7 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,scss,md}\"",
     "typecheck": "tsc -b --noEmit",
     "test": "npm run typecheck && vitest run",
+    "test:pdpp-interop": "node --test scripts/pdpp-interoperability-e2e.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:icon": "tauri icon ./public/data_connect_1024_1x.png",
@@ -70,7 +71,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
-    "@opendatalabs/data-connectors-tools": "github:vana-com/data-connectors#data-connectors-tools-v0.1.0-sigstore.2",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#data-connectors-tools-v0.1.0-sigstore.4",
     "@tailwindcss/postcss": "^4.1.18",
     "@tailwindcss/vite": "^4.1.18",
     "@testing-library/react": "^16.3.2",

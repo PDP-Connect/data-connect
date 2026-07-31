@@ -45,5 +45,17 @@ export const loadLatestSourceExportFull = (
     scope,
   })
 
+export const loadSourceExportPreviewFromPath = (
+  exportPath: string,
+  maxBytes = 65_536
+) =>
+  invoke<SourceExportPreview>("load_source_export_preview_from_path", {
+    exportPath,
+    maxBytes,
+  })
+
+export const loadSourceExportFullFromPath = (exportPath: string) =>
+  invoke<string>("load_source_export_full_from_path", { exportPath })
+
 export const deleteExportedRun = (exportPath: string) =>
   invoke("delete_exported_run", { exportPath })

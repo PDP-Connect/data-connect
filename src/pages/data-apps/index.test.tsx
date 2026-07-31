@@ -47,7 +47,10 @@ vi.mock("@/hooks/usePersonalServer", () => ({
 
 const renderDataApps = (initialEntry = "/apps") => {
   const router = createMemoryRouter(
-    [{ path: "/apps", element: <DataApps /> }],
+    [
+      { path: "/apps", element: <DataApps /> },
+      { path: "/apps/timeline", element: <div>Timeline route</div> },
+    ],
     {
       initialEntries: [initialEntry],
     }
@@ -87,11 +90,28 @@ describe("DataApps", () => {
     const liveApps = apps.filter(app => app.status === "live")
 
     expect(screen.getAllByRole("heading", { level: 1 }).length).toBe(1)
-    expect(screen.getAllByRole("heading", { level: 3 }).length).toBe(apps.length)
+    expect(screen.getAllByRole("heading", { level: 3 }).length).toBe(
+      apps.length
+    )
     expect(
       container.querySelectorAll('button[data-slot="app-card"]').length
     ).toBe(liveApps.length)
     expect(mockFetchConnectedApps).not.toHaveBeenCalled()
+  })
+
+  it("lists the first-party Timeline app in Discover", () => {
+    const { router } = renderDataApps()
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Timeline" }))
+
+    expect(router.state.location.pathname).toBe("/apps/timeline")
+  })
+
+  it("labels PDPP and grant/session app access paths in Discover", () => {
+    renderDataApps()
+
+    expect(screen.getByText("Uses PDPP")).toBeTruthy()
+    expect(screen.getAllByText("Vana grant/session").length).toBeGreaterThan(0)
   })
 
   it("wires page links to the configured docs targets", () => {
@@ -112,14 +132,16 @@ describe("DataApps", () => {
     const { container } = renderDataApps("/apps?tab=connected")
 
     expect(
-      screen.getByRole("tab", { name: /connected apps/i }).getAttribute(
-        "aria-selected"
-      )
+      screen
+        .getByRole("tab", { name: /connected apps/i })
+        .getAttribute("aria-selected")
     ).toBe("true")
     expect(
       container.querySelector('[data-component="connected-apps-list"]')
     ).toBeTruthy()
-    expect(container.querySelector('[data-slot="source-row-list"]')).toBeTruthy()
+    expect(
+      container.querySelector('[data-slot="source-row-list"]')
+    ).toBeTruthy()
     expect(screen.getByText("Test Connected App")).toBeTruthy()
 
     await waitFor(() => {
@@ -152,11 +174,13 @@ describe("DataApps", () => {
     const apps = getAppRegistryEntries()
 
     expect(
-      screen.getByRole("tab", { name: /discover apps/i }).getAttribute(
-        "aria-selected"
-      )
+      screen
+        .getByRole("tab", { name: /discover apps/i })
+        .getAttribute("aria-selected")
     ).toBe("true")
-    expect(screen.getAllByRole("heading", { level: 3 }).length).toBe(apps.length)
+    expect(screen.getAllByRole("heading", { level: 3 }).length).toBe(
+      apps.length
+    )
     expect(
       container.querySelector('[data-component="connected-apps-list"]')
     ).toBeNull()

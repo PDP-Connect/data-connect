@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { useSelector } from "react-redux"
 import { usePlatforms } from "@/hooks/usePlatforms"
@@ -10,6 +17,16 @@ import { Text } from "@/components/typography/text"
 import { ConnectedSourcesList } from "@/pages/home/components/connected-sources-list"
 import { AvailableSourcesList } from "@/pages/home/components/available-sources-list"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { ROUTES } from "@/config/routes"
 import {
   buildGrantSearchParams,
@@ -52,6 +69,9 @@ export function Home() {
   const { startImport, stopExport } = useConnector()
   const runs = useSelector((state: RootState) => state.app.runs)
   const [deepLinkInput, setDeepLinkInput] = useState("")
+  const [githubTokenDialogPlatform, setGithubTokenDialogPlatform] =
+    useState<Platform | null>(null)
+  const [githubTokenInput, setGithubTokenInput] = useState("")
   const knownSuccessfulRunIdsRef = useRef<Set<string> | null>(null)
   const homeUiDebugEnabled = useMemo(
     () => isHomeImportSourcesDebugEnabled(location.search),
@@ -101,15 +121,55 @@ export function Home() {
     }
   }, [refreshConnectedStatus, runs])
 
-  const handleImportSource = useCallback(
-    async (platform: Platform) => {
+  const runImportSource = useCallback(
+    async (platform: Platform, githubToken?: string) => {
       try {
-        await startImport(platform)
+        if (githubToken === undefined) {
+          await startImport(platform)
+        } else {
+          await startImport(platform, { githubToken })
+        }
       } catch (error) {
         console.error("Import failed:", error)
       }
     },
     [startImport]
+  )
+
+  const handleImportSource = useCallback(
+    (platform: Platform) => {
+      if (platform.id === "github-pdpp") {
+        setGithubTokenInput("")
+        setGithubTokenDialogPlatform(platform)
+        return
+      }
+
+      void runImportSource(platform)
+    },
+    [runImportSource]
+  )
+
+  const closeGithubTokenDialog = useCallback(() => {
+    setGithubTokenDialogPlatform(null)
+    setGithubTokenInput("")
+  }, [])
+
+  const submitGithubToken = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const platform = githubTokenDialogPlatform
+      const githubToken = githubTokenInput.trim()
+      if (!platform || !githubToken) return
+
+      closeGithubTokenDialog()
+      void runImportSource(platform, githubToken)
+    },
+    [
+      closeGithubTokenDialog,
+      githubTokenDialogPlatform,
+      githubTokenInput,
+      runImportSource,
+    ]
   )
 
   const handleStopImport = useCallback(
@@ -187,13 +247,22 @@ export function Home() {
 
   // Separate available platforms (memoized to avoid re-filtering on every render)
   const connectedPlatformsList = useMemo(() => {
-    return displayPlatforms.filter(platform => {
-      if (isPlatformConnected(platform.id)) return true
-      const canonicalId = getPlatformRegistryEntry(platform)?.id
-      return canonicalId
-        ? connectedCanonicalIdsFromRuns.has(canonicalId)
-        : false
-    })
+    const connectedByCanonicalId = new Map<string, Platform>()
+
+    for (const platform of displayPlatforms) {
+      const canonicalId = getPlatformRegistryEntry(platform)?.id ?? platform.id
+      const isConnected =
+        isPlatformConnected(platform.id) ||
+        connectedCanonicalIdsFromRuns.has(canonicalId)
+      if (!isConnected) continue
+
+      const existing = connectedByCanonicalId.get(canonicalId)
+      if (!existing || platform.runtime === "pdpp-network") {
+        connectedByCanonicalId.set(canonicalId, platform)
+      }
+    }
+
+    return [...connectedByCanonicalId.values()]
   }, [connectedCanonicalIdsFromRuns, displayPlatforms, isPlatformConnected])
 
   const connectedPlatformIds = useMemo(
@@ -264,6 +333,60 @@ export function Home() {
       </div>
 
       {/* DEV ONLY SHORTCUT: RickRoll /connect link */}
+      <AlertDialog
+        open={Boolean(githubTokenDialogPlatform)}
+        onOpenChange={open => {
+          if (!open) closeGithubTokenDialog()
+        }}
+      >
+        <AlertDialogContent size="sm" className="max-w-[380px]!">
+          <form onSubmit={submitGithubToken} className="grid gap-4">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="w-full text-left">
+                Connect GitHub
+              </AlertDialogTitle>
+              <AlertDialogDescription className="text-left">
+                Enter a GitHub personal access token with the permissions needed
+                for this import. DataConnect uses it for this run and does not
+                save it.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="github-pdpp-token"
+                className="text-xs font-medium text-foreground"
+              >
+                Personal access token
+              </label>
+              <Input
+                id="github-pdpp-token"
+                type="password"
+                autoComplete="off"
+                value={githubTokenInput}
+                onChange={event => setGithubTokenInput(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel
+                type="button"
+                size="sm"
+                onClick={closeGithubTokenDialog}
+              >
+                Cancel
+              </AlertDialogCancel>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={!githubTokenInput.trim()}
+              >
+                Start import
+              </Button>
+            </AlertDialogFooter>
+          </form>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {import.meta.env.DEV && (
         <DebugTogglePanel title="Home debug" openClassName="w-[900px]">
           <div className="grid grid-cols-12 gap-3 divide-x">

@@ -1,6 +1,7 @@
 import { useSearchParams, useLocation, useNavigate } from "react-router-dom"
 import { useState } from "react"
 import { getGrantParamsFromSearchParams } from "@/lib/grant-params"
+import { resolveGrantHandoff } from "@/lib/grant-handoff"
 import { PageContainer } from "@/components/elements/page-container"
 import { LoadingState } from "@/components/elements/loading-state"
 import { useBrowserStatus } from "./use-browser-status"
@@ -18,7 +19,7 @@ export function Grant() {
   const [searchParams] = useSearchParams()
   const location = useLocation()
   const navigate = useNavigate()
-  const params = getGrantParamsFromSearchParams(searchParams)
+  const params = resolveGrantHandoff(getGrantParamsFromSearchParams(searchParams))
   // Pre-fetched session + builder data passed from the connect page via navigation state.
   // When available, the grant flow skips claim + verify steps (already done in background).
   const prefetched = (
@@ -115,6 +116,9 @@ export function Grant() {
         builderManifest={resolvedBuilderManifest}
         appName={resolvedAppName}
         isApproving={resolvedIsApproving}
+        githubPdppTerms={
+          resolvedFlowState.githubPdppConsentRequest?.authorization_details
+        }
         onApprove={handleApprove}
         onDeny={handleDeny}
       />

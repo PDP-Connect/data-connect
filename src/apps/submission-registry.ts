@@ -36,6 +36,7 @@ const appSubmissionBaseSchema = z.object({
     .optional(),
   description: z.string().min(1),
   category: z.string().min(1),
+  dataAccessProtocol: z.enum(["pdpp", "vana-grant-session"]).optional(),
 })
 
 const liveAppSubmissionSchema = appSubmissionBaseSchema.extend({
@@ -66,11 +67,13 @@ export function parseAppSubmissionMarkdown(
 
   const data = parseFrontmatter(rawMarkdown)
   const parsedEntry = appSubmissionSchema.parse(data)
+  const { dataAccessProtocol = "vana-grant-session", ...entry } = parsedEntry
   const dataRequired = getDataRequiredFromScopes(parsedEntry.scopes)
 
   return {
-    ...parsedEntry,
+    ...entry,
     dataRequired,
+    dataAccess: getDataAccess(dataAccessProtocol),
   }
 }
 
@@ -110,6 +113,14 @@ function getDataRequiredFromScopes(scopes?: string[]) {
   }
 
   return Array.from(itemsByToken.values())
+}
+
+function getDataAccess(
+  protocol: "pdpp" | "vana-grant-session"
+): AppRegistryEntry["dataAccess"] {
+  return protocol === "pdpp"
+    ? { protocol, capabilities: ["personal-data-read"] }
+    : { protocol, capabilities: ["grant-session"] }
 }
 
 function parseFrontmatter(rawMarkdown: string): Record<string, unknown> {

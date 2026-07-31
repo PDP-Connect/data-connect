@@ -103,8 +103,11 @@ async function relayFetch<T>(
   }
 
   if (!response.ok) {
-    console.error("[SessionRelay] Non-OK response", { url, status: response.status, body: data });
     const errBody = parseErrorBody(data);
+    console.error("[SessionRelay] Non-OK response", {
+      status: response.status,
+      errorCode: errBody?.errorCode,
+    });
     if (errBody) {
       throw new SessionRelayError(
         errBody.message,

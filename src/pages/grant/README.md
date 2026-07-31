@@ -22,6 +22,24 @@
 - `appId` may still be present as supplemental context, but it is not the
   canonical authority for a grant session
 - `masterKeySig` may be present when auth is restored from a deep link
+- `authorizationDetails` carries a PDPP Rich Authorization Request
+- `authorizationDetailsSig` is required whenever `authorizationDetails` is
+  present
+
+For an external PDPP request, the builder signs this recursively key-sorted JSON
+message with EIP-191:
+
+```json
+{
+  "authorization_details": [],
+  "session_id": "relay-session-id"
+}
+```
+
+The signature must recover to the `granteeAddress` returned by Session Relay.
+DataConnect verifies the proof before it renders consent. Missing signatures,
+modified authorization details, and signatures copied to another session fail
+closed. Existing non-PDPP Session Relay links do not need this parameter.
 
 Prefetched session and builder data passed in `location.state` from `/connect`
 is an optimization only. The route still treats URL params as canonical.
@@ -33,14 +51,16 @@ is an optimization only. The route still treats URL params as canonical.
 2. If prefetched data exists, `useGrantFlow` skips some or all of claim/verify work.
 3. Without prefetched data, `useGrantFlow` claims the session, verifies the builder,
    then enters `consent`.
-4. Clicking **Allow** requires auth to already be populated, typically from a deep
+4. A PDPP request verifies `authorizationDetailsSig` against the claimed builder
+   before it enters `consent`.
+5. Clicking **Allow** requires auth to already be populated, typically from a deep
    link carrying `masterKeySig`. If auth is missing, the route surfaces an error
    that sends the user to `account.vana.org`.
-5. If auth exists but the Personal Server is still starting, the route enters
+6. If auth exists but the Personal Server is still starting, the route enters
    `preparing-server` and auto-resumes approval once the port and tunnel are ready.
-6. Clicking **Cancel** makes a best-effort deny call for real sessions, then
+7. Clicking **Cancel** makes a best-effort deny call for real sessions, then
    navigates home.
-7. `status=success` forces the success UI.
+8. `status=success` forces the success UI.
 
 ## Data-source label
 
