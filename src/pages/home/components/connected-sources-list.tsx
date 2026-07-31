@@ -25,6 +25,7 @@ interface ConnectedSourcesListProps {
   headline?: string
   onOpenRuns?: (platform: Platform) => void
   onSyncSource?: (platform: Platform) => void
+  onReconnectSource?: (platform: Platform) => void
 }
 
 type OnboardingMessageState = "empty" | "early" | "mature"
@@ -44,6 +45,7 @@ export function ConnectedSourcesList({
   headline = "Your sources at the moment.",
   onOpenRuns,
   onSyncSource,
+  onReconnectSource,
 }: ConnectedSourcesListProps) {
   const inFlightSyncPlatformIdsRef = useRef<Set<string>>(new Set())
   const syncFeedbackTimeoutsRef = useRef<
@@ -166,6 +168,10 @@ export function ConnectedSourcesList({
             hasBlockingRun ||
             hasActiveRun ||
             isShowingSyncFeedback
+          const canReconnect =
+            platform.id === "chatgpt-pdpp" &&
+            Boolean(onReconnectSource) &&
+            !hasActiveRun
           const syncTooltipCopy =
             hasActiveRun || syncFeedbackState === "backgrounding"
               ? "Fetching in background"
@@ -184,41 +190,59 @@ export function ConnectedSourcesList({
                 ariaLabel: `Open ${platform.name}`,
               }}
               middleSlot={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <SourceRowActionButton
-                      className={cn("gap-2.5 pl-3.5 pr-3.5 justify-start")}
-                      onClick={
-                        !isSyncDisabled
-                          ? () => triggerSyncFeedback(platform)
-                          : undefined
-                      }
-                      disabled={isSyncDisabled}
-                      aria-label={`Fetch latest data for ${platform.name}`}
-                    >
-                      {syncFeedbackState ? (
-                        <Text
-                          as="span"
-                          intent="fine"
-                          muted
-                          className="mt-[0.3em]"
+                <div className="flex h-full">
+                  {canReconnect ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SourceRowActionButton
+                          className="px-2"
+                          onClick={() => onReconnectSource?.(platform)}
+                          aria-label={`Reconnect ${platform.name}`}
                         >
-                          {syncFeedbackState === "running"
-                            ? "Fetching…"
-                            : "Backgrounding…"}
-                        </Text>
-                      ) : null}
-                      <RotateCcwIcon
-                        className={cn(
-                          syncFeedbackState &&
-                            "animate-[spin_2s_linear_infinite_reverse]"
-                        )}
-                        aria-hidden
-                      />
-                    </SourceRowActionButton>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{syncTooltipCopy}</TooltipContent>
-                </Tooltip>
+                          <RotateCcwIcon aria-hidden />
+                        </SourceRowActionButton>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        Reset this browser session and reconnect
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <SourceRowActionButton
+                        className={cn("gap-2.5 pl-3.5 pr-3.5 justify-start")}
+                        onClick={
+                          !isSyncDisabled
+                            ? () => triggerSyncFeedback(platform)
+                            : undefined
+                        }
+                        disabled={isSyncDisabled}
+                        aria-label={`Fetch latest data for ${platform.name}`}
+                      >
+                        {syncFeedbackState ? (
+                          <Text
+                            as="span"
+                            intent="fine"
+                            muted
+                            className="mt-[0.3em]"
+                          >
+                            {syncFeedbackState === "running"
+                              ? "Fetching…"
+                              : "Backgrounding…"}
+                          </Text>
+                        ) : null}
+                        <RotateCcwIcon
+                          className={cn(
+                            syncFeedbackState &&
+                              "animate-[spin_2s_linear_infinite_reverse]"
+                          )}
+                          aria-hidden
+                        />
+                      </SourceRowActionButton>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">{syncTooltipCopy}</TooltipContent>
+                  </Tooltip>
+                </div>
               }
               endSlotClassName="[&_svg:not([class*='size-']):not([data-slot=spinner])]:size-7!"
               surface="list-item"

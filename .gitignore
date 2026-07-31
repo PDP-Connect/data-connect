@@ -39,3 +39,4 @@ src-tauri/auth-page/
 .devcontainer/
 connectors/
 .vercel
+pdpp-runtime/.install-stamp

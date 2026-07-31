@@ -100,6 +100,7 @@ pub struct Platform {
     pub runtime: Option<String>,
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
+    pub setup: Option<ActivePdppStaticSecretSetup>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,7 +109,31 @@ struct ActivePdppPlatformManifest {
     display_name: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    setup: Option<ActivePdppStaticSecretSetup>,
     streams: Vec<ActivePdppStream>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActivePdppStaticSecretSetup {
+    modality: String,
+    credential_capture: ActivePdppCredentialCapture,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActivePdppCredentialCapture {
+    fields: Vec<ActivePdppCredentialField>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActivePdppCredentialField {
+    name: String,
+    label: Option<String>,
+    #[serde(rename = "type")]
+    field_type: Option<String>,
+    required: bool,
+    secret: bool,
+    autocomplete: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +422,7 @@ fn platform_from_metadata(
         vectorize_config: metadata.vectorize_config,
         runtime: runtime_override.or(metadata.runtime),
         scopes,
+        setup: None,
     }
 }
 
@@ -551,6 +577,7 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
             vectorize_config: None,
             runtime: Some("pdpp-network".to_string()),
             scopes: Some(scopes),
+            setup: manifest.setup,
         });
     }
 
@@ -567,6 +594,12 @@ fn pdpp_streams_to_dataconnect_scopes(
             ("github", "user") => Some("github.profile"),
             ("github", "repositories") => Some("github.repositories"),
             ("github", "starred") => Some("github.starred"),
+            ("chatgpt", "conversations") => Some("chatgpt.conversations"),
+            ("chatgpt", "messages") => Some("chatgpt.messages"),
+            ("chatgpt", "memories") => Some("chatgpt.memories"),
+            ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts"),
+            ("chatgpt", "custom_instructions") => Some("chatgpt.custom_instructions"),
+            ("chatgpt", "shared_conversations") => Some("chatgpt.shared_conversations"),
             _ => None,
         };
         if let Some(scope) = scope {
@@ -2209,7 +2242,7 @@ fn resolve_browser_status(
 }
 
 /// Get system browser path (Chrome/Edge)
-fn get_system_browser_path() -> Option<PathBuf> {
+pub(crate) fn get_system_browser_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let paths = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"];
@@ -2302,7 +2335,7 @@ pub async fn test_nodejs(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Get downloaded Chromium path from ~/.dataconnect/browsers
-fn get_downloaded_chromium_path() -> Option<PathBuf> {
+pub(crate) fn get_downloaded_chromium_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
@@ -2381,6 +2414,12 @@ fn find_chromium_executable(browsers_dir: &Path, platform: &str) -> Option<PathB
     }
 
     None
+}
+
+/// Shared executable discovery only. PDPP browser leases intentionally do not
+/// reuse the legacy runner's page API or persistent connector profiles.
+pub(crate) fn resolve_automation_browser_path() -> Option<PathBuf> {
+    get_system_browser_path().or_else(get_downloaded_chromium_path)
 }
 
 /// Get the Chromium download URL for the current platform

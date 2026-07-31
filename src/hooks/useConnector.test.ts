@@ -115,15 +115,20 @@ describe("useConnector.startImport", () => {
       })
     })
 
-    expect(mockInvoke).toHaveBeenCalledWith("start_installed_pdpp_connector_run", {
-      request: {
-        runId: "github-pdpp-1700000000000",
-        connectorId: "github-pdpp",
-        collectionMode: "incremental",
-        streams: [],
-        githubToken: null,
-      },
-    })
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: {
+          runId: "github-pdpp-1700000000000",
+          connectorId: "github-pdpp",
+          collectionMode: "incremental",
+          streams: [],
+          githubToken: null,
+          connectionId: null,
+          setupSecrets: null,
+        },
+      }
+    )
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "start_connector_run",
       expect.anything()
@@ -149,15 +154,20 @@ describe("useConnector.startImport", () => {
       )
     })
 
-    expect(mockInvoke).toHaveBeenCalledWith("start_installed_pdpp_connector_run", {
-      request: {
-        runId: "github-pdpp-1700000000000",
-        connectorId: "github-pdpp",
-        collectionMode: "incremental",
-        streams: [],
-        githubToken: "ghp_transient",
-      },
-    })
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: {
+          runId: "github-pdpp-1700000000000",
+          connectorId: "github-pdpp",
+          collectionMode: "incremental",
+          streams: [],
+          githubToken: "ghp_transient",
+          connectionId: null,
+          setupSecrets: null,
+        },
+      }
+    )
     expect(startRun).toHaveBeenCalledWith(
       expect.not.objectContaining({ githubToken: "ghp_transient" })
     )
@@ -193,6 +203,46 @@ describe("useConnector.startImport", () => {
     resolveHost?.()
   })
 
+  it("hands ChatGPT static secrets only to the installed PDPP host invoke", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "chatgpt-pdpp",
+          filename: "chatgpt-pdpp",
+          runtime: "pdpp-network",
+        },
+        {
+          setupSecrets: {
+            username: "owner@example.com",
+            password: "transient-password",
+          },
+        }
+      )
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: expect.objectContaining({
+          connectorId: "chatgpt-pdpp",
+          connectionId: "chatgpt-pdpp-owner",
+          setupSecrets: {
+            username: "owner@example.com",
+            password: "transient-password",
+          },
+        }),
+      }
+    )
+    expect(startRun).toHaveBeenCalledWith(
+      expect.not.objectContaining({ setupSecrets: expect.anything() })
+    )
+  })
+
   it("preserves the legacy connector command for non-PDPP platforms", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")
@@ -225,9 +275,15 @@ describe("useConnector.startImport", () => {
     })
 
     expect(stopRun).not.toHaveBeenCalled()
-    expect(mockInvoke).toHaveBeenCalledWith("stop_installed_pdpp_connector_run", {
-      runId: "github-pdpp-run",
-    })
-    expect(mockInvoke).not.toHaveBeenCalledWith("stop_connector_run", expect.anything())
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "stop_installed_pdpp_connector_run",
+      {
+        runId: "github-pdpp-run",
+      }
+    )
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "stop_connector_run",
+      expect.anything()
+    )
   })
 })

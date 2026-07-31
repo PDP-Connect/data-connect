@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { createMemoryRouter, RouterProvider } from "react-router-dom"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { RegistryAppCard } from "./registry-app-card"
@@ -180,7 +186,7 @@ describe("RegistryAppCard", () => {
     })
 
     expect(screen.getByText("Uses PDPP")).toBeTruthy()
-    screen.getByRole("button", { name: "Open Timeline" }).click()
+    fireEvent.click(screen.getByRole("button", { name: "Open Timeline" }))
 
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/apps/timeline")

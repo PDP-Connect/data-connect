@@ -74,6 +74,16 @@ switch (mode) {
       message: "Log in",
     })
     break
+  case "interaction-success":
+    emit({
+      type: "INTERACTION",
+      request_id: "browser-login",
+      kind: "browser",
+      message: "Sign in in the opened browser",
+    })
+    emit(record)
+    emit(done)
+    break
   case "oversized-stdout":
     process.stdout.write(`${"x".repeat(128)}\n`)
     break

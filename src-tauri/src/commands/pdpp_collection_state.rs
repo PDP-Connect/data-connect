@@ -9,7 +9,7 @@ use super::pdpp_connector::{PdppRecord, PdppRunStatus};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,10 @@ pub struct PdppCollectionConnectionState {
 struct PdppCollectionStateFile {
     version: u8,
     connectors: HashMap<String, HashMap<String, PdppCollectionConnectionState>>,
+    /// A non-secret setup acknowledgement. Browser authentication remains in
+    /// the owner-confined profile, never in collection state.
+    #[serde(default)]
+    setup_complete_connections: HashMap<String, HashSet<String>>,
 }
 
 pub fn collection_state_path() -> Result<PathBuf, String> {
@@ -61,6 +65,69 @@ pub fn load_connection_state_at(
         .and_then(|connections| connections.get(connection_id))
         .cloned()
         .unwrap_or_default())
+}
+
+pub fn is_connection_setup_complete(
+    connector_id: &str,
+    connection_id: &str,
+) -> Result<bool, String> {
+    is_connection_setup_complete_at(&collection_state_path()?, connector_id, connection_id)
+}
+
+fn is_connection_setup_complete_at(
+    path: &Path,
+    connector_id: &str,
+    connection_id: &str,
+) -> Result<bool, String> {
+    let _guard = COLLECTION_STATE_LOCK
+        .lock()
+        .map_err(|_| "PDPP collection state lock is unavailable")?;
+    Ok(read_state_file(path)?
+        .setup_complete_connections
+        .get(connector_id)
+        .is_some_and(|connections| connections.contains(connection_id)))
+}
+
+/// Stores only that setup occurred, allowing a later scheduled run to reuse
+/// the durable browser profile without another credential prompt.
+pub fn mark_connection_setup_complete(
+    connector_id: &str,
+    connection_id: &str,
+) -> Result<(), String> {
+    update_connection_setup_complete_at(&collection_state_path()?, connector_id, connection_id, true)
+}
+
+pub fn clear_connection_setup_complete(
+    connector_id: &str,
+    connection_id: &str,
+) -> Result<(), String> {
+    update_connection_setup_complete_at(&collection_state_path()?, connector_id, connection_id, false)
+}
+
+fn update_connection_setup_complete_at(
+    path: &Path,
+    connector_id: &str,
+    connection_id: &str,
+    complete: bool,
+) -> Result<(), String> {
+    let _guard = COLLECTION_STATE_LOCK
+        .lock()
+        .map_err(|_| "PDPP collection state lock is unavailable")?;
+    let _file_lock = lock_state_file(path)?;
+    let mut file = read_state_file(path)?;
+    if complete {
+        file.setup_complete_connections
+            .entry(connector_id.to_owned())
+            .or_default()
+            .insert(connection_id.to_owned());
+    } else if let Some(connections) = file.setup_complete_connections.get_mut(connector_id) {
+        connections.remove(connection_id);
+        if connections.is_empty() {
+            file.setup_complete_connections.remove(connector_id);
+        }
+    }
+    file.version = 1;
+    write_state_file_atomically(path, &file)
 }
 
 /// Commit a terminal run only when the validated protocol result succeeded.
@@ -337,6 +404,23 @@ mod tests {
                 .checkpoints,
             HashMap::from([("repositories".into(), json!({ "cursor": "b" }))])
         );
+    }
+
+    #[test]
+    fn reset_clears_the_owner_confined_nonsecret_setup_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        update_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a", true).unwrap();
+
+        assert!(is_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a").unwrap());
+        assert!(!is_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-b").unwrap());
+        let stored = fs::read_to_string(&path).unwrap();
+        assert!(stored.contains("setupCompleteConnections"));
+        assert!(!stored.contains("password"));
+        assert!(!stored.contains("username"));
+
+        update_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a", false).unwrap();
+        assert!(!is_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a").unwrap());
     }
 
     #[test]

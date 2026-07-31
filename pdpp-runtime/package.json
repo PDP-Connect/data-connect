@@ -1,0 +1,9 @@
+{
+  "name": "dataconnect-pdpp-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "p-queue": "^9.3.3",
+    "patchright": "^1.61.1"
+  }
+}
