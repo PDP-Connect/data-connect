@@ -11,6 +11,12 @@ const REQUIRED_PATH_FRAGMENTS = [
   "personal-server/dist/personal-server",
   "personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
   "playwright-runner/dist/playwright-runner",
+  "pdpp-runtime/connector-loader.mjs",
+  "pdpp-runtime/connector-loader-bootstrap.mjs",
+  "pdpp-runtime/node_modules/p-queue/package.json",
+  "pdpp-runtime/node_modules/p-queue/dist/index.js",
+  "pdpp-runtime/node_modules/patchright/package.json",
+  "pdpp-runtime/node_modules/patchright/index.mjs",
 ]
 
 function fail(message) {

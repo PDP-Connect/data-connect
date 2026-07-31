@@ -66,6 +66,8 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       "npm run build -- --require-browser --target ${{ matrix.pkg_target }}"
     )
+    expect(workflow).toContain("Install PDPP runtime dependencies")
+    expect(workflow).toContain("node scripts/ensure-pdpp-runtime.js")
     expect(workflow).toContain("if: github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i

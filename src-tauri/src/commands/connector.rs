@@ -2352,7 +2352,10 @@ fn get_bundled_chromium_path(resource_dir: &Path) -> Option<PathBuf> {
     get_bundled_chromium_path_for_platform(resource_dir, current_browser_platform())
 }
 
-fn get_bundled_chromium_path_for_platform(resource_dir: &Path, platform: &str) -> Option<PathBuf> {
+pub(crate) fn get_bundled_chromium_path_for_platform(
+    resource_dir: &Path,
+    platform: &str,
+) -> Option<PathBuf> {
     let browser_roots = [
         resource_dir
             .join("playwright-runner")
@@ -2418,8 +2421,20 @@ fn find_chromium_executable(browsers_dir: &Path, platform: &str) -> Option<PathB
 
 /// Shared executable discovery only. PDPP browser leases intentionally do not
 /// reuse the legacy runner's page API or persistent connector profiles.
-pub(crate) fn resolve_automation_browser_path() -> Option<PathBuf> {
-    get_system_browser_path().or_else(get_downloaded_chromium_path)
+pub(crate) fn resolve_automation_browser_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    resolve_automation_browser_path_from(
+        get_system_browser_path(),
+        get_downloaded_chromium_path(),
+        resource_dir.and_then(get_bundled_chromium_path),
+    )
+}
+
+fn resolve_automation_browser_path_from(
+    system: Option<PathBuf>,
+    downloaded: Option<PathBuf>,
+    bundled: Option<PathBuf>,
+) -> Option<PathBuf> {
+    system.or(downloaded).or(bundled)
 }
 
 /// Get the Chromium download URL for the current platform
@@ -2775,8 +2790,8 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, resolve_browser_status, resolve_icon_path,
-        ConnectorMetadata,
+        manifest_looks_like_connector, resolve_automation_browser_path_from,
+        resolve_browser_status, resolve_icon_path, ConnectorMetadata,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2907,6 +2922,34 @@ mod tests {
         assert_eq!(
             get_bundled_chromium_path_for_platform(temp.path(), "macos"),
             Some(executable)
+        );
+    }
+
+    #[test]
+    fn bundled_browser_lookup_supports_release_platform_layouts() {
+        for (platform, relative_path) in [
+            ("linux", "playwright-runner/dist/browsers/chromium-1200/chrome-linux64/chrome"),
+            ("windows", "playwright-runner/dist/browsers/chromium-1200/chrome-win64/chrome.exe"),
+            ("macos", "playwright-runner/dist/browsers/chromium-1200/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+            ("macos", "playwright-runner/dist/browsers/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let executable = create_file(temp.path(), relative_path);
+
+            assert_eq!(
+                get_bundled_chromium_path_for_platform(temp.path(), platform),
+                Some(executable)
+            );
+        }
+    }
+
+    #[test]
+    fn pdpp_browser_discovery_uses_bundled_chromium_on_fresh_install() {
+        let bundled = PathBuf::from("bundled-browser");
+
+        assert_eq!(
+            resolve_automation_browser_path_from(None, None, Some(bundled.clone())),
+            Some(bundled)
         );
     }
 }

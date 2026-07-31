@@ -127,6 +127,9 @@ jobs:
           npm run test:security
           npm run build
 
+      - name: Install PDPP runtime dependencies
+        run: node scripts/ensure-pdpp-runtime.js
+
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:

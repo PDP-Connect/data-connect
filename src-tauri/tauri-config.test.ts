@@ -17,6 +17,29 @@ describe("tauri manual-install config", () => {
     ).toBeUndefined()
   })
 
+  it("preserves the packaged PDPP runtime directory tree", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { resources?: Record<string, string> }
+    }
+
+    expect(document.bundle?.resources?.["../pdpp-runtime/"]).toBe(
+      "pdpp-runtime/"
+    )
+    expect(document.bundle?.resources?.["../pdpp-runtime/**/*"]).toBeUndefined()
+  })
+
+  it("stages PDPP runtime dependencies before production Tauri packaging", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      build?: { beforeBuildCommand?: string }
+    }
+
+    expect(document.build?.beforeBuildCommand).toContain(
+      "node scripts/ensure-pdpp-runtime.js"
+    )
+  })
+
   it("disables updater artifacts and ships no updater endpoint", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {

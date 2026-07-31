@@ -23,6 +23,12 @@ const runtimeEntries = [
   "usr/lib/data-connect/resources/personal-server/dist/personal-server",
   "usr/lib/data-connect/resources/personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
   "usr/lib/data-connect/resources/playwright-runner/dist/playwright-runner",
+  "usr/lib/data-connect/resources/pdpp-runtime/connector-loader.mjs",
+  "usr/lib/data-connect/resources/pdpp-runtime/connector-loader-bootstrap.mjs",
+  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/p-queue/package.json",
+  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/p-queue/dist/index.js",
+  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/patchright/package.json",
+  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/patchright/index.mjs",
 ]
 
 const linuxBrowserEntry =
@@ -42,6 +48,15 @@ describe("bundled personal-server verifier", () => {
         "DataConnect.exe"
       )
     ).toThrow("better-sqlite3")
+  })
+
+  it("rejects an artifact missing a PDPP runtime dependency", () => {
+    expect(() =>
+      assertPackagedRuntime(
+        runtimeEntries.filter(entry => !entry.includes("p-queue/package.json")),
+        "DataConnect.deb"
+      )
+    ).toThrow("p-queue")
   })
 
   it("requires a real packaged browser executable", () => {
@@ -109,7 +124,7 @@ describe("bundled personal-server verifier", () => {
       ]
     )
 
-    expect(entries).toHaveLength(4)
+    expect(entries).toHaveLength(10)
     expect(() =>
       assertPackagedRuntime(entries, "DataConnect.exe")
     ).not.toThrow()
@@ -147,7 +162,7 @@ describe("bundled personal-server verifier", () => {
     })
 
     const entries = await entriesPromise
-    expect(entries).toHaveLength(4)
+    expect(entries).toHaveLength(10)
     expect(() =>
       assertPackagedBrowser(entries, "DataConnect.exe", "windows")
     ).not.toThrow()

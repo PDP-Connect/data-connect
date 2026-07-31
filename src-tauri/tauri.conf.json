@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "node scripts/ensure-connectors.js && npm run dev",
-    "beforeBuildCommand": "node scripts/ensure-connectors.js && npm run build"
+    "beforeBuildCommand": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -62,7 +62,7 @@
       "../playwright-runner/dist/": "playwright-runner/dist/",
       "../personal-server/dist/personal-server*": "personal-server/dist/",
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/",
-      "../pdpp-runtime/**/*": "pdpp-runtime/"
+      "../pdpp-runtime/": "pdpp-runtime/"
     },
     "linux": {
       "deb": {

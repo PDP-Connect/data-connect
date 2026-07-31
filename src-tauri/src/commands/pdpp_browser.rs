@@ -13,6 +13,8 @@ use fs2::FileExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -50,13 +52,19 @@ pub struct PdppBrowserLease {
     lease_lock: Option<File>,
     state: PdppBrowserInteractionState,
     child: Option<Child>,
+    termination_failed: bool,
 }
 
 impl PdppBrowserLease {
-    pub fn launch(connector_id: &str, owner_id: &str, run_id: &str) -> Result<Self, String> {
+    pub fn launch(
+        connector_id: &str,
+        owner_id: &str,
+        run_id: &str,
+        resource_dir: Option<&Path>,
+    ) -> Result<Self, String> {
         validate_owner_id(owner_id)?;
-        let browser = super::connector::resolve_automation_browser_path().ok_or(
-            "No system or downloaded Chromium browser is available for PDPP browser automation",
+        let browser = resolve_pdpp_browser_path(resource_dir).ok_or(
+            "No system, downloaded, or bundled Chromium browser is available for PDPP browser automation",
         )?;
         let (profile_dir, lease_lock) =
             acquire_profile_lease(&profile_root()?, connector_id, owner_id)?;
@@ -91,9 +99,13 @@ impl PdppBrowserLease {
         let lease_id = lease_id(connector_id, owner_id, run_id);
         let (endpoint, child) = match wait_for_devtools_endpoint(&profile_dir, child) {
             Ok(ready) => ready,
-            Err(error) => {
-                release_profile_lease(Some(lease_lock));
-                return Err(error);
+            Err(failure) => {
+                if failure.terminated {
+                    release_profile_lease(Some(lease_lock));
+                } else {
+                    std::mem::forget(lease_lock);
+                }
+                return Err(failure.message);
             }
         };
         Ok(Self {
@@ -107,6 +119,7 @@ impl PdppBrowserLease {
             lease_lock: Some(lease_lock),
             state: PdppBrowserInteractionState::Collecting,
             child: Some(child),
+            termination_failed: false,
         })
     }
 
@@ -130,6 +143,7 @@ impl PdppBrowserLease {
             lease_lock: Some(lease_lock),
             state: PdppBrowserInteractionState::Launching,
             child: None,
+            termination_failed: false,
         })
     }
 
@@ -154,13 +168,34 @@ impl PdppBrowserLease {
     }
 
     pub fn close(&mut self) {
+        self.close_with_before_release_hook(|_| {});
+    }
+
+    fn close_with_before_release_hook<F>(&mut self, before_release: F)
+    where
+        F: FnOnce(&Path),
+    {
+        self.close_with_terminator(terminate_browser, before_release);
+    }
+
+    fn close_with_terminator<T, F>(&mut self, mut terminate: T, before_release: F)
+    where
+        T: FnMut(&mut Child) -> bool,
+        F: FnOnce(&Path),
+    {
         if self.state == PdppBrowserInteractionState::Closed {
             return;
         }
         self.state = PdppBrowserInteractionState::Closing;
         if let Some(mut child) = self.child.take() {
-            terminate_browser(&mut child);
+            if !terminate(&mut child) {
+                self.child = Some(child);
+                self.termination_failed = true;
+                return;
+            }
         }
+        self.termination_failed = false;
+        before_release(&self.profile_dir);
         release_profile_lease(self.lease_lock.take());
         self.state = PdppBrowserInteractionState::Closed;
     }
@@ -181,7 +216,18 @@ impl PdppBrowserLease {
 
 impl Drop for PdppBrowserLease {
     fn drop(&mut self) {
+        if self.termination_failed {
+            if let Some(lock) = self.lease_lock.take() {
+                std::mem::forget(lock);
+            }
+            return;
+        }
         self.close();
+        if self.child.is_some() {
+            if let Some(lock) = self.lease_lock.take() {
+                std::mem::forget(lock);
+            }
+        }
     }
 }
 
@@ -204,6 +250,10 @@ fn profile_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home)
         .join(".dataconnect")
         .join("pdpp-browser-leases"))
+}
+
+fn resolve_pdpp_browser_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    super::connector::resolve_automation_browser_path(resource_dir)
 }
 
 fn profile_dir(root: &Path, connector_id: &str, owner_id: &str) -> PathBuf {
@@ -289,14 +339,15 @@ fn profile_key(connector_id: &str, owner_id: &str) -> String {
 fn wait_for_devtools_endpoint(
     profile_dir: &Path,
     mut child: Child,
-) -> Result<(String, Child), String> {
+) -> Result<(String, Child), BrowserLaunchFailure> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     while Instant::now() < deadline {
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!(
-                "PDPP browser exited before becoming ready: {status}"
-            ));
+            return Err(BrowserLaunchFailure {
+                message: format!("PDPP browser exited before becoming ready: {status}"),
+                terminated: true,
+            });
         }
         if let Ok(contents) = fs::read_to_string(&active_port) {
             if let Some(port) = contents
@@ -309,41 +360,135 @@ fn wait_for_devtools_endpoint(
         }
         thread::sleep(Duration::from_millis(25));
     }
-    terminate_browser(&mut child);
-    Err("Timed out waiting for PDPP browser CDP endpoint".into())
+    Err(BrowserLaunchFailure {
+        message: "Timed out waiting for PDPP browser CDP endpoint".into(),
+        terminated: terminate_browser(&mut child),
+    })
 }
 
-fn terminate_browser(child: &mut Child) {
+struct BrowserLaunchFailure {
+    message: String,
+    terminated: bool,
+}
+
+fn terminate_browser(child: &mut Child) -> bool {
     #[cfg(unix)]
     {
-        crate::commands::server::kill_process_group(child.id(), libc::SIGTERM);
+        let process_group = child.id();
+        signal_process_group(process_group, libc::SIGTERM);
+        let leader_exited = wait_for_child_exit(child, BROWSER_STOP_WAIT);
+        if leader_exited && wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT) {
+            return true;
+        }
+        signal_process_group(process_group, libc::SIGKILL);
+        let _ = wait_for_child_exit(child, BROWSER_STOP_WAIT);
+        return wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT);
     }
+
     #[cfg(not(unix))]
     {
-        let _ = child.kill();
+        #[cfg(windows)]
+        {
+            run_windows_taskkill(child.id(), BROWSER_STOP_WAIT);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child.kill();
+        }
+        if wait_for_child_exit(child, BROWSER_STOP_WAIT) {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            run_windows_taskkill(child.id(), BROWSER_STOP_WAIT);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child.kill();
+        }
+        wait_for_child_exit(child, BROWSER_STOP_WAIT)
     }
-    let deadline = Instant::now() + BROWSER_STOP_WAIT;
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group: u32, signal: libc::c_int) {
+    unsafe {
+        libc::kill(-(process_group as i32), signal);
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_group_exists(process_group) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    !process_group_exists(process_group)
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group: u32) -> bool {
+    let result = unsafe { libc::kill(-(process_group as i32), 0) };
+    if result == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[cfg(windows)]
+fn run_windows_taskkill(pid: u32, timeout: Duration) {
+    let (program, args) = windows_taskkill_command(pid);
+    let Ok(mut taskkill) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if taskkill.try_wait().ok().flatten().is_some() {
             return;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    #[cfg(unix)]
-    crate::commands::server::kill_process_group(child.id(), libc::SIGKILL);
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
+    let _ = taskkill.kill();
+    let _ = wait_for_child_exit(&mut taskkill, Duration::from_millis(200));
+}
+
+fn windows_taskkill_command(pid: u32) -> (&'static str, Vec<String>) {
+    (
+        "taskkill",
+        vec!["/PID".into(), pid.to_string(), "/T".into(), "/F".into()],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs2::FileExt;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
     use std::process::Command;
 
     const LOCK_HOLDER_ROOT: &str = "PDPP_BROWSER_LOCK_HOLDER_ROOT";
+    const LOCK_EXPECT_BLOCKED_ROOT: &str = "PDPP_BROWSER_LOCK_EXPECT_BLOCKED_ROOT";
 
     struct ReapedTestChild(Child);
 
@@ -367,6 +512,16 @@ mod tests {
         loop {
             thread::sleep(Duration::from_secs(1));
         }
+    }
+
+    #[test]
+    fn expects_profile_lease_to_be_blocked() {
+        let Ok(root) = std::env::var(LOCK_EXPECT_BLOCKED_ROOT) else {
+            return;
+        };
+        let blocked =
+            PdppBrowserLease::fixture(Path::new(&root), "chatgpt-pdpp", "alice", "blocked-check");
+        assert!(matches!(blocked, Err(error) if error.contains("already leased")));
     }
 
     #[test]
@@ -451,5 +606,92 @@ mod tests {
         assert!(validate_owner_id("").is_err());
         assert!(validate_owner_id("../other-owner").is_err());
         assert!(validate_owner_id("account-one").is_ok());
+    }
+
+    #[test]
+    fn windows_tree_cleanup_targets_only_the_browser_process_tree() {
+        let (program, args) = windows_taskkill_command(4242);
+
+        assert_eq!(program, "taskkill");
+        assert_eq!(args, ["/PID", "4242", "/T", "/F"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_releases_profile_lock_after_bounded_browser_termination() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lease =
+            PdppBrowserLease::fixture(root.path(), "chatgpt-pdpp", "alice", "run-1").unwrap();
+        lease.state = PdppBrowserInteractionState::Collecting;
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command.process_group(0);
+        lease.child = Some(command.spawn().expect("spawn test browser process"));
+        let canonical_root = fs::canonicalize(root.path()).unwrap();
+        let lock_path = lock_path(&canonical_root, "chatgpt-pdpp", "alice");
+        let mut observed_still_locked = false;
+
+        lease.close_with_before_release_hook(|_| {
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            let error = lock.try_lock_exclusive().unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            observed_still_locked = true;
+        });
+
+        assert!(observed_still_locked);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock_exclusive()
+            .expect("profile lock releases only after close completes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_preserves_profile_lock_when_browser_tree_is_not_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lease =
+            PdppBrowserLease::fixture(root.path(), "chatgpt-pdpp", "alice", "run-1").unwrap();
+        lease.state = PdppBrowserInteractionState::Collecting;
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command.process_group(0);
+        let child = command.spawn().expect("spawn test browser process");
+        let process_group = child.id();
+        lease.child = Some(child);
+
+        lease.close_with_terminator(|_| false, |_| panic!("lock must not release"));
+        drop(lease);
+
+        let blocked = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::pdpp_browser::tests::expects_profile_lease_to_be_blocked",
+                "--nocapture",
+            ])
+            .env(LOCK_EXPECT_BLOCKED_ROOT, root.path())
+            .status()
+            .expect("spawn blocked lock oracle");
+        assert!(blocked.success());
+        crate::commands::server::kill_process_group(process_group, libc::SIGKILL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_browser_waits_for_descendant_process_group_exit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' TERM; (trap '' TERM; sleep 30) & exit 0"]);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn test browser process tree");
+        let process_group = child.id();
+
+        assert!(terminate_browser(&mut child));
+        assert!(!process_group_exists(process_group));
     }
 }
