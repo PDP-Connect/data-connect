@@ -69,11 +69,7 @@ describe("bundled personal-server verifier", () => {
       assertPackagedNode(runtimeEntries, "DataConnect.deb", "linux")
     ).not.toThrow()
     expect(() =>
-      assertPackagedNode(
-        ["resources/pdpp-node.exe"],
-        "DataConnect.exe",
-        "windows"
-      )
+      assertPackagedNode(["pdpp-node.exe"], "DataConnect.exe", "windows")
     ).not.toThrow()
     expect(() =>
       assertPackagedNode(
@@ -85,6 +81,26 @@ describe("bundled personal-server verifier", () => {
     expect(() =>
       assertPackagedNode(runtimeEntries, "DataConnect.exe", "windows")
     ).toThrow("packaged Node.js sidecar")
+  })
+
+  it("requires Tauri's exact root-installed Windows x64 Node sidecar", () => {
+    const tauriNsisListing = [
+      "2026-07-31 23:39:00 ....A 124835376 50000000 pdpp-node.exe",
+    ]
+    expect(() =>
+      assertPackagedNode(tauriNsisListing, "DataConnect.exe", "windows")
+    ).not.toThrow()
+
+    for (const wrongEntry of [
+      "resources/pdpp-node.exe",
+      "pdpp-node-x86_64-pc-windows-msvc.exe",
+      "not-pdpp-node.exe",
+      "pdpp-node-arm64.exe",
+    ]) {
+      expect(() =>
+        assertPackagedNode([wrongEntry], "DataConnect.exe", "windows")
+      ).toThrow("packaged Node.js sidecar")
+    }
   })
 
   it("requires a real packaged browser executable", () => {
@@ -211,6 +227,7 @@ describe("bundled personal-server verifier", () => {
           for (const entry of ${JSON.stringify([
             ...runtimeEntries,
             "resources/pdpp-node.exe",
+            "pdpp-node.exe",
             "usr/lib/data-connect/resources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe",
           ])}) {
             console.log(\`2026-07-31 ..... \${entry.replaceAll("/", "\\\\")}\`)
@@ -222,6 +239,9 @@ describe("bundled personal-server verifier", () => {
     expect(entries).toHaveLength(12)
     expect(() =>
       assertPackagedRuntime(entries, "DataConnect.exe")
+    ).not.toThrow()
+    expect(() =>
+      assertPackagedNode(entries, "DataConnect.exe", "windows")
     ).not.toThrow()
     expect(() =>
       assertPackagedBrowser(entries, "DataConnect.exe", "windows")
@@ -252,12 +272,15 @@ describe("bundled personal-server verifier", () => {
     child.emit("close", 0)
     setImmediate(() => {
       child.stdout.end(
-        "resources/pdpp-node.exe\nresources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
+        "pdpp-node.exe\nresources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
       )
     })
 
     const entries = await entriesPromise
     expect(entries).toHaveLength(12)
+    expect(() =>
+      assertPackagedNode(entries, "DataConnect.exe", "windows")
+    ).not.toThrow()
     expect(() =>
       assertPackagedBrowser(entries, "DataConnect.exe", "windows")
     ).not.toThrow()

@@ -63,9 +63,13 @@ export function assertPackagedNode(entries, artifactName, platform) {
     windows: "pdpp-node.exe",
   }[platform]
   if (!expectedSuffix) fail(`Unsupported Node sidecar platform: ${platform}`)
-  if (
-    !entries.map(normalizeEntry).some(entry => entry.endsWith(expectedSuffix))
-  ) {
+  const hasNode = entries.some(entry => {
+    if (platform === "windows") {
+      return windowsInstallerEntryPath(entry) === expectedSuffix
+    }
+    return normalizeEntry(entry).endsWith(expectedSuffix)
+  })
+  if (!hasNode) {
     fail(`${artifactName} is missing its packaged Node.js sidecar`)
   }
 }
@@ -140,13 +144,19 @@ function listAppImageEntries(artifact) {
 
 const WINDOWS_BROWSER_FRAGMENT = "playwright-runner/dist/browsers/chromium-"
 const WINDOWS_BROWSER_EXECUTABLE = "/chrome.exe"
-const WINDOWS_NODE_FRAGMENT = "/pdpp-node.exe"
+const WINDOWS_NODE_FILENAME = "pdpp-node.exe"
 const WINDOWS_RELEVANT_FRAGMENTS = [
   ...REQUIRED_PATH_FRAGMENTS,
-  WINDOWS_NODE_FRAGMENT,
+  WINDOWS_NODE_FILENAME,
   WINDOWS_BROWSER_FRAGMENT,
 ].map(normalizeEntry)
 const COMMAND_ERROR_OUTPUT_LIMIT = 64 * 1024
+
+function windowsInstallerEntryPath(entry) {
+  // `7z l -ba` prefixes metadata, while Tauri's NSIS `/oname` sidecar is a
+  // bare root entry. Compare that installed path, not the staged source name.
+  return normalizeEntry(entry).trim().split(/\s+/).at(-1)
+}
 
 function appendBoundedOutput(output, chunk) {
   return `${output}${chunk}`.slice(-COMMAND_ERROR_OUTPUT_LIMIT)
@@ -174,6 +184,12 @@ export async function collectRelevantWindowsInstallerEntries(
     for (const fragment of WINDOWS_RELEVANT_FRAGMENTS) {
       if (relevantEntries.has(fragment)) continue
       if (!normalizedLine.includes(fragment)) continue
+      if (
+        fragment === WINDOWS_NODE_FILENAME &&
+        windowsInstallerEntryPath(line) !== WINDOWS_NODE_FILENAME
+      ) {
+        continue
+      }
       if (
         fragment === WINDOWS_BROWSER_FRAGMENT &&
         !normalizedLine.endsWith(WINDOWS_BROWSER_EXECUTABLE)
