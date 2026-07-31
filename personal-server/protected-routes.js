@@ -45,16 +45,13 @@ export function registerProtectedRoutes({
         grantId,
       })
 
+      await onLegacyGrantRevoked?.(grantId)
+
       await gatewayClient.revokeGrant({
         grantId,
         grantorAddress: ownerAddress,
         signature,
       })
-
-      // The local token is never revoked if the authoritative Gateway revoke
-      // fails. Keeping this after the awaited Gateway call preserves that
-      // principal-bound lifecycle invariant.
-      await onLegacyGrantRevoked?.(grantId)
 
       return c.body(null, 204)
     } catch (err) {

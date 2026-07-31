@@ -1133,6 +1133,136 @@ test("composes local GitHub authorization with imported PDPP reads and legacy re
   restartedAdapter.close()
 })
 
+test("rejects a local PDPP bearer after owner revoke intent even when Gateway revoke fails", async () => {
+  const fixture = createInstalledGithubFixture()
+  const adapter = createGithubAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    databasePath: join(dirname(fixture.databasePath), "authorization.sqlite"),
+  })
+  const app = new Hono()
+  const desktopToken = "desktop-token"
+  const remoteAttempts = []
+
+  registerProtectedRoutes({
+    app,
+    devToken: desktopToken,
+    gatewayClient: {
+      revokeGrant: async ({ grantId }) => {
+        remoteAttempts.push(grantId)
+        throw new Error("gateway unavailable")
+      },
+    },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: {
+      signGrantRevocation: async () => "signature",
+    },
+    onLegacyGrantRevoked: legacyGrantId =>
+      adapter.revokeByLegacyGrantId(legacyGrantId),
+  })
+  registerGithubAuthorizationRoutes({ app, devToken: desktopToken, adapter })
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    tokenIntrospector: {
+      introspect: token => adapter.resolveForResourceServer(token),
+    },
+  })
+
+  async function issueBearer({ sessionId, legacyGrantId }) {
+    const authorizationDetails = [
+      {
+        type: PDPP_DATA_ACCESS_TYPE,
+        source: { kind: "connector", id: "github" },
+        access_mode: "continuous",
+        purpose_code: "https://example.test/purpose/research",
+        streams: [{ name: "repositories", resources: ["allowed"] }],
+      },
+    ]
+    const consent = await app.request(
+      "http://personal.example/v1/pdpp/consent-requests",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          scopes: ["github.repositories"],
+          authorization_details: authorizationDetails,
+        }),
+      }
+    )
+    assert.equal(consent.status, 201, await consent.clone().text())
+    const request = await consent.json()
+    const approval = await app.request(
+      `http://personal.example/v1/pdpp/consent-requests/${request.request_id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          legacy_grant_id: legacyGrantId,
+          subject_id: "subject-1",
+          client_id: TEST_BUILDER.address,
+        }),
+      }
+    )
+    assert.equal(approval.status, 201, await approval.clone().text())
+    const authorization = await redemptionAuthorization({
+      account: TEST_BUILDER,
+      origin: "http://personal.example",
+      sessionId,
+    })
+    const credential = await app.request(
+      `http://personal.example/v1/pdpp/credentials/${sessionId}/redeem`,
+      { method: "POST", headers: { authorization } }
+    )
+    assert.equal(credential.status, 200, await credential.clone().text())
+    return `Bearer ${(await credential.json()).access_token}`
+  }
+
+  const revokedBearer = await issueBearer({
+    sessionId: "revoke-failure-session",
+    legacyGrantId: "legacy-grant-fail-closed",
+  })
+  const otherBearer = await issueBearer({
+    sessionId: "other-session",
+    legacyGrantId: "legacy-grant-other",
+  })
+
+  const before = await app.request("http://personal.example/v1/streams", {
+    headers: { authorization: revokedBearer },
+  })
+  assert.equal(before.status, 200, await before.clone().text())
+
+  const revoke = await app.request(
+    "http://personal.example/v1/grants/legacy-grant-fail-closed",
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${desktopToken}` },
+    }
+  )
+  assert.equal(revoke.status, 500)
+  assert.equal((await revoke.json()).error, "gateway unavailable")
+  assert.deepEqual(remoteAttempts, ["legacy-grant-fail-closed"])
+
+  const after = await app.request("http://personal.example/v1/streams", {
+    headers: { authorization: revokedBearer },
+  })
+  assert.equal(after.status, 403)
+  assert.equal((await after.json()).error.code, "grant_revoked")
+
+  const other = await app.request("http://personal.example/v1/streams", {
+    headers: { authorization: otherBearer },
+  })
+  assert.equal(other.status, 200, await other.clone().text())
+  adapter.close()
+})
+
 test("serves Timeline only after local consent and fails closed after its bound session is revoked", async () => {
   const fixture = createInstalledGithubFixture()
   const adapter = createGithubAuthorizationAdapter({

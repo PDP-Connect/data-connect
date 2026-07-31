@@ -106,8 +106,10 @@ test("an authorized desktop request can revoke and read the owner status", async
   })
 })
 
-test("does not revoke the local token when the authoritative Gateway revoke fails", async t => {
-  const server = await startServer({ revokeError: new Error("gateway unavailable") })
+test("revokes the local token when the Gateway revoke fails", async t => {
+  const server = await startServer({
+    revokeError: new Error("gateway unavailable"),
+  })
   t.after(() => server.close())
 
   const response = await fetch(`${server.origin}/v1/grants/grant-1`, {
@@ -116,5 +118,55 @@ test("does not revoke the local token when the authoritative Gateway revoke fail
   })
 
   assert.equal(response.status, 500)
-  assert.deepEqual(server.localRevocations, [])
+  assert.deepEqual(server.localRevocations, ["grant-1"])
+  assert.deepEqual(
+    server.revocations.map(({ grantId }) => grantId),
+    ["grant-1"]
+  )
+})
+
+test("does not call Gateway when local revocation cannot be recorded", async t => {
+  const app = new Hono()
+  const revocations = []
+  const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 })
+  await once(server, "listening")
+  t.after(
+    () =>
+      new Promise((resolve, reject) =>
+        server.close(error => (error ? reject(error) : resolve()))
+      )
+  )
+
+  registerProtectedRoutes({
+    app,
+    devToken: DEV_TOKEN,
+    gatewayClient: {
+      async revokeGrant(request) {
+        revocations.push(request)
+      },
+    },
+    ownerAddress: OWNER,
+    port: server.address().port,
+    send() {},
+    serverSigner: {
+      async signGrantRevocation() {
+        return "revocation-signature"
+      },
+    },
+    onLegacyGrantRevoked() {
+      throw new Error("local store unavailable")
+    },
+  })
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/v1/grants/grant-1`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${DEV_TOKEN}` },
+    }
+  )
+
+  assert.equal(response.status, 500)
+  assert.equal((await response.json()).error, "local store unavailable")
+  assert.deepEqual(revocations, [])
 })
