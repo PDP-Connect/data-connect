@@ -3716,6 +3716,7 @@ setInterval(() => {}, 1000);
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
         let request = request_with_token("test-token");
         let start = build_start(&request, &resolved.manifest, None).unwrap();
         let mut command = build_command(
@@ -3723,6 +3724,7 @@ setInterval(() => {}, 1000);
             &resolve_child_secrets(&request, &resolved).unwrap(),
             &CommandCustomization::default(),
             None,
+            &runtime_root,
         )
         .unwrap();
         command.program = resolved_node;
