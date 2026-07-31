@@ -17,6 +17,10 @@ const ROOT = join(__dirname, "..")
 const CONNECTORS_DIR = join(ROOT, "connectors")
 const DEPENDENCIES_PATH = join(CONNECTORS_DIR, "connector-dependencies.json")
 const LOCK_PATH = join(CONNECTORS_DIR, "lock.json")
+const PDP_CONNECT_ARTIFACT_IDENTITY =
+  "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main"
+const VANA_LEGACY_ARTIFACT_IDENTITY =
+  "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main"
 const NON_CONNECTOR_FILES = new Set([
   "connector-dependencies.json",
   "connector-dependencies.schema.json",
@@ -24,6 +28,18 @@ const NON_CONNECTOR_FILES = new Set([
   "lock.json",
   "types",
 ])
+
+function artifactCertificateIdentityResolver({ artifactUrl }) {
+  const url = new URL(artifactUrl)
+  if (url.hostname !== "github.com") return null
+  if (url.pathname.startsWith("/PDP-Connect/data-connectors/releases/download/")) {
+    return PDP_CONNECT_ARTIFACT_IDENTITY
+  }
+  if (url.pathname.startsWith("/vana-com/data-connectors/releases/download/")) {
+    return VANA_LEGACY_ARTIFACT_IDENTITY
+  }
+  return null
+}
 
 function parseArgs() {
   const out = {
@@ -78,6 +94,7 @@ async function main() {
   const lock = await generateLock({
     dependencies,
     source,
+    artifactCertificateIdentityResolver,
     dependencyFile: "connectors/connector-dependencies.json",
     generatedAt:
       checkMode && existingLock?.generatedAt
@@ -96,6 +113,7 @@ async function main() {
     const result = await verifyInstalled({
       lock,
       source,
+      artifactCertificateIdentityResolver,
       installRoot: CONNECTORS_DIR,
       layout: "source",
     })
@@ -114,6 +132,7 @@ async function main() {
   const result = await installFromLock({
     lock,
     source,
+    artifactCertificateIdentityResolver,
     installRoot: CONNECTORS_DIR,
     layout: "source",
   })

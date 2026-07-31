@@ -124,7 +124,7 @@ function main() {
   const connectorLock = readJson(CONNECTOR_LOCK_PATH)
   const overlay = readJson(OVERLAY_PATH)
   const manifestByConnectorId = new Map(
-    connectorLock.connectors.map((entry) => {
+    connectorLock.connectors.filter((entry) => entry.sourceFiles).map((entry) => {
       const manifestPath = join(ROOT, "connectors", entry.sourceFiles.metadata)
       return [entry.connectorId, readJson(manifestPath)]
     })

@@ -22,6 +22,8 @@ const DEFAULT_INDEX_URL: &str =
 const DEFAULT_SIGSTORE_CERTIFICATE_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY: &str =
     "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
+const VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY: &str =
+    "https://github.com/vana-com/data-connectors/.github/workflows/publish-connector-release-index.yml@refs/heads/main";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -342,15 +344,13 @@ fn verify_sigstore_bundle_blocking(
     payload: &[u8],
     bundle_bytes: &[u8],
     subject_label: &str,
+    certificate_identity: &str,
 ) -> Result<(), String> {
     let bundle: sigstore::bundle::Bundle = serde_json::from_slice(bundle_bytes)
         .map_err(|e| format!("Failed to parse {} signature bundle: {}", subject_label, e))?;
     let verifier = Verifier::production()
         .map_err(|e| format!("Failed to initialize Sigstore verifier: {}", e))?;
-    let policy = policy::Identity::new(
-        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-        DEFAULT_SIGSTORE_CERTIFICATE_ISSUER,
-    );
+    let policy = policy::Identity::new(certificate_identity, DEFAULT_SIGSTORE_CERTIFICATE_ISSUER);
 
     verifier
         .verify(Cursor::new(payload), bundle, &policy, true)
@@ -363,10 +363,16 @@ async fn verify_sigstore_bundle_async(
     payload: Vec<u8>,
     bundle_bytes: Vec<u8>,
     subject_label: String,
+    certificate_identity: String,
 ) -> Result<(), String> {
     let label_for_join = subject_label.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        verify_sigstore_bundle_blocking(&payload, &bundle_bytes, &subject_label)
+        verify_sigstore_bundle_blocking(
+            &payload,
+            &bundle_bytes,
+            &subject_label,
+            &certificate_identity,
+        )
     })
     .await
     .map_err(|e| {
@@ -375,6 +381,17 @@ async fn verify_sigstore_bundle_async(
             label_for_join, e
         )
     })?
+}
+
+fn artifact_certificate_identity_for_url(artifact_url: &str) -> Option<&'static str> {
+    if artifact_url.starts_with("https://github.com/PDP-Connect/data-connectors/releases/download/")
+    {
+        return Some(DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
+    }
+    if artifact_url.starts_with("https://github.com/vana-com/data-connectors/releases/download/") {
+        return Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY);
+    }
+    None
 }
 
 fn get_index_cache_dir() -> Option<PathBuf> {
@@ -415,6 +432,7 @@ async fn load_cached_index() -> Option<ConnectorIndex> {
         index_bytes.clone(),
         bundle_bytes.clone(),
         "Cached connector index".to_string(),
+        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY.to_string(),
     )
     .await
     .is_err()
@@ -485,6 +503,7 @@ async fn fetch_index(force: bool) -> Result<ConnectorIndex, String> {
         index_bytes.to_vec(),
         bundle_bytes.to_vec(),
         "Connector index".to_string(),
+        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY.to_string(),
     )
     .await?;
 
@@ -868,6 +887,13 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
         .bytes()
         .await
         .map_err(|e| format!("Failed to read connector signature bundle: {}", e))?;
+    let artifact_certificate_identity = artifact_certificate_identity_for_url(&common.artifact_url)
+        .ok_or_else(|| {
+            format!(
+                "Connector artifact {}@{} comes from an untrusted repository",
+                common.connector_id, common.version
+            )
+        })?;
     verify_sigstore_bundle_async(
         artifact_bytes.to_vec(),
         artifact_bundle_bytes.to_vec(),
@@ -875,6 +901,7 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
             "Connector artifact {}@{}",
             common.connector_id, common.version
         ),
+        artifact_certificate_identity.to_string(),
     )
     .await?;
     if !verify_checksum(artifact_bytes.as_ref(), &common.artifact_sha256) {
@@ -1248,10 +1275,11 @@ fn scan_connectors_dir_no_overwrite(dir: &PathBuf, versions: &mut HashMap<String
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_checksum, connector_path_within_root, connector_root_relative_path,
-        install_verified_connector_artifact_into, verify_checksum, verify_sigstore_bundle_async,
-        verify_sigstore_bundle_blocking, ConnectorFiles, ConnectorIndex, IndexedConnector,
-        IndexedConnectorCommon, LegacyIndexedConnector,
+        artifact_certificate_identity_for_url, calculate_checksum, connector_path_within_root,
+        connector_root_relative_path, install_verified_connector_artifact_into, verify_checksum,
+        verify_sigstore_bundle_async, verify_sigstore_bundle_blocking, ConnectorFiles,
+        ConnectorIndex, IndexedConnector, IndexedConnectorCommon, LegacyIndexedConnector,
+        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY,
     };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
@@ -1513,7 +1541,12 @@ mod tests {
         let payload = b"connector-index bytes";
         let malformed_bundle = b"not a sigstore bundle";
 
-        let result = verify_sigstore_bundle_blocking(payload, malformed_bundle, "tampered bundle");
+        let result = verify_sigstore_bundle_blocking(
+            payload,
+            malformed_bundle,
+            "tampered bundle",
+            DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+        );
 
         assert!(
             result.is_err(),
@@ -1527,14 +1560,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_certificate_identity_is_bound_to_url_repository() {
+        assert_eq!(
+            artifact_certificate_identity_for_url(
+                "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/github-pdpp-0.5.0.tgz"
+            ),
+            Some(DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY)
+        );
+        assert_eq!(
+            artifact_certificate_identity_for_url(
+                "https://github.com/vana-com/data-connectors/releases/download/connectors-legacy/chatgpt-playwright-2.0.0.tgz"
+            ),
+            Some(VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY)
+        );
+        assert_eq!(
+            artifact_certificate_identity_for_url(
+                "https://github.com/attacker/data-connectors/releases/download/x/github-pdpp-0.5.0.tgz"
+            ),
+            None
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn verify_sigstore_bundle_async_rejects_malformed_bundle() {
         let payload = b"connector-index bytes".to_vec();
         let malformed_bundle = b"not a sigstore bundle".to_vec();
 
-        let result =
-            verify_sigstore_bundle_async(payload, malformed_bundle, "tampered bundle".to_string())
-                .await;
+        let result = verify_sigstore_bundle_async(
+            payload,
+            malformed_bundle,
+            "tampered bundle".to_string(),
+            DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY.to_string(),
+        )
+        .await;
 
         assert!(
             result.is_err(),
