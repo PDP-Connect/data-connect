@@ -290,9 +290,15 @@ describe("Timeline", () => {
     })
 
     await screen.findByText("2 records loaded")
-    fireEvent.click(
-      screen.getByRole("button", { name: "Revoke Timeline access" })
-    )
+    const revokeButton = screen.getByRole("button", {
+      name: "Revoke Timeline access",
+    })
+    expect(
+      revokeButton.compareDocumentPosition(
+        screen.getByText("A message from the archive")
+      ) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    fireEvent.click(revokeButton)
 
     await waitFor(() => {
       expect(revokeConsent).toHaveBeenCalledOnce()
@@ -302,7 +308,7 @@ describe("Timeline", () => {
     ).toBeTruthy()
   })
 
-  it("shows unauthorized and revoked source states", async () => {
+  it("returns expired or revoked access to the consent entry point", async () => {
     const { rerender } = renderTimeline({
       read: vi.fn().mockResolvedValue({ kind: "unauthorized" }),
     })
@@ -313,6 +319,7 @@ describe("Timeline", () => {
 
     const revokedSource: TimelineDataSource = {
       read: vi.fn().mockResolvedValue({ kind: "revoked" }),
+      requestConsent: vi.fn().mockResolvedValue(localTimelineTerms),
     }
     const router = createMemoryRouter(
       [
@@ -327,7 +334,7 @@ describe("Timeline", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("Timeline access has expired or been revoked.")
+        screen.getByRole("button", { name: /review local timeline access/i })
       ).toBeTruthy()
     })
   })
@@ -401,15 +408,17 @@ describe("Timeline", () => {
     })
   })
 
-  it("shows an honest unavailable state without using fixtures", async () => {
-    renderTimeline({
-      read: vi.fn().mockResolvedValue({
+  it("retries a retryable Timeline error", async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({
         kind: "error",
         code: "unavailable",
         message: "Timeline is waiting for your local Personal Server.",
         retryable: true,
-      }),
-    })
+      })
+      .mockResolvedValueOnce({ kind: "ready", read: { streams: [] } })
+    renderTimeline({ read })
 
     await waitFor(() => {
       expect(
@@ -417,5 +426,10 @@ describe("Timeline", () => {
       ).toBeTruthy()
     })
     expect(screen.getByText("No records are shown.")).toBeTruthy()
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    expect(screen.getByText("0 records loaded")).toBeTruthy()
   })
 })

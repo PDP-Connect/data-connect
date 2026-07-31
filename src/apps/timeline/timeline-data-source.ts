@@ -126,6 +126,7 @@ export function createProductionTimelineDataSource({
         }
       }
       const {
+        clearLocalTimelineCapability,
         getLocalTimelineCapability,
         PdppTimelineRequestError,
         readLocalTimeline,
@@ -155,7 +156,8 @@ export function createProductionTimelineDataSource({
             error.code === "grant_revoked" ||
             error.code === "grant_expired"
           ) {
-            return { kind: "revoked" }
+            clearLocalTimelineCapability()
+            return { kind: "unauthorized" }
           }
           if (error.status === 401) return { kind: "unauthorized" }
         }
@@ -177,6 +179,7 @@ export function createProductionTimelineDataSource({
         }
       }
       const {
+        clearLocalTimelineCapability,
         getLocalTimelineCapability,
         PdppTimelineRequestError,
         readLocalTimeline,
@@ -199,7 +202,8 @@ export function createProductionTimelineDataSource({
             error.code === "grant_revoked" ||
             error.code === "grant_expired"
           ) {
-            return { kind: "revoked" }
+            clearLocalTimelineCapability()
+            return { kind: "unauthorized" }
           }
           if (error.status === 401) return { kind: "unauthorized" }
         }

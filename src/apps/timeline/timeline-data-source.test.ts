@@ -430,46 +430,41 @@ describe("production Timeline PDPP data source", () => {
     )
   })
 
-  it("fails closed after revocation or expiry and loses its in-memory handoff on renderer restart", async () => {
-    const dataSource = createProductionTimelineDataSource({
-      port: 3100,
-      devToken: "desktop-secret",
-    })
-    tauriFetch
-      .mockImplementationOnce((_url, init) => localConsent(init, "request-2"))
-      .mockResolvedValueOnce(
-        response({ access_token: "pdpp-bearer-2", token_type: "Bearer" }, 201)
-      )
-      .mockResolvedValueOnce(
-        response(
-          {
-            error: {
-              code: "grant_revoked",
-              message: "The grant has been revoked",
-            },
-          },
-          403
+  it.each(["grant_revoked", "grant_expired"])(
+    "returns to consent after %s and clears its in-memory capability",
+    async code => {
+      const dataSource = createProductionTimelineDataSource({
+        port: 3100,
+        devToken: "desktop-secret",
+      })
+      tauriFetch
+        .mockImplementationOnce((_url, init) => localConsent(init, "request-2"))
+        .mockResolvedValueOnce(
+          response({ access_token: "pdpp-bearer-2", token_type: "Bearer" }, 201)
         )
-      )
-    const consent = await dataSource.requestConsent?.()
-    await dataSource.approveConsent?.(consent!)
-    await expect(
-      dataSource.read({
-        maxStreams: 24,
-        maxRecords: 100,
-        signal: new AbortController().signal,
-      })
-    ).resolves.toEqual({ kind: "revoked" })
-
-    clearLocalTimelineCapability()
-    await expect(
-      dataSource.read({
-        maxStreams: 24,
-        maxRecords: 100,
-        signal: new AbortController().signal,
-      })
-    ).resolves.toEqual({ kind: "unauthorized" })
-  })
+        .mockResolvedValueOnce(
+          response(
+            {
+              error: {
+                code,
+                message: "The grant is no longer valid",
+              },
+            },
+            403
+          )
+        )
+      const consent = await dataSource.requestConsent?.()
+      await dataSource.approveConsent?.(consent!)
+      await expect(
+        dataSource.read({
+          maxStreams: 24,
+          maxRecords: 100,
+          signal: new AbortController().signal,
+        })
+      ).resolves.toEqual({ kind: "unauthorized" })
+      expect(getLocalTimelineCapability()).toBeNull()
+    }
+  )
 
   it("sends local revocation through the protected loopback endpoint", async () => {
     const dataSource = createProductionTimelineDataSource({

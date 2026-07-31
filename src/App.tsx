@@ -48,7 +48,7 @@ function AppContent() {
   useEvents()
   useInitialize()
   useDeepLink()
-  const personalServer = usePersonalServer()
+  usePersonalServer()
   useClearLegacyPendingApproval()
 
   useEffect(() => {
@@ -78,7 +78,7 @@ function AppContent() {
       <div className="flex h-screen">
         {/* Tauri app shell layout: fixed header, scrollable main */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          <TopNav personalServerStatus={personalServer.status} />
+          <TopNav />
           <main className="flex-1 overflow-auto">
             <Suspense fallback={<LoadingState />}>
               {/* Routes config: keep @/config/routes.ts in sync when adding/removing routes */}

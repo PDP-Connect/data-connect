@@ -170,10 +170,10 @@ describe("Settings", () => {
     expect(getAllByText("Sign out").length).toBeGreaterThan(0)
   })
 
-  it("reads section from URL", () => {
+  it("falls back to app access when the hidden Storage section is in the URL", () => {
     const { getByRole } = renderSettings(`${ROUTES.settings}?section=storage`)
 
-    expect(getByRole("heading", { name: "Storage & Server" })).toBeTruthy()
+    expect(getByRole("heading", { name: "App access" })).toBeTruthy()
   })
 
   it("falls back to connected apps for invalid section values", () => {
@@ -194,39 +194,10 @@ describe("Settings", () => {
     expect(getByTestId("search").textContent).toBe("?section=credentials")
   })
 
-  it("shows Storage in the sidebar nav (local-first: reactivated provider picker)", () => {
-    const { getAllByRole } = renderSettings()
-    expect(
-      getAllByRole("button", { name: "Storage & Server" }).length
-    ).toBeGreaterThan(0)
-  })
-
-  it("defaults the Storage section to Local Only with no Vana sign-in", () => {
-    const { getByRole } = renderSettings(`${ROUTES.settings}?section=storage`)
-
-    const localOnlyRadio = getByRole("radio", { name: /Local Only/ })
-    expect(localOnlyRadio.getAttribute("aria-checked")).toBe("true")
-
-    const vanaRadio = getByRole("radio", { name: /Vana Storage/ })
-    expect(vanaRadio.getAttribute("aria-checked")).toBe("false")
-  })
-
-  it("selecting Vana Storage and saving switches appConfig.serverMode away from local-only", () => {
-    const { getByRole, getByText } = renderSettings(
-      `${ROUTES.settings}?section=storage`
+  it("hides Storage from the sidebar nav", () => {
+    const { queryAllByRole } = renderSettings()
+    expect(queryAllByRole("button", { name: "Storage & Server" })).toHaveLength(
+      0
     )
-
-    expect(store.getState().app.appConfig.serverMode).toBe("local-only")
-
-    fireEvent.click(getByRole("radio", { name: /Vana Storage/ }))
-    fireEvent.click(getByText("Save & create"))
-
-    expect(store.getState().app.appConfig.serverMode).toBe("local")
-
-    // Reset shared store state so later tests see the local-first default.
-    store.dispatch({
-      type: "app/setAppConfig",
-      payload: { serverMode: "local-only" },
-    })
   })
 })

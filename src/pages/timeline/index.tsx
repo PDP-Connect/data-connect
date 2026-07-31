@@ -58,6 +58,7 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
     visibleTimeline,
     requestConsent,
     approveConsent,
+    retry,
     loadMore,
     isLoadingMore,
     revokeConsent,
@@ -142,9 +143,17 @@ function TimelineContent({ dataSource }: { dataSource: TimelineDataSource }) {
             />
           )
         ) : null}
-        {state.kind === "revoked" ? <TimelineRevoked /> : null}
+        {state.kind === "revoked" ? (
+          <TimelineUnauthorized
+            onRequestTerms={requestConsent ? requestTerms : undefined}
+            error={consentError}
+          />
+        ) : null}
         {state.kind === "error" ? (
-          <TimelineError message={state.message} />
+          <TimelineError
+            message={state.message}
+            onRetry={state.retryable ? retry : undefined}
+          />
         ) : null}
         {state.kind === "ready" && timeline && visibleTimeline ? (
           <TimelineReady
@@ -298,12 +307,24 @@ function formatTimelineExpiry(seconds: number | undefined) {
   return ` It expires ${Math.ceil(seconds / 60)} minutes after approval.`
 }
 
-function TimelineRevoked() {
-  return <TimelineStatus title="Timeline access has expired or been revoked." />
-}
-
-function TimelineError({ message }: { message: string }) {
-  return <TimelineStatus title={message} />
+function TimelineError({
+  message,
+  onRetry,
+}: {
+  message: string
+  onRetry?: () => void
+}) {
+  return (
+    <section aria-live="polite" className="space-y-1">
+      <Text as="h2" intent="heading">
+        {message}
+      </Text>
+      <Text as="p" intent="small" muted>
+        No records are shown.
+      </Text>
+      {onRetry ? <Button onClick={onRetry}>Try again</Button> : null}
+    </section>
+  )
 }
 
 function TimelineStatus({ title }: { title: string }) {
@@ -369,28 +390,46 @@ function TimelineReady({
                 : "All available records are loaded."}
           </Text>
         </div>
-        <div className="space-y-1">
-          <Text as="span" intent="fine" muted>
-            Stream
-          </Text>
-          <Select
-            value={activeStreamId ?? "all"}
-            onValueChange={value =>
-              onStreamChange(value === "all" ? null : value)
-            }
-          >
-            <SelectTrigger aria-label="Filter timeline by stream">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All streams</SelectItem>
-              {streams.map(stream => (
-                <SelectItem key={stream.id} value={stream.id}>
-                  {stream.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Text as="span" intent="fine" muted>
+              Stream
+            </Text>
+            <Select
+              value={activeStreamId ?? "all"}
+              onValueChange={value =>
+                onStreamChange(value === "all" ? null : value)
+              }
+            >
+              <SelectTrigger aria-label="Filter timeline by stream">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All streams</SelectItem>
+                {streams.map(stream => (
+                  <SelectItem key={stream.id} value={stream.id}>
+                    {stream.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {onRevokeAccess ? (
+            <div className="space-y-1">
+              <Button variant="outline" onClick={onRevokeAccess}>
+                Revoke Timeline access
+              </Button>
+              <Text as="p" intent="small" muted>
+                Revokes this local Timeline approval and returns to the consent
+                screen.
+              </Text>
+            </div>
+          ) : null}
+          {revokeError ? (
+            <Text as="p" intent="small" color="destructive">
+              {revokeError}
+            </Text>
+          ) : null}
         </div>
       </div>
 
@@ -425,23 +464,6 @@ function TimelineReady({
       ) : (
         <TimelineStatus title="No loaded records match this stream." />
       )}
-
-      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
-        {onRevokeAccess ? (
-          <Button variant="outline" onClick={onRevokeAccess}>
-            Revoke Timeline access
-          </Button>
-        ) : null}
-        <Text as="p" intent="small" muted>
-          Revokes this local Timeline approval and returns to the consent
-          screen.
-        </Text>
-      </div>
-      {revokeError ? (
-        <Text as="p" intent="small" color="destructive">
-          {revokeError}
-        </Text>
-      ) : null}
     </div>
   )
 }

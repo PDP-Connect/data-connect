@@ -36,8 +36,7 @@ const settingsSections: Array<{
   label: string
   icon: ReactNode
 }> = SETTINGS_SECTION_ORDER
-  // Account remains hidden pending a dedicated design pass; Storage is
-  // reactivated so users can see and choose the local-vs-Vana provider.
+  // Account and Storage remain hidden pending dedicated product design passes.
   .filter(section => section !== "account")
   .map(section => ({
     key: section,

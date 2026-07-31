@@ -79,6 +79,10 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
     [dataSource]
   )
 
+  const retry = useCallback(() => {
+    setReadAttempt(attempt => attempt + 1)
+  }, [])
+
   const loadMore = useCallback(async () => {
     if (
       !dataSource.loadMore ||
@@ -171,6 +175,7 @@ export function useTimelinePage(dataSource: TimelineDataSource) {
     visibleTimeline,
     requestConsent: dataSource.requestConsent ? requestConsent : undefined,
     approveConsent: dataSource.approveConsent ? approveConsent : undefined,
+    retry,
     loadMore:
       dataSource.loadMore && state.kind === "ready" ? loadMore : undefined,
     isLoadingMore,
