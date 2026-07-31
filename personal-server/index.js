@@ -22,13 +22,14 @@ process.env.NODE_ENV = 'production';
 import { dirname, join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { registerProtectedRoutes } from './protected-routes.js';
 import { mountPdppResourceServer } from './pdpp/resource-server.js';
-import { createGithubAuthorizationAdapter } from './pdpp/github-authorization/index.js';
-import { registerGithubAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
+import { createPdppAuthorizationAdapter } from './pdpp/github-authorization/index.js';
+import { registerPdppAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
+import { loadInstalledManifest } from './pdpp/installed-manifest.js';
 import { createPersonalServerServeOptions } from './listener-options.cjs';
 
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
@@ -36,6 +37,49 @@ const PACKAGED_RUNTIME_ENTRYPOINTS = {
   '@opendatalabs/personal-server-ts-server': '@opendatalabs/personal-server-ts-server/dist/api.js',
   '@hono/node-server': '@hono/node-server/dist/index.js',
 };
+
+const PDPP_SERVING_PROFILES = {
+  'github-pdpp': {
+    connector: {
+      key: 'github',
+      id: 'https://registry.pdpp.org/connectors/github',
+    },
+    scopeForStream: stream => ({
+      user: 'github.profile',
+      repositories: 'github.repositories',
+      starred: 'github.starred',
+    })[stream],
+    enableLocalTimeline: true,
+  },
+  'chatgpt-pdpp': {
+    connector: {
+      key: 'chatgpt',
+      id: 'https://registry.pdpp.org/connectors/chatgpt',
+    },
+    scopeForStream: stream => [
+      'conversations',
+      'messages',
+      'memories',
+      'custom_gpts',
+      'custom_instructions',
+      'shared_conversations',
+    ].includes(stream) ? `chatgpt.${stream}` : undefined,
+    enableLocalTimeline: false,
+  },
+};
+
+function selectedPdppServingProfile() {
+  const connectorId = process.env.PDPP_SERVING_CONNECTOR_ID || 'github-pdpp';
+  const profile = PDPP_SERVING_PROFILES[connectorId];
+  if (!profile) {
+    throw new Error(`PDPP_SERVING_CONNECTOR_ID must select a supported profile, got ${connectorId}`);
+  }
+  return { connectorId, ...profile };
+}
+
+function pdppProfileStorageName(connectorId) {
+  return createHash('sha256').update(connectorId).digest('hex').slice(0, 16);
+}
 
 function send(msg) {
   let json;
@@ -407,8 +451,25 @@ async function main() {
     // Keep as a reference because startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
-    const pdppAuthorization = createGithubAuthorizationAdapter({
-      databasePath: join(configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server'), 'pdpp-github-authorization.sqlite'),
+    const selectedPdppProfile = selectedPdppServingProfile();
+    const pdppStorageName = pdppProfileStorageName(selectedPdppProfile.connectorId);
+    const pdppActiveManifestPath = process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH;
+    // Resolve this once, then require both independently mounted surfaces to
+    // re-verify this exact selected install. The two surfaces must never
+    // compose grants from one active-manifest path with records from another.
+    const pdppSelectedInstall = loadInstalledManifest({
+      activeManifestPath: pdppActiveManifestPath,
+      connectorId: selectedPdppProfile.connectorId,
+      expectedConnector: selectedPdppProfile.connector,
+    });
+    const pdppAuthorization = createPdppAuthorizationAdapter({
+      databasePath: join(configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server'), `pdpp-${pdppStorageName}-authorization.sqlite`),
+      activeManifestPath: pdppActiveManifestPath,
+      connectorId: selectedPdppProfile.connectorId,
+      expectedConnector: selectedPdppProfile.connector,
+      selectedInstall: pdppSelectedInstall,
+      scopeForStream: selectedPdppProfile.scopeForStream,
+      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
       singleUseAccessExpiresInSeconds,
     });
 
@@ -420,15 +481,18 @@ async function main() {
         || configDir
         || join(homedir(), '.dataconnect', 'personal-server');
       await mountPdppResourceServer(app, {
-        activeManifestPath: process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH,
-        databasePath: join(pdppStorageRoot, 'pdpp-github-records.sqlite'),
+        activeManifestPath: pdppActiveManifestPath,
+        connectorId: selectedPdppProfile.connectorId,
+        expectedConnector: selectedPdppProfile.connector,
+        selectedInstall: pdppSelectedInstall,
+        databasePath: join(pdppStorageRoot, `pdpp-${pdppStorageName}-records.sqlite`),
         exportRoot: process.env.DATACONNECT_EXPORT_ROOT,
-        connectionId: process.env.PDPP_GITHUB_CONNECTION_ID || 'default',
+        connectionId: process.env.PDPP_SERVING_CONNECTION_ID || process.env.PDPP_GITHUB_CONNECTION_ID || 'default',
         tokenIntrospector: {
           introspect: token => pdppAuthorization.resolveForResourceServer(token),
         },
       });
-      send({ type: 'log', message: '[pdpp] mounted installed GitHub resource routes' });
+      send({ type: 'log', message: `[pdpp] mounted selected ${selectedPdppProfile.connector.key} resource routes` });
     } catch (error) {
       send({ type: 'log', message: `[pdpp] resource routes unavailable: ${error instanceof Error ? error.message : String(error)}` });
     }
@@ -471,10 +535,11 @@ async function main() {
       serverSigner,
       onLegacyGrantRevoked: grantId => pdppAuthorization.revokeByLegacyGrantId(grantId),
     });
-    registerGithubAuthorizationRoutes({
+    registerPdppAuthorizationRoutes({
       app,
       devToken,
       adapter: pdppAuthorization,
+      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
       externalOrigin: personalServerExternalOrigin(
         context.serverAccount?.address,
         tunnelServerAddr

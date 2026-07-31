@@ -5,12 +5,7 @@ import { RecordsRepositoryError } from "./grant-scoped-records-repository.js"
 
 const DEFAULT_FILE_OPERATIONS = { readdir, readFile, stat }
 
-async function visitJsonFiles(
-  directory,
-  files,
-  directories,
-  fileOperations
-) {
+async function visitJsonFiles(directory, files, directories, fileOperations) {
   directories.set(
     directory,
     directoryGeneration(await fileOperations.stat(directory))
@@ -26,10 +21,10 @@ async function visitJsonFiles(
 }
 
 /**
- * Return lossless GitHub export candidates newest first. The repository validates
+ * Return lossless selected-profile export candidates newest first. The repository validates
  * their record envelopes transactionally before one is accepted for serving.
  */
-export async function findGithubSnapshotCandidates({
+export async function findSnapshotCandidates({
   exportRoot,
   manifest,
   manifestDigest,
@@ -79,7 +74,7 @@ export async function findGithubSnapshotCandidates({
         }
         continue
       }
-      const result = await readGithubSnapshotCandidate({
+      const result = await readSnapshotCandidate({
         path,
         generation,
         metadata,
@@ -112,7 +107,7 @@ export async function findGithubSnapshotCandidates({
  * record validation. `importSnapshot` is one SQLite transaction, so a rejected
  * candidate cannot leave partial collection state behind.
  */
-export async function importLatestGithubSnapshot({
+export async function importLatestSnapshot({
   exportRoot,
   manifest,
   manifestDigest,
@@ -127,7 +122,7 @@ export async function importLatestGithubSnapshot({
   },
   fileOperations = DEFAULT_FILE_OPERATIONS,
 }) {
-  const candidates = await findGithubSnapshotCandidates({
+  const candidates = await findSnapshotCandidates({
     exportRoot,
     manifest,
     manifestDigest,
@@ -222,7 +217,7 @@ async function loadCachedCandidate({
     if (fileGeneration(candidate.path, metadata) !== candidate.generation) {
       return null
     }
-    const result = await readGithubSnapshotCandidate({
+    const result = await readSnapshotCandidate({
       path: candidate.path,
       generation: candidate.generation,
       metadata,
@@ -237,7 +232,7 @@ async function loadCachedCandidate({
   }
 }
 
-async function readGithubSnapshotCandidate({
+async function readSnapshotCandidate({
   path,
   generation,
   metadata,
@@ -260,7 +255,7 @@ async function readGithubSnapshotCandidate({
   const content = exportFile?.content
   const recordsByStream = content?.["pdpp.recordsByStream"]
   if (
-    content?.platform !== "github" ||
+    content?.platform !== manifest.connector_key ||
     content?.version !== manifest.version ||
     !hasVerifiedSnapshotProvenance({
       provenance: content?.["pdpp.provenance"],
@@ -283,6 +278,10 @@ async function readGithubSnapshotCandidate({
     },
   }
 }
+
+/** GitHub names remain available to avoid an unrelated call-site migration. */
+export const findGithubSnapshotCandidates = findSnapshotCandidates
+export const importLatestGithubSnapshot = importLatestSnapshot
 
 function fileGeneration(path, metadata) {
   return `${path}\0${metadata.mtimeMs}:${metadata.size}`

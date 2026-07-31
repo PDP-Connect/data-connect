@@ -157,10 +157,12 @@ function normalizeSelectedFields(stream, selected) {
  * currently hash-verified installed manifest. The stream-to-scope check binds
  * this additional authorization to the legacy Session Relay authorization.
  */
-export function validateGithubAuthorizationDetails({
+export function validateAuthorizationDetails({
   authorizationDetails,
   manifest,
   scopes,
+  scopeForStream,
+  sourceIds = [manifest?.connector_key, manifest?.connector_id],
   localTimeline = false,
 }) {
   if (
@@ -184,10 +186,10 @@ export function validateGithubAuthorizationDetails({
   if (
     !detail.source ||
     detail.source.kind !== "connector" ||
-    detail.source.id !== "github" ||
+    !sourceIds.includes(detail.source.id) ||
     Object.keys(detail.source).length !== 2
   ) {
-    throw invalid("source must be { kind: 'connector', id: 'github' }")
+    throw invalid("source must identify the selected connector")
   }
   if (!["single_use", "continuous"].includes(detail.access_mode)) {
     throw invalid('access_mode must be "single_use" or "continuous"')
@@ -263,22 +265,21 @@ export function validateGithubAuthorizationDetails({
     return normalized
   })
 
-  const requestedScopes = normalizedStreams.map(stream =>
-    localTimeline
-      ? `pdpp.local.github.${stream.name}`
-      : GITHUB_STREAM_SCOPES[stream.name]
-  )
+  const requestedScopes = normalizedStreams.map(stream => {
+    if (localTimeline) return `pdpp.local.github.${stream.name}`
+    return scopeForStream?.(stream.name)
+  })
   if (
     requestedScopes.some(scope => !scope) ||
     !sameScopeSet(requestedScopes, scopes)
   ) {
     throw invalid(
-      "GitHub authorization details do not exactly match the claimed session scopes"
+      "Authorization details do not exactly match the claimed session scopes"
     )
   }
   return {
     type: PDPP_DATA_ACCESS_TYPE,
-    source: { kind: "connector", id: "github" },
+    source: { kind: "connector", id: detail.source.id },
     access_mode: detail.access_mode,
     purpose_code: detail.purpose_code,
     purpose_description: detail.purpose_description,
@@ -288,4 +289,13 @@ export function validateGithubAuthorizationDetails({
         : normalizeRetention(detail.retention),
     streams: normalizedStreams,
   }
+}
+
+/** GitHub policy is retained as the legacy Session Relay compatibility adapter. */
+export function validateGithubAuthorizationDetails(options) {
+  return validateAuthorizationDetails({
+    ...options,
+    sourceIds: ["github", "https://registry.pdpp.org/connectors/github"],
+    scopeForStream: stream => GITHUB_STREAM_SCOPES[stream],
+  })
 }

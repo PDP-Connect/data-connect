@@ -1,10 +1,8 @@
-import { createHash } from "node:crypto"
-import { readFileSync } from "node:fs"
-import { loadInstalledGithubManifest } from "../installed-manifest.js"
+import { resolveSelectedInstalledManifest } from "../installed-manifest.js"
 import {
   createLocalTimelineAuthorizationRequest,
   LOCAL_TIMELINE_CLIENT_ID,
-  validateGithubAuthorizationDetails,
+  validateAuthorizationDetails,
 } from "./policy.js"
 import { openGithubAuthorizationStore } from "./store.js"
 
@@ -19,21 +17,34 @@ function inactive() {
   return { active: false }
 }
 
-function readVerifiedManifest(activeManifestPath) {
-  const installed = loadInstalledGithubManifest({ activeManifestPath })
+function readVerifiedManifest(
+  activeManifestPath,
+  connectorId,
+  expectedConnector,
+  selectedInstall
+) {
+  const installed = resolveSelectedInstalledManifest({
+    activeManifestPath,
+    connectorId,
+    expectedConnector,
+    selectedInstall,
+  })
   return {
     version: installed.version,
-    digest: createHash("sha256")
-      .update(readFileSync(installed.manifestPath))
-      .digest("hex"),
+    digest: installed.manifestDigest,
     manifest: installed.manifest,
   }
 }
 
-/** A separate UAT authorization composition; it intentionally does not alter query-core pdpp/index.js. */
-export function createGithubAuthorizationAdapter({
+/** Selected-install authorization composition. The route core remains unchanged. */
+export function createPdppAuthorizationAdapter({
   databasePath,
   activeManifestPath,
+  connectorId = "github-pdpp",
+  expectedConnector,
+  selectedInstall,
+  scopeForStream,
+  enableLocalTimeline = false,
   now,
   random,
   singleUseAccessExpiresInSeconds = SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS,
@@ -47,7 +58,16 @@ export function createGithubAuthorizationAdapter({
     credentialHandoffExpiresInSeconds,
   })
   const clock = now ?? (() => new Date())
-  const currentManifest = () => readVerifiedManifest(activeManifestPath)
+  if (typeof scopeForStream !== "function") {
+    throw new TypeError("scopeForStream must be a function")
+  }
+  const currentManifest = () =>
+    readVerifiedManifest(
+      activeManifestPath,
+      connectorId,
+      expectedConnector,
+      selectedInstall
+    )
   const publicIdentity = token => {
     try {
       const found = store.findActiveGrant(token, currentManifest())
@@ -68,19 +88,27 @@ export function createGithubAuthorizationAdapter({
   return {
     createConsentRequest({ sessionId, scopes, authorizationDetails }) {
       const manifest = currentManifest()
-      const terms = validateGithubAuthorizationDetails({
+      const terms = validateAuthorizationDetails({
         authorizationDetails,
         manifest: manifest.manifest,
         scopes,
+        scopeForStream,
       })
       return store.createRequest({ sessionId, scopes, terms, manifest })
     },
     createLocalTimelineConsentRequest({ sessionId, subjectId }) {
+      if (!enableLocalTimeline) {
+        throw new Error(
+          "The selected connector does not support Timeline consent"
+        )
+      }
       const manifest = currentManifest()
       const local = createLocalTimelineAuthorizationRequest(manifest.manifest)
-      const terms = validateGithubAuthorizationDetails({
+      const terms = validateAuthorizationDetails({
         ...local,
         manifest: manifest.manifest,
+        scopeForStream: stream => `pdpp.local.github.${stream}`,
+        sourceIds: ["github", "https://registry.pdpp.org/connectors/github"],
         localTimeline: true,
       })
       return {
@@ -132,6 +160,11 @@ export function createGithubAuthorizationAdapter({
       })
     },
     issueLocalTimelineGrant({ requestId, sessionId, subjectId }) {
+      if (!enableLocalTimeline) {
+        throw new Error(
+          "The selected connector does not support Timeline consent"
+        )
+      }
       return store.issueGrant({
         requestId,
         // The legacy field is retained for the existing schema and legacy
@@ -171,6 +204,11 @@ export function createGithubAuthorizationAdapter({
     },
     revokeByLegacyGrantId: store.revokeByLegacyGrantId,
     revokeLocalTimelineSession({ sessionId, subjectId }) {
+      if (!enableLocalTimeline) {
+        throw new Error(
+          "The selected connector does not support Timeline consent"
+        )
+      }
       return store.revokeBoundSession({
         sessionId,
         subjectId,
@@ -179,6 +217,21 @@ export function createGithubAuthorizationAdapter({
     },
     close: store.close,
   }
+}
+
+/** GitHub remains the default authorization composition for deployed clients. */
+export function createGithubAuthorizationAdapter(options = {}) {
+  const githubScopes = {
+    user: "github.profile",
+    repositories: "github.repositories",
+    starred: "github.starred",
+  }
+  return createPdppAuthorizationAdapter({
+    ...options,
+    connectorId: options.connectorId ?? "github-pdpp",
+    scopeForStream: stream => githubScopes[stream],
+    enableLocalTimeline: true,
+  })
 }
 
 function requiredLocalSession(sessionId) {

@@ -6,6 +6,7 @@ import test from "node:test"
 
 import {
   CursorExpiredError,
+  createStreamMetadata,
   GrantScopedRecordsRepository,
   RecordsRepositoryError,
 } from "./grant-scoped-records-repository.js"
@@ -27,6 +28,52 @@ function withRepository(options = {}) {
     },
   }
 }
+
+test("supports streams without consent_time_field but rejects unsupported serving contracts", () => {
+  const withoutConsentTime = {
+    streams: [
+      {
+        name: "events",
+        primary_key: ["id"],
+        cursor_field: "updated_at",
+        schema: {
+          required: ["id"],
+          properties: {
+            id: { type: "string" },
+            updated_at: { type: ["string", "null"], format: "date-time" },
+          },
+        },
+      },
+    ],
+  }
+  assert.equal(
+    createStreamMetadata(withoutConsentTime).events.consentTimeField,
+    undefined
+  )
+  for (const invalid of [
+    {
+      ...withoutConsentTime,
+      streams: [
+        { ...withoutConsentTime.streams[0], primary_key: ["id", "other"] },
+      ],
+    },
+    {
+      ...withoutConsentTime,
+      streams: [{ ...withoutConsentTime.streams[0], cursor_field: "id" }],
+    },
+    {
+      ...withoutConsentTime,
+      streams: [
+        { ...withoutConsentTime.streams[0], schema: { required: ["id"] } },
+      ],
+    },
+  ]) {
+    assert.throws(
+      () => createStreamMetadata(invalid),
+      /unsupported record contract/
+    )
+  }
+})
 
 const TIMES = {
   created: "2026-01-01T00:00:00.000Z",
@@ -629,7 +676,10 @@ test("manifest fields bound every disclosure while retaining lossless extension 
       emittedAt: TIMES.emitted,
     })
 
-    const unrestrictedCurrent = harness.repository.listCurrent({ ...base, grant: {} })
+    const unrestrictedCurrent = harness.repository.listCurrent({
+      ...base,
+      grant: {},
+    })
     assert.equal(unrestrictedCurrent.data[0].data.extra, undefined)
     assert.equal(
       harness.repository.getCurrent({ ...base, grant: {} }).data.extra,
@@ -644,7 +694,8 @@ test("manifest fields bound every disclosure while retaining lossless extension 
 
     const narrowGrant = { fields: ["id", "full_name"] }
     assert.deepEqual(
-      harness.repository.listCurrent({ ...base, grant: narrowGrant }).data[0].data,
+      harness.repository.listCurrent({ ...base, grant: narrowGrant }).data[0]
+        .data,
       { id: "1", full_name: "owner/repo-1" }
     )
     assert.deepEqual(

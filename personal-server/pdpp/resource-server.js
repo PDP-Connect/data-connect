@@ -5,10 +5,10 @@ import {
   CursorExpiredError,
   GrantScopedRecordsRepository,
   RecordsRepositoryError,
-  createGithubStreamMetadata,
+  createStreamMetadata,
 } from "./grant-scoped-records-repository.js"
-import { importLatestGithubSnapshot } from "./github-snapshot.js"
-import { loadInstalledGithubManifest } from "./installed-manifest.js"
+import { importLatestSnapshot } from "./github-snapshot.js"
+import { resolveSelectedInstalledManifest } from "./installed-manifest.js"
 import { createCoreApp } from "./index.js"
 import { CoreOperationError } from "./operations.js"
 import { createHttpTokenIntrospector } from "./token-introspector.js"
@@ -16,11 +16,14 @@ import { createHttpTokenIntrospector } from "./token-introspector.js"
 const DEFAULT_CONNECTION_ID = "default"
 
 /**
- * Compose the validated installed GitHub profile, durable record store, and
+ * Compose the validated selected profile, durable record store, and
  * opaque-token boundary into the transport-independent Core route surface.
  */
 export async function createPdppResourceServer({
   activeManifestPath,
+  connectorId = "github-pdpp",
+  expectedConnector,
+  selectedInstall,
   databasePath,
   exportRoot,
   connectionId = DEFAULT_CONNECTION_ID,
@@ -31,9 +34,15 @@ export async function createPdppResourceServer({
     authorization: process.env.PDPP_INTROSPECTION_AUTHORIZATION,
   }),
 } = {}) {
-  const installed = loadInstalledGithubManifest({ activeManifestPath })
-  const streamMetadata = createGithubStreamMetadata(installed.manifest)
-  const repository = recordsRepository ?? createRepository(databasePath, streamMetadata)
+  const installed = resolveSelectedInstalledManifest({
+    activeManifestPath,
+    connectorId,
+    expectedConnector,
+    selectedInstall,
+  })
+  const streamMetadata = createStreamMetadata(installed.manifest)
+  const repository =
+    recordsRepository ?? createRepository(databasePath, streamMetadata)
   const refreshSnapshot = createSnapshotRefresher({
     exportRoot,
     manifest: installed.manifest,
@@ -47,7 +56,7 @@ export async function createPdppResourceServer({
     requestId,
     tokenIntrospector: createGrantValidatedIntrospector(
       tokenIntrospector,
-      [installed.manifest.connector_id, installed.manifest.connector_key]
+      installed
     ),
     recordsRepository: createCoreRepositoryPort({
       repository,
@@ -77,7 +86,7 @@ function createRepository(databasePath, streamMetadata) {
   return new GrantScopedRecordsRepository({ databasePath, streamMetadata })
 }
 
-function createGrantValidatedIntrospector(tokenIntrospector, connectorIds) {
+function createGrantValidatedIntrospector(tokenIntrospector, installed) {
   if (typeof tokenIntrospector?.introspect !== "function") {
     throw new TypeError("tokenIntrospector.introspect must be a function")
   }
@@ -111,12 +120,17 @@ function createGrantValidatedIntrospector(tokenIntrospector, connectorIds) {
       }
       if (
         identity.grant.source?.kind !== "connector" ||
-        !connectorIds.includes(identity.grant.source?.id)
+        ![
+          installed.manifest.connector_id,
+          installed.manifest.connector_key,
+        ].includes(identity.grant.source?.id) ||
+        identity.grant.manifest_version !== installed.version ||
+        identity.grant.manifest_digest !== installed.manifestDigest
       ) {
         throw new CoreOperationError(
           403,
           "grant_invalid",
-          "The grant is not bound to the installed GitHub connector"
+          "The grant is not bound to the selected installed manifest"
         )
       }
       return identity
@@ -135,7 +149,7 @@ export function createSnapshotRefresher(dependencies) {
   }
   return async () => {
     if (inFlight !== null) return inFlight
-    inFlight = importLatestGithubSnapshot({
+    inFlight = importLatestSnapshot({
       ...dependencies,
       snapshotCache,
     }).finally(() => {
