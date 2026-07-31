@@ -186,6 +186,8 @@ npm run release:github -- --version X.Y.Z --dry-run
 npm run release:github -- --version X.Y.Z
 ```
 
+If AI helped with the release commit, run `npm run release:github -- --version X.Y.Z --assisted-by-ai`.
+
 Do not create releases manually with `gh release create` or the GitHub UI. The
 CI workflow checks that `tauri.conf.json` matches the release tag.
 

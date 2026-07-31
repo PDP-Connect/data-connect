@@ -22,6 +22,7 @@ export default defineConfig({
       "src-tauri/**/*.test.ts",
       "scripts/is-main-module.test.mjs",
       "scripts/create-macos-dmg.test.mjs",
+      "scripts/release-github.test.mjs",
       "scripts/release-workflow.test.ts",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",
