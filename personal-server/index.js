@@ -61,6 +61,12 @@ function optionalPositiveIntegerEnv(name) {
   return parsed;
 }
 
+function personalServerExternalOrigin(serverAddress, tunnelServerAddr) {
+  if (!serverAddress) return undefined;
+  const tunnelDomain = (tunnelServerAddr || 'frpc.server.vana.org').replace(/^frpc\./, '');
+  return `https://${serverAddress.toLowerCase()}.${tunnelDomain}`;
+}
+
 async function importRuntimeModule(specifier) {
   const packagedEntrypoint = PACKAGED_RUNTIME_ENTRYPOINTS[specifier];
   if (process.pkg && packagedEntrypoint) {
@@ -264,8 +270,7 @@ async function connectTunnel(tunnelManager, storageRoot, send, { refreshAuth, at
  * wallet) and POSTs to the gateway. Idempotent — 409 means already registered.
  */
 async function registerWithGateway({ accountUrl, gatewayConfig, masterKeySignature, ownerAddress, serverAddress, publicKey, tunnelServerAddr, send }) {
-  const regDomain = tunnelServerAddr ? tunnelServerAddr.replace(/^frpc\./, '') : 'server.vana.org';
-  const serverUrl = `https://${serverAddress.toLowerCase()}.${regDomain}`;
+  const serverUrl = personalServerExternalOrigin(serverAddress, tunnelServerAddr);
   const typedData = {
     types: {
       ServerRegistration: [
@@ -467,6 +472,10 @@ async function main() {
       app,
       devToken,
       adapter: pdppAuthorization,
+      externalOrigin: personalServerExternalOrigin(
+        context.serverAccount?.address,
+        tunnelServerAddr
+      ),
     });
 
     // Start HTTP server first so the desktop app can connect immediately.

@@ -12,7 +12,21 @@ function errorResponse(c, error) {
 }
 
 /** Routes are intentionally thin: all policy and persistence stay in the adapter. */
-export function registerGithubAuthorizationRoutes({ app, devToken, adapter }) {
+function resolveExpectedOrigin(requestUrl, externalOrigin) {
+  const requestOrigin = new URL(requestUrl).origin
+  if (!externalOrigin) return requestOrigin
+
+  const request = new URL(requestUrl)
+  const external = new URL(externalOrigin)
+  return request.host === external.host ? external.origin : requestOrigin
+}
+
+export function registerGithubAuthorizationRoutes({
+  app,
+  devToken,
+  adapter,
+  externalOrigin,
+}) {
   const desktopAuth = requireDesktopAuth(devToken)
 
   // This route is public only in the HTTP sense. The bearer is released exactly
@@ -24,7 +38,7 @@ export function registerGithubAuthorizationRoutes({ app, devToken, adapter }) {
     try {
       const requester = await verifyWeb3SignedRequester({
         authorization: c.req.header("authorization"),
-        expectedOrigin: new URL(c.req.url).origin,
+        expectedOrigin: resolveExpectedOrigin(c.req.url, externalOrigin),
         expectedPath: path,
       })
       return c.json(
