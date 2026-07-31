@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
+use super::updates::activate_bundled_pdpp_connectors;
+
 /// Send a signal to an entire process group (negative PID).
 /// Falls back to single-process signal if pgid lookup fails.
 #[cfg(unix)]
@@ -160,6 +162,13 @@ pub async fn start_personal_server(
             *s = false;
         }
     };
+
+    // The Personal Server reads the active PDPP install once at startup.
+    // Seed verified bundled installs before it composes its routes.
+    if let Err(error) = activate_bundled_pdpp_connectors(&app) {
+        clear_starting();
+        return Err(error);
+    }
 
     // Kill any stale personal-server from a previous unclean exit
     #[cfg(unix)]

@@ -12,9 +12,9 @@ use tauri::{AppHandle, Manager};
 use tempfile::tempdir_in;
 
 use super::connector_store::{
-    get_active_connector_install, get_connectors_store_dir, get_legacy_user_connectors_dir,
-    read_active_connector_manifest, write_active_connector_manifest, ActiveConnectorInstall,
-    ActiveConnectorManifest,
+    activate_bundled_connector_install, get_active_connector_install, get_connectors_store_dir,
+    get_legacy_user_connectors_dir, read_active_connector_manifest,
+    replace_active_connector_install, ActiveConnectorInstall,
 };
 
 const DEFAULT_INDEX_URL: &str =
@@ -179,21 +179,46 @@ struct PdppArtifactBundle {
     provenance: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BundledConnectorLock {
+    connectors: Vec<IndexedConnector>,
+}
+
 fn get_user_connectors_dir() -> Option<PathBuf> {
     get_legacy_user_connectors_dir()
 }
 
-fn activate_connector_install(install: ActiveConnectorInstall) -> Result<(), String> {
-    let mut manifest = read_active_connector_manifest().unwrap_or(ActiveConnectorManifest {
-        version: "1.0".to_string(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        connectors: HashMap::new(),
-    });
-    manifest.updated_at = chrono::Utc::now().to_rfc3339();
-    manifest
-        .connectors
-        .insert(install.connector_id.clone(), install);
-    write_active_connector_manifest(&manifest)
+fn bundled_pdpp_connector_installs(
+    bundled_connectors_dir: &Path,
+) -> Result<Vec<ActiveConnectorInstall>, String> {
+    let lock_path = bundled_connectors_dir.join("lock.json");
+    let lock_bytes = fs::read(&lock_path)
+        .map_err(|e| format!("Failed to read bundled connector lock: {}", e))?;
+    let lock: BundledConnectorLock = serde_json::from_slice(&lock_bytes)
+        .map_err(|e| format!("Failed to parse bundled connector lock: {}", e))?;
+
+    lock.connectors
+        .iter()
+        .filter_map(|connector| match connector {
+            IndexedConnector::PdppCollectionProfile(connector) => Some(connector),
+            IndexedConnector::Legacy(_) => None,
+        })
+        .map(|connector| {
+            let connector_id =
+                safe_store_segment(&connector.common.connector_id, "PDPP connector id")?;
+            let install_root = bundled_connectors_dir
+                .join("collection-profiles")
+                .join(connector_id);
+            active_pdpp_install_at(connector, &install_root)
+        })
+        .collect()
+}
+
+pub(crate) fn activate_bundled_pdpp_connectors(app: &AppHandle) -> Result<(), String> {
+    for install in bundled_pdpp_connector_installs(&get_bundled_connectors_dir(&app))? {
+        activate_bundled_connector_install(install)?;
+    }
+    Ok(())
 }
 
 fn get_bundled_connectors_dir(app: &AppHandle) -> PathBuf {
@@ -930,7 +955,7 @@ fn install_verified_connector_artifact(
     let store_dir =
         get_connectors_store_dir().ok_or("Could not determine connectors store directory")?;
     let install = install_verified_connector_artifact_into(connector, artifact_bytes, &store_dir)?;
-    activate_connector_install(install)
+    replace_active_connector_install(install)
 }
 
 fn install_verified_connector_artifact_into(
@@ -1122,13 +1147,6 @@ fn install_verified_pdpp_connector(
     let connector_store_dir = install_root
         .parent()
         .ok_or("Connector install root is missing its store directory")?;
-    let manifest_relative =
-        normalize_nonempty_artifact_path(&connector.manifest_path, "PDPP manifest path")?;
-    let entrypoint_relative =
-        normalize_nonempty_artifact_path(&connector.entrypoint_path, "PDPP entrypoint path")?;
-    let provenance_relative =
-        normalize_nonempty_artifact_path(&connector.provenance_path, "PDPP provenance path")?;
-
     if !install_root.exists() {
         log::info!(
             "Installing PDPP connector artifact for {} to {:?}",
@@ -1138,25 +1156,57 @@ fn install_verified_pdpp_connector(
         promote_staged_install(connector_store_dir, &install_root, |staged| {
             write_pdpp_artifact_bundle(staged, &bundle)
         })?;
-    } else {
-        verify_installed_file(
-            &install_root.join(&manifest_relative),
-            &common.manifest_sha256,
-            "installed PDPP manifest",
-        )?;
-        verify_installed_file(
-            &install_root.join(&entrypoint_relative),
-            &connector.entrypoint_sha256,
-            "installed PDPP entrypoint",
-        )?;
-        verify_installed_file(
-            &install_root.join(&provenance_relative),
-            &connector.provenance_sha256,
-            "installed PDPP provenance",
-        )?;
     }
 
-    let install = ActiveConnectorInstall {
+    let install = active_pdpp_install_at(connector, &install_root)?;
+
+    log::info!(
+        "=== Successfully installed PDPP connector: {} ===",
+        common.connector_id
+    );
+    Ok(install)
+}
+
+fn active_pdpp_install_at(
+    connector: &PdppIndexedConnector,
+    install_root: &Path,
+) -> Result<ActiveConnectorInstall, String> {
+    let common = &connector.common;
+    let manifest_relative =
+        normalize_nonempty_artifact_path(&connector.manifest_path, "PDPP manifest path")?;
+    let entrypoint_relative =
+        normalize_nonempty_artifact_path(&connector.entrypoint_path, "PDPP entrypoint path")?;
+    let provenance_relative =
+        normalize_nonempty_artifact_path(&connector.provenance_path, "PDPP provenance path")?;
+
+    verify_installed_file(
+        &install_root.join(&manifest_relative),
+        &common.manifest_sha256,
+        "installed PDPP manifest",
+    )?;
+    verify_installed_file(
+        &install_root.join(&entrypoint_relative),
+        &connector.entrypoint_sha256,
+        "installed PDPP entrypoint",
+    )?;
+    verify_installed_file(
+        &install_root.join(&provenance_relative),
+        &connector.provenance_sha256,
+        "installed PDPP provenance",
+    )?;
+
+    let manifest_bytes = fs::read(install_root.join(&manifest_relative))
+        .map_err(|e| format!("Failed to read installed PDPP manifest: {}", e))?;
+    let manifest: PdppManifestIdentity = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("Failed to parse installed PDPP manifest: {}", e))?;
+    if manifest.version != common.version {
+        return Err(format!(
+            "Installed PDPP version mismatch. Expected {}, got {}",
+            common.version, manifest.version
+        ));
+    }
+
+    Ok(ActiveConnectorInstall {
         connector_id: common.connector_id.clone(),
         company: common.company.clone(),
         version: common.version.clone(),
@@ -1170,13 +1220,7 @@ fn install_verified_pdpp_connector(
         manifest_sha256: Some(common.manifest_sha256.clone()),
         provenance_path: Some(provenance_relative.to_string_lossy().into_owned()),
         provenance_sha256: Some(connector.provenance_sha256.clone()),
-    };
-
-    log::info!(
-        "=== Successfully installed PDPP connector: {} ===",
-        common.connector_id
-    );
-    Ok(install)
+    })
 }
 
 fn verify_named_checksum(bytes: &[u8], expected: &str, label: &str) -> Result<(), String> {
@@ -1283,16 +1327,17 @@ fn scan_connectors_dir_no_overwrite(dir: &PathBuf, versions: &mut HashMap<String
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_certificate_identity_for_url, calculate_checksum, connector_path_within_root,
-        connector_root_relative_path, install_verified_connector_artifact_into, verify_checksum,
-        verify_sigstore_bundle_async, verify_sigstore_bundle_blocking, ConnectorFiles,
-        ConnectorIndex, IndexedConnector, IndexedConnectorCommon, LegacyIndexedConnector,
-        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY,
-        VANA_LEGACY_ARTIFACT_URLS,
+        artifact_certificate_identity_for_url, bundled_pdpp_connector_installs, calculate_checksum,
+        connector_path_within_root, connector_root_relative_path,
+        install_verified_connector_artifact_into, verify_checksum, verify_sigstore_bundle_async,
+        verify_sigstore_bundle_blocking, ConnectorFiles, ConnectorIndex, IndexedConnector,
+        IndexedConnectorCommon, LegacyIndexedConnector, DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+        VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_URLS,
     };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
     use std::io::Cursor;
+    use std::path::PathBuf;
     use tar::{Builder, Header};
     use tempfile::tempdir;
 
@@ -1422,6 +1467,71 @@ mod tests {
             index.connectors["goodreads-playwright"][0],
             IndexedConnector::Legacy(_)
         ));
+    }
+
+    #[test]
+    fn bundled_lock_activates_only_hash_verified_pdpp_profiles() {
+        let manifest = br#"{"version":"0.5.0","connector_key":"github"}"#;
+        let entrypoint = b"export default {};\n";
+        let provenance = br#"{"upstream":{"commit":"test"}}"#;
+        let artifact = pdpp_artifact(manifest, entrypoint, provenance);
+        let index = real_shaped_index(&artifact, manifest, entrypoint, provenance);
+        let temp = tempdir().expect("bundled connector tempdir");
+        let install_root = temp.path().join("collection-profiles/github-pdpp");
+        std::fs::create_dir_all(install_root.join("profile")).expect("manifest directory");
+        std::fs::create_dir_all(install_root.join("dist")).expect("entrypoint directory");
+        std::fs::write(
+            install_root.join("profile/collection-profile.json"),
+            manifest,
+        )
+        .expect("manifest");
+        std::fs::write(install_root.join("dist/collection-profile.mjs"), entrypoint)
+            .expect("entrypoint");
+        std::fs::write(install_root.join("provenance.json"), provenance).expect("provenance");
+        std::fs::write(
+            temp.path().join("lock.json"),
+            serde_json::to_vec(&json!({
+                "connectors": [
+                    index["connectors"]["github-pdpp"][0].clone(),
+                    index["connectors"]["goodreads-playwright"][0].clone()
+                ]
+            }))
+            .expect("lock JSON"),
+        )
+        .expect("lock file");
+
+        let installs = bundled_pdpp_connector_installs(temp.path()).expect("bundled installs");
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].connector_id, "github-pdpp");
+        assert_eq!(
+            installs[0].entrypoint_sha256.as_deref(),
+            Some(calculate_checksum(entrypoint).as_str())
+        );
+
+        std::fs::write(
+            install_root.join("dist/collection-profile.mjs"),
+            b"tampered",
+        )
+        .expect("tampered entrypoint");
+        let error = bundled_pdpp_connector_installs(temp.path())
+            .expect_err("bundled profiles must match the pinned lock");
+        assert!(error.contains("checksum verification failed"), "{error}");
+    }
+
+    #[test]
+    fn checked_in_bundled_lock_resolves_github_and_chatgpt_profiles() {
+        let bundled_connectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("DataConnect repository root")
+            .join("connectors");
+        let installs = bundled_pdpp_connector_installs(&bundled_connectors)
+            .expect("checked-in bundled profiles must match their lock hashes");
+        let mut connector_ids = installs
+            .iter()
+            .map(|install| install.connector_id.as_str())
+            .collect::<Vec<_>>();
+        connector_ids.sort_unstable();
+        assert_eq!(connector_ids, ["chatgpt-pdpp", "github-pdpp"]);
     }
 
     #[test]

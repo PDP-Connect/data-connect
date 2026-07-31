@@ -44,6 +44,23 @@ describe("tauri manual-install config", () => {
     expect(document.bundle?.resources?.["../pdpp-runtime/**/*"]).toBeUndefined()
   })
 
+  it("bundles the pinned GitHub and ChatGPT PDPP profiles", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { resources?: Record<string, string> }
+    }
+
+    expect(
+      document.bundle?.resources?.["../connectors/collection-profiles/"]
+    ).toBe("connectors/collection-profiles/")
+    expect(
+      document.bundle?.resources?.["../connectors/collection-profiles/**/*"]
+    ).toBeUndefined()
+    expect(document.bundle?.resources?.["../connectors/lock.json"]).toBe(
+      "connectors/lock.json"
+    )
+  })
+
   it("stages PDPP runtime dependencies before production Tauri packaging", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {

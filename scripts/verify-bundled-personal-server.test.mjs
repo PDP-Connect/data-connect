@@ -24,20 +24,48 @@ import {
 
 const runtimeEntries = [
   "usr/bin/pdpp-node",
-  "usr/lib/data-connect/licenses/pdpp-node-LICENSE",
-  "usr/lib/data-connect/resources/personal-server/dist/personal-server",
-  "usr/lib/data-connect/resources/personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-  "usr/lib/data-connect/resources/playwright-runner/dist/playwright-runner",
-  "usr/lib/data-connect/resources/pdpp-runtime/connector-loader.mjs",
-  "usr/lib/data-connect/resources/pdpp-runtime/connector-loader-bootstrap.mjs",
-  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/p-queue/package.json",
-  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/p-queue/dist/index.js",
-  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/patchright/package.json",
-  "usr/lib/data-connect/resources/pdpp-runtime/node_modules/patchright/index.mjs",
+  "usr/lib/DataConnect/connectors/lock.json",
+  "usr/lib/DataConnect/connectors/collection-profiles/github-pdpp/profile/collection-profile.json",
+  "usr/lib/DataConnect/connectors/collection-profiles/github-pdpp/dist/collection-profile.mjs",
+  "usr/lib/DataConnect/connectors/collection-profiles/github-pdpp/provenance.json",
+  "usr/lib/DataConnect/connectors/collection-profiles/chatgpt-pdpp/profile/collection-profile.json",
+  "usr/lib/DataConnect/connectors/collection-profiles/chatgpt-pdpp/dist/collection-profile.mjs",
+  "usr/lib/DataConnect/connectors/collection-profiles/chatgpt-pdpp/provenance.json",
+  "usr/lib/DataConnect/licenses/pdpp-node-LICENSE",
+  "usr/lib/DataConnect/personal-server/dist/personal-server",
+  "usr/lib/DataConnect/personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+  "usr/lib/DataConnect/playwright-runner/dist/playwright-runner",
+  "usr/lib/DataConnect/pdpp-runtime/connector-loader.mjs",
+  "usr/lib/DataConnect/pdpp-runtime/connector-loader-bootstrap.mjs",
+  "usr/lib/DataConnect/pdpp-runtime/node_modules/p-queue/package.json",
+  "usr/lib/DataConnect/pdpp-runtime/node_modules/p-queue/dist/index.js",
+  "usr/lib/DataConnect/pdpp-runtime/node_modules/patchright/package.json",
+  "usr/lib/DataConnect/pdpp-runtime/node_modules/patchright/index.mjs",
 ]
 
+const windowsRuntimeEntries = runtimeEntries
+  .filter(entry => entry !== "usr/bin/pdpp-node")
+  .map(entry =>
+    entry
+      .replace("usr/lib/DataConnect/", "")
+      .replace(
+        "personal-server/dist/personal-server",
+        "personal-server/dist/personal-server.exe"
+      )
+      .replace(
+        "playwright-runner/dist/playwright-runner",
+        "playwright-runner/dist/playwright-runner.exe"
+      )
+  )
+
+const macRuntimeEntries = windowsRuntimeEntries.map(entry =>
+  `Contents/Resources/${entry}`
+    .replace("personal-server.exe", "personal-server")
+    .replace("playwright-runner.exe", "playwright-runner")
+)
+
 const linuxBrowserEntry =
-  "usr/lib/data-connect/resources/playwright-runner/dist/browsers/chromium-1228/chrome-linux64/chrome"
+  "usr/lib/DataConnect/playwright-runner/dist/browsers/chromium-1228/chrome-linux64/chrome"
 
 describe("bundled personal-server verifier", () => {
   it("accepts an artifact with the helper and native dependency", () => {
@@ -64,6 +92,51 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("p-queue")
   })
 
+  it("rejects an artifact missing a bundled PDPP connector", () => {
+    expect(() =>
+      assertPackagedRuntime(
+        runtimeEntries.filter(entry => !entry.includes("chatgpt-pdpp")),
+        "DataConnect.deb"
+      )
+    ).toThrow("chatgpt-pdpp")
+  })
+
+  it("requires packaged runtime paths on exact segment boundaries", () => {
+    expect(() =>
+      assertPackagedRuntime(
+        runtimeEntries.map(entry =>
+          entry.endsWith("connectors/lock.json")
+            ? entry.replace("connectors/lock.json", "not-connectors/lock.json")
+            : entry
+        ),
+        "DataConnect.deb"
+      )
+    ).toThrow("connectors/lock.json")
+  })
+
+  it("rejects a complete runtime tree under an unrecognized root", () => {
+    for (const wrongRoot of ["attacker", "resources-not-really"]) {
+      expect(() =>
+        assertPackagedRuntime(
+          windowsRuntimeEntries.map(entry => `${wrongRoot}/${entry}`),
+          "DataConnect.exe"
+        )
+      ).toThrow("connectors/lock.json")
+    }
+  })
+
+  it("accepts only the macOS app resource root", () => {
+    expect(() =>
+      assertPackagedRuntime(macRuntimeEntries, "DataConnect.app")
+    ).not.toThrow()
+    expect(() =>
+      assertPackagedRuntime(
+        macRuntimeEntries.map(entry => `attacker/${entry}`),
+        "DataConnect.dmg"
+      )
+    ).toThrow("connectors/lock.json")
+  })
+
   it("requires the platform-native Node sidecar path", () => {
     expect(() =>
       assertPackagedNode(runtimeEntries, "DataConnect.deb", "linux")
@@ -80,6 +153,13 @@ describe("bundled personal-server verifier", () => {
     ).not.toThrow()
     expect(() =>
       assertPackagedNode(runtimeEntries, "DataConnect.exe", "windows")
+    ).toThrow("packaged Node.js sidecar")
+    expect(() =>
+      assertPackagedNode(
+        ["attacker/usr/bin/pdpp-node"],
+        "DataConnect.deb",
+        "linux"
+      )
     ).toThrow("packaged Node.js sidecar")
   })
 
@@ -113,6 +193,13 @@ describe("bundled personal-server verifier", () => {
     ).not.toThrow()
     expect(() =>
       assertPackagedBrowser(runtimeEntries, "DataConnect.deb", "linux")
+    ).toThrow("packaged Chromium executable")
+    expect(() =>
+      assertPackagedBrowser(
+        [`attacker/${linuxBrowserEntry}`],
+        "DataConnect.deb",
+        "linux"
+      )
     ).toThrow("packaged Chromium executable")
   })
 
@@ -225,10 +312,10 @@ describe("bundled personal-server verifier", () => {
             console.log(\`2026-07-31 ..... \${noise}-\${index}\`)
           }
           for (const entry of ${JSON.stringify([
-            ...runtimeEntries,
+            ...windowsRuntimeEntries,
             "resources/pdpp-node.exe",
             "pdpp-node.exe",
-            "usr/lib/data-connect/resources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe",
+            "playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe",
           ])}) {
             console.log(\`2026-07-31 ..... \${entry.replaceAll("/", "\\\\")}\`)
           }
@@ -236,7 +323,7 @@ describe("bundled personal-server verifier", () => {
       ]
     )
 
-    expect(entries).toHaveLength(12)
+    expect(entries).toHaveLength(19)
     expect(() =>
       assertPackagedRuntime(entries, "DataConnect.exe")
     ).not.toThrow()
@@ -267,17 +354,17 @@ describe("bundled personal-server verifier", () => {
       () => child
     )
 
-    child.stdout.write(`${runtimeEntries.join("\n")}\n`)
+    child.stdout.write(`${windowsRuntimeEntries.join("\n")}\n`)
     child.stderr.end()
     child.emit("close", 0)
     setImmediate(() => {
       child.stdout.end(
-        "pdpp-node.exe\nresources/playwright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
+        "pdpp-node.exe\nplaywright-runner/dist/browsers/chromium-1228/chrome-win64/chrome.exe"
       )
     })
 
     const entries = await entriesPromise
-    expect(entries).toHaveLength(12)
+    expect(entries).toHaveLength(19)
     expect(() =>
       assertPackagedNode(entries, "DataConnect.exe", "windows")
     ).not.toThrow()
@@ -293,7 +380,7 @@ describe("bundled personal-server verifier", () => {
       const temporaryRoot = mkdtempSync(join(process.cwd(), ".verify-deb-"))
       try {
         const packageRoot = join(temporaryRoot, "package")
-        const resources = join(packageRoot, "usr", "lib", "data-connect")
+        const resources = join(packageRoot, "usr", "lib", "DataConnect")
         mkdirSync(join(packageRoot, "DEBIAN"), { recursive: true })
         writeFileSync(
           join(packageRoot, "DEBIAN", "control"),

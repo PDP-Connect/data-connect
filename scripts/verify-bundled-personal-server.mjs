@@ -8,6 +8,13 @@ import { createInterface } from "node:readline"
 import { isMainModule } from "./is-main-module.js"
 
 const REQUIRED_PATH_FRAGMENTS = [
+  "connectors/lock.json",
+  "connectors/collection-profiles/github-pdpp/profile/collection-profile.json",
+  "connectors/collection-profiles/github-pdpp/dist/collection-profile.mjs",
+  "connectors/collection-profiles/github-pdpp/provenance.json",
+  "connectors/collection-profiles/chatgpt-pdpp/profile/collection-profile.json",
+  "connectors/collection-profiles/chatgpt-pdpp/dist/collection-profile.mjs",
+  "connectors/collection-profiles/chatgpt-pdpp/provenance.json",
   "licenses/pdpp-node-license",
   "personal-server/dist/personal-server",
   "personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
@@ -43,10 +50,12 @@ function normalizeEntry(entry) {
 }
 
 export function assertPackagedRuntime(entries, artifactName) {
-  const normalizedEntries = entries.map(normalizeEntry)
-  const missing = REQUIRED_PATH_FRAGMENTS.filter(
-    fragment =>
-      !normalizedEntries.some(entry => entry.includes(fragment.toLowerCase()))
+  const platform = artifactPlatform(artifactName)
+  const packagedPaths = new Set(
+    entries.map(entry => packagedEntryPath(entry, platform))
+  )
+  const missing = expectedRuntimePaths(platform).filter(
+    expectedPath => !packagedPaths.has(expectedPath)
   )
 
   if (missing.length > 0) {
@@ -56,25 +65,65 @@ export function assertPackagedRuntime(entries, artifactName) {
   }
 }
 
+function artifactPlatform(artifactName) {
+  const normalizedName = artifactName.toLowerCase()
+  if (normalizedName.endsWith(".exe")) return "windows"
+  if (normalizedName.endsWith(".dmg") || normalizedName.endsWith(".app"))
+    return "macos"
+  if (normalizedName.endsWith(".deb") || normalizedName.endsWith(".appimage"))
+    return "linux"
+  fail(`Cannot determine artifact platform from ${artifactName}`)
+}
+
+function expectedRuntimePaths(platform) {
+  const root = {
+    linux: "usr/lib/dataconnect/",
+    macos: "contents/resources/",
+    windows: "",
+  }[platform]
+  if (root === undefined) fail(`Unsupported runtime platform: ${platform}`)
+  return REQUIRED_PATH_FRAGMENTS.map(fragment => {
+    const executableSuffix =
+      platform === "windows" &&
+      (fragment.endsWith("personal-server/dist/personal-server") ||
+        fragment.endsWith("playwright-runner/dist/playwright-runner"))
+        ? ".exe"
+        : ""
+    return `${root}${fragment}${executableSuffix}`.toLowerCase()
+  })
+}
+
+function packagedEntryPath(entry, platform) {
+  if (platform === "windows") return windowsInstallerEntryPath(entry)
+  const normalized = normalizeEntry(entry).trim()
+  if (platform === "macos") return normalized
+  const path = normalized.includes(" ")
+    ? normalized.split(/\s+/).at(-1)
+    : normalized
+  return path.replace(/^\.\//, "")
+}
+
 export function assertPackagedNode(entries, artifactName, platform) {
-  const expectedSuffix = {
+  const expectedPath = {
     linux: "usr/bin/pdpp-node",
     macos: "contents/macos/pdpp-node",
     windows: "pdpp-node.exe",
   }[platform]
-  if (!expectedSuffix) fail(`Unsupported Node sidecar platform: ${platform}`)
-  const hasNode = entries.some(entry => {
-    if (platform === "windows") {
-      return windowsInstallerEntryPath(entry) === expectedSuffix
-    }
-    return normalizeEntry(entry).endsWith(expectedSuffix)
-  })
+  if (!expectedPath) fail(`Unsupported Node sidecar platform: ${platform}`)
+  const hasNode = entries.some(
+    entry => packagedEntryPath(entry, platform) === expectedPath
+  )
   if (!hasNode) {
     fail(`${artifactName} is missing its packaged Node.js sidecar`)
   }
 }
 
 export function assertPackagedBrowser(entries, artifactName, platform) {
+  const expectedPrefix = {
+    linux: "usr/lib/dataconnect/playwright-runner/dist/browsers/chromium-",
+    macos: "contents/resources/playwright-runner/dist/browsers/chromium-",
+    windows: "playwright-runner/dist/browsers/chromium-",
+  }[platform]
   const executableNames = {
     linux: ["/chrome"],
     macos: [
@@ -83,14 +132,17 @@ export function assertPackagedBrowser(entries, artifactName, platform) {
     ],
     windows: ["/chrome.exe"],
   }[platform]
-  if (!executableNames) fail(`Unsupported browser platform: ${platform}`)
+  if (!expectedPrefix || !executableNames)
+    fail(`Unsupported browser platform: ${platform}`)
 
-  const hasBrowserExecutable = entries.map(normalizeEntry).some(entry => {
-    return (
-      entry.includes("playwright-runner/dist/browsers/chromium-") &&
-      executableNames.some(name => entry.endsWith(name))
-    )
-  })
+  const hasBrowserExecutable = entries
+    .map(entry => packagedEntryPath(entry, platform))
+    .some(entry => {
+      return (
+        entry.startsWith(expectedPrefix) &&
+        executableNames.some(name => entry.endsWith(name))
+      )
+    })
   if (!hasBrowserExecutable) {
     fail(`${artifactName} is missing its packaged Chromium executable`)
   }
@@ -145,11 +197,7 @@ function listAppImageEntries(artifact) {
 const WINDOWS_BROWSER_FRAGMENT = "playwright-runner/dist/browsers/chromium-"
 const WINDOWS_BROWSER_EXECUTABLE = "/chrome.exe"
 const WINDOWS_NODE_FILENAME = "pdpp-node.exe"
-const WINDOWS_RELEVANT_FRAGMENTS = [
-  ...REQUIRED_PATH_FRAGMENTS,
-  WINDOWS_NODE_FILENAME,
-  WINDOWS_BROWSER_FRAGMENT,
-].map(normalizeEntry)
+const WINDOWS_RUNTIME_PATHS = new Set(expectedRuntimePaths("windows"))
 const COMMAND_ERROR_OUTPUT_LIMIT = 64 * 1024
 
 function windowsInstallerEntryPath(entry) {
@@ -180,24 +228,13 @@ export async function collectRelevantWindowsInstallerEntries(
 
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
   lines.on("line", line => {
-    const normalizedLine = normalizeEntry(line)
-    for (const fragment of WINDOWS_RELEVANT_FRAGMENTS) {
-      if (relevantEntries.has(fragment)) continue
-      if (!normalizedLine.includes(fragment)) continue
-      if (
-        fragment === WINDOWS_NODE_FILENAME &&
-        windowsInstallerEntryPath(line) !== WINDOWS_NODE_FILENAME
-      ) {
-        continue
-      }
-      if (
-        fragment === WINDOWS_BROWSER_FRAGMENT &&
-        !normalizedLine.endsWith(WINDOWS_BROWSER_EXECUTABLE)
-      ) {
-        continue
-      }
-      relevantEntries.set(fragment, line)
-    }
+    const path = windowsInstallerEntryPath(line)
+    const isRuntime = WINDOWS_RUNTIME_PATHS.has(path)
+    const isNode = path === WINDOWS_NODE_FILENAME
+    const isBrowser =
+      path.startsWith(WINDOWS_BROWSER_FRAGMENT) &&
+      path.endsWith(WINDOWS_BROWSER_EXECUTABLE)
+    if (isRuntime || isNode || isBrowser) relevantEntries.set(path, line)
   })
 
   const processExited = new Promise((resolveExit, rejectExit) => {
