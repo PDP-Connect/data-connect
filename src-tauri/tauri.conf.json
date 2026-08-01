@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DataConnect",
-  "version": "0.7.53",
+  "version": "0.7.54",
   "identifier": "dev.dataconnect",
   "build": {
     "frontendDist": "../dist",
@@ -33,15 +33,25 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["vana"]
+        "schemes": [
+          "vana"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
-    "externalBin": ["binaries/pdpp-node"],
-    "targets": ["dmg", "app", "nsis", "appimage", "deb"],
+    "externalBin": [
+      "binaries/pdpp-node"
+    ],
+    "targets": [
+      "dmg",
+      "app",
+      "nsis",
+      "appimage",
+      "deb"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
