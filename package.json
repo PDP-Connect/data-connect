@@ -10,7 +10,7 @@
     "dev": "vite",
     "dev:app": "vite --port 5173 --strictPort",
     "build": "tsc -b && vite build",
-    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
+    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
     "connectors:resolve": "node scripts/resolve-connectors.js",
     "connectors:install": "npm run connectors:resolve",
     "connectors:upgrade": "npm run connectors:resolve",

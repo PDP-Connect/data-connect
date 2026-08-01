@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+src-tauri/binaries/pdpp-node-*
+src-tauri/binaries/pdpp-node-LICENSE
 dist
 dist-ssr
 *.local
@@ -39,3 +41,4 @@ src-tauri/auth-page/
 .devcontainer/
 connectors/
 .vercel
+pdpp-runtime/.install-stamp

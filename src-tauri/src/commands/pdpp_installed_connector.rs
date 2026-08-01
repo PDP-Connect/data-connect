@@ -5,36 +5,51 @@
 //! capability, then delegates process supervision to the PDPP connector kernel.
 
 use super::connector_store::{get_active_connector_install, ActiveConnectorInstall};
+use super::pdpp_browser::{PdppBrowserBinding, PdppBrowserLease};
 use super::pdpp_collection_state::{
-    commit_terminal_run, load_connection_state, stage_succeeded_run, PdppCollectionConnectionState,
-    DEFAULT_CONNECTION_ID,
+    clear_connection_setup_complete, commit_terminal_run, is_connection_setup_complete,
+    load_connection_state, mark_connection_setup_complete, stage_succeeded_run,
+    PdppCollectionConnectionState, DEFAULT_CONNECTION_ID,
 };
 use super::pdpp_connector::{
-    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppRecord, PdppRunControl,
-    PdppRunOptions, PdppRunResult, PdppRunStatus, PdppScopeValidators, PdppStart,
+    supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppInteractionResponder,
+    PdppInteractionResponseStatus, PdppRecord, PdppRunControl, PdppRunOptions, PdppRunResult,
+    PdppRunStatus, PdppScopeValidators, PdppStart,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
+const BUNDLED_NODE_NAME: &str = if cfg!(windows) {
+    "pdpp-node.exe"
+} else {
+    "pdpp-node"
+};
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_CONNECTOR_KEY: &str = "github";
 const GITHUB_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/github";
+const CHATGPT_CONNECTOR_KEY: &str = "chatgpt";
+const CHATGPT_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/chatgpt";
+const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static PENDING_PDPP_INTERACTIONS: LazyLock<
+    Mutex<HashMap<(String, String), PdppInteractionResponder>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A run remains registered until its child-supervision task has returned.
 /// Keeping connector identity alongside the cancellation control makes the
@@ -59,6 +74,11 @@ pub struct StartInstalledPdppConnectorRequest {
     pub connection_id: Option<String>,
     #[serde(default)]
     pub github_token: Option<String>,
+    /// The pinned ChatGPT profile declares exactly two static-secret fields.
+    /// They are accepted for this invocation only and never enter run state,
+    /// export data, or a command response.
+    #[serde(default)]
+    pub setup_secrets: Option<HashMap<String, String>>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
 }
@@ -119,6 +139,7 @@ struct CommandCustomization {
     max_retained_records: usize,
     control: PdppRunControl,
     on_event: Option<super::pdpp_connector::PdppEventSink>,
+    on_interaction: Option<super::pdpp_connector::PdppInteractionSink>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +149,34 @@ struct PdppConnectorManifest {
     display_name: Option<String>,
     version: Option<String>,
     runtime_requirements: Option<RuntimeRequirements>,
+    setup: Option<PdppStaticSecretSetup>,
     streams: Vec<PdppManifestStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppStaticSecretSetup {
+    modality: String,
+    credential_capture: PdppCredentialCapture,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppCredentialCapture {
+    fields: Vec<PdppStaticSecretField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppStaticSecretField {
+    name: String,
+    required: bool,
+    secret: bool,
+    #[serde(default)]
+    env: Vec<String>,
+}
+
+#[derive(Default)]
+struct PdppChildSecrets {
+    environment: HashMap<String, String>,
+    values: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +194,23 @@ struct PdppManifestStream {
     name: String,
     schema: Option<Value>,
     consent_time_field: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppArtifactProvenance {
+    #[serde(default)]
+    external_runtime_packages: Vec<PdppRuntimePackageRequirement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppRuntimePackageRequirement {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodePackageMetadata {
+    version: String,
 }
 
 /// The kernel validates every record before this accumulator sees it. Keeping
@@ -202,16 +267,19 @@ fn start_installed_pdpp_connector_run_impl(
     control: PdppRunControl,
 ) -> Result<InstalledPdppRunCompletion, String> {
     validate_request(&request)?;
-    let resolved = resolve_active_installed_pdpp_connector(&request.connector_id)?;
-    let credential = resolve_github_credential(&request, &resolved)?;
+    let resource_dir = app.path().resource_dir().ok();
+    let runtime_root = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
+    let resolved = resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)?;
     let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
+    let setup_complete = chatgpt_setup_complete(&resolved, request.connection_id())?;
+    let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
     let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
     let sink = event_sink_for_run(
-        app,
+        app.clone(),
         request.run_id.clone(),
         export_accumulator.clone(),
-        credential.clone(),
+        secrets.values.clone(),
     );
     let result = run_resolved_installed_pdpp_connector_with_state(
         &resolved,
@@ -219,10 +287,17 @@ fn start_installed_pdpp_connector_run_impl(
         CommandCustomization {
             control,
             on_event: Some(sink),
+            on_interaction: Some(interaction_sink_for_run(
+                app.clone(),
+                request.run_id.clone(),
+                secrets.values.clone(),
+            )),
             ..Default::default()
         },
-        credential.as_deref(),
+        &secrets,
         start_state,
+        resource_dir,
+        runtime_root,
     )?;
     let export = if result.status == PdppRunStatus::Succeeded {
         let accumulated = export_accumulator
@@ -263,6 +338,12 @@ fn start_installed_pdpp_connector_run_impl(
             &committed_checkpoints,
         )?
         .ok_or("PDPP collection state was not committed after a successful run")?;
+        // Mark setup only after the credentialed run and its export/state
+        // commit have succeeded. A failed launch, login, cancellation, or
+        // timeout must leave the next attempt in owner-attended setup.
+        if should_mark_chatgpt_setup_complete(&resolved, &request, &result.status) {
+            mark_connection_setup_complete(&resolved.connector_id, request.connection_id())?;
+        }
         Some(export)
     } else {
         None
@@ -272,7 +353,7 @@ fn start_installed_pdpp_connector_run_impl(
             request.run_id,
             resolved.connector_id,
             result,
-            credential.as_deref(),
+            &secrets.values,
         ),
         export,
     })
@@ -283,14 +364,16 @@ fn run_resolved_installed_pdpp_connector(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     customization: CommandCustomization,
-    github_credential: Option<&str>,
+    secrets: &PdppChildSecrets,
 ) -> Result<PdppRunResult, String> {
     run_resolved_installed_pdpp_connector_with_state(
         resolved,
         request,
         customization,
-        github_credential,
+        secrets,
         None,
+        None,
+        resolve_pdpp_runtime_root(None)?,
     )
 }
 
@@ -298,12 +381,44 @@ fn run_resolved_installed_pdpp_connector_with_state(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     customization: CommandCustomization,
-    github_credential: Option<&str>,
+    secrets: &PdppChildSecrets,
     state: Option<Value>,
+    resource_dir: Option<PathBuf>,
+    runtime_root: PathBuf,
 ) -> Result<PdppRunResult, String> {
     validate_request(request)?;
+    let browser_lease = if requires_browser(&resolved.manifest) {
+        let owner_id = request.connection_id.as_deref().filter(|owner| !owner.is_empty()).ok_or(
+            "PDPP browser connector requires an explicit connectionId owner; the default owner is not permitted",
+        )?;
+        Some(Arc::new(Mutex::new(PdppBrowserLease::launch(
+            &resolved.connector_id,
+            owner_id,
+            &request.run_id,
+            resource_dir.as_deref(),
+        )?)))
+    } else {
+        None
+    };
+    let browser_binding = browser_lease
+        .as_ref()
+        .map(|lease| {
+            lease
+                .lock()
+                .map_err(|_| "PDPP browser lease is unavailable")
+        })
+        .transpose()?
+        .map(|lease| lease.binding().clone());
     let start = build_start(request, &resolved.manifest, state)?;
-    let command = build_command(resolved, github_credential, &customization)?;
+    let command = build_command(
+        resolved,
+        secrets,
+        &customization,
+        browser_binding.as_ref(),
+        &runtime_root,
+    )?;
+    let host_interaction = customization.on_interaction.clone();
+    let browser_for_interaction = browser_lease.clone();
     let options = PdppRunOptions {
         timeout: Some(Duration::from_secs(
             request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
@@ -317,9 +432,64 @@ fn run_resolved_installed_pdpp_connector_with_state(
                 .unwrap_or_else(|| Arc::new(|_| Ok(()))),
         ),
         control: customization.control,
+        on_interaction: host_interaction.map(|host_interaction| {
+            Arc::new(
+                move |interaction: &super::pdpp_connector::PdppInteraction, responder| {
+                    if let Some(lease) = &browser_for_interaction {
+                        lease
+                            .lock()
+                            .map_err(|_| "PDPP browser lease is unavailable")?
+                            .mark_waiting_for_user();
+                    }
+                    host_interaction(interaction, responder)
+                },
+            ) as super::pdpp_connector::PdppInteractionSink
+        }),
+        on_interaction_closed: Some(interaction_closed_sink_for_run(request.run_id.clone())),
         ..Default::default()
     };
-    supervise_pdpp_connector(&command, &start, &options)
+    let mut result = supervise_pdpp_connector(&command, &start, &options);
+    if let (Ok(result), Some(binding)) = (&mut result, browser_binding.as_ref()) {
+        redact_browser_endpoint(result, &binding.cdp_http_url);
+    }
+    if let Some(lease) = browser_lease {
+        if let Ok(mut lease) = lease.lock() {
+            lease.close();
+        }
+    }
+    result
+}
+
+fn redact_browser_endpoint(result: &mut PdppRunResult, endpoint: &str) {
+    if endpoint.is_empty() {
+        return;
+    }
+    result.stderr = result
+        .stderr
+        .replace(endpoint, "[REDACTED_BROWSER_ENDPOINT]");
+    if let Some(failure) = &mut result.failure {
+        *failure = failure.replace(endpoint, "[REDACTED_BROWSER_ENDPOINT]");
+    }
+    for event in &mut result.events {
+        match event {
+            PdppEvent::Progress(progress) => {
+                progress.message = progress
+                    .message
+                    .replace(endpoint, "[REDACTED_BROWSER_ENDPOINT]");
+            }
+            PdppEvent::SkipResult(skip) => {
+                if let Some(message) = &mut skip.message {
+                    *message = message.replace(endpoint, "[REDACTED_BROWSER_ENDPOINT]");
+                }
+            }
+            PdppEvent::Interaction(interaction) => {
+                interaction.message = interaction
+                    .message
+                    .replace(endpoint, "[REDACTED_BROWSER_ENDPOINT]");
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,7 +506,7 @@ fn run_resolved_installed_pdpp_connector_for_test(
             max_retained_records: 256,
             ..Default::default()
         },
-        request.github_token.as_deref(),
+        &resolve_child_secrets(request, resolved)?,
     )
 }
 
@@ -375,6 +545,7 @@ fn unregister_run(run_id: &str) {
     if let Ok(mut runs) = ACTIVE_PDPP_RUNS.lock() {
         runs.remove(run_id);
     }
+    invalidate_pending_interactions_for_run(run_id);
 }
 
 fn cancel_run(run_id: &str) -> Result<(), String> {
@@ -384,6 +555,9 @@ fn cancel_run(run_id: &str) -> Result<(), String> {
         .get(run_id)
         .map(|run| run.control.clone())
         .ok_or_else(|| format!("PDPP runId {run_id} is not active"))?;
+    // Remove owner-visible responders before signalling the supervisor. A
+    // late Tauri command must not claim success while cancellation is queued.
+    invalidate_pending_interactions_for_run(run_id);
     control.cancel();
     Ok(())
 }
@@ -392,6 +566,71 @@ fn cancel_run(run_id: &str) -> Result<(), String> {
 pub fn stop_installed_pdpp_connector_run(run_id: String) -> Result<(), String> {
     validate_run_id(&run_id)?;
     cancel_run(&run_id)
+}
+
+/// Sends one authoritative Collection Profile `INTERACTION_RESPONSE` to the
+/// still-pending request for this run. OTP values stay only in this command
+/// payload and the child stdin; they are never retained in state, events, or
+/// logs.
+#[tauri::command]
+pub fn submit_installed_pdpp_interaction_response(
+    run_id: String,
+    request_id: String,
+    status: String,
+    data: Option<Value>,
+) -> Result<(), String> {
+    validate_run_id(&run_id)?;
+    validate_interaction_request_id(&request_id)?;
+    let status = match status.as_str() {
+        "success" => PdppInteractionResponseStatus::Success,
+        "cancelled" => PdppInteractionResponseStatus::Cancelled,
+        "timeout" => PdppInteractionResponseStatus::Timeout,
+        _ => {
+            return Err(
+                "PDPP INTERACTION_RESPONSE status must be success, cancelled, or timeout".into(),
+            )
+        }
+    };
+    if data.as_ref().is_some_and(|value| !value.is_object()) {
+        return Err("PDPP INTERACTION_RESPONSE data must be an object".into());
+    }
+    let responder = PENDING_PDPP_INTERACTIONS
+        .lock()
+        .map_err(|_| "PDPP interaction registry is unavailable")?
+        .remove(&(run_id.clone(), request_id.clone()))
+        .ok_or("PDPP interaction is no longer pending for this run")?;
+    responder.respond(status, data)
+}
+
+/// Explicitly disconnects an installed PDPP browser connector by deleting the
+/// durable, owner-confined authenticated profile. It refuses while that owner
+/// has a live lease, so a reset can never race a collection run.
+#[tauri::command]
+pub fn reset_installed_pdpp_browser_profile(
+    connector_id: String,
+    connection_id: String,
+) -> Result<(), String> {
+    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
+        return Err("PDPP browser profile reset is only available for ChatGPT".into());
+    }
+    validate_connection_id(&connection_id)?;
+    PdppBrowserLease::reset_profile(&connector_id, &connection_id)?;
+    clear_connection_setup_complete(&connector_id, &connection_id)
+}
+
+/// A non-secret marker and its durable owner profile are both required before
+/// the UI may omit recovery credentials for a scheduled ChatGPT run.
+#[tauri::command]
+pub fn is_installed_pdpp_browser_setup_complete(
+    connector_id: String,
+    connection_id: String,
+) -> Result<bool, String> {
+    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
+        return Err("PDPP browser setup state is only available for ChatGPT".into());
+    }
+    validate_connection_id(&connection_id)?;
+    Ok(is_connection_setup_complete(&connector_id, &connection_id)?
+        && PdppBrowserLease::profile_exists(&connector_id, &connection_id)?)
 }
 
 pub fn cleanup_installed_pdpp_connector_runs() {
@@ -461,6 +700,20 @@ fn validate_connection_id(connection_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_interaction_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_RUN_ID_BYTES
+        || !request_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(
+            "PDPP interaction requestId must be 1-128 URL-safe identifier characters".into(),
+        );
+    }
+    Ok(())
+}
+
 fn persisted_start_state(
     request: &StartInstalledPdppConnectorRequest,
     saved_state: &PdppCollectionConnectionState,
@@ -481,14 +734,23 @@ impl StartInstalledPdppConnectorRequest {
 
 fn resolve_active_installed_pdpp_connector(
     connector_id: &str,
+    runtime_root: &Path,
 ) -> Result<ResolvedInstalledPdppConnector, String> {
     let install = get_active_connector_install(connector_id)
         .ok_or_else(|| format!("PDPP connector {connector_id} is not installed"))?;
-    resolve_installed_pdpp_connector(&install)
+    resolve_installed_pdpp_connector_with_runtime(&install, runtime_root)
 }
 
 fn resolve_installed_pdpp_connector(
     install: &ActiveConnectorInstall,
+) -> Result<ResolvedInstalledPdppConnector, String> {
+    let runtime_root = resolve_pdpp_runtime_root(None)?;
+    resolve_installed_pdpp_connector_with_runtime(install, &runtime_root)
+}
+
+fn resolve_installed_pdpp_connector_with_runtime(
+    install: &ActiveConnectorInstall,
+    runtime_root: &Path,
 ) -> Result<ResolvedInstalledPdppConnector, String> {
     if install.artifact_kind.as_deref() != Some(PDPP_ARTIFACT_KIND) {
         return Err(format!(
@@ -515,11 +777,7 @@ fn resolve_installed_pdpp_connector(
     let provenance_path =
         confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
     let manifest_sha256 = required_hash(install.manifest_sha256.as_deref(), "manifestSha256")?;
-    verify_file_hash(
-        &manifest_path,
-        Some(manifest_sha256),
-        "PDPP manifest",
-    )?;
+    verify_file_hash(&manifest_path, Some(manifest_sha256), "PDPP manifest")?;
     verify_file_hash(
         &entrypoint_path,
         Some(required_hash(
@@ -542,6 +800,7 @@ fn resolve_installed_pdpp_connector(
     )
     .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
     validate_manifest(&install.connector_id, &install.version, &manifest)?;
+    validate_chatgpt_runtime_requirements(&provenance_path, &manifest, runtime_root)?;
     Ok(ResolvedInstalledPdppConnector {
         connector_id: install.connector_id.clone(),
         manifest_sha256: manifest_sha256.to_owned(),
@@ -602,10 +861,21 @@ fn validate_manifest(
     if manifest.streams.is_empty() {
         return Err("PDPP connector manifest must declare at least one stream".into());
     }
-    if connector_id != "github-pdpp"
-        || manifest.connector_key.as_deref() != Some(GITHUB_CONNECTOR_KEY)
-        || manifest.connector_id.as_deref() != Some(GITHUB_CONNECTOR_ID)
-    {
+    let identity_matches = match manifest.connector_key.as_deref() {
+        Some(GITHUB_CONNECTOR_KEY) => {
+            connector_id == "github-pdpp"
+                && manifest.connector_id.as_deref() == Some(GITHUB_CONNECTOR_ID)
+                && !requires_browser(manifest)
+        }
+        Some(CHATGPT_CONNECTOR_KEY) => {
+            connector_id == CHATGPT_CONNECTOR_INSTALL_ID
+                && manifest.connector_id.as_deref() == Some(CHATGPT_CONNECTOR_ID)
+                && requires_browser(manifest)
+                && required_chatgpt_static_secret_fields(manifest).is_ok()
+        }
+        _ => false,
+    };
+    if !identity_matches {
         return Err(format!(
             "PDPP connector manifest does not match active install id {connector_id}"
         ));
@@ -625,7 +895,7 @@ fn validate_manifest(
         return Err("PDPP connector manifest must require the network binding".into());
     }
     for (binding, requirement) in bindings.into_iter().flat_map(|bindings| bindings.iter()) {
-        if binding != "network" && requirement.required.unwrap_or(false) {
+        if binding != "network" && binding != "browser" && requirement.required.unwrap_or(false) {
             return Err(format!(
                 "PDPP connector requires unsupported binding {binding}"
             ));
@@ -638,6 +908,100 @@ fn validate_manifest(
         }
     }
     Ok(())
+}
+
+fn required_chatgpt_static_secret_fields(
+    manifest: &PdppConnectorManifest,
+) -> Result<Vec<(&str, &str)>, String> {
+    let setup = manifest
+        .setup
+        .as_ref()
+        .ok_or("ChatGPT PDPP connector must declare setup")?;
+    if setup.modality != "static_secret" {
+        return Err("ChatGPT PDPP connector must use setup.modality static_secret".into());
+    }
+    let fields = &setup.credential_capture.fields;
+    if fields.len() != 2
+        || fields[0].name != "username"
+        || !fields[0].required
+        || !fields[0].secret
+        || fields[0].env != ["CHATGPT_USERNAME"]
+        || fields[1].name != "password"
+        || !fields[1].required
+        || !fields[1].secret
+        || fields[1].env != ["CHATGPT_PASSWORD"]
+    {
+        return Err(
+            "ChatGPT PDPP setup must declare only required secret username and password fields"
+                .into(),
+        );
+    }
+    Ok(vec![
+        ("username", "CHATGPT_USERNAME"),
+        ("password", "CHATGPT_PASSWORD"),
+    ])
+}
+
+fn validate_chatgpt_runtime_requirements(
+    provenance_path: &Path,
+    manifest: &PdppConnectorManifest,
+    runtime_root: &Path,
+) -> Result<(), String> {
+    if manifest.connector_key.as_deref() != Some(CHATGPT_CONNECTOR_KEY) {
+        return Ok(());
+    }
+    // The distributable tar does not carry build-only artifact.json. The
+    // artifact builder copies declared external_packages into signed provenance,
+    // whose hash is verified before this parse.
+    let provenance: PdppArtifactProvenance = serde_json::from_str(
+        &fs::read_to_string(provenance_path)
+            .map_err(|error| format!("Failed to read ChatGPT PDPP provenance: {error}"))?,
+    )
+    .map_err(|error| format!("Failed to parse ChatGPT PDPP provenance: {error}"))?;
+    for expected in ["p-queue", "patchright"] {
+        let requirement = provenance
+            .external_runtime_packages
+            .iter()
+            .find(|package| package.name == expected)
+            .ok_or_else(|| format!("ChatGPT PDPP provenance must declare {expected}"))?;
+        let metadata: NodePackageMetadata = serde_json::from_str(
+            &fs::read_to_string(confined_existing_file(
+                &runtime_root,
+                &format!("node_modules/{expected}/package.json"),
+                &format!("PDPP runtime dependency {expected}"),
+            )?)
+            .map_err(|error| {
+                format!("Failed to read PDPP runtime dependency {expected}: {error}")
+            })?,
+        )
+        .map_err(|error| format!("Failed to parse PDPP runtime dependency {expected}: {error}"))?;
+        if !satisfies_caret_requirement(&metadata.version, &requirement.version) {
+            return Err(format!(
+                "PDPP runtime dependency {expected}@{} does not satisfy artifact requirement {}",
+                metadata.version, requirement.version
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn satisfies_caret_requirement(installed: &str, requirement: &str) -> bool {
+    let Some(required) = requirement.strip_prefix('^').and_then(parse_semver) else {
+        return false;
+    };
+    let Some(installed) = parse_semver(installed) else {
+        return false;
+    };
+    installed.0 == required.0 && installed >= required
+}
+
+fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = value.split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.split(['-', '+']).next()?.parse().ok()?,
+    ))
 }
 
 fn build_start(
@@ -661,13 +1025,21 @@ fn build_start(
     let scope = json!({
         "streams": selected.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>()
     });
-    PdppStart::new(
-        &request.run_id,
-        &request.collection_mode,
-        scope,
-        state,
-        json!({ "network": { "enabled": true } }),
-    )
+    PdppStart::new(&request.run_id, &request.collection_mode, scope, state)
+}
+
+fn requires_browser(manifest: &PdppConnectorManifest) -> bool {
+    manifest
+        .runtime_requirements
+        .as_ref()
+        .and_then(|requirements| requirements.bindings.as_ref())
+        .and_then(|bindings| bindings.get("browser"))
+        .and_then(|binding| binding.required)
+        .unwrap_or(false)
+}
+
+fn is_chatgpt_connector(manifest: &PdppConnectorManifest) -> bool {
+    manifest.connector_key.as_deref() == Some(CHATGPT_CONNECTOR_KEY)
 }
 
 fn selected_streams(
@@ -742,24 +1114,102 @@ fn validators_from_manifest(manifest: &PdppConnectorManifest) -> PdppScopeValida
     validators
 }
 
-fn resolve_github_credential(
+fn resolve_child_secrets(
     request: &StartInstalledPdppConnectorRequest,
     resolved: &ResolvedInstalledPdppConnector,
-) -> Result<Option<String>, String> {
+) -> Result<PdppChildSecrets, String> {
+    resolve_child_secrets_for_connection(request, resolved, false)
+}
+
+fn resolve_child_secrets_for_connection(
+    request: &StartInstalledPdppConnectorRequest,
+    resolved: &ResolvedInstalledPdppConnector,
+    setup_complete: bool,
+) -> Result<PdppChildSecrets, String> {
     let manifest_key = resolved.manifest.connector_key.as_deref().unwrap_or("");
-    if manifest_key != "github" {
+    if manifest_key == CHATGPT_CONNECTOR_KEY {
         if request.github_token.is_some() {
             return Err("githubToken can only be passed to the GitHub PDPP connector".into());
         }
-        return Ok(None);
+        let expected = required_chatgpt_static_secret_fields(&resolved.manifest)?;
+        let Some(provided) = request.setup_secrets.as_ref() else {
+            return if setup_complete {
+                Ok(PdppChildSecrets::default())
+            } else {
+                Err("ChatGPT PDPP connector requires setupSecrets.username and setupSecrets.password for first setup or explicit recovery".into())
+            };
+        };
+        if provided.len() != expected.len()
+            || expected.iter().any(|(field, _)| {
+                provided
+                    .get(*field)
+                    .is_none_or(|value| value.trim().is_empty())
+            })
+        {
+            return Err(
+                "ChatGPT PDPP connector requires only non-empty setupSecrets.username and setupSecrets.password"
+                    .into(),
+            );
+        }
+        let mut secrets = PdppChildSecrets::default();
+        for (field, environment_key) in expected {
+            let value = provided[field].clone();
+            secrets.values.push(value.clone());
+            secrets
+                .environment
+                .insert(environment_key.to_owned(), value);
+        }
+        return Ok(secrets);
     }
 
+    if request.setup_secrets.is_some() {
+        return Err("setupSecrets can only be passed to the ChatGPT PDPP connector".into());
+    }
+    if manifest_key != GITHUB_CONNECTOR_KEY {
+        return Err("DataConnect does not support this PDPP connector identity".into());
+    }
+
+    let token = resolve_github_credential(request)?;
+    let mut secrets = PdppChildSecrets::default();
+    secrets.values.push(token.clone());
+    secrets
+        .environment
+        .insert("GITHUB_TOKEN".into(), token.clone());
+    secrets
+        .environment
+        .insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token);
+    Ok(secrets)
+}
+
+fn chatgpt_setup_complete(
+    resolved: &ResolvedInstalledPdppConnector,
+    connection_id: &str,
+) -> Result<bool, String> {
+    if !is_chatgpt_connector(&resolved.manifest) {
+        return Ok(false);
+    }
+    is_connection_setup_complete(&resolved.connector_id, connection_id)
+}
+
+fn should_mark_chatgpt_setup_complete(
+    resolved: &ResolvedInstalledPdppConnector,
+    request: &StartInstalledPdppConnectorRequest,
+    status: &PdppRunStatus,
+) -> bool {
+    is_chatgpt_connector(&resolved.manifest)
+        && request.setup_secrets.is_some()
+        && *status == PdppRunStatus::Succeeded
+}
+
+fn resolve_github_credential(
+    request: &StartInstalledPdppConnectorRequest,
+) -> Result<String, String> {
     if let Some(token) = request
         .github_token
         .as_deref()
         .filter(|token| !token.is_empty())
     {
-        return Ok(Some(token.to_owned()));
+        return Ok(token.to_owned());
     }
 
     // A local desktop UAT may use a shell-provided credential, but release
@@ -768,7 +1218,7 @@ fn resolve_github_credential(
     #[cfg(debug_assertions)]
     if let Ok(token) = std::env::var("PDPP_E2E_GITHUB_TOKEN") {
         if !token.is_empty() {
-            return Ok(Some(token));
+            return Ok(token);
         }
     }
 
@@ -780,17 +1230,23 @@ fn resolve_github_credential(
 
 fn build_command(
     resolved: &ResolvedInstalledPdppConnector,
-    github_credential: Option<&str>,
+    secrets: &PdppChildSecrets,
     customization: &CommandCustomization,
+    browser_binding: Option<&PdppBrowserBinding>,
+    runtime_root: &Path,
 ) -> Result<PdppConnectorCommand, String> {
-    let mut env = HashMap::new();
-    if let Some(token) = github_credential {
-        let manifest_key = resolved.manifest.connector_key.as_deref().unwrap_or("");
-        if manifest_key != "github" {
-            return Err("githubToken can only be passed to the GitHub PDPP connector".into());
+    let mut env = secrets.environment.clone();
+    if let Some(binding) = browser_binding {
+        if resolved.manifest.connector_key.as_deref() != Some(CHATGPT_CONNECTOR_KEY) {
+            return Err("PDPP browser binding is only available to the ChatGPT connector".into());
         }
-        env.insert("GITHUB_TOKEN".into(), token.to_owned());
-        env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token.to_owned());
+        // The pinned runtime resolves this documented compatibility seam before it
+        // considers an isolated local browser. It is a PDPP runtime concern,
+        // unrelated to DataConnect's legacy Playwright page API.
+        env.insert(
+            "PDPP_CHATGPT_REMOTE_CDP_URL".into(),
+            binding.cdp_http_url.clone(),
+        );
     }
     env.insert("PDPP_CONNECTOR_NETWORK".into(), "1".into());
     env.insert(
@@ -805,6 +1261,17 @@ fn build_command(
         args.push("--import".into());
         args.push(import.to_string_lossy().into_owned());
     }
+    args.push("--import".into());
+    args.push(
+        runtime_root
+            .join("connector-loader-bootstrap.mjs")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    env.insert(
+        "DATACONNECT_PDPP_RUNTIME_ROOT".into(),
+        runtime_root.to_string_lossy().into_owned(),
+    );
     args.push(resolved.entrypoint_path.to_string_lossy().into_owned());
     Ok(PdppConnectorCommand {
         program: resolve_node_program()?,
@@ -815,18 +1282,70 @@ fn build_command(
     })
 }
 
+fn resolve_pdpp_runtime_root(resource_dir: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(resource_dir) = resource_dir {
+        let root = resource_dir.join("pdpp-runtime");
+        let root = canonical_existing_dir(&root, "PDPP runtime root")?;
+        return validate_pdpp_runtime_root(root);
+    }
+    if let Some(configured) = std::env::var_os("DATACONNECT_PDPP_RUNTIME_ROOT") {
+        let root = canonical_existing_dir(Path::new(&configured), "PDPP runtime root")?;
+        return validate_pdpp_runtime_root(root);
+    }
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("pdpp-runtime")];
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(macos_resources) = executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|contents| contents.join("Resources").join("pdpp-runtime"))
+        {
+            candidates.push(macos_resources);
+        }
+        if let Some(executable_dir) = executable.parent() {
+            candidates.push(executable_dir.join("pdpp-runtime"));
+            candidates.push(executable_dir.join("resources").join("pdpp-runtime"));
+        }
+    }
+    for candidate in candidates {
+        if let Ok(root) = canonical_existing_dir(&candidate, "PDPP runtime root") {
+            if let Ok(root) = validate_pdpp_runtime_root(root) {
+                return Ok(root);
+            }
+        }
+    }
+    Err("Packaged PDPP runtime dependencies p-queue and patchright are unavailable".into())
+}
+
+fn validate_pdpp_runtime_root(root: PathBuf) -> Result<PathBuf, String> {
+    confined_existing_file(&root, "connector-loader.mjs", "PDPP runtime loader")?;
+    confined_existing_file(
+        &root,
+        "connector-loader-bootstrap.mjs",
+        "PDPP runtime loader bootstrap",
+    )?;
+    for package in ["p-queue", "patchright"] {
+        confined_existing_file(
+            &root,
+            &format!("node_modules/{package}/package.json"),
+            &format!("PDPP runtime dependency {package}"),
+        )?;
+    }
+    Ok(root)
+}
+
 fn event_sink_for_run(
     app: AppHandle,
     run_id: String,
     export_accumulator: Arc<Mutex<PdppExportAccumulator>>,
-    secret: Option<String>,
+    secrets: Vec<String>,
 ) -> super::pdpp_connector::PdppEventSink {
     Arc::new(move |event| match event {
         PdppEvent::Record(record) => {
-            if secret.as_deref().is_some_and(|credential| {
-                value_contains_secret(&record.key, credential)
-                    || value_contains_secret(&record.data, credential)
-            }) {
+            if value_contains_any_secret(&record.key, &secrets)
+                || value_contains_any_secret(&record.data, &secrets)
+            {
                 return Err("PDPP connector attempted to emit its credential as data".into());
             }
             let mut collected = export_accumulator
@@ -840,11 +1359,7 @@ fn event_sink_for_run(
             Ok(())
         }
         PdppEvent::Progress(progress) => {
-            emit_running_status(
-                &app,
-                &run_id,
-                &redact_secret(&progress.message, secret.as_deref()),
-            );
+            emit_running_status(&app, &run_id, &redact_secrets(&progress.message, &secrets));
             Ok(())
         }
         PdppEvent::SkipResult(skip) => {
@@ -864,9 +1379,68 @@ fn event_sink_for_run(
         PdppEvent::State(_)
         | PdppEvent::DetailCoverage(_)
         | PdppEvent::DetailGap(_)
-        | PdppEvent::DetailGapRecovered(_)
-        | PdppEvent::Interaction(_) => Ok(()),
+        | PdppEvent::DetailGapRecovered(_) => Ok(()),
+        PdppEvent::Interaction(_) => {
+            emit_running_status(&app, &run_id, "Waiting for browser interaction...");
+            Ok(())
+        }
     })
+}
+
+fn interaction_sink_for_run(
+    app: AppHandle,
+    run_id: String,
+    secrets: Vec<String>,
+) -> super::pdpp_connector::PdppInteractionSink {
+    Arc::new(
+        move |interaction: &super::pdpp_connector::PdppInteraction, responder| {
+            if responder.run_id() != run_id || interaction.request_id != responder.request_id() {
+                return Err("PDPP interaction responder is not bound to this run/request".into());
+            }
+            validate_interaction_request_id(&interaction.request_id)?;
+            let key = (run_id.clone(), interaction.request_id.clone());
+            PENDING_PDPP_INTERACTIONS
+                .lock()
+                .map_err(|_| "PDPP interaction registry is unavailable")?
+                .insert(key, responder);
+            let message = redact_secrets(&interaction.message, &secrets);
+            emit_running_status(&app, &run_id, "Waiting for owner interaction...");
+            let _ = app.emit(
+                "pdpp-interaction",
+                json!({
+                    "runId": run_id,
+                    "requestId": interaction.request_id,
+                    "kind": interaction.kind,
+                    "message": message,
+                    "schema": interaction.schema,
+                    "timeoutSeconds": interaction.timeout_seconds,
+                }),
+            );
+            Ok(())
+        },
+    )
+}
+
+fn interaction_closed_sink_for_run(
+    run_id: String,
+) -> super::pdpp_connector::PdppInteractionClosedSink {
+    Arc::new(move |closed_run_id, request_id| {
+        if closed_run_id == run_id {
+            invalidate_pending_interaction(closed_run_id, request_id);
+        }
+    })
+}
+
+fn invalidate_pending_interaction(run_id: &str, request_id: &str) {
+    if let Ok(mut pending) = PENDING_PDPP_INTERACTIONS.lock() {
+        pending.remove(&(run_id.to_owned(), request_id.to_owned()));
+    }
+}
+
+fn invalidate_pending_interactions_for_run(run_id: &str) {
+    if let Ok(mut pending) = PENDING_PDPP_INTERACTIONS.lock() {
+        pending.retain(|(pending_run_id, _), _| pending_run_id != run_id);
+    }
 }
 
 fn value_contains_secret(value: &Value, secret: &str) -> bool {
@@ -885,6 +1459,12 @@ fn value_contains_secret(value: &Value, secret: &str) -> bool {
     }
 }
 
+fn value_contains_any_secret(value: &Value, secrets: &[String]) -> bool {
+    secrets
+        .iter()
+        .any(|secret| value_contains_secret(value, secret))
+}
+
 fn build_export_data(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
@@ -901,7 +1481,7 @@ fn build_export_data(
         .connector_id
         .as_deref()
         .ok_or("PDPP connector manifest is missing connector_id")?;
-    if connector_key != GITHUB_CONNECTOR_KEY {
+    if connector_key != GITHUB_CONNECTOR_KEY && connector_key != CHATGPT_CONNECTOR_KEY {
         return Err(
             "DataConnect does not yet have a storage projection for this PDPP connector".into(),
         );
@@ -916,18 +1496,27 @@ fn build_export_data(
         let records = records_by_stream.get(stream).cloned().unwrap_or_default();
         record_count += records.len();
         stream_counts.insert(stream.clone(), json!(records.len()));
-        let projection = match stream.as_str() {
+        let projection = match (connector_key, stream.as_str()) {
             // The Personal Server's existing GitHub schemas deliberately use
             // these shapes. This is a DataConnect storage projection, not a
             // claim that the PDPP connector only supports three streams.
-            "user" if !records.is_empty() => {
+            (GITHUB_CONNECTOR_KEY, "user") if !records.is_empty() => {
                 Some(("github.profile", project_github_profile(&records)?))
             }
-            "repositories" => Some((
+            (GITHUB_CONNECTOR_KEY, "repositories") => Some((
                 "github.repositories",
                 project_github_repositories(&records)?,
             )),
-            "starred" => Some(("github.starred", project_github_starred(&records)?)),
+            (GITHUB_CONNECTOR_KEY, "starred") => {
+                Some(("github.starred", project_github_starred(&records)?))
+            }
+            // Fixture contract: the ChatGPT Collection Profile emits one
+            // PDPP record per conversation. Preserve each record's data as
+            // supplied; schema-specific normalization belongs upstream.
+            (CHATGPT_CONNECTOR_KEY, "conversations") => Some((
+                "chatgpt.conversations",
+                json!({ "conversations": records.iter().map(|record| record.data.clone()).collect::<Vec<_>>() }),
+            )),
             _ => None,
         };
         if let Some((scope, value)) = projection {
@@ -999,7 +1588,7 @@ fn build_export_data(
             "count": record_count,
             "label": format!("{record_count} {connector_key} records exported"),
             "details": {
-                "pdppStorageProjection": "github-v1",
+                "pdppStorageProjection": if connector_key == GITHUB_CONNECTOR_KEY { "github-v1" } else { "chatgpt-fixture-v1" },
                 "pdppStreamRecords": stream_counts,
             }
         }),
@@ -1299,7 +1888,29 @@ fn verify_file_hash(path: &Path, expected: Option<&str>, label: &str) -> Result<
 }
 
 fn resolve_node_program() -> Result<String, String> {
-    let path = std::env::var_os("PATH").ok_or("PATH is unavailable; cannot resolve node")?;
+    let executable = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the DataConnect executable: {e}"))?;
+    resolve_node_program_from(&executable, std::env::var_os("PATH").as_deref())
+}
+
+fn resolve_node_program_from(executable: &Path, path: Option<&OsStr>) -> Result<String, String> {
+    let executable_dir = executable
+        .parent()
+        .ok_or("DataConnect executable has no parent directory")?;
+    let bundled = executable_dir.join(BUNDLED_NODE_NAME);
+    if bundled.exists() {
+        if !bundled.is_file() {
+            return Err(format!(
+                "Bundled Node.js path is not a file: {}",
+                bundled.display()
+            ));
+        }
+        validate_node_program(&bundled)?;
+        return Ok(bundled.to_string_lossy().into_owned());
+    }
+
+    let path = path
+        .ok_or("Bundled Node.js is unavailable and PATH cannot resolve a development fallback")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
         if candidate.is_file() {
@@ -1307,7 +1918,7 @@ fn resolve_node_program() -> Result<String, String> {
             return Ok(candidate.to_string_lossy().into_owned());
         }
     }
-    Err("node executable was not found on PATH".into())
+    Err("Bundled Node.js is unavailable and node was not found on PATH".into())
 }
 
 fn validate_node_program(candidate: &Path) -> Result<(), String> {
@@ -1356,9 +1967,9 @@ fn to_response(
     run_id: String,
     connector_id: String,
     result: PdppRunResult,
-    secret: Option<&str>,
+    secrets: &[String],
 ) -> InstalledPdppConnectorRunResponse {
-    let progress = sanitize_retained_events(result.events, secret);
+    let progress = sanitize_retained_events(result.events, secrets);
     let event_summary = PdppEventSummary {
         records: result.event_counts.records,
         checkpoint_updates: result.event_counts.checkpoint_updates,
@@ -1393,7 +2004,7 @@ fn to_response(
         progress,
         records_truncated: result.records_truncated,
         events_truncated: result.events_truncated,
-        failure: failure.map(|failure| redact_secret(&failure, secret)),
+        failure: failure.map(|failure| redact_secrets(&failure, secrets)),
         stderr_bytes: result.stderr.len(),
         stderr_truncated: result.stderr_truncated,
         exit_code: result.exit_code,
@@ -1402,7 +2013,7 @@ fn to_response(
 
 fn sanitize_retained_events(
     events: Vec<PdppEvent>,
-    secret: Option<&str>,
+    secrets: &[String],
 ) -> Vec<SanitizedConnectorMessage> {
     let mut messages = Vec::new();
     for event in events {
@@ -1411,21 +2022,23 @@ fn sanitize_retained_events(
                 messages.push(SanitizedConnectorMessage {
                     message_type: "PROGRESS".into(),
                     stream: progress.stream,
-                    message: Some(redact_secret(&progress.message, secret)),
+                    message: Some(redact_secrets(&progress.message, secrets)),
                 });
             }
             PdppEvent::SkipResult(skip) => {
                 messages.push(SanitizedConnectorMessage {
                     message_type: "SKIP_RESULT".into(),
                     stream: skip.stream,
-                    message: skip.message.map(|message| redact_secret(&message, secret)),
+                    message: skip
+                        .message
+                        .map(|message| redact_secrets(&message, secrets)),
                 });
             }
             PdppEvent::Interaction(interaction) => {
                 messages.push(SanitizedConnectorMessage {
                     message_type: "INTERACTION".into(),
                     stream: None,
-                    message: Some(redact_secret(&interaction.message, secret)),
+                    message: Some(redact_secrets(&interaction.message, secrets)),
                 });
             }
             PdppEvent::Record(_)
@@ -1438,11 +2051,14 @@ fn sanitize_retained_events(
     messages
 }
 
-fn redact_secret(value: &str, secret: Option<&str>) -> String {
-    match secret {
-        Some(secret) if !secret.is_empty() => value.replace(secret, "[REDACTED]"),
-        _ => value.to_string(),
-    }
+fn redact_secrets(value: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(value.to_owned(), |redacted, secret| {
+        if secret.is_empty() {
+            redacted
+        } else {
+            redacted.replace(secret, "[REDACTED]")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1465,13 +2081,24 @@ mod tests {
         )
         .unwrap();
         fs::write(temp.path().join("dist/profile.cjs"), script).unwrap();
-        fs::write(temp.path().join("provenance.json"), "{}").unwrap();
+        let provenance = if manifest["connector_key"] == CHATGPT_CONNECTOR_KEY {
+            json!({
+                "external_runtime_packages": [
+                    { "name": "p-queue", "version": "^9.3.3" },
+                    { "name": "patchright", "version": "^1.61.1" }
+                ]
+            })
+        } else {
+            json!({})
+        };
+        let provenance_bytes = serde_json::to_vec_pretty(&provenance).unwrap();
+        fs::write(temp.path().join("provenance.json"), &provenance_bytes).unwrap();
         let manifest_sha = format!(
             "sha256:{:x}",
             Sha256::digest(&serde_json::to_vec_pretty(&manifest).unwrap())
         );
         let entrypoint_sha = format!("sha256:{:x}", Sha256::digest(script.as_bytes()));
-        let provenance_sha = format!("sha256:{:x}", Sha256::digest(b"{}"));
+        let provenance_sha = format!("sha256:{:x}", Sha256::digest(&provenance_bytes));
         (
             temp,
             ActiveConnectorInstall {
@@ -1530,6 +2157,134 @@ mod tests {
         })
     }
 
+    fn chatgpt_browser_manifest() -> Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"
+        ))
+        .unwrap()
+    }
+
+    fn chatgpt_artifact_root() -> Option<PathBuf> {
+        std::env::var_os("PDPP_CHATGPT_ARTIFACT_ROOT").map(PathBuf::from)
+    }
+
+    fn sha256_for(path: &Path) -> String {
+        format!("sha256:{:x}", Sha256::digest(fs::read(path).unwrap()))
+    }
+
+    fn unpacked_actual_chatgpt_install(
+        artifact_root: &Path,
+        root: &Path,
+    ) -> ActiveConnectorInstall {
+        let artifact_dir = artifact_root.join("artifacts/chatgpt-pdpp");
+        let artifact = fs::read_dir(&artifact_dir)
+            .expect("PDPP_CHATGPT_ARTIFACT_ROOT must contain artifacts/chatgpt-pdpp")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tgz"))
+            .expect("PDPP_CHATGPT_ARTIFACT_ROOT must contain one chatgpt-pdpp tarball");
+        let status = Command::new("tar")
+            .args([
+                "-xzf",
+                artifact.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let version = serde_json::from_str::<Value>(
+            &fs::read_to_string(root.join("profile/collection-profile.json")).unwrap(),
+        )
+        .unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        ActiveConnectorInstall {
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            company: "OpenAI".into(),
+            version,
+            root_path: root.to_string_lossy().into_owned(),
+            metadata_relative_path: "legacy.json".into(),
+            script_relative_path: "legacy.js".into(),
+            artifact_kind: Some(PDPP_ARTIFACT_KIND.into()),
+            manifest_path: Some("profile/collection-profile.json".into()),
+            entrypoint_path: Some("dist/collection-profile.mjs".into()),
+            entrypoint_sha256: Some(sha256_for(&root.join("dist/collection-profile.mjs"))),
+            manifest_sha256: Some(sha256_for(&root.join("profile/collection-profile.json"))),
+            provenance_path: Some("provenance.json".into()),
+            provenance_sha256: Some(sha256_for(&root.join("provenance.json"))),
+        }
+    }
+
+    fn node_major(program: &Path) -> Option<u64> {
+        let output = Command::new(program).arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout)
+            .ok()?
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    fn optional_node_for_major(major: u64) -> Option<PathBuf> {
+        let environment_name = format!("DATACONNECT_NODE_{major}");
+        let configured = std::env::var_os(environment_name).map(PathBuf::from);
+        let mut candidates = configured
+            .into_iter()
+            .chain(std::iter::once(PathBuf::from(format!("node{major}"))));
+        candidates.find(|candidate| node_major(candidate.as_path()) == Some(major))
+    }
+
+    fn assert_actual_patchright_esm_import(root: &Path, node: &Path) {
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        let bootstrap = runtime_root.join("connector-loader-bootstrap.mjs");
+        let probe = r#"
+const { default: PQueue } = await import("p-queue");
+const { chromium } = await import("patchright");
+if (typeof PQueue !== "function") throw new Error("p-queue default export is unavailable");
+if (!chromium || typeof chromium.connectOverCDP !== "function") {
+  throw new Error("patchright ESM chromium export is unavailable");
+}
+process.stdout.write("packaged-externals-ok\n");
+"#;
+        let positive = Command::new(node)
+            .args([
+                "--import",
+                bootstrap.to_str().unwrap(),
+                "--input-type=module",
+                "-e",
+                probe,
+            ])
+            .current_dir(root)
+            .env_clear()
+            .env("DATACONNECT_PDPP_RUNTIME_ROOT", &runtime_root)
+            .output()
+            .unwrap();
+        assert!(
+            positive.status.success(),
+            "loader import failed: {}",
+            String::from_utf8_lossy(&positive.stderr)
+        );
+        assert_eq!(positive.stdout, b"packaged-externals-ok\n");
+
+        let negative = Command::new(node)
+            .args(["--input-type=module", "-e", "await import('patchright')"])
+            .current_dir(root)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(!negative.status.success());
+        assert!(
+            String::from_utf8_lossy(&negative.stderr).contains("Cannot find package 'patchright'")
+        );
+    }
+
     fn success_script() -> &'static str {
         r#"
 const readline = require('node:readline');
@@ -1556,6 +2311,68 @@ rl.on('line', (line) => {
 "#
     }
 
+    fn pending_interaction_command() -> PdppConnectorCommand {
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${JSON.stringify(message)}\n`);
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.type === 'START') {
+    emit({ type: 'INTERACTION', request_id: 'pending-request', kind: 'otp', message: 'Enter code', timeout_seconds: 60 });
+  }
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+
+    fn start_pending_interaction_for_test(
+        run_id: &'static str,
+    ) -> (PdppRunControl, thread::JoinHandle<PdppRunResult>) {
+        let control = register_run(run_id, "pending-interaction-test", "owner").unwrap();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let run_id_owned = run_id.to_owned();
+        let on_interaction: crate::commands::pdpp_connector::PdppInteractionSink = Arc::new(
+            move |_interaction: &crate::commands::pdpp_connector::PdppInteraction, responder| {
+                PENDING_PDPP_INTERACTIONS
+                    .lock()
+                    .unwrap()
+                    .insert((run_id_owned.clone(), "pending-request".into()), responder);
+                ready_sender.send(()).unwrap();
+                Ok(())
+            },
+        );
+        let options = PdppRunOptions {
+            control: control.clone(),
+            max_retained_records: 1,
+            on_interaction: Some(on_interaction),
+            on_interaction_closed: Some(interaction_closed_sink_for_run(run_id.into())),
+            ..Default::default()
+        };
+        let start = PdppStart::new(
+            run_id,
+            "incremental",
+            json!({"streams":[{"name":"items"}]}),
+            None,
+        )
+        .unwrap();
+        let handle = thread::spawn(move || {
+            supervise_pdpp_connector(&pending_interaction_command(), &start, &options).unwrap()
+        });
+        ready_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pending interaction should register before the test continues");
+        (control, handle)
+    }
+
     fn request_with_token(token: &str) -> StartInstalledPdppConnectorRequest {
         StartInstalledPdppConnectorRequest {
             run_id: "run-1".into(),
@@ -1564,6 +2381,7 @@ rl.on('line', (line) => {
             streams: vec!["repositories".into()],
             connection_id: None,
             github_token: Some(token.into()),
+            setup_secrets: None,
             timeout_seconds: Some(5),
         }
     }
@@ -1637,7 +2455,7 @@ rl.on('line', (line) => {
     }
 
     #[test]
-    fn rejects_unsupported_browser_binding_for_network_only_host() {
+    fn rejects_a_browser_binding_for_the_network_only_github_host() {
         let manifest = json!({
             "connector_id": GITHUB_CONNECTOR_ID,
             "connector_key": GITHUB_CONNECTOR_KEY,
@@ -1645,7 +2463,7 @@ rl.on('line', (line) => {
             "runtime_requirements": {
                 "bindings": {
                     "network": { "required": true },
-                    "browser_automation": { "required": true }
+                    "browser": { "required": true }
                 }
             },
             "streams": [{ "name": "repositories" }]
@@ -1654,7 +2472,435 @@ rl.on('line', (line) => {
         install.root_path = temp.path().to_string_lossy().into_owned();
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
-            .contains("unsupported binding"));
+            .contains("does not match"));
+    }
+
+    #[test]
+    fn admits_the_actual_chatgpt_browser_capability_without_extending_start() {
+        let manifest: PdppConnectorManifest =
+            serde_json::from_value(chatgpt_browser_manifest()).unwrap();
+        validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-browser-fixture".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("account-one".into()),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "fixture-password".into()),
+            ])),
+            timeout_seconds: Some(5),
+        };
+        let start = build_start(&request, &manifest, None).unwrap();
+        let serialized = serde_json::to_value(start).unwrap();
+        assert!(serialized.get("bindings").is_none());
+        assert!(serialized.get("browser").is_none());
+    }
+
+    #[test]
+    fn chatgpt_static_secrets_are_transient_after_first_owner_setup() {
+        let (temp, mut install) = install_fixture(chatgpt_browser_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let first_setup = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-first-setup".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("owner-a".into()),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "not-persisted".into()),
+            ])),
+            timeout_seconds: Some(5),
+        };
+        let first = resolve_child_secrets_for_connection(&first_setup, &resolved, false).unwrap();
+        assert_eq!(first.environment["CHATGPT_USERNAME"], "owner@example.com");
+        assert_eq!(first.environment["CHATGPT_PASSWORD"], "not-persisted");
+
+        let scheduled = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-scheduled".into(),
+            setup_secrets: None,
+            ..first_setup.clone()
+        };
+        let second = resolve_child_secrets_for_connection(&scheduled, &resolved, true).unwrap();
+        assert!(second.environment.is_empty());
+        assert!(second.values.is_empty());
+        assert!(matches!(
+            resolve_child_secrets_for_connection(&scheduled, &resolved, false),
+            Err(error) if error.contains("first setup or explicit recovery")
+        ));
+    }
+
+    #[test]
+    fn failed_or_interrupted_chatgpt_setup_keeps_the_next_run_in_setup() {
+        let (temp, mut install) = install_fixture(chatgpt_browser_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let credentialed = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-first-setup".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("owner-a".into()),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "not-persisted".into()),
+            ])),
+            timeout_seconds: Some(5),
+        };
+        let retry_without_secrets = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-retry".into(),
+            setup_secrets: None,
+            ..credentialed.clone()
+        };
+
+        for status in [
+            PdppRunStatus::Failed, // login/run error or browser launch failure
+            PdppRunStatus::Cancelled,
+            PdppRunStatus::TimedOut,
+        ] {
+            assert!(!should_mark_chatgpt_setup_complete(
+                &resolved,
+                &credentialed,
+                &status
+            ));
+            assert!(matches!(
+                resolve_child_secrets_for_connection(&retry_without_secrets, &resolved, false),
+                Err(error) if error.contains("first setup or explicit recovery")
+            ));
+        }
+        assert!(should_mark_chatgpt_setup_complete(
+            &resolved,
+            &credentialed,
+            &PdppRunStatus::Succeeded
+        ));
+    }
+
+    #[test]
+    fn cancelling_a_pending_interaction_rejects_late_tauri_responses() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let run_id = "cancel-pending-interaction";
+        let (_control, handle) = start_pending_interaction_for_test(run_id);
+
+        cancel_run(run_id).unwrap();
+        assert!(submit_installed_pdpp_interaction_response(
+            run_id.into(),
+            "pending-request".into(),
+            "success".into(),
+            Some(json!({"code":"late"})),
+        )
+        .unwrap_err()
+        .contains("no longer pending"));
+        assert_eq!(handle.join().unwrap().status, PdppRunStatus::Cancelled);
+        unregister_run(run_id);
+    }
+
+    #[test]
+    fn timed_out_interaction_close_callback_rejects_late_tauri_responses() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let run_id = "timeout-pending-interaction";
+        let (control, handle) = start_pending_interaction_for_test(run_id);
+
+        interaction_closed_sink_for_run(run_id.into())(run_id, "pending-request");
+        assert!(submit_installed_pdpp_interaction_response(
+            run_id.into(),
+            "pending-request".into(),
+            "success".into(),
+            Some(json!({"code":"late"})),
+        )
+        .unwrap_err()
+        .contains("no longer pending"));
+        control.cancel();
+        assert_eq!(handle.join().unwrap().status, PdppRunStatus::Cancelled);
+        unregister_run(run_id);
+    }
+
+    #[test]
+    fn chatgpt_fixture_tracks_configured_artifact_manifest_contract() {
+        let Some(artifact_root) = chatgpt_artifact_root() else {
+            return;
+        };
+        let actual = fs::read_to_string(
+            artifact_root.join("connectors/chatgpt-pdpp/collection-profile.json"),
+        )
+        .unwrap();
+        let actual: Value = serde_json::from_str(&actual).unwrap();
+        let fixture = chatgpt_browser_manifest();
+        assert_eq!(fixture["connector_id"], actual["connector_id"]);
+        assert_eq!(
+            fixture["runtime_requirements"]["bindings"],
+            actual["runtime_requirements"]["bindings"]
+        );
+        assert_eq!(fixture["setup"]["modality"], actual["setup"]["modality"]);
+        assert_eq!(
+            fixture["setup"]["credential_capture"]["fields"],
+            actual["setup"]["credential_capture"]["fields"]
+        );
+        assert_eq!(
+            fixture["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|stream| &stream["name"])
+                .collect::<Vec<_>>(),
+            actual["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|stream| &stream["name"])
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn packaged_runtime_matches_configured_artifact_requirements() {
+        let Some(artifact_root) = chatgpt_artifact_root() else {
+            return;
+        };
+        let artifact: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("connectors/chatgpt-pdpp/artifact.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let provenance: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("connectors/chatgpt-pdpp/provenance.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact["build"]["external_packages"],
+            provenance["external_runtime_packages"]
+        );
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        assert_packaged_pdpp_runtime_files(&runtime_root);
+        let generated_runtime_root = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pdpp-runtime");
+        assert_packaged_pdpp_runtime_files(&generated_runtime_root);
+        for requirement in artifact["build"]["external_packages"].as_array().unwrap() {
+            let name = requirement["name"].as_str().unwrap();
+            let required = requirement["version"].as_str().unwrap();
+            let metadata: NodePackageMetadata = serde_json::from_str(
+                &fs::read_to_string(
+                    runtime_root
+                        .join("node_modules")
+                        .join(name)
+                        .join("package.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(satisfies_caret_requirement(&metadata.version, required));
+        }
+    }
+
+    fn assert_packaged_pdpp_runtime_files(runtime_root: &Path) {
+        for relative_path in [
+            "connector-loader.mjs",
+            "connector-loader-bootstrap.mjs",
+            "node_modules/p-queue/package.json",
+            "node_modules/p-queue/dist/index.js",
+            "node_modules/patchright/package.json",
+            "node_modules/patchright/index.mjs",
+        ] {
+            assert!(
+                runtime_root.join(relative_path).is_file(),
+                "packaged PDPP runtime is missing {relative_path} under {}",
+                runtime_root.display()
+            );
+        }
+    }
+
+    fn create_minimal_pdpp_runtime_root(root: &Path) {
+        for relative_path in [
+            "connector-loader.mjs",
+            "connector-loader-bootstrap.mjs",
+            "node_modules/p-queue/package.json",
+            "node_modules/patchright/package.json",
+        ] {
+            let path = root.join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "{}").unwrap();
+        }
+    }
+
+    #[test]
+    fn runtime_root_prefers_explicit_tauri_resource_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let resource_runtime = temp.path().join("Resources").join("pdpp-runtime");
+        create_minimal_pdpp_runtime_root(&resource_runtime);
+
+        let resolved = resolve_pdpp_runtime_root(Some(&temp.path().join("Resources"))).unwrap();
+
+        assert_eq!(resolved, fs::canonicalize(resource_runtime).unwrap());
+    }
+
+    #[test]
+    fn actual_artifact_loader_uses_patchright_esm_chromium_export() {
+        let Some(artifact_root) = chatgpt_artifact_root() else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        unpacked_actual_chatgpt_install(&artifact_root, temp.path());
+
+        // The configured Node is always verified. Exercise Node 22 and 23 as
+        // well when CI or a developer has explicitly provided either binary.
+        let configured = PathBuf::from(resolve_node_program().unwrap());
+        assert_actual_patchright_esm_import(temp.path(), &configured);
+        for major in [22, 23] {
+            if let Some(node) = optional_node_for_major(major) {
+                if node != configured {
+                    assert_actual_patchright_esm_import(temp.path(), &node);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unpacks_and_starts_the_configured_artifact_with_packaged_externals() {
+        let Some(artifact_root) = chatgpt_artifact_root() else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let install = unpacked_actual_chatgpt_install(&artifact_root, temp.path());
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "actual-chatgpt-artifact".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("actual-artifact-owner".into()),
+            github_token: None,
+            // A scheduled collection reuses its owner profile without replaying
+            // the initial static-secret handoff.
+            setup_secrets: None,
+            timeout_seconds: Some(5),
+        };
+        let binding = PdppBrowserBinding {
+            backend: "neko",
+            cdp_http_url: "http://127.0.0.1:9".into(),
+            lease_id: "actual-artifact-lease".into(),
+            profile_key: "actual-artifact-profile".into(),
+        };
+        let secrets = resolve_child_secrets_for_connection(&request, &resolved, true).unwrap();
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        let command = build_command(
+            &resolved,
+            &secrets,
+            &CommandCustomization {
+                max_retained_records: 1,
+                ..Default::default()
+            },
+            Some(&binding),
+            &runtime_root,
+        )
+        .unwrap();
+        assert!(!command.env.contains_key("CHATGPT_USERNAME"));
+        assert!(!command.env.contains_key("CHATGPT_PASSWORD"));
+        assert_eq!(
+            command.env["PDPP_CHATGPT_REMOTE_CDP_URL"],
+            "http://127.0.0.1:9"
+        );
+        assert!(!command.env.contains_key("PDPP_BROWSER_SURFACE_REQUIRED"));
+        assert!(command.clear_env);
+        let loader_index = command
+            .args
+            .iter()
+            .position(|argument| argument == "--import")
+            .expect("Node 22 loader hook must be installed with --import");
+        assert!(command.args[loader_index + 1].ends_with("connector-loader-bootstrap.mjs"));
+
+        let mut without_loader = command.clone();
+        without_loader.args.drain(loader_index..=loader_index + 1);
+        without_loader.env.remove("DATACONNECT_PDPP_RUNTIME_ROOT");
+        let negative = supervise_pdpp_connector(
+            &without_loader,
+            &build_start(&request, &resolved.manifest, None).unwrap(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_secs(5)),
+                max_retained_records: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(negative.status, PdppRunStatus::Succeeded);
+        assert!(negative.stderr.contains("Cannot find package 'p-queue'"));
+
+        let mut result = supervise_pdpp_connector(
+            &command,
+            &build_start(&request, &resolved.manifest, None).unwrap(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_secs(5)),
+                max_retained_records: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(result.status, PdppRunStatus::Succeeded);
+        assert!(!result.stderr.contains("Cannot find package 'p-queue'"));
+        assert!(!result.stderr.contains("Cannot find package 'patchright'"));
+        assert!(result.stderr.contains("remote CDP attach start"));
+        redact_browser_endpoint(&mut result, "http://127.0.0.1:9");
+        assert!(!result.stderr.contains("http://127.0.0.1:9"));
+        assert!(!result
+            .failure
+            .as_deref()
+            .unwrap_or_default()
+            .contains("http://127.0.0.1:9"));
+    }
+
+    #[test]
+    fn projects_the_provisional_chatgpt_conversation_stream_without_schema_rewrite() {
+        let (temp, mut install) = install_fixture(chatgpt_browser_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-projection".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("account-one".into()),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "fixture-password".into()),
+            ])),
+            timeout_seconds: Some(5),
+        };
+        let state = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([(
+                "conversations".into(),
+                vec![PdppRecord {
+                    stream: "conversations".into(),
+                    key: json!("conversation-1"),
+                    data: json!({ "id": "conversation-1", "upstream_field": "preserved" }),
+                    emitted_at: "2026-07-31T00:00:00Z".into(),
+                    op: None,
+                }],
+            )]),
+            ..Default::default()
+        };
+        let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+        assert_eq!(export["requestedScopes"], json!(["chatgpt.conversations"]));
+        assert_eq!(
+            export["chatgpt.conversations"]["conversations"][0]["upstream_field"],
+            json!("preserved")
+        );
     }
 
     #[test]
@@ -1666,7 +2912,7 @@ rl.on('line', (line) => {
             "runtime_requirements": {
                 "bindings": {
                     "network": { "required": true },
-                    "browser_automation": { "required": false }
+                    "browser": { "required": false }
                 }
             },
             "streams": [{ "name": "repositories" }]
@@ -1738,6 +2984,7 @@ rl.on('line', (line) => {
             streams: vec!["repositories".into()],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: None,
         };
         let manifest: PdppConnectorManifest = serde_json::from_value(github_manifest()).unwrap();
@@ -1760,6 +3007,7 @@ rl.on('line', (line) => {
             streams: vec![],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: None,
         };
         let manifest: PdppConnectorManifest =
@@ -1790,6 +3038,7 @@ rl.on('line', (line) => {
             streams: vec!["user_stats".into(), "pull_requests".into()],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: None,
         };
         let manifest: PdppConnectorManifest =
@@ -1967,6 +3216,7 @@ rl.on('line', (line) => {
             streams: vec![],
             connection_id: Some("account-one".into()),
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: None,
         };
 
@@ -2052,6 +3302,7 @@ rl.on('line', (line) => {
             streams: vec!["repositories".into()],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: None,
         };
         let removed = PdppRecord {
@@ -2097,10 +3348,13 @@ rl.on('line', (line) => {
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
         let request = request_with_token("test-token");
         let start = build_start(&request, &resolved.manifest, None).unwrap();
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
         let command = build_command(
             &resolved,
-            request.github_token.as_deref(),
+            &resolve_child_secrets(&request, &resolved).unwrap(),
             &CommandCustomization::default(),
+            None,
+            &runtime_root,
         )
         .unwrap();
         assert!(command.clear_env);
@@ -2149,7 +3403,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
                 max_retained_records: 4,
                 ..Default::default()
             },
-            request.github_token.as_deref(),
+            &resolve_child_secrets(&request, &resolved).unwrap(),
         )
         .unwrap();
         assert!(result.stderr.contains(token));
@@ -2157,7 +3411,12 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             .records
             .iter()
             .any(|record| record.data.to_string().contains(token)));
-        let response = to_response("run-1".into(), "github-pdpp".into(), result, Some(token));
+        let response = to_response(
+            "run-1".into(),
+            "github-pdpp".into(),
+            result,
+            &[token.into()],
+        );
         let serialized = serde_json::to_string(&response).unwrap();
         assert!(!serialized.contains(token));
         assert!(!serialized.contains("repo-1"));
@@ -2256,10 +3515,18 @@ setInterval(() => {}, 1000);
             streams: vec!["repositories".into()],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: Some(1),
         };
         let result = supervise_pdpp_connector(
-            &build_command(&resolved, None, &CommandCustomization::default()).unwrap(),
+            &build_command(
+                &resolved,
+                &PdppChildSecrets::default(),
+                &CommandCustomization::default(),
+                None,
+                &resolve_pdpp_runtime_root(None).unwrap(),
+            )
+            .unwrap(),
             &build_start(&request, &resolved.manifest, None).unwrap(),
             &PdppRunOptions {
                 timeout: Some(Duration::from_millis(50)),
@@ -2302,6 +3569,7 @@ setInterval(() => {}, 1000);
             streams: vec!["repositories".into()],
             connection_id: None,
             github_token: None,
+            setup_secrets: None,
             timeout_seconds: Some(30),
         };
         let handle = thread::spawn(move || {
@@ -2313,7 +3581,7 @@ setInterval(() => {}, 1000);
                     control,
                     ..Default::default()
                 },
-                None,
+                &PdppChildSecrets::default(),
             )
         });
 
@@ -2413,6 +3681,72 @@ setInterval(() => {}, 1000);
     }
 
     #[test]
+    fn uses_path_node_only_when_bundled_node_is_absent() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let app_dir = tempfile::tempdir().unwrap();
+        let fake_app = app_dir.path().join("dataconnect");
+        fs::write(&fake_app, b"fixture app").unwrap();
+        let path = std::env::join_paths([ambient_node.parent().unwrap()]).unwrap();
+
+        let fallback = resolve_node_program_from(&fake_app, Some(&path)).unwrap();
+        assert_eq!(Path::new(&fallback), ambient_node);
+
+        fs::write(app_dir.path().join(BUNDLED_NODE_NAME), b"not node").unwrap();
+        let error = resolve_node_program_from(&fake_app, Some(&path)).unwrap_err();
+        assert!(error.contains("Failed to inspect Node.js"));
+    }
+
+    #[test]
+    fn starts_connector_with_bundled_node_and_no_node_on_path() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let app_dir = tempfile::tempdir().unwrap();
+        let fake_app = app_dir.path().join(if cfg!(windows) {
+            "dataconnect.exe"
+        } else {
+            "dataconnect"
+        });
+        fs::write(&fake_app, b"fixture app").unwrap();
+        let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
+        fs::copy(&ambient_node, &bundled_node).unwrap();
+
+        let resolved_node =
+            resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
+        assert_eq!(Path::new(&resolved_node), bundled_node);
+
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        let request = request_with_token("test-token");
+        let start = build_start(&request, &resolved.manifest, None).unwrap();
+        let mut command = build_command(
+            &resolved,
+            &resolve_child_secrets(&request, &resolved).unwrap(),
+            &CommandCustomization::default(),
+            None,
+            &runtime_root,
+        )
+        .unwrap();
+        command.program = resolved_node;
+        assert!(command.clear_env);
+        assert!(!command.env.contains_key("PATH"));
+
+        let result = supervise_pdpp_connector(
+            &command,
+            &start,
+            &PdppRunOptions {
+                timeout: Some(Duration::from_secs(5)),
+                scope_validators: validators_from_manifest(&resolved.manifest),
+                max_retained_records: 8,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.record_count, 1);
+    }
+
+    #[test]
     fn event_summary_counts_all_events_when_retained_messages_are_truncated() {
         let script = r#"
 const readline = require('node:readline');
@@ -2438,14 +3772,15 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
                 max_retained_records: 1,
                 ..Default::default()
             },
-            request.github_token.as_deref(),
+            &resolve_child_secrets(&request, &resolved).unwrap(),
         )
         .unwrap();
+        let secrets = resolve_child_secrets(&request, &resolved).unwrap();
         let response = to_response(
             request.run_id,
             resolved.connector_id,
             result,
-            request.github_token.as_deref(),
+            &secrets.values,
         );
 
         assert_eq!(response.event_summary.progress, 80);
@@ -2464,7 +3799,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             .map(PathBuf::from)
             .into_iter()
             .collect();
-        let resolved = resolve_active_installed_pdpp_connector("github-pdpp").unwrap();
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        let resolved =
+            resolve_active_installed_pdpp_connector("github-pdpp", &runtime_root).unwrap();
         let request = StartInstalledPdppConnectorRequest {
             run_id: "github-pdpp-cross-repo-e2e".into(),
             connector_id: "github-pdpp".into(),
@@ -2472,6 +3809,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             streams: vec!["user".into(), "repositories".into()],
             connection_id: None,
             github_token: Some(token.clone()),
+            setup_secrets: None,
             timeout_seconds: Some(120),
         };
         let result =
@@ -2520,9 +3858,74 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             result.records_truncated,
         );
 
-        let response = to_response(request.run_id, resolved.connector_id, result, Some(&token));
+        let response = to_response(
+            request.run_id,
+            resolved.connector_id,
+            result,
+            &[token.clone()],
+        );
         let serialized = serde_json::to_string(&response).unwrap();
         assert!(!serialized.contains(&token));
         assert!(!serialized.contains("\"data\""));
+    }
+
+    #[test]
+    #[ignore = "requires a published ChatGPT PDPP artifact, local browser login, and explicit confirmation"]
+    fn runs_external_installed_chatgpt_browser_artifact_end_to_end() {
+        assert_eq!(
+            std::env::var("PDPP_E2E_CHATGPT_CONFIRM").as_deref(),
+            Ok("1"),
+            "set PDPP_E2E_CHATGPT_CONFIRM=1 to allow the credentialed browser E2E"
+        );
+        let runtime_root = resolve_pdpp_runtime_root(None).unwrap();
+        let resolved =
+            resolve_active_installed_pdpp_connector(CHATGPT_CONNECTOR_INSTALL_ID, &runtime_root)
+                .unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "chatgpt-pdpp-browser-e2e".into(),
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["conversations".into()],
+            connection_id: Some("chatgpt-e2e-owner".into()),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                (
+                    "username".into(),
+                    std::env::var("PDPP_E2E_CHATGPT_USERNAME")
+                        .expect("PDPP_E2E_CHATGPT_USERNAME must be set"),
+                ),
+                (
+                    "password".into(),
+                    std::env::var("PDPP_E2E_CHATGPT_PASSWORD")
+                        .expect("PDPP_E2E_CHATGPT_PASSWORD must be set"),
+                ),
+            ])),
+            timeout_seconds: Some(300),
+        };
+        let result = run_resolved_installed_pdpp_connector(
+            &resolved,
+            &request,
+            CommandCustomization {
+                max_retained_records: 4,
+                ..Default::default()
+            },
+            &resolve_child_secrets(&request, &resolved).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.status,
+            PdppRunStatus::Succeeded,
+            "{:?}",
+            result.failure
+        );
+        assert!(result
+            .events
+            .iter()
+            .any(|event| matches!(event, PdppEvent::Interaction(_))));
+        assert!(result
+            .records
+            .iter()
+            .any(|record| record.stream == "conversations"));
+        assert!(!result.stderr.contains("chatgpt-e2e-owner"));
     }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -9,6 +9,12 @@ import { privateKeyToAccount } from "viem/accounts"
 
 import { Hono } from "hono"
 
+import {
+  createPdppRevocationSink,
+  pdppDefaultStorageRoots,
+  pdppProfileDatabasePath,
+  registerOptionalPdppSurfaces,
+} from "../index.js"
 import { registerProtectedRoutes } from "../protected-routes.js"
 import {
   createGithubStreamMetadata,
@@ -16,13 +22,19 @@ import {
 } from "./grant-scoped-records-repository.js"
 import {
   createGithubAuthorizationAdapter,
+  createPdppAuthorizationAdapter,
   PDPP_DATA_ACCESS_TYPE,
 } from "./github-authorization/index.js"
-import { registerGithubAuthorizationRoutes } from "./github-authorization/http-routes.js"
+import {
+  registerGithubAuthorizationRoutes,
+  registerPdppAuthorizationRoutes,
+} from "./github-authorization/http-routes.js"
 import {
   createSnapshotRefresher,
   mountPdppResourceServer,
 } from "./resource-server.js"
+import { loadInstalledManifest } from "./installed-manifest.js"
+import { canonicalChatgptManifestBytes } from "./test/fixtures/chatgpt.collection-profile.js"
 
 const tempRoots = []
 
@@ -193,12 +205,121 @@ function createInstalledGithubFixture({ allStreams = false } = {}) {
     })
   )
   return {
+    root,
+    installRoot,
     activeManifestPath,
     exportRoot,
     databasePath: join(root, "records.sqlite"),
     manifest,
     manifestDigest,
   }
+}
+
+function createInstalledChatgptFixture() {
+  const root = mkdtempSync(
+    join(tmpdir(), "dataconnect-pdpp-chatgpt-resource-server-")
+  )
+  tempRoots.push(root)
+  const installRoot = join(root, "install")
+  const exportRoot = join(root, "exports")
+  mkdirSync(join(installRoot, "profile"), { recursive: true })
+  mkdirSync(join(installRoot, "dist"), { recursive: true })
+  mkdirSync(exportRoot)
+
+  const manifestBytes = canonicalChatgptManifestBytes
+  const manifest = JSON.parse(manifestBytes)
+  const manifestDigest = hash(manifestBytes)
+  const entrypointBytes = Buffer.from("export default {};")
+  const provenanceBytes = Buffer.from(
+    JSON.stringify({ source: "canonical-chatgpt" })
+  )
+  writeFileSync(
+    join(installRoot, "profile/collection-profile.json"),
+    manifestBytes
+  )
+  writeFileSync(
+    join(installRoot, "dist/collection-profile.mjs"),
+    entrypointBytes
+  )
+  writeFileSync(join(installRoot, "provenance.json"), provenanceBytes)
+  const activeManifestPath = join(root, "connectors-active.json")
+  writeFileSync(
+    activeManifestPath,
+    JSON.stringify({
+      connectors: {
+        "chatgpt-pdpp": {
+          connectorId: "chatgpt-pdpp",
+          version: manifest.version,
+          rootPath: installRoot,
+          artifactKind: "pdpp-collection-profile",
+          manifestPath: "profile/collection-profile.json",
+          entrypointPath: "dist/collection-profile.mjs",
+          provenancePath: "provenance.json",
+          manifestSha256: manifestDigest,
+          entrypointSha256: hash(entrypointBytes),
+          provenanceSha256: hash(provenanceBytes),
+        },
+      },
+    })
+  )
+  return {
+    root,
+    installRoot,
+    activeManifestPath,
+    exportRoot,
+    databasePath: join(root, "records.sqlite"),
+    manifest,
+    manifestBytes,
+    manifestDigest,
+  }
+}
+
+function chatgptSnapshotProvenance({
+  manifestDigest,
+  connectionId = "chatgpt-account-a",
+  runId = "chatgpt-run-1",
+  overrides = {},
+}) {
+  return {
+    connector_key: "chatgpt",
+    connector_id: "https://registry.pdpp.org/connectors/chatgpt",
+    manifest_version: "0.1.0",
+    manifest_sha256: manifestDigest,
+    run_id: runId,
+    connection_id: connectionId,
+    ...overrides,
+  }
+}
+
+function chatgptConversation(id, createTime, updateTime = createTime) {
+  return {
+    stream: "conversations",
+    key: id,
+    data: {
+      id,
+      title: `title-${id}`,
+      create_time: createTime,
+      update_time: updateTime,
+      is_archived: false,
+    },
+    emitted_at: "2026-07-31T00:00:00.000Z",
+  }
+}
+
+function rewriteInstalledManifest(fixture, mutate) {
+  const manifest = JSON.parse(JSON.stringify(fixture.manifest))
+  mutate(manifest)
+  const manifestBytes = Buffer.from(JSON.stringify(manifest))
+  writeFileSync(
+    join(fixture.installRoot, "profile/collection-profile.json"),
+    manifestBytes
+  )
+  const active = JSON.parse(readFileSync(fixture.activeManifestPath))
+  active.connectors["github-pdpp"].version = manifest.version
+  active.connectors["github-pdpp"].manifestSha256 = hash(manifestBytes)
+  writeFileSync(fixture.activeManifestPath, JSON.stringify(active))
+  fixture.manifest = manifest
+  fixture.manifestDigest = hash(manifestBytes)
 }
 
 function githubSnapshotProvenance({
@@ -282,7 +403,11 @@ function record(id, createdAt) {
   }
 }
 
-function activeToken(overrides = {}) {
+function activeToken({
+  manifestDigest,
+  grant: grantOverrides,
+  ...overrides
+} = {}) {
   return {
     active: true,
     pdpp_token_kind: "client",
@@ -292,6 +417,8 @@ function activeToken(overrides = {}) {
         kind: "connector",
         id: "https://registry.pdpp.org/connectors/github",
       },
+      manifest_version: "0.5.0",
+      manifest_digest: manifestDigest,
       streams: [
         {
           name: "repositories",
@@ -300,6 +427,7 @@ function activeToken(overrides = {}) {
           time_range: { since: "2026-01-01T00:00:00Z" },
         },
       ],
+      ...grantOverrides,
     },
     ...overrides,
   }
@@ -421,6 +549,8 @@ test("serves every verified GitHub stream while omitted export streams are empty
             id: "https://registry.pdpp.org/connectors/github",
           },
           streams: streamNames.map(name => ({ name })),
+          manifest_version: fixture.manifest.version,
+          manifest_digest: fixture.manifestDigest,
         },
       }),
     },
@@ -472,6 +602,7 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
           return { active: false, inactive_reason: "grant_expired" }
         if (token === "wrong-connector") {
           return activeToken({
+            manifestDigest: fixture.manifestDigest,
             grant: {
               source: {
                 kind: "connector",
@@ -483,6 +614,7 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
         }
         if (token === "unrestricted-fields") {
           return activeToken({
+            manifestDigest: fixture.manifestDigest,
             grant: {
               source: {
                 kind: "connector",
@@ -500,6 +632,7 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
         }
         if (token === "name-only") {
           return activeToken({
+            manifestDigest: fixture.manifestDigest,
             grant: {
               source: {
                 kind: "connector",
@@ -516,7 +649,7 @@ test("mounts installed GitHub PDPP streams beside legacy routes with opaque gran
             },
           })
         }
-        return activeToken()
+        return activeToken({ manifestDigest: fixture.manifestDigest })
       },
     },
   })
@@ -666,7 +799,10 @@ test("a successful authoritative full refresh removes records absent from the ne
   const app = new Hono()
   await mountPdppResourceServer(app, {
     ...fixture,
-    tokenIntrospector: { introspect: async () => activeToken() },
+    tokenIntrospector: {
+      introspect: async () =>
+        activeToken({ manifestDigest: fixture.manifestDigest }),
+    },
   })
   const headers = { authorization: "Bearer opaque" }
   const before = await app.request(
@@ -766,7 +902,10 @@ test("serves only the requested connection's verified installed snapshot", async
   const defaultApp = new Hono()
   await mountPdppResourceServer(defaultApp, {
     ...fixture,
-    tokenIntrospector: { introspect: async () => activeToken() },
+    tokenIntrospector: {
+      introspect: async () =>
+        activeToken({ manifestDigest: fixture.manifestDigest }),
+    },
   })
   const defaultRead = await defaultApp.request(
     "http://personal.example/v1/streams/repositories/records",
@@ -786,11 +925,13 @@ test("serves only the requested connection's verified installed snapshot", async
     tokenIntrospector: {
       introspect: async () =>
         activeToken({
+          manifestDigest: fixture.manifestDigest,
           grant: {
-            ...activeToken().grant,
+            ...activeToken({ manifestDigest: fixture.manifestDigest }).grant,
             streams: [
               {
-                ...activeToken().grant.streams[0],
+                ...activeToken({ manifestDigest: fixture.manifestDigest }).grant
+                  .streams[0],
                 resources: ["other-account"],
               },
             ],
@@ -1263,6 +1404,366 @@ test("rejects a local PDPP bearer after owner revoke intent even when Gateway re
   adapter.close()
 })
 
+test("default GitHub serving retains legacy authorization and record database paths on upgrade", async () => {
+  const fixture = createInstalledGithubFixture()
+  const desktopToken = "desktop-token"
+  assert.equal(
+    pdppProfileDatabasePath(fixture.root, "github-pdpp", "authorization"),
+    join(fixture.root, "pdpp-github-authorization.sqlite")
+  )
+  assert.equal(
+    pdppProfileDatabasePath(fixture.root, "github-pdpp", "records"),
+    join(fixture.root, "pdpp-github-records.sqlite")
+  )
+
+  const seededAdapter = createPdppAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    connectorId: "github-pdpp",
+    expectedConnector: {
+      key: "github",
+      id: "https://registry.pdpp.org/connectors/github",
+    },
+    databasePath: pdppProfileDatabasePath(
+      fixture.root,
+      "github-pdpp",
+      "authorization"
+    ),
+    scopeForStream: stream =>
+      ({
+        user: "github.profile",
+        repositories: "github.repositories",
+        starred: "github.starred",
+      })[stream],
+  })
+  const consent = seededAdapter.createConsentRequest({
+    sessionId: "legacy-upgrade-session",
+    scopes: ["github.repositories"],
+    authorizationDetails: [
+      {
+        type: PDPP_DATA_ACCESS_TYPE,
+        source: { kind: "connector", id: "github" },
+        access_mode: "continuous",
+        purpose_code: "https://example.test/purpose/research",
+        streams: [{ name: "repositories", resources: ["allowed"] }],
+      },
+    ],
+  })
+  const issued = seededAdapter.issueApprovedGrant({
+    requestId: consent.request_id,
+    legacyGrantId: "legacy-upgrade-grant",
+    subjectId: "subject-1",
+    clientId: TEST_BUILDER.address,
+  })
+  seededAdapter.close()
+
+  const app = new Hono()
+  app.get("/health", context => context.json({ ok: true }))
+  const adapter = await registerOptionalPdppSurfaces({
+    app,
+    devToken: desktopToken,
+    storageRoot: fixture.root,
+    recordsRoot: fixture.root,
+    activeManifestPath: fixture.activeManifestPath,
+    exportRoot: fixture.exportRoot,
+    connectionId: "default",
+    selectedPdppProfile: {
+      connectorId: "github-pdpp",
+      connector: {
+        key: "github",
+        id: "https://registry.pdpp.org/connectors/github",
+      },
+      scopeForStream: stream =>
+        ({
+          user: "github.profile",
+          repositories: "github.repositories",
+          starred: "github.starred",
+        })[stream],
+      enableLocalTimeline: true,
+    },
+  })
+  assert.notEqual(adapter, null)
+  registerProtectedRoutes({
+    app,
+    devToken: desktopToken,
+    gatewayClient: { revokeGrant: async () => {} },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: { signGrantRevocation: async () => "signature" },
+    onLegacyGrantRevoked: grantId => adapter.revokeByLegacyGrantId(grantId),
+  })
+
+  const headers = { authorization: `Bearer ${issued.access_token}` }
+  const streams = await app.request("http://personal.example/v1/streams", {
+    headers,
+  })
+  assert.equal(streams.status, 200, await streams.clone().text())
+  assert.deepEqual(
+    (await streams.json()).data.map(stream => stream.name),
+    ["repositories"]
+  )
+
+  const revoke = await app.request(
+    "http://personal.example/v1/grants/legacy-upgrade-grant",
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${desktopToken}` },
+    }
+  )
+  assert.equal(revoke.status, 204)
+  const revoked = await app.request("http://personal.example/v1/streams", {
+    headers,
+  })
+  assert.equal(revoked.status, 403)
+  assert.equal((await revoked.json()).error.code, "grant_revoked")
+  adapter.close()
+})
+
+test("invalid selected install leaves legacy routes alive and PDPP routes absent", async () => {
+  const fixture = createInstalledGithubFixture()
+  const app = new Hono()
+  app.get("/health", context => context.json({ ok: true }))
+  const logs = []
+  const adapter = await registerOptionalPdppSurfaces({
+    app,
+    devToken: "desktop-token",
+    storageRoot: fixture.root,
+    recordsRoot: fixture.root,
+    activeManifestPath: join(fixture.root, "missing-active.json"),
+    exportRoot: fixture.exportRoot,
+    selectedPdppProfile: {
+      connectorId: "github-pdpp",
+      connector: {
+        key: "github",
+        id: "https://registry.pdpp.org/connectors/github",
+      },
+      scopeForStream: stream =>
+        ({
+          user: "github.profile",
+          repositories: "github.repositories",
+          starred: "github.starred",
+        })[stream],
+      enableLocalTimeline: true,
+    },
+    send: message => logs.push(message),
+  })
+
+  assert.equal(adapter, null)
+  assert.equal(
+    (await app.request("http://personal.example/health")).status,
+    200
+  )
+  assert.equal(
+    (await app.request("http://personal.example/v1/streams")).status,
+    404
+  )
+  assert.equal(
+    (
+      await app.request("http://personal.example/v1/pdpp/consent-requests", {
+        method: "POST",
+      })
+    ).status,
+    404
+  )
+  assert.match(logs.at(-1).message, /routes unavailable/)
+})
+
+test("unsupported selected install atomically leaves all PDPP routes absent", async () => {
+  const fixture = createInstalledGithubFixture()
+  rewriteInstalledManifest(fixture, manifest => {
+    manifest.streams[0].primary_key = ["id", "full_name"]
+  })
+  const app = new Hono()
+  app.get("/health", context => context.json({ ok: true }))
+  const logs = []
+  const adapter = await registerOptionalPdppSurfaces({
+    app,
+    devToken: "desktop-token",
+    storageRoot: fixture.root,
+    recordsRoot: fixture.root,
+    activeManifestPath: fixture.activeManifestPath,
+    exportRoot: fixture.exportRoot,
+    selectedPdppProfile: {
+      connectorId: "github-pdpp",
+      connector: {
+        key: "github",
+        id: "https://registry.pdpp.org/connectors/github",
+      },
+      scopeForStream: stream =>
+        ({
+          user: "github.profile",
+          repositories: "github.repositories",
+          starred: "github.starred",
+        })[stream],
+      enableLocalTimeline: true,
+    },
+    send: message => logs.push(message),
+  })
+
+  assert.equal(adapter, null)
+  assert.equal(
+    (await app.request("http://personal.example/health")).status,
+    200
+  )
+  for (const [url, options] of [
+    ["http://personal.example/v1/streams"],
+    [
+      "http://personal.example/v1/pdpp/consent-requests",
+      { method: "POST", headers: { authorization: "Bearer desktop-token" } },
+    ],
+    [
+      "http://personal.example/v1/pdpp/consent-requests/request/approve",
+      { method: "POST", headers: { authorization: "Bearer desktop-token" } },
+    ],
+    [
+      "http://personal.example/v1/pdpp/credentials/session/redeem",
+      { method: "POST" },
+    ],
+    [
+      "http://personal.example/v1/pdpp/local-timeline/consent-requests",
+      { method: "POST", headers: { authorization: "Bearer desktop-token" } },
+    ],
+    ["http://personal.example/v1/pdpp/introspect", { method: "POST" }],
+  ]) {
+    assert.equal((await app.request(url, options)).status, 404, url)
+  }
+  assert.match(logs.at(-1).message, /unsupported record contract/)
+})
+
+test("revocation during optional PDPP outage persists through recovery and Gateway failure", async () => {
+  const fixture = createInstalledGithubFixture()
+  const desktopToken = "desktop-token"
+  const selectedPdppProfile = {
+    connectorId: "github-pdpp",
+    connector: {
+      key: "github",
+      id: "https://registry.pdpp.org/connectors/github",
+    },
+    scopeForStream: stream =>
+      ({
+        user: "github.profile",
+        repositories: "github.repositories",
+        starred: "github.starred",
+      })[stream],
+    enableLocalTimeline: true,
+  }
+  const seededAdapter = createPdppAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    connectorId: "github-pdpp",
+    expectedConnector: selectedPdppProfile.connector,
+    databasePath: pdppProfileDatabasePath(
+      fixture.root,
+      "github-pdpp",
+      "authorization"
+    ),
+    scopeForStream: selectedPdppProfile.scopeForStream,
+  })
+  const consent = seededAdapter.createConsentRequest({
+    sessionId: "outage-session",
+    scopes: ["github.repositories"],
+    authorizationDetails: [
+      {
+        type: PDPP_DATA_ACCESS_TYPE,
+        source: { kind: "connector", id: "github" },
+        access_mode: "continuous",
+        purpose_code: "https://example.test/purpose/research",
+        streams: [{ name: "repositories" }],
+      },
+    ],
+  })
+  const issued = seededAdapter.issueApprovedGrant({
+    requestId: consent.request_id,
+    legacyGrantId: "outage-grant",
+    subjectId: "subject-1",
+    clientId: TEST_BUILDER.address,
+  })
+  seededAdapter.close()
+
+  const outageApp = new Hono()
+  outageApp.get("/health", context => context.json({ ok: true }))
+  const outageAdapter = await registerOptionalPdppSurfaces({
+    app: outageApp,
+    devToken: desktopToken,
+    storageRoot: fixture.root,
+    recordsRoot: fixture.root,
+    activeManifestPath: join(fixture.root, "missing-active.json"),
+    exportRoot: fixture.exportRoot,
+    selectedPdppProfile,
+  })
+  assert.equal(outageAdapter, null)
+  const revocationSink = createPdppRevocationSink({
+    storageRoot: fixture.root,
+    activeManifestPath: join(fixture.root, "missing-active.json"),
+    selectedPdppProfile,
+  })
+  registerProtectedRoutes({
+    app: outageApp,
+    devToken: desktopToken,
+    gatewayClient: {
+      revokeGrant: async () => {
+        throw new Error("gateway unavailable")
+      },
+    },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: { signGrantRevocation: async () => "signature" },
+    onLegacyGrantRevoked: grantId =>
+      revocationSink.revokeByLegacyGrantId(grantId),
+  })
+  const revoke = await outageApp.request(
+    "http://personal.example/v1/grants/outage-grant",
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${desktopToken}` },
+    }
+  )
+  assert.equal(revoke.status, 500)
+  revocationSink.close()
+
+  const recoveredApp = new Hono()
+  const recoveredAdapter = await registerOptionalPdppSurfaces({
+    app: recoveredApp,
+    devToken: desktopToken,
+    storageRoot: fixture.root,
+    recordsRoot: fixture.root,
+    activeManifestPath: fixture.activeManifestPath,
+    exportRoot: fixture.exportRoot,
+    selectedPdppProfile,
+  })
+  assert.notEqual(recoveredAdapter, null)
+  const revoked = await recoveredApp.request(
+    "http://personal.example/v1/streams",
+    { headers: { authorization: `Bearer ${issued.access_token}` } }
+  )
+  assert.equal(revoked.status, 403)
+  assert.equal((await revoked.json()).error.code, "grant_revoked")
+  recoveredAdapter.close()
+})
+
+test("default records root preserves the legacy standalone fallback path", () => {
+  const roots = pdppDefaultStorageRoots({ homeDir: "/tmp/fake-home" })
+  assert.equal(
+    roots.authorizationRoot,
+    "/tmp/fake-home/.data-connect/personal-server"
+  )
+  assert.equal(roots.recordsRoot, "/tmp/fake-home/.dataconnect/personal-server")
+  assert.equal(
+    pdppDefaultStorageRoots({
+      homeDir: "/tmp/fake-home",
+      configDir: "/tmp/config",
+    }).recordsRoot,
+    "/tmp/config"
+  )
+  assert.equal(
+    pdppDefaultStorageRoots({
+      homeDir: "/tmp/fake-home",
+      pdppStorageDir: "/tmp/pdpp-storage",
+    }).recordsRoot,
+    "/tmp/pdpp-storage"
+  )
+})
+
 test("serves Timeline only after local consent and fails closed after its bound session is revoked", async () => {
   const fixture = createInstalledGithubFixture()
   const adapter = createGithubAuthorizationAdapter({
@@ -1385,7 +1886,10 @@ test("maps durable cursor errors to stable resource-server responses", async () 
   await mountPdppResourceServer(app, {
     ...fixture,
     recordsRepository: repository,
-    tokenIntrospector: { introspect: async () => activeToken() },
+    tokenIntrospector: {
+      introspect: async () =>
+        activeToken({ manifestDigest: fixture.manifestDigest }),
+    },
   })
   const headers = { authorization: "Bearer opaque" }
   const initial = await app.request(
@@ -1420,4 +1924,477 @@ test("maps durable cursor errors to stable resource-server responses", async () 
   assert.equal(malformed.status, 400)
   assert.equal((await malformed.json()).error.code, "invalid_cursor")
   repository.close()
+})
+
+test("fails closed when the active manifest diverges from the composed selection", async () => {
+  const fixture = createInstalledGithubFixture()
+  const divergent = createInstalledGithubFixture()
+  const selectedInstall = loadInstalledManifest({
+    activeManifestPath: fixture.activeManifestPath,
+    connectorId: "github-pdpp",
+    expectedConnector: {
+      key: "github",
+      id: "https://registry.pdpp.org/connectors/github",
+    },
+  })
+  const divergentManifest = { ...divergent.manifest, version: "0.5.1" }
+  const divergentBytes = Buffer.from(JSON.stringify(divergentManifest))
+  writeFileSync(
+    join(
+      dirname(divergent.activeManifestPath),
+      "install/profile/collection-profile.json"
+    ),
+    divergentBytes
+  )
+  const divergentActive = JSON.parse(readFileSync(divergent.activeManifestPath))
+  divergentActive.connectors["github-pdpp"].version = "0.5.1"
+  divergentActive.connectors["github-pdpp"].manifestSha256 =
+    hash(divergentBytes)
+  writeFileSync(divergent.activeManifestPath, JSON.stringify(divergentActive))
+
+  const adapter = createPdppAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    connectorId: "github-pdpp",
+    expectedConnector: {
+      key: "github",
+      id: "https://registry.pdpp.org/connectors/github",
+    },
+    selectedInstall,
+    databasePath: join(
+      dirname(fixture.activeManifestPath),
+      "authorization.sqlite"
+    ),
+    scopeForStream: stream => ({ repositories: "github.repositories" })[stream],
+  })
+  const app = new Hono()
+  try {
+    await mountPdppResourceServer(app, {
+      ...fixture,
+      selectedInstall,
+      tokenIntrospector: {
+        introspect: token => adapter.resolveForResourceServer(token),
+      },
+    })
+    const consent = adapter.createConsentRequest({
+      sessionId: "selection-bound-session",
+      scopes: ["github.repositories"],
+      authorizationDetails: [
+        {
+          type: PDPP_DATA_ACCESS_TYPE,
+          source: { kind: "connector", id: "github" },
+          access_mode: "continuous",
+          purpose_code: "https://example.test/purpose/research",
+          streams: [{ name: "repositories" }],
+        },
+      ],
+    })
+    const issued = adapter.issueApprovedGrant({
+      requestId: consent.request_id,
+      legacyGrantId: "selection-bound-grant",
+      subjectId: "selection-bound-subject",
+      clientId: "selection-bound-client",
+    })
+    const beforeDivergence = await app.request(
+      "http://personal.example/v1/streams",
+      { headers: { authorization: `Bearer ${issued.access_token}` } }
+    )
+    assert.equal(beforeDivergence.status, 200)
+
+    writeFileSync(
+      fixture.activeManifestPath,
+      readFileSync(divergent.activeManifestPath)
+    )
+    assert.throws(
+      () =>
+        adapter.createConsentRequest({
+          sessionId: "divergent-selection-session",
+          scopes: ["github.repositories"],
+          authorizationDetails: [
+            {
+              type: PDPP_DATA_ACCESS_TYPE,
+              source: { kind: "connector", id: "github" },
+              access_mode: "continuous",
+              purpose_code: "https://example.test/purpose/research",
+              streams: [{ name: "repositories" }],
+            },
+          ],
+        }),
+      /active install no longer matches the composed serving selection/
+    )
+    const afterDivergence = await app.request(
+      "http://personal.example/v1/streams",
+      { headers: { authorization: `Bearer ${issued.access_token}` } }
+    )
+    assert.equal(afterDivergence.status, 401)
+
+    await assert.rejects(
+      mountPdppResourceServer(new Hono(), {
+        ...fixture,
+        activeManifestPath: divergent.activeManifestPath,
+        selectedInstall,
+        tokenIntrospector: {
+          introspect: token => adapter.resolveForResourceServer(token),
+        },
+      }),
+      /active install no longer matches the composed serving selection/
+    )
+  } finally {
+    adapter.close()
+  }
+})
+
+test("serves the selected canonical ChatGPT profile through grant-scoped routes", async () => {
+  const fixture = createInstalledChatgptFixture()
+  const desktopToken = "desktop-token"
+  let now = new Date("2026-07-31T12:00:00.000Z")
+  const adapter = createPdppAuthorizationAdapter({
+    activeManifestPath: fixture.activeManifestPath,
+    connectorId: "chatgpt-pdpp",
+    expectedConnector: {
+      key: "chatgpt",
+      id: "https://registry.pdpp.org/connectors/chatgpt",
+    },
+    databasePath: join(fixture.root, "authorization.sqlite"),
+    now: () => now,
+    scopeForStream: stream => `chatgpt.${stream}`,
+    singleUseAccessExpiresInSeconds: 60,
+  })
+  const app = new Hono()
+  registerProtectedRoutes({
+    app,
+    devToken: desktopToken,
+    gatewayClient: { revokeGrant: async () => {} },
+    ownerAddress: "0xowner",
+    port: 8080,
+    send: () => {},
+    serverSigner: { signGrantRevocation: async () => "signature" },
+    onLegacyGrantRevoked: grantId => adapter.revokeByLegacyGrantId(grantId),
+  })
+  registerPdppAuthorizationRoutes({
+    app,
+    devToken: desktopToken,
+    adapter,
+    enableLocalTimeline: false,
+  })
+
+  const writeExport = (name, timestamp, content) =>
+    writeFileSync(
+      join(fixture.exportRoot, name),
+      JSON.stringify({ timestamp, content })
+    )
+  const exportContent = ({ provenance, recordsByStream, snapshot } = {}) => ({
+    platform: "chatgpt",
+    version: fixture.manifest.version,
+    "pdpp.provenance":
+      provenance ??
+      chatgptSnapshotProvenance({
+        manifestDigest: fixture.manifestDigest,
+      }),
+    "pdpp.recordsByStream": recordsByStream ?? {
+      conversations: [
+        chatgptConversation("conversation-a", "2026-02-01T00:00:00.000Z"),
+        chatgptConversation("conversation-b", "2026-03-01T00:00:00.000Z"),
+        chatgptConversation("resource-excluded", "2026-04-01T00:00:00.000Z"),
+        chatgptConversation("time-excluded", "2025-01-01T00:00:00.000Z"),
+      ],
+    },
+    ...(snapshot ? { "pdpp.snapshot": snapshot } : {}),
+  })
+  writeExport("initial.json", 1785456000000, exportContent())
+  await mountPdppResourceServer(app, {
+    ...fixture,
+    connectorId: "chatgpt-pdpp",
+    expectedConnector: {
+      key: "chatgpt",
+      id: "https://registry.pdpp.org/connectors/chatgpt",
+    },
+    connectionId: "chatgpt-account-a",
+    tokenIntrospector: {
+      introspect: token => adapter.resolveForResourceServer(token),
+    },
+  })
+
+  const details = ({ source = "chatgpt", accessMode = "continuous" } = {}) => [
+    {
+      type: PDPP_DATA_ACCESS_TYPE,
+      source: { kind: "connector", id: source },
+      access_mode: accessMode,
+      purpose_code: "https://example.test/purpose/research",
+      streams: [
+        {
+          name: "conversations",
+          fields: ["title"],
+          resources: ["conversation-a", "conversation-b", "time-excluded"],
+          time_range: { since: "2026-01-01T00:00:00.000Z" },
+        },
+      ],
+    },
+  ]
+  const createConsent = async ({ sessionId, scopes, authorizationDetails }) =>
+    app.request("http://personal.example/v1/pdpp/consent-requests", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${desktopToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        scopes,
+        authorization_details: authorizationDetails,
+      }),
+    })
+  const issueBearer = async ({
+    sessionId,
+    legacyGrantId,
+    accessMode = "continuous",
+  }) => {
+    const consent = await createConsent({
+      sessionId,
+      scopes: ["chatgpt.conversations"],
+      authorizationDetails: details({ accessMode }),
+    })
+    assert.equal(consent.status, 201, await consent.clone().text())
+    const request = await consent.json()
+    assert.deepEqual(request.authorization_details.streams[0].fields, [
+      "id",
+      "title",
+    ])
+    const approval = await app.request(
+      `http://personal.example/v1/pdpp/consent-requests/${request.request_id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          legacy_grant_id: legacyGrantId,
+          subject_id: "chatgpt-subject",
+          client_id: TEST_BUILDER.address,
+        }),
+      }
+    )
+    assert.equal(approval.status, 201, await approval.clone().text())
+    const authorization = await redemptionAuthorization({
+      account: TEST_BUILDER,
+      origin: "http://personal.example",
+      sessionId,
+    })
+    const credential = await app.request(
+      `http://personal.example/v1/pdpp/credentials/${sessionId}/redeem`,
+      { method: "POST", headers: { authorization } }
+    )
+    assert.equal(credential.status, 200, await credential.clone().text())
+    return `Bearer ${(await credential.json()).access_token}`
+  }
+
+  try {
+    const timeline = await app.request(
+      "http://personal.example/v1/pdpp/local-timeline/consent-requests",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${desktopToken}` },
+      }
+    )
+    assert.equal(timeline.status, 404)
+
+    for (const [index, invalid] of [
+      {
+        scopes: ["chatgpt.conversations"],
+        authorizationDetails: details({ source: "github" }),
+      },
+      { scopes: [], authorizationDetails: details() },
+      {
+        scopes: ["chatgpt.conversations", "chatgpt.messages"],
+        authorizationDetails: details(),
+      },
+    ].entries()) {
+      const response = await createConsent({
+        sessionId: `invalid-${index}`,
+        ...invalid,
+      })
+      assert.equal(response.status, 400)
+    }
+
+    const uriSourceConsent = await createConsent({
+      sessionId: "chatgpt-uri-source",
+      scopes: ["chatgpt.conversations"],
+      authorizationDetails: details({
+        source: "https://registry.pdpp.org/connectors/chatgpt",
+      }),
+    })
+    assert.equal(uriSourceConsent.status, 201)
+    assert.equal(
+      (await uriSourceConsent.json()).authorization_details.source.id,
+      "chatgpt"
+    )
+
+    const bearer = await issueBearer({
+      sessionId: "chatgpt-session",
+      legacyGrantId: "chatgpt-legacy-grant",
+    })
+    const headers = { authorization: bearer }
+    const streams = await app.request("http://personal.example/v1/streams", {
+      headers,
+    })
+    assert.equal(streams.status, 200)
+    assert.deepEqual(
+      (await streams.json()).data.map(stream => stream.name),
+      ["conversations"]
+    )
+
+    const firstPage = await app.request(
+      "http://personal.example/v1/streams/conversations/records?limit=1",
+      { headers }
+    )
+    assert.equal(firstPage.status, 200)
+    const first = await firstPage.json()
+    assert.deepEqual(
+      first.data.map(record => record.id),
+      ["conversation-a"]
+    )
+    assert.deepEqual(first.data[0].data, {
+      id: "conversation-a",
+      title: "title-conversation-a",
+    })
+    assert.equal(typeof first.next_cursor, "string")
+    const secondPage = await app.request(
+      `http://personal.example/v1/streams/conversations/records?limit=1&cursor=${encodeURIComponent(first.next_cursor)}`,
+      { headers }
+    )
+    assert.equal(secondPage.status, 200)
+    assert.deepEqual(
+      (await secondPage.json()).data.map(record => record.id),
+      ["conversation-b"]
+    )
+    const detail = await app.request(
+      "http://personal.example/v1/streams/conversations/records/conversation-a",
+      { headers }
+    )
+    assert.equal(detail.status, 200)
+    assert.deepEqual((await detail.json()).data, {
+      id: "conversation-a",
+      title: "title-conversation-a",
+    })
+
+    writeExport(
+      "newer-malformed.json",
+      1785542400000,
+      exportContent({
+        recordsByStream: {
+          conversations: [{ stream: "conversations", key: "bad" }],
+        },
+      })
+    )
+    writeExport("wrong-source.json", 1785628800000, {
+      ...exportContent(),
+      platform: "github",
+    })
+    writeExport("wrong-version.json", 1785672000000, {
+      ...exportContent(),
+      version: "0.1.1",
+    })
+    writeExport(
+      "wrong-provenance.json",
+      1785715200000,
+      exportContent({
+        provenance: chatgptSnapshotProvenance({
+          manifestDigest: "sha256:wrong",
+          connectionId: "wrong-connection",
+        }),
+      })
+    )
+    const retained = await app.request(
+      "http://personal.example/v1/streams/conversations/records?limit=100",
+      { headers }
+    )
+    assert.equal(retained.status, 200)
+    assert.deepEqual(
+      (await retained.json()).data.map(record => record.id),
+      ["conversation-a", "conversation-b"]
+    )
+
+    const revoke = await app.request(
+      "http://personal.example/v1/grants/chatgpt-legacy-grant",
+      { method: "DELETE", headers: { authorization: `Bearer ${desktopToken}` } }
+    )
+    assert.equal(revoke.status, 204)
+    const revoked = await app.request("http://personal.example/v1/streams", {
+      headers,
+    })
+    assert.equal(revoked.status, 403)
+    assert.equal((await revoked.json()).error.code, "grant_revoked")
+
+    const expiringBearer = await issueBearer({
+      sessionId: "chatgpt-expiring-session",
+      legacyGrantId: "chatgpt-expiring-grant",
+      accessMode: "single_use",
+    })
+    now = new Date("2026-07-31T12:02:00.000Z")
+    const expired = await app.request("http://personal.example/v1/streams", {
+      headers: { authorization: expiringBearer },
+    })
+    assert.equal(expired.status, 403)
+    assert.equal((await expired.json()).error.code, "grant_expired")
+
+    now = new Date("2026-07-31T12:00:00.000Z")
+    const refreshBearer = await issueBearer({
+      sessionId: "chatgpt-refresh-session",
+      legacyGrantId: "chatgpt-refresh-grant",
+    })
+    writeExport(
+      "authoritative-empty.json",
+      1785801600000,
+      exportContent({
+        recordsByStream: { conversations: [] },
+        snapshot: {
+          collection_mode: "full_refresh",
+          reset_streams: ["conversations"],
+          completed_at: "2026-07-31T12:00:00.000Z",
+        },
+      })
+    )
+    const empty = await app.request(
+      "http://personal.example/v1/streams/conversations/records",
+      { headers: { authorization: refreshBearer } }
+    )
+    assert.equal(empty.status, 200)
+    assert.deepEqual((await empty.json()).data, [])
+
+    const bindingConsent = await createConsent({
+      sessionId: "chatgpt-manifest-mismatch",
+      scopes: ["chatgpt.conversations"],
+      authorizationDetails: details(),
+    })
+    assert.equal(bindingConsent.status, 201)
+    const bindingRequest = await bindingConsent.json()
+    const changedManifest = { ...fixture.manifest, version: "0.1.1" }
+    const changedBytes = Buffer.from(JSON.stringify(changedManifest))
+    writeFileSync(
+      join(fixture.installRoot, "profile/collection-profile.json"),
+      changedBytes
+    )
+    const active = JSON.parse(readFileSync(fixture.activeManifestPath))
+    active.connectors["chatgpt-pdpp"].version = "0.1.1"
+    active.connectors["chatgpt-pdpp"].manifestSha256 = hash(changedBytes)
+    writeFileSync(fixture.activeManifestPath, JSON.stringify(active))
+    const mismatchedApproval = await app.request(
+      `http://personal.example/v1/pdpp/consent-requests/${bindingRequest.request_id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${desktopToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          legacy_grant_id: "chatgpt-mismatched-grant",
+          subject_id: "chatgpt-subject",
+          client_id: TEST_BUILDER.address,
+        }),
+      }
+    )
+    assert.equal(mismatchedApproval.status, 400)
+  } finally {
+    adapter.close()
+  }
 })

@@ -22,13 +22,17 @@ process.env.NODE_ENV = 'production';
 import { dirname, join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execSync, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { registerProtectedRoutes } from './protected-routes.js';
-import { mountPdppResourceServer } from './pdpp/resource-server.js';
-import { createGithubAuthorizationAdapter } from './pdpp/github-authorization/index.js';
-import { registerGithubAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
+import {
+  createPdppResourceServer,
+  mountPdppResourceRoutes,
+} from './pdpp/resource-server.js';
+import { createPdppAuthorizationAdapter } from './pdpp/github-authorization/index.js';
+import { registerPdppAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
+import { loadInstalledManifest } from './pdpp/installed-manifest.js';
 import { createPersonalServerServeOptions } from './listener-options.cjs';
 
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
@@ -36,6 +40,170 @@ const PACKAGED_RUNTIME_ENTRYPOINTS = {
   '@opendatalabs/personal-server-ts-server': '@opendatalabs/personal-server-ts-server/dist/api.js',
   '@hono/node-server': '@hono/node-server/dist/index.js',
 };
+
+const PDPP_SERVING_PROFILES = {
+  'github-pdpp': {
+    connector: {
+      key: 'github',
+      id: 'https://registry.pdpp.org/connectors/github',
+    },
+    scopeForStream: stream => ({
+      user: 'github.profile',
+      repositories: 'github.repositories',
+      starred: 'github.starred',
+    })[stream],
+    enableLocalTimeline: true,
+  },
+  'chatgpt-pdpp': {
+    connector: {
+      key: 'chatgpt',
+      id: 'https://registry.pdpp.org/connectors/chatgpt',
+    },
+    scopeForStream: stream => [
+      'conversations',
+      'messages',
+      'memories',
+      'custom_gpts',
+      'custom_instructions',
+      'shared_conversations',
+    ].includes(stream) ? `chatgpt.${stream}` : undefined,
+    enableLocalTimeline: false,
+  },
+};
+
+function selectedPdppServingProfile() {
+  const connectorId = process.env.PDPP_SERVING_CONNECTOR_ID || 'github-pdpp';
+  const profile = PDPP_SERVING_PROFILES[connectorId];
+  if (!profile) {
+    throw new Error(`PDPP_SERVING_CONNECTOR_ID must select a supported profile, got ${connectorId}`);
+  }
+  return { connectorId, ...profile };
+}
+
+function pdppProfileStorageName(connectorId) {
+  if (connectorId === 'github-pdpp') return 'github';
+  return createHash('sha256').update(connectorId).digest('hex').slice(0, 16);
+}
+
+export function pdppProfileDatabasePath(root, connectorId, kind) {
+  return join(
+    root,
+    `pdpp-${pdppProfileStorageName(connectorId)}-${kind}.sqlite`
+  );
+}
+
+export function pdppDefaultStorageRoots({
+  configDir,
+  pdppStorageDir,
+  homeDir = homedir(),
+} = {}) {
+  const serverRoot =
+    configDir || join(homeDir, '.data-connect', 'personal-server');
+  return {
+    authorizationRoot: serverRoot,
+    recordsRoot:
+      pdppStorageDir ||
+      configDir ||
+      join(homeDir, '.dataconnect', 'personal-server'),
+  };
+}
+
+export function createPdppRevocationSink({
+  storageRoot,
+  activeManifestPath,
+  selectedPdppProfile = selectedPdppServingProfile(),
+}) {
+  return createPdppAuthorizationAdapter({
+    databasePath: pdppProfileDatabasePath(
+      storageRoot,
+      selectedPdppProfile.connectorId,
+      'authorization'
+    ),
+    activeManifestPath,
+    connectorId: selectedPdppProfile.connectorId,
+    expectedConnector: selectedPdppProfile.connector,
+    scopeForStream: selectedPdppProfile.scopeForStream,
+    enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
+  });
+}
+
+export async function registerOptionalPdppSurfaces({
+  app,
+  devToken,
+  storageRoot,
+  recordsRoot = storageRoot,
+  activeManifestPath,
+  exportRoot,
+  connectionId = 'default',
+  selectedPdppProfile = selectedPdppServingProfile(),
+  singleUseAccessExpiresInSeconds,
+  externalOrigin,
+  send = () => {},
+}) {
+  let adapter;
+  try {
+    // Resolve this once, then require both independently mounted surfaces to
+    // re-verify this exact selected install. The two surfaces must never
+    // compose grants from one active-manifest path with records from another.
+    const selectedInstall = loadInstalledManifest({
+      activeManifestPath,
+      connectorId: selectedPdppProfile.connectorId,
+      expectedConnector: selectedPdppProfile.connector,
+    });
+    adapter = createPdppAuthorizationAdapter({
+      databasePath: pdppProfileDatabasePath(
+        storageRoot,
+        selectedPdppProfile.connectorId,
+        'authorization'
+      ),
+      activeManifestPath,
+      connectorId: selectedPdppProfile.connectorId,
+      expectedConnector: selectedPdppProfile.connector,
+      selectedInstall,
+      scopeForStream: selectedPdppProfile.scopeForStream,
+      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
+      singleUseAccessExpiresInSeconds,
+    });
+    const resourceServer = await createPdppResourceServer({
+      activeManifestPath,
+      connectorId: selectedPdppProfile.connectorId,
+      expectedConnector: selectedPdppProfile.connector,
+      selectedInstall,
+      databasePath: pdppProfileDatabasePath(
+        recordsRoot,
+        selectedPdppProfile.connectorId,
+        'records'
+      ),
+      exportRoot,
+      connectionId,
+      tokenIntrospector: {
+        introspect: token => adapter.resolveForResourceServer(token),
+      },
+    });
+    registerPdppAuthorizationRoutes({
+      app,
+      devToken,
+      adapter,
+      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
+      externalOrigin,
+    });
+    mountPdppResourceRoutes(app, resourceServer);
+    send({
+      type: 'log',
+      message: `[pdpp] mounted selected ${selectedPdppProfile.connector.key} resource routes`,
+    });
+    return adapter;
+  } catch (error) {
+    adapter?.close();
+    send({
+      type: 'log',
+      message: `[pdpp] routes unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    });
+    return null;
+  }
+}
 
 function send(msg) {
   let json;
@@ -407,31 +575,36 @@ async function main() {
     // Keep as a reference because startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
-    const pdppAuthorization = createGithubAuthorizationAdapter({
-      databasePath: join(configDir || join((await import('node:os')).homedir(), '.data-connect', 'personal-server'), 'pdpp-github-authorization.sqlite'),
-      singleUseAccessExpiresInSeconds,
+    const selectedPdppProfile = selectedPdppServingProfile();
+    const pdppActiveManifestPath = process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH;
+    const pdppStorageRoots = pdppDefaultStorageRoots({
+      configDir,
+      pdppStorageDir: process.env.PDPP_STORAGE_DIR,
     });
-
-    // PDPP reads are additive: unavailable or invalid local connector state
-    // leaves the established Personal Server routes running without a fallback
-    // manifest or lossy data source.
-    try {
-      const pdppStorageRoot = process.env.PDPP_STORAGE_DIR
-        || configDir
-        || join(homedir(), '.dataconnect', 'personal-server');
-      await mountPdppResourceServer(app, {
-        activeManifestPath: process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH,
-        databasePath: join(pdppStorageRoot, 'pdpp-github-records.sqlite'),
-        exportRoot: process.env.DATACONNECT_EXPORT_ROOT,
-        connectionId: process.env.PDPP_GITHUB_CONNECTION_ID || 'default',
-        tokenIntrospector: {
-          introspect: token => pdppAuthorization.resolveForResourceServer(token),
-        },
-      });
-      send({ type: 'log', message: '[pdpp] mounted installed GitHub resource routes' });
-    } catch (error) {
-      send({ type: 'log', message: `[pdpp] resource routes unavailable: ${error instanceof Error ? error.message : String(error)}` });
-    }
+    const pdppRevocationSink = createPdppRevocationSink({
+      storageRoot: pdppStorageRoots.authorizationRoot,
+      activeManifestPath: pdppActiveManifestPath,
+      selectedPdppProfile,
+    });
+    const pdppAuthorization = await registerOptionalPdppSurfaces({
+      app,
+      devToken,
+      storageRoot: pdppStorageRoots.authorizationRoot,
+      recordsRoot: pdppStorageRoots.recordsRoot,
+      activeManifestPath: pdppActiveManifestPath,
+      exportRoot: process.env.DATACONNECT_EXPORT_ROOT,
+      connectionId:
+        process.env.PDPP_SERVING_CONNECTION_ID ||
+        process.env.PDPP_GITHUB_CONNECTION_ID ||
+        'default',
+      selectedPdppProfile,
+      singleUseAccessExpiresInSeconds,
+      externalOrigin: personalServerExternalOrigin(
+        context.serverAccount?.address,
+        tunnelServerAddr
+      ),
+      send,
+    });
 
     // --- Request logging ---
     // Wrap app.fetch to log all incoming requests (including routes registered
@@ -469,16 +642,8 @@ async function main() {
       port,
       send,
       serverSigner,
-      onLegacyGrantRevoked: grantId => pdppAuthorization.revokeByLegacyGrantId(grantId),
-    });
-    registerGithubAuthorizationRoutes({
-      app,
-      devToken,
-      adapter: pdppAuthorization,
-      externalOrigin: personalServerExternalOrigin(
-        context.serverAccount?.address,
-        tunnelServerAddr
-      ),
+      onLegacyGrantRevoked: grantId =>
+        pdppRevocationSink.revokeByLegacyGrantId(grantId),
     });
 
     // Start HTTP server first so the desktop app can connect immediately.
@@ -639,7 +804,10 @@ async function main() {
 
     function shutdown(signal) {
       send({ type: 'log', message: `Shutdown signal: ${signal}` });
-      pdppAuthorization.close();
+      pdppAuthorization?.close();
+      if (pdppAuthorization !== pdppRevocationSink) {
+        pdppRevocationSink.close();
+      }
       if (cleanup) cleanup().catch(() => {});
       server.close(() => {
         process.exit(0);
@@ -656,4 +824,6 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

@@ -34,7 +34,7 @@ function info(message) {
   process.stdout.write(`[release] ${message}\n`);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     version: "",
     target: "main",
@@ -45,6 +45,7 @@ function parseArgs(argv) {
     checkVersion: false,
     showVersions: false,
     suggestVersion: false,
+    assistedByAi: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -87,6 +88,10 @@ function parseArgs(argv) {
     }
     if (token === "--suggest-version") {
       args.suggestVersion = true;
+      continue;
+    }
+    if (token === "--assisted-by-ai") {
+      args.assistedByAi = true;
       continue;
     }
 
@@ -193,6 +198,11 @@ function updateTauriVersion(nextVersion) {
   writeFileSync(TAURI_CONF_PATH, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
 }
 
+export function releaseCommitCommand(tagName, args) {
+  const assistedByAiTrailer = args.assistedByAi ? ' -m "Assisted-by: AI"' : "";
+  return `git commit -s -m "release: ${tagName}"${assistedByAiTrailer}`;
+}
+
 function assertVersionOrdering(nextVersion, currentTauriVersion, latestRemoteTagVersion) {
   if (compareSemver(nextVersion, currentTauriVersion) <= 0) {
     fail(
@@ -265,7 +275,7 @@ function main() {
     info(`Would run: git pull --ff-only origin ${args.target}`);
     info(`Would update: src-tauri/tauri.conf.json version -> ${version}`);
     info(`Would run: git add src-tauri/tauri.conf.json`);
-    info(`Would run: git commit -m "release: ${tagName}"`);
+    info(`Would run: ${releaseCommitCommand(tagName, args)}`);
     if (!args.noPush) {
       info(`Would run: git push origin ${args.target}`);
     }
@@ -282,7 +292,7 @@ function main() {
   updateTauriVersion(version);
 
   runInherit("git add src-tauri/tauri.conf.json");
-  runInherit(`git commit -m "release: ${tagName}"`);
+  runInherit(releaseCommitCommand(tagName, args));
 
   if (!args.noPush) {
     runInherit(`git push origin ${args.target}`);
@@ -297,4 +307,6 @@ function main() {
   info(`Release created: ${tagName}`);
 }
 
-main();
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main();
+}

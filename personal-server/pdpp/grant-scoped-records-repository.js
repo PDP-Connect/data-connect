@@ -67,21 +67,29 @@ export const GITHUB_STREAMS = Object.freeze({
 })
 
 /**
- * Turn the hash-verified installed profile into the repository's narrow
- * record contract. We deliberately support the profile's declared GitHub
+ * Turn the hash-verified selected profile into the repository's narrow
+ * record contract. We deliberately support only the profile's declared
  * streams, not an independently-maintained stream-name list.
  */
-export function createGithubStreamMetadata(manifest) {
+export function createStreamMetadata(manifest) {
   if (!isPlainObject(manifest) || !Array.isArray(manifest.streams)) {
-    throw new TypeError("Installed GitHub manifest must declare streams")
+    throw new TypeError("Installed connector manifest must declare streams")
   }
   const streams = {}
   for (const stream of manifest.streams) {
-    if (!isPlainObject(stream) || typeof stream.name !== "string" || !stream.name) {
-      throw new TypeError("Installed GitHub manifest stream must have a name")
+    if (
+      !isPlainObject(stream) ||
+      typeof stream.name !== "string" ||
+      !stream.name
+    ) {
+      throw new TypeError(
+        "Installed connector manifest stream must have a name"
+      )
     }
     if (Object.hasOwn(streams, stream.name)) {
-      throw new TypeError(`Installed GitHub manifest has duplicate stream '${stream.name}'`)
+      throw new TypeError(
+        `Installed connector manifest has duplicate stream '${stream.name}'`
+      )
     }
     const schema = stream.schema
     const properties = schema?.properties
@@ -93,14 +101,17 @@ export function createGithubStreamMetadata(manifest) {
       !Array.isArray(stream.primary_key) ||
       stream.primary_key.length !== 1 ||
       stream.primary_key[0] !== "id" ||
-      !requiredFields.includes("id")
+      !requiredFields.includes("id") ||
+      typeof stream.cursor_field !== "string"
     ) {
       throw new TypeError(
-        `Installed GitHub stream '${stream.name}' has an unsupported record contract`
+        `Installed connector stream '${stream.name}' has an unsupported record contract`
       )
     }
     const fields = Object.keys(properties)
-    const timingFields = [stream.cursor_field, stream.consent_time_field]
+    const timingFields = [stream.cursor_field]
+    if (stream.consent_time_field !== undefined)
+      timingFields.push(stream.consent_time_field)
     if (
       timingFields.some(
         field =>
@@ -108,11 +119,13 @@ export function createGithubStreamMetadata(manifest) {
           !fields.includes(field) ||
           !["date", "date-time"].includes(properties[field]?.format)
       ) ||
-      requiredFields.some(field => typeof field !== "string" || !fields.includes(field)) ||
+      requiredFields.some(
+        field => typeof field !== "string" || !fields.includes(field)
+      ) ||
       fields.some(field => !validSchemaProperty(properties[field]))
     ) {
       throw new TypeError(
-        `Installed GitHub stream '${stream.name}' has an unsupported record contract`
+        `Installed connector stream '${stream.name}' has an unsupported record contract`
       )
     }
     streams[stream.name] = Object.freeze({
@@ -121,7 +134,10 @@ export function createGithubStreamMetadata(manifest) {
       consentTimeField: stream.consent_time_field,
       fields,
       fieldTypes: Object.fromEntries(
-        fields.map(field => [field, normalizeSchemaTypes(properties[field].type)])
+        fields.map(field => [
+          field,
+          normalizeSchemaTypes(properties[field].type),
+        ])
       ),
       fieldFormats: Object.fromEntries(
         fields.map(field => [field, properties[field].format ?? null])
@@ -130,6 +146,9 @@ export function createGithubStreamMetadata(manifest) {
   }
   return Object.freeze(streams)
 }
+
+/** GitHub-named export retained for existing callers and tests. */
+export const createGithubStreamMetadata = createStreamMetadata
 
 function validSchemaProperty(property) {
   return (
@@ -143,7 +162,17 @@ function validSchemaProperty(property) {
 
 function normalizeSchemaTypes(value) {
   const types = Array.isArray(value) ? value : [value]
-  return types.every(type => ["string", "integer", "number", "boolean", "array", "object", "null"].includes(type))
+  return types.every(type =>
+    [
+      "string",
+      "integer",
+      "number",
+      "boolean",
+      "array",
+      "object",
+      "null",
+    ].includes(type)
+  )
     ? types
     : []
 }
@@ -217,18 +246,24 @@ export class GrantScopedRecordsRepository {
   }
 
   upsert({ connectionId, stream, key, data, emittedAt = this.#now() }) {
-    const identity = validateLiveRecord({
-      connectionId,
-      stream,
-      key,
-      data,
-      emittedAt,
-    }, this.#streamMetadata)
+    const identity = validateLiveRecord(
+      {
+        connectionId,
+        stream,
+        key,
+        data,
+        emittedAt,
+      },
+      this.#streamMetadata
+    )
     return this.#mutate(identity, "upsert")
   }
 
   delete({ connectionId, stream, key, emittedAt = this.#now() }) {
-    const identity = validateDelete({ connectionId, stream, key, emittedAt }, this.#streamMetadata)
+    const identity = validateDelete(
+      { connectionId, stream, key, emittedAt },
+      this.#streamMetadata
+    )
     return this.#mutate(identity, "delete")
   }
 
@@ -245,7 +280,11 @@ export class GrantScopedRecordsRepository {
         "recordsByStream must be an object"
       )
     }
-    const snapshotMetadata = validateSnapshotMetadata(snapshot, recordsByStream, this.#streamMetadata)
+    const snapshotMetadata = validateSnapshotMetadata(
+      snapshot,
+      recordsByStream,
+      this.#streamMetadata
+    )
 
     const apply = this.#db.transaction(() => {
       const results = []
@@ -269,24 +308,30 @@ export class GrantScopedRecordsRepository {
           }
           const op = envelope.op ?? "upsert"
           if (op === "upsert") {
-            const record = validateLiveRecord({
-              connectionId,
-              stream,
-              key: envelope.key,
-              data: envelope.data,
-              emittedAt: envelope.emitted_at,
-            }, this.#streamMetadata)
+            const record = validateLiveRecord(
+              {
+                connectionId,
+                stream,
+                key: envelope.key,
+                data: envelope.data,
+                emittedAt: envelope.emitted_at,
+              },
+              this.#streamMetadata
+            )
             observedKeysByResetStream.get(stream)?.add(record.key)
             results.push(this.#mutateInTransaction(record, "upsert"))
           } else if (op === "delete") {
             results.push(
               this.#mutateInTransaction(
-                validateDelete({
-                  connectionId,
-                  stream,
-                  key: envelope.key,
-                  emittedAt: envelope.emitted_at,
-                }, this.#streamMetadata),
+                validateDelete(
+                  {
+                    connectionId,
+                    stream,
+                    key: envelope.key,
+                    emittedAt: envelope.emitted_at,
+                  },
+                  this.#streamMetadata
+                ),
                 "delete"
               )
             )
@@ -315,7 +360,12 @@ export class GrantScopedRecordsRepository {
 
   getCurrent({ connectionId, stream, key, grant }) {
     validateLocation({ connectionId, stream, key }, this.#streamMetadata)
-    const effectiveGrant = normalizeGrant(stream, grant, undefined, this.#streamMetadata)
+    const effectiveGrant = normalizeGrant(
+      stream,
+      grant,
+      undefined,
+      this.#streamMetadata
+    )
     const row = this.#db
       .prepare(
         `
@@ -331,7 +381,12 @@ export class GrantScopedRecordsRepository {
 
   summarizeCurrent({ connectionId, stream, grant }) {
     validateLocation({ connectionId, stream }, this.#streamMetadata)
-    const effectiveGrant = normalizeGrant(stream, grant, undefined, this.#streamMetadata)
+    const effectiveGrant = normalizeGrant(
+      stream,
+      grant,
+      undefined,
+      this.#streamMetadata
+    )
     const metadata = this.#streamMetadata[stream]
     const visible = this.#db
       .prepare(
@@ -343,17 +398,26 @@ export class GrantScopedRecordsRepository {
       )
       .all(connectionId, stream)
       .map(row => {
-        const record = discloseLiveRow(row, stream, effectiveGrant, this.#streamMetadata)
+        const record = discloseLiveRow(
+          row,
+          stream,
+          effectiveGrant,
+          this.#streamMetadata
+        )
         return record === null
           ? null
-          : { cursorValue: JSON.parse(row.payload)[metadata.cursorField], record }
+          : {
+              cursorValue: JSON.parse(row.payload)[metadata.cursorField],
+              record,
+            }
       })
       .filter(entry => entry !== null)
-    const updated = visible
-      .map(entry => entry.cursorValue)
-      .filter(value => typeof value === "string")
-      .sort()
-      .at(-1) ?? null
+    const updated =
+      visible
+        .map(entry => entry.cursorValue)
+        .filter(value => typeof value === "string")
+        .sort()
+        .at(-1) ?? null
     return { record_count: visible.length, last_updated: updated }
   }
 
@@ -370,7 +434,12 @@ export class GrantScopedRecordsRepository {
     validateLocation({ connectionId, stream }, this.#streamMetadata)
     const normalizedLimit = normalizeLimit(limit)
     const normalizedOrder = normalizeOrder(order)
-    const effectiveGrant = normalizeGrant(stream, grant, fields, this.#streamMetadata)
+    const effectiveGrant = normalizeGrant(
+      stream,
+      grant,
+      fields,
+      this.#streamMetadata
+    )
     const pageCursor = cursor
       ? decodeCurrentCursor(cursor, connectionId, stream, normalizedOrder)
       : null
@@ -386,15 +455,21 @@ export class GrantScopedRecordsRepository {
 
     const visible = rows
       .map(row => {
-        const record = discloseLiveRow(row, stream, effectiveGrant, this.#streamMetadata)
+        const record = discloseLiveRow(
+          row,
+          stream,
+          effectiveGrant,
+          this.#streamMetadata
+        )
         return record === null
           ? null
           : {
               record,
               key: row.record_key,
               cursorValue:
-                JSON.parse(row.payload)[this.#streamMetadata[stream].cursorField] ??
-                null,
+                JSON.parse(row.payload)[
+                  this.#streamMetadata[stream].cursorField
+                ] ?? null,
             }
       })
       .filter(
@@ -444,7 +519,12 @@ export class GrantScopedRecordsRepository {
   }) {
     validateLocation({ connectionId, stream }, this.#streamMetadata)
     const normalizedLimit = normalizeLimit(limit)
-    const effectiveGrant = normalizeGrant(stream, grant, undefined, this.#streamMetadata)
+    const effectiveGrant = normalizeGrant(
+      stream,
+      grant,
+      undefined,
+      this.#streamMetadata
+    )
     const session = cursor
       ? decodeChangesCursor(cursor, connectionId, stream)
       : this.#startChangesSession(connectionId, stream, changesSince)
@@ -655,7 +735,10 @@ export class GrantScopedRecordsRepository {
       .filter(key => !presentKeys.has(key))
       .map(key =>
         this.#mutateInTransaction(
-          validateDelete({ connectionId, stream, key, emittedAt }, this.#streamMetadata),
+          validateDelete(
+            { connectionId, stream, key, emittedAt },
+            this.#streamMetadata
+          ),
           "delete"
         )
       )
@@ -773,7 +856,9 @@ export class GrantScopedRecordsRepository {
       change.record_key,
       sinceVersion
     )
-    const beforeRecord = before ? discloseSnapshot(before, stream, grant, this.#streamMetadata) : null
+    const beforeRecord = before
+      ? discloseSnapshot(before, stream, grant, this.#streamMetadata)
+      : null
     const afterRecord = change.deleted
       ? null
       : discloseSnapshot(change, stream, grant, this.#streamMetadata)
@@ -807,7 +892,10 @@ export class GrantScopedRecordsRepository {
   }
 }
 
-function validateLiveRecord({ connectionId, stream, key, data, emittedAt }, streams) {
+function validateLiveRecord(
+  { connectionId, stream, key, data, emittedAt },
+  streams
+) {
   validateLocation({ connectionId, stream, key }, streams)
   if (!isPlainObject(data))
     throw new RecordsRepositoryError(
@@ -816,7 +904,12 @@ function validateLiveRecord({ connectionId, stream, key, data, emittedAt }, stre
     )
   const metadata = requireStream(stream, streams)
   for (const field of metadata.requiredFields) {
-    if (!matchesSchemaType(data[field], metadata.fieldTypes?.[field] ?? ["string"])) {
+    if (
+      !matchesSchemaType(
+        data[field],
+        metadata.fieldTypes?.[field] ?? ["string"]
+      )
+    ) {
       throw new RecordsRepositoryError(
         "invalid_record",
         `Stream '${stream}' requires a valid '${field}'`
@@ -829,7 +922,13 @@ function validateLiveRecord({ connectionId, stream, key, data, emittedAt }, stre
       "Record key must equal data.id"
     )
   }
-  if (!validTemporalValue(data[metadata.consentTimeField], metadata.fieldFormats?.[metadata.consentTimeField] ?? "date-time")) {
+  if (
+    metadata.consentTimeField &&
+    !validTemporalValue(
+      data[metadata.consentTimeField],
+      metadata.fieldFormats?.[metadata.consentTimeField] ?? "date-time"
+    )
+  ) {
     throw new RecordsRepositoryError(
       "invalid_record",
       `Stream '${stream}' requires a valid '${metadata.consentTimeField}' timestamp`
@@ -837,7 +936,10 @@ function validateLiveRecord({ connectionId, stream, key, data, emittedAt }, stre
   }
   if (
     data[metadata.cursorField] != null &&
-    !validTemporalValue(data[metadata.cursorField], metadata.fieldFormats?.[metadata.cursorField] ?? "date-time")
+    !validTemporalValue(
+      data[metadata.cursorField],
+      metadata.fieldFormats?.[metadata.cursorField] ?? "date-time"
+    )
   ) {
     throw new RecordsRepositoryError(
       "invalid_record",
@@ -990,6 +1092,12 @@ function normalizeGrant(stream, grant = {}, requestedFields, streams) {
       ? null
       : normalizeStringList(grant.resources, "grant.resources")
   const timeRange = grant.timeRange ?? grant.time_range
+  if (timeRange !== undefined && !metadata.consentTimeField) {
+    throw new RecordsRepositoryError(
+      "invalid_request",
+      `Stream '${stream}' does not support time_range`
+    )
+  }
   if (
     timeRange !== undefined &&
     (!isPlainObject(timeRange) ||
@@ -1039,6 +1147,7 @@ function discloseSnapshot(row, stream, grant, streams) {
   const metadata = requireStream(stream, streams)
   if (grant.resources && !grant.resources.includes(data.id)) return null
   const time = data[metadata.consentTimeField]
+  if (grant.timeRange && time == null) return null
   if (
     grant.timeRange?.since &&
     Date.parse(time) < Date.parse(grant.timeRange.since)
@@ -1054,7 +1163,9 @@ function discloseSnapshot(row, stream, grant, streams) {
   )
   const projected = grant.fields
     ? Object.fromEntries(
-        Object.entries(manifestData).filter(([field]) => grant.fields.includes(field))
+        Object.entries(manifestData).filter(([field]) =>
+          grant.fields.includes(field)
+        )
       )
     : manifestData
   return {
@@ -1123,9 +1234,14 @@ function compareCurrentRows(left, right, order) {
 
 function matchesSchemaType(value, types) {
   if (value === null) return types.includes("null")
-  if (typeof value === "string") return types.includes("string") && value.length > 0
+  if (typeof value === "string")
+    return types.includes("string") && value.length > 0
   if (typeof value === "number")
-    return (types.includes("number") || (Number.isInteger(value) && types.includes("integer"))) && Number.isFinite(value)
+    return (
+      (types.includes("number") ||
+        (Number.isInteger(value) && types.includes("integer"))) &&
+      Number.isFinite(value)
+    )
   if (typeof value === "boolean") return types.includes("boolean")
   if (Array.isArray(value)) return types.includes("array")
   return isPlainObject(value) && types.includes("object")
@@ -1133,7 +1249,12 @@ function matchesSchemaType(value, types) {
 
 function validTemporalValue(value, format) {
   if (value == null) return false
-  if (format === "date") return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+  if (format === "date")
+    return (
+      typeof value === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+      !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+    )
   return isIsoTimestamp(value)
 }
 

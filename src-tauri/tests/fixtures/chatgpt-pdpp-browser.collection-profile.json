@@ -1,0 +1,73 @@
+{
+  "connector_id": "https://registry.pdpp.org/connectors/chatgpt",
+  "connector_key": "chatgpt",
+  "display_name": "ChatGPT",
+  "version": "0.1.0",
+  "setup": {
+    "modality": "static_secret",
+    "credential_capture": {
+      "fields": [
+        {
+          "name": "username",
+          "label": "ChatGPT email",
+          "type": "email",
+          "required": true,
+          "secret": true,
+          "autocomplete": "username",
+          "placeholder": "you@example.com",
+          "env": ["CHATGPT_USERNAME"]
+        },
+        {
+          "name": "password",
+          "label": "ChatGPT password",
+          "type": "password",
+          "required": true,
+          "secret": true,
+          "autocomplete": "current-password",
+          "env": ["CHATGPT_PASSWORD"]
+        }
+      ]
+    }
+  },
+  "runtime_requirements": {
+    "bindings": {
+      "network": { "required": true },
+      "browser": { "required": true }
+    }
+  },
+  "streams": [
+    {
+      "name": "conversations",
+      "schema": {
+        "type": "object",
+        "required": ["id"]
+      }
+    },
+    {
+      "name": "messages",
+      "schema": {
+        "type": "object",
+        "required": ["id", "conversation_id"]
+      }
+    },
+    {
+      "name": "memories",
+      "schema": {
+        "type": "object",
+        "required": ["id", "content"]
+      }
+    },
+    {
+      "name": "custom_gpts",
+      "schema": { "type": "object", "required": ["id"] }
+    },
+    {
+      "name": "custom_instructions",
+      "schema": { "type": "object", "required": ["id"] }
+    },
+    {
+      "name": "shared_conversations",
+      "schema": { "type": "object", "required": ["id"] }
+    }
+  ]
+}

@@ -13,7 +13,10 @@ use commands::{
     load_source_export_preview_from_path, mark_export_synced,
     open_folder, open_personal_server_scope_folder, open_platform_export_folder, set_app_config,
     start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
-    stop_connector_run, stop_installed_pdpp_connector_run, stop_personal_server, test_nodejs,
+    is_installed_pdpp_browser_setup_complete, reset_installed_pdpp_browser_profile,
+    stop_connector_run, stop_installed_pdpp_connector_run,
+    submit_installed_pdpp_interaction_response,
+    stop_personal_server, test_nodejs,
     write_export_data,
 };
 use tauri::{Listener, Manager};
@@ -78,6 +81,9 @@ pub fn run() {
             start_connector_run,
             start_installed_pdpp_connector_run,
             stop_installed_pdpp_connector_run,
+            reset_installed_pdpp_browser_profile,
+            is_installed_pdpp_browser_setup_complete,
+            submit_installed_pdpp_interaction_response,
             stop_connector_run,
             check_connected_platforms,
             check_browser_available,

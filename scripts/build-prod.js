@@ -20,6 +20,7 @@ import { existsSync, cpSync, readdirSync, mkdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { nativeTauriTarget, stagePdppNode } from './stage-pdpp-node.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -72,6 +73,10 @@ function findAppBundle() {
 async function build() {
   log('Building DataConnect for production...');
 
+  // Keep local production builds on the same fail-closed Node 22 sidecar
+  // contract as the release workflow.
+  stagePdppNode({ ...nativeTauriTarget(PLAT, arch()), projectRoot: ROOT });
+
   // 1. Install playwright-runner dependencies
   log('Installing playwright-runner dependencies...');
   exec('npm install', { cwd: PLAYWRIGHT_RUNNER });
@@ -89,7 +94,11 @@ async function build() {
   log('Installing personal-server dependencies...');
   exec('npm install', { cwd: PERSONAL_SERVER });
 
-  // 4. Build personal-server binary
+  // 4. Install PDPP runtime dependencies that Tauri packages as resources
+  log('Installing PDPP runtime dependencies...');
+  exec('node scripts/ensure-pdpp-runtime.js');
+
+  // 5. Build personal-server binary
   log('Building personal-server binary...');
   exec('npm run build', { cwd: PERSONAL_SERVER });
 
@@ -98,7 +107,7 @@ async function build() {
     throw new Error('personal-server build failed - dist directory not found');
   }
 
-  // 5. Build frontend
+  // 6. Build frontend
   log('Building frontend...');
   exec('npm run build');
 
@@ -111,14 +120,14 @@ async function build() {
     return;
   }
 
-  // 6. Build the .app bundle only (no DMG).
+  // 7. Build the .app bundle only (no DMG).
   // Tauri's resource glob flattens directory structures, so node_modules/
   // can't be included via tauri.conf.json. We build .app first, inject
   // node_modules, then create the DMG ourselves.
   log('Building Tauri .app bundle...');
   exec('npx tauri build --bundles app');
 
-  // 7. Inject personal-server native addons into the .app bundle.
+  // 8. Inject personal-server native addons into the .app bundle.
   const appPath = findAppBundle();
   if (!appPath) {
     throw new Error('.app bundle not found after build');
@@ -126,7 +135,7 @@ async function build() {
   log(`Injecting native addons into ${appPath}...`);
   copyNativeModulesIntoApp(appPath);
 
-  // 8. Create DMG from the complete .app.
+  // 9. Create DMG from the complete .app.
   if (PLAT === 'darwin') {
     const version = getVersion();
     const archName = arch() === 'arm64' ? 'aarch64' : 'x64';

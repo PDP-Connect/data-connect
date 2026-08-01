@@ -15,6 +15,7 @@
     "wholefoods-playwright": "1.0.0",
     "youtube-playwright": "1.0.0",
     "claude-export-playwright": "2.0.1",
+    "chatgpt-pdpp": "0.1.0",
     "github-pdpp": "0.5.0"
   }
 }

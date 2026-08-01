@@ -7,6 +7,8 @@ import {
   useState,
 } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
+import { invoke } from "@tauri-apps/api/core"
+import { listen } from "@tauri-apps/api/event"
 import { useSelector } from "react-redux"
 import { usePlatforms } from "@/hooks/usePlatforms"
 import { useConnector } from "@/hooks/useConnector"
@@ -46,6 +48,14 @@ import {
   resolveHomeImportSourcesUiDebugState,
 } from "./home-import-sources-ui-debug"
 
+type PendingPdppInteraction = {
+  runId: string
+  requestId: string
+  kind: string
+  message: string
+  schema?: { properties?: Record<string, unknown> } | null
+}
+
 export function Home() {
   const homeDebugScenarioLabel: Record<string, string> = {
     "blocking-waiting": "blocking-waiting",
@@ -67,6 +77,21 @@ export function Home() {
   const [githubTokenDialogPlatform, setGithubTokenDialogPlatform] =
     useState<Platform | null>(null)
   const [githubTokenInput, setGithubTokenInput] = useState("")
+  const [chatgptSetupDialogPlatform, setChatgptSetupDialogPlatform] =
+    useState<Platform | null>(null)
+  const [chatgptUsernameInput, setChatgptUsernameInput] = useState("")
+  const [chatgptPasswordInput, setChatgptPasswordInput] = useState("")
+  const [pendingInteraction, setPendingInteraction] =
+    useState<PendingPdppInteraction | null>(null)
+  const [interactionInput, setInteractionInput] = useState("")
+  const chatgptSetupFields =
+    chatgptSetupDialogPlatform?.setup?.credentialCapture.fields ?? []
+  const chatgptUsernameField = chatgptSetupFields.find(
+    field => field.name === "username"
+  )
+  const chatgptPasswordField = chatgptSetupFields.find(
+    field => field.name === "password"
+  )
   const knownSuccessfulRunIdsRef = useRef<Set<string> | null>(null)
   const homeUiDebugEnabled = useMemo(
     () => isHomeImportSourcesDebugEnabled(location.search),
@@ -108,13 +133,42 @@ export function Home() {
     }
   }, [refreshConnectedStatus, runs])
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<PendingPdppInteraction>("pdpp-interaction", event => {
+      setInteractionInput("")
+      setPendingInteraction(event.payload)
+    }).then(listener => {
+      unlisten = listener
+    })
+    return () => unlisten?.()
+  }, [])
+
+  useEffect(() => {
+    if (
+      pendingInteraction &&
+      !runs.some(
+        run => run.id === pendingInteraction.runId && run.status === "running"
+      )
+    ) {
+      setInteractionInput("")
+      setPendingInteraction(null)
+    }
+  }, [pendingInteraction, runs])
+
   const runImportSource = useCallback(
-    async (platform: Platform, githubToken?: string) => {
+    async (
+      platform: Platform,
+      options?: {
+        githubToken?: string
+        setupSecrets?: { username: string; password: string }
+      }
+    ) => {
       try {
-        if (githubToken === undefined) {
+        if (options === undefined) {
           await startImport(platform)
         } else {
-          await startImport(platform, { githubToken })
+          await startImport(platform, options)
         }
       } catch (error) {
         console.error("Import failed:", error)
@@ -128,6 +182,32 @@ export function Home() {
       if (platform.id === "github-pdpp") {
         setGithubTokenInput("")
         setGithubTokenDialogPlatform(platform)
+        return
+      }
+      if (
+        platform.id === "chatgpt-pdpp" &&
+        platform.setup?.modality === "static_secret"
+      ) {
+        void invoke<boolean>("is_installed_pdpp_browser_setup_complete", {
+          connectorId: platform.id,
+          connectionId: "chatgpt-pdpp-owner",
+        })
+          .then(setupComplete => {
+            if (setupComplete) {
+              void runImportSource(platform)
+              return
+            }
+            setChatgptUsernameInput("")
+            setChatgptPasswordInput("")
+            setChatgptSetupDialogPlatform(platform)
+          })
+          // A missing marker is the safe fallback for a failed or older host:
+          // show first-setup recovery rather than accidentally sending no auth.
+          .catch(() => {
+            setChatgptUsernameInput("")
+            setChatgptPasswordInput("")
+            setChatgptSetupDialogPlatform(platform)
+          })
         return
       }
 
@@ -149,12 +229,40 @@ export function Home() {
       if (!platform || !githubToken) return
 
       closeGithubTokenDialog()
-      void runImportSource(platform, githubToken)
+      void runImportSource(platform, { githubToken })
     },
     [
       closeGithubTokenDialog,
       githubTokenDialogPlatform,
       githubTokenInput,
+      runImportSource,
+    ]
+  )
+
+  const closeChatgptSetupDialog = useCallback(() => {
+    setChatgptSetupDialogPlatform(null)
+    setChatgptUsernameInput("")
+    setChatgptPasswordInput("")
+  }, [])
+
+  const submitChatgptSetup = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const platform = chatgptSetupDialogPlatform
+      const username = chatgptUsernameInput.trim()
+      const password = chatgptPasswordInput
+      if (!platform || !username || !password) return
+
+      closeChatgptSetupDialog()
+      void runImportSource(platform, {
+        setupSecrets: { username, password },
+      })
+    },
+    [
+      chatgptPasswordInput,
+      chatgptSetupDialogPlatform,
+      chatgptUsernameInput,
+      closeChatgptSetupDialog,
       runImportSource,
     ]
   )
@@ -168,6 +276,54 @@ export function Home() {
       }
     },
     [stopExport]
+  )
+
+  const handleReconnectSource = useCallback(
+    async (platform: Platform) => {
+      if (platform.id !== "chatgpt-pdpp") return
+      try {
+        await invoke("reset_installed_pdpp_browser_profile", {
+          connectorId: platform.id,
+          connectionId: "chatgpt-pdpp-owner",
+        })
+        // The reset clears the non-secret setup marker. Re-enter the normal
+        // setup gate so an expired session gets owner-attended recovery.
+        handleImportSource(platform)
+      } catch (error) {
+        console.error("Failed to reset ChatGPT browser session:", error)
+      }
+    },
+    [handleImportSource]
+  )
+
+  const respondToPendingInteraction = useCallback(
+    async (status: "success" | "cancelled") => {
+      const interaction = pendingInteraction
+      if (!interaction) return
+      const fields = Object.keys(interaction.schema?.properties ?? {})
+      const requiresVerificationCode = interaction.kind === "otp"
+      const data =
+        status === "success" && requiresVerificationCode
+          ? { code: interactionInput }
+          : status === "success" && fields.length > 0
+            ? { [fields[0]]: interactionInput }
+          : undefined
+      try {
+        await invoke("submit_installed_pdpp_interaction_response", {
+          runId: interaction.runId,
+          requestId: interaction.requestId,
+          status,
+          data,
+        })
+      } catch (error) {
+        console.error("Failed to submit connector interaction:", error)
+      } finally {
+        // OTP/recovery input is never promoted into Redux, logs, or storage.
+        setInteractionInput("")
+        setPendingInteraction(null)
+      }
+    },
+    [interactionInput, pendingInteraction]
   )
 
   const handleTestDeepLink = useCallback(() => {
@@ -303,6 +459,7 @@ export function Home() {
           headline="Your imported data"
           onOpenRuns={handleOpenRuns}
           onSyncSource={handleImportSource}
+          onReconnectSource={handleReconnectSource}
         />
         <AvailableSourcesList
           platforms={homeImportSourcesDebug.platforms}
@@ -366,6 +523,131 @@ export function Home() {
               </Button>
             </AlertDialogFooter>
           </form>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(chatgptSetupDialogPlatform)}
+        onOpenChange={open => {
+          if (!open) closeChatgptSetupDialog()
+        }}
+      >
+        <AlertDialogContent size="sm" className="max-w-[380px]!">
+          <form onSubmit={submitChatgptSetup} className="grid gap-4">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="w-full text-left">
+                Connect ChatGPT
+              </AlertDialogTitle>
+              <AlertDialogDescription className="text-left">
+                Use these only for initial setup or owner-mediated recovery.
+                DataConnect passes them only to this run and does not save them.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="chatgpt-pdpp-username"
+                className="text-xs font-medium text-foreground"
+              >
+                {chatgptUsernameField?.label ?? "ChatGPT email"}
+              </label>
+              <Input
+                id="chatgpt-pdpp-username"
+                type={chatgptUsernameField?.type ?? "email"}
+                autoComplete={chatgptUsernameField?.autocomplete ?? "username"}
+                value={chatgptUsernameInput}
+                onChange={event => setChatgptUsernameInput(event.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="chatgpt-pdpp-password"
+                className="text-xs font-medium text-foreground"
+              >
+                {chatgptPasswordField?.label ?? "ChatGPT password"}
+              </label>
+              <Input
+                id="chatgpt-pdpp-password"
+                type="password"
+                autoComplete={
+                  chatgptPasswordField?.autocomplete ?? "current-password"
+                }
+                value={chatgptPasswordInput}
+                onChange={event => setChatgptPasswordInput(event.target.value)}
+              />
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel
+                type="button"
+                size="sm"
+                onClick={closeChatgptSetupDialog}
+              >
+                Cancel
+              </AlertDialogCancel>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={!chatgptUsernameInput.trim() || !chatgptPasswordInput}
+              >
+                Start owner-attended sync
+              </Button>
+            </AlertDialogFooter>
+          </form>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(pendingInteraction)}>
+        <AlertDialogContent size="sm" className="max-w-[380px]!">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="w-full text-left">
+              ChatGPT needs your attention
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-left">
+              {pendingInteraction?.message}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {pendingInteraction?.kind === "otp" ||
+          Object.keys(pendingInteraction?.schema?.properties ?? {}).length > 0 ? (
+            <div className="grid gap-1.5">
+              <label
+                htmlFor="pdpp-interaction-input"
+                className="text-xs font-medium text-foreground"
+              >
+                Verification code
+              </label>
+              <Input
+                id="pdpp-interaction-input"
+                type="password"
+                autoComplete="one-time-code"
+                value={interactionInput}
+                onChange={event => setInteractionInput(event.target.value)}
+                autoFocus
+              />
+            </div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              type="button"
+              size="sm"
+              onClick={() => void respondToPendingInteraction("cancelled")}
+            >
+              Cancel run
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              size="sm"
+              disabled={
+                (pendingInteraction?.kind === "otp" ||
+                  Object.keys(
+                    pendingInteraction?.schema?.properties ?? {}
+                  ).length > 0) &&
+                !interactionInput
+              }
+              onClick={() => void respondToPendingInteraction("success")}
+            >
+              Continue
+            </Button>
+          </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 

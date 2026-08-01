@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,7 +35,6 @@ pub struct PdppStart {
     pub collection_mode: String,
     pub scope: Value,
     pub state: Option<Value>,
-    pub bindings: Value,
 }
 
 impl PdppStart {
@@ -44,7 +43,6 @@ impl PdppStart {
         collection_mode: impl Into<String>,
         scope: Value,
         state: Option<Value>,
-        bindings: Value,
     ) -> Result<Self, String> {
         let start = Self {
             message_type: "START",
@@ -52,7 +50,6 @@ impl PdppStart {
             collection_mode: collection_mode.into(),
             scope,
             state,
-            bindings,
         };
         start.validate()?;
         Ok(start)
@@ -68,9 +65,6 @@ impl PdppStart {
         ) {
             return Err("PDPP START collection_mode must be full_refresh or incremental".into());
         }
-        if !self.bindings.is_object() {
-            return Err("PDPP START bindings must be an object".into());
-        }
         Ok(())
     }
 }
@@ -84,6 +78,112 @@ pub struct PdppScopeValidators {
 }
 
 pub type PdppEventSink = Arc<dyn Fn(PdppEvent) -> Result<(), String> + Send + Sync>;
+/// Delivers one connector interaction together with the only responder that
+/// can answer it. The responder is bound to this kernel run and interaction
+/// generation, so a delayed callback cannot answer a later interaction.
+pub type PdppInteractionSink = Arc<
+    dyn for<'interaction> Fn(
+            &'interaction PdppInteraction,
+            PdppInteractionResponder,
+        ) -> Result<(), String>
+        + Send
+        + Sync,
+>;
+/// Notifies a host that a pending interaction can no longer accept a response.
+/// Hosts use this to remove any owner-visible responder before a late command
+/// can report success after cancellation, timeout, or protocol failure.
+pub type PdppInteractionClosedSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+const DEFAULT_INTERACTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MIN_INTERACTION_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_INTERACTION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdppInteractionResponseStatus {
+    Success,
+    Cancelled,
+    Timeout,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PdppInteractionResponse {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    pub request_id: String,
+    pub status: PdppInteractionResponseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl PdppInteractionResponse {
+    fn new(
+        request_id: impl Into<String>,
+        status: PdppInteractionResponseStatus,
+        data: Option<Value>,
+    ) -> Result<Self, String> {
+        let response = Self {
+            message_type: "INTERACTION_RESPONSE",
+            request_id: request_id.into(),
+            status,
+            data,
+        };
+        response.validate()?;
+        Ok(response)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.request_id.is_empty() {
+            return Err("PDPP INTERACTION_RESPONSE requires a non-empty request_id".into());
+        }
+        if self.data.as_ref().is_some_and(|data| !data.is_object()) {
+            return Err("PDPP INTERACTION_RESPONSE data must be an object".into());
+        }
+        if !matches!(self.status, PdppInteractionResponseStatus::Success) && self.data.is_some() {
+            return Err("PDPP INTERACTION_RESPONSE data is only allowed for success".into());
+        }
+        Ok(())
+    }
+}
+
+/// A one-shot, run-bound response channel. The JSONL envelope deliberately
+/// contains no run_id (the Collection Profile contract keys it by
+/// request_id); `run_id()` is exposed only for host-side ownership checks.
+#[derive(Clone)]
+pub struct PdppInteractionResponder {
+    run_id: String,
+    request_id: String,
+    generation: u64,
+    sent: Arc<AtomicBool>,
+    sender: mpsc::Sender<PendingInteractionResponse>,
+}
+
+impl PdppInteractionResponder {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn respond(
+        &self,
+        status: PdppInteractionResponseStatus,
+        data: Option<Value>,
+    ) -> Result<(), String> {
+        let response = PdppInteractionResponse::new(self.request_id.clone(), status, data)?;
+        if self.sent.swap(true, Ordering::SeqCst) {
+            return Err("PDPP INTERACTION responder was already used".into());
+        }
+        self.sender
+            .send(PendingInteractionResponse {
+                generation: self.generation,
+                response,
+            })
+            .map_err(|_| "PDPP INTERACTION run is no longer active".to_string())
+    }
+}
 
 #[derive(Clone)]
 pub struct PdppRunOptions {
@@ -95,6 +195,11 @@ pub struct PdppRunOptions {
     pub max_retained_records: usize,
     pub max_retained_events: usize,
     pub on_event: Option<PdppEventSink>,
+    /// Browser-capable hosts can surface an interaction to the user while the
+    /// connector remains alive. Network-only hosts deliberately leave this
+    /// unset and retain the prior fail-closed behavior.
+    pub on_interaction: Option<PdppInteractionSink>,
+    pub on_interaction_closed: Option<PdppInteractionClosedSink>,
 }
 
 impl Default for PdppRunOptions {
@@ -108,6 +213,8 @@ impl Default for PdppRunOptions {
             max_retained_records: 0,
             max_retained_events: 32,
             on_event: None,
+            on_interaction: None,
+            on_interaction_closed: None,
         }
     }
 }
@@ -278,6 +385,69 @@ enum Line {
     End,
 }
 
+struct PendingInteractionResponse {
+    generation: u64,
+    response: PdppInteractionResponse,
+}
+
+struct PendingInteraction {
+    generation: u64,
+    request_id: String,
+    deadline: Instant,
+}
+
+fn interaction_deadline_elapsed(pending: &PendingInteraction, now: Instant) -> bool {
+    now >= pending.deadline
+}
+
+fn close_pending_interaction(
+    options: &PdppRunOptions,
+    run_id: &str,
+    pending: PendingInteraction,
+) -> PendingInteraction {
+    if let Some(on_interaction_closed) = &options.on_interaction_closed {
+        on_interaction_closed(run_id, &pending.request_id);
+    }
+    pending
+}
+
+fn interaction_timeout(timeout_seconds: Option<u64>) -> Result<Duration, String> {
+    let timeout = timeout_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_INTERACTION_TIMEOUT);
+    if !(MIN_INTERACTION_TIMEOUT..=MAX_INTERACTION_TIMEOUT).contains(&timeout) {
+        return Err("PDPP INTERACTION timeout_seconds must be between 60 and 3600".into());
+    }
+    Ok(timeout)
+}
+
+fn write_interaction_response<W: Write>(
+    writer: &mut W,
+    response: &PdppInteractionResponse,
+) -> Result<(), String> {
+    response.validate()?;
+    writeln!(
+        writer,
+        "{}",
+        serde_json::to_string(response)
+            .map_err(|error| format!("Failed to serialize PDPP INTERACTION_RESPONSE: {error}"))?
+    )
+    .map_err(|error| format!("Failed to send PDPP INTERACTION_RESPONSE: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("Failed to flush PDPP INTERACTION_RESPONSE: {error}"))
+}
+
+fn send_interaction_response(
+    stdin: &mut Option<std::process::ChildStdin>,
+    response: &PdppInteractionResponse,
+) -> Result<(), String> {
+    let stdin = stdin
+        .as_mut()
+        .ok_or("PDPP connector stdin closed before INTERACTION_RESPONSE")?;
+    write_interaction_response(stdin, response)
+}
+
 pub fn supervise_pdpp_connector(
     command: &PdppConnectorCommand,
     start: &PdppStart,
@@ -312,20 +482,25 @@ pub fn supervise_pdpp_connector(
     let mut child = process
         .spawn()
         .map_err(|e| format!("Failed to spawn PDPP connector: {e}"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or("PDPP connector stdin unavailable")?;
+    let mut stdin = Some(
+        child
+            .stdin
+            .take()
+            .ok_or("PDPP connector stdin unavailable")?,
+    );
     writeln!(
-        stdin,
+        stdin
+            .as_mut()
+            .expect("PDPP connector stdin was initialized"),
         "{}",
         serde_json::to_string(start).map_err(|e| e.to_string())?
     )
     .map_err(|e| format!("Failed to send PDPP START: {e}"))?;
     stdin
+        .as_mut()
+        .expect("PDPP connector stdin was initialized")
         .flush()
         .map_err(|e| format!("Failed to flush PDPP START: {e}"))?;
-    drop(stdin);
     let stdout = child
         .stdout
         .take()
@@ -335,10 +510,14 @@ pub fn supervise_pdpp_connector(
         .take()
         .ok_or("PDPP connector stderr unavailable")?;
     let (tx, rx) = mpsc::channel();
+    let (interaction_tx, interaction_rx) = mpsc::channel::<PendingInteractionResponse>();
     let stdout_thread = spawn_reader(stdout, options.max_stdout_line_bytes, true, tx.clone());
     let stderr_thread = spawn_reader(stderr, options.max_stderr_bytes, false, tx);
 
-    let started = Instant::now();
+    let mut normal_started = Instant::now();
+    let mut normal_elapsed = Duration::ZERO;
+    let mut pending_interaction: Option<PendingInteraction> = None;
+    let mut interaction_generation = 0u64;
     let mut stdout_closed = false;
     let mut stderr_closed = false;
     let mut exit = None;
@@ -361,14 +540,73 @@ pub fn supervise_pdpp_connector(
                 .map_err(|e| format!("Failed to poll PDPP connector: {e}"))?;
         }
         if termination.is_none() && options.control.is_cancelled() {
+            if let Some(pending) = pending_interaction.take() {
+                let pending = close_pending_interaction(&options, &start.run_id, pending);
+                let response = PdppInteractionResponse::new(
+                    pending.request_id,
+                    PdppInteractionResponseStatus::Cancelled,
+                    None,
+                )?;
+                let _ = send_interaction_response(&mut stdin, &response);
+            }
             termination = Some(PdppRunStatus::Cancelled);
             set_failure(&mut failure, "PDPP connector was cancelled by the runtime");
             terminate_child(&mut child);
         }
-        if termination.is_none() && options.timeout.is_some_and(|t| started.elapsed() >= t) {
+        if termination.is_none()
+            && pending_interaction.is_none()
+            && options
+                .timeout
+                .is_some_and(|timeout| normal_elapsed + normal_started.elapsed() >= timeout)
+        {
             termination = Some(PdppRunStatus::TimedOut);
             set_failure(&mut failure, "PDPP connector exceeded its runtime timeout");
             terminate_child(&mut child);
+        }
+        while let Ok(pending_response) = interaction_rx.try_recv() {
+            let matches_pending = pending_interaction.as_ref().is_some_and(|pending| {
+                pending.generation == pending_response.generation
+                    && pending.request_id == pending_response.response.request_id
+            });
+            if !matches_pending {
+                // A responder from an earlier interaction or run cannot affect
+                // the active connector state. It is intentionally discarded.
+                continue;
+            }
+            if let Err(error) = send_interaction_response(&mut stdin, &pending_response.response) {
+                if let Some(pending) = pending_interaction.take() {
+                    close_pending_interaction(&options, &start.run_id, pending);
+                }
+                set_failure(&mut failure, error);
+                terminate_child(&mut child);
+            } else {
+                let pending = pending_interaction
+                    .take()
+                    .expect("matching response requires a pending interaction");
+                close_pending_interaction(&options, &start.run_id, pending);
+                normal_started = Instant::now();
+            }
+        }
+        if termination.is_none()
+            && pending_interaction
+                .as_ref()
+                .is_some_and(|pending| interaction_deadline_elapsed(pending, Instant::now()))
+        {
+            let pending = pending_interaction
+                .take()
+                .expect("pending interaction was checked above");
+            let pending = close_pending_interaction(&options, &start.run_id, pending);
+            let response = PdppInteractionResponse::new(
+                pending.request_id,
+                PdppInteractionResponseStatus::Timeout,
+                None,
+            )?;
+            if let Err(error) = send_interaction_response(&mut stdin, &response) {
+                set_failure(&mut failure, error);
+                terminate_child(&mut child);
+            } else {
+                normal_started = Instant::now();
+            }
         }
         match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(ReaderEvent::Stdout(Ok(line))) => {
@@ -378,6 +616,17 @@ pub fn supervise_pdpp_connector(
                     continue;
                 }
                 match parse_message(&line, &scope) {
+                    Ok(_) if pending_interaction.is_some() => {
+                        let pending = pending_interaction
+                            .take()
+                            .expect("pending interaction was checked above");
+                        close_pending_interaction(&options, &start.run_id, pending);
+                        set_failure(
+                            &mut failure,
+                            "PDPP connector emitted output while waiting for INTERACTION_RESPONSE",
+                        );
+                        terminate_child(&mut child);
+                    }
                     Ok(ConnectorMessage::Record(record)) => {
                         record_count += 1;
                         event_counts.records += 1;
@@ -461,15 +710,58 @@ pub fn supervise_pdpp_connector(
                         event_counts.interactions += 1;
                         retain_event(
                             &options,
-                            PdppEvent::Interaction(interaction),
+                            PdppEvent::Interaction(interaction.clone()),
                             &mut events,
                             &mut events_truncated,
                             &mut failure,
                         );
-                        set_failure(&mut failure, "PDPP INTERACTION requires an INTERACTION_RESPONSE API, which this foundation kernel does not provide");
-                        terminate_child(&mut child);
+                        if let Some(on_interaction) = &options.on_interaction {
+                            if pending_interaction.is_some() {
+                                set_failure(
+                                    &mut failure,
+                                    "PDPP connector emitted INTERACTION while already waiting for a response",
+                                );
+                                terminate_child(&mut child);
+                                continue;
+                            }
+                            let timeout = match interaction_timeout(interaction.timeout_seconds) {
+                                Ok(timeout) => timeout,
+                                Err(error) => {
+                                    set_failure(&mut failure, error);
+                                    terminate_child(&mut child);
+                                    continue;
+                                }
+                            };
+                            normal_elapsed += normal_started.elapsed();
+                            interaction_generation += 1;
+                            let responder = PdppInteractionResponder {
+                                run_id: start.run_id.clone(),
+                                request_id: interaction.request_id.clone(),
+                                generation: interaction_generation,
+                                sent: Arc::new(AtomicBool::new(false)),
+                                sender: interaction_tx.clone(),
+                            };
+                            pending_interaction = Some(PendingInteraction {
+                                generation: interaction_generation,
+                                request_id: interaction.request_id.clone(),
+                                deadline: Instant::now() + timeout,
+                            });
+                            if let Err(error) = on_interaction(&interaction, responder) {
+                                set_failure(&mut failure, error);
+                                terminate_child(&mut child);
+                            }
+                        } else {
+                            set_failure(&mut failure, "PDPP INTERACTION requires an INTERACTION_RESPONSE API, which this foundation kernel does not provide");
+                            terminate_child(&mut child);
+                        }
                     }
-                    Ok(ConnectorMessage::Done(message)) => done = Some(message),
+                    Ok(ConnectorMessage::Done(message)) => {
+                        done = Some(message);
+                        // A connector that uses readline keeps its event loop
+                        // alive until its input closes. No further runtime
+                        // message is valid after DONE, so release the writer.
+                        stdin.take();
+                    }
                     Err(error) => {
                         set_failure(&mut failure, error);
                         terminate_child(&mut child);
@@ -682,9 +974,22 @@ fn parse_message(line: &str, scope: &ScopePolicy) -> Result<ConnectorMessage, St
             validate_reference_evidence(&value, ty, scope)?;
             Ok(ConnectorMessage::DetailGapRecovered(value))
         }
-        "INTERACTION" => serde_json::from_value(value)
-            .map(ConnectorMessage::Interaction)
-            .map_err(|e| format!("Invalid PDPP INTERACTION: {e}")),
+        "INTERACTION" => {
+            let interaction: PdppInteraction = serde_json::from_value(value)
+                .map_err(|e| format!("Invalid PDPP INTERACTION: {e}"))?;
+            if interaction.request_id.is_empty()
+                || interaction.kind.is_empty()
+                || interaction.message.is_empty()
+                || interaction
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| !schema.is_object())
+            {
+                return Err("Invalid PDPP INTERACTION envelope".into());
+            }
+            interaction_timeout(interaction.timeout_seconds)?;
+            Ok(ConnectorMessage::Interaction(interaction))
+        }
         _ => Err(format!("Unsupported PDPP connector message type: {ty}")),
     }
 }
@@ -951,14 +1256,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn start(scope: Value) -> PdppStart {
-        PdppStart::new(
-            "run_test",
-            "incremental",
-            scope,
-            None,
-            json!({"network": {}}),
-        )
-        .unwrap()
+        PdppStart::new("run_test", "incremental", scope, None).unwrap()
     }
     fn scoped() -> PdppStart {
         start(
@@ -969,11 +1267,116 @@ mod tests {
         PdppConnectorCommand {
             program: "node".into(),
             args: vec![
+                "-e".into(),
+                r#"
+const { spawn } = require('node:child_process');
+const [fixturePath, mode] = process.argv.slice(1);
+const child = spawn(process.execPath, [fixturePath, mode], { stdio: ['pipe', 'inherit', 'inherit'] });
+process.stdin.once('data', chunk => child.stdin.end(chunk));
+child.on('exit', code => process.exit(code ?? 1));
+"#
+                .into(),
                 format!(
                     "{}/tests/fixtures/pdpp-connector-fixture.mjs",
                     env!("CARGO_MANIFEST_DIR")
                 ),
                 mode.into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+    fn blocking_interaction_fixture(two_interactions: bool) -> PdppConnectorCommand {
+        let second = if two_interactions {
+            r#"
+    if (phase === 0) {
+      phase = 1;
+      emit({ type: 'INTERACTION', request_id: 'request-2', kind: 'manual_action', message: 'Continue', timeout_seconds: 60 });
+      return;
+    }
+"#
+        } else {
+            ""
+        };
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                format!(
+                    r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${{JSON.stringify(message)}}\n`);
+let phase = 0;
+readline.createInterface({{ input: process.stdin }}).on('line', line => {{
+  const message = JSON.parse(line);
+  if (message.type === 'START') {{
+    emit({{ type: 'INTERACTION', request_id: 'request-1', kind: 'manual_action', message: 'Sign in', timeout_seconds: 60 }});
+    return;
+  }}
+  if (message.type !== 'INTERACTION_RESPONSE') process.exit(70);
+  const expected = phase === 0 ? 'request-1' : 'request-2';
+  if (message.request_id !== expected) process.exit(71);
+  {second}
+  emit({{ type: 'RECORD', stream: 'items', key: 'item-1', data: {{ id: 'item-1', source_updated_at: '2026-07-30T00:00:00Z' }}, emitted_at: '2026-07-30T00:00:00Z' }});
+  emit({{ type: 'DONE', status: 'succeeded', records_emitted: 1 }});
+  setImmediate(() => process.exit(0));
+}});
+"#
+                ),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+
+    fn delayed_after_interaction_fixture() -> PdppConnectorCommand {
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${JSON.stringify(message)}\n`);
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.type === 'START') {
+    emit({ type: 'INTERACTION', request_id: 'request-1', kind: 'manual_action', message: 'Sign in', timeout_seconds: 60 });
+    return;
+  }
+  if (message.type !== 'INTERACTION_RESPONSE' || message.request_id !== 'request-1') process.exit(71);
+  setTimeout(() => {
+    emit({ type: 'RECORD', stream: 'items', key: 'item-1', data: { id: 'item-1', source_updated_at: '2026-07-30T00:00:00Z' }, emitted_at: '2026-07-30T00:00:00Z' });
+    emit({ type: 'DONE', status: 'succeeded', records_emitted: 1 });
+    process.exit(0);
+  }, 60);
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+
+    fn output_while_waiting_fixture(output: &str) -> PdppConnectorCommand {
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                format!(
+                    r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${{JSON.stringify(message)}}\n`);
+readline.createInterface({{ input: process.stdin }}).on('line', line => {{
+  if (JSON.parse(line).type !== 'START') process.exit(70);
+  emit({{ type: 'INTERACTION', request_id: 'request-1', kind: 'manual_action', message: 'Sign in', timeout_seconds: 60 }});
+  emit({output});
+}});
+"#
+                ),
             ],
             cwd: None,
             env: HashMap::new(),
@@ -994,6 +1397,26 @@ mod tests {
             ["source_updated_at".into()].into_iter().collect(),
         );
         options
+    }
+
+    fn supervise_with_test_deadline(
+        command: PdppConnectorCommand,
+        start: PdppStart,
+        options: PdppRunOptions,
+    ) -> PdppRunResult {
+        let control = options.control.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(supervise_pdpp_connector(&command, &start, &options));
+        });
+        match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result.expect("interaction fixture supervision should succeed"),
+            Err(error) => {
+                control.cancel();
+                let _ = receiver.recv_timeout(Duration::from_secs(1));
+                panic!("interaction fixture exceeded the 2-second test deadline: {error}");
+            }
+        }
     }
     #[test]
     fn accepts_scoped_success_and_retains_bounded_output() {
@@ -1056,6 +1479,184 @@ mod tests {
             .failure
             .unwrap()
             .contains("INTERACTION_RESPONSE"));
+    }
+    #[test]
+    fn browser_interaction_hook_keeps_the_protocol_alive_until_done() {
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_by_hook = observed.clone();
+        let result = supervise_pdpp_connector(
+            &blocking_interaction_fixture(false),
+            &scoped(),
+            &PdppRunOptions {
+                on_interaction: Some(Arc::new(move |interaction, responder| {
+                    assert_eq!(interaction.request_id, "request-1");
+                    assert_eq!(responder.run_id(), "run_test");
+                    observed_by_hook.store(true, Ordering::SeqCst);
+                    responder.respond(PdppInteractionResponseStatus::Success, None)
+                })),
+                ..options()
+            },
+        )
+        .unwrap();
+        assert!(observed.load(Ordering::SeqCst));
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+    }
+
+    #[test]
+    fn stale_interaction_responder_cannot_answer_the_next_request() {
+        let first_responder = Arc::new(Mutex::new(None));
+        let first_responder_for_hook = first_responder.clone();
+        let result = supervise_with_test_deadline(
+            blocking_interaction_fixture(true),
+            scoped(),
+            PdppRunOptions {
+                on_interaction: Some(Arc::new(move |interaction, responder| {
+                    if interaction.request_id == "request-1" {
+                        *first_responder_for_hook.lock().unwrap() = Some(responder.clone());
+                        responder.respond(PdppInteractionResponseStatus::Success, None)
+                    } else {
+                        assert!(first_responder_for_hook
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .respond(PdppInteractionResponseStatus::Cancelled, None)
+                            .is_err());
+                        responder.respond(PdppInteractionResponseStatus::Success, None)
+                    }
+                })),
+                ..options()
+            },
+        );
+        assert_eq!(
+            result.status,
+            PdppRunStatus::Succeeded,
+            "{:?}",
+            result.failure
+        );
+    }
+
+    #[test]
+    fn rejects_every_connector_output_while_waiting_for_an_interaction_response() {
+        let outputs = [
+            r#"{ type: 'RECORD', stream: 'items', key: 'item-1', data: { id: 'item-1', source_updated_at: '2026-07-30T00:00:00Z' }, emitted_at: '2026-07-30T00:00:00Z' }"#,
+            r#"{ type: 'STATE', stream: 'items', cursor: { cursor: 'next' } }"#,
+            r#"{ type: 'PROGRESS', stream: 'items', message: 'working' }"#,
+            r#"{ type: 'SKIP_RESULT', stream: 'items', reason: 'rate_limited' }"#,
+            r#"{ type: 'DETAIL_COVERAGE', stream: 'items', state_stream: 'items', required_keys: [], hydrated_keys: [], reference_only: true }"#,
+            r#"{ type: 'DETAIL_GAP', stream: 'items', record_key: 'item-1', detail_locator: { kind: 'api' }, retryable: true, status: 'pending', reference_only: true }"#,
+            r#"{ type: 'DETAIL_GAP_RECOVERED', stream: 'items', gap_id: 'gap-1', reference_only: true }"#,
+            r#"{ type: 'DONE', status: 'succeeded', records_emitted: 0 }"#,
+        ];
+        for output in outputs {
+            let result = supervise_pdpp_connector(
+                &output_while_waiting_fixture(output),
+                &scoped(),
+                &PdppRunOptions {
+                    on_interaction: Some(Arc::new(|_, _| Ok(()))),
+                    ..options()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.status, PdppRunStatus::Failed, "{output}");
+            assert!(result
+                .failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("waiting for INTERACTION_RESPONSE")));
+        }
+    }
+
+    #[test]
+    fn interaction_timeout_contract_is_bounded_and_serializes_the_exact_wire_envelope() {
+        assert_eq!(
+            interaction_timeout(None).unwrap(),
+            DEFAULT_INTERACTION_TIMEOUT
+        );
+        assert_eq!(
+            interaction_timeout(Some(60)).unwrap(),
+            MIN_INTERACTION_TIMEOUT
+        );
+        assert!(interaction_timeout(Some(59)).is_err());
+        assert!(interaction_timeout(Some(3601)).is_err());
+
+        let response =
+            PdppInteractionResponse::new("request-1", PdppInteractionResponseStatus::Timeout, None)
+                .unwrap();
+        let mut wire = Vec::new();
+        write_interaction_response(&mut wire, &response).unwrap();
+        assert_eq!(
+            String::from_utf8(wire).unwrap(),
+            "{\"type\":\"INTERACTION_RESPONSE\",\"request_id\":\"request-1\",\"status\":\"timeout\"}\n"
+        );
+
+        let now = Instant::now();
+        let expired = PendingInteraction {
+            generation: 1,
+            request_id: "request-1".into(),
+            deadline: now - Duration::from_millis(1),
+        };
+        let active = PendingInteraction {
+            generation: 1,
+            request_id: "request-1".into(),
+            deadline: now + Duration::from_millis(1),
+        };
+        assert!(interaction_deadline_elapsed(&expired, now));
+        assert!(!interaction_deadline_elapsed(&active, now));
+    }
+
+    #[test]
+    fn interaction_pauses_the_normal_timeout_then_response_resumes_it() {
+        let result = supervise_pdpp_connector(
+            &delayed_after_interaction_fixture(),
+            &scoped(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_millis(25)),
+                on_interaction: Some(Arc::new(|_, responder| {
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(50));
+                        responder
+                            .respond(PdppInteractionResponseStatus::Success, None)
+                            .unwrap();
+                    });
+                    Ok(())
+                })),
+                ..options()
+            },
+        )
+        .unwrap();
+
+        // The 50ms owner interaction exceeds the normal 25ms policy without
+        // timing out; the connector then exceeds that policy after response.
+        assert_eq!(result.status, PdppRunStatus::TimedOut);
+    }
+
+    #[test]
+    fn cancellation_stops_a_connector_while_its_interaction_is_pending() {
+        let control = PdppRunControl::default();
+        let cancellation = control.clone();
+        let interaction_seen = Arc::new(AtomicBool::new(false));
+        let interaction_seen_by_hook = interaction_seen.clone();
+        let cancellation_worker = thread::spawn(move || {
+            while !interaction_seen.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+            cancellation.cancel();
+        });
+        let result = supervise_pdpp_connector(
+            &blocking_interaction_fixture(false),
+            &scoped(),
+            &PdppRunOptions {
+                control,
+                on_interaction: Some(Arc::new(move |_, _| {
+                    interaction_seen_by_hook.store(true, Ordering::SeqCst);
+                    Ok(())
+                })),
+                ..options()
+            },
+        )
+        .unwrap();
+        cancellation_worker.join().unwrap();
+        assert_eq!(result.status, PdppRunStatus::Cancelled);
     }
     #[test]
     fn requires_a_sink_or_positive_record_retention_before_spawning() {

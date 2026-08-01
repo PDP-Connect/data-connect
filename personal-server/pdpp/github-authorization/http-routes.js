@@ -26,6 +26,7 @@ export function registerGithubAuthorizationRoutes({
   devToken,
   adapter,
   externalOrigin,
+  enableLocalTimeline = true,
 }) {
   const desktopAuth = requireDesktopAuth(devToken)
 
@@ -90,53 +91,62 @@ export function registerGithubAuthorizationRoutes({
       }
     }
   )
-  app.post("/v1/pdpp/local-timeline/consent-requests", desktopAuth, async c => {
-    try {
-      const body = await c.req.json()
-      return c.json(
-        adapter.createLocalTimelineConsentRequest({
-          sessionId: body.session_id,
-          subjectId: body.subject_id,
-        }),
-        201
-      )
-    } catch (error) {
-      return errorResponse(c, error)
-    }
-  })
-  app.post(
-    "/v1/pdpp/local-timeline/consent-requests/:requestId/approve",
-    desktopAuth,
-    async c => {
+  if (enableLocalTimeline) {
+    app.post(
+      "/v1/pdpp/local-timeline/consent-requests",
+      desktopAuth,
+      async c => {
+        try {
+          const body = await c.req.json()
+          return c.json(
+            adapter.createLocalTimelineConsentRequest({
+              sessionId: body.session_id,
+              subjectId: body.subject_id,
+            }),
+            201
+          )
+        } catch (error) {
+          return errorResponse(c, error)
+        }
+      }
+    )
+    app.post(
+      "/v1/pdpp/local-timeline/consent-requests/:requestId/approve",
+      desktopAuth,
+      async c => {
+        try {
+          const body = await c.req.json()
+          return c.json(
+            adapter.issueLocalTimelineGrant({
+              requestId: c.req.param("requestId"),
+              sessionId: body.session_id,
+              subjectId: body.subject_id,
+            }),
+            201
+          )
+        } catch (error) {
+          return errorResponse(c, error)
+        }
+      }
+    )
+    app.post("/v1/pdpp/local-timeline/revoke", desktopAuth, async c => {
       try {
         const body = await c.req.json()
-        return c.json(
-          adapter.issueLocalTimelineGrant({
-            requestId: c.req.param("requestId"),
+        return c.json({
+          revoked: adapter.revokeLocalTimelineSession({
             sessionId: body.session_id,
             subjectId: body.subject_id,
           }),
-          201
-        )
+        })
       } catch (error) {
         return errorResponse(c, error)
       }
-    }
-  )
-  app.post("/v1/pdpp/local-timeline/revoke", desktopAuth, async c => {
-    try {
-      const body = await c.req.json()
-      return c.json({
-        revoked: adapter.revokeLocalTimelineSession({
-          sessionId: body.session_id,
-          subjectId: body.subject_id,
-        }),
-      })
-    } catch (error) {
-      return errorResponse(c, error)
-    }
-  })
+    })
+  }
   app.post("/v1/pdpp/introspect", c =>
     c.json(adapter.introspectPublicBearer(c.req.header("authorization")))
   )
 }
+
+/** Neutral route registration retains the existing endpoint contract. */
+export const registerPdppAuthorizationRoutes = registerGithubAuthorizationRoutes

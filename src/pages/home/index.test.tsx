@@ -1,6 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
-import { render, waitFor, cleanup, fireEvent, screen } from "@testing-library/react"
-import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom"
+import {
+  render,
+  act,
+  waitFor,
+  cleanup,
+  fireEvent,
+  screen,
+} from "@testing-library/react"
+import {
+  createMemoryRouter,
+  MemoryRouter,
+  RouterProvider,
+} from "react-router-dom"
 import { ROUTES } from "@/config/routes"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Home } from "./index"
@@ -10,6 +21,8 @@ const mockStartImport = vi.fn()
 const mockStopExport = vi.fn()
 const mockNavigate = vi.fn()
 const mockRefreshConnectedStatus = vi.fn()
+const mockInvoke = vi.fn()
+const mockListen = vi.fn()
 let mockConnectedPlatforms: Record<string, boolean> = {}
 let mockRuns: Array<{
   id: string
@@ -27,9 +40,8 @@ let mockRuns: Array<{
 }> = []
 
 vi.mock("react-router-dom", async () => {
-  const actual = await vi.importActual<typeof import("react-router-dom")>(
-    "react-router-dom"
-  )
+  const actual =
+    await vi.importActual<typeof import("react-router-dom")>("react-router-dom")
   return {
     ...actual,
     useNavigate: () => mockNavigate,
@@ -38,6 +50,14 @@ vi.mock("react-router-dom", async () => {
 
 vi.mock("@/hooks/usePlatforms", () => ({
   usePlatforms: () => mockUsePlatforms(),
+}))
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+}))
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (...args: unknown[]) => mockListen(...args),
 }))
 
 vi.mock("@/hooks/useConnector", () => ({
@@ -103,6 +123,10 @@ describe("Home", () => {
     mockStopExport.mockReset()
     mockNavigate.mockReset()
     mockRefreshConnectedStatus.mockReset()
+    mockInvoke.mockReset()
+    mockInvoke.mockResolvedValue(false)
+    mockListen.mockReset()
+    mockListen.mockResolvedValue(() => undefined)
     mockConnectedPlatforms = {}
     mockRuns = []
     mockStartImport.mockResolvedValue("run-1")
@@ -125,17 +149,13 @@ describe("Home", () => {
     const { getByRole } = renderHome()
 
     expect(getByRole("heading", { level: 1, name: /your data/i })).toBeTruthy()
-    expect(
-      getByRole("heading", { name: /your imported data/i })
-    ).toBeTruthy()
+    expect(getByRole("heading", { name: /your imported data/i })).toBeTruthy()
   })
 
   it("does not render the connected apps tab or surface", () => {
     const { container } = renderHome()
 
-    expect(
-      screen.queryByRole("tab", { name: /connected apps/i })
-    ).toBeNull()
+    expect(screen.queryByRole("tab", { name: /connected apps/i })).toBeNull()
     expect(
       container.querySelector('[data-component="connected-apps-list"]')
     ).toBeNull()
@@ -239,6 +259,225 @@ describe("Home", () => {
       )
     })
     expect(screen.queryByLabelText(/personal access token/i)).toBeNull()
+  })
+
+  it("captures the manifest-declared ChatGPT static secrets before launching", async () => {
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "chatgpt-pdpp",
+          company: "OpenAI",
+          name: "ChatGPT",
+          filename: "chatgpt-pdpp",
+          description: "ChatGPT PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: { fields: [] },
+          },
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: /connect chatgpt/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/chatgpt email/i)).toBeTruthy()
+    })
+    expect(mockStartImport).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText(/chatgpt email/i), {
+      target: { value: "owner@example.com" },
+    })
+    fireEvent.change(screen.getByLabelText(/chatgpt password/i), {
+      target: { value: "transient-password" },
+    })
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /start owner-attended sync/i,
+      })
+    )
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "chatgpt-pdpp" }),
+        {
+          setupSecrets: {
+            username: "owner@example.com",
+            password: "transient-password",
+          },
+        }
+      )
+    })
+    expect(screen.queryByLabelText(/chatgpt password/i)).toBeNull()
+  })
+
+  it("reuses a completed owner profile without asking for static secrets again", async () => {
+    mockInvoke.mockResolvedValue(true)
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "chatgpt-pdpp",
+          company: "OpenAI",
+          name: "ChatGPT",
+          filename: "chatgpt-pdpp",
+          description: "ChatGPT PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: { fields: [] },
+          },
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: /connect chatgpt/i }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "is_installed_pdpp_browser_setup_complete",
+        { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" }
+      )
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "chatgpt-pdpp" })
+      )
+    })
+    expect(screen.queryByLabelText(/chatgpt password/i)).toBeNull()
+    expect(mockStartImport).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ setupSecrets: expect.anything() })
+    )
+  })
+
+  it("resets an expired ChatGPT session and returns the owner to setup", async () => {
+    mockInvoke.mockImplementation(command =>
+      command === "reset_installed_pdpp_browser_profile"
+        ? Promise.resolve(undefined)
+        : Promise.resolve(false)
+    )
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "chatgpt-pdpp",
+          company: "OpenAI",
+          name: "ChatGPT",
+          filename: "chatgpt-pdpp",
+          description: "ChatGPT PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: { fields: [] },
+          },
+        },
+      ],
+      connectedPlatforms: { "chatgpt-pdpp": true },
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => true),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect ChatGPT" }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "reset_installed_pdpp_browser_profile",
+        { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" }
+      )
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "is_installed_pdpp_browser_setup_complete",
+        { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" }
+      )
+      expect(screen.getByLabelText(/chatgpt email/i)).toBeTruthy()
+    })
+    expect(mockStartImport).not.toHaveBeenCalled()
+  })
+
+  it("submits a transient code response for the exact no-schema ChatGPT OTP interaction", async () => {
+    let deliverInteraction: ((event: { payload: unknown }) => void) | undefined
+    mockListen.mockImplementation((_event, callback) => {
+      deliverInteraction = callback as (event: { payload: unknown }) => void
+      return Promise.resolve(() => undefined)
+    })
+    mockInvoke.mockResolvedValue(undefined)
+    mockRuns = [
+      {
+        id: "chatgpt-pdpp-run-1",
+        platformId: "chatgpt-pdpp",
+        filename: "chatgpt-pdpp",
+        isConnected: false,
+        startDate: new Date().toISOString(),
+        status: "running",
+        url: "",
+        company: "OpenAI",
+        name: "ChatGPT",
+        logs: "",
+      },
+    ]
+    renderHome()
+    await waitFor(() => expect(deliverInteraction).toBeTypeOf("function"))
+
+    await act(async () => {
+      deliverInteraction?.({
+        payload: {
+          runId: "chatgpt-pdpp-run-1",
+          requestId: "otp-1",
+          kind: "otp",
+          message: "Enter your verification code",
+        },
+      })
+    })
+
+    fireEvent.change(screen.getByLabelText(/verification code/i), {
+      target: { value: "123456" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "submit_installed_pdpp_interaction_response",
+        {
+          runId: "chatgpt-pdpp-run-1",
+          requestId: "otp-1",
+          status: "success",
+          data: { code: "123456" },
+        }
+      )
+    })
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/verification code/i)).toBeNull()
+    })
   })
 
   it("cancels the GitHub PAT prompt without starting import", () => {
@@ -351,7 +590,9 @@ describe("Home", () => {
     expect(
       screen.queryByRole("button", { name: /connect chatgpt/i })
     ).toBeNull()
-    expect(screen.getAllByRole("button", { name: /open chatgpt/i }).length).toBeGreaterThan(0)
+    expect(
+      screen.getAllByRole("button", { name: /open chatgpt/i }).length
+    ).toBeGreaterThan(0)
   })
 
   it("shows connected source from persisted run even when connected status map is stale", async () => {
@@ -400,7 +641,9 @@ describe("Home", () => {
     expect(
       screen.queryByRole("button", { name: /connect chatgpt/i })
     ).toBeNull()
-    expect(screen.getAllByRole("button", { name: /open chatgpt/i }).length).toBeGreaterThan(0)
+    expect(
+      screen.getAllByRole("button", { name: /open chatgpt/i }).length
+    ).toBeGreaterThan(0)
   })
 
   it.each([
@@ -553,7 +796,8 @@ describe("Home", () => {
         company: "OpenAI",
         name: "ChatGPT",
         logs: "",
-        exportPath: "/tmp/dataconnect/exported_data/OpenAI/ChatGPT/run-chatgpt-1",
+        exportPath:
+          "/tmp/dataconnect/exported_data/OpenAI/ChatGPT/run-chatgpt-1",
       },
     ]
 
@@ -629,9 +873,11 @@ describe("Home", () => {
     renderHome()
 
     expect(
-      screen.getByRole("button", {
-        name: /fetch latest data for chatgpt/i,
-      }).hasAttribute("disabled")
+      screen
+        .getByRole("button", {
+          name: /fetch latest data for chatgpt/i,
+        })
+        .hasAttribute("disabled")
     ).toBe(true)
   })
 
@@ -828,7 +1074,9 @@ describe("Home", () => {
 
     renderHome()
 
-    const spotifyButton = screen.getByRole("button", { name: /connect spotify/i })
+    const spotifyButton = screen.getByRole("button", {
+      name: /connect spotify/i,
+    })
     expect(spotifyButton.hasAttribute("disabled")).toBe(false)
 
     fireEvent.click(spotifyButton)

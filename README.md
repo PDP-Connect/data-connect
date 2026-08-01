@@ -1,9 +1,31 @@
 # DataConnect
 
-> DataConnect is being made local-first and vendor-neutral. The app runs and exports your data to disk with no sign-in and no external account. Vana is one optional storage and sync provider you can enable in Settings, not a bundled default. Some code paths, URLs, and package names still assume Vana; we are actively generalizing these as the project moves toward a neutral, provider-agnostic architecture.
+DataConnect is a local-first desktop application for collecting data from
+online services and keeping the resulting data on your computer.
 
-Desktop app for exporting your data from various platforms.
-<img width="2466" height="1372" alt="Screenshot 2026-02-24 at 8 10 08 PM" src="https://github.com/user-attachments/assets/c3d72ca7-866d-4629-8f24-51b782a820e8" />
+## Status
+
+DataConnect is in active development. Use the
+[Releases page](https://github.com/PDP-Connect/data-connect/releases) for
+binary downloads when a release is available. Release artifacts are manual
+installs. This build does not include an in-app auto-updater.
+
+Public code signing is not available yet. Some macOS artifacts do not have a
+signature. For an unsigned macOS build, run this command after installation:
+
+```bash
+xattr -cr /Applications/DataConnect.app
+```
+
+## What DataConnect does now
+
+DataConnect writes collected data to local disk by default. Local collection
+does not require a Vana account or a Vana sign-in.
+
+Every installer bundles and runs a local Personal Server. It gives the desktop
+app loopback-only access to imported and exported data. It also enables local
+PDPP and MCP integrations. Remote registration and tunneling stay disabled
+unless you configure service endpoints.
 
 ## Installation
 
@@ -11,177 +33,184 @@ Download the latest release from [Releases](../../releases).
 
 ### macOS
 
-macOS artifacts may be unsigned. For an unsigned build, run this after installing:
-
-```bash
-xattr -cr /Applications/DataConnect.app
-```
-
-Then open the app normally.
+Install the DMG. If macOS blocks an unsigned build, run the `xattr` command in
+the Status section and open the app again.
 
 ### Windows
 
-Run the `.exe` installer and follow the prompts.
+Run the NSIS installer and follow the prompts.
 
 ### Linux
 
 Use the `.deb` or `.AppImage` package.
 
-Every installer bundles and runs a local Personal Server. It gives the desktop app loopback-only access to imported and exported data, and it enables local PDPP and MCP integrations. Remote registration and tunneling stay disabled unless you explicitly configure service endpoints.
+## Build from source
 
-## Browser Requirements
+Use this path if a binary is not available for your platform.
 
-DataConnect uses browser automation to export your data. Release installers include a compatible Chromium build. At runtime:
+### Requirements
 
-1. **If you have Chrome/Edge installed:** The app uses your existing browser (recommended)
-2. **If no system browser is found:** The app uses the Chromium bundled with the installer
-3. **For local builds without bundled Chromium:** The app downloads Chromium automatically when needed
+- Node.js 22 or 23.
+- Rust stable and the Tauri build prerequisites for your operating system.
+- Internet access during setup to install dependencies and resolve bundled
+  connectors when they are absent.
 
-The downloaded browser is stored in `~/.dataconnect/browsers/` and persists across app updates.
-
-## Supported Platforms
-
-DataConnect currently supports exporting data from ChatGPT, GitHub, Instagram, LinkedIn, Spotify,YouTube, and Shop (Shopify) — covering your conversations, social profiles, listening history, watch history, order history, and more.
-
-For the latest available connectors, visit the [Data Connectors repository](https://github.com/vana-com/data-connectors).
-
-## Development
-
-### Prerequisites
-
-- Node.js 20+
-- Rust (latest stable)
-- For Playwright connectors: `cd playwright-runner && npm install`
-
-### Running locally
+### Run the development application
 
 ```bash
-# Install dependencies
+git clone https://github.com/PDP-Connect/data-connect.git
+cd data-connect
 npm install
-
-# Run in development mode
 npm run tauri:dev
-
-# Copy .env file
-cp .env.example .env
 ```
 
-### Connector management
+`npm run tauri:dev` builds required local helper programs when needed. It also
+resolves the bundled connectors from the signed connector index when they are
+not already present.
 
-Connector scripts live upstream in [`vana-com/data-connectors`](https://github.com/vana-com/data-connectors). This repo consumes them as pinned dependencies.
-
-#### Updating connectors
-
-```bash
-npm run connectors:resolve
-# Review the diff in connectors/, commit, push.
-```
-
-This fetches the latest matching versions from the signed data-connectors index, verifies checksums, and writes them to `connectors/`. Version constraints are declared in `connectors/connector-dependencies.json`.
-
-If you only want to verify the lockfile and bundled connector tree without mutating them, run `npm run connectors:check`.
-
-#### How it works at runtime
-
-- `tauri dev` runs `ensure-connectors.js`, which restores missing bundled connectors from `~/.dataconnect/connectors/` first and then resolves them from the signed connector index if needed.
-- The Rust backend loads connectors from active installs in `~/.dataconnect/connectors-store/` via `connectors-active.json`, then legacy `~/.dataconnect/connectors/`, then bundled `connectors/`.
-- The `playwright-runner` executes connector scripts with a local Chromium browser.
-
-### Agent config files
-
-This repo keeps both `AGENTS.md` and `CLAUDE.md`: Claude Code auto‑loads `CLAUDE.md` but not `AGENTS.md`, and Cursor does the opposite. Keep them aligned.
-
-### Agent skills sync
-
-Skills are stored in `.agents/skills` (source of truth). Cursor reads them via per-skill symlinks in `.cursor/skills`. The sync script rebuilds those symlinks so any manually created skills show up in Cursor.
+### Create a package
 
 ```bash
-# One-off sync (default is .cursor/skills)
-npm run skills:sync
-
-# Sync to Claude instead
-npm run skills:sync -- --target=claude
-
-# Auto-sync on changes
-npm run skills:watch
-```
-
-### Building for production
-
-```bash
-# Install the locked dependencies, then build helpers and the native bundle
-npm ci
 npm run tauri:build
 ```
 
-Local installs and builds do not download Chromium as an npm lifecycle step. A local build bundles a compatible Playwright Chromium already present in its cache when available. Otherwise, the app uses a supported system browser or provisions Chromium at runtime. Release CI explicitly provisions Chromium and fails verification if the browser executable is absent from an installer.
+The command builds the frontend, the Personal Server, and the Playwright
+runner. It creates Linux and macOS packages from a local checkout. Release CI
+also builds the Windows NSIS installer.
 
-The built app will be in `src-tauri/target/release/bundle/`.
+Treat local build output as a development build. Do not treat it as a signed
+public release.
 
-### Releasing
+## Browser Requirements
 
-Releases are created via the release script, which bumps the version in `tauri.conf.json`, commits, pushes, and creates a GitHub release that triggers CI builds across macOS, Linux, and Windows.
+DataConnect uses browser automation for legacy connectors and for browser-based
+PDPP collection profiles.
+
+1. If you installed Chrome or Edge, DataConnect can use that browser.
+2. If no supported system browser is found, DataConnect can use the Chromium
+   build bundled with the installer.
+3. For local builds without bundled Chromium, DataConnect provisions Chromium at
+   runtime when needed.
+
+DataConnect stores the downloaded browser in `~/.dataconnect/browsers/`. It
+persists across app updates.
+
+## Data sources
+
+### GitHub PDPP Collection Profile
+
+GitHub is a PDPP-native collection path. DataConnect prefers this path when the
+GitHub PDPP connector is available. It collects GitHub profile, repositories,
+stars, issues, pull requests, and gists through the PDPP Collection Profile
+protocol.
+
+To collect GitHub data:
+
+1. Select **GitHub** on the Home page.
+2. Enter a GitHub personal access token when DataConnect requests one.
+3. Give the token the GitHub permissions needed for the data that you want to
+   collect.
+4. Select **Start import**.
+
+DataConnect uses the token for that import only. The application does not save
+the token. Use a token that you can revoke in GitHub if you no longer want to
+use it.
+
+### ChatGPT PDPP Collection Profile
+
+ChatGPT is also available as a PDPP Collection Profile. It uses a browser
+session to collect conversations, messages, memories, custom GPTs, custom
+instructions, and shared conversations.
+
+To collect ChatGPT data:
+
+1. Select **ChatGPT** on the Home page.
+2. Enter your ChatGPT sign-in details when DataConnect requests them.
+3. Complete any browser sign-in or verification step.
+4. Select **Start import**.
+
+### Legacy browser connectors
+
+DataConnect keeps its Playwright-based legacy connectors. They automate export
+flows in a browser and write exports to local disk. The bundled legacy
+connectors currently cover ChatGPT, Claude, GitHub, H-E-B, Instagram,
+Instagram Ads, LinkedIn, Oura, Shop, Spotify, Whole Foods Market, and YouTube.
+
+These connectors depend on the website and export process of each service. A
+service can change that process without notice. A connector can therefore fail
+or collect less data than expected.
+
+The [PDP-Connect Data Connectors repository](https://github.com/PDP-Connect/data-connectors)
+contains the connector artifacts and their signed index.
+
+## Use Timeline locally
+
+Timeline gives a chronological view of records from connected sources. The
+current Timeline reads verified GitHub records from your local Personal Server.
+
+1. Collect GitHub data with the GitHub PDPP Collection Profile.
+2. Open **Apps > Timeline**.
+3. Select **Review local Timeline access**.
+4. Review the requested GitHub streams, access mode, retention, and expiry.
+5. Select **Approve local Timeline access**.
+6. View the Timeline.
+
+The approval applies only to the local Personal Server on that device.
+Timeline access expires after its issued lifetime, which is eight hours by
+default.
+
+To stop Timeline access, select **Revoke Timeline access** in Timeline. The
+app revokes the local approval and returns you to the consent screen.
+
+## Connector management
+
+Connector versions use two pinned files: `connectors/connector-dependencies.json`
+and `connectors/lock.json`.
 
 ```bash
-# Check current and suggested versions
+npm run connectors:resolve
+npm run connectors:check
+```
+
+`connectors:resolve` resolves the pinned versions from the signed connector
+index and updates the bundled connector tree. `connectors:check` verifies the
+lockfile and bundled connector tree without changing them.
+
+## Releasing
+
+Use the release script to create releases:
+
+```bash
 npm run release:github -- --show-versions
-
-# Dry run to preview what will happen
 npm run release:github -- --version X.Y.Z --dry-run
-
-# Create a new release
 npm run release:github -- --version X.Y.Z
 ```
 
-> **Do not** create releases manually via `gh release create` or the GitHub UI — the CI workflow will fail if `tauri.conf.json` version doesn't match the release tag.
+If AI helped with the release commit, run `npm run release:github -- --version X.Y.Z --assisted-by-ai`.
 
-Release artifacts are manual installs: macOS DMGs, Linux `.deb` and AppImage files, and Windows NSIS installers. This build does not include an in-app auto-updater. macOS artifacts are unsigned unless the optional `APPLE_BUILD_CERTIFICATE_BASE64`, `APPLE_BUILD_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` GitHub secrets are configured. Signed builds are not notarized.
+Do not create releases manually with `gh release create` or the GitHub UI. The
+CI workflow checks that `tauri.conf.json` matches the release tag.
 
-The workflow can also be run manually without uploading artifacts (`workflow_dispatch` with `upload: false`) to validate all platform build legs.
+Release artifacts are manual installs: macOS DMGs, Linux `.deb` and AppImage
+files, and Windows NSIS installers. macOS artifacts do not have signatures
+unless CI has the optional Apple signing secrets. Signed builds do not have
+notarization.
 
-## Architecture
+The workflow can also run without uploading artifacts to validate all platform
+build legs.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    DataConnect App                        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
-│  │   React UI  │  │ Tauri/Rust  │  │ Playwright      │  │
-│  │  (Frontend) │◄─►│  (Backend)  │◄─►│ Runner          │  │
-│  └─────────────┘  └─────────────┘  └────────┬────────┘  │
-└────────────────────────────────────────────┬┼───────────┘
-                                             ││
-                    ┌────────────────────────┘│
-                    │                         │
-              ┌─────▼─────┐           ┌───────▼───────┐
-              │  System   │           │  Downloaded   │
-              │  Chrome   │    OR     │   Chromium    │
-              └───────────┘           └───────────────┘
-```
+## Not supported yet
 
-### Browser Selection Priority
-
-1. **System Chrome** - `/Applications/Google Chrome.app` (macOS)
-2. **System Edge** - Available on Windows
-3. **Downloaded Chromium** - `~/.dataconnect/browsers/`
-4. **Auto-download** - If nothing found, downloads Chromium on first run
-
-## Connectors
-
-Connectors are JavaScript files that automate data export. Located in the [Data Connectors repository](https://github.com/vana-com/data-connectors).
-
-### Connector API (Playwright runtime)
-
-```javascript
-// Available in connector scripts:
-page.goto(url) // Navigate to URL
-page.evaluate(script) // Run JS in page context
-page.sleep(ms) // Wait for milliseconds
-page.setData(key, value) // Send data back to app
-page.promptUser(message, checkFn) // Wait for user action
-```
+- Public code signing or notarization.
+- A cloud account or remote service as a requirement for local collection.
+- Timeline data from sources other than verified GitHub PDPP records.
+- A guarantee that every legacy connector works with every account, browser, or
+  service change.
+- Automatic updates.
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the LICENSE file for details.
-This software is provided as open-source utility software and is not a managed or hosted service.
-See LEGAL.md for additional legal disclaimers and responsibility framing.
+DataConnect uses the Apache License 2.0. See [LICENSE](LICENSE) for details.
+This software is open-source utility software. It is not a managed or hosted
+service. See [LEGAL.md](LEGAL.md) for legal disclaimers and responsibility
+information.

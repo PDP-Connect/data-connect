@@ -100,6 +100,7 @@ pub struct Platform {
     pub runtime: Option<String>,
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
+    pub setup: Option<ActivePdppStaticSecretSetup>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,7 +109,31 @@ struct ActivePdppPlatformManifest {
     display_name: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    setup: Option<ActivePdppStaticSecretSetup>,
     streams: Vec<ActivePdppStream>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActivePdppStaticSecretSetup {
+    modality: String,
+    credential_capture: ActivePdppCredentialCapture,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActivePdppCredentialCapture {
+    fields: Vec<ActivePdppCredentialField>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ActivePdppCredentialField {
+    name: String,
+    label: Option<String>,
+    #[serde(rename = "type")]
+    field_type: Option<String>,
+    required: bool,
+    secret: bool,
+    autocomplete: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +422,7 @@ fn platform_from_metadata(
         vectorize_config: metadata.vectorize_config,
         runtime: runtime_override.or(metadata.runtime),
         scopes,
+        setup: None,
     }
 }
 
@@ -551,6 +577,7 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
             vectorize_config: None,
             runtime: Some("pdpp-network".to_string()),
             scopes: Some(scopes),
+            setup: manifest.setup,
         });
     }
 
@@ -567,6 +594,12 @@ fn pdpp_streams_to_dataconnect_scopes(
             ("github", "user") => Some("github.profile"),
             ("github", "repositories") => Some("github.repositories"),
             ("github", "starred") => Some("github.starred"),
+            ("chatgpt", "conversations") => Some("chatgpt.conversations"),
+            ("chatgpt", "messages") => Some("chatgpt.messages"),
+            ("chatgpt", "memories") => Some("chatgpt.memories"),
+            ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts"),
+            ("chatgpt", "custom_instructions") => Some("chatgpt.custom_instructions"),
+            ("chatgpt", "shared_conversations") => Some("chatgpt.shared_conversations"),
             _ => None,
         };
         if let Some(scope) = scope {
@@ -2209,7 +2242,7 @@ fn resolve_browser_status(
 }
 
 /// Get system browser path (Chrome/Edge)
-fn get_system_browser_path() -> Option<PathBuf> {
+pub(crate) fn get_system_browser_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let paths = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"];
@@ -2302,7 +2335,7 @@ pub async fn test_nodejs(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Get downloaded Chromium path from ~/.dataconnect/browsers
-fn get_downloaded_chromium_path() -> Option<PathBuf> {
+pub(crate) fn get_downloaded_chromium_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
@@ -2319,7 +2352,10 @@ fn get_bundled_chromium_path(resource_dir: &Path) -> Option<PathBuf> {
     get_bundled_chromium_path_for_platform(resource_dir, current_browser_platform())
 }
 
-fn get_bundled_chromium_path_for_platform(resource_dir: &Path, platform: &str) -> Option<PathBuf> {
+pub(crate) fn get_bundled_chromium_path_for_platform(
+    resource_dir: &Path,
+    platform: &str,
+) -> Option<PathBuf> {
     let browser_roots = [
         resource_dir
             .join("playwright-runner")
@@ -2381,6 +2417,24 @@ fn find_chromium_executable(browsers_dir: &Path, platform: &str) -> Option<PathB
     }
 
     None
+}
+
+/// Shared executable discovery only. PDPP browser leases intentionally do not
+/// reuse the legacy runner's page API or persistent connector profiles.
+pub(crate) fn resolve_automation_browser_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    resolve_automation_browser_path_from(
+        get_system_browser_path(),
+        get_downloaded_chromium_path(),
+        resource_dir.and_then(get_bundled_chromium_path),
+    )
+}
+
+fn resolve_automation_browser_path_from(
+    system: Option<PathBuf>,
+    downloaded: Option<PathBuf>,
+    bundled: Option<PathBuf>,
+) -> Option<PathBuf> {
+    system.or(downloaded).or(bundled)
 }
 
 /// Get the Chromium download URL for the current platform
@@ -2736,8 +2790,8 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, resolve_browser_status, resolve_icon_path,
-        ConnectorMetadata,
+        manifest_looks_like_connector, resolve_automation_browser_path_from,
+        resolve_browser_status, resolve_icon_path, ConnectorMetadata,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2868,6 +2922,34 @@ mod tests {
         assert_eq!(
             get_bundled_chromium_path_for_platform(temp.path(), "macos"),
             Some(executable)
+        );
+    }
+
+    #[test]
+    fn bundled_browser_lookup_supports_release_platform_layouts() {
+        for (platform, relative_path) in [
+            ("linux", "playwright-runner/dist/browsers/chromium-1200/chrome-linux64/chrome"),
+            ("windows", "playwright-runner/dist/browsers/chromium-1200/chrome-win64/chrome.exe"),
+            ("macos", "playwright-runner/dist/browsers/chromium-1200/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+            ("macos", "playwright-runner/dist/browsers/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let executable = create_file(temp.path(), relative_path);
+
+            assert_eq!(
+                get_bundled_chromium_path_for_platform(temp.path(), platform),
+                Some(executable)
+            );
+        }
+    }
+
+    #[test]
+    fn pdpp_browser_discovery_uses_bundled_chromium_on_fresh_install() {
+        let bundled = PathBuf::from("bundled-browser");
+
+        assert_eq!(
+            resolve_automation_browser_path_from(None, None, Some(bundled.clone())),
+            Some(bundled)
         );
     }
 }
