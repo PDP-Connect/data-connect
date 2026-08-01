@@ -273,4 +273,4 @@ jobs:
             echo "::error::Expected exactly five verified release artifacts, found ${#artifacts[@]}."
             exit 1
           fi
-          gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
