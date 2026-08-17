@@ -1,21 +1,21 @@
 {
   "name": "@pdpp/local-collector",
   "version": "0.0.0",
-  "private": false,
-  "description": "Publishable local collector runtime for PDPP: filesystem-class connectors (Claude Code, Codex) plus the device-exporter ingest client.",
+  "private": true,
+  "description": "Local collector runtime for PDPP: filesystem-class connectors (Claude Code, Codex, Google Takeout, iMessage, Apple Photos, Google Messages) plus the device-exporter ingest client.",
   "keywords": [
     "pdpp",
     "personal-data",
     "collector",
     "data-portability"
   ],
-  "homepage": "https://github.com/PDP-Connect/pdpp#readme",
+  "homepage": "https://github.com/PDP-Connect/data-connect#readme",
   "bugs": {
-    "url": "https://github.com/PDP-Connect/pdpp/issues"
+    "url": "https://github.com/PDP-Connect/data-connect/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PDP-Connect/pdpp.git",
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
     "directory": "packages/local-collector"
   },
   "license": "Apache-2.0",
