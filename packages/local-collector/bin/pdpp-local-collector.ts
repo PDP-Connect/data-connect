@@ -94,8 +94,12 @@ import {
  * carry a source dependency on the content package. The snapshot is
  * regenerated from `@pdpp/polyfill-connectors`'s
  * `LOCAL_COLLECTOR_DEFINITIONS` (see that script's header for the update
- * path) and a drift test keeps it from going stale. Adding a
- * filesystem-class connector to the bundle is a change in
+ * path). In this repository the snapshot is a pinned duplicate with no
+ * active cross-repository drift test (the in-monorepo drift test is
+ * `test.skip`'d — see `test/collector-definitions-snapshot-drift.test.ts`);
+ * drift is bounded only by the pinned commit map until the second tranche
+ * lands a cross-repository check. Adding a filesystem-class connector to
+ * the bundle is a change in
  * `@pdpp/polyfill-connectors/src/collector-registry.ts` followed by
  * regenerating the snapshot — this file and the runtime do not change.
  */

@@ -9,9 +9,12 @@
 // here stays a frozen snapshot, not a live cross-package source import, so
 // @pdpp/local-collector (the publishable runner) never depends on
 // @pdpp/polyfill-connectors (the content package) at build or publish time.
-// test/collector-definitions-snapshot-drift.test.ts fails CI if this file
-// drifts from what the generator would produce for polyfill-connectors'
-// current definitions.
+// Current state in this repository: pinned duplicate, no active
+// cross-repository drift test. test/collector-definitions-snapshot-drift.test.ts
+// is test.skip'd here because its generator imports polyfill-connectors'
+// source, which does not exist in this repository. Drift is bounded ONLY by
+// the pinned commit map (docs/migration/collector-commit-map.txt) until the
+// second tranche establishes a required cross-repository check.
 //
 // Update path: after changing a connector's LocalCollectorDefinition (or
 // adding/removing a bundled connector) in polyfill-connectors, regenerate
