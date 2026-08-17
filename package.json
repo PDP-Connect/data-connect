@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=20 <24"
+    "node": ">=22.14.0 <24"
   },
   "scripts": {
     "dev": "vite",
