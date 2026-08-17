@@ -14,6 +14,9 @@
     "./pdpp-safe-text": "./src/pdpp-safe-text.ts",
     "./safe-text-preview": "./src/safe-text-preview.ts"
   },
+  "files": [
+    "dist/"
+  ],
   "scripts": {
     "build": "node --experimental-strip-types scripts/build.ts",
     "check": "ultracite check",
@@ -29,6 +32,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",
+    "@types/node": "^24.10.1",
     "tsx": "^4.23.11",
     "ultracite": "7.10.2"
   },
