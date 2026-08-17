@@ -30,7 +30,13 @@ const packageDir = fileURLToPath(new URL("..", import.meta.url));
 const generatorScript = join(packageDir, "scripts/generate-collector-definitions-snapshot.ts");
 const trackedSnapshotPath = join(packageDir, "src/generated/collector-definitions.generated.ts");
 
-test("collector-definitions.generated.ts has not drifted from polyfill-connectors' LOCAL_COLLECTOR_DEFINITIONS", () => {
+test.skip("collector-definitions.generated.ts has not drifted from polyfill-connectors' LOCAL_COLLECTOR_DEFINITIONS", () => {
+  // Skipped post-Move-R: the generator script this test invokes imports
+  // packages/polyfill-connectors/src/collector-registry.ts, which is Move A
+  // content and correctly does not exist in this repo (same reasoning as the
+  // two registry-drift tests skipped in runner.test.ts — see that commit).
+  // In-process drift detection becomes cross-repository CI once Move A lands
+  // the registry at its destination; see Phase 0 evidence row A25.
   const scratchDir = mkdtempSync(join(tmpdir(), "collector-definitions-snapshot-drift-"));
   try {
     const scratchPath = join(scratchDir, "collector-definitions.generated.ts");
