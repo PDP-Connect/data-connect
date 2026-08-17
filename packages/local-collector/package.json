@@ -59,7 +59,8 @@
   },
   "devDependencies": {
     "@pdpp/collector-runtime": "*",
-    "@pdpp/connector-protocol": "*"
+    "@pdpp/connector-protocol": "*",
+    "tsx": "^4.23.11"
   },
   "engines": {
     "node": ">=22.14.0"

@@ -5652,13 +5652,16 @@ test("abort signal listener cleanup (regression: listener must be removed on abo
   let listenerCount = 0;
   let removeCount = 0;
 
+  type AddListenerArgs = Parameters<typeof controller.signal.addEventListener>;
+  type RemoveListenerArgs = Parameters<typeof controller.signal.removeEventListener>;
+
   const originalAddEventListener = controller.signal.addEventListener;
   const originalRemoveEventListener = controller.signal.removeEventListener;
 
   controller.signal.addEventListener = function (
-    type: string,
-    listener: EventListener,
-    options?: boolean | AddEventListenerOptions
+    type: AddListenerArgs[0],
+    listener: AddListenerArgs[1],
+    options?: AddListenerArgs[2]
   ) {
     if (type === "abort") {
       listenerCount += 1;
@@ -5666,7 +5669,7 @@ test("abort signal listener cleanup (regression: listener must be removed on abo
     return originalAddEventListener.call(this, type, listener, options);
   };
 
-  controller.signal.removeEventListener = function (type: string, listener: EventListener) {
+  controller.signal.removeEventListener = function (type: RemoveListenerArgs[0], listener: RemoveListenerArgs[1]) {
     if (type === "abort") {
       removeCount += 1;
     }

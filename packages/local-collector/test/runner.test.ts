@@ -193,7 +193,14 @@ test("bundled connector entries declare filesystem binding as required", () => {
   }
 });
 
-test("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
+test.skip("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
+  // Skipped post-Move-R: reads packages/polyfill-connectors/manifests/{id}.json,
+  // the per-connector manifest registry for pdpp's whole connector ecosystem
+  // (not just the 6 bundled connectors) — Move A content, correctly out of
+  // scope here, same reasoning as this file's other skipped registry-drift
+  // test and collector-definitions-snapshot-drift.test.ts. See Phase 0
+  // evidence row A25 for the cross-repo-CI mechanism this is reinstated under.
+  //
   // Local-device collectors push records from a device outbox and write no
   // spine run, so the connection-health rollup can only project a non-`unknown`
   // coverage axis from durable `coverage_diagnostics` records where that is the
@@ -222,7 +229,9 @@ test("bundled connector defaults request coverage_diagnostics whenever the conne
   }
 });
 
-test("bundled connector default streams are all manifest-declared (no undeclared stream requested)", async () => {
+test.skip("bundled connector default streams are all manifest-declared (no undeclared stream requested)", async () => {
+  // Skipped post-Move-R: same reason as the test above — needs
+  // packages/polyfill-connectors/manifests/{id}.json (Move A content).
   for (const id of BUNDLED_CONNECTOR_IDS) {
     const entry = getBundledConnector(id);
     assert.ok(entry, `entry for ${id}`);

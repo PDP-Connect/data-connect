@@ -12,7 +12,12 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(packageRoot, "../..");
-const referenceSpine = path.join(repoRoot, "reference-implementation/lib/spine.ts");
+// Any real .ts file with type annotations works as this probe's fixture — it
+// only needs to fail to parse without type-stripping. The original pdpp file
+// here (reference-implementation/lib/spine.ts) was an arbitrary choice, not a
+// real dependency of this test; repointed at Move R since that file (pdpp's
+// backend server) does not exist in this repo.
+const referenceSpine = path.join(packageRoot, "src/runner.ts");
 const whitespacePattern = /\s+/;
 
 function noTypeStrippingFlag() {
