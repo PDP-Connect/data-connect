@@ -161,3 +161,38 @@ support transcripts.
 For a full operator runbook, including Docker move guidance and troubleshooting
 for `403` after source migration and `409 collector_protocol_mismatch`, see
 [`docs/reference/local-collector.md`](../../docs/local-collector.md).
+
+## Connector child-process authority (current state, per D-29)
+
+Decision D-29 records the operative assumption for every officially bundled
+connector this package ships: **official connector source is code-trusted at
+the same privilege level as the runner until confinement lands**. Repository
+separation (this package living apart from connector content) is governance
+and release separation, not runtime containment. Custom/untrusted connector
+execution stays disabled — the published CLI's `run --connector` accepts only
+the bundled connector ids.
+
+Under that trust posture, the exact current child-process authority is:
+
+- **Environment:** the child inherits the entire parent `process.env`, then
+  the runtime's own reserved keys (`PDPP_LOCAL_DEVICE_TOKEN`,
+  `PDPP_REFERENCE_BASE_URL`, `PDPP_RUN_ID`) are applied, then the connector's
+  own declared `env` is merged in last — a connector can override the
+  runtime's reserved keys.
+- **Device token:** the device-exporter bearer token is forwarded to every
+  connector child as `PDPP_LOCAL_DEVICE_TOKEN`.
+- **Filesystem and network:** unrestricted, at the same privilege level as
+  the collector process itself.
+- **Process execution:** the runtime invokes the connector's declared command
+  by name with `node_modules/.bin` from both the package root and the repo
+  root prepended to `PATH`.
+- **Working directory:** the child's `cwd` is the collector's own package
+  root.
+
+This supersedes older, narrower design text that described the connector
+child as receiving no device token and an allowlisted-from-scratch
+environment — that description does not match what this runtime does today
+for the officially bundled connectors. Sandboxing, credential brokering (a
+narrower, per-connector token instead of the full device token), and a
+built-from-scratch allowlisted child environment remain future enablement
+gates, not requirements this package meets now.
