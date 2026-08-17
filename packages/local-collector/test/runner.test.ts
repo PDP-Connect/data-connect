@@ -128,7 +128,18 @@ test("bundled connectors registry contains every supported local connector", () 
   assert.ok(BUNDLED_CONNECTORS.google_messages);
 });
 
-test("bundled registry is assembled from the connector-owned definitions (runtime names no connector)", async () => {
+test.skip("bundled registry is assembled from the connector-owned definitions (runtime names no connector)", async () => {
+  // Skipped post-Move-R: this drift check compares the bundled snapshot
+  // (src/generated/collector-definitions.generated.ts) against
+  // packages/polyfill-connectors/src/collector-registry.ts, which is Move A
+  // content and correctly does not live in this repo (it's the connector
+  // registry's own authoring source, not runtime support). Same-repo
+  // in-process drift detection becomes cross-repository CI once Move A lands
+  // the registry in its own destination — see Phase 0 evidence row A25 ("Real
+  // candidate artifacts in cross-repo CI... CI consumes packed artifacts
+  // under exact target package manager/lockfile") for the mechanism this
+  // reinstates under.
+  //
   // Inversion invariant: the runtime does not author the connector list — the
   // bin injects the connectors' own LOCAL_COLLECTOR_DEFINITIONS. The runnable
   // registry must therefore be exactly those definitions, id-for-id, with each
@@ -143,7 +154,12 @@ test("bundled registry is assembled from the connector-owned definitions (runtim
   }
 });
 
-test("tsconfig packaging manifest bundles exactly the connectors in the definitions registry", async () => {
+test.skip("tsconfig packaging manifest bundles exactly the connectors in the definitions registry", async () => {
+  // Skipped post-Move-R: same reason as the drift-check test above — needs
+  // packages/polyfill-connectors/src/collector-registry.ts (Move A content).
+  // See that test's comment and Phase 0 evidence row A25 for the
+  // cross-repo-CI mechanism this is reinstated under.
+  //
   // The generic runtime names no connector, but the collector build still has
   // to COMPILE the bundled connectors into dist so it can spawn them. That
   // packaging list lives in tsconfig.build.json; this guard keeps it in
