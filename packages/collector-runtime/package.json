@@ -17,15 +17,15 @@
     "check": "ultracite check",
     "check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
     "fix": "ultracite fix",
-    "prepack": "pnpm build",
-    "prepare": "pnpm build",
-    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
+    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "test": "node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "verify": "pnpm typecheck && pnpm check && pnpm check:noUnnecessaryConditions-expiry && pnpm test"
+    "verify": "npm run typecheck && npm run check && npm run check:noUnnecessaryConditions-expiry && npm test"
   },
   "dependencies": {
-    "@pdpp/connector-protocol": "workspace:*",
-    "@pdpp/reference-contract": "workspace:*"
+    "@pdpp/connector-protocol": "*",
+    "@pdpp/reference-contract": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

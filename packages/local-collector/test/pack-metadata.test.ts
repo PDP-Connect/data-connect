@@ -59,7 +59,7 @@ test("npm pack metadata preserves lifecycle diagnostics on failure", async () =>
 test("package validation builds once through npm pack prepare", async () => {
   const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 
-  assert.equal(packageJson.scripts.prepare, "pnpm build");
-  assert.equal(packageJson.scripts.prepack, "pnpm build");
+  assert.equal(packageJson.scripts.prepare, "npm run build");
+  assert.equal(packageJson.scripts.prepack, "npm run build");
   assert.equal(packageJson.scripts["validate:package"], "tsx scripts/validate-package.ts");
 });

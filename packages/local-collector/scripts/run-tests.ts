@@ -1,6 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+// package.json's "test" script invokes this directly (no test-scratch/run-command.ts
+// wrapper, dropped at Move R): that wrapper coordinated scratch-directory ownership
+// across concurrently-running sibling packages in the pdpp monorepo, which does not
+// apply with a single tested package here. Revisit if a later merge (e.g. bringing
+// the personal-server suite into this repo) reintroduces concurrent scratch use.
+
 import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";

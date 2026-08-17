@@ -12,6 +12,6 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const distDir = path.join(packageRoot, "dist");
 
 await rm(distDir, { force: true, recursive: true });
-await execFileAsync("pnpm", ["exec", "tsc", "--project", "tsconfig.build.json"], {
+await execFileAsync("npx", ["tsc", "--project", "tsconfig.build.json"], {
   cwd: packageRoot,
 });

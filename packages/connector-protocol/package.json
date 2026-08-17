@@ -18,11 +18,11 @@
     "build": "node --experimental-strip-types scripts/build.ts",
     "check": "ultracite check",
     "fix": "ultracite fix",
-    "prepack": "pnpm build",
-    "prepare": "pnpm build",
-    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
+    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "test": "node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "verify": "pnpm typecheck && pnpm check && pnpm test"
+    "verify": "npm run typecheck && npm run check && npm test"
   },
   "dependencies": {
     "zod": "^4.4.3"

@@ -1,0 +1,12 @@
+{
+  "name": "@pdpp/reference-contract",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TEMPORARY VENDORED STAND-IN — see README.md in this directory before editing.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./common": "./src/common/index.ts",
+    "./evidence/named-collection-scope": "./src/evidence/named-collection-scope.ts"
+  }
+}
