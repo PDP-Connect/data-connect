@@ -197,8 +197,16 @@ export function resolveBundledConnectorEntry(entry: string): string {
   return fileURLToPath(new URL(`../../polyfill-connectors/connectors/${entry}/index.ts`, import.meta.url));
 }
 
-function commandForEntry(entry: string): "node" | "tsx" {
-  return extname(entry) === ".ts" ? "tsx" : "node";
+/**
+ * `.ts` entrypoints (monorepo dev) still need `tsx` on PATH to transpile on
+ * the fly. A built `.js` entrypoint needs no transpiler — spawning it with
+ * `process.execPath` (this process's own Node binary) rather than the
+ * literal string `"node"` means the child runs under the exact interpreter
+ * already running the collector, regardless of what (if anything) a `node`
+ * on the spawned child's PATH would resolve to.
+ */
+function commandForEntry(entry: string): string {
+  return extname(entry) === ".ts" ? "tsx" : process.execPath;
 }
 
 /** Turn one injected {@link LocalCollectorDefinition} into a runnable entry. */

@@ -39,6 +39,7 @@ import {
   recoverLocalCollector,
   removeLocalCollectorProfile,
   resolveConnectScopeChoice,
+  resolveExecutionRoot,
   resolveInspectionOptions,
   resolveLocalCollectorPackageVersion,
   resolveRunProfileOptions,
@@ -2019,6 +2020,45 @@ test("pdpp-local-collector run --connector claude_code resolves to the bundled d
   assert.deepEqual([...spec.args], [...BUNDLED_CONNECTORS.claude_code.args]);
   assert.deepEqual([...spec.streams].sort(), [...BUNDLED_CONNECTORS.claude_code.streams].sort());
   assert.equal(spec.runtime_requirements.bindings.filesystem?.required, true);
+});
+
+test("resolveExecutionRoot resolves a monorepo-dev bundled entrypoint (sibling package) to the repository root", () => {
+  const options = parseArgs([
+    "run",
+    "--base-url",
+    "http://127.0.0.1:7662",
+    "--connector",
+    "claude_code",
+    "--device-id",
+    "device-1",
+    "--device-token",
+    "token-1",
+    "--connection-id",
+    "src-claude",
+  ]);
+  const spec = buildConnectorSpec(options);
+  // In a monorepo checkout with no built `dist/`, the bundled entrypoint
+  // resolves to the sibling `packages/polyfill-connectors` source tree —
+  // beneath the repo root, not beneath `packages/local-collector` itself.
+  const executionRoot = resolveExecutionRoot(spec);
+  assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
+});
+
+test("resolveExecutionRoot resolves a published-shape bundled entrypoint under the local-collector package root", () => {
+  const executionRoot = resolveExecutionRoot({
+    args: [join(import.meta.dirname, "..", "dist", "polyfill-connectors", "connectors", "claude_code", "index.js")],
+  });
+  assert.equal(executionRoot, join(import.meta.dirname, ".."));
+});
+
+test("resolveExecutionRoot falls back to the entrypoint's own directory for an out-of-tree custom command", () => {
+  const executionRoot = resolveExecutionRoot({ args: ["/tmp/some-unrelated-dir/fixture.mjs"] });
+  assert.equal(executionRoot, "/tmp/some-unrelated-dir");
+});
+
+test("resolveExecutionRoot resolves a relative dev entrypoint to the enclosing repository root", () => {
+  const executionRoot = resolveExecutionRoot({ args: ["connectors/claude_code/index.ts"] });
+  assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
 });
 
 test("pdpp-local-collector run --connector claude-code (hyphen) normalizes to the bundled claude_code entrypoint", () => {

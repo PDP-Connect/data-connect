@@ -36,7 +36,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildConnectScopeRequest,
@@ -766,6 +766,7 @@ export async function runCollectorOnce(options: CliOptions): Promise<CollectorRu
       connector: spec,
       deviceId: options.deviceId,
       deviceToken: options.deviceToken,
+      executionRoot: resolveExecutionRoot(spec),
       ...(reporter ? { onMessage: reporter.onMessage } : {}),
       queuePath: resolveOutboxPath(options),
       ...(options.runId ? { runId: options.runId } : {}),
@@ -839,6 +840,7 @@ export async function runCollectorSample(options: CliOptions): Promise<SampleRun
       connector: spec,
       deviceId: options.deviceId,
       deviceToken: options.deviceToken,
+      executionRoot: resolveExecutionRoot(spec),
       onMessage,
       queuePath: resolveOutboxPath(options),
       ...(options.runId ? { runId: options.runId } : {}),
@@ -3076,6 +3078,84 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
     runtime_requirements: { bindings: bundled?.bindings ?? {} },
   };
+}
+
+export class CollectorExecutionRootError extends CollectorUsageError {}
+
+/**
+ * Resolve the explicit, realpath'd `executionRoot` `runCollectorConnector`
+ * spawns the connector child under (its `cwd`, its `node_modules/.bin` PATH
+ * base — see `CollectorRunConfig.executionRoot`). This is the composition
+ * layer's responsibility per the runtime's contract: the runtime itself
+ * never inspects `process.cwd()` or import order to find this path.
+ *
+ * Candidates are tried in order and the first one that (after realpath)
+ * actually contains the resolved connector entrypoint wins:
+ *
+ *   1. the resolved `@pdpp/local-collector` package root — true for every
+ *      published install, where the collector build vendors the bundled
+ *      connectors into its own `dist/` tree;
+ *   2. that package root's grandparent — true for a monorepo dev checkout,
+ *      where the entrypoint falls back to a sibling workspace package
+ *      (`packages/polyfill-connectors/...`) or a custom relative dev path
+ *      (`connectors/<id>/index.ts`) that only resolves under the repo root;
+ *   3. the entrypoint's own containing directory — the
+ *      `PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1` escape hatch
+ *      (`buildConnectorSpec`'s `options.entrypointCommand` path) lets an
+ *      operator point `--command`/`--args` at an absolute path anywhere on
+ *      disk; that is an explicit, opted-in choice of entrypoint, not an
+ *      ambient one, so it is still honest to derive `executionRoot` from it
+ *      rather than refuse the whole run.
+ *
+ * Only throws {@link CollectorExecutionRootError} when no candidate can be
+ * derived at all (no package root found, or no entrypoint argument given) —
+ * never on ambient/unvalidated state.
+ */
+export function resolveExecutionRoot(
+  spec: Pick<CollectorConnectorSpec, "args">,
+  startUrl: string | URL = import.meta.url
+): string {
+  const { packageRoot } = resolveLocalCollectorManifest(startUrl);
+  const entrypoint = spec.args[0];
+  if (!(packageRoot && entrypoint)) {
+    throw new CollectorExecutionRootError(
+      "could not resolve an execution root: no @pdpp/local-collector package root was found for this bin, " +
+        "or the connector spec has no entrypoint argument."
+    );
+  }
+  const resolvedEntrypoint = isAbsolute(entrypoint) ? realpathOrSelf(entrypoint) : null;
+  const repoRoot = join(packageRoot, "..", "..");
+  if (!resolvedEntrypoint) {
+    // A relative entrypoint (the monorepo custom-command dev fallback,
+    // `connectors/<id>/index.ts`) is only ever meant to resolve under the
+    // repo root, not the package root — accept it without requiring the
+    // file to exist yet (a typo'd connector id fails later at spawn, exactly
+    // as it did before this change; validating filesystem existence here
+    // would just move that error earlier for no safety benefit).
+    return repoRoot;
+  }
+  for (const candidate of [packageRoot, repoRoot]) {
+    if (isPathInside(resolvedEntrypoint, candidate)) {
+      return candidate;
+    }
+  }
+  return dirname(resolvedEntrypoint);
+}
+
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // Entrypoint may not exist yet in some test harnesses (e.g. the
+    // "missing connector command" error-path test); fall back to the
+    // lexical path so containment can still be checked against it.
+    return path;
+  }
+}
+
+function isPathInside(candidatePath: string, root: string): boolean {
+  const relativePath = relative(root, candidatePath);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 export function parseArgs(args: string[]): CliOptions {

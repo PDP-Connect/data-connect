@@ -794,6 +794,7 @@ test("M24: Claude mtime touch queues no transcript records while advancing its d
     },
     deviceId: "device-test",
     deviceToken: "test-token",
+    executionRoot: join(import.meta.dirname, "..", ".."),
     queuePath,
     sourceInstanceId: "claude-mtime-touch",
   } as const;
