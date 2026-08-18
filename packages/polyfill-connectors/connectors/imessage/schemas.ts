@@ -50,33 +50,38 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const NUMERIC_ID_RE = /^\d+$/; // chat_id is String(numeric ROWID)
 const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/; // sha256 hex of filename+rowid
 
-const isoDatetimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
-const chatIdSchema = z.string().regex(NUMERIC_ID_RE, "chat_id must be a numeric string").nullable();
+const isoDatetimeSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const chatIdSchema = z
+	.string()
+	.regex(NUMERIC_ID_RE, "chat_id must be a numeric string")
+	.nullable();
 
 const blobRefSchema = z
-  .object({
-    blob_id: pdppSafeText.min(1),
-    mime_type: pdppSafeText.min(1),
-    sha256: pdppSafeText.min(1),
-    size_bytes: z.number().int().min(0),
-  })
-  .nullable();
+	.object({
+		blob_id: pdppSafeText.min(1),
+		mime_type: pdppSafeText.min(1),
+		sha256: pdppSafeText.min(1),
+		size_bytes: z.number().int().min(0),
+	})
+	.nullable();
 
 /**
  * messages stream: one record per message row.
  * Cursor: date (Apple epoch high-water mark tracked in STATE).
  */
 export const messagesSchema = z.object({
-  // GUID (uppercase UUID) or numeric ROWID string. Bounded, non-empty.
-  id: z.string().min(1).max(80),
-  chat_id: chatIdSchema,
-  handle: pdppSafeText.max(320).nullable(),
-  service: pdppSafeText.max(40).nullable(),
-  is_from_me: z.boolean(),
-  text: pdppSafeText.max(10_000_000).nullable(),
-  date: isoDatetimeSchema,
-  date_read: isoDatetimeSchema.nullable(),
-  has_attachments: z.boolean(),
+	// GUID (uppercase UUID) or numeric ROWID string. Bounded, non-empty.
+	id: z.string().min(1).max(80),
+	chat_id: chatIdSchema,
+	handle: pdppSafeText.max(320).nullable(),
+	service: pdppSafeText.max(40).nullable(),
+	is_from_me: z.boolean(),
+	text: pdppSafeText.max(10_000_000).nullable(),
+	date: isoDatetimeSchema,
+	date_read: isoDatetimeSchema.nullable(),
+	has_attachments: z.boolean(),
 });
 
 /**
@@ -85,10 +90,10 @@ export const messagesSchema = z.object({
  * each run, not an incremental stream.
  */
 export const participantsSchema = z.object({
-  id: z.string().min(1).max(160),
-  chat_id: z.string().regex(NUMERIC_ID_RE, "chat_id must be a numeric string"),
-  handle: pdppSafeText.max(320).nullable(),
-  is_from_me: z.boolean(),
+	id: z.string().min(1).max(160),
+	chat_id: z.string().regex(NUMERIC_ID_RE, "chat_id must be a numeric string"),
+	handle: pdppSafeText.max(320).nullable(),
+	is_from_me: z.boolean(),
 });
 
 /**
@@ -100,25 +105,33 @@ export const participantsSchema = z.object({
  * leaking the local filesystem path.
  */
 export const attachmentsSchema = z.object({
-  id: z.string().regex(ATTACHMENT_ID_RE, "attachment id must be a sha256 hex digest"),
-  message_id: z.string().min(1).max(80).nullable(),
-  chat_id: chatIdSchema,
-  filename: pdppSafeText.min(1).max(500),
-  content_type: pdppSafeText.min(1).max(200),
-  size_bytes: z.number().int().min(0).nullable(),
-  content_sha256: pdppSafeText.nullable(),
-  hydration_status: z.enum(["deferred", "hydrated", "failed", "too_large", "missing"]),
-  hydration_error: pdppSafeText.nullable(),
-  blob_ref: blobRefSchema,
+	id: z
+		.string()
+		.regex(ATTACHMENT_ID_RE, "attachment id must be a sha256 hex digest"),
+	message_id: z.string().min(1).max(80).nullable(),
+	chat_id: chatIdSchema,
+	filename: pdppSafeText.min(1).max(500),
+	content_type: pdppSafeText.min(1).max(200),
+	size_bytes: z.number().int().min(0).nullable(),
+	content_sha256: pdppSafeText.nullable(),
+	hydration_status: z.enum([
+		"deferred",
+		"hydrated",
+		"failed",
+		"too_large",
+		"missing",
+	]),
+	hydration_error: pdppSafeText.nullable(),
+	blob_ref: blobRefSchema,
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  messages: messagesSchema,
-  participants: participantsSchema,
-  attachments: attachmentsSchema,
+	messages: messagesSchema,
+	participants: participantsSchema,
+	attachments: attachmentsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

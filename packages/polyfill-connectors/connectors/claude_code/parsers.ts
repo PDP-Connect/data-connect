@@ -6,7 +6,11 @@
 // walker and JSONL iterator live in index.ts.
 
 import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
-import type { ContentPart, ParsedFrontmatter, SessionAccumulator } from "./types.ts";
+import type {
+	ContentPart,
+	ParsedFrontmatter,
+	SessionAccumulator,
+} from "./types.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -38,96 +42,112 @@ const CLAUDE_MD_SUFFIX_RE = /\.md$/i;
 
 // ─── Previews ───────────────────────────────────────────────────────────
 
-export function textPreview(s: unknown, max = SHORT_PREVIEW_CHARS): string | null {
-  return safeTextPreview(s, max).preview;
+export function textPreview(
+	s: unknown,
+	max = SHORT_PREVIEW_CHARS,
+): string | null {
+	return safeTextPreview(s, max).preview;
 }
 
-export function truncateBody(body: string, max: number = SKILL_BODY_MAX_CHARS): string {
-  return body.length > max ? body.slice(0, max) : body;
+export function truncateBody(
+	body: string,
+	max: number = SKILL_BODY_MAX_CHARS,
+): string {
+	return body.length > max ? body.slice(0, max) : body;
 }
 
 // ─── Content extraction (messages + attachments) ────────────────────────
 
 function extractFromArrayPart(p: unknown): string {
-  if (typeof p === "string") {
-    return p;
-  }
-  const part = p as ContentPart | null;
-  if (part?.type === "text" && part.text) {
-    return part.text;
-  }
-  if (part?.type === "tool_use") {
-    return `[tool_use: ${part.name || "unknown"}]`;
-  }
-  if (part?.type === "tool_result") {
-    return "[tool_result]";
-  }
-  return "";
+	if (typeof p === "string") {
+		return p;
+	}
+	const part = p as ContentPart | null;
+	if (part?.type === "text" && part.text) {
+		return part.text;
+	}
+	if (part?.type === "tool_use") {
+		return `[tool_use: ${part.name || "unknown"}]`;
+	}
+	if (part?.type === "tool_result") {
+		return "[tool_result]";
+	}
+	return "";
 }
 
 function extractFromArray(arr: unknown[]): string | null {
-  const parts = arr.map(extractFromArrayPart).filter(Boolean);
-  return parts.join("\n") || null;
+	const parts = arr.map(extractFromArrayPart).filter(Boolean);
+	return parts.join("\n") || null;
 }
 
-function extractFromObject(obj: { content?: unknown; text?: unknown }): string | null {
-  if (obj.content) {
-    return extractContent(obj.content);
-  }
-  if (typeof obj.text === "string") {
-    return obj.text;
-  }
-  return null;
+function extractFromObject(obj: {
+	content?: unknown;
+	text?: unknown;
+}): string | null {
+	if (obj.content) {
+		return extractContent(obj.content);
+	}
+	if (typeof obj.text === "string") {
+		return obj.text;
+	}
+	return null;
 }
 
 export function extractContent(obj: unknown): string | null {
-  if (!obj) {
-    return null;
-  }
-  if (typeof obj === "string") {
-    return obj;
-  }
-  if (Array.isArray(obj)) {
-    return extractFromArray(obj);
-  }
-  if (typeof obj === "object") {
-    return extractFromObject(obj as { content?: unknown; text?: unknown });
-  }
-  return null;
+	if (!obj) {
+		return null;
+	}
+	if (typeof obj === "string") {
+		return obj;
+	}
+	if (Array.isArray(obj)) {
+		return extractFromArray(obj);
+	}
+	if (typeof obj === "object") {
+		return extractFromObject(obj as { content?: unknown; text?: unknown });
+	}
+	return null;
 }
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────
 
 function stripQuotes(value: string): string {
-  return value.replace(CLAUDE_FM_QUOTED_DOUBLE_RE, "$1").replace(CLAUDE_FM_QUOTED_SINGLE_RE, "$1").trim();
+	return value
+		.replace(CLAUDE_FM_QUOTED_DOUBLE_RE, "$1")
+		.replace(CLAUDE_FM_QUOTED_SINGLE_RE, "$1")
+		.trim();
 }
 
 function isBlockScalar(value: string): boolean {
-  return value === ">" || value === "|" || value === ">-" || value === "|-";
+	return value === ">" || value === "|" || value === ">-" || value === "|-";
 }
 
 interface BlockScalarResult {
-  nextIndex: number;
-  value: string;
+	nextIndex: number;
+	value: string;
 }
 
-function readBlockScalar(lines: string[], startIdx: number, marker: string): BlockScalarResult {
-  const folded = marker.startsWith(">");
-  const collected: string[] = [];
-  let i = startIdx;
-  while (i < lines.length) {
-    const next = lines[i] ?? "";
-    if (CLAUDE_FM_INDENT_RE.test(next) || next === "") {
-      collected.push(next.replace(CLAUDE_FM_LEADING_WS_RE, ""));
-      i += 1;
-    } else {
-      break;
-    }
-  }
-  const value = folded
-    ? collected.join(" ").replace(CLAUDE_FM_COLLAPSE_WS_RE, " ").trim()
-    : collected.join("\n").trim();
-  return { nextIndex: i, value };
+function readBlockScalar(
+	lines: string[],
+	startIdx: number,
+	marker: string,
+): BlockScalarResult {
+	const folded = marker.startsWith(">");
+	const collected: string[] = [];
+	let i = startIdx;
+	while (i < lines.length) {
+		const next = lines[i] ?? "";
+		if (CLAUDE_FM_INDENT_RE.test(next) || next === "") {
+			collected.push(next.replace(CLAUDE_FM_LEADING_WS_RE, ""));
+			i += 1;
+		} else {
+			break;
+		}
+	}
+	const value = folded
+		? collected.join(" ").replace(CLAUDE_FM_COLLAPSE_WS_RE, " ").trim()
+		: collected.join("\n").trim();
+	return { nextIndex: i, value };
 }
 
 /**
@@ -136,177 +156,190 @@ function readBlockScalar(lines: string[], startIdx: number, marker: string): Blo
  * with `>` or `|`. Returns { frontmatter, body }.
  */
 export function parseFrontmatter(text: string): ParsedFrontmatter {
-  if (typeof text !== "string") {
-    return { frontmatter: {}, body: text || "" };
-  }
-  const m = CLAUDE_FRONTMATTER_RE.exec(text);
-  if (!m) {
-    return { frontmatter: {}, body: text };
-  }
-  const rawFm = m[1] ?? "";
-  const body = m[2] ?? "";
-  const frontmatter: Record<string, string> = {};
-  const lines = rawFm.split(CLAUDE_FM_LINE_SPLIT_RE);
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-    if (!line.trim() || CLAUDE_FM_COMMENT_RE.test(line)) {
-      i += 1;
-      continue;
-    }
-    const kv = CLAUDE_FM_LINE_RE.exec(line);
-    if (!kv) {
-      i += 1;
-      continue;
-    }
-    const key = kv[1] ?? "";
-    const rawValue = kv[2] ?? "";
-    if (isBlockScalar(rawValue)) {
-      const { nextIndex, value } = readBlockScalar(lines, i + 1, rawValue);
-      frontmatter[key] = value;
-      i = nextIndex;
-    } else {
-      frontmatter[key] = stripQuotes(rawValue);
-      i += 1;
-    }
-  }
-  return { frontmatter, body };
+	if (typeof text !== "string") {
+		return { frontmatter: {}, body: text || "" };
+	}
+	const m = CLAUDE_FRONTMATTER_RE.exec(text);
+	if (!m) {
+		return { frontmatter: {}, body: text };
+	}
+	const rawFm = m[1] ?? "";
+	const body = m[2] ?? "";
+	const frontmatter: Record<string, string> = {};
+	const lines = rawFm.split(CLAUDE_FM_LINE_SPLIT_RE);
+	let i = 0;
+	while (i < lines.length) {
+		const line = lines[i] ?? "";
+		if (!line.trim() || CLAUDE_FM_COMMENT_RE.test(line)) {
+			i += 1;
+			continue;
+		}
+		const kv = CLAUDE_FM_LINE_RE.exec(line);
+		if (!kv) {
+			i += 1;
+			continue;
+		}
+		const key = kv[1] ?? "";
+		const rawValue = kv[2] ?? "";
+		if (isBlockScalar(rawValue)) {
+			const { nextIndex, value } = readBlockScalar(lines, i + 1, rawValue);
+			frontmatter[key] = value;
+			i = nextIndex;
+		} else {
+			frontmatter[key] = stripQuotes(rawValue);
+			i += 1;
+		}
+	}
+	return { frontmatter, body };
 }
 
 // ─── Session accumulator construction ───────────────────────────────────
 
-export function makeEmptySessionAccumulator(id: string, projectPath: string): SessionAccumulator {
-  return {
-    id,
-    project_path: projectPath,
-    cwd: null,
-    git_branch: null,
-    version: null,
-    started_at: null,
-    last_event_at: null,
-    message_count: 0,
-    user_type: null,
-    entrypoint: null,
-  };
+export function makeEmptySessionAccumulator(
+	id: string,
+	projectPath: string,
+): SessionAccumulator {
+	return {
+		id,
+		project_path: projectPath,
+		cwd: null,
+		git_branch: null,
+		version: null,
+		started_at: null,
+		last_event_at: null,
+		message_count: 0,
+		user_type: null,
+		entrypoint: null,
+	};
 }
 
 interface ObservedFields {
-  cwd: string | null;
-  entrypoint: string | null;
-  gitBranch: string | null;
-  userType: string | null;
-  version: string | null;
+	cwd: string | null;
+	entrypoint: string | null;
+	gitBranch: string | null;
+	userType: string | null;
+	version: string | null;
 }
 
-export function mergeSessionObservations(acc: SessionAccumulator, obs: ObservedFields): void {
-  if (obs.cwd) {
-    acc.cwd = obs.cwd;
-  }
-  if (obs.gitBranch) {
-    acc.git_branch = obs.gitBranch;
-  }
-  if (obs.version) {
-    acc.version = obs.version;
-  }
-  if (obs.userType) {
-    acc.user_type = obs.userType;
-  }
-  if (obs.entrypoint) {
-    acc.entrypoint = obs.entrypoint;
-  }
+export function mergeSessionObservations(
+	acc: SessionAccumulator,
+	obs: ObservedFields,
+): void {
+	if (obs.cwd) {
+		acc.cwd = obs.cwd;
+	}
+	if (obs.gitBranch) {
+		acc.git_branch = obs.gitBranch;
+	}
+	if (obs.version) {
+		acc.version = obs.version;
+	}
+	if (obs.userType) {
+		acc.user_type = obs.userType;
+	}
+	if (obs.entrypoint) {
+		acc.entrypoint = obs.entrypoint;
+	}
 }
 
 export function widenSessionTimeRange(
-  acc: SessionAccumulator,
-  firstTimestamp: string | null,
-  lastTimestamp: string | null
+	acc: SessionAccumulator,
+	firstTimestamp: string | null,
+	lastTimestamp: string | null,
 ): void {
-  if (firstTimestamp && (!acc.started_at || firstTimestamp < acc.started_at)) {
-    acc.started_at = firstTimestamp;
-  }
-  if (lastTimestamp && (!acc.last_event_at || lastTimestamp > acc.last_event_at)) {
-    acc.last_event_at = lastTimestamp;
-  }
+	if (firstTimestamp && (!acc.started_at || firstTimestamp < acc.started_at)) {
+		acc.started_at = firstTimestamp;
+	}
+	if (
+		lastTimestamp &&
+		(!acc.last_event_at || lastTimestamp > acc.last_event_at)
+	) {
+		acc.last_event_at = lastTimestamp;
+	}
 }
 
 // ─── Skill / slash-command record builders ──────────────────────────────
 
 export function buildSkillRecord(args: {
-  name: string;
-  frontmatter: Record<string, string>;
-  body: string;
-  path: string;
-  mtimeMs: number;
+	name: string;
+	frontmatter: Record<string, string>;
+	body: string;
+	path: string;
+	mtimeMs: number;
 }): Record<string, unknown> {
-  return {
-    id: `skills:${args.name}`,
-    name: args.frontmatter.name || args.name,
-    description: args.frontmatter.description || null,
-    source: "user",
-    path: args.path,
-    content: truncateBody(args.body),
-    frontmatter: args.frontmatter,
-    mtime_epoch: Math.floor(args.mtimeMs / 1000),
-  };
+	return {
+		id: `skills:${args.name}`,
+		name: args.frontmatter.name || args.name,
+		description: args.frontmatter.description || null,
+		source: "user",
+		path: args.path,
+		content: truncateBody(args.body),
+		frontmatter: args.frontmatter,
+		mtime_epoch: Math.floor(args.mtimeMs / 1000),
+	};
 }
 
 export function buildMemoryNoteRecord(args: {
-  projectDir: string;
-  relPath: string;
-  frontmatter: Record<string, string>;
-  body: string;
-  path: string;
-  mtimeMs: number;
+	projectDir: string;
+	relPath: string;
+	frontmatter: Record<string, string>;
+	body: string;
+	path: string;
+	mtimeMs: number;
 }): Record<string, unknown> {
-  const fallbackName = args.relPath.replace(CLAUDE_MD_SUFFIX_RE, "");
-  return {
-    id: `memory_notes:${args.projectDir}/${args.relPath}`,
-    project_path: args.projectDir,
-    note_path: args.relPath,
-    name: args.frontmatter.name || args.frontmatter.title || fallbackName,
-    description: args.frontmatter.description || null,
-    path: args.path,
-    content: truncateBody(args.body),
-    frontmatter: args.frontmatter,
-    mtime_epoch: Math.floor(args.mtimeMs / 1000),
-  };
+	const fallbackName = args.relPath.replace(CLAUDE_MD_SUFFIX_RE, "");
+	return {
+		id: `memory_notes:${args.projectDir}/${args.relPath}`,
+		project_path: args.projectDir,
+		note_path: args.relPath,
+		name: args.frontmatter.name || args.frontmatter.title || fallbackName,
+		description: args.frontmatter.description || null,
+		path: args.path,
+		content: truncateBody(args.body),
+		frontmatter: args.frontmatter,
+		mtime_epoch: Math.floor(args.mtimeMs / 1000),
+	};
 }
 
 export function buildSlashCommandRecord(args: {
-  idPath: string;
-  base: string;
-  frontmatter: Record<string, string>;
-  body: string;
-  path: string;
-  mtimeMs: number;
+	idPath: string;
+	base: string;
+	frontmatter: Record<string, string>;
+	body: string;
+	path: string;
+	mtimeMs: number;
 }): Record<string, unknown> {
-  return {
-    id: `commands:${args.idPath}`,
-    name: args.frontmatter.name || args.base,
-    description: args.frontmatter.description || null,
-    path: args.path,
-    content: truncateBody(args.body),
-    frontmatter: args.frontmatter,
-    mtime_epoch: Math.floor(args.mtimeMs / 1000),
-  };
+	return {
+		id: `commands:${args.idPath}`,
+		name: args.frontmatter.name || args.base,
+		description: args.frontmatter.description || null,
+		path: args.path,
+		content: truncateBody(args.body),
+		frontmatter: args.frontmatter,
+		mtime_epoch: Math.floor(args.mtimeMs / 1000),
+	};
 }
 
 // ─── Project-dir scoping ────────────────────────────────────────────────
 
-export function applyProjectDirScope(dirs: string[], include: readonly string[], exclude: readonly string[]): string[] {
-  let out = dirs;
-  if (include.length) {
-    out = out.filter((d) => include.some((s) => d.includes(s)));
-  }
-  if (exclude.length) {
-    out = out.filter((d) => !exclude.some((s) => d.includes(s)));
-  }
-  return out;
+export function applyProjectDirScope(
+	dirs: string[],
+	include: readonly string[],
+	exclude: readonly string[],
+): string[] {
+	let out = dirs;
+	if (include.length) {
+		out = out.filter((d) => include.some((s) => d.includes(s)));
+	}
+	if (exclude.length) {
+		out = out.filter((d) => !exclude.some((s) => d.includes(s)));
+	}
+	return out;
 }
 
 export function parseCsvEnv(value: string | undefined): string[] {
-  return (value || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+	return (value || "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
 }

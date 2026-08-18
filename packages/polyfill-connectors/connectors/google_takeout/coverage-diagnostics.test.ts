@@ -20,78 +20,125 @@ import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
  * import directory.
  */
 
-function records(messages: EmittedMessage[]): Extract<EmittedMessage, { type: "RECORD" }>[] {
-  return messages.filter((msg): msg is Extract<EmittedMessage, { type: "RECORD" }> => msg.type === "RECORD");
+function records(
+	messages: EmittedMessage[],
+): Extract<EmittedMessage, { type: "RECORD" }>[] {
+	return messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "RECORD" }> =>
+			msg.type === "RECORD",
+	);
 }
 
 function coverageFor(
-  recs: Extract<EmittedMessage, { type: "RECORD" }>[],
-  store: string
+	recs: Extract<EmittedMessage, { type: "RECORD" }>[],
+	store: string,
 ): Extract<EmittedMessage, { type: "RECORD" }> | undefined {
-  return recs.find((r) => r.stream === "coverage_diagnostics" && r.data.store === store);
+	return recs.find(
+		(r) => r.stream === "coverage_diagnostics" && r.data.store === store,
+	);
 }
 
 async function runFixtureConnector(
-  importDir: string
+	importDir: string,
 ): Promise<{ exitCode: number | null; messages: EmittedMessage[] }> {
-  const result = await runConnectorProtocolSubprocess({
-    allowFailedDone: true,
-    cwd: join(import.meta.dirname, "../.."),
-    entrypoint: "connectors/google_takeout/index.ts",
-    env: { GOOGLE_TAKEOUT_DIR: importDir },
-    start: {
-      scope: {
-        streams: [
-          { name: "location_history" },
-          { name: "youtube_watch_history" },
-          { name: "search_history" },
-          { name: "photos" },
-          { name: "coverage_diagnostics" },
-        ],
-      },
-      type: "START",
-    },
-  });
-  return { exitCode: result.code, messages: result.messages };
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: join(import.meta.dirname, "../.."),
+		entrypoint: "connectors/google_takeout/index.ts",
+		env: { GOOGLE_TAKEOUT_DIR: importDir },
+		start: {
+			scope: {
+				streams: [
+					{ name: "location_history" },
+					{ name: "youtube_watch_history" },
+					{ name: "search_history" },
+					{ name: "photos" },
+					{ name: "coverage_diagnostics" },
+				],
+			},
+			type: "START",
+		},
+	});
+	return { exitCode: result.code, messages: result.messages };
 }
 
 test("google_takeout coverage diagnostics: fully-extracted export reports every store collected", async () => {
-  const importDir = await mktempTakeoutDir();
-  await mkdir(join(importDir, "Location History (Timeline)"), { recursive: true });
-  await writeFile(join(importDir, "Location History (Timeline)", "Records.json"), JSON.stringify({ locations: [] }));
-  await mkdir(join(importDir, "YouTube and YouTube Music", "history"), { recursive: true });
-  await writeFile(join(importDir, "YouTube and YouTube Music", "history", "watch-history.json"), "[]");
-  await mkdir(join(importDir, "My Activity", "Search"), { recursive: true });
-  await writeFile(join(importDir, "My Activity", "Search", "MyActivity.json"), "[]");
-  await mkdir(join(importDir, "Photos"), { recursive: true });
+	const importDir = await mktempTakeoutDir();
+	await mkdir(join(importDir, "Location History (Timeline)"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(importDir, "Location History (Timeline)", "Records.json"),
+		JSON.stringify({ locations: [] }),
+	);
+	await mkdir(join(importDir, "YouTube and YouTube Music", "history"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(
+			importDir,
+			"YouTube and YouTube Music",
+			"history",
+			"watch-history.json",
+		),
+		"[]",
+	);
+	await mkdir(join(importDir, "My Activity", "Search"), { recursive: true });
+	await writeFile(
+		join(importDir, "My Activity", "Search", "MyActivity.json"),
+		"[]",
+	);
+	await mkdir(join(importDir, "Photos"), { recursive: true });
 
-  const result = await runFixtureConnector(importDir);
-  assert.equal(result.exitCode, 0);
-  const recs = records(result.messages);
+	const result = await runFixtureConnector(importDir);
+	assert.equal(result.exitCode, 0);
+	const recs = records(result.messages);
 
-  for (const store of ["location_history", "youtube_watch_history", "search_history", "photos"]) {
-    assert.equal(coverageFor(recs, store)?.data.status, "collected", `${store} should be collected`);
-  }
+	for (const store of [
+		"location_history",
+		"youtube_watch_history",
+		"search_history",
+		"photos",
+	]) {
+		assert.equal(
+			coverageFor(recs, store)?.data.status,
+			"collected",
+			`${store} should be collected`,
+		);
+	}
 
-  const stateMessages = result.messages.filter(
-    (msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
-      msg.type === "STATE" && msg.stream === "coverage_diagnostics"
-  );
-  assert.equal(stateMessages.length, 1, "coverage_diagnostics STATE must be emitted exactly once");
+	const stateMessages = result.messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
+			msg.type === "STATE" && msg.stream === "coverage_diagnostics",
+	);
+	assert.equal(
+		stateMessages.length,
+		1,
+		"coverage_diagnostics STATE must be emitted exactly once",
+	);
 });
 
 test("google_takeout coverage diagnostics: empty import directory reports every store missing, not a silent omission", async () => {
-  const importDir = await mktempTakeoutDir();
+	const importDir = await mktempTakeoutDir();
 
-  const result = await runFixtureConnector(importDir);
-  assert.equal(result.exitCode, 0);
-  const recs = records(result.messages);
+	const result = await runFixtureConnector(importDir);
+	assert.equal(result.exitCode, 0);
+	const recs = records(result.messages);
 
-  for (const store of ["location_history", "youtube_watch_history", "search_history", "photos"]) {
-    assert.equal(coverageFor(recs, store)?.data.status, "missing", `${store} should be missing`);
-  }
+	for (const store of [
+		"location_history",
+		"youtube_watch_history",
+		"search_history",
+		"photos",
+	]) {
+		assert.equal(
+			coverageFor(recs, store)?.data.status,
+			"missing",
+			`${store} should be missing`,
+		);
+	}
 });
 
 async function mktempTakeoutDir(): Promise<string> {
-  return await mkdtemp(join(tmpdir(), "pdpp-google-takeout-coverage-"));
+	return await mkdtemp(join(tmpdir(), "pdpp-google-takeout-coverage-"));
 }

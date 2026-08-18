@@ -50,62 +50,65 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
-  type EmittedMessage,
-  isMainModule,
-  type RecordData,
-  resourceSet,
-  type StreamScope,
-  stringifyForJsonl,
+	type EmittedMessage,
+	isMainModule,
+	type RecordData,
+	resourceSet,
+	type StreamScope,
+	stringifyForJsonl,
 } from "@pdpp/connector-protocol";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
 import {
-  dateDirectoryInRange,
-  type EnumerationScope,
-  enumerationScopeFingerprint,
-  isPathWithinSourceRoots,
-  readEnumerationScope,
-  scopeBoundsEnumeration,
+	dateDirectoryInRange,
+	type EnumerationScope,
+	enumerationScopeFingerprint,
+	isPathWithinSourceRoots,
+	readEnumerationScope,
+	scopeBoundsEnumeration,
 } from "../../src/collection-scope-enumeration.ts";
 import { flushAndExitAfterRuntimeAck } from "../../src/connector-exit.ts";
-import { type CarryForwardCursor, openCarryForwardCursor } from "../../src/fingerprint-cursor.ts";
 import {
-  buildCoverageDiagnosticsStateSnapshot,
-  buildDerivedCoverageRecord,
-  buildLocalSourceInventory,
-  type CoverageRecord,
-  type KnownLocalStore,
-  listDirectoryInventory,
-  openInventoryFingerprintCursor,
+	type CarryForwardCursor,
+	openCarryForwardCursor,
+} from "../../src/fingerprint-cursor.ts";
+import {
+	buildCoverageDiagnosticsStateSnapshot,
+	buildDerivedCoverageRecord,
+	buildLocalSourceInventory,
+	type CoverageRecord,
+	type KnownLocalStore,
+	listDirectoryInventory,
+	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
 import {
-  buildPromptRecord,
-  buildRolloutOnlySessionRecord,
-  buildRuleRecord,
-  buildSkillRecord,
-  buildThreadSessionRecord,
-  extendTimestampRange,
-  extractMessageText,
-  isRolloutFile,
-  isSkippableRulesLine,
-  parseFrontmatter,
-  payloadOutputPreview,
-  RULES_SUFFIX_RE,
-  splitRulesLines,
-  type TimestampRange,
-  TWO_DIGIT_DIR_RE,
-  textPreview,
-  YEAR_DIR_RE,
+	buildPromptRecord,
+	buildRolloutOnlySessionRecord,
+	buildRuleRecord,
+	buildSkillRecord,
+	buildThreadSessionRecord,
+	extendTimestampRange,
+	extractMessageText,
+	isRolloutFile,
+	isSkippableRulesLine,
+	parseFrontmatter,
+	payloadOutputPreview,
+	RULES_SUFFIX_RE,
+	splitRulesLines,
+	type TimestampRange,
+	TWO_DIGIT_DIR_RE,
+	textPreview,
+	YEAR_DIR_RE,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
-  PendingCall,
-  RolloutAggregate,
-  RolloutFileCursor,
-  RolloutObject,
-  RolloutPayload,
-  StartMessage,
-  ThreadFingerprint,
-  ThreadRow,
+	PendingCall,
+	RolloutAggregate,
+	RolloutFileCursor,
+	RolloutObject,
+	RolloutPayload,
+	StartMessage,
+	ThreadFingerprint,
+	ThreadRow,
 } from "./types.ts";
 
 const DEFAULT_ACTIVE_ROLLOUT_QUIET_MS = 120_000;
@@ -125,139 +128,141 @@ const MAX_PENDING_FUNCTION_CALLS = 1024;
 let stdoutDrainPromise: Promise<void> | null = null;
 
 const emit = (m: EmittedMessage): void => {
-  const ok = process.stdout.write(stringifyForJsonl(m));
-  if (!ok && stdoutDrainPromise === null) {
-    stdoutDrainPromise = new Promise<void>((resolve) => {
-      process.stdout.once("drain", () => {
-        stdoutDrainPromise = null;
-        resolve();
-      });
-    });
-  }
+	const ok = process.stdout.write(stringifyForJsonl(m));
+	if (!ok && stdoutDrainPromise === null) {
+		stdoutDrainPromise = new Promise<void>((resolve) => {
+			process.stdout.once("drain", () => {
+				stdoutDrainPromise = null;
+				resolve();
+			});
+		});
+	}
 };
 
 async function waitForEmitDrain(): Promise<void> {
-  if (stdoutDrainPromise !== null) {
-    await stdoutDrainPromise;
-  }
+	if (stdoutDrainPromise !== null) {
+		await stdoutDrainPromise;
+	}
 }
 
 const flushAndExit = (code: number): void => {
-  flushAndExitAfterRuntimeAck(code);
+	flushAndExitAfterRuntimeAck(code);
 };
 const fail = (m: string, r = false): void => {
-  emit({
-    type: "DONE",
-    status: "failed",
-    records_emitted: 0,
-    error: { message: m, retryable: r },
-  });
-  flushAndExit(1);
+	emit({
+		type: "DONE",
+		status: "failed",
+		records_emitted: 0,
+		error: { message: m, retryable: r },
+	});
+	flushAndExit(1);
 };
 
 export const CODEX_KNOWN_LOCAL_STORES: KnownLocalStore[] = [
-  {
-    store: "sessions",
-    relativePath: "sessions",
-    stream: "sessions",
-    classification: "collect",
-    reason: "declared rollout source",
-  },
-  {
-    store: "state_db",
-    relativePath: "state_5.sqlite",
-    stream: "sessions",
-    classification: "collect",
-    reason: "declared thread metadata source opened read-only",
-  },
-  {
-    store: "rules",
-    relativePath: "rules",
-    stream: "rules",
-    classification: "collect",
-    reason: "declared user-authored rules source",
-  },
-  {
-    store: "prompts",
-    relativePath: "prompts",
-    stream: "prompts",
-    classification: "collect",
-    reason: "declared user-authored prompts source",
-  },
-  {
-    store: "skills",
-    relativePath: "skills",
-    stream: "skills",
-    classification: "collect",
-    reason: "declared user-authored skills source",
-  },
-  {
-    store: "history",
-    relativePath: "history.jsonl",
-    stream: "history",
-    classification: "inventory_only",
-    reason: "metadata-only until prompt-history payload contract is approved",
-  },
-  {
-    store: "session_index",
-    relativePath: "session_index.jsonl",
-    stream: "session_index",
-    classification: "inventory_only",
-    reason: "metadata-only until session-index payload contract is approved",
-  },
-  {
-    store: "shell_snapshots",
-    relativePath: "shell-snapshots",
-    stream: "shell_snapshots",
-    classification: "inventory_only",
-    reason: "shell content requires redaction review before payload collection",
-  },
-  {
-    store: "memories",
-    relativePath: "memories",
-    stream: null,
-    classification: "inventory_only",
-    reason: "deferred private local store; diagnostics only until a general Codex memory surface is approved",
-  },
-  {
-    store: "context_mode",
-    relativePath: "context-mode",
-    stream: null,
-    classification: "inventory_only",
-    reason: "user-specific local convention; diagnostics only, not a general Codex stream",
-  },
-  {
-    store: "config",
-    relativePath: "config.toml",
-    stream: "config_inventory",
-    classification: "inventory_only",
-    reason: "configuration is inventoried without payload content",
-  },
-  {
-    store: "cache",
-    relativePath: "cache",
-    stream: "cache_inventory",
-    classification: "inventory_only",
-    reason: "raw cache payloads may contain sensitive tool output",
-  },
-  {
-    store: "auth",
-    relativePath: "auth.json",
-    stream: null,
-    classification: "exclude",
-    reason: "auth-adjacent credential material is never emitted",
-  },
+	{
+		store: "sessions",
+		relativePath: "sessions",
+		stream: "sessions",
+		classification: "collect",
+		reason: "declared rollout source",
+	},
+	{
+		store: "state_db",
+		relativePath: "state_5.sqlite",
+		stream: "sessions",
+		classification: "collect",
+		reason: "declared thread metadata source opened read-only",
+	},
+	{
+		store: "rules",
+		relativePath: "rules",
+		stream: "rules",
+		classification: "collect",
+		reason: "declared user-authored rules source",
+	},
+	{
+		store: "prompts",
+		relativePath: "prompts",
+		stream: "prompts",
+		classification: "collect",
+		reason: "declared user-authored prompts source",
+	},
+	{
+		store: "skills",
+		relativePath: "skills",
+		stream: "skills",
+		classification: "collect",
+		reason: "declared user-authored skills source",
+	},
+	{
+		store: "history",
+		relativePath: "history.jsonl",
+		stream: "history",
+		classification: "inventory_only",
+		reason: "metadata-only until prompt-history payload contract is approved",
+	},
+	{
+		store: "session_index",
+		relativePath: "session_index.jsonl",
+		stream: "session_index",
+		classification: "inventory_only",
+		reason: "metadata-only until session-index payload contract is approved",
+	},
+	{
+		store: "shell_snapshots",
+		relativePath: "shell-snapshots",
+		stream: "shell_snapshots",
+		classification: "inventory_only",
+		reason: "shell content requires redaction review before payload collection",
+	},
+	{
+		store: "memories",
+		relativePath: "memories",
+		stream: null,
+		classification: "inventory_only",
+		reason:
+			"deferred private local store; diagnostics only until a general Codex memory surface is approved",
+	},
+	{
+		store: "context_mode",
+		relativePath: "context-mode",
+		stream: null,
+		classification: "inventory_only",
+		reason:
+			"user-specific local convention; diagnostics only, not a general Codex stream",
+	},
+	{
+		store: "config",
+		relativePath: "config.toml",
+		stream: "config_inventory",
+		classification: "inventory_only",
+		reason: "configuration is inventoried without payload content",
+	},
+	{
+		store: "cache",
+		relativePath: "cache",
+		stream: "cache_inventory",
+		classification: "inventory_only",
+		reason: "raw cache payloads may contain sensitive tool output",
+	},
+	{
+		store: "auth",
+		relativePath: "auth.json",
+		stream: null,
+		classification: "exclude",
+		reason: "auth-adjacent credential material is never emitted",
+	},
 ];
 
 // ─── JSONL line iteration (byte-offset aware) ───────────────────────────
 
 export interface RolloutLineYield {
-  /** Byte offset just past this line's terminating `\n`. This is the safe
-   *  append boundary: a parse that stops here has consumed only fully
-   *  newline-terminated lines, so a later run can resume from here without
-   *  re-reading or splitting a partial line. */
-  committedOffset: number;
-  obj: RolloutObject;
+	/** Byte offset just past this line's terminating `\n`. This is the safe
+	 *  append boundary: a parse that stops here has consumed only fully
+	 *  newline-terminated lines, so a later run can resume from here without
+	 *  re-reading or splitting a partial line. */
+	committedOffset: number;
+	obj: RolloutObject;
 }
 
 /**
@@ -272,37 +277,40 @@ export interface RolloutLineYield {
  * characters, so a multi-byte UTF-8 sequence advances the offset by its true
  * byte length and the resume offset always lands on a real byte boundary.
  */
-export async function* iterJsonlLinesFromOffset(path: string, startOffset: number): AsyncGenerator<RolloutLineYield> {
-  const stream = createReadStream(path, { start: startOffset });
-  let pending: Buffer = Buffer.alloc(0);
-  // Byte offset (from file start) just past the last `\n` we have emitted.
-  let committed = startOffset;
-  for await (const chunk of stream) {
-    const buf = chunk as Buffer;
-    pending = pending.length === 0 ? buf : Buffer.concat([pending, buf]);
-    let nl = pending.indexOf(0x0a);
-    while (nl !== -1) {
-      const lineBuf = pending.subarray(0, nl);
-      committed += nl + 1; // bytes consumed up to and including the `\n`
-      const line = lineBuf.toString("utf8");
-      const trimmed = line.trim();
-      if (trimmed) {
-        let parsed: RolloutObject | null = null;
-        try {
-          parsed = JSON.parse(line) as RolloutObject;
-        } catch {
-          parsed = null; // skip malformed, but still advance the offset
-        }
-        if (parsed) {
-          yield { obj: parsed, committedOffset: committed };
-        }
-      }
-      pending = pending.subarray(nl + 1);
-      nl = pending.indexOf(0x0a);
-    }
-  }
-  // Any leftover `pending` is a partial (unterminated) line — intentionally
-  // dropped without advancing `committed`, so it is re-read next run.
+export async function* iterJsonlLinesFromOffset(
+	path: string,
+	startOffset: number,
+): AsyncGenerator<RolloutLineYield> {
+	const stream = createReadStream(path, { start: startOffset });
+	let pending: Buffer = Buffer.alloc(0);
+	// Byte offset (from file start) just past the last `\n` we have emitted.
+	let committed = startOffset;
+	for await (const chunk of stream) {
+		const buf = chunk as Buffer;
+		pending = pending.length === 0 ? buf : Buffer.concat([pending, buf]);
+		let nl = pending.indexOf(0x0a);
+		while (nl !== -1) {
+			const lineBuf = pending.subarray(0, nl);
+			committed += nl + 1; // bytes consumed up to and including the `\n`
+			const line = lineBuf.toString("utf8");
+			const trimmed = line.trim();
+			if (trimmed) {
+				let parsed: RolloutObject | null = null;
+				try {
+					parsed = JSON.parse(line) as RolloutObject;
+				} catch {
+					parsed = null; // skip malformed, but still advance the offset
+				}
+				if (parsed) {
+					yield { obj: parsed, committedOffset: committed };
+				}
+			}
+			pending = pending.subarray(nl + 1);
+			nl = pending.indexOf(0x0a);
+		}
+	}
+	// Any leftover `pending` is a partial (unterminated) line — intentionally
+	// dropped without advancing `committed`, so it is re-read next run.
 }
 
 // ─── Rollout file integrity guard ───────────────────────────────────────
@@ -313,121 +321,148 @@ export async function* iterJsonlLinesFromOffset(path: string, startOffset: numbe
  * shorter than `guardBytes` (caller treats a short read as an integrity
  * mismatch and full-reparses) or on any read error.
  */
-async function hashFilePrefix(path: string, guardBytes: number): Promise<string | null> {
-  if (guardBytes <= 0) {
-    return createHash("sha256").update(Buffer.alloc(0)).digest("hex");
-  }
-  return await new Promise<string | null>((resolve) => {
-    const hash = createHash("sha256");
-    let read = 0;
-    const stream = createReadStream(path, { start: 0, end: guardBytes - 1 });
-    stream.on("data", (chunk) => {
-      const buf = chunk as Buffer;
-      read += buf.length;
-      hash.update(buf);
-    });
-    stream.on("error", () => resolve(null));
-    stream.on("end", () => {
-      // A guard prefix that came up short means the file shrank below the
-      // boundary we committed against — treat as replaced.
-      resolve(read >= guardBytes ? hash.digest("hex") : null);
-    });
-  });
+async function hashFilePrefix(
+	path: string,
+	guardBytes: number,
+): Promise<string | null> {
+	if (guardBytes <= 0) {
+		return createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+	}
+	return await new Promise<string | null>((resolve) => {
+		const hash = createHash("sha256");
+		let read = 0;
+		const stream = createReadStream(path, { start: 0, end: guardBytes - 1 });
+		stream.on("data", (chunk) => {
+			const buf = chunk as Buffer;
+			read += buf.length;
+			hash.update(buf);
+		});
+		stream.on("error", () => resolve(null));
+		stream.on("end", () => {
+			// A guard prefix that came up short means the file shrank below the
+			// boundary we committed against — treat as replaced.
+			resolve(read >= guardBytes ? hash.digest("hex") : null);
+		});
+	});
 }
 
 // ─── Rollout directory walking ──────────────────────────────────────────
 
 // Distinguish ENOENT (legitimate absence) from other errors (unreadable/permission failure)
 async function listIfExists(dir: string): Promise<string[] | null> {
-  try {
-    return await readdir(dir);
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException;
-    if (err?.code === "ENOENT") {
-      return null;
-    }
-    throw e;
-  }
+	try {
+		return await readdir(dir);
+	} catch (e) {
+		const err = e as NodeJS.ErrnoException;
+		if (err?.code === "ENOENT") {
+			return null;
+		}
+		throw e;
+	}
 }
 
 async function* walkDayFiles(
-  dayPath: string,
-  year: string,
-  month: string,
-  day: string
-): AsyncGenerator<{ path: string; year: string; month: string; day: string; file: string }> {
-  const files = await listIfExists(dayPath);
-  if (files === null) {
-    return;
-  }
-  for (const f of files) {
-    if (isRolloutFile(f)) {
-      yield { path: join(dayPath, f), year, month, day, file: f };
-    }
-  }
+	dayPath: string,
+	year: string,
+	month: string,
+	day: string,
+): AsyncGenerator<{
+	path: string;
+	year: string;
+	month: string;
+	day: string;
+	file: string;
+}> {
+	const files = await listIfExists(dayPath);
+	if (files === null) {
+		return;
+	}
+	for (const f of files) {
+		if (isRolloutFile(f)) {
+			yield { path: join(dayPath, f), year, month, day, file: f };
+		}
+	}
 }
 
 async function* walkMonthDays(
-  monthPath: string,
-  year: string,
-  month: string,
-  scope?: EnumerationScope | null
-): AsyncGenerator<{ path: string; year: string; month: string; day: string; file: string }> {
-  const days = await listIfExists(monthPath);
-  if (days === null) {
-    return;
-  }
-  for (const d of days) {
-    if (!TWO_DIGIT_DIR_RE.test(d)) {
-      continue;
-    }
-    // A civil day strictly before the boundary day cannot hold an in-range
-    // record, so the whole day is skipped without listing or opening any file.
-    if (!dateDirectoryInRange({ day: d, month, year }, scope)) {
-      continue;
-    }
-    yield* walkDayFiles(join(monthPath, d), year, month, d);
-  }
+	monthPath: string,
+	year: string,
+	month: string,
+	scope?: EnumerationScope | null,
+): AsyncGenerator<{
+	path: string;
+	year: string;
+	month: string;
+	day: string;
+	file: string;
+}> {
+	const days = await listIfExists(monthPath);
+	if (days === null) {
+		return;
+	}
+	for (const d of days) {
+		if (!TWO_DIGIT_DIR_RE.test(d)) {
+			continue;
+		}
+		// A civil day strictly before the boundary day cannot hold an in-range
+		// record, so the whole day is skipped without listing or opening any file.
+		if (!dateDirectoryInRange({ day: d, month, year }, scope)) {
+			continue;
+		}
+		yield* walkDayFiles(join(monthPath, d), year, month, d);
+	}
 }
 
 async function* walkYearMonths(
-  yearPath: string,
-  year: string,
-  scope?: EnumerationScope | null
-): AsyncGenerator<{ path: string; year: string; month: string; day: string; file: string }> {
-  const months = await listIfExists(yearPath);
-  if (months === null) {
-    return;
-  }
-  for (const m of months) {
-    if (!TWO_DIGIT_DIR_RE.test(m)) {
-      continue;
-    }
-    if (!dateDirectoryInRange({ month: m, year }, scope)) {
-      continue;
-    }
-    yield* walkMonthDays(join(yearPath, m), year, m, scope);
-  }
+	yearPath: string,
+	year: string,
+	scope?: EnumerationScope | null,
+): AsyncGenerator<{
+	path: string;
+	year: string;
+	month: string;
+	day: string;
+	file: string;
+}> {
+	const months = await listIfExists(yearPath);
+	if (months === null) {
+		return;
+	}
+	for (const m of months) {
+		if (!TWO_DIGIT_DIR_RE.test(m)) {
+			continue;
+		}
+		if (!dateDirectoryInRange({ month: m, year }, scope)) {
+			continue;
+		}
+		yield* walkMonthDays(join(yearPath, m), year, m, scope);
+	}
 }
 
 // Recursively walk the yyyy/mm/dd hierarchy and yield rollout-*.jsonl paths.
 export async function* walkRollouts(
-  baseDir: string,
-  scope?: EnumerationScope | null
-): AsyncGenerator<{ path: string; year: string; month: string; day: string; file: string }> {
-  const years = await listIfExists(baseDir);
-  if (years === null) {
-    return;
-  }
-  for (const y of years) {
-    if (!YEAR_DIR_RE.test(y)) {
-      continue;
-    }
-    if (!dateDirectoryInRange({ year: y }, scope)) {
-      continue;
-    }
-    yield* walkYearMonths(join(baseDir, y), y, scope);
-  }
+	baseDir: string,
+	scope?: EnumerationScope | null,
+): AsyncGenerator<{
+	path: string;
+	year: string;
+	month: string;
+	day: string;
+	file: string;
+}> {
+	const years = await listIfExists(baseDir);
+	if (years === null) {
+		return;
+	}
+	for (const y of years) {
+		if (!YEAR_DIR_RE.test(y)) {
+			continue;
+		}
+		if (!dateDirectoryInRange({ year: y }, scope)) {
+			continue;
+		}
+		yield* walkYearMonths(join(baseDir, y), y, scope);
+	}
 }
 
 // ─── state_5.sqlite reader ─────────────────────────────────────────────
@@ -442,158 +477,182 @@ const THREADS_QUERY = `
 `;
 
 function openThreadsDb(dbPath: string): DatabaseSync | null {
-  try {
-    return new DatabaseSync(dbPath, { readOnly: true });
-  } catch {
-    emit({
-      type: "PROGRESS",
-      message: "Codex phase=index pass=index state_db_readable=false fallback=rollouts_only",
-    });
-    return null;
-  }
+	try {
+		return new DatabaseSync(dbPath, { readOnly: true });
+	} catch {
+		emit({
+			type: "PROGRESS",
+			message:
+				"Codex phase=index pass=index state_db_readable=false fallback=rollouts_only",
+		});
+		return null;
+	}
 }
 
 function isThreadRow(row: unknown): row is ThreadRow {
-  return typeof row === "object" && row !== null && typeof (row as { id?: unknown }).id === "string";
+	return (
+		typeof row === "object" &&
+		row !== null &&
+		typeof (row as { id?: unknown }).id === "string"
+	);
 }
 
 function* queryThreadsRows(db: DatabaseSync): Iterable<ThreadRow> {
-  try {
-    for (const row of db.prepare(THREADS_QUERY).iterate()) {
-      if (isThreadRow(row)) {
-        yield row;
-      }
-    }
-  } catch {
-    emit({
-      type: "PROGRESS",
-      message: "Codex phase=index pass=index state_db_query_failed=true fallback=rollouts_only",
-    });
-  }
+	try {
+		for (const row of db.prepare(THREADS_QUERY).iterate()) {
+			if (isThreadRow(row)) {
+				yield row;
+			}
+		}
+	} catch {
+		emit({
+			type: "PROGRESS",
+			message:
+				"Codex phase=index pass=index state_db_query_failed=true fallback=rollouts_only",
+		});
+	}
 }
 
 // ─── Static-file streams ────────────────────────────────────────────────
 
 interface LoadedFile {
-  mtimeMs: number;
-  size: number;
-  text: string;
+	mtimeMs: number;
+	size: number;
+	text: string;
 }
 
 async function statAndRead(path: string): Promise<LoadedFile | null> {
-  try {
-    const st = await stat(path);
-    const preview = await readBoundedFilePreview(path);
-    if (preview === null) {
-      return null;
-    }
-    const text = preview.buffer.toString("utf8");
-    return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
-  } catch {
-    return null;
-  }
+	try {
+		const st = await stat(path);
+		const preview = await readBoundedFilePreview(path);
+		if (preview === null) {
+			return null;
+		}
+		const text = preview.buffer.toString("utf8");
+		return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
+	} catch {
+		return null;
+	}
 }
 
 async function emitRulesStream(
-  rulesDir: string,
-  emitRecord: (stream: string, data: RecordData) => void
+	rulesDir: string,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): Promise<void> {
-  const entries = await listIfExists(rulesDir);
-  if (entries === null) {
-    return;
-  }
-  for (const f of entries) {
-    if (!f.endsWith(".rules")) {
-      continue;
-    }
-    const p = join(rulesDir, f);
-    const loaded = await statAndRead(p);
-    if (!loaded) {
-      continue;
-    }
-    const mtime = Math.floor(loaded.mtimeMs / 1000);
-    const ruleset = f.replace(RULES_SUFFIX_RE, "");
-    let idx = 0;
-    for (const raw of splitRulesLines(loaded.text)) {
-      const line = raw.trim();
-      if (isSkippableRulesLine(line)) {
-        continue;
-      }
-      emitRecord("rules", buildRuleRecord({ ruleset, line, index: idx, path: p, mtime }));
-      await waitForEmitDrain();
-      idx += 1;
-    }
-  }
+	const entries = await listIfExists(rulesDir);
+	if (entries === null) {
+		return;
+	}
+	for (const f of entries) {
+		if (!f.endsWith(".rules")) {
+			continue;
+		}
+		const p = join(rulesDir, f);
+		const loaded = await statAndRead(p);
+		if (!loaded) {
+			continue;
+		}
+		const mtime = Math.floor(loaded.mtimeMs / 1000);
+		const ruleset = f.replace(RULES_SUFFIX_RE, "");
+		let idx = 0;
+		for (const raw of splitRulesLines(loaded.text)) {
+			const line = raw.trim();
+			if (isSkippableRulesLine(line)) {
+				continue;
+			}
+			emitRecord(
+				"rules",
+				buildRuleRecord({ ruleset, line, index: idx, path: p, mtime }),
+			);
+			await waitForEmitDrain();
+			idx += 1;
+		}
+	}
 }
 
 async function emitPromptsStream(
-  promptsDir: string,
-  emitRecord: (stream: string, data: RecordData) => void
+	promptsDir: string,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): Promise<void> {
-  const entries = await listIfExists(promptsDir);
-  if (entries === null) {
-    return;
-  }
-  for (const f of entries) {
-    if (!f.endsWith(".md")) {
-      continue;
-    }
-    const p = join(promptsDir, f);
-    const loaded = await statAndRead(p);
-    if (!loaded) {
-      continue;
-    }
-    const { meta, body } = parseFrontmatter(loaded.text);
-    emitRecord("prompts", buildPromptRecord({ fileName: f, meta, body, path: p, mtimeMs: loaded.mtimeMs }));
-    await waitForEmitDrain();
-  }
+	const entries = await listIfExists(promptsDir);
+	if (entries === null) {
+		return;
+	}
+	for (const f of entries) {
+		if (!f.endsWith(".md")) {
+			continue;
+		}
+		const p = join(promptsDir, f);
+		const loaded = await statAndRead(p);
+		if (!loaded) {
+			continue;
+		}
+		const { meta, body } = parseFrontmatter(loaded.text);
+		emitRecord(
+			"prompts",
+			buildPromptRecord({
+				fileName: f,
+				meta,
+				body,
+				path: p,
+				mtimeMs: loaded.mtimeMs,
+			}),
+		);
+		await waitForEmitDrain();
+	}
 }
 
 function shouldSkipSkillEntry(ent: Dirent): boolean {
-  return ent.name.startsWith(".") || ent.name === "skills.backup";
+	return ent.name.startsWith(".") || ent.name === "skills.backup";
 }
 
 async function isDirectoryPath(p: string): Promise<boolean> {
-  try {
-    const s = await stat(p);
-    return s.isDirectory();
-  } catch {
-    return false;
-  }
+	try {
+		const s = await stat(p);
+		return s.isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 async function emitSkillsStream(
-  skillsDir: string,
-  emitRecord: (stream: string, data: RecordData) => void
+	skillsDir: string,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): Promise<void> {
-  // Each skill is a subdirectory with SKILL.md at its root. Follows symlinks
-  // (skills are often symlinked from dotfiles). Skips hidden dirs (.system).
-  let entries: Dirent[];
-  try {
-    entries = await readdir(skillsDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const ent of entries) {
-    if (shouldSkipSkillEntry(ent)) {
-      continue;
-    }
-    const dirPath = join(skillsDir, ent.name);
-    if (!(await isDirectoryPath(dirPath))) {
-      continue;
-    }
-    const skillMdPath = join(dirPath, "SKILL.md");
-    const loaded = await statAndRead(skillMdPath);
-    if (!loaded) {
-      continue;
-    }
-    const { meta, body } = parseFrontmatter(loaded.text);
-    emitRecord(
-      "skills",
-      buildSkillRecord({ dirName: ent.name, meta, body, path: skillMdPath, mtimeMs: loaded.mtimeMs })
-    );
-    await waitForEmitDrain();
-  }
+	// Each skill is a subdirectory with SKILL.md at its root. Follows symlinks
+	// (skills are often symlinked from dotfiles). Skips hidden dirs (.system).
+	let entries: Dirent[];
+	try {
+		entries = await readdir(skillsDir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const ent of entries) {
+		if (shouldSkipSkillEntry(ent)) {
+			continue;
+		}
+		const dirPath = join(skillsDir, ent.name);
+		if (!(await isDirectoryPath(dirPath))) {
+			continue;
+		}
+		const skillMdPath = join(dirPath, "SKILL.md");
+		const loaded = await statAndRead(skillMdPath);
+		if (!loaded) {
+			continue;
+		}
+		const { meta, body } = parseFrontmatter(loaded.text);
+		emitRecord(
+			"skills",
+			buildSkillRecord({
+				dirName: ent.name,
+				meta,
+				body,
+				path: skillMdPath,
+				mtimeMs: loaded.mtimeMs,
+			}),
+		);
+		await waitForEmitDrain();
+	}
 }
 
 // ─── Per-run dependency bag ─────────────────────────────────────────────
@@ -602,24 +661,24 @@ async function emitSkillsStream(
  *  amazon/chase/slack pattern: one stable bag so parseRolloutFile becomes
  *  pure orchestration and each helper is individually testable. */
 export interface LineEmitDeps {
-  emitRecord: (stream: string, data: RecordData) => void;
-  /** Coarse progress hook fired every 2000 lines. Tests wire this to a
-   *  recorder; production wires it to the runtime `emit(PROGRESS)`. */
-  progress: (message: string) => void;
-  requested: Map<string, StreamScope>;
+	emitRecord: (stream: string, data: RecordData) => void;
+	/** Coarse progress hook fired every 2000 lines. Tests wire this to a
+	 *  recorder; production wires it to the runtime `emit(PROGRESS)`. */
+	progress: (message: string) => void;
+	requested: Map<string, StreamScope>;
 }
 
 // ─── Per-file parse state ───────────────────────────────────────────────
 
 export interface RolloutParseState {
-  firstTimestamp: string | null;
-  functionCallCount: number;
-  lastTimestamp: string | null;
-  lineCount: number;
-  messageCount: number;
-  pendingCalls: Map<string, PendingCall>;
-  sessionId: string | null;
-  sessionMeta: RolloutPayload | null;
+	firstTimestamp: string | null;
+	functionCallCount: number;
+	lastTimestamp: string | null;
+	lineCount: number;
+	messageCount: number;
+	pendingCalls: Map<string, PendingCall>;
+	sessionId: string | null;
+	sessionMeta: RolloutPayload | null;
 }
 
 /** Optional seed for an append-only resume. Carries forward the parser
@@ -629,132 +688,134 @@ export interface RolloutParseState {
  *  appended suffix has no `session_meta` line, so seeding `sessionId` is what
  *  attributes the suffix response_items to the right session. */
 export interface RolloutParseSeed {
-  firstTimestamp: string | null;
-  functionCallCount: number;
-  lastTimestamp: string | null;
-  lineCount: number;
-  messageCount: number;
-  sessionId: string | null;
+	firstTimestamp: string | null;
+	functionCallCount: number;
+	lastTimestamp: string | null;
+	lineCount: number;
+	messageCount: number;
+	sessionId: string | null;
 }
 
-export function makeRolloutParseState(seed?: RolloutParseSeed): RolloutParseState {
-  return {
-    sessionId: seed?.sessionId ?? null,
-    sessionMeta: null,
-    firstTimestamp: seed?.firstTimestamp ?? null,
-    lastTimestamp: seed?.lastTimestamp ?? null,
-    messageCount: seed?.messageCount ?? 0,
-    functionCallCount: seed?.functionCallCount ?? 0,
-    pendingCalls: new Map(),
-    lineCount: seed?.lineCount ?? 0,
-  };
+export function makeRolloutParseState(
+	seed?: RolloutParseSeed,
+): RolloutParseState {
+	return {
+		sessionId: seed?.sessionId ?? null,
+		sessionMeta: null,
+		firstTimestamp: seed?.firstTimestamp ?? null,
+		lastTimestamp: seed?.lastTimestamp ?? null,
+		messageCount: seed?.messageCount ?? 0,
+		functionCallCount: seed?.functionCallCount ?? 0,
+		pendingCalls: new Map(),
+		lineCount: seed?.lineCount ?? 0,
+	};
 }
 
 // ─── Per-payload record builders (stateful over RolloutParseState) ──────
 
 function emitMessageRecord(
-  state: RolloutParseState,
-  payload: RolloutPayload,
-  ts: string | null,
-  emitRecord: (stream: string, data: RecordData) => void
+	state: RolloutParseState,
+	payload: RolloutPayload,
+	ts: string | null,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): void {
-  const { sessionId } = state;
-  if (!sessionId) {
-    return;
-  }
-  const id = `${sessionId}:${state.lineCount}`;
-  emitRecord("messages", {
-    id,
-    session_id: sessionId,
-    role: payload.role || null,
-    type: "message",
-    content: textPreview(extractMessageText(payload), 5000),
-    timestamp: ts,
-  });
+	const { sessionId } = state;
+	if (!sessionId) {
+		return;
+	}
+	const id = `${sessionId}:${state.lineCount}`;
+	emitRecord("messages", {
+		id,
+		session_id: sessionId,
+		role: payload.role || null,
+		type: "message",
+		content: textPreview(extractMessageText(payload), 5000),
+		timestamp: ts,
+	});
 }
 
 function registerFunctionCall(
-  state: RolloutParseState,
-  payload: RolloutPayload,
-  ts: string | null,
-  emitRecord: (stream: string, data: RecordData) => void
+	state: RolloutParseState,
+	payload: RolloutPayload,
+	ts: string | null,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): void {
-  const { sessionId } = state;
-  if (!sessionId) {
-    return;
-  }
-  const callId = payload.call_id || `${sessionId}:${state.lineCount}`;
-  while (state.pendingCalls.size >= MAX_PENDING_FUNCTION_CALLS) {
-    const oldestEntry = state.pendingCalls.entries().next();
-    if (oldestEntry.done) {
-      break;
-    }
-    const [oldestCallId, oldest] = oldestEntry.value;
-    emitRecord("function_calls", oldest);
-    state.pendingCalls.delete(oldestCallId);
-  }
-  state.pendingCalls.set(callId, {
-    id: callId,
-    session_id: sessionId,
-    call_id: callId,
-    name: payload.name || null,
-    arguments: textPreview(payload.arguments || null, 2000),
-    output_preview: null,
-    timestamp: ts,
-  });
+	const { sessionId } = state;
+	if (!sessionId) {
+		return;
+	}
+	const callId = payload.call_id || `${sessionId}:${state.lineCount}`;
+	while (state.pendingCalls.size >= MAX_PENDING_FUNCTION_CALLS) {
+		const oldestEntry = state.pendingCalls.entries().next();
+		if (oldestEntry.done) {
+			break;
+		}
+		const [oldestCallId, oldest] = oldestEntry.value;
+		emitRecord("function_calls", oldest);
+		state.pendingCalls.delete(oldestCallId);
+	}
+	state.pendingCalls.set(callId, {
+		id: callId,
+		session_id: sessionId,
+		call_id: callId,
+		name: payload.name || null,
+		arguments: textPreview(payload.arguments || null, 2000),
+		output_preview: null,
+		timestamp: ts,
+	});
 }
 
 function applyFunctionCallOutput(
-  state: RolloutParseState,
-  payload: RolloutPayload,
-  ts: string | null,
-  emitRecord: (stream: string, data: RecordData) => void
+	state: RolloutParseState,
+	payload: RolloutPayload,
+	ts: string | null,
+	emitRecord: (stream: string, data: RecordData) => void,
 ): void {
-  const { sessionId } = state;
-  if (!sessionId) {
-    return;
-  }
-  const callId = payload.call_id;
-  const existing = callId ? state.pendingCalls.get(callId) : null;
-  const previewResult = payloadOutputPreview(payload.output);
-  if (existing) {
-    // Emit the merged call+output record NOW and drop the pending entry, rather
-    // than mutating it in place and waiting for the EOF flush. Holding every
-    // paired call in `pendingCalls` until end-of-file made the map grow to one
-    // entry per call across the whole parse — O(file) memory, multi-GB on a
-    // very large active Codex session. The "pendingCalls stays bounded across a
-    // large parse" test in integration.test.ts pins this. The record shape is
-    // identical to what flushPendingCalls produced; only the emit moment moves
-    // earlier, so the stream still lands each call exactly once.
-    existing.output_preview = previewResult.preview;
-    if (previewResult.binaryReason) {
-      existing.output_binary_reason = previewResult.binaryReason;
-    }
-    if (callId) {
-      state.pendingCalls.delete(callId);
-    }
-    emitRecord("function_calls", { ...existing });
-    return;
-  }
-  emitRecord("function_calls", {
-    id: `${sessionId}:${state.lineCount}:output`,
-    session_id: sessionId,
-    call_id: callId || null,
-    name: null,
-    arguments: null,
-    output_preview: previewResult.preview,
-    output_binary_reason: previewResult.binaryReason,
-    timestamp: ts,
-  });
+	const { sessionId } = state;
+	if (!sessionId) {
+		return;
+	}
+	const callId = payload.call_id;
+	const existing = callId ? state.pendingCalls.get(callId) : null;
+	const previewResult = payloadOutputPreview(payload.output);
+	if (existing) {
+		// Emit the merged call+output record NOW and drop the pending entry, rather
+		// than mutating it in place and waiting for the EOF flush. Holding every
+		// paired call in `pendingCalls` until end-of-file made the map grow to one
+		// entry per call across the whole parse — O(file) memory, multi-GB on a
+		// very large active Codex session. The "pendingCalls stays bounded across a
+		// large parse" test in integration.test.ts pins this. The record shape is
+		// identical to what flushPendingCalls produced; only the emit moment moves
+		// earlier, so the stream still lands each call exactly once.
+		existing.output_preview = previewResult.preview;
+		if (previewResult.binaryReason) {
+			existing.output_binary_reason = previewResult.binaryReason;
+		}
+		if (callId) {
+			state.pendingCalls.delete(callId);
+		}
+		emitRecord("function_calls", { ...existing });
+		return;
+	}
+	emitRecord("function_calls", {
+		id: `${sessionId}:${state.lineCount}:output`,
+		session_id: sessionId,
+		call_id: callId || null,
+		name: null,
+		arguments: null,
+		output_preview: previewResult.preview,
+		output_binary_reason: previewResult.binaryReason,
+		timestamp: ts,
+	});
 }
 
 // ─── Per-payload dispatcher ─────────────────────────────────────────────
 
 export interface ProcessResponseItemArgs {
-  deps: LineEmitDeps;
-  payload: RolloutPayload;
-  state: RolloutParseState;
-  ts: string | null;
+	deps: LineEmitDeps;
+	payload: RolloutPayload;
+	state: RolloutParseState;
+	ts: string | null;
 }
 
 /**
@@ -768,40 +829,52 @@ export interface ProcessResponseItemArgs {
  * advance unconditionally (so the session aggregate stays accurate even
  * when the corresponding record stream is gated off).
  */
-export function processResponseItem({ deps, payload, state, ts }: ProcessResponseItemArgs): void {
-  if (payload.type === "message") {
-    state.messageCount += 1;
-    if (deps.requested.has("messages")) {
-      emitMessageRecord(state, payload, ts, deps.emitRecord);
-    }
-    return;
-  }
-  if (payload.type === "function_call") {
-    state.functionCallCount += 1;
-    if (deps.requested.has("function_calls")) {
-      registerFunctionCall(state, payload, ts, deps.emitRecord);
-    }
-    return;
-  }
-  if (payload.type === "function_call_output" && deps.requested.has("function_calls")) {
-    applyFunctionCallOutput(state, payload, ts, deps.emitRecord);
-  }
-  // reasoning is skipped — encrypted_content is opaque.
+export function processResponseItem({
+	deps,
+	payload,
+	state,
+	ts,
+}: ProcessResponseItemArgs): void {
+	if (payload.type === "message") {
+		state.messageCount += 1;
+		if (deps.requested.has("messages")) {
+			emitMessageRecord(state, payload, ts, deps.emitRecord);
+		}
+		return;
+	}
+	if (payload.type === "function_call") {
+		state.functionCallCount += 1;
+		if (deps.requested.has("function_calls")) {
+			registerFunctionCall(state, payload, ts, deps.emitRecord);
+		}
+		return;
+	}
+	if (
+		payload.type === "function_call_output" &&
+		deps.requested.has("function_calls")
+	) {
+		applyFunctionCallOutput(state, payload, ts, deps.emitRecord);
+	}
+	// reasoning is skipped — encrypted_content is opaque.
 }
 
 // ─── Per-line dispatcher ────────────────────────────────────────────────
 
 export interface ProcessRolloutLineArgs {
-  deps: LineEmitDeps;
-  file: string;
-  obj: RolloutObject;
-  state: RolloutParseState;
+	deps: LineEmitDeps;
+	file: string;
+	obj: RolloutObject;
+	state: RolloutParseState;
 }
 
 const PROGRESS_EVERY = 2000;
 
-export function shouldDeferActiveRolloutFile(input: { mtimeMs: number; nowMs: number; quietMs: number }): boolean {
-  return input.quietMs > 0 && input.mtimeMs > input.nowMs - input.quietMs;
+export function shouldDeferActiveRolloutFile(input: {
+	mtimeMs: number;
+	nowMs: number;
+	quietMs: number;
+}): boolean {
+	return input.quietMs > 0 && input.mtimeMs > input.nowMs - input.quietMs;
 }
 
 /**
@@ -820,36 +893,43 @@ export function shouldDeferActiveRolloutFile(input: { mtimeMs: number; nowMs: nu
  * files. Timestamps extend the first/last range on every line regardless
  * of dispatch, so the session aggregate covers the full file span.
  */
-export function processRolloutLine({ deps, obj, state }: ProcessRolloutLineArgs): void {
-  state.lineCount += 1;
-  if (state.lineCount % PROGRESS_EVERY === 0) {
-    deps.progress(`Codex phase=emit pass=emit lines_parsed=${state.lineCount}`);
-  }
-  const ts = obj.timestamp || null;
-  const range: TimestampRange = { firstTs: state.firstTimestamp, lastTs: state.lastTimestamp };
-  extendTimestampRange(range, ts);
-  state.firstTimestamp = range.firstTs;
-  state.lastTimestamp = range.lastTs;
+export function processRolloutLine({
+	deps,
+	obj,
+	state,
+}: ProcessRolloutLineArgs): void {
+	state.lineCount += 1;
+	if (state.lineCount % PROGRESS_EVERY === 0) {
+		deps.progress(`Codex phase=emit pass=emit lines_parsed=${state.lineCount}`);
+	}
+	const ts = obj.timestamp || null;
+	const range: TimestampRange = {
+		firstTs: state.firstTimestamp,
+		lastTs: state.lastTimestamp,
+	};
+	extendTimestampRange(range, ts);
+	state.firstTimestamp = range.firstTs;
+	state.lastTimestamp = range.lastTs;
 
-  if (obj.type === "session_meta") {
-    if (state.sessionId === null) {
-      state.sessionMeta = obj.payload || {};
-      state.sessionId = state.sessionMeta.id || null;
-    }
-    return;
-  }
-  if (!state.sessionId) {
-    return;
-  }
-  if (obj.type !== "response_item") {
-    return;
-  }
-  processResponseItem({
-    payload: obj.payload || {},
-    ts,
-    state,
-    deps,
-  });
+	if (obj.type === "session_meta") {
+		if (state.sessionId === null) {
+			state.sessionMeta = obj.payload || {};
+			state.sessionId = state.sessionMeta.id || null;
+		}
+		return;
+	}
+	if (!state.sessionId) {
+		return;
+	}
+	if (obj.type !== "response_item") {
+		return;
+	}
+	processResponseItem({
+		payload: obj.payload || {},
+		ts,
+		state,
+		deps,
+	});
 }
 
 // ─── End-of-file flush ──────────────────────────────────────────────────
@@ -867,43 +947,46 @@ export function processRolloutLine({ deps, obj, state }: ProcessRolloutLineArgs)
  * number of concurrently-open (unanswered) calls, NOT by the file size — which
  * is what keeps a multi-GB session parse memory-bounded.
  */
-export function flushPendingCalls(state: RolloutParseState, deps: LineEmitDeps): void {
-  for (const call of state.pendingCalls.values()) {
-    deps.emitRecord("function_calls", { ...call });
-  }
-  state.pendingCalls.clear();
+export function flushPendingCalls(
+	state: RolloutParseState,
+	deps: LineEmitDeps,
+): void {
+	for (const call of state.pendingCalls.values()) {
+		deps.emitRecord("function_calls", { ...call });
+	}
+	state.pendingCalls.clear();
 }
 
 // ─── Sessions pass (I/O-free) ───────────────────────────────────────────
 
 export interface EmitSessionsFromMapsArgs {
-  /**
-   * Shared carry-forward cursor over the per-thread `ThreadFingerprint`.
-   * This run's emitted sessions `note` a fresh fingerprint, and skipped
-   * sessions carry their prior fingerprint forward unchanged (the cursor
-   * seeds its next map from the prior). The caller serializes
-   * `cursor.toState()` into the next `sessions` STATE cursor so the chain
-   * stays intact across runs.
-   *
-   * The cursor owns two behaviors the connector relies on:
-   *   1. Lossy-overwrite repair: `cursor.prior(id)` supplies the prior
-   *      counts when this run did NOT parse the session's rollout file, so
-   *      a state_5-only update doesn't clobber a real `message_count` with
-   *      `null` (see `buildThreadSessionRecord` / `makeThreadFingerprint`).
-   *   2. Churn reduction: `shouldReemitThreadSession` skips emitting a
-   *      thread entirely when none of (a) rollout parsed this run,
-   *      (b) thread.updated_at moved, (c) the session id is new. No emit =
-   *      no new history version. The cursor still carries the fingerprint
-   *      forward so the next run can gate against it.
-   *
-   * Omitted by callers that don't need the cursor (e.g. unit tests pinning
-   * the legacy emit-everything contract); in that case every thread emits
-   * and no fingerprints are tracked.
-   */
-  cursor?: CarryForwardCursor<ThreadFingerprint>;
-  emitRecord: (stream: string, data: RecordData) => void;
-  rolloutAggregates: Map<string, RolloutAggregate>;
-  threadsMap: Map<string, ThreadRow>;
+	/**
+	 * Shared carry-forward cursor over the per-thread `ThreadFingerprint`.
+	 * This run's emitted sessions `note` a fresh fingerprint, and skipped
+	 * sessions carry their prior fingerprint forward unchanged (the cursor
+	 * seeds its next map from the prior). The caller serializes
+	 * `cursor.toState()` into the next `sessions` STATE cursor so the chain
+	 * stays intact across runs.
+	 *
+	 * The cursor owns two behaviors the connector relies on:
+	 *   1. Lossy-overwrite repair: `cursor.prior(id)` supplies the prior
+	 *      counts when this run did NOT parse the session's rollout file, so
+	 *      a state_5-only update doesn't clobber a real `message_count` with
+	 *      `null` (see `buildThreadSessionRecord` / `makeThreadFingerprint`).
+	 *   2. Churn reduction: `shouldReemitThreadSession` skips emitting a
+	 *      thread entirely when none of (a) rollout parsed this run,
+	 *      (b) thread.updated_at moved, (c) the session id is new. No emit =
+	 *      no new history version. The cursor still carries the fingerprint
+	 *      forward so the next run can gate against it.
+	 *
+	 * Omitted by callers that don't need the cursor (e.g. unit tests pinning
+	 * the legacy emit-everything contract); in that case every thread emits
+	 * and no fingerprints are tracked.
+	 */
+	cursor?: CarryForwardCursor<ThreadFingerprint>;
+	emitRecord: (stream: string, data: RecordData) => void;
+	rolloutAggregates: Map<string, RolloutAggregate>;
+	threadsMap: Map<string, ThreadRow>;
 }
 
 /**
@@ -918,41 +1001,42 @@ export interface EmitSessionsFromMapsArgs {
  * skipping the emit avoids a new history version downstream.
  */
 export function shouldReemitThreadSession(
-  thread: ThreadRow,
-  agg: RolloutAggregate | undefined,
-  priorFingerprint: ThreadFingerprint | undefined
+	thread: ThreadRow,
+	agg: RolloutAggregate | undefined,
+	priorFingerprint: ThreadFingerprint | undefined,
 ): boolean {
-  if (!priorFingerprint) {
-    return true;
-  }
-  if (agg) {
-    return true;
-  }
-  const priorUpdatedAt = priorFingerprint.updated_at ?? null;
-  const currentUpdatedAt = thread.updated_at ?? null;
-  if (currentUpdatedAt === null) {
-    return priorUpdatedAt !== null;
-  }
-  if (priorUpdatedAt === null) {
-    return true;
-  }
-  return currentUpdatedAt > priorUpdatedAt;
+	if (!priorFingerprint) {
+		return true;
+	}
+	if (agg) {
+		return true;
+	}
+	const priorUpdatedAt = priorFingerprint.updated_at ?? null;
+	const currentUpdatedAt = thread.updated_at ?? null;
+	if (currentUpdatedAt === null) {
+		return priorUpdatedAt !== null;
+	}
+	if (priorUpdatedAt === null) {
+		return true;
+	}
+	return currentUpdatedAt > priorUpdatedAt;
 }
 
 function makeThreadFingerprint(
-  thread: ThreadRow,
-  agg: RolloutAggregate | undefined,
-  priorFingerprint: ThreadFingerprint | undefined
+	thread: ThreadRow,
+	agg: RolloutAggregate | undefined,
+	priorFingerprint: ThreadFingerprint | undefined,
 ): ThreadFingerprint {
-  // Counts must follow the same fallback chain as buildThreadSessionRecord
-  // — otherwise the fingerprint we persist would disagree with the record
-  // we just emitted, and the next run would think state_5 hasn't moved
-  // while the count field oscillates.
-  return {
-    updated_at: thread.updated_at ?? null,
-    message_count: agg?.messageCount ?? priorFingerprint?.message_count ?? null,
-    function_call_count: agg?.functionCallCount ?? priorFingerprint?.function_call_count ?? null,
-  };
+	// Counts must follow the same fallback chain as buildThreadSessionRecord
+	// — otherwise the fingerprint we persist would disagree with the record
+	// we just emitted, and the next run would think state_5 hasn't moved
+	// while the count field oscillates.
+	return {
+		updated_at: thread.updated_at ?? null,
+		message_count: agg?.messageCount ?? priorFingerprint?.message_count ?? null,
+		function_call_count:
+			agg?.functionCallCount ?? priorFingerprint?.function_call_count ?? null,
+	};
 }
 
 /**
@@ -980,54 +1064,59 @@ function makeThreadFingerprint(
  *     (thread-preferred). Tests pin this — a regression would double-emit.
  */
 export function emitSessionsFromMaps({
-  threadsMap,
-  rolloutAggregates,
-  emitRecord,
-  cursor,
+	threadsMap,
+	rolloutAggregates,
+	emitRecord,
+	cursor,
 }: EmitSessionsFromMapsArgs): void {
-  const emittedSessionIds = new Set<string>();
-  for (const [id, t] of threadsMap) {
-    emittedSessionIds.add(id);
-    const agg = rolloutAggregates.get(id);
-    const prior = cursor?.prior(id);
-    if (shouldReemitThreadSession(t, agg, prior)) {
-      emitRecord("sessions", buildThreadSessionRecord(id, t, agg, prior));
-    }
-    cursor?.note(id, makeThreadFingerprint(t, agg, prior));
-  }
-  for (const [id, agg] of rolloutAggregates) {
-    if (emittedSessionIds.has(id)) {
-      continue;
-    }
-    emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
-    // Rollout-only sessions don't have a state_5 row to fingerprint
-    // against (updated_at lives in threads). They re-emit whenever
-    // their rollout file mtime changes — the rollout-file mtime gate
-    // in scanRollouts is the right deduper for that path.
-  }
+	const emittedSessionIds = new Set<string>();
+	for (const [id, t] of threadsMap) {
+		emittedSessionIds.add(id);
+		const agg = rolloutAggregates.get(id);
+		const prior = cursor?.prior(id);
+		if (shouldReemitThreadSession(t, agg, prior)) {
+			emitRecord("sessions", buildThreadSessionRecord(id, t, agg, prior));
+		}
+		cursor?.note(id, makeThreadFingerprint(t, agg, prior));
+	}
+	for (const [id, agg] of rolloutAggregates) {
+		if (emittedSessionIds.has(id)) {
+			continue;
+		}
+		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		// Rollout-only sessions don't have a state_5 row to fingerprint
+		// against (updated_at lives in threads). They re-emit whenever
+		// their rollout file mtime changes — the rollout-file mtime gate
+		// in scanRollouts is the right deduper for that path.
+	}
 }
 
 interface EmitSessionsFromRowsArgs {
-  cursor: CarryForwardCursor<ThreadFingerprint>;
-  emitRecord: (stream: string, data: RecordData) => void;
-  rolloutAggregates: Map<string, RolloutAggregate>;
-  threadsRows: Iterable<ThreadRow>;
+	cursor: CarryForwardCursor<ThreadFingerprint>;
+	emitRecord: (stream: string, data: RecordData) => void;
+	rolloutAggregates: Map<string, RolloutAggregate>;
+	threadsRows: Iterable<ThreadRow>;
 }
 
-function emitSessionsFromRows({ threadsRows, rolloutAggregates, emitRecord, cursor }: EmitSessionsFromRowsArgs): void {
-  for (const t of threadsRows) {
-    const agg = rolloutAggregates.get(t.id);
-    rolloutAggregates.delete(t.id);
-    const prior = cursor.prior(t.id);
-    if (shouldReemitThreadSession(t, agg, prior)) {
-      emitRecord("sessions", buildThreadSessionRecord(t.id, t, agg, prior));
-    }
-    cursor.note(t.id, makeThreadFingerprint(t, agg, prior));
-  }
+function emitSessionsFromRows({
+	threadsRows,
+	rolloutAggregates,
+	emitRecord,
+	cursor,
+}: EmitSessionsFromRowsArgs): void {
+	for (const t of threadsRows) {
+		const agg = rolloutAggregates.get(t.id);
+		rolloutAggregates.delete(t.id);
+		const prior = cursor.prior(t.id);
+		if (shouldReemitThreadSession(t, agg, prior)) {
+			emitRecord("sessions", buildThreadSessionRecord(t.id, t, agg, prior));
+		}
+		cursor.note(t.id, makeThreadFingerprint(t, agg, prior));
+	}
 
-  for (const [id, agg] of rolloutAggregates) {
-    emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
-  }
+	for (const [id, agg] of rolloutAggregates) {
+		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+	}
 }
 
 // ─── Rollout-file line processing ───────────────────────────────────────
@@ -1035,85 +1124,90 @@ function emitSessionsFromRows({ threadsRows, rolloutAggregates, emitRecord, curs
 // rolloutAggregates write-back.
 
 interface ParseRolloutFileArgs {
-  emitRecord: (stream: string, data: RecordData) => void;
-  file: string;
-  path: string;
-  requested: Map<string, StreamScope>;
-  rolloutAggregates: Map<string, RolloutAggregate>;
-  /** Parser-state seed for an append tail (`undefined` for a full parse). */
-  seed: RolloutParseSeed | undefined;
-  /** Byte offset to start reading from. 0 for a full parse; the prior
-   *  committed offset for an append-only tail. */
-  startOffset: number;
+	emitRecord: (stream: string, data: RecordData) => void;
+	file: string;
+	path: string;
+	requested: Map<string, StreamScope>;
+	rolloutAggregates: Map<string, RolloutAggregate>;
+	/** Parser-state seed for an append tail (`undefined` for a full parse). */
+	seed: RolloutParseSeed | undefined;
+	/** Byte offset to start reading from. 0 for a full parse; the prior
+	 *  committed offset for an append-only tail. */
+	startOffset: number;
 }
 
 interface ParseRolloutFileResult {
-  /** Byte offset just past the last fully-parsed line — the new commit
-   *  boundary for this file's cursor. Equals `startOffset` when the suffix
-   *  contained no newline-terminated line. */
-  committedOffset: number;
-  firstTimestamp: string | null;
-  functionCallCount: number;
-  lastTimestamp: string | null;
-  lineCount: number;
-  messageCount: number;
-  sessionId: string | null;
+	/** Byte offset just past the last fully-parsed line — the new commit
+	 *  boundary for this file's cursor. Equals `startOffset` when the suffix
+	 *  contained no newline-terminated line. */
+	committedOffset: number;
+	firstTimestamp: string | null;
+	functionCallCount: number;
+	lastTimestamp: string | null;
+	lineCount: number;
+	messageCount: number;
+	sessionId: string | null;
 }
 
-async function parseRolloutFile(args: ParseRolloutFileArgs): Promise<ParseRolloutFileResult> {
-  const state = makeRolloutParseState(args.seed);
-  const deps: LineEmitDeps = {
-    emitRecord: args.emitRecord,
-    progress: (message: string): void => {
-      emit({ type: "PROGRESS", message });
-    },
-    requested: args.requested,
-  };
-  let committedOffset = args.startOffset;
-  for await (const { obj, committedOffset: lineEnd } of iterJsonlLinesFromOffset(args.path, args.startOffset)) {
-    processRolloutLine({ obj, state, deps, file: args.file });
-    committedOffset = lineEnd;
-    await waitForEmitDrain();
-  }
-  flushPendingCalls(state, deps);
-  await waitForEmitDrain();
-  if (state.sessionId) {
-    args.rolloutAggregates.set(state.sessionId, {
-      meta: state.sessionMeta || {},
-      firstTs: state.firstTimestamp,
-      lastTs: state.lastTimestamp,
-      // Counts are cumulative: makeRolloutParseState seeded them from the
-      // prior cursor on an append, so this is prior + delta, not suffix-only.
-      messageCount: state.messageCount,
-      functionCallCount: state.functionCallCount,
-      rolloutPath: args.path,
-    });
-  }
-  return {
-    committedOffset,
-    sessionId: state.sessionId,
-    lineCount: state.lineCount,
-    messageCount: state.messageCount,
-    functionCallCount: state.functionCallCount,
-    firstTimestamp: state.firstTimestamp,
-    lastTimestamp: state.lastTimestamp,
-  };
+async function parseRolloutFile(
+	args: ParseRolloutFileArgs,
+): Promise<ParseRolloutFileResult> {
+	const state = makeRolloutParseState(args.seed);
+	const deps: LineEmitDeps = {
+		emitRecord: args.emitRecord,
+		progress: (message: string): void => {
+			emit({ type: "PROGRESS", message });
+		},
+		requested: args.requested,
+	};
+	let committedOffset = args.startOffset;
+	for await (const {
+		obj,
+		committedOffset: lineEnd,
+	} of iterJsonlLinesFromOffset(args.path, args.startOffset)) {
+		processRolloutLine({ obj, state, deps, file: args.file });
+		committedOffset = lineEnd;
+		await waitForEmitDrain();
+	}
+	flushPendingCalls(state, deps);
+	await waitForEmitDrain();
+	if (state.sessionId) {
+		args.rolloutAggregates.set(state.sessionId, {
+			meta: state.sessionMeta || {},
+			firstTs: state.firstTimestamp,
+			lastTs: state.lastTimestamp,
+			// Counts are cumulative: makeRolloutParseState seeded them from the
+			// prior cursor on an append, so this is prior + delta, not suffix-only.
+			messageCount: state.messageCount,
+			functionCallCount: state.functionCallCount,
+			rolloutPath: args.path,
+		});
+	}
+	return {
+		committedOffset,
+		sessionId: state.sessionId,
+		lineCount: state.lineCount,
+		messageCount: state.messageCount,
+		functionCallCount: state.functionCallCount,
+		firstTimestamp: state.firstTimestamp,
+		lastTimestamp: state.lastTimestamp,
+	};
 }
 
 // ─── Per-file append-safe decision ──────────────────────────────────────
 
 export type RolloutAction =
-  /** size+mtime match the cursor — nothing changed, skip the file. */
-  | { kind: "skip" }
-  /** No tracked cursor or legacy-mtime-only entry that changed — parse the
-   *  whole file from offset 0 and write a fresh cursor. */
-  | { kind: "full" }
-  /** Cursor present, file grew, prefix guard verified — tail the suffix from
-   *  the committed offset, seeding the parser to continue the sequence. */
-  | { kind: "append"; startOffset: number; seed: RolloutParseSeed }
-  /** Cursor present but file shrank / offset past EOF / prefix guard changed —
-   *  truncated or replaced, full reparse from offset 0 to avoid data loss. */
-  | { kind: "unsafe_full" };
+	/** size+mtime match the cursor — nothing changed, skip the file. */
+	| { kind: "skip" }
+	/** No tracked cursor or legacy-mtime-only entry that changed — parse the
+	 *  whole file from offset 0 and write a fresh cursor. */
+	| { kind: "full" }
+	/** Cursor present, file grew, prefix guard verified — tail the suffix from
+	 *  the committed offset, seeding the parser to continue the sequence. */
+	| { kind: "append"; startOffset: number; seed: RolloutParseSeed }
+	/** Cursor present but file shrank / offset past EOF / prefix guard changed —
+	 *  truncated or replaced, full reparse from offset 0 to avoid data loss. */
+	| { kind: "unsafe_full" };
 
 /**
  * Decide how to process one rollout file given its current stat and the prior
@@ -1123,100 +1217,113 @@ export type RolloutAction =
  * consulted on the grow path — a verified prefix is required before tailing.
  */
 export function decideRolloutAction(input: {
-  cursor: RolloutFileCursor | undefined;
-  guardMatches: boolean;
-  mtimeMs: number;
-  sizeBytes: number;
+	cursor: RolloutFileCursor | undefined;
+	guardMatches: boolean;
+	mtimeMs: number;
+	sizeBytes: number;
 }): RolloutAction {
-  const { cursor, sizeBytes, mtimeMs } = input;
-  if (!cursor) {
-    return { kind: "full" };
-  }
-  if (sizeBytes === cursor.size_bytes && mtimeMs === cursor.mtime_ms) {
-    return { kind: "skip" };
-  }
-  // Anything that is not a clean forward-append over a verified prefix is
-  // treated as truncation/replacement and reparsed in full — never tailed
-  // from a stale offset, never silently skipped.
-  if (sizeBytes < cursor.size_bytes || cursor.offset_bytes > sizeBytes || !input.guardMatches) {
-    return { kind: "unsafe_full" };
-  }
-  if (sizeBytes > cursor.size_bytes) {
-    return {
-      kind: "append",
-      startOffset: cursor.offset_bytes,
-      seed: {
-        sessionId: cursor.session_id,
-        lineCount: cursor.line_count,
-        messageCount: cursor.message_count,
-        functionCallCount: cursor.function_call_count,
-        firstTimestamp: cursor.first_ts,
-        lastTimestamp: cursor.last_ts,
-      },
-    };
-  }
-  // Same size, different mtime, prefix intact: content is byte-identical up to
-  // the boundary and the file did not grow. A touch with no new data — skip.
-  return { kind: "skip" };
+	const { cursor, sizeBytes, mtimeMs } = input;
+	if (!cursor) {
+		return { kind: "full" };
+	}
+	if (sizeBytes === cursor.size_bytes && mtimeMs === cursor.mtime_ms) {
+		return { kind: "skip" };
+	}
+	// Anything that is not a clean forward-append over a verified prefix is
+	// treated as truncation/replacement and reparsed in full — never tailed
+	// from a stale offset, never silently skipped.
+	if (
+		sizeBytes < cursor.size_bytes ||
+		cursor.offset_bytes > sizeBytes ||
+		!input.guardMatches
+	) {
+		return { kind: "unsafe_full" };
+	}
+	if (sizeBytes > cursor.size_bytes) {
+		return {
+			kind: "append",
+			startOffset: cursor.offset_bytes,
+			seed: {
+				sessionId: cursor.session_id,
+				lineCount: cursor.line_count,
+				messageCount: cursor.message_count,
+				functionCallCount: cursor.function_call_count,
+				firstTimestamp: cursor.first_ts,
+				lastTimestamp: cursor.last_ts,
+			},
+		};
+	}
+	// Same size, different mtime, prefix intact: content is byte-identical up to
+	// the boundary and the file did not grow. A touch with no new data — skip.
+	return { kind: "skip" };
 }
 
 interface ScanRolloutsArgs {
-  activeQuietMs: number;
-  baseDir: string;
-  emitRecord: (stream: string, data: RecordData) => void;
-  fileCursors: Record<string, RolloutFileCursor>;
-  fileMtimes: Record<string, number>;
-  newFileCursors: Record<string, RolloutFileCursor>;
-  newMtimes: Record<string, number>;
-  requested: Map<string, StreamScope>;
-  rolloutAggregates: Map<string, RolloutAggregate>;
-  scanStartedAtMs: number;
-  scope?: EnumerationScope | null;
+	activeQuietMs: number;
+	baseDir: string;
+	emitRecord: (stream: string, data: RecordData) => void;
+	fileCursors: Record<string, RolloutFileCursor>;
+	fileMtimes: Record<string, number>;
+	newFileCursors: Record<string, RolloutFileCursor>;
+	newMtimes: Record<string, number>;
+	requested: Map<string, StreamScope>;
+	rolloutAggregates: Map<string, RolloutAggregate>;
+	scanStartedAtMs: number;
+	scope?: EnumerationScope | null;
 }
 
 interface ScanRolloutsResult {
-  functionCallsEmitted: number;
-  functionCallsExamined: number;
-  messagesEmitted: number;
-  messagesExamined: number;
-  parsedFiles: number;
-  scanOutcome: "complete" | "unreadable" | "parse_error";
+	functionCallsEmitted: number;
+	functionCallsExamined: number;
+	messagesEmitted: number;
+	messagesExamined: number;
+	parsedFiles: number;
+	scanOutcome: "complete" | "unreadable" | "parse_error";
 }
 
 /** Carry a file's prior cursor forward verbatim into the next STATE, and keep
  *  the legacy mtime map populated so a downgrade still has a usable cursor. */
-function carryFileCursorForward(args: ScanRolloutsArgs, path: string, mtime: number): void {
-  const prior = args.fileCursors[path];
-  if (prior) {
-    args.newFileCursors[path] = prior;
-  }
-  args.newMtimes[path] = mtime;
+function carryFileCursorForward(
+	args: ScanRolloutsArgs,
+	path: string,
+	mtime: number,
+): void {
+	const prior = args.fileCursors[path];
+	if (prior) {
+		args.newFileCursors[path] = prior;
+	}
+	args.newMtimes[path] = mtime;
 }
 
 /** Report `Codex phase=index sessions_dir_readable=false` and return the empty scan result. */
-async function reportMissingSessionsBase(scanOutcomeOnBaseError: "unreadable" | null): Promise<ScanRolloutsResult> {
-  emit({
-    type: "PROGRESS",
-    message: "Codex phase=index pass=index sessions_dir_readable=false",
-  });
-  await waitForEmitDrain();
-  // If we caught an error, it's unreadable; if not, ENOENT = complete
-  return {
-    parsedFiles: 0,
-    messagesEmitted: 0,
-    messagesExamined: 0,
-    functionCallsEmitted: 0,
-    functionCallsExamined: 0,
-    scanOutcome: scanOutcomeOnBaseError || "complete",
-  };
+async function reportMissingSessionsBase(
+	scanOutcomeOnBaseError: "unreadable" | null,
+): Promise<ScanRolloutsResult> {
+	emit({
+		type: "PROGRESS",
+		message: "Codex phase=index pass=index sessions_dir_readable=false",
+	});
+	await waitForEmitDrain();
+	// If we caught an error, it's unreadable; if not, ENOENT = complete
+	return {
+		parsedFiles: 0,
+		messagesEmitted: 0,
+		messagesExamined: 0,
+		functionCallsEmitted: 0,
+		functionCallsExamined: 0,
+		scanOutcome: scanOutcomeOnBaseError || "complete",
+	};
 }
 
 /** The examined-record counts a rollout file's carried-forward cursor vouches for. */
-function examinedCountsFromCursor(cursor: RolloutFileCursor | undefined): { functionCalls: number; messages: number } {
-  return {
-    functionCalls: cursor?.function_call_count ?? 0,
-    messages: cursor?.message_count ?? 0,
-  };
+function examinedCountsFromCursor(cursor: RolloutFileCursor | undefined): {
+	functionCalls: number;
+	messages: number;
+} {
+	return {
+		functionCalls: cursor?.function_call_count ?? 0,
+		messages: cursor?.message_count ?? 0,
+	};
 }
 
 /**
@@ -1239,318 +1346,367 @@ function examinedCountsFromCursor(cursor: RolloutFileCursor | undefined): { func
  * prefix, which is immutable on an append-only file, so it is stable across the
  * mid-parse growth.
  */
-async function buildFileCursorAfterParse(path: string, result: ParseRolloutFileResult): Promise<RolloutFileCursor> {
-  const guardBytes = Math.min(result.committedOffset, GUARD_PREFIX_BYTES);
-  const head = (await hashFilePrefix(path, guardBytes)) ?? "";
-  // Re-stat AFTER the parse so mtime reflects any mid-parse append. Fall back to
-  // the committed offset for size if the re-stat fails (file vanished): never
-  // record a size that disagrees with what we committed.
-  let mtimeMs = 0;
-  try {
-    ({ mtimeMs } = statSync(path));
-  } catch {
-    mtimeMs = 0;
-  }
-  return {
-    mtime_ms: mtimeMs,
-    // Invariant: size_bytes == offset_bytes. The cursor vouches for exactly the
-    // committed prefix; everything past it is re-read on a later run.
-    size_bytes: result.committedOffset,
-    offset_bytes: result.committedOffset,
-    line_count: result.lineCount,
-    head_sha256: head,
-    guard_bytes: guardBytes,
-    session_id: result.sessionId,
-    message_count: result.messageCount,
-    function_call_count: result.functionCallCount,
-    first_ts: result.firstTimestamp,
-    last_ts: result.lastTimestamp,
-  };
+async function buildFileCursorAfterParse(
+	path: string,
+	result: ParseRolloutFileResult,
+): Promise<RolloutFileCursor> {
+	const guardBytes = Math.min(result.committedOffset, GUARD_PREFIX_BYTES);
+	const head = (await hashFilePrefix(path, guardBytes)) ?? "";
+	// Re-stat AFTER the parse so mtime reflects any mid-parse append. Fall back to
+	// the committed offset for size if the re-stat fails (file vanished): never
+	// record a size that disagrees with what we committed.
+	let mtimeMs = 0;
+	try {
+		({ mtimeMs } = statSync(path));
+	} catch {
+		mtimeMs = 0;
+	}
+	return {
+		mtime_ms: mtimeMs,
+		// Invariant: size_bytes == offset_bytes. The cursor vouches for exactly the
+		// committed prefix; everything past it is re-read on a later run.
+		size_bytes: result.committedOffset,
+		offset_bytes: result.committedOffset,
+		line_count: result.lineCount,
+		head_sha256: head,
+		guard_bytes: guardBytes,
+		session_id: result.sessionId,
+		message_count: result.messageCount,
+		function_call_count: result.functionCallCount,
+		first_ts: result.firstTimestamp,
+		last_ts: result.lastTimestamp,
+	};
 }
 
 /** Resolve the append-safe action for one file: recompute the prefix guard
  *  only when there is a cursor and the file grew (the only path that tails). */
 async function resolveRolloutAction(
-  path: string,
-  st: Stats,
-  cursor: RolloutFileCursor | undefined
+	path: string,
+	st: Stats,
+	cursor: RolloutFileCursor | undefined,
 ): Promise<RolloutAction> {
-  const sizeBytes = Number(st.size);
-  let guardMatches = false;
-  if (cursor && sizeBytes > cursor.size_bytes && cursor.offset_bytes <= sizeBytes) {
-    const head = await hashFilePrefix(path, cursor.guard_bytes);
-    guardMatches = head !== null && head === cursor.head_sha256;
-  }
-  return decideRolloutAction({ cursor, sizeBytes, mtimeMs: st.mtimeMs, guardMatches });
+	const sizeBytes = Number(st.size);
+	let guardMatches = false;
+	if (
+		cursor &&
+		sizeBytes > cursor.size_bytes &&
+		cursor.offset_bytes <= sizeBytes
+	) {
+		const head = await hashFilePrefix(path, cursor.guard_bytes);
+		guardMatches = head !== null && head === cursor.head_sha256;
+	}
+	return decideRolloutAction({
+		cursor,
+		sizeBytes,
+		mtimeMs: st.mtimeMs,
+		guardMatches,
+	});
 }
 
 async function processRolloutEntry(
-  entry: { path: string; year: string; month: string; day: string; file: string },
-  args: ScanRolloutsArgs,
-  rolloutOrdinal: number
+	entry: {
+		path: string;
+		year: string;
+		month: string;
+		day: string;
+		file: string;
+	},
+	args: ScanRolloutsArgs,
+	rolloutOrdinal: number,
 ): Promise<"missing" | "parsed" | "skipped"> {
-  let st: Stats;
-  try {
-    st = statSync(entry.path);
-  } catch {
-    return "missing";
-  }
-  const mtime = st.mtimeMs;
-  const cursor = args.fileCursors[entry.path];
+	let st: Stats;
+	try {
+		st = statSync(entry.path);
+	} catch {
+		return "missing";
+	}
+	const mtime = st.mtimeMs;
+	const cursor = args.fileCursors[entry.path];
 
-  // Legacy fast path: no rich cursor yet, but the legacy mtime matches — the
-  // previously-emitted records stay valid. Carry the (absent) cursor forward.
-  if (!cursor && args.fileMtimes[entry.path] === mtime) {
-    args.newMtimes[entry.path] = mtime;
-    return "skipped";
-  }
+	// Legacy fast path: no rich cursor yet, but the legacy mtime matches — the
+	// previously-emitted records stay valid. Carry the (absent) cursor forward.
+	if (!cursor && args.fileMtimes[entry.path] === mtime) {
+		args.newMtimes[entry.path] = mtime;
+		return "skipped";
+	}
 
-  const action = await resolveRolloutAction(entry.path, st, cursor);
-  if (action.kind === "skip") {
-    carryFileCursorForward(args, entry.path, mtime);
-    return "skipped";
-  }
+	const action = await resolveRolloutAction(entry.path, st, cursor);
+	if (action.kind === "skip") {
+		carryFileCursorForward(args, entry.path, mtime);
+		return "skipped";
+	}
 
-  if (shouldDeferActiveRolloutFile({ mtimeMs: mtime, nowMs: args.scanStartedAtMs, quietMs: args.activeQuietMs })) {
-    emit({
-      type: "PROGRESS",
-      message: `Codex phase=index pass=index item=${rolloutOrdinal} backpressure=active_rollout_deferred`,
-    });
-    await waitForEmitDrain();
-    // Defer: the file is being actively written, so it must be reconsidered
-    // next run once it goes quiet. Carry a prior RICH cursor forward (preserves
-    // its committed offset) but do NOT write a fresh `newMtimes` entry: the
-    // legacy fast path skips a file when `!cursor && fileMtimes[path] === mtime`,
-    // so stamping the mtime of a deferred-but-unparsed new file would skip it
-    // forever (silent data loss). For a file with a prior rich cursor the
-    // newMtimes stamp is harmless (the fast path is gated on `!cursor`), but we
-    // still avoid stamping it so the deferral is a pure no-op on this run's
-    // record emission.
-    if (cursor) {
-      args.newFileCursors[entry.path] = cursor;
-    }
-    return "skipped";
-  }
+	if (
+		shouldDeferActiveRolloutFile({
+			mtimeMs: mtime,
+			nowMs: args.scanStartedAtMs,
+			quietMs: args.activeQuietMs,
+		})
+	) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex phase=index pass=index item=${rolloutOrdinal} backpressure=active_rollout_deferred`,
+		});
+		await waitForEmitDrain();
+		// Defer: the file is being actively written, so it must be reconsidered
+		// next run once it goes quiet. Carry a prior RICH cursor forward (preserves
+		// its committed offset) but do NOT write a fresh `newMtimes` entry: the
+		// legacy fast path skips a file when `!cursor && fileMtimes[path] === mtime`,
+		// so stamping the mtime of a deferred-but-unparsed new file would skip it
+		// forever (silent data loss). For a file with a prior rich cursor the
+		// newMtimes stamp is harmless (the fast path is gated on `!cursor`), but we
+		// still avoid stamping it so the deferral is a pure no-op on this run's
+		// record emission.
+		if (cursor) {
+			args.newFileCursors[entry.path] = cursor;
+		}
+		return "skipped";
+	}
 
-  const isAppend = action.kind === "append";
-  emit({
-    type: "PROGRESS",
-    message: `Codex phase=emit pass=emit item=${rolloutOrdinal} mode=${isAppend ? "append" : "full"} file_size_mb=${(st.size / 1024 / 1024).toFixed(1)}`,
-  });
-  await waitForEmitDrain();
+	const isAppend = action.kind === "append";
+	emit({
+		type: "PROGRESS",
+		message: `Codex phase=emit pass=emit item=${rolloutOrdinal} mode=${isAppend ? "append" : "full"} file_size_mb=${(st.size / 1024 / 1024).toFixed(1)}`,
+	});
+	await waitForEmitDrain();
 
-  const result = await parseRolloutFile({
-    path: entry.path,
-    file: entry.file,
-    requested: args.requested,
-    emitRecord: args.emitRecord,
-    rolloutAggregates: args.rolloutAggregates,
-    startOffset: isAppend ? action.startOffset : 0,
-    seed: isAppend ? action.seed : undefined,
-  });
+	const result = await parseRolloutFile({
+		path: entry.path,
+		file: entry.file,
+		requested: args.requested,
+		emitRecord: args.emitRecord,
+		rolloutAggregates: args.rolloutAggregates,
+		startOffset: isAppend ? action.startOffset : 0,
+		seed: isAppend ? action.seed : undefined,
+	});
 
-  args.newFileCursors[entry.path] = await buildFileCursorAfterParse(entry.path, result);
-  args.newMtimes[entry.path] = mtime;
-  return "parsed";
+	args.newFileCursors[entry.path] = await buildFileCursorAfterParse(
+		entry.path,
+		result,
+	);
+	args.newMtimes[entry.path] = mtime;
+	return "parsed";
 }
 
-async function scanRollouts(args: ScanRolloutsArgs): Promise<ScanRolloutsResult> {
-  let baseExists = false;
-  let scanOutcomeOnBaseError: "unreadable" | null = null;
+async function scanRollouts(
+	args: ScanRolloutsArgs,
+): Promise<ScanRolloutsResult> {
+	let baseExists = false;
+	let scanOutcomeOnBaseError: "unreadable" | null = null;
 
-  try {
-    baseExists = (await listIfExists(args.baseDir)) !== null;
-  } catch {
-    // listIfExists distinguishes ENOENT (returns null) from other errors (throws)
-    scanOutcomeOnBaseError = "unreadable";
-  }
+	try {
+		baseExists = (await listIfExists(args.baseDir)) !== null;
+	} catch {
+		// listIfExists distinguishes ENOENT (returns null) from other errors (throws)
+		scanOutcomeOnBaseError = "unreadable";
+	}
 
-  if (!baseExists) {
-    return await reportMissingSessionsBase(scanOutcomeOnBaseError);
-  }
+	if (!baseExists) {
+		return await reportMissingSessionsBase(scanOutcomeOnBaseError);
+	}
 
-  // Local wrapper to track emissions without mutating args
-  const originalEmit = args.emitRecord;
-  let messagesEmitted = 0;
-  let functionCallsEmitted = 0;
-  const countingEmit = (stream: string, data: RecordData): void => {
-    if (stream === "messages") {
-      messagesEmitted += 1;
-    }
-    if (stream === "function_calls") {
-      functionCallsEmitted += 1;
-    }
-    originalEmit(stream, data);
-  };
+	// Local wrapper to track emissions without mutating args
+	const originalEmit = args.emitRecord;
+	let messagesEmitted = 0;
+	let functionCallsEmitted = 0;
+	const countingEmit = (stream: string, data: RecordData): void => {
+		if (stream === "messages") {
+			messagesEmitted += 1;
+		}
+		if (stream === "function_calls") {
+			functionCallsEmitted += 1;
+		}
+		originalEmit(stream, data);
+	};
 
-  let totalRollouts = 0;
-  let parsedRollouts = 0;
-  let scanOutcome: "complete" | "unreadable" | "parse_error" = "complete";
-  let messagesExamined = 0;
-  let functionCallsExamined = 0;
+	let totalRollouts = 0;
+	let parsedRollouts = 0;
+	let scanOutcome: "complete" | "unreadable" | "parse_error" = "complete";
+	let messagesExamined = 0;
+	let functionCallsExamined = 0;
 
-  try {
-    for await (const entry of walkRollouts(args.baseDir, args.scope)) {
-      if (!isPathWithinSourceRoots(entry.path, args.scope)) {
-        continue;
-      }
-      totalRollouts += 1;
-      try {
-        const result = await processRolloutEntry(entry, { ...args, emitRecord: countingEmit }, totalRollouts);
-        if (result === "parsed") {
-          parsedRollouts += 1;
-        }
-        // A "parsed" file was just examined; a "skipped" file may still carry
-        // examined counts forward from a prior run's cursor — either way, the
-        // cursor at this path (fresh or carried-forward) is the source of truth.
-        if (result === "parsed" || result === "skipped") {
-          const counts = examinedCountsFromCursor(args.newFileCursors[entry.path]);
-          messagesExamined += counts.messages;
-          functionCallsExamined += counts.functionCalls;
-        }
-      } catch {
-        // Any error during parsing (without code or other) makes scan incomplete
-        scanOutcome = "parse_error";
-        break;
-      }
-    }
-  } catch {
-    // Enumeration error (e.g., directory traversal failure) makes scan incomplete
-    scanOutcome = "unreadable";
-  }
+	try {
+		for await (const entry of walkRollouts(args.baseDir, args.scope)) {
+			if (!isPathWithinSourceRoots(entry.path, args.scope)) {
+				continue;
+			}
+			totalRollouts += 1;
+			try {
+				const result = await processRolloutEntry(
+					entry,
+					{ ...args, emitRecord: countingEmit },
+					totalRollouts,
+				);
+				if (result === "parsed") {
+					parsedRollouts += 1;
+				}
+				// A "parsed" file was just examined; a "skipped" file may still carry
+				// examined counts forward from a prior run's cursor — either way, the
+				// cursor at this path (fresh or carried-forward) is the source of truth.
+				if (result === "parsed" || result === "skipped") {
+					const counts = examinedCountsFromCursor(
+						args.newFileCursors[entry.path],
+					);
+					messagesExamined += counts.messages;
+					functionCallsExamined += counts.functionCalls;
+				}
+			} catch {
+				// Any error during parsing (without code or other) makes scan incomplete
+				scanOutcome = "parse_error";
+				break;
+			}
+		}
+	} catch {
+		// Enumeration error (e.g., directory traversal failure) makes scan incomplete
+		scanOutcome = "unreadable";
+	}
 
-  emit({
-    type: "PROGRESS",
-    message: `Codex phase=index pass=index total_items=${totalRollouts} parsed_items=${parsedRollouts}`,
-  });
-  await waitForEmitDrain();
+	emit({
+		type: "PROGRESS",
+		message: `Codex phase=index pass=index total_items=${totalRollouts} parsed_items=${parsedRollouts}`,
+	});
+	await waitForEmitDrain();
 
-  return {
-    parsedFiles: parsedRollouts,
-    messagesEmitted,
-    messagesExamined,
-    functionCallsEmitted,
-    functionCallsExamined,
-    scanOutcome,
-  };
+	return {
+		parsedFiles: parsedRollouts,
+		messagesEmitted,
+		messagesExamined,
+		functionCallsEmitted,
+		functionCallsExamined,
+		scanOutcome,
+	};
 }
 
 // ─── Session emission ───────────────────────────────────────────────────
 
 interface EmitSessionsArgs {
-  cursor: CarryForwardCursor<ThreadFingerprint>;
-  emitRecord: (stream: string, data: RecordData) => void;
-  rolloutAggregates: Map<string, RolloutAggregate>;
-  stateDbPath: string;
+	cursor: CarryForwardCursor<ThreadFingerprint>;
+	emitRecord: (stream: string, data: RecordData) => void;
+	rolloutAggregates: Map<string, RolloutAggregate>;
+	stateDbPath: string;
 }
 
-function emitSessions({ stateDbPath, rolloutAggregates, emitRecord, cursor }: EmitSessionsArgs): void {
-  // Sessions: prefer state_5.sqlite#threads; fall back to rollout-derived
-  // fields only when state_5 doesn't have the session. Session PK stays the
-  // thread/session id — the same UUID is used by both sources.
-  const db = openThreadsDb(stateDbPath);
-  if (!db) {
-    for (const [id, agg] of rolloutAggregates) {
-      emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
-    }
-    return;
-  }
+function emitSessions({
+	stateDbPath,
+	rolloutAggregates,
+	emitRecord,
+	cursor,
+}: EmitSessionsArgs): void {
+	// Sessions: prefer state_5.sqlite#threads; fall back to rollout-derived
+	// fields only when state_5 doesn't have the session. Session PK stays the
+	// thread/session id — the same UUID is used by both sources.
+	const db = openThreadsDb(stateDbPath);
+	if (!db) {
+		for (const [id, agg] of rolloutAggregates) {
+			emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		}
+		return;
+	}
 
-  try {
-    emitSessionsFromRows({
-      threadsRows: queryThreadsRows(db),
-      rolloutAggregates,
-      emitRecord,
-      cursor,
-    });
-  } finally {
-    db.close();
-  }
+	try {
+		emitSessionsFromRows({
+			threadsRows: queryThreadsRows(db),
+			rolloutAggregates,
+			emitRecord,
+			cursor,
+		});
+	} finally {
+		db.close();
+	}
 }
 
 // ─── Start-message + state-cursor helpers ───────────────────────────────
 
 async function readStartMessage(): Promise<StartMessage> {
-  const rl = createInterface({ input: process.stdin, terminal: false });
-  return await new Promise<StartMessage>((resolve, reject) =>
-    rl.once("line", (l) => {
-      try {
-        resolve(JSON.parse(l) as StartMessage);
-      } catch (e) {
-        reject(e);
-      }
-    })
-  );
+	const rl = createInterface({ input: process.stdin, terminal: false });
+	return await new Promise<StartMessage>((resolve, reject) =>
+		rl.once("line", (l) => {
+			try {
+				resolve(JSON.parse(l) as StartMessage);
+			} catch (e) {
+				reject(e);
+			}
+		}),
+	);
 }
 
 interface CodexDirs {
-  baseDir: string;
-  codexHome: string;
-  promptsDir: string;
-  rulesDir: string;
-  skillsDir: string;
-  stateDbPath: string;
+	baseDir: string;
+	codexHome: string;
+	promptsDir: string;
+	rulesDir: string;
+	skillsDir: string;
+	stateDbPath: string;
 }
 
 function resolveCodexDirs(): CodexDirs {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
-  return {
-    codexHome,
-    baseDir: process.env.CODEX_SESSIONS_DIR || join(codexHome, "sessions"),
-    stateDbPath: process.env.CODEX_STATE_DB || join(codexHome, "state_5.sqlite"),
-    rulesDir: process.env.CODEX_RULES_DIR || join(codexHome, "rules"),
-    promptsDir: process.env.CODEX_PROMPTS_DIR || join(codexHome, "prompts"),
-    skillsDir: process.env.CODEX_SKILLS_DIR || join(codexHome, "skills"),
-  };
+	const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+	return {
+		codexHome,
+		baseDir: process.env.CODEX_SESSIONS_DIR || join(codexHome, "sessions"),
+		stateDbPath:
+			process.env.CODEX_STATE_DB || join(codexHome, "state_5.sqlite"),
+		rulesDir: process.env.CODEX_RULES_DIR || join(codexHome, "rules"),
+		promptsDir: process.env.CODEX_PROMPTS_DIR || join(codexHome, "prompts"),
+		skillsDir: process.env.CODEX_SKILLS_DIR || join(codexHome, "skills"),
+	};
 }
 
 function readFileMtimes(startMsg: StartMessage): Record<string, number> {
-  const state = startMsg.state || {};
-  // STATE is stream-keyed per Collection Profile: `state` is
-  // { <stream>: <cursor>, ... }. This connector emits STATE with a
-  // stream name (see cursorStream below), cursor={file_mtimes:{...}}.
-  // Check all streams that might carry file_mtimes plus legacy top-level.
-  return (
-    state.messages?.file_mtimes ||
-    state.function_calls?.file_mtimes ||
-    state.sessions?.file_mtimes ||
-    state.file_mtimes ||
-    {}
-  );
+	const state = startMsg.state || {};
+	// STATE is stream-keyed per Collection Profile: `state` is
+	// { <stream>: <cursor>, ... }. This connector emits STATE with a
+	// stream name (see cursorStream below), cursor={file_mtimes:{...}}.
+	// Check all streams that might carry file_mtimes plus legacy top-level.
+	return (
+		state.messages?.file_mtimes ||
+		state.function_calls?.file_mtimes ||
+		state.sessions?.file_mtimes ||
+		state.file_mtimes ||
+		{}
+	);
 }
 
 function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const v = value as Record<string, unknown>;
-  const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
-  const offset = num(v.offset_bytes);
-  const size = num(v.size_bytes);
-  const mtime = num(v.mtime_ms);
-  const line = num(v.line_count);
-  const guardBytes = num(v.guard_bytes);
-  const head = typeof v.head_sha256 === "string" ? v.head_sha256 : null;
-  // These six are load-bearing for the tail/skip/unsafe decision. A cursor
-  // missing any of them is unusable — drop it so the file full-reparses once
-  // (the same one-time cost as the legacy-mtime upgrade) rather than risk a
-  // bad offset.
-  if (offset === null || size === null || mtime === null || line === null || guardBytes === null || head === null) {
-    return null;
-  }
-  return {
-    mtime_ms: mtime,
-    size_bytes: size,
-    offset_bytes: offset,
-    line_count: line,
-    head_sha256: head,
-    guard_bytes: guardBytes,
-    session_id: typeof v.session_id === "string" ? v.session_id : null,
-    message_count: num(v.message_count) ?? 0,
-    function_call_count: num(v.function_call_count) ?? 0,
-    first_ts: typeof v.first_ts === "string" ? v.first_ts : null,
-    last_ts: typeof v.last_ts === "string" ? v.last_ts : null,
-  };
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	const v = value as Record<string, unknown>;
+	const num = (x: unknown): number | null =>
+		typeof x === "number" && Number.isFinite(x) ? x : null;
+	const offset = num(v.offset_bytes);
+	const size = num(v.size_bytes);
+	const mtime = num(v.mtime_ms);
+	const line = num(v.line_count);
+	const guardBytes = num(v.guard_bytes);
+	const head = typeof v.head_sha256 === "string" ? v.head_sha256 : null;
+	// These six are load-bearing for the tail/skip/unsafe decision. A cursor
+	// missing any of them is unusable — drop it so the file full-reparses once
+	// (the same one-time cost as the legacy-mtime upgrade) rather than risk a
+	// bad offset.
+	if (
+		offset === null ||
+		size === null ||
+		mtime === null ||
+		line === null ||
+		guardBytes === null ||
+		head === null
+	) {
+		return null;
+	}
+	return {
+		mtime_ms: mtime,
+		size_bytes: size,
+		offset_bytes: offset,
+		line_count: line,
+		head_sha256: head,
+		guard_bytes: guardBytes,
+		session_id: typeof v.session_id === "string" ? v.session_id : null,
+		message_count: num(v.message_count) ?? 0,
+		function_call_count: num(v.function_call_count) ?? 0,
+		first_ts: typeof v.first_ts === "string" ? v.first_ts : null,
+		last_ts: typeof v.last_ts === "string" ? v.last_ts : null,
+	};
 }
 
 /**
@@ -1560,211 +1716,238 @@ function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
  * rather than failing the run. Checks the rollout streams plus the sessions
  * stream so the lookup survives whichever stream carried the cursor.
  */
-export function readPriorFileCursors(startMsg: StartMessage): Record<string, RolloutFileCursor> {
-  const state = startMsg.state || {};
-  const raw =
-    state.messages?.file_cursors || state.function_calls?.file_cursors || state.sessions?.file_cursors || null;
-  const out: Record<string, RolloutFileCursor> = {};
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return out;
-  }
-  for (const [path, value] of Object.entries(raw)) {
-    const cursor = coerceRolloutFileCursor(value);
-    if (cursor) {
-      out[path] = cursor;
-    }
-  }
-  return out;
+export function readPriorFileCursors(
+	startMsg: StartMessage,
+): Record<string, RolloutFileCursor> {
+	const state = startMsg.state || {};
+	const raw =
+		state.messages?.file_cursors ||
+		state.function_calls?.file_cursors ||
+		state.sessions?.file_cursors ||
+		null;
+	const out: Record<string, RolloutFileCursor> = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [path, value] of Object.entries(raw)) {
+		const cursor = coerceRolloutFileCursor(value);
+		if (cursor) {
+			out[path] = cursor;
+		}
+	}
+	return out;
 }
 
-function resolveActiveRolloutQuietMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env[ACTIVE_ROLLOUT_QUIET_MS_ENV];
-  if (!raw) {
-    return DEFAULT_ACTIVE_ROLLOUT_QUIET_MS;
-  }
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_ACTIVE_ROLLOUT_QUIET_MS;
+function resolveActiveRolloutQuietMs(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	const raw = env[ACTIVE_ROLLOUT_QUIET_MS_ENV];
+	if (!raw) {
+		return DEFAULT_ACTIVE_ROLLOUT_QUIET_MS;
+	}
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 0
+		? parsed
+		: DEFAULT_ACTIVE_ROLLOUT_QUIET_MS;
 }
 
 function buildRequestedMap(startMsg: StartMessage): Map<string, StreamScope> {
-  return new Map<string, StreamScope>((startMsg.scope?.streams || []).map((s) => [s.name, s]));
+	return new Map<string, StreamScope>(
+		(startMsg.scope?.streams || []).map((s) => [s.name, s]),
+	);
 }
 
-function buildResourceFilters(requested: Map<string, StreamScope>): Map<string, ReadonlySet<string> | null> {
-  const resFilters = new Map<string, ReadonlySet<string> | null>();
-  for (const [n, r] of requested) {
-    resFilters.set(n, resourceSet(r));
-  }
-  return resFilters;
+function buildResourceFilters(
+	requested: Map<string, StreamScope>,
+): Map<string, ReadonlySet<string> | null> {
+	const resFilters = new Map<string, ReadonlySet<string> | null>();
+	for (const [n, r] of requested) {
+		resFilters.set(n, resourceSet(r));
+	}
+	return resFilters;
 }
 
 // Check if path is a readable directory; returns true/false/error code for distinction
 async function isReadableDirectory(path: string): Promise<boolean> {
-  try {
-    const st = await stat(path);
-    return st.isDirectory();
-  } catch {
-    return false;
-  }
+	try {
+		const st = await stat(path);
+		return st.isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 // Check if path exists as a directory and is readable; return error code if not
-async function checkDirectoryReadable(path: string): Promise<"ok" | "not_found" | "unreadable"> {
-  try {
-    const st = await stat(path);
-    if (st.isDirectory()) {
-      return "ok";
-    }
-    return "unreadable"; // exists but is not a directory
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException;
-    if (err?.code === "ENOENT") {
-      return "not_found";
-    }
-    return "unreadable"; // EACCES, EIO, etc.
-  }
+async function checkDirectoryReadable(
+	path: string,
+): Promise<"ok" | "not_found" | "unreadable"> {
+	try {
+		const st = await stat(path);
+		if (st.isDirectory()) {
+			return "ok";
+		}
+		return "unreadable"; // exists but is not a directory
+	} catch (e) {
+		const err = e as NodeJS.ErrnoException;
+		if (err?.code === "ENOENT") {
+			return "not_found";
+		}
+		return "unreadable"; // EACCES, EIO, etc.
+	}
 }
 
 async function isReadableFile(path: string): Promise<boolean> {
-  try {
-    const st = await stat(path);
-    return st.isFile();
-  } catch {
-    return false;
-  }
+	try {
+		const st = await stat(path);
+		return st.isFile();
+	} catch {
+		return false;
+	}
 }
 
-async function assertRequestedCodexSources(dirs: CodexDirs, requested: Map<string, StreamScope>): Promise<void> {
-  // Distinguish ENOENT (legitimately absent) from EACCES/EIO (actual I/O failures).
-  // ENOENT allows coverage_diagnostics to emit verified_empty evidence.
-  // EACCES/EIO is an actual error that should be reported.
-  const unreadable: string[] = [];
-  const needsRollouts = requested.has("messages") || requested.has("function_calls");
+async function assertRequestedCodexSources(
+	dirs: CodexDirs,
+	requested: Map<string, StreamScope>,
+): Promise<void> {
+	// Distinguish ENOENT (legitimately absent) from EACCES/EIO (actual I/O failures).
+	// ENOENT allows coverage_diagnostics to emit verified_empty evidence.
+	// EACCES/EIO is an actual error that should be reported.
+	const unreadable: string[] = [];
+	const needsRollouts =
+		requested.has("messages") || requested.has("function_calls");
 
-  if (needsRollouts) {
-    const status = await checkDirectoryReadable(dirs.baseDir);
-    if (status === "unreadable") {
-      unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
-    }
-  }
-  if (requested.has("sessions")) {
-    const hasRollouts = await isReadableDirectory(dirs.baseDir);
-    const hasThreadsDb = await isReadableFile(dirs.stateDbPath);
-    if (!(hasRollouts || hasThreadsDb)) {
-      // Both missing — check if unreadable (not just absent)
-      const rolloutStatus = await checkDirectoryReadable(dirs.baseDir);
-      if (rolloutStatus === "unreadable") {
-        unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
-      }
-    }
-  }
-  // rules/prompts/skills are optional, user-authored directories that Codex
-  // itself never creates until the user writes one — coverage_diagnostics
-  // already reports each as "missing" (not an error) when absent, and
-  // emitRulesStream/emitPromptsStream/emitSkillsStream already no-op safely
-  // on a missing directory. Requiring them here was fatal-on-every-fresh-
-  // install: any host without a manually-created empty rules/prompts dir
-  // failed its very first run. Only actual I/O failures (not ENOENT) are errors.
-  if (unreadable.length > 0) {
-    throw new Error(`requested Codex local source path(s) are unreadable: ${unreadable.join(", ")}`);
-  }
+	if (needsRollouts) {
+		const status = await checkDirectoryReadable(dirs.baseDir);
+		if (status === "unreadable") {
+			unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
+		}
+	}
+	if (requested.has("sessions")) {
+		const hasRollouts = await isReadableDirectory(dirs.baseDir);
+		const hasThreadsDb = await isReadableFile(dirs.stateDbPath);
+		if (!(hasRollouts || hasThreadsDb)) {
+			// Both missing — check if unreadable (not just absent)
+			const rolloutStatus = await checkDirectoryReadable(dirs.baseDir);
+			if (rolloutStatus === "unreadable") {
+				unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
+			}
+		}
+	}
+	// rules/prompts/skills are optional, user-authored directories that Codex
+	// itself never creates until the user writes one — coverage_diagnostics
+	// already reports each as "missing" (not an error) when absent, and
+	// emitRulesStream/emitPromptsStream/emitSkillsStream already no-op safely
+	// on a missing directory. Requiring them here was fatal-on-every-fresh-
+	// install: any host without a manually-created empty rules/prompts dir
+	// failed its very first run. Only actual I/O failures (not ENOENT) are errors.
+	if (unreadable.length > 0) {
+		throw new Error(
+			`requested Codex local source path(s) are unreadable: ${unreadable.join(", ")}`,
+		);
+	}
 }
 
 interface EmitStateCursorsArgs {
-  newFileCursors: Record<string, RolloutFileCursor>;
-  newMtimes: Record<string, number>;
-  nowIso: () => string;
-  requested: Map<string, StreamScope>;
-  sessionsSourceMtimeMs: number;
-  threadFingerprints: CarryForwardCursor<ThreadFingerprint>;
+	newFileCursors: Record<string, RolloutFileCursor>;
+	newMtimes: Record<string, number>;
+	nowIso: () => string;
+	requested: Map<string, StreamScope>;
+	sessionsSourceMtimeMs: number;
+	threadFingerprints: CarryForwardCursor<ThreadFingerprint>;
 }
 
 function emitStateCursors({
-  requested,
-  newFileCursors,
-  newMtimes,
-  nowIso,
-  sessionsSourceMtimeMs,
-  threadFingerprints,
+	requested,
+	newFileCursors,
+	newMtimes,
+	nowIso,
+	sessionsSourceMtimeMs,
+	threadFingerprints,
 }: EmitStateCursorsArgs): void {
-  if (requested.has("sessions")) {
-    emit({
-      type: "STATE",
-      stream: "sessions",
-      cursor: {
-        fetched_at: nowIso(),
-        source_mtime_ms: sessionsSourceMtimeMs,
-        thread_fingerprints: threadFingerprints.toState(),
-      },
-    });
-  }
-  if (requested.has("messages") || requested.has("function_calls")) {
-    const cursorStream = requested.has("messages") ? "messages" : "function_calls";
-    emit({
-      type: "STATE",
-      stream: cursorStream,
-      // file_cursors is the append-safe per-file cursor; file_mtimes is kept
-      // alongside it for backward compatibility with a downgraded collector
-      // (and the legacy fast-path skip on files this connector hasn't yet
-      // upgraded to a rich cursor).
-      cursor: { file_mtimes: newMtimes, file_cursors: newFileCursors, fetched_at: nowIso() },
-    });
-  }
-  for (const s of ["rules", "prompts", "skills"]) {
-    if (requested.has(s)) {
-      emit({ type: "STATE", stream: s, cursor: { fetched_at: nowIso() } });
-    }
-  }
-  // Inventory streams (history, session_index, shell_snapshots,
-  // config_inventory, cache_inventory) own their STATE inside the fingerprint
-  // gate (emitLocalInventoryStreams) and must NOT get a bare clobbering STATE
-  // here. coverage_diagnostics is emitted after all collection output drains,
-  // immediately before terminal success, so it cannot certify a partial scan.
+	if (requested.has("sessions")) {
+		emit({
+			type: "STATE",
+			stream: "sessions",
+			cursor: {
+				fetched_at: nowIso(),
+				source_mtime_ms: sessionsSourceMtimeMs,
+				thread_fingerprints: threadFingerprints.toState(),
+			},
+		});
+	}
+	if (requested.has("messages") || requested.has("function_calls")) {
+		const cursorStream = requested.has("messages")
+			? "messages"
+			: "function_calls";
+		emit({
+			type: "STATE",
+			stream: cursorStream,
+			// file_cursors is the append-safe per-file cursor; file_mtimes is kept
+			// alongside it for backward compatibility with a downgraded collector
+			// (and the legacy fast-path skip on files this connector hasn't yet
+			// upgraded to a rich cursor).
+			cursor: {
+				file_mtimes: newMtimes,
+				file_cursors: newFileCursors,
+				fetched_at: nowIso(),
+			},
+		});
+	}
+	for (const s of ["rules", "prompts", "skills"]) {
+		if (requested.has(s)) {
+			emit({ type: "STATE", stream: s, cursor: { fetched_at: nowIso() } });
+		}
+	}
+	// Inventory streams (history, session_index, shell_snapshots,
+	// config_inventory, cache_inventory) own their STATE inside the fingerprint
+	// gate (emitLocalInventoryStreams) and must NOT get a bare clobbering STATE
+	// here. coverage_diagnostics is emitted after all collection output drains,
+	// immediately before terminal success, so it cannot certify a partial scan.
 }
 
 function readPriorSessionsSourceMtimeMs(startMsg: StartMessage): number | null {
-  const state = startMsg.state || {};
-  const { sessions } = state;
-  const value =
-    sessions && typeof sessions === "object" && !Array.isArray(sessions)
-      ? (sessions as Record<string, unknown>).source_mtime_ms
-      : null;
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+	const state = startMsg.state || {};
+	const { sessions } = state;
+	const value =
+		sessions && typeof sessions === "object" && !Array.isArray(sessions)
+			? (sessions as Record<string, unknown>).source_mtime_ms
+			: null;
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function nullableFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function coerceFingerprintEntry(value: unknown): ThreadFingerprint | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const v = value as Record<string, unknown>;
-  return {
-    updated_at: nullableFiniteNumber(v.updated_at),
-    message_count: nullableFiniteNumber(v.message_count),
-    function_call_count: nullableFiniteNumber(v.function_call_count),
-  };
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return null;
+	}
+	const v = value as Record<string, unknown>;
+	return {
+		updated_at: nullableFiniteNumber(v.updated_at),
+		message_count: nullableFiniteNumber(v.message_count),
+		function_call_count: nullableFiniteNumber(v.function_call_count),
+	};
 }
 
 function rawFingerprintMap(startMsg: unknown): Record<string, unknown> | null {
-  if (!startMsg || typeof startMsg !== "object") {
-    return null;
-  }
-  const { state } = startMsg as Record<string, unknown>;
-  if (!state || typeof state !== "object") {
-    return null;
-  }
-  const { sessions } = state as Record<string, unknown>;
-  if (!sessions || typeof sessions !== "object" || Array.isArray(sessions)) {
-    return null;
-  }
-  const { thread_fingerprints: raw } = sessions as Record<string, unknown>;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return null;
-  }
-  return raw as Record<string, unknown>;
+	if (!startMsg || typeof startMsg !== "object") {
+		return null;
+	}
+	const { state } = startMsg as Record<string, unknown>;
+	if (!state || typeof state !== "object") {
+		return null;
+	}
+	const { sessions } = state as Record<string, unknown>;
+	if (!sessions || typeof sessions !== "object" || Array.isArray(sessions)) {
+		return null;
+	}
+	const { thread_fingerprints: raw } = sessions as Record<string, unknown>;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return null;
+	}
+	return raw as Record<string, unknown>;
 }
 
 /**
@@ -1773,27 +1956,29 @@ function rawFingerprintMap(startMsg: unknown): Record<string, unknown> | null {
  * types, or values from a partially-different schema — bad entries are
  * silently dropped rather than failing the whole run.
  */
-export function readPriorThreadFingerprints(startMsg: unknown): Map<string, ThreadFingerprint> {
-  const out = new Map<string, ThreadFingerprint>();
-  const raw = rawFingerprintMap(startMsg);
-  if (!raw) {
-    return out;
-  }
-  for (const [id, value] of Object.entries(raw)) {
-    const entry = coerceFingerprintEntry(value);
-    if (entry) {
-      out.set(id, entry);
-    }
-  }
-  return out;
+export function readPriorThreadFingerprints(
+	startMsg: unknown,
+): Map<string, ThreadFingerprint> {
+	const out = new Map<string, ThreadFingerprint>();
+	const raw = rawFingerprintMap(startMsg);
+	if (!raw) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw)) {
+		const entry = coerceFingerprintEntry(value);
+		if (entry) {
+			out.set(id, entry);
+		}
+	}
+	return out;
 }
 
 function fileMtimeMs(path: string): number {
-  try {
-    return statSync(path).mtimeMs;
-  } catch {
-    return 0;
-  }
+	try {
+		return statSync(path).mtimeMs;
+	} catch {
+		return 0;
+	}
 }
 
 /**
@@ -1810,17 +1995,17 @@ function fileMtimeMs(path: string): number {
  * was not requested.
  */
 async function emitCoverageDiagnostics(input: {
-  emitRecord: (stream: string, data: RecordData) => void;
-  inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-  requested: Map<string, StreamScope>;
+	emitRecord: (stream: string, data: RecordData) => void;
+	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
+	requested: Map<string, StreamScope>;
 }): Promise<void> {
-  if (!input.requested.has("coverage_diagnostics")) {
-    return;
-  }
-  for (const record of input.inventory.coverage) {
-    input.emitRecord("coverage_diagnostics", record);
-    await waitForEmitDrain();
-  }
+	if (!input.requested.has("coverage_diagnostics")) {
+		return;
+	}
+	for (const record of input.inventory.coverage) {
+		input.emitRecord("coverage_diagnostics", record);
+		await waitForEmitDrain();
+	}
 }
 
 /**
@@ -1844,19 +2029,22 @@ async function emitCoverageDiagnostics(input: {
  * the committed coverage-axis proof.
  */
 async function emitStaticCoverageState(input: {
-  inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-  nowIso: () => string;
-  requested: Map<string, StreamScope>;
+	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
+	nowIso: () => string;
+	requested: Map<string, StreamScope>;
 }): Promise<void> {
-  if (!input.requested.has("coverage_diagnostics")) {
-    return;
-  }
-  emit({
-    type: "STATE",
-    stream: "coverage_diagnostics",
-    cursor: { fetched_at: input.nowIso(), stores: buildCoverageDiagnosticsStateSnapshot(input.inventory.coverage) },
-  });
-  await waitForEmitDrain();
+	if (!input.requested.has("coverage_diagnostics")) {
+		return;
+	}
+	emit({
+		type: "STATE",
+		stream: "coverage_diagnostics",
+		cursor: {
+			fetched_at: input.nowIso(),
+			stores: buildCoverageDiagnosticsStateSnapshot(input.inventory.coverage),
+		},
+	});
+	await waitForEmitDrain();
 }
 
 /** Emit one inventory stream's records under a fingerprint gate that excludes
@@ -1865,26 +2053,28 @@ async function emitStaticCoverageState(input: {
  *  stale ids are pruned: a store that disappears drops out and re-appears as a
  *  fresh emit. */
 async function emitGatedInventoryStream(input: {
-  emitRecord: (stream: string, data: RecordData) => void;
-  nowIso: () => string;
-  priorState: unknown;
-  records: readonly RecordData[];
-  stream: string;
+	emitRecord: (stream: string, data: RecordData) => void;
+	nowIso: () => string;
+	priorState: unknown;
+	records: readonly RecordData[];
+	stream: string;
 }): Promise<void> {
-  const cursor = openInventoryFingerprintCursor(input.priorState);
-  for (const record of input.records) {
-    if (cursor.shouldEmit(record)) {
-      input.emitRecord(input.stream, record);
-      await waitForEmitDrain();
-    }
-  }
-  cursor.pruneStale();
-  const inventoryCursor: Record<string, unknown> = { fetched_at: input.nowIso() };
-  if (cursor.size() > 0) {
-    inventoryCursor.fingerprints = cursor.toState();
-  }
-  emit({ type: "STATE", stream: input.stream, cursor: inventoryCursor });
-  await waitForEmitDrain();
+	const cursor = openInventoryFingerprintCursor(input.priorState);
+	for (const record of input.records) {
+		if (cursor.shouldEmit(record)) {
+			input.emitRecord(input.stream, record);
+			await waitForEmitDrain();
+		}
+	}
+	cursor.pruneStale();
+	const inventoryCursor: Record<string, unknown> = {
+		fetched_at: input.nowIso(),
+	};
+	if (cursor.size() > 0) {
+		inventoryCursor.fingerprints = cursor.toState();
+	}
+	emit({ type: "STATE", stream: input.stream, cursor: inventoryCursor });
+	await waitForEmitDrain();
 }
 
 /** Inventory streams whose STATE cursor is owned by the fingerprint gate.
@@ -1893,97 +2083,103 @@ async function emitGatedInventoryStream(input: {
  *  `{ fetched_at }` STATE for these — that trailing write would clobber the
  *  fingerprint map and re-open the per-run churn the gate exists to close. */
 export const CODEX_GATED_INVENTORY_STREAMS = [
-  "history",
-  "session_index",
-  "shell_snapshots",
-  "config_inventory",
-  "cache_inventory",
+	"history",
+	"session_index",
+	"shell_snapshots",
+	"config_inventory",
+	"cache_inventory",
 ] as const;
 
 /** Resolve one gated inventory stream's records: `shell_snapshots` is a live
  *  directory listing; every other gated stream reads from the pre-built
  *  store inventory's `recordsByStream` map (empty for an absent store). */
 async function resolveGatedInventoryRecords(
-  stream: string,
-  codexHome: string,
-  inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>
+	stream: string,
+	codexHome: string,
+	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>,
 ): Promise<readonly RecordData[]> {
-  if (stream !== "shell_snapshots") {
-    return inventory.recordsByStream.get(stream) ?? [];
-  }
-  return await listDirectoryInventory({
-    tool: "codex",
-    sourceHome: codexHome,
-    relativeRoot: "shell-snapshots",
-    store: "shell_snapshots",
-    stream: "shell_snapshots",
-    reason: "shell content requires redaction review before payload collection",
-  });
+	if (stream !== "shell_snapshots") {
+		return inventory.recordsByStream.get(stream) ?? [];
+	}
+	return await listDirectoryInventory({
+		tool: "codex",
+		sourceHome: codexHome,
+		relativeRoot: "shell-snapshots",
+		store: "shell_snapshots",
+		stream: "shell_snapshots",
+		reason: "shell content requires redaction review before payload collection",
+	});
 }
 
 async function emitLocalInventoryStreams(input: {
-  codexHome: string;
-  emitRecord: (stream: string, data: RecordData) => void;
-  inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-  nowIso: () => string;
-  requested: Map<string, StreamScope>;
-  state: Record<string, unknown>;
+	codexHome: string;
+	emitRecord: (stream: string, data: RecordData) => void;
+	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
+	nowIso: () => string;
+	requested: Map<string, StreamScope>;
+	state: Record<string, unknown>;
 }): Promise<void> {
-  // `shell_snapshots` is enumerated via a directory listing rather than the
-  // pre-built store inventory; everything else comes from `recordsByStream`
-  // (empty for an absent store, which still produces a carry-forward STATE).
-  for (const stream of CODEX_GATED_INVENTORY_STREAMS) {
-    if (!input.requested.has(stream)) {
-      continue;
-    }
-    const records = await resolveGatedInventoryRecords(stream, input.codexHome, input.inventory);
-    await emitGatedInventoryStream({
-      emitRecord: input.emitRecord,
-      nowIso: input.nowIso,
-      priorState: input.state[stream],
-      records,
-      stream,
-    });
-  }
+	// `shell_snapshots` is enumerated via a directory listing rather than the
+	// pre-built store inventory; everything else comes from `recordsByStream`
+	// (empty for an absent store, which still produces a carry-forward STATE).
+	for (const stream of CODEX_GATED_INVENTORY_STREAMS) {
+		if (!input.requested.has(stream)) {
+			continue;
+		}
+		const records = await resolveGatedInventoryRecords(
+			stream,
+			input.codexHome,
+			input.inventory,
+		);
+		await emitGatedInventoryStream({
+			emitRecord: input.emitRecord,
+			nowIso: input.nowIso,
+			priorState: input.state[stream],
+			records,
+			stream,
+		});
+	}
 }
 
 /** Factory: returns the emitRecord closure + a live-updating emitted-count ref. */
 function makeCodexEmitRecord(deps: {
-  emittedAt: string;
-  resFilters: ReadonlyMap<string, ReadonlySet<string> | null>;
-}): { counters: { total: number }; emitRecord: (s: string, d: RecordData) => void } {
-  const { emittedAt, resFilters } = deps;
-  const counters = { total: 0 };
-  const emitRecord = (s: string, d: RecordData): void => {
-    // biome-ignore lint/suspicious/noEqualsToNull: id is string | number | null | undefined; == null intentionally covers both a missing id and an explicit null.
-    if (d.id == null) {
-      return;
-    }
-    const resSet = resFilters.get(s);
-    if (resSet && !resSet.has(String(d.id))) {
-      return;
-    }
-    const validation = validateRecord(s, d);
-    if (!validation.ok) {
-      const message = `${String(d.id)}: ${validation.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`;
-      emit({
-        type: "SKIP_RESULT",
-        stream: s,
-        reason: "shape_check_failed",
-        message,
-      });
-      return;
-    }
-    emit({
-      type: "RECORD",
-      stream: s,
-      key: String(d.id),
-      data: d,
-      emitted_at: emittedAt,
-    });
-    counters.total += 1;
-  };
-  return { counters, emitRecord };
+	emittedAt: string;
+	resFilters: ReadonlyMap<string, ReadonlySet<string> | null>;
+}): {
+	counters: { total: number };
+	emitRecord: (s: string, d: RecordData) => void;
+} {
+	const { emittedAt, resFilters } = deps;
+	const counters = { total: 0 };
+	const emitRecord = (s: string, d: RecordData): void => {
+		if (d.id == null) {
+			return;
+		}
+		const resSet = resFilters.get(s);
+		if (resSet && !resSet.has(String(d.id))) {
+			return;
+		}
+		const validation = validateRecord(s, d);
+		if (!validation.ok) {
+			const message = `${String(d.id)}: ${validation.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`;
+			emit({
+				type: "SKIP_RESULT",
+				stream: s,
+				reason: "shape_check_failed",
+				message,
+			});
+			return;
+		}
+		emit({
+			type: "RECORD",
+			stream: s,
+			key: String(d.id),
+			data: d,
+			emitted_at: emittedAt,
+		});
+		counters.total += 1;
+	};
+	return { counters, emitRecord };
 }
 
 /**
@@ -1992,228 +2188,270 @@ function makeCodexEmitRecord(deps: {
  * then flushes the combined snapshot as the stream's STATE cursor.
  */
 async function emitDerivedCoverage(input: {
-  emitRecord: (s: string, d: RecordData) => void;
-  enumerationScope: ReturnType<typeof readEnumerationScope>;
-  inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
-  nowIso: () => string;
-  requested: Map<string, StreamScope>;
-  rolloutScan: ScanRolloutsResult;
+	emitRecord: (s: string, d: RecordData) => void;
+	enumerationScope: ReturnType<typeof readEnumerationScope>;
+	inventory: Awaited<ReturnType<typeof buildLocalSourceInventory>>;
+	nowIso: () => string;
+	requested: Map<string, StreamScope>;
+	rolloutScan: ScanRolloutsResult;
 }): Promise<void> {
-  const { emitRecord, enumerationScope, inventory, nowIso, requested, rolloutScan } = input;
-  const derivedRecords: CoverageRecord[] = [];
-  const scopeFingerprint = enumerationScopeFingerprint(enumerationScope);
-  const scanComplete = rolloutScan.scanOutcome === "complete";
-  const incompleteReason = scanComplete ? undefined : `rollout enumeration failed: ${rolloutScan.scanOutcome}`;
+	const {
+		emitRecord,
+		enumerationScope,
+		inventory,
+		nowIso,
+		requested,
+		rolloutScan,
+	} = input;
+	const derivedRecords: CoverageRecord[] = [];
+	const scopeFingerprint = enumerationScopeFingerprint(enumerationScope);
+	const scanComplete = rolloutScan.scanOutcome === "complete";
+	const incompleteReason = scanComplete
+		? undefined
+		: `rollout enumeration failed: ${rolloutScan.scanOutcome}`;
 
-  if (requested.has("messages")) {
-    derivedRecords.push(
-      buildDerivedCoverageRecord({
-        connectorId: "codex",
-        emitted: rolloutScan.messagesEmitted,
-        examined: rolloutScan.messagesExamined,
-        incompleteReason,
-        label: "message",
-        scanComplete,
-        scopeFingerprint,
-        stream: "messages",
-      })
-    );
-  }
+	if (requested.has("messages")) {
+		derivedRecords.push(
+			buildDerivedCoverageRecord({
+				connectorId: "codex",
+				emitted: rolloutScan.messagesEmitted,
+				examined: rolloutScan.messagesExamined,
+				incompleteReason,
+				label: "message",
+				scanComplete,
+				scopeFingerprint,
+				stream: "messages",
+			}),
+		);
+	}
 
-  if (requested.has("function_calls")) {
-    derivedRecords.push(
-      buildDerivedCoverageRecord({
-        connectorId: "codex",
-        emitted: rolloutScan.functionCallsEmitted,
-        examined: rolloutScan.functionCallsExamined,
-        incompleteReason,
-        label: "function_call",
-        scanComplete,
-        scopeFingerprint,
-        stream: "function_calls",
-      })
-    );
-  }
+	if (requested.has("function_calls")) {
+		derivedRecords.push(
+			buildDerivedCoverageRecord({
+				connectorId: "codex",
+				emitted: rolloutScan.functionCallsEmitted,
+				examined: rolloutScan.functionCallsExamined,
+				incompleteReason,
+				label: "function_call",
+				scanComplete,
+				scopeFingerprint,
+				stream: "function_calls",
+			}),
+		);
+	}
 
-  // Emit derived records
-  for (const record of derivedRecords) {
-    emitRecord("coverage_diagnostics", record);
-    await waitForEmitDrain();
-  }
+	// Emit derived records
+	for (const record of derivedRecords) {
+		emitRecord("coverage_diagnostics", record);
+		await waitForEmitDrain();
+	}
 
-  // Emit STATE with snapshot including both static and derived records.
-  const allCoverageRecords: readonly CoverageRecord[] = [...inventory.coverage, ...derivedRecords];
-  emit({
-    type: "STATE",
-    stream: "coverage_diagnostics",
-    cursor: { fetched_at: nowIso(), stores: buildCoverageDiagnosticsStateSnapshot(allCoverageRecords) },
-  });
-  await waitForEmitDrain();
+	// Emit STATE with snapshot including both static and derived records.
+	const allCoverageRecords: readonly CoverageRecord[] = [
+		...inventory.coverage,
+		...derivedRecords,
+	];
+	emit({
+		type: "STATE",
+		stream: "coverage_diagnostics",
+		cursor: {
+			fetched_at: nowIso(),
+			stores: buildCoverageDiagnosticsStateSnapshot(allCoverageRecords),
+		},
+	});
+	await waitForEmitDrain();
 }
 
 // ─── main ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const startMsg = await readStartMessage();
-  if (startMsg.type !== "START") {
-    return fail("Expected START");
-  }
+	const startMsg = await readStartMessage();
+	if (startMsg.type !== "START") {
+		return fail("Expected START");
+	}
 
-  const requested = buildRequestedMap(startMsg);
-  if (!requested.size) {
-    return fail("START.scope.streams is required");
-  }
+	const requested = buildRequestedMap(startMsg);
+	if (!requested.size) {
+		return fail("START.scope.streams is required");
+	}
 
-  const resFilters = buildResourceFilters(requested);
-  const dirs = resolveCodexDirs();
-  const fileMtimes = readFileMtimes(startMsg);
-  const fileCursors = readPriorFileCursors(startMsg);
+	const resFilters = buildResourceFilters(requested);
+	const dirs = resolveCodexDirs();
+	const fileMtimes = readFileMtimes(startMsg);
+	const fileCursors = readPriorFileCursors(startMsg);
 
-  const nowIso = (): string => new Date().toISOString();
-  const emittedAt = nowIso();
-  const { counters, emitRecord } = makeCodexEmitRecord({ emittedAt, resFilters });
+	const nowIso = (): string => new Date().toISOString();
+	const emittedAt = nowIso();
+	const { counters, emitRecord } = makeCodexEmitRecord({
+		emittedAt,
+		resFilters,
+	});
 
-  const needRollouts = requested.has("sessions") || requested.has("messages") || requested.has("function_calls");
+	const needRollouts =
+		requested.has("sessions") ||
+		requested.has("messages") ||
+		requested.has("function_calls");
 
-  // Rollout aggregates per session (so `sessions` can carry message_count /
-  // function_call_count even when state_5 provides the canonical metadata).
-  const rolloutAggregates = new Map<string, RolloutAggregate>();
-  const newMtimes: Record<string, number> = { ...fileMtimes };
-  // Seed the next rich-cursor map from the prior one; processRolloutEntry
-  // overwrites a file's entry when it parses/tails it and otherwise carries
-  // the prior cursor forward unchanged (so unscanned/deferred files keep
-  // their offset). Deleted files naturally drop out — they are never walked.
-  const newFileCursors: Record<string, RolloutFileCursor> = {};
-  const scanStartedAtMs = Date.now();
-  const sessionsSourceMtimeMs = fileMtimeMs(dirs.stateDbPath);
-  let parsedRolloutFiles = 0;
-  // Prior per-thread fingerprints (from last STATE cursor) gate which
-  // thread sessions actually need to re-emit, and provide the count
-  // fallback that prevents `message_count: null` overwrites when this
-  // run didn't parse the matching rollout file. The shared carry-forward
-  // cursor seeds its next map from the prior map (via openCarryForwardCursor),
-  // so threads we deliberately don't re-emit carry their fingerprints
-  // forward unchanged. The connector-specific decode + tolerant coercion of
-  // the structured `ThreadFingerprint` shape stays in readPriorThreadFingerprints.
-  const threadFingerprints = openCarryForwardCursor<ThreadFingerprint>(readPriorThreadFingerprints(startMsg));
+	// Rollout aggregates per session (so `sessions` can carry message_count /
+	// function_call_count even when state_5 provides the canonical metadata).
+	const rolloutAggregates = new Map<string, RolloutAggregate>();
+	const newMtimes: Record<string, number> = { ...fileMtimes };
+	// Seed the next rich-cursor map from the prior one; processRolloutEntry
+	// overwrites a file's entry when it parses/tails it and otherwise carries
+	// the prior cursor forward unchanged (so unscanned/deferred files keep
+	// their offset). Deleted files naturally drop out — they are never walked.
+	const newFileCursors: Record<string, RolloutFileCursor> = {};
+	const scanStartedAtMs = Date.now();
+	const sessionsSourceMtimeMs = fileMtimeMs(dirs.stateDbPath);
+	let parsedRolloutFiles = 0;
+	// Prior per-thread fingerprints (from last STATE cursor) gate which
+	// thread sessions actually need to re-emit, and provide the count
+	// fallback that prevents `message_count: null` overwrites when this
+	// run didn't parse the matching rollout file. The shared carry-forward
+	// cursor seeds its next map from the prior map (via openCarryForwardCursor),
+	// so threads we deliberately don't re-emit carry their fingerprints
+	// forward unchanged. The connector-specific decode + tolerant coercion of
+	// the structured `ThreadFingerprint` shape stays in readPriorThreadFingerprints.
+	const threadFingerprints = openCarryForwardCursor<ThreadFingerprint>(
+		readPriorThreadFingerprints(startMsg),
+	);
 
-  // Build the source inventory and flush durable coverage diagnostics BEFORE
-  // asserting requested content sources exist. A missing content store should
-  // surface an honest `missing` coverage row, not abort the run with zero
-  // coverage evidence — see emitCoverageDiagnostics. The inventory walk reads
-  // only path metadata, never payload, so it is safe on a partial/empty home.
-  const enumerationScope = readEnumerationScope(requested, ["sessions", "messages", "function_calls"]);
-  // The measured boundary is stamped onto the coverage records themselves,
-  // so it commits atomically with the evidence it qualifies.
-  const inventory = await buildLocalSourceInventory(
-    "codex",
-    dirs.codexHome,
-    CODEX_KNOWN_LOCAL_STORES,
-    enumerationScopeFingerprint(enumerationScope)
-  );
-  await emitCoverageDiagnostics({ emitRecord, inventory, requested });
-  // Commit the static coverage proof now, independent of everything that
-  // follows — see emitStaticCoverageState. assertRequestedCodexSources can
-  // still throw right after this, and a sample-limit abort can still kill
-  // the process during rollout scanning; either way this snapshot already
-  // reached bufferedState and survives as the checkpoint if nothing later
-  // supersedes it.
-  await emitStaticCoverageState({ inventory, nowIso, requested });
-  await assertRequestedCodexSources(dirs, requested);
+	// Build the source inventory and flush durable coverage diagnostics BEFORE
+	// asserting requested content sources exist. A missing content store should
+	// surface an honest `missing` coverage row, not abort the run with zero
+	// coverage evidence — see emitCoverageDiagnostics. The inventory walk reads
+	// only path metadata, never payload, so it is safe on a partial/empty home.
+	const enumerationScope = readEnumerationScope(requested, [
+		"sessions",
+		"messages",
+		"function_calls",
+	]);
+	// The measured boundary is stamped onto the coverage records themselves,
+	// so it commits atomically with the evidence it qualifies.
+	const inventory = await buildLocalSourceInventory(
+		"codex",
+		dirs.codexHome,
+		CODEX_KNOWN_LOCAL_STORES,
+		enumerationScopeFingerprint(enumerationScope),
+	);
+	await emitCoverageDiagnostics({ emitRecord, inventory, requested });
+	// Commit the static coverage proof now, independent of everything that
+	// follows — see emitStaticCoverageState. assertRequestedCodexSources can
+	// still throw right after this, and a sample-limit abort can still kill
+	// the process during rollout scanning; either way this snapshot already
+	// reached bufferedState and survives as the checkpoint if nothing later
+	// supersedes it.
+	await emitStaticCoverageState({ inventory, nowIso, requested });
+	await assertRequestedCodexSources(dirs, requested);
 
-  // The owner-declared boundary rides on the stream scopes the runtime already
-  // threads through. Applied at ENUMERATION: the rollout tree is laid out as
-  // yyyy/mm/dd, so a `since` prunes whole years, months, and days before they
-  // are listed, and `source_roots` skips out-of-root files before they open.
-  if (scopeBoundsEnumeration(enumerationScope)) {
-    emit({
-      type: "PROGRESS",
-      message: `Codex phase=index pass=index enumeration_bounded=true since=${
-        enumerationScope?.since ? "set" : "unset"
-      } roots=${enumerationScope?.source_roots?.length ?? 0}`,
-    });
-  }
+	// The owner-declared boundary rides on the stream scopes the runtime already
+	// threads through. Applied at ENUMERATION: the rollout tree is laid out as
+	// yyyy/mm/dd, so a `since` prunes whole years, months, and days before they
+	// are listed, and `source_roots` skips out-of-root files before they open.
+	if (scopeBoundsEnumeration(enumerationScope)) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex phase=index pass=index enumeration_bounded=true since=${
+				enumerationScope?.since ? "set" : "unset"
+			} roots=${enumerationScope?.source_roots?.length ?? 0}`,
+		});
+	}
 
-  await emitLocalInventoryStreams({
-    codexHome: dirs.codexHome,
-    emitRecord,
-    inventory,
-    nowIso,
-    requested,
-    state: startMsg.state || {},
-  });
+	await emitLocalInventoryStreams({
+		codexHome: dirs.codexHome,
+		emitRecord,
+		inventory,
+		nowIso,
+		requested,
+		state: startMsg.state || {},
+	});
 
-  let rolloutScan: ScanRolloutsResult = {
-    parsedFiles: 0,
-    messagesEmitted: 0,
-    messagesExamined: 0,
-    functionCallsEmitted: 0,
-    functionCallsExamined: 0,
-    scanOutcome: "complete",
-  };
-  if (needRollouts) {
-    rolloutScan = await scanRollouts({
-      activeQuietMs: resolveActiveRolloutQuietMs(),
-      baseDir: dirs.baseDir,
-      fileCursors,
-      fileMtimes,
-      newFileCursors,
-      newMtimes,
-      requested,
-      emitRecord,
-      rolloutAggregates,
-      scanStartedAtMs,
-      scope: enumerationScope,
-    });
-    parsedRolloutFiles = rolloutScan.parsedFiles;
-  }
+	let rolloutScan: ScanRolloutsResult = {
+		parsedFiles: 0,
+		messagesEmitted: 0,
+		messagesExamined: 0,
+		functionCallsEmitted: 0,
+		functionCallsExamined: 0,
+		scanOutcome: "complete",
+	};
+	if (needRollouts) {
+		rolloutScan = await scanRollouts({
+			activeQuietMs: resolveActiveRolloutQuietMs(),
+			baseDir: dirs.baseDir,
+			fileCursors,
+			fileMtimes,
+			newFileCursors,
+			newMtimes,
+			requested,
+			emitRecord,
+			rolloutAggregates,
+			scanStartedAtMs,
+			scope: enumerationScope,
+		});
+		parsedRolloutFiles = rolloutScan.parsedFiles;
+	}
 
-  if (
-    requested.has("sessions") &&
-    (parsedRolloutFiles > 0 || readPriorSessionsSourceMtimeMs(startMsg) !== sessionsSourceMtimeMs)
-  ) {
-    emitSessions({
-      stateDbPath: dirs.stateDbPath,
-      rolloutAggregates,
-      emitRecord,
-      cursor: threadFingerprints,
-    });
-    await waitForEmitDrain();
-  }
+	if (
+		requested.has("sessions") &&
+		(parsedRolloutFiles > 0 ||
+			readPriorSessionsSourceMtimeMs(startMsg) !== sessionsSourceMtimeMs)
+	) {
+		emitSessions({
+			stateDbPath: dirs.stateDbPath,
+			rolloutAggregates,
+			emitRecord,
+			cursor: threadFingerprints,
+		});
+		await waitForEmitDrain();
+	}
 
-  if (requested.has("rules")) {
-    await emitRulesStream(dirs.rulesDir, emitRecord);
-  }
-  if (requested.has("prompts")) {
-    await emitPromptsStream(dirs.promptsDir, emitRecord);
-  }
-  if (requested.has("skills")) {
-    await emitSkillsStream(dirs.skillsDir, emitRecord);
-  }
+	if (requested.has("rules")) {
+		await emitRulesStream(dirs.rulesDir, emitRecord);
+	}
+	if (requested.has("prompts")) {
+		await emitPromptsStream(dirs.promptsDir, emitRecord);
+	}
+	if (requested.has("skills")) {
+		await emitSkillsStream(dirs.skillsDir, emitRecord);
+	}
 
-  emitStateCursors({ requested, newFileCursors, newMtimes, nowIso, sessionsSourceMtimeMs, threadFingerprints });
-  await waitForEmitDrain();
+	emitStateCursors({
+		requested,
+		newFileCursors,
+		newMtimes,
+		nowIso,
+		sessionsSourceMtimeMs,
+		threadFingerprints,
+	});
+	await waitForEmitDrain();
 
-  if (requested.has("coverage_diagnostics")) {
-    await emitDerivedCoverage({ emitRecord, enumerationScope, inventory, nowIso, requested, rolloutScan });
-  }
+	if (requested.has("coverage_diagnostics")) {
+		await emitDerivedCoverage({
+			emitRecord,
+			enumerationScope,
+			inventory,
+			nowIso,
+			requested,
+			rolloutScan,
+		});
+	}
 
-  emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
-  flushAndExit(0);
+	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
+	flushAndExit(0);
 }
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime
 // and block the Node event loop on stdin. Only fires when this module
 // IS the process entry point (i.e. `tsx connectors/codex/index.ts`).
 if (isMainModule(import.meta.url)) {
-  main().catch((e: unknown) => {
-    const msg = e instanceof Error ? e.message : String(e);
-    emit({
-      type: "DONE",
-      status: "failed",
-      records_emitted: 0,
-      error: { message: msg, retryable: false },
-    });
-    flushAndExit(1);
-  });
+	main().catch((e: unknown) => {
+		const msg = e instanceof Error ? e.message : String(e);
+		emit({
+			type: "DONE",
+			status: "failed",
+			records_emitted: 0,
+			error: { message: msg, retryable: false },
+		});
+		flushAndExit(1);
+	});
 }

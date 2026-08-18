@@ -29,7 +29,11 @@
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
 
-export const IMESSAGE_DEFAULT_STREAMS = ["messages", "participants", "attachments"] as const;
+export const IMESSAGE_DEFAULT_STREAMS = [
+	"messages",
+	"participants",
+	"attachments",
+] as const;
 
 /**
  * Only `messages` declares a `consent_time_field` (`date`). Participants are
@@ -39,9 +43,9 @@ export const IMESSAGE_DEFAULT_STREAMS = ["messages", "participants", "attachment
 export const IMESSAGE_TIME_SCOPABLE_STREAMS = ["messages"] as const;
 
 export const imessageCollectorDefinition: LocalCollectorDefinition = {
-  connector_id: "imessage",
-  entry: "imessage",
-  bindings: { filesystem: { required: true } },
-  streams: IMESSAGE_DEFAULT_STREAMS,
-  time_scopable_streams: IMESSAGE_TIME_SCOPABLE_STREAMS,
+	connector_id: "imessage",
+	entry: "imessage",
+	bindings: { filesystem: { required: true } },
+	streams: IMESSAGE_DEFAULT_STREAMS,
+	time_scopable_streams: IMESSAGE_TIME_SCOPABLE_STREAMS,
 };

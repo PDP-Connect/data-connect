@@ -25,49 +25,77 @@ import { runConnectorProtocolSubprocess } from "../../src/test-harness.ts";
  * SAME run.
  */
 
-function states(messages: EmittedMessage[], stream: string): Extract<EmittedMessage, { type: "STATE" }>[] {
-  return messages.filter(
-    (msg): msg is Extract<EmittedMessage, { type: "STATE" }> => msg.type === "STATE" && msg.stream === stream
-  );
+function states(
+	messages: EmittedMessage[],
+	stream: string,
+): Extract<EmittedMessage, { type: "STATE" }>[] {
+	return messages.filter(
+		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
+			msg.type === "STATE" && msg.stream === stream,
+	);
 }
 
-function fileHistoryStatus(state: Extract<EmittedMessage, { type: "STATE" }> | undefined): unknown {
-  const stores = (state?.cursor as { stores?: Array<{ store?: unknown; status?: unknown }> } | undefined)?.stores;
-  return stores?.find((row) => row.store === "file_history")?.status;
+function fileHistoryStatus(
+	state: Extract<EmittedMessage, { type: "STATE" }> | undefined,
+): unknown {
+	const stores = (
+		state?.cursor as
+			| { stores?: Array<{ store?: unknown; status?: unknown }> }
+			| undefined
+	)?.stores;
+	return stores?.find((row) => row.store === "file_history")?.status;
 }
 
 test("claude_code: a run that fails after the inventory pass still commits fresh static coverage STATE", async () => {
-  const claudeHome = await mkdtemp(join(tmpdir(), "pdpp-claude-coverage-state-fail-"));
-  await mkdir(join(claudeHome, "file-history"), { recursive: true });
-  await writeFile(join(claudeHome, "file-history", "snapshot.json"), "{}");
-  // CLAUDE_CODE_PROJECTS_DIR is genuinely absent — assertRequestedClaudeSources
-  // throws for `sessions`, AFTER buildLocalSourceInventory/emitCoverageDiagnostics/
-  // emitCoverageDiagnosticsState (the early call) have already run.
-  const projectsDir = join(claudeHome, "projects-missing");
+	const claudeHome = await mkdtemp(
+		join(tmpdir(), "pdpp-claude-coverage-state-fail-"),
+	);
+	await mkdir(join(claudeHome, "file-history"), { recursive: true });
+	await writeFile(join(claudeHome, "file-history", "snapshot.json"), "{}");
+	// CLAUDE_CODE_PROJECTS_DIR is genuinely absent — assertRequestedClaudeSources
+	// throws for `sessions`, AFTER buildLocalSourceInventory/emitCoverageDiagnostics/
+	// emitCoverageDiagnosticsState (the early call) have already run.
+	const projectsDir = join(claudeHome, "projects-missing");
 
-  const result = await runConnectorProtocolSubprocess({
-    allowFailedDone: true,
-    cwd: join(import.meta.dirname, "../.."),
-    entrypoint: "connectors/claude_code/index.ts",
-    env: { CLAUDE_CODE_HOME: claudeHome, CLAUDE_CODE_PROJECTS_DIR: projectsDir },
-    start: {
-      scope: { streams: [{ name: "sessions" }, { name: "file_history" }, { name: "coverage_diagnostics" }] },
-      type: "START",
-    },
-  });
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: join(import.meta.dirname, "../.."),
+		entrypoint: "connectors/claude_code/index.ts",
+		env: {
+			CLAUDE_CODE_HOME: claudeHome,
+			CLAUDE_CODE_PROJECTS_DIR: projectsDir,
+		},
+		start: {
+			scope: {
+				streams: [
+					{ name: "sessions" },
+					{ name: "file_history" },
+					{ name: "coverage_diagnostics" },
+				],
+			},
+			type: "START",
+		},
+	});
 
-  const done = result.messages.findLast((msg): msg is Extract<EmittedMessage, { type: "DONE" }> => msg.type === "DONE");
-  assert.equal(done?.status, "failed", "the run must genuinely fail after the inventory pass, not succeed");
+	const done = result.messages.findLast(
+		(msg): msg is Extract<EmittedMessage, { type: "DONE" }> =>
+			msg.type === "DONE",
+	);
+	assert.equal(
+		done?.status,
+		"failed",
+		"the run must genuinely fail after the inventory pass, not succeed",
+	);
 
-  const coverageStates = states(result.messages, "coverage_diagnostics");
-  assert.equal(
-    coverageStates.length,
-    1,
-    "only the early static write should land — collect() never reached the final write"
-  );
-  assert.equal(
-    fileHistoryStatus(coverageStates.at(0)),
-    "inventory_only",
-    "the static snapshot committed before the failure must still classify file_history fresh, not stale"
-  );
+	const coverageStates = states(result.messages, "coverage_diagnostics");
+	assert.equal(
+		coverageStates.length,
+		1,
+		"only the early static write should land — collect() never reached the final write",
+	);
+	assert.equal(
+		fileHistoryStatus(coverageStates.at(0)),
+		"inventory_only",
+		"the static snapshot committed before the failure must still classify file_history fresh, not stale",
+	);
 });

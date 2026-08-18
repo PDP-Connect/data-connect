@@ -53,150 +53,196 @@ import { iterJsonlLinesFromOffset } from "./index.ts";
 /** Byte length of a string as it lands on disk (UTF-8), so tests can predict
  *  committed offsets without re-reading the file. */
 function byteLen(s: string): number {
-  return Buffer.byteLength(s, "utf8");
+	return Buffer.byteLength(s, "utf8");
 }
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "pdpp-codex-stream-"));
-  try {
-    await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-codex-stream-"));
+	try {
+		await fn(dir);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 }
 
-async function collect(path: string, startOffset: number): Promise<Array<{ obj: unknown; committedOffset: number }>> {
-  const out: Array<{ obj: unknown; committedOffset: number }> = [];
-  for await (const yielded of iterJsonlLinesFromOffset(path, startOffset)) {
-    out.push(yielded);
-  }
-  return out;
+async function collect(
+	path: string,
+	startOffset: number,
+): Promise<Array<{ obj: unknown; committedOffset: number }>> {
+	const out: Array<{ obj: unknown; committedOffset: number }> = [];
+	for await (const yielded of iterJsonlLinesFromOffset(path, startOffset)) {
+		out.push(yielded);
+	}
+	return out;
 }
 
 // ─── Invariant A + B: resume-from-offset and byte-exact committed offsets ────
 
 test("iterJsonlLinesFromOffset: yields each line with the byte offset just past its terminator", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "rollout.jsonl");
-    const lines = [
-      JSON.stringify({ type: "session_meta", payload: { id: "s1" } }),
-      JSON.stringify({ type: "response_item", payload: { type: "message" } }),
-      JSON.stringify({ type: "response_item", payload: { type: "function_call" } }),
-    ];
-    const body = `${lines.join("\n")}\n`;
-    await writeFile(path, body);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "rollout.jsonl");
+		const lines = [
+			JSON.stringify({ type: "session_meta", payload: { id: "s1" } }),
+			JSON.stringify({ type: "response_item", payload: { type: "message" } }),
+			JSON.stringify({
+				type: "response_item",
+				payload: { type: "function_call" },
+			}),
+		];
+		const body = `${lines.join("\n")}\n`;
+		await writeFile(path, body);
 
-    const yielded = await collect(path, 0);
-    assert.equal(yielded.length, 3, "every newline-terminated line is yielded");
+		const yielded = await collect(path, 0);
+		assert.equal(yielded.length, 3, "every newline-terminated line is yielded");
 
-    // committedOffset is cumulative byte length up to and including each `\n`.
-    let expected = 0;
-    for (let i = 0; i < lines.length; i += 1) {
-      expected += byteLen(lines[i] as string) + 1; // +1 for the `\n`
-      assert.equal(yielded[i]?.committedOffset, expected, `line ${i} commits at the byte just past its terminator`);
-    }
-    // The final commit equals the whole file size (file ends on a terminator).
-    assert.equal(yielded.at(-1)?.committedOffset, byteLen(body), "final commit == file size");
-  });
+		// committedOffset is cumulative byte length up to and including each `\n`.
+		let expected = 0;
+		for (let i = 0; i < lines.length; i += 1) {
+			expected += byteLen(lines[i] as string) + 1; // +1 for the `\n`
+			assert.equal(
+				yielded[i]?.committedOffset,
+				expected,
+				`line ${i} commits at the byte just past its terminator`,
+			);
+		}
+		// The final commit equals the whole file size (file ends on a terminator).
+		assert.equal(
+			yielded.at(-1)?.committedOffset,
+			byteLen(body),
+			"final commit == file size",
+		);
+	});
 });
 
 test("iterJsonlLinesFromOffset: resuming from a prior committed offset yields ONLY the suffix (the append tail)", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "rollout.jsonl");
-    const head = `${JSON.stringify({ n: 1 })}\n${JSON.stringify({ n: 2 })}\n`;
-    const tail = `${JSON.stringify({ n: 3 })}\n${JSON.stringify({ n: 4 })}\n`;
-    await writeFile(path, head + tail);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "rollout.jsonl");
+		const head = `${JSON.stringify({ n: 1 })}\n${JSON.stringify({ n: 2 })}\n`;
+		const tail = `${JSON.stringify({ n: 3 })}\n${JSON.stringify({ n: 4 })}\n`;
+		await writeFile(path, head + tail);
 
-    // Resume exactly at the head boundary — the cursor's committed offset.
-    const suffix = await collect(path, byteLen(head));
-    assert.equal(suffix.length, 2, "only the two appended lines are yielded — the prefix is never re-read");
-    assert.deepEqual(
-      suffix.map((y) => (y.obj as { n: number }).n),
-      [3, 4],
-      "the suffix lines are exactly the appended records, in order"
-    );
-    assert.equal(
-      suffix.at(-1)?.committedOffset,
-      byteLen(head + tail),
-      "the resumed commit continues from the start offset, not from zero"
-    );
-  });
+		// Resume exactly at the head boundary — the cursor's committed offset.
+		const suffix = await collect(path, byteLen(head));
+		assert.equal(
+			suffix.length,
+			2,
+			"only the two appended lines are yielded — the prefix is never re-read",
+		);
+		assert.deepEqual(
+			suffix.map((y) => (y.obj as { n: number }).n),
+			[3, 4],
+			"the suffix lines are exactly the appended records, in order",
+		);
+		assert.equal(
+			suffix.at(-1)?.committedOffset,
+			byteLen(head + tail),
+			"the resumed commit continues from the start offset, not from zero",
+		);
+	});
 });
 
 test("iterJsonlLinesFromOffset: byte offsets are exact over multi-byte UTF-8 so a resume never splits a line", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "rollout.jsonl");
-    // Emoji + CJK: each char is 3–4 UTF-8 bytes. If the iterator counted decoded
-    // characters instead of raw bytes, the committed offset would land mid-byte
-    // and the next resume would corrupt or skip a line.
-    const l1 = JSON.stringify({ text: "héllo 🌍 世界" });
-    const l2 = JSON.stringify({ text: "second 🚀 line" });
-    const body = `${l1}\n${l2}\n`;
-    await writeFile(path, body);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "rollout.jsonl");
+		// Emoji + CJK: each char is 3–4 UTF-8 bytes. If the iterator counted decoded
+		// characters instead of raw bytes, the committed offset would land mid-byte
+		// and the next resume would corrupt or skip a line.
+		const l1 = JSON.stringify({ text: "héllo 🌍 世界" });
+		const l2 = JSON.stringify({ text: "second 🚀 line" });
+		const body = `${l1}\n${l2}\n`;
+		await writeFile(path, body);
 
-    const all = await collect(path, 0);
-    assert.equal(all.length, 2);
-    const afterFirst = all[0]?.committedOffset ?? -1;
-    assert.equal(afterFirst, byteLen(l1) + 1, "offset counts raw UTF-8 bytes, not characters");
+		const all = await collect(path, 0);
+		assert.equal(all.length, 2);
+		const afterFirst = all[0]?.committedOffset ?? -1;
+		assert.equal(
+			afterFirst,
+			byteLen(l1) + 1,
+			"offset counts raw UTF-8 bytes, not characters",
+		);
 
-    // Resuming at that byte boundary must yield the second line whole.
-    const resumed = await collect(path, afterFirst);
-    assert.equal(resumed.length, 1, "resume at a multi-byte boundary yields exactly the remaining line");
-    assert.deepEqual(resumed[0]?.obj, { text: "second 🚀 line" }, "the resumed line decodes intact");
-  });
+		// Resuming at that byte boundary must yield the second line whole.
+		const resumed = await collect(path, afterFirst);
+		assert.equal(
+			resumed.length,
+			1,
+			"resume at a multi-byte boundary yields exactly the remaining line",
+		);
+		assert.deepEqual(
+			resumed[0]?.obj,
+			{ text: "second 🚀 line" },
+			"the resumed line decodes intact",
+		);
+	});
 });
 
 // ─── Invariant C: partial trailing line is held, not skipped or duplicated ───
 
 test("iterJsonlLinesFromOffset: an unterminated trailing line is not yielded and does not advance the offset", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "rollout.jsonl");
-    const complete = `${JSON.stringify({ n: 1 })}\n`;
-    const partial = JSON.stringify({ n: 2 }); // no trailing newline — an in-flight append
-    await writeFile(path, complete + partial);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "rollout.jsonl");
+		const complete = `${JSON.stringify({ n: 1 })}\n`;
+		const partial = JSON.stringify({ n: 2 }); // no trailing newline — an in-flight append
+		await writeFile(path, complete + partial);
 
-    const firstPass = await collect(path, 0);
-    assert.equal(firstPass.length, 1, "only the newline-terminated line is yielded; the partial is withheld");
-    assert.equal(
-      firstPass.at(-1)?.committedOffset,
-      byteLen(complete),
-      "the committed offset stops at the last terminator — the partial bytes are not counted"
-    );
+		const firstPass = await collect(path, 0);
+		assert.equal(
+			firstPass.length,
+			1,
+			"only the newline-terminated line is yielded; the partial is withheld",
+		);
+		assert.equal(
+			firstPass.at(-1)?.committedOffset,
+			byteLen(complete),
+			"the committed offset stops at the last terminator — the partial bytes are not counted",
+		);
 
-    // The writer finishes the line later; re-reading from the committed offset
-    // must now yield the (formerly partial) line intact, with no duplication of
-    // the first line.
-    await writeFile(path, `${complete + partial}\n`);
-    const secondPass = await collect(path, byteLen(complete));
-    assert.equal(secondPass.length, 1, "the completed line is picked up exactly once on the next run");
-    assert.deepEqual(secondPass[0]?.obj, { n: 2 }, "the formerly-partial line is now whole");
-  });
+		// The writer finishes the line later; re-reading from the committed offset
+		// must now yield the (formerly partial) line intact, with no duplication of
+		// the first line.
+		await writeFile(path, `${complete + partial}\n`);
+		const secondPass = await collect(path, byteLen(complete));
+		assert.equal(
+			secondPass.length,
+			1,
+			"the completed line is picked up exactly once on the next run",
+		);
+		assert.deepEqual(
+			secondPass[0]?.obj,
+			{ n: 2 },
+			"the formerly-partial line is now whole",
+		);
+	});
 });
 
 test("iterJsonlLinesFromOffset: a malformed (unparseable) line is skipped but its bytes still advance the offset", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "rollout.jsonl");
-    const good1 = JSON.stringify({ n: 1 });
-    const bad = "{not valid json";
-    const good2 = JSON.stringify({ n: 2 });
-    const body = `${good1}\n${bad}\n${good2}\n`;
-    await writeFile(path, body);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "rollout.jsonl");
+		const good1 = JSON.stringify({ n: 1 });
+		const bad = "{not valid json";
+		const good2 = JSON.stringify({ n: 2 });
+		const body = `${good1}\n${bad}\n${good2}\n`;
+		await writeFile(path, body);
 
-    const yielded = await collect(path, 0);
-    assert.equal(yielded.length, 2, "the malformed line is dropped, the two valid lines survive");
-    assert.deepEqual(
-      yielded.map((y) => (y.obj as { n: number }).n),
-      [1, 2],
-      "only the parseable objects are yielded"
-    );
-    // Critically: the final commit still equals the full file size, so the
-    // malformed line is consumed (not re-read forever) on the next run.
-    assert.equal(
-      yielded.at(-1)?.committedOffset,
-      byteLen(body),
-      "the malformed line's bytes are counted toward the committed offset (skip, do not stall)"
-    );
-  });
+		const yielded = await collect(path, 0);
+		assert.equal(
+			yielded.length,
+			2,
+			"the malformed line is dropped, the two valid lines survive",
+		);
+		assert.deepEqual(
+			yielded.map((y) => (y.obj as { n: number }).n),
+			[1, 2],
+			"only the parseable objects are yielded",
+		);
+		// Critically: the final commit still equals the full file size, so the
+		// malformed line is consumed (not re-read forever) on the next run.
+		assert.equal(
+			yielded.at(-1)?.committedOffset,
+			byteLen(body),
+			"the malformed line's bytes are counted toward the committed offset (skip, do not stall)",
+		);
+	});
 });
 
 // ─── Invariant D: bounded residency on a large active-shaped file ────────────
@@ -205,93 +251,119 @@ test("iterJsonlLinesFromOffset: a malformed (unparseable) line is skipped but it
  *  in memory in the test itself (mirrors how Codex appends incrementally). Each
  *  line carries a bounded text preview-sized payload — the realistic per-line
  *  shape, never a single multi-GB line. */
-async function writeManyLines(path: string, lineCount: number, perLineFiller: number): Promise<number> {
-  const filler = "x".repeat(perLineFiller);
-  const ws = createWriteStream(path);
-  let bytes = 0;
-  for (let i = 0; i < lineCount; i += 1) {
-    const line = `${JSON.stringify({ type: "response_item", i, payload: { type: "message", t: filler } })}\n`;
-    bytes += byteLen(line);
-    if (!ws.write(line)) {
-      await once(ws, "drain");
-    }
-  }
-  ws.end();
-  await once(ws, "finish");
-  return bytes;
+async function writeManyLines(
+	path: string,
+	lineCount: number,
+	perLineFiller: number,
+): Promise<number> {
+	const filler = "x".repeat(perLineFiller);
+	const ws = createWriteStream(path);
+	let bytes = 0;
+	for (let i = 0; i < lineCount; i += 1) {
+		const line = `${JSON.stringify({ type: "response_item", i, payload: { type: "message", t: filler } })}\n`;
+		bytes += byteLen(line);
+		if (!ws.write(line)) {
+			await once(ws, "drain");
+		}
+	}
+	ws.end();
+	await once(ws, "finish");
+	return bytes;
 }
 
 test("iterJsonlLinesFromOffset: resident Buffer memory stays bounded while streaming a large active-shaped log", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "big-rollout.jsonl");
-    // ~32 MB across ~64k lines (~512 B/line). Big enough that buffering even a
-    // fraction of the file would dwarf a single 64 KB read chunk; small enough
-    // to stay fast and not stress CI disk. The point is fileSize >> peak-buffer.
-    const fileBytes = await writeManyLines(path, 64_000, 480);
-    assert.ok(fileBytes > 24 * 1024 * 1024, `synthetic file should be sizeable; was ${fileBytes} bytes`);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "big-rollout.jsonl");
+		// ~32 MB across ~64k lines (~512 B/line). Big enough that buffering even a
+		// fraction of the file would dwarf a single 64 KB read chunk; small enough
+		// to stay fast and not stress CI disk. The point is fileSize >> peak-buffer.
+		const fileBytes = await writeManyLines(path, 64_000, 480);
+		assert.ok(
+			fileBytes > 24 * 1024 * 1024,
+			`synthetic file should be sizeable; was ${fileBytes} bytes`,
+		);
 
-    // `arrayBuffers` tracks off-heap Buffer/ArrayBuffer bytes — exactly where the
-    // generator's `pending` Buffer and the read stream's internal chunk queue
-    // live. Unlike RSS (perturbed by V8 heap-arena growth and GC bookkeeping, so
-    // it flakes at tens of MB), this isolates the bytes the streaming read holds.
-    // Because the consumer loop is synchronous, stream backpressure keeps the
-    // internal queue near one highWaterMark (~64 KB) plus at most one pending
-    // line. A regression that accumulated chunks into one whole-file Buffer (or
-    // read the file into a Buffer wholesale) would push this delta toward
-    // fileBytes and trip the absolute ceiling below.
-    const baseArrayBuffers = process.memoryUsage().arrayBuffers;
-    let peakArrayBuffersDelta = 0;
-    let count = 0;
-    let lastOffset = 0;
-    for await (const { committedOffset } of iterJsonlLinesFromOffset(path, 0)) {
-      count += 1;
-      lastOffset = committedOffset;
-      // Sample periodically — sampling every line would dominate runtime.
-      if (count % 2048 === 0) {
-        const delta = process.memoryUsage().arrayBuffers - baseArrayBuffers;
-        if (delta > peakArrayBuffersDelta) {
-          peakArrayBuffersDelta = delta;
-        }
-      }
-    }
+		// `arrayBuffers` tracks off-heap Buffer/ArrayBuffer bytes — exactly where the
+		// generator's `pending` Buffer and the read stream's internal chunk queue
+		// live. Unlike RSS (perturbed by V8 heap-arena growth and GC bookkeeping, so
+		// it flakes at tens of MB), this isolates the bytes the streaming read holds.
+		// Because the consumer loop is synchronous, stream backpressure keeps the
+		// internal queue near one highWaterMark (~64 KB) plus at most one pending
+		// line. A regression that accumulated chunks into one whole-file Buffer (or
+		// read the file into a Buffer wholesale) would push this delta toward
+		// fileBytes and trip the absolute ceiling below.
+		const baseArrayBuffers = process.memoryUsage().arrayBuffers;
+		let peakArrayBuffersDelta = 0;
+		let count = 0;
+		let lastOffset = 0;
+		for await (const { committedOffset } of iterJsonlLinesFromOffset(path, 0)) {
+			count += 1;
+			lastOffset = committedOffset;
+			// Sample periodically — sampling every line would dominate runtime.
+			if (count % 2048 === 0) {
+				const delta = process.memoryUsage().arrayBuffers - baseArrayBuffers;
+				if (delta > peakArrayBuffersDelta) {
+					peakArrayBuffersDelta = delta;
+				}
+			}
+		}
 
-    assert.equal(count, 64_000, "every line is streamed exactly once");
-    assert.equal(lastOffset, fileBytes, "the stream commits the whole file (ends on a terminator)");
+		assert.equal(count, 64_000, "every line is streamed exactly once");
+		assert.equal(
+			lastOffset,
+			fileBytes,
+			"the stream commits the whole file (ends on a terminator)",
+		);
 
-    // Absolute ceiling independent of file size. Buffer-pool retention differs
-    // across supported Node releases; current runtimes peak around 13 MiB for
-    // this shape even though the iterator retains only a read chunk plus one
-    // partial line. A wholesale `readFile` holds the full ~35 MiB body. The
-    // 16 MiB ceiling leaves runtime headroom while remaining below half the
-    // fixture size, so a whole-file buffering regression still fails clearly.
-    const CEILING_BYTES = 16 * 1024 * 1024;
-    assert.ok(
-      peakArrayBuffersDelta < CEILING_BYTES,
-      `streaming must stay bounded: peak arrayBuffers delta ${peakArrayBuffersDelta} should be < ${CEILING_BYTES} (file ${fileBytes} bytes)`
-    );
-  });
+		// Absolute ceiling independent of file size. Buffer-pool retention differs
+		// across supported Node releases; current runtimes peak around 13 MiB for
+		// this shape even though the iterator retains only a read chunk plus one
+		// partial line. A wholesale `readFile` holds the full ~35 MiB body. The
+		// 16 MiB ceiling leaves runtime headroom while remaining below half the
+		// fixture size, so a whole-file buffering regression still fails clearly.
+		const CEILING_BYTES = 16 * 1024 * 1024;
+		assert.ok(
+			peakArrayBuffersDelta < CEILING_BYTES,
+			`streaming must stay bounded: peak arrayBuffers delta ${peakArrayBuffersDelta} should be < ${CEILING_BYTES} (file ${fileBytes} bytes)`,
+		);
+	});
 });
 
 test("iterJsonlLinesFromOffset: a single large line is buffered to one line, not the whole file", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "one-big-line.jsonl");
-    // One ~4 MB line followed by a small line. The generator must buffer the big
-    // line (a line is the irreducible unit) but release it on its terminator and
-    // not accumulate it together with the rest of the file.
-    const bigText = "y".repeat(4 * 1024 * 1024);
-    const bigLine = JSON.stringify({ type: "response_item", payload: { type: "message", t: bigText } });
-    const smallLine = JSON.stringify({ n: 2 });
-    const body = `${bigLine}\n${smallLine}\n`;
-    await writeFile(path, body);
+	await withTempDir(async (dir) => {
+		const path = join(dir, "one-big-line.jsonl");
+		// One ~4 MB line followed by a small line. The generator must buffer the big
+		// line (a line is the irreducible unit) but release it on its terminator and
+		// not accumulate it together with the rest of the file.
+		const bigText = "y".repeat(4 * 1024 * 1024);
+		const bigLine = JSON.stringify({
+			type: "response_item",
+			payload: { type: "message", t: bigText },
+		});
+		const smallLine = JSON.stringify({ n: 2 });
+		const body = `${bigLine}\n${smallLine}\n`;
+		await writeFile(path, body);
 
-    const yielded = await collect(path, 0);
-    assert.equal(yielded.length, 2, "both lines yield");
-    assert.equal(yielded[0]?.committedOffset, byteLen(bigLine) + 1, "the big line commits at its own terminator");
-    assert.equal(yielded.at(-1)?.committedOffset, byteLen(body), "the small line commits at file end");
-    // Resuming after the big line yields only the small line — the big prefix is
-    // never re-read, so a session with one huge historical line still tails cheap.
-    const resumed = await collect(path, byteLen(bigLine) + 1);
-    assert.equal(resumed.length, 1, "resume past the big line yields only the suffix");
-    assert.deepEqual(resumed[0]?.obj, { n: 2 });
-  });
+		const yielded = await collect(path, 0);
+		assert.equal(yielded.length, 2, "both lines yield");
+		assert.equal(
+			yielded[0]?.committedOffset,
+			byteLen(bigLine) + 1,
+			"the big line commits at its own terminator",
+		);
+		assert.equal(
+			yielded.at(-1)?.committedOffset,
+			byteLen(body),
+			"the small line commits at file end",
+		);
+		// Resuming after the big line yields only the small line — the big prefix is
+		// never re-read, so a session with one huge historical line still tails cheap.
+		const resumed = await collect(path, byteLen(bigLine) + 1);
+		assert.equal(
+			resumed.length,
+			1,
+			"resume past the big line yields only the suffix",
+		);
+		assert.deepEqual(resumed[0]?.obj, { n: 2 });
+	});
 });

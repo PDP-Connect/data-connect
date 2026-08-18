@@ -31,18 +31,18 @@ import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collecto
  * inventory streams emit metadata only (path hash, size, mtime).
  */
 export const CODEX_DEFAULT_STREAMS = [
-  "sessions",
-  "messages",
-  "function_calls",
-  "rules",
-  "prompts",
-  "skills",
-  "history",
-  "session_index",
-  "shell_snapshots",
-  "config_inventory",
-  "cache_inventory",
-  "coverage_diagnostics",
+	"sessions",
+	"messages",
+	"function_calls",
+	"rules",
+	"prompts",
+	"skills",
+	"history",
+	"session_index",
+	"shell_snapshots",
+	"config_inventory",
+	"cache_inventory",
+	"coverage_diagnostics",
 ] as const;
 
 /**
@@ -53,16 +53,20 @@ export const CODEX_DEFAULT_STREAMS = [
  * Streams without a consent time field remain whole-store under a time bound;
  * the runner keeps them in the requested inventory and marks them unscoped.
  */
-export const CODEX_TIME_SCOPABLE_STREAMS = ["sessions", "messages", "function_calls"] as const;
+export const CODEX_TIME_SCOPABLE_STREAMS = [
+	"sessions",
+	"messages",
+	"function_calls",
+] as const;
 
 export const CODEX_SOURCE_ROOT_SCOPABLE_STREAMS = CODEX_TIME_SCOPABLE_STREAMS;
 
 export const codexCollectorDefinition: LocalCollectorDefinition = {
-  connector_id: "codex",
-  entry: "codex",
-  bindings: { filesystem: { required: true } },
-  streams: CODEX_DEFAULT_STREAMS,
-  enforces_source_roots: true,
-  source_root_scopable_streams: CODEX_SOURCE_ROOT_SCOPABLE_STREAMS,
-  time_scopable_streams: CODEX_TIME_SCOPABLE_STREAMS,
+	connector_id: "codex",
+	entry: "codex",
+	bindings: { filesystem: { required: true } },
+	streams: CODEX_DEFAULT_STREAMS,
+	enforces_source_roots: true,
+	source_root_scopable_streams: CODEX_SOURCE_ROOT_SCOPABLE_STREAMS,
+	time_scopable_streams: CODEX_TIME_SCOPABLE_STREAMS,
 };
