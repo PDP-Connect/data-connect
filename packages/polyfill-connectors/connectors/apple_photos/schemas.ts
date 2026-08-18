@@ -44,41 +44,54 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const HYDRATION_STATUS_RE = /^(failed|hydrated|skipped_too_large|unavailable)$/;
 
-const applePhotosIdSchema = z.string().regex(APPLE_PHOTOS_ID_RE, "must be a 24-char hex Apple Photos record id");
-const sha256HexSchema = z.string().regex(SHA256_HEX_RE, "must be a 64-char hex sha256 digest");
-const isoDateTimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const applePhotosIdSchema = z
+	.string()
+	.regex(APPLE_PHOTOS_ID_RE, "must be a 24-char hex Apple Photos record id");
+const sha256HexSchema = z
+	.string()
+	.regex(SHA256_HEX_RE, "must be a 64-char hex sha256 digest");
+const isoDateTimeSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 
 const blobRefSchema = z
-  .object({
-    blob_id: z.string().min(1),
-    mime_type: z.string().min(1),
-    sha256: sha256HexSchema,
-    size_bytes: z.number().int().min(0),
-  })
-  .nullable();
+	.object({
+		blob_id: z.string().min(1),
+		mime_type: z.string().min(1),
+		sha256: sha256HexSchema,
+		size_bytes: z.number().int().min(0),
+	})
+	.nullable();
 
 /**
  * photos stream: one record per discovered image/video file found under
  * APPLE_PHOTOS_EXPORT_DIR. Cursor: file_modified_at (last_modified).
  */
 export const photosSchema = z.object({
-  id: applePhotosIdSchema,
-  filename: pdppSafeText.max(1024),
-  content_type: z.string().min(1).max(200),
-  size_bytes: z.number().int().min(0).nullable(),
-  content_sha256: sha256HexSchema.nullable(),
-  hydration_status: z.string().regex(HYDRATION_STATUS_RE),
-  hydration_error: pdppSafeText.max(240).nullable(),
-  blob_ref: blobRefSchema,
-  taken_at: isoDateTimeSchema.nullable(),
-  file_modified_at: isoDateTimeSchema,
-  latitude: z.number().min(-90).max(90).nullable(),
-  longitude: z.number().min(-180).max(180).nullable(),
-  camera_make: z.string().min(1).max(200).nullable(),
-  camera_model: z.string().min(1).max(200).nullable(),
+	id: applePhotosIdSchema,
+	filename: pdppSafeText.max(1024),
+	content_type: z.string().min(1).max(200),
+	size_bytes: z.number().int().min(0).nullable(),
+	content_sha256: sha256HexSchema.nullable(),
+	hydration_status: z.string().regex(HYDRATION_STATUS_RE),
+	hydration_error: pdppSafeText.max(240).nullable(),
+	blob_ref: blobRefSchema,
+	taken_at: isoDateTimeSchema.nullable(),
+	file_modified_at: isoDateTimeSchema,
+	latitude: z.number().min(-90).max(90).nullable(),
+	longitude: z.number().min(-180).max(180).nullable(),
+	camera_make: z.string().min(1).max(200).nullable(),
+	camera_model: z.string().min(1).max(200).nullable(),
 });
 
-const coverageStatusSchema = z.enum(["collected", "inventory_only", "excluded", "deferred", "missing", "unsupported"]);
+const coverageStatusSchema = z.enum([
+	"collected",
+	"inventory_only",
+	"excluded",
+	"deferred",
+	"missing",
+	"unsupported",
+]);
 
 /**
  * coverage_diagnostics stream: one row per known local store (currently just
@@ -88,19 +101,19 @@ const coverageStatusSchema = z.enum(["collected", "inventory_only", "excluded", 
  * both this connector and those use.
  */
 export const coverageDiagnosticsSchema = z.object({
-  id: pdppSafeText,
-  store: pdppSafeText,
-  stream: pdppSafeText.nullable(),
-  status: coverageStatusSchema,
-  reason: pdppSafeText.max(512),
+	id: pdppSafeText,
+	store: pdppSafeText,
+	stream: pdppSafeText.nullable(),
+	status: coverageStatusSchema,
+	reason: pdppSafeText.max(512),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  photos: photosSchema,
-  coverage_diagnostics: coverageDiagnosticsSchema,
+	photos: photosSchema,
+	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

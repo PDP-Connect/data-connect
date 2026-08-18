@@ -81,9 +81,20 @@ import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { runConnector } from "../../src/connector-runtime.ts";
-import { hydrateMediaBytes, resolveMaxMediaBytes } from "../../src/local-media-blob-hydration.ts";
-import { buildLocalSourceInventory, type KnownLocalStore } from "../../src/local-source-inventory.ts";
-import { advanceCursor, buildPhotoRecord, isBeforeCursor, SUPPORTED_EXTENSIONS } from "./parsers.ts";
+import {
+	hydrateMediaBytes,
+	resolveMaxMediaBytes,
+} from "../../src/local-media-blob-hydration.ts";
+import {
+	buildLocalSourceInventory,
+	type KnownLocalStore,
+} from "../../src/local-source-inventory.ts";
+import {
+	advanceCursor,
+	buildPhotoRecord,
+	isBeforeCursor,
+	SUPPORTED_EXTENSIONS,
+} from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApplePhotosState, DiscoveredFile } from "./types.ts";
 
@@ -91,13 +102,14 @@ const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/apple-photos";
 const MAX_PHOTO_BYTES_ENV = "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES";
 
 const APPLE_PHOTOS_KNOWN_STORES: KnownLocalStore[] = [
-  {
-    store: "export_dir",
-    relativePath: ".",
-    stream: "photos",
-    classification: "collect",
-    reason: "Photos.app manual export directory (File → Export → Export Unmodified Originals)",
-  },
+	{
+		store: "export_dir",
+		relativePath: ".",
+		stream: "photos",
+		classification: "collect",
+		reason:
+			"Photos.app manual export directory (File → Export → Export Unmodified Originals)",
+	},
 ];
 
 // Progress cadence — emit a PROGRESS every N files so operators see motion
@@ -106,28 +118,31 @@ const PROGRESS_INTERVAL_FILES = 500;
 
 /** The configured export directory path, regardless of whether it currently exists. */
 function configuredExportDir(): string {
-  return process.env.APPLE_PHOTOS_EXPORT_DIR || join(homedir(), ".pdpp/imports/apple_photos");
+	return (
+		process.env.APPLE_PHOTOS_EXPORT_DIR ||
+		join(homedir(), ".pdpp/imports/apple_photos")
+	);
 }
 
 function resolveExportDir(): string | null {
-  const dir = configuredExportDir();
-  return existsSync(dir) ? dir : null;
+	const dir = configuredExportDir();
+	return existsSync(dir) ? dir : null;
 }
 
 /** True if `dir` contains no entries at all (empty top-level listing). */
 async function isEmptyDir(dir: string): Promise<boolean> {
-  const entries = await readdir(dir);
-  return entries.length === 0;
+	const entries = await readdir(dir);
+	return entries.length === 0;
 }
 
 function hasSupportedExtension(filename: string): boolean {
-  const lower = filename.toLowerCase();
-  for (const ext of SUPPORTED_EXTENSIONS) {
-    if (lower.endsWith(ext)) {
-      return true;
-    }
-  }
-  return false;
+	const lower = filename.toLowerCase();
+	for (const ext of SUPPORTED_EXTENSIONS) {
+		if (lower.endsWith(ext)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -136,94 +151,101 @@ function hasSupportedExtension(filename: string): boolean {
  * than materialized into one giant array.
  */
 async function* walkDir(dir: string): AsyncGenerator<DiscoveredFile> {
-  const handle = await opendir(dir);
-  for await (const entry of handle) {
-    const entryPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      yield* walkDir(entryPath);
-      continue;
-    }
-    if (!(entry.isFile() && hasSupportedExtension(entry.name))) {
-      continue;
-    }
-    const st = await stat(entryPath);
-    yield {
-      path: entryPath,
-      sizeBytes: st.size,
-      mtimeIso: st.mtime.toISOString(),
-    };
-  }
+	const handle = await opendir(dir);
+	for await (const entry of handle) {
+		const entryPath = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			yield* walkDir(entryPath);
+			continue;
+		}
+		if (!(entry.isFile() && hasSupportedExtension(entry.name))) {
+			continue;
+		}
+		const st = await stat(entryPath);
+		yield {
+			path: entryPath,
+			sizeBytes: st.size,
+			mtimeIso: st.mtime.toISOString(),
+		};
+	}
 }
 
 runConnector({
-  name: "apple_photos",
-  validateRecord,
-  async collect({ state, requested, emit, emitRecord, progress }) {
-    if (requested.has("coverage_diagnostics")) {
-      const configuredDir = configuredExportDir();
-      const inventory = await buildLocalSourceInventory(
-        "apple_photos",
-        dirname(configuredDir),
-        APPLE_PHOTOS_KNOWN_STORES.map((store) => ({ ...store, relativePath: basename(configuredDir) }))
-      );
-      for (const record of inventory.coverage) {
-        await emitRecord("coverage_diagnostics", record);
-      }
-    }
+	name: "apple_photos",
+	validateRecord,
+	async collect({ state, requested, emit, emitRecord, progress }) {
+		if (requested.has("coverage_diagnostics")) {
+			const configuredDir = configuredExportDir();
+			const inventory = await buildLocalSourceInventory(
+				"apple_photos",
+				dirname(configuredDir),
+				APPLE_PHOTOS_KNOWN_STORES.map((store) => ({
+					...store,
+					relativePath: basename(configuredDir),
+				})),
+			);
+			for (const record of inventory.coverage) {
+				await emitRecord("coverage_diagnostics", record);
+			}
+		}
 
-    const dir = resolveExportDir();
-    if (!dir || (await isEmptyDir(dir))) {
-      await emit({
-        type: "SKIP_RESULT",
-        stream: "photos",
-        reason: "export_not_found",
-        message:
-          "Export photos from Photos.app (File → Export → Export Unmodified Originals) into " +
-          "~/.pdpp/imports/apple_photos/ (or set APPLE_PHOTOS_EXPORT_DIR).",
-      });
-      return;
-    }
+		const dir = resolveExportDir();
+		if (!dir || (await isEmptyDir(dir))) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "photos",
+				reason: "export_not_found",
+				message:
+					"Export photos from Photos.app (File → Export → Export Unmodified Originals) into " +
+					"~/.pdpp/imports/apple_photos/ (or set APPLE_PHOTOS_EXPORT_DIR).",
+			});
+			return;
+		}
 
-    if (!requested.has("photos")) {
-      return;
-    }
+		if (!requested.has("photos")) {
+			return;
+		}
 
-    const photosState = (state.photos ?? {}) as ApplePhotosState;
-    const since = photosState.last_modified;
-    let latest = since;
-    let fileCount = 0;
-    const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
+		const photosState = (state.photos ?? {}) as ApplePhotosState;
+		const since = photosState.last_modified;
+		let latest = since;
+		let fileCount = 0;
+		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
-    await progress("Apple Photos phase=emit pass=emit starting directory walk");
+		await progress("Apple Photos phase=emit pass=emit starting directory walk");
 
-    for await (const file of walkDir(dir)) {
-      fileCount += 1;
-      if (isBeforeCursor(file.mtimeIso, since)) {
-        continue;
-      }
-      const filename = basename(file.path);
-      const hydration = await hydrateMediaBytes({
-        connectorId: CONNECTOR_ID,
-        fileName: filename,
-        filePath: file.path,
-        maxBytes,
-        stream: "photos",
-      });
-      const record = buildPhotoRecord(file, filename, hydration);
-      latest = advanceCursor(latest, file.mtimeIso);
-      await emitRecord("photos", { ...record });
+		for await (const file of walkDir(dir)) {
+			fileCount += 1;
+			if (isBeforeCursor(file.mtimeIso, since)) {
+				continue;
+			}
+			const filename = basename(file.path);
+			const hydration = await hydrateMediaBytes({
+				connectorId: CONNECTOR_ID,
+				fileName: filename,
+				filePath: file.path,
+				maxBytes,
+				stream: "photos",
+			});
+			const record = buildPhotoRecord(file, filename, hydration);
+			latest = advanceCursor(latest, file.mtimeIso);
+			await emitRecord("photos", { ...record });
 
-      if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
-        await progress(`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`);
-      }
-    }
+			if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
+				await progress(
+					`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`,
+				);
+			}
+		}
 
-    await progress(`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`);
+		await progress(
+			`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`,
+		);
 
-    await emit({
-      type: "STATE",
-      stream: "photos",
-      cursor: { last_modified: latest },
-    });
-  },
+		await emit({
+			type: "STATE",
+			stream: "photos",
+			cursor: { last_modified: latest },
+		});
+	},
 });

@@ -143,7 +143,11 @@
 
 import { spawn } from "node:child_process";
 import { isMainModule } from "@pdpp/connector-protocol";
-import { type CollectContext, emitDetailCoverage, runConnector } from "../../src/connector-runtime.ts";
+import {
+	type CollectContext,
+	emitDetailCoverage,
+	runConnector,
+} from "../../src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
 import type { CoverageRecord } from "../../src/local-source-inventory.ts";
 import type { GmcliResult } from "./fixtures.ts";
@@ -152,19 +156,19 @@ import { validateRecord } from "./schemas.ts";
 // ─── gmcli binary resolution + subprocess wrapping ─────────────────────
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return typeof error === "object" && error !== null && "code" in error;
+	return typeof error === "object" && error !== null && "code" in error;
 }
 
 export function resolveGmcliBin(): string {
-  return process.env.GMCLI_BIN || "gmcli";
+	return process.env.GMCLI_BIN || "gmcli";
 }
 
 export function formatGmcliMissingError(bin: string): string {
-  return [
-    `gmcli binary not found: ${bin}`,
-    "Install gmcli from github.com/johnlindquist/gmkit and either put it on PATH or set GMCLI_BIN to its absolute path.",
-    "This connector never runs `gmcli auth` for you — pair your Android device manually first (see the gmkit README).",
-  ].join(" ");
+	return [
+		`gmcli binary not found: ${bin}`,
+		"Install gmcli from github.com/johnlindquist/gmkit and either put it on PATH or set GMCLI_BIN to its absolute path.",
+		"This connector never runs `gmcli auth` for you — pair your Android device manually first (see the gmkit README).",
+	].join(" ");
 }
 
 /**
@@ -174,19 +178,23 @@ export function formatGmcliMissingError(bin: string): string {
  * first, then a conservative generic pattern for anything token/session-
  * shaped that slips through unexpected error text.
  */
-const TOKEN_SHAPED_RE = /\b[a-z0-9_-]{24,}\.[a-z0-9_-]{6,}\.[a-z0-9_-]{6,}\b/giu;
+const TOKEN_SHAPED_RE =
+	/\b[a-z0-9_-]{24,}\.[a-z0-9_-]{6,}\.[a-z0-9_-]{6,}\b/giu;
 const BEARER_LIKE_RE = /\b(session|token|bearer)[=:]\s*\S+/giu;
 const BEARER_LIKE_KEY_SPLIT_RE = /[=:]/u;
 
 export function redactGmcliOutput(output: string): string {
-  return output
-    .replace(TOKEN_SHAPED_RE, "[REDACTED]")
-    .replace(BEARER_LIKE_RE, (m) => `${m.split(BEARER_LIKE_KEY_SPLIT_RE)[0]}=[REDACTED]`);
+	return output
+		.replace(TOKEN_SHAPED_RE, "[REDACTED]")
+		.replace(
+			BEARER_LIKE_RE,
+			(m) => `${m.split(BEARER_LIKE_KEY_SPLIT_RE)[0]}=[REDACTED]`,
+		);
 }
 
 const GMCLI_TIMEOUT_MS = Number(process.env.GMCLI_TIMEOUT_MS) || 2 * 60 * 1000;
 const NOT_PAIRED_OUTPUT_RE =
-  /not[\s_-]?paired|no[\s_-]?session|please run ["'`]?gmcli auth|auth(entication)? required/iu;
+	/not[\s_-]?paired|no[\s_-]?session|please run ["'`]?gmcli auth|auth(entication)? required/iu;
 
 /**
  * gmcli invocation errors carry a `kind` so callers can distinguish
@@ -194,16 +202,19 @@ const NOT_PAIRED_OUTPUT_RE =
  * re-parsing message text.
  */
 export class GmcliError extends Error {
-  readonly kind: "not_installed" | "not_paired" | "query_failed";
-  constructor(
-    message: string,
-    kind: "not_installed" | "not_paired" | "query_failed",
-    options: { cause?: unknown } = {}
-  ) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
-    this.name = "GmcliError";
-    this.kind = kind;
-  }
+	readonly kind: "not_installed" | "not_paired" | "query_failed";
+	constructor(
+		message: string,
+		kind: "not_installed" | "not_paired" | "query_failed",
+		options: { cause?: unknown } = {},
+	) {
+		super(
+			message,
+			options.cause === undefined ? undefined : { cause: options.cause },
+		);
+		this.name = "GmcliError";
+		this.kind = kind;
+	}
 }
 
 /**
@@ -211,50 +222,63 @@ export class GmcliError extends Error {
  * subcommands only — callers MUST NOT pass "auth", "serve", "mcp", or any
  * send-capable subcommand here.
  */
-export function runGmcli(args: readonly string[], opts: { timeoutMs?: number } = {}): Promise<GmcliResult> {
-  const timeoutMs = opts.timeoutMs ?? GMCLI_TIMEOUT_MS;
-  return new Promise((resolve, reject) => {
-    const bin = resolveGmcliBin();
-    const child = spawn(bin, [...args], { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (d: Buffer) => {
-      stdout += d.toString();
-    });
-    child.stderr?.on("data", (d: Buffer) => {
-      stderr += d.toString();
-    });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new GmcliError(`gmcli timed out after ${String(timeoutMs)}ms running: ${args.join(" ")}`, "query_failed"));
-    }, timeoutMs);
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ stdout, stderr, exitCode: code });
-        return;
-      }
-      const combined = redactGmcliOutput(`${stderr}\n${stdout}`).slice(0, 400);
-      if (NOT_PAIRED_OUTPUT_RE.test(combined)) {
-        reject(
-          new GmcliError(
-            `gmcli reports the device is not paired (exit ${String(code)}). Run \`gmcli auth\` yourself to pair — this connector cannot do it for you. Detail: ${combined}`,
-            "not_paired"
-          )
-        );
-        return;
-      }
-      reject(new GmcliError(`gmcli exited ${String(code)}: ${combined}`, "query_failed"));
-    });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      if (isErrnoException(e) && e.code === "ENOENT") {
-        reject(new GmcliError(formatGmcliMissingError(bin), "not_installed"));
-        return;
-      }
-      reject(new GmcliError(redactGmcliOutput(e.message), "query_failed"));
-    });
-  });
+export function runGmcli(
+	args: readonly string[],
+	opts: { timeoutMs?: number } = {},
+): Promise<GmcliResult> {
+	const timeoutMs = opts.timeoutMs ?? GMCLI_TIMEOUT_MS;
+	return new Promise((resolve, reject) => {
+		const bin = resolveGmcliBin();
+		const child = spawn(bin, [...args], { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		child.stderr?.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+		const timer = setTimeout(() => {
+			child.kill();
+			reject(
+				new GmcliError(
+					`gmcli timed out after ${String(timeoutMs)}ms running: ${args.join(" ")}`,
+					"query_failed",
+				),
+			);
+		}, timeoutMs);
+		child.on("exit", (code) => {
+			clearTimeout(timer);
+			if (code === 0) {
+				resolve({ stdout, stderr, exitCode: code });
+				return;
+			}
+			const combined = redactGmcliOutput(`${stderr}\n${stdout}`).slice(0, 400);
+			if (NOT_PAIRED_OUTPUT_RE.test(combined)) {
+				reject(
+					new GmcliError(
+						`gmcli reports the device is not paired (exit ${String(code)}). Run \`gmcli auth\` yourself to pair — this connector cannot do it for you. Detail: ${combined}`,
+						"not_paired",
+					),
+				);
+				return;
+			}
+			reject(
+				new GmcliError(
+					`gmcli exited ${String(code)}: ${combined}`,
+					"query_failed",
+				),
+			);
+		});
+		child.on("error", (e) => {
+			clearTimeout(timer);
+			if (isErrnoException(e) && e.code === "ENOENT") {
+				reject(new GmcliError(formatGmcliMissingError(bin), "not_installed"));
+				return;
+			}
+			reject(new GmcliError(redactGmcliOutput(e.message), "query_failed"));
+		});
+	});
 }
 
 // ─── Parsing ─────────────────────────────────────────────────────────────
@@ -270,30 +294,32 @@ export function runGmcli(args: readonly string[], opts: { timeoutMs?: number } =
 //            reactions_json?, reply_to_id?
 
 interface ParsedGmcliChat {
-  readonly id: string;
-  readonly lastMessageTimeMs: number | null;
-  readonly name: string | null;
+	readonly id: string;
+	readonly lastMessageTimeMs: number | null;
+	readonly name: string | null;
 }
 
 interface ParsedGmcliMessage {
-  readonly body: string;
-  readonly chat_id: string;
-  readonly chat_name: string | null;
-  readonly direction: "incoming" | "outgoing";
-  readonly id: string;
-  readonly sender_id: string | null;
-  readonly sent_at: string;
+	readonly body: string;
+	readonly chat_id: string;
+	readonly chat_name: string | null;
+	readonly direction: "incoming" | "outgoing";
+	readonly id: string;
+	readonly sender_id: string | null;
+	readonly sent_at: string;
 }
 
 function asNullableString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
+	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 // A zero/negative timestamp_ms is gmcli reporting "no timestamp", not the
 // epoch — returning null routes it to the missing-required-field throw below
 // rather than stamping 1970-01-01 on `sent_at` (the semantic-time source).
 function isoFromEpochMs(value: unknown): string | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : null;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? new Date(value).toISOString()
+		: null;
 }
 
 // Same "zero/negative/missing means no timestamp" rule as isoFromEpochMs,
@@ -301,7 +327,9 @@ function isoFromEpochMs(value: unknown): string | null {
 // only ever used for chat recency sorting (see sortChatsByRecency), never
 // emitted as a record field.
 function nullableEpochMs(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? value
+		: null;
 }
 
 /**
@@ -310,87 +338,109 @@ function nullableEpochMs(value: unknown): number | null {
  * silently returns a wrong-shape/empty result on a parse failure.
  */
 export function parseGmcliChatsJson(stdout: string): ParsedGmcliChat[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch (err) {
-    // biome-ignore lint/style/useErrorCause: GmcliError's 3rd constructor arg forwards to super(message, { cause })
-    throw new GmcliError(
-      `gmcli chats output was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-      "query_failed",
-      { cause: err }
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new GmcliError("gmcli chats output was not a JSON array", "query_failed");
-  }
-  return parsed.map((raw) => {
-    if (typeof raw !== "object" || raw === null) {
-      throw new GmcliError("gmcli chats output contained a non-object entry", "query_failed");
-    }
-    const row = raw as Record<string, unknown>;
-    const id = typeof row.conversation_id === "string" ? row.conversation_id : null;
-    if (!id) {
-      throw new GmcliError(
-        "gmcli chat entry is missing conversation_id — schema drift from what this connector expects",
-        "query_failed"
-      );
-    }
-    return { id, name: asNullableString(row.name), lastMessageTimeMs: nullableEpochMs(row.last_message_time_ms) };
-  });
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch (err) {
+		throw new GmcliError(
+			`gmcli chats output was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+			"query_failed",
+			{ cause: err },
+		);
+	}
+	if (!Array.isArray(parsed)) {
+		throw new GmcliError(
+			"gmcli chats output was not a JSON array",
+			"query_failed",
+		);
+	}
+	return parsed.map((raw) => {
+		if (typeof raw !== "object" || raw === null) {
+			throw new GmcliError(
+				"gmcli chats output contained a non-object entry",
+				"query_failed",
+			);
+		}
+		const row = raw as Record<string, unknown>;
+		const id =
+			typeof row.conversation_id === "string" ? row.conversation_id : null;
+		if (!id) {
+			throw new GmcliError(
+				"gmcli chat entry is missing conversation_id — schema drift from what this connector expects",
+				"query_failed",
+			);
+		}
+		return {
+			id,
+			name: asNullableString(row.name),
+			lastMessageTimeMs: nullableEpochMs(row.last_message_time_ms),
+		};
+	});
 }
 
 /**
  * Convert one raw Message JSON row into a ParsedGmcliMessage, or throw a
  * typed GmcliError when a required field is absent/wrong-typed.
  */
-function parseGmcliMessageRow(raw: unknown, chatName: string | null): ParsedGmcliMessage {
-  if (typeof raw !== "object" || raw === null) {
-    throw new GmcliError("gmcli messages output contained a non-object entry", "query_failed");
-  }
-  const row = raw as Record<string, unknown>;
-  const id = typeof row.message_id === "string" ? row.message_id : null;
-  const chatId = typeof row.conversation_id === "string" ? row.conversation_id : null;
-  const body = typeof row.body === "string" ? row.body : null;
-  const sentAt = isoFromEpochMs(row.timestamp_ms);
-  const isFromMe = typeof row.is_from_me === "boolean" ? row.is_from_me : null;
-  if (!(id && chatId && body !== null && sentAt && isFromMe !== null)) {
-    throw new GmcliError(
-      "gmcli Message entry is missing a required field (message_id, conversation_id, body, timestamp_ms, is_from_me) — schema drift from what this connector expects",
-      "query_failed"
-    );
-  }
-  return {
-    id,
-    chat_id: chatId,
-    chat_name: chatName,
-    sender_id: asNullableString(row.sender_id),
-    body,
-    sent_at: sentAt,
-    direction: isFromMe ? "outgoing" : "incoming",
-  };
+function parseGmcliMessageRow(
+	raw: unknown,
+	chatName: string | null,
+): ParsedGmcliMessage {
+	if (typeof raw !== "object" || raw === null) {
+		throw new GmcliError(
+			"gmcli messages output contained a non-object entry",
+			"query_failed",
+		);
+	}
+	const row = raw as Record<string, unknown>;
+	const id = typeof row.message_id === "string" ? row.message_id : null;
+	const chatId =
+		typeof row.conversation_id === "string" ? row.conversation_id : null;
+	const body = typeof row.body === "string" ? row.body : null;
+	const sentAt = isoFromEpochMs(row.timestamp_ms);
+	const isFromMe = typeof row.is_from_me === "boolean" ? row.is_from_me : null;
+	if (!(id && chatId && body !== null && sentAt && isFromMe !== null)) {
+		throw new GmcliError(
+			"gmcli Message entry is missing a required field (message_id, conversation_id, body, timestamp_ms, is_from_me) — schema drift from what this connector expects",
+			"query_failed",
+		);
+	}
+	return {
+		id,
+		chat_id: chatId,
+		chat_name: chatName,
+		sender_id: asNullableString(row.sender_id),
+		body,
+		sent_at: sentAt,
+		direction: isFromMe ? "outgoing" : "incoming",
+	};
 }
 
 /**
  * Parse `gmcli messages list --conv <id> --json --full` output (Message
  * rows) for one conversation into ParsedGmcliMessage records.
  */
-export function parseGmcliMessagesJson(stdout: string, chatName: string | null = null): ParsedGmcliMessage[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch (err) {
-    // biome-ignore lint/style/useErrorCause: GmcliError's 3rd constructor arg forwards to super(message, { cause })
-    throw new GmcliError(
-      `gmcli messages output was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-      "query_failed",
-      { cause: err }
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new GmcliError("gmcli messages output was not a JSON array", "query_failed");
-  }
-  return parsed.map((row) => parseGmcliMessageRow(row, chatName));
+export function parseGmcliMessagesJson(
+	stdout: string,
+	chatName: string | null = null,
+): ParsedGmcliMessage[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch (err) {
+		throw new GmcliError(
+			`gmcli messages output was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+			"query_failed",
+			{ cause: err },
+		);
+	}
+	if (!Array.isArray(parsed)) {
+		throw new GmcliError(
+			"gmcli messages output was not a JSON array",
+			"query_failed",
+		);
+	}
+	return parsed.map((row) => parseGmcliMessageRow(row, chatName));
 }
 
 // ─── Bounding ────────────────────────────────────────────────────────────
@@ -406,13 +456,15 @@ const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 500;
 const DEFAULT_MAX_CHATS = 200;
 
 function resolveMessagesPerChatLimit(): number {
-  const raw = Number(process.env.GMCLI_MESSAGES_PER_CHAT_LIMIT);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MESSAGES_PER_CHAT_LIMIT;
+	const raw = Number(process.env.GMCLI_MESSAGES_PER_CHAT_LIMIT);
+	return Number.isFinite(raw) && raw > 0
+		? Math.floor(raw)
+		: DEFAULT_MESSAGES_PER_CHAT_LIMIT;
 }
 
 function resolveMaxChats(): number {
-  const raw = Number(process.env.GMCLI_MAX_CHATS);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CHATS;
+	const raw = Number(process.env.GMCLI_MAX_CHATS);
+	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CHATS;
 }
 
 /**
@@ -438,99 +490,108 @@ function resolveMaxChats(): number {
  * (last), never treated as "most recent" — an absent signal must never win
  * priority over a chat with a real, verified recent-activity timestamp.
  */
-function compareChatIdAscending(a: ParsedGmcliChat, b: ParsedGmcliChat): number {
-  if (a.id < b.id) {
-    return -1;
-  }
-  if (a.id > b.id) {
-    return 1;
-  }
-  return 0;
+function compareChatIdAscending(
+	a: ParsedGmcliChat,
+	b: ParsedGmcliChat,
+): number {
+	if (a.id < b.id) {
+		return -1;
+	}
+	if (a.id > b.id) {
+		return 1;
+	}
+	return 0;
 }
 
-export function sortChatsByRecency(chats: readonly ParsedGmcliChat[]): ParsedGmcliChat[] {
-  return [...chats].sort((a, b) => {
-    const aTime = a.lastMessageTimeMs ?? Number.NEGATIVE_INFINITY;
-    const bTime = b.lastMessageTimeMs ?? Number.NEGATIVE_INFINITY;
-    if (aTime !== bTime) {
-      return bTime - aTime;
-    }
-    return compareChatIdAscending(a, b);
-  });
+export function sortChatsByRecency(
+	chats: readonly ParsedGmcliChat[],
+): ParsedGmcliChat[] {
+	return [...chats].sort((a, b) => {
+		const aTime = a.lastMessageTimeMs ?? Number.NEGATIVE_INFINITY;
+		const bTime = b.lastMessageTimeMs ?? Number.NEGATIVE_INFINITY;
+		if (aTime !== bTime) {
+			return bTime - aTime;
+		}
+		return compareChatIdAscending(a, b);
+	});
 }
 
 // ─── Coverage diagnostics ────────────────────────────────────────────────
 
 const GMCLI_ARCHIVE_STORE = "gmcli_archive";
 
-function buildCoverageRecord(status: CoverageRecord["status"], reason: string): CoverageRecord {
-  return {
-    id: `coverage:${GMCLI_ARCHIVE_STORE}`,
-    store: GMCLI_ARCHIVE_STORE,
-    stream: "messages",
-    status,
-    reason,
-  };
+function buildCoverageRecord(
+	status: CoverageRecord["status"],
+	reason: string,
+): CoverageRecord {
+	return {
+		id: `coverage:${GMCLI_ARCHIVE_STORE}`,
+		store: GMCLI_ARCHIVE_STORE,
+		stream: "messages",
+		status,
+		reason,
+	};
 }
 
 // ─── Fetch + classify (extracted so `collect()` stays a thin dispatcher) ──
 
 interface GmcliFetchOutcome {
-  /** Present when the chat list itself was cut to GMCLI_MAX_CHATS — distinct
-   *  from `truncated` (per-chat message-limit truncation). `collect()` turns
-   *  this into its own `messages` SKIP_RESULT so a run that silently
-   *  dropped whole conversations cannot read as complete coverage.
-   *
-   *  `atLeastTotalCount` is a LOWER BOUND, not the true total: the
-   *  `chats list --limit` probe (see fetchAndParseGmcliMessages's doc
-   *  comment) only fetches `maxChats + 1` rows, so once truncation is
-   *  detected the real archive could hold far more conversations than that
-   *  — this connector has no way to learn the exact true count without an
-   *  unbounded fetch, which would defeat the whole purpose of the cap. */
-  readonly chatsTruncated?: { atLeastTotalCount: number; scannedCount: number };
-  readonly coverageReason: string;
-  readonly coverageStatus: CoverageRecord["status"];
-  /**
-   * Flat `reason`/`message` fields (not a nested `skip: { reason, message
-   * }` object) so the emission call site in `collect()` can write a
-   * literal `reason:` property whose value is `outcome.reason` — a plain
-   * one-hop `x.reason` MemberExpression the reason-code completeness
-   * scanner already resolves via its existing same-file-call-result bound
-   * — instead of `outcome.skip.reason`/`...outcome.skip`, both of which
-   * need resolution depth beyond that deliberately bounded one hop (see
-   * `reason-emission-scan.ts`'s doc comment on why this scanner does not
-   * chase nested member chains or spreads).
-   */
-  readonly message?: string;
-  readonly parsed?: ParsedGmcliMessage[];
-  readonly reason?: string;
-  readonly truncated?: readonly string[];
+	/** Present when the chat list itself was cut to GMCLI_MAX_CHATS — distinct
+	 *  from `truncated` (per-chat message-limit truncation). `collect()` turns
+	 *  this into its own `messages` SKIP_RESULT so a run that silently
+	 *  dropped whole conversations cannot read as complete coverage.
+	 *
+	 *  `atLeastTotalCount` is a LOWER BOUND, not the true total: the
+	 *  `chats list --limit` probe (see fetchAndParseGmcliMessages's doc
+	 *  comment) only fetches `maxChats + 1` rows, so once truncation is
+	 *  detected the real archive could hold far more conversations than that
+	 *  — this connector has no way to learn the exact true count without an
+	 *  unbounded fetch, which would defeat the whole purpose of the cap. */
+	readonly chatsTruncated?: { atLeastTotalCount: number; scannedCount: number };
+	readonly coverageReason: string;
+	readonly coverageStatus: CoverageRecord["status"];
+	/**
+	 * Flat `reason`/`message` fields (not a nested `skip: { reason, message
+	 * }` object) so the emission call site in `collect()` can write a
+	 * literal `reason:` property whose value is `outcome.reason` — a plain
+	 * one-hop `x.reason` MemberExpression the reason-code completeness
+	 * scanner already resolves via its existing same-file-call-result bound
+	 * — instead of `outcome.skip.reason`/`...outcome.skip`, both of which
+	 * need resolution depth beyond that deliberately bounded one hop (see
+	 * `reason-emission-scan.ts`'s doc comment on why this scanner does not
+	 * chase nested member chains or spreads).
+	 */
+	readonly message?: string;
+	readonly parsed?: ParsedGmcliMessage[];
+	readonly reason?: string;
+	readonly truncated?: readonly string[];
 }
 
 function classifyGmcliFetchError(err: unknown): GmcliFetchOutcome {
-  const message = err instanceof Error ? err.message : String(err);
-  if (err instanceof GmcliError && err.kind === "not_installed") {
-    return {
-      coverageStatus: "missing",
-      coverageReason: "gmcli binary not found on PATH/GMCLI_BIN.",
-      reason: "gmcli_not_installed",
-      message,
-    };
-  }
-  if (err instanceof GmcliError && err.kind === "not_paired") {
-    return {
-      coverageStatus: "excluded",
-      coverageReason: "gmcli is installed but the Android device is not paired.",
-      reason: "gmcli_not_paired",
-      message,
-    };
-  }
-  return {
-    coverageStatus: "unsupported",
-    coverageReason: `gmcli query failed: ${message}`,
-    reason: "gmcli_query_failed",
-    message,
-  };
+	const message = err instanceof Error ? err.message : String(err);
+	if (err instanceof GmcliError && err.kind === "not_installed") {
+		return {
+			coverageStatus: "missing",
+			coverageReason: "gmcli binary not found on PATH/GMCLI_BIN.",
+			reason: "gmcli_not_installed",
+			message,
+		};
+	}
+	if (err instanceof GmcliError && err.kind === "not_paired") {
+		return {
+			coverageStatus: "excluded",
+			coverageReason:
+				"gmcli is installed but the Android device is not paired.",
+			reason: "gmcli_not_paired",
+			message,
+		};
+	}
+	return {
+		coverageStatus: "unsupported",
+		coverageReason: `gmcli query failed: ${message}`,
+		reason: "gmcli_query_failed",
+		message,
+	};
 }
 
 /**
@@ -555,24 +616,24 @@ function classifyGmcliFetchError(err: unknown): GmcliFetchOutcome {
  * fetch-boundary change, not a display-order change.
  */
 async function fetchChatMessages(
-  invoke: GmcliInvoker,
-  chat: ParsedGmcliChat,
-  limit: number
+	invoke: GmcliInvoker,
+	chat: ParsedGmcliChat,
+	limit: number,
 ): Promise<{ messages: ParsedGmcliMessage[]; possiblyTruncated: boolean }> {
-  const result = await invoke([
-    "messages",
-    "list",
-    "--conv",
-    chat.id,
-    "--json",
-    "--full",
-    "--limit",
-    String(limit),
-    "--order",
-    "desc",
-  ]);
-  const messages = parseGmcliMessagesJson(result.stdout, chat.name);
-  return { messages, possiblyTruncated: messages.length >= limit };
+	const result = await invoke([
+		"messages",
+		"list",
+		"--conv",
+		chat.id,
+		"--json",
+		"--full",
+		"--limit",
+		String(limit),
+		"--order",
+		"desc",
+	]);
+	const messages = parseGmcliMessagesJson(result.stdout, chat.name);
+	return { messages, possiblyTruncated: messages.length >= limit };
 }
 
 /**
@@ -615,228 +676,250 @@ async function fetchChatMessages(
  * (verified from the same store source), so `maxChats + 1` is honored as a
  * literal SQL `LIMIT`, not silently re-capped to 50 by passing it explicitly.
  */
-export async function fetchAndParseGmcliMessages(invoke: GmcliInvoker = runGmcli): Promise<GmcliFetchOutcome> {
-  const maxChats = resolveMaxChats();
-  const chatsListProbeLimit = maxChats + 1;
+export async function fetchAndParseGmcliMessages(
+	invoke: GmcliInvoker = runGmcli,
+): Promise<GmcliFetchOutcome> {
+	const maxChats = resolveMaxChats();
+	const chatsListProbeLimit = maxChats + 1;
 
-  let chatsResult: GmcliResult;
-  try {
-    chatsResult = await invoke(["--json", "--full", "chats", "list", "--limit", String(chatsListProbeLimit)]);
-  } catch (err) {
-    return classifyGmcliFetchError(err);
-  }
+	let chatsResult: GmcliResult;
+	try {
+		chatsResult = await invoke([
+			"--json",
+			"--full",
+			"chats",
+			"list",
+			"--limit",
+			String(chatsListProbeLimit),
+		]);
+	} catch (err) {
+		return classifyGmcliFetchError(err);
+	}
 
-  let chats: ParsedGmcliChat[];
-  try {
-    chats = parseGmcliChatsJson(chatsResult.stdout);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      coverageStatus: "unsupported",
-      coverageReason: `gmcli chats output did not match the expected shape: ${message}`,
-      reason: "gmcli_schema_drift",
-      message,
-    };
-  }
+	let chats: ParsedGmcliChat[];
+	try {
+		chats = parseGmcliChatsJson(chatsResult.stdout);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			coverageStatus: "unsupported",
+			coverageReason: `gmcli chats output did not match the expected shape: ${message}`,
+			reason: "gmcli_schema_drift",
+			message,
+		};
+	}
 
-  const perChatLimit = resolveMessagesPerChatLimit();
-  // Sort by recency BEFORE slicing: a truncated run must keep the most
-  // recently active chats, not an arbitrary gmcli-response-order prefix
-  // (see sortChatsByRecency's doc comment).
-  const orderedChats = sortChatsByRecency(chats);
-  const boundedChats = orderedChats.slice(0, maxChats);
-  // `orderedChats.length` is bounded above by `chatsListProbeLimit`
-  // (`maxChats + 1`) — it is the true total ONLY when the archive has
-  // `maxChats` or fewer conversations. When the fetch itself returned the
-  // full `maxChats + 1` probe, the real total may be far larger; this
-  // connector deliberately does NOT claim to know the real total in that
-  // case (see the `chatsTruncated` result below), only that at least one
-  // conversation beyond `maxChats` exists.
-  const chatsTruncated = orderedChats.length > maxChats;
+	const perChatLimit = resolveMessagesPerChatLimit();
+	// Sort by recency BEFORE slicing: a truncated run must keep the most
+	// recently active chats, not an arbitrary gmcli-response-order prefix
+	// (see sortChatsByRecency's doc comment).
+	const orderedChats = sortChatsByRecency(chats);
+	const boundedChats = orderedChats.slice(0, maxChats);
+	// `orderedChats.length` is bounded above by `chatsListProbeLimit`
+	// (`maxChats + 1`) — it is the true total ONLY when the archive has
+	// `maxChats` or fewer conversations. When the fetch itself returned the
+	// full `maxChats + 1` probe, the real total may be far larger; this
+	// connector deliberately does NOT claim to know the real total in that
+	// case (see the `chatsTruncated` result below), only that at least one
+	// conversation beyond `maxChats` exists.
+	const chatsTruncated = orderedChats.length > maxChats;
 
-  const parsed: ParsedGmcliMessage[] = [];
-  const truncatedChatIds: string[] = [];
-  for (const chat of boundedChats) {
-    let outcome: { messages: ParsedGmcliMessage[]; possiblyTruncated: boolean };
-    try {
-      outcome = await fetchChatMessages(invoke, chat, perChatLimit);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        coverageStatus: "unsupported",
-        coverageReason: `gmcli messages query failed for a conversation: ${message}`,
-        reason: "gmcli_query_failed",
-        message,
-      };
-    }
-    parsed.push(...outcome.messages);
-    if (outcome.possiblyTruncated) {
-      truncatedChatIds.push(chat.id);
-    }
-  }
+	const parsed: ParsedGmcliMessage[] = [];
+	const truncatedChatIds: string[] = [];
+	for (const chat of boundedChats) {
+		let outcome: { messages: ParsedGmcliMessage[]; possiblyTruncated: boolean };
+		try {
+			outcome = await fetchChatMessages(invoke, chat, perChatLimit);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return {
+				coverageStatus: "unsupported",
+				coverageReason: `gmcli messages query failed for a conversation: ${message}`,
+				reason: "gmcli_query_failed",
+				message,
+			};
+		}
+		parsed.push(...outcome.messages);
+		if (outcome.possiblyTruncated) {
+			truncatedChatIds.push(chat.id);
+		}
+	}
 
-  const truncationNote =
-    truncatedChatIds.length > 0
-      ? ` ${String(truncatedChatIds.length)} conversation(s) hit the per-chat limit (${String(perChatLimit)}) and may have older messages not fetched this run.`
-      : "";
-  // `orderedChats.length` here is exactly `chatsListProbeLimit`
-  // (`maxChats + 1`) whenever truncated — it is a LOWER BOUND on the real
-  // total, not the true count (see GmcliFetchOutcome's chatsTruncated doc).
-  const chatsBoundNote = chatsTruncated
-    ? ` Only the ${String(maxChats)} most recently active of at least ${String(orderedChats.length)} conversations were scanned this run.`
-    : "";
+	const truncationNote =
+		truncatedChatIds.length > 0
+			? ` ${String(truncatedChatIds.length)} conversation(s) hit the per-chat limit (${String(perChatLimit)}) and may have older messages not fetched this run.`
+			: "";
+	// `orderedChats.length` here is exactly `chatsListProbeLimit`
+	// (`maxChats + 1`) whenever truncated — it is a LOWER BOUND on the real
+	// total, not the true count (see GmcliFetchOutcome's chatsTruncated doc).
+	const chatsBoundNote = chatsTruncated
+		? ` Only the ${String(maxChats)} most recently active of at least ${String(orderedChats.length)} conversations were scanned this run.`
+		: "";
 
-  return {
-    ...(chatsTruncated
-      ? {
-          chatsTruncated: {
-            atLeastTotalCount: orderedChats.length,
-            scannedCount: boundedChats.length,
-          },
-        }
-      : {}),
-    coverageStatus: "collected",
-    coverageReason: `gmcli reported ${String(parsed.length)} message(s) across ${String(boundedChats.length)} conversation(s).${truncationNote}${chatsBoundNote}`,
-    parsed,
-    truncated: truncatedChatIds,
-  };
+	return {
+		...(chatsTruncated
+			? {
+					chatsTruncated: {
+						atLeastTotalCount: orderedChats.length,
+						scannedCount: boundedChats.length,
+					},
+				}
+			: {}),
+		coverageStatus: "collected",
+		coverageReason: `gmcli reported ${String(parsed.length)} message(s) across ${String(boundedChats.length)} conversation(s).${truncationNote}${chatsBoundNote}`,
+		parsed,
+		truncated: truncatedChatIds,
+	};
 }
 
 // ─── Connector ─────────────────────────────────────────────────────────
 
 export type GmcliInvoker = (args: readonly string[]) => Promise<GmcliResult>;
 
-export async function collect({ state, requested, emit, emitRecord, progress }: CollectContext): Promise<void> {
-  const outcome = await fetchAndParseGmcliMessages();
+export async function collect({
+	state,
+	requested,
+	emit,
+	emitRecord,
+	progress,
+}: CollectContext): Promise<void> {
+	const outcome = await fetchAndParseGmcliMessages();
 
-  if (requested.has("coverage_diagnostics")) {
-    await emitRecord("coverage_diagnostics", buildCoverageRecord(outcome.coverageStatus, outcome.coverageReason));
-  }
+	if (requested.has("coverage_diagnostics")) {
+		await emitRecord(
+			"coverage_diagnostics",
+			buildCoverageRecord(outcome.coverageStatus, outcome.coverageReason),
+		);
+	}
 
-  if (outcome.reason) {
-    // outcome.reason/outcome.message are flat fields on GmcliFetchOutcome
-    // (not a nested `skip: { reason, message }` object, and not spread from
-    // one) specifically so this is a literal `reason:` property whose
-    // value is a plain one-hop `x.reason` MemberExpression — the shape the
-    // bounded, AST-based reason-emission scanner already resolves (see
-    // packages/polyfill-connectors/src/reason-emission-scan.ts). A spread
-    // (`...outcome.skip`) or a nested member chain (`outcome.skip.reason`)
-    // both need resolution depth beyond that scanner's deliberately bounded
-    // one hop, so every reason code emitted through either shape would
-    // silently evade completeness checking.
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "messages",
-      reason: outcome.reason,
-      message: outcome.message ?? outcome.reason,
-    });
-    return;
-  }
+	if (outcome.reason) {
+		// outcome.reason/outcome.message are flat fields on GmcliFetchOutcome
+		// (not a nested `skip: { reason, message }` object, and not spread from
+		// one) specifically so this is a literal `reason:` property whose
+		// value is a plain one-hop `x.reason` MemberExpression — the shape the
+		// bounded, AST-based reason-emission scanner already resolves (see
+		// packages/polyfill-connectors/src/reason-emission-scan.ts). A spread
+		// (`...outcome.skip`) or a nested member chain (`outcome.skip.reason`)
+		// both need resolution depth beyond that scanner's deliberately bounded
+		// one hop, so every reason code emitted through either shape would
+		// silently evade completeness checking.
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: outcome.reason,
+			message: outcome.message ?? outcome.reason,
+		});
+		return;
+	}
 
-  const parsed = outcome.parsed ?? [];
-  if (outcome.truncated && outcome.truncated.length > 0) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "messages",
-      reason: "gmcli_per_chat_limit_reached",
-      message: `${String(outcome.truncated.length)} conversation(s) reached the per-chat message limit; older history in those conversations was not fetched this run. Increase GMCLI_MESSAGES_PER_CHAT_LIMIT and re-run to fetch more.`,
-    });
-  }
-  // Whole conversations dropped by the GMCLI_MAX_CHATS cap are a distinct
-  // gap from a per-chat message-limit truncation above: those chats
-  // contributed ZERO messages this run, not a partial history. This must
-  // surface its own SKIP_RESULT — without it, a run that silently dropped
-  // entire conversations would look identical to one that scanned
-  // everything, and health/coverage could read complete when it is not.
-  // `reason` is a generic, connector-authored code (not gmcli jargon) so it
-  // can carry vetted end-user display copy from this connector's own
-  // manifest (`reason_display_messages`), never RI-side connector-specific
-  // copy. This does NOT claim historical convergence — it only says which
-  // chats were left unscanned this run and how to recover them.
-  // `atLeastTotalCount` is a lower bound (see GmcliFetchOutcome's doc
-  // comment) — the message is phrased "at least N", never a precise count,
-  // since the chats-list probe itself is bounded and cannot see past it.
-  if (outcome.chatsTruncated) {
-    await emit({
-      type: "SKIP_RESULT",
-      stream: "messages",
-      reason: "gmcli_chat_scan_limit_reached",
-      message: `Only the ${String(outcome.chatsTruncated.scannedCount)} most recently active conversations were scanned this run; at least ${String(outcome.chatsTruncated.atLeastTotalCount)} conversation(s) exist in total. Increase GMCLI_MAX_CHATS and re-run to scan more.`,
-    });
-  }
-  if (!requested.has("messages")) {
-    return;
-  }
+	const parsed = outcome.parsed ?? [];
+	if (outcome.truncated && outcome.truncated.length > 0) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: "gmcli_per_chat_limit_reached",
+			message: `${String(outcome.truncated.length)} conversation(s) reached the per-chat message limit; older history in those conversations was not fetched this run. Increase GMCLI_MESSAGES_PER_CHAT_LIMIT and re-run to fetch more.`,
+		});
+	}
+	// Whole conversations dropped by the GMCLI_MAX_CHATS cap are a distinct
+	// gap from a per-chat message-limit truncation above: those chats
+	// contributed ZERO messages this run, not a partial history. This must
+	// surface its own SKIP_RESULT — without it, a run that silently dropped
+	// entire conversations would look identical to one that scanned
+	// everything, and health/coverage could read complete when it is not.
+	// `reason` is a generic, connector-authored code (not gmcli jargon) so it
+	// can carry vetted end-user display copy from this connector's own
+	// manifest (`reason_display_messages`), never RI-side connector-specific
+	// copy. This does NOT claim historical convergence — it only says which
+	// chats were left unscanned this run and how to recover them.
+	// `atLeastTotalCount` is a lower bound (see GmcliFetchOutcome's doc
+	// comment) — the message is phrased "at least N", never a precise count,
+	// since the chats-list probe itself is bounded and cannot see past it.
+	if (outcome.chatsTruncated) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: "gmcli_chat_scan_limit_reached",
+			message: `Only the ${String(outcome.chatsTruncated.scannedCount)} most recently active conversations were scanned this run; at least ${String(outcome.chatsTruncated.atLeastTotalCount)} conversation(s) exist in total. Increase GMCLI_MAX_CHATS and re-run to scan more.`,
+		});
+	}
+	if (!requested.has("messages")) {
+		return;
+	}
 
-  // Per-message-id content fingerprint, seeded from the prior run's
-  // STATE cursor (see the file header's STATE section). gmcli returns
-  // the same bounded per-conversation window every run (no server-side
-  // "since" cursor exists to narrow the re-fetch) — this gate is what
-  // stops that repeated fetch from re-emitting a RECORD for a message
-  // this run already durably queued in a prior run. A message whose
-  // fingerprint changed (or is new) is always emitted; `considered`/
-  // `covered` below still count every fetched message regardless of
-  // whether the gate emitted it, since a fetched-but-unchanged message
-  // was genuinely considered and is already durably covered from its
-  // prior emission.
-  const cursor = openFingerprintCursor(state.messages);
+	// Per-message-id content fingerprint, seeded from the prior run's
+	// STATE cursor (see the file header's STATE section). gmcli returns
+	// the same bounded per-conversation window every run (no server-side
+	// "since" cursor exists to narrow the re-fetch) — this gate is what
+	// stops that repeated fetch from re-emitting a RECORD for a message
+	// this run already durably queued in a prior run. A message whose
+	// fingerprint changed (or is new) is always emitted; `considered`/
+	// `covered` below still count every fetched message regardless of
+	// whether the gate emitted it, since a fetched-but-unchanged message
+	// was genuinely considered and is already durably covered from its
+	// prior emission.
+	const cursor = openFingerprintCursor(state.messages);
 
-  await progress(`Google Messages phase=emit pass=emit messages=${String(parsed.length)}`);
-  for (const message of parsed) {
-    const record = { ...message };
-    if (cursor.shouldEmit(record)) {
-      await emitRecord("messages", record);
-    }
-  }
-  await progress(`Google Messages phase=emit pass=emit done messages=${String(parsed.length)}`);
+	await progress(
+		`Google Messages phase=emit pass=emit messages=${String(parsed.length)}`,
+	);
+	for (const message of parsed) {
+		const record = { ...message };
+		if (cursor.shouldEmit(record)) {
+			await emitRecord("messages", record);
+		}
+	}
+	await progress(
+		`Google Messages phase=emit pass=emit done messages=${String(parsed.length)}`,
+	);
 
-  // STATE is written only after every fetched message has passed
-  // through the cursor and any resulting RECORD has been handed to
-  // emitRecord above — never before. The local-collector runtime only
-  // durably commits a buffered STATE cursor after this run's record
-  // batches have been enqueued (collector-runner.ts flushes pending
-  // record batches before it drains the checkpoint), so a crash or
-  // interruption between here and that commit leaves the prior
-  // checkpoint (or none, on a first run) in place rather than a
-  // checkpoint claiming coverage this run never durably queued.
-  await emit({
-    type: "STATE",
-    stream: "messages",
-    cursor: { fingerprints: cursor.toState() },
-  });
+	// STATE is written only after every fetched message has passed
+	// through the cursor and any resulting RECORD has been handed to
+	// emitRecord above — never before. The local-collector runtime only
+	// durably commits a buffered STATE cursor after this run's record
+	// batches have been enqueued (collector-runner.ts flushes pending
+	// record batches before it drains the checkpoint), so a crash or
+	// interruption between here and that commit leaves the prior
+	// checkpoint (or none, on a first run) in place rather than a
+	// checkpoint claiming coverage this run never durably queued.
+	await emit({
+		type: "STATE",
+		stream: "messages",
+		cursor: { fingerprints: cursor.toState() },
+	});
 
-  // `messages` is this connector's only required stream and previously
-  // never proved its own coverage, leaving it permanently unmeasured
-  // even on a fully successful run. gmcli's per-conversation query
-  // already gives an exact enumerated count (`parsed.length`) every
-  // run — every fetched message is unconditionally considered above, so
-  // considered === covered even though the fingerprint gate may not
-  // re-emit an unchanged one as a fresh RECORD. A truncated run's
-  // SKIP_RESULT (emitted above) already outranks this in the coverage
-  // precedence order, so this always-emit is safe even when the fetch
-  // was bounded.
-  await emitDetailCoverage(
-    { emit },
-    {
-      stream: "messages",
-      stateStream: "messages",
-      requiredKeys: [],
-      hydratedKeys: [],
-      considered: parsed.length,
-      covered: parsed.length,
-    }
-  );
+	// `messages` is this connector's only required stream and previously
+	// never proved its own coverage, leaving it permanently unmeasured
+	// even on a fully successful run. gmcli's per-conversation query
+	// already gives an exact enumerated count (`parsed.length`) every
+	// run — every fetched message is unconditionally considered above, so
+	// considered === covered even though the fingerprint gate may not
+	// re-emit an unchanged one as a fresh RECORD. A truncated run's
+	// SKIP_RESULT (emitted above) already outranks this in the coverage
+	// precedence order, so this always-emit is safe even when the fetch
+	// was bounded.
+	await emitDetailCoverage(
+		{ emit },
+		{
+			stream: "messages",
+			stateStream: "messages",
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: parsed.length,
+			covered: parsed.length,
+		},
+	);
 }
 
 runConnectorGuarded();
 
 function runConnectorGuarded(): void {
-  if (!isMainModule(import.meta.url)) {
-    return;
-  }
-  runConnector({
-    name: "google_messages",
-    validateRecord,
-    collect,
-  });
+	if (!isMainModule(import.meta.url)) {
+		return;
+	}
+	runConnector({
+		name: "google_messages",
+		validateRecord,
+		collect,
+	});
 }

@@ -15,12 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface FixtureFile {
-  /** File contents. Small synthetic buffers are fine — no real photo data. */
-  contents?: Buffer;
-  /** Override mtime/atime; defaults to "now" if omitted. */
-  mtime?: Date;
-  /** Relative path (may include subdirectories) within the export dir. */
-  relPath: string;
+	/** File contents. Small synthetic buffers are fine — no real photo data. */
+	contents?: Buffer;
+	/** Override mtime/atime; defaults to "now" if omitted. */
+	mtime?: Date;
+	/** Relative path (may include subdirectories) within the export dir. */
+	relPath: string;
 }
 
 /**
@@ -28,19 +28,22 @@ export interface FixtureFile {
  * files (creating subdirectories as needed). Returns the directory path.
  */
 export function buildExportDirFixture(files: FixtureFile[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "apple-photos-fixture-"));
-  for (const file of files) {
-    const fullPath = join(dir, file.relPath);
-    mkdirSync(join(fullPath, ".."), { recursive: true });
-    writeFileSync(fullPath, file.contents ?? Buffer.from(`synthetic-${file.relPath}`));
-    if (file.mtime) {
-      utimesSync(fullPath, file.mtime, file.mtime);
-    }
-  }
-  return dir;
+	const dir = mkdtempSync(join(tmpdir(), "apple-photos-fixture-"));
+	for (const file of files) {
+		const fullPath = join(dir, file.relPath);
+		mkdirSync(join(fullPath, ".."), { recursive: true });
+		writeFileSync(
+			fullPath,
+			file.contents ?? Buffer.from(`synthetic-${file.relPath}`),
+		);
+		if (file.mtime) {
+			utimesSync(fullPath, file.mtime, file.mtime);
+		}
+	}
+	return dir;
 }
 
 /** Create an empty temp directory (simulates an export dir with nothing in it). */
 export function buildEmptyExportDirFixture(): string {
-  return mkdtempSync(join(tmpdir(), "apple-photos-fixture-empty-"));
+	return mkdtempSync(join(tmpdir(), "apple-photos-fixture-empty-"));
 }

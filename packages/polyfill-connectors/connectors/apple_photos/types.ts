@@ -5,20 +5,23 @@
 // pure parsers in parsers.ts can import them without pulling in the
 // runtime entry point or the directory walker.
 
-import type { MediaHydrationStatus, ReferenceBlobRef } from "../../src/local-media-blob-hydration.ts";
+import type {
+	MediaHydrationStatus,
+	ReferenceBlobRef,
+} from "../../src/local-media-blob-hydration.ts";
 
 export interface ApplePhotosState {
-  last_modified?: string;
+	last_modified?: string;
 }
 
 /** A single file discovered under the export directory. */
 export interface DiscoveredFile {
-  /** mtime as an ISO-8601 datetime string. */
-  mtimeIso: string;
-  /** Absolute path on disk. */
-  path: string;
-  /** File size in bytes. */
-  sizeBytes: number;
+	/** mtime as an ISO-8601 datetime string. */
+	mtimeIso: string;
+	/** Absolute path on disk. */
+	path: string;
+	/** File size in bytes. */
+	sizeBytes: number;
 }
 
 /**
@@ -29,18 +32,18 @@ export interface DiscoveredFile {
  * record id and the same blob, rather than being stored twice.
  */
 export interface PhotoRecordOut {
-  blob_ref: ReferenceBlobRef | null;
-  camera_make: string | null;
-  camera_model: string | null;
-  content_sha256: string | null;
-  content_type: string;
-  file_modified_at: string;
-  filename: string;
-  hydration_error: string | null;
-  hydration_status: MediaHydrationStatus;
-  id: string;
-  latitude: number | null;
-  longitude: number | null;
-  size_bytes: number | null;
-  taken_at: string | null;
+	blob_ref: ReferenceBlobRef | null;
+	camera_make: string | null;
+	camera_model: string | null;
+	content_sha256: string | null;
+	content_type: string;
+	file_modified_at: string;
+	filename: string;
+	hydration_error: string | null;
+	hydration_status: MediaHydrationStatus;
+	id: string;
+	latitude: number | null;
+	longitude: number | null;
+	size_bytes: number | null;
+	taken_at: string | null;
 }

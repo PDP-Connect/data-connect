@@ -62,7 +62,9 @@ import { makeValidateRecord } from "../../src/schema-registry.ts";
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const DIRECTION_RE = /^(incoming|outgoing)$/;
 
-const isoDateTimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const isoDateTimeSchema = z
+	.string()
+	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
 
 /**
  * messages stream: one record per gmcli Message row (`gmcli messages list
@@ -74,16 +76,23 @@ const isoDateTimeSchema = z.string().regex(ISO_DT_RE, "must be an ISO-8601 datet
  * and the fingerprint gate is what stops that from re-emitting duplicates.
  */
 export const messagesSchema = z.object({
-  id: pdppSafeText.max(512),
-  chat_id: pdppSafeText.max(512),
-  chat_name: pdppSafeText.max(512).nullable(),
-  sender_id: pdppSafeText.max(512).nullable(),
-  body: pdppSafeText.max(200_000),
-  sent_at: isoDateTimeSchema,
-  direction: z.string().regex(DIRECTION_RE),
+	id: pdppSafeText.max(512),
+	chat_id: pdppSafeText.max(512),
+	chat_name: pdppSafeText.max(512).nullable(),
+	sender_id: pdppSafeText.max(512).nullable(),
+	body: pdppSafeText.max(200_000),
+	sent_at: isoDateTimeSchema,
+	direction: z.string().regex(DIRECTION_RE),
 });
 
-const coverageStatusSchema = z.enum(["collected", "inventory_only", "excluded", "deferred", "missing", "unsupported"]);
+const coverageStatusSchema = z.enum([
+	"collected",
+	"inventory_only",
+	"excluded",
+	"deferred",
+	"missing",
+	"unsupported",
+]);
 
 /**
  * coverage_diagnostics stream: one row per known local store (currently just
@@ -92,19 +101,19 @@ const coverageStatusSchema = z.enum(["collected", "inventory_only", "excluded", 
  * see src/local-source-inventory.ts's CoverageRecord.
  */
 export const coverageDiagnosticsSchema = z.object({
-  id: pdppSafeText,
-  store: pdppSafeText,
-  stream: pdppSafeText.nullable(),
-  status: coverageStatusSchema,
-  reason: pdppSafeText.max(512),
+	id: pdppSafeText,
+	store: pdppSafeText,
+	stream: pdppSafeText.nullable(),
+	status: coverageStatusSchema,
+	reason: pdppSafeText.max(512),
 });
 
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
-  messages: messagesSchema,
-  coverage_diagnostics: coverageDiagnosticsSchema,
+	messages: messagesSchema,
+	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

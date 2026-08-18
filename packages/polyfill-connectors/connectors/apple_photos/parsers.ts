@@ -18,33 +18,38 @@ const RECORD_ID_HASH_LENGTH = 24;
 // connector does not sniff magic bytes, so an unrecognized/renamed
 // extension falls back to a generic octet-stream type.
 const EXTENSION_MIME_MAP: Readonly<Record<string, string>> = {
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".png": "image/png",
-  ".heic": "image/heic",
-  ".heif": "image/heif",
-  ".gif": "image/gif",
-  ".tiff": "image/tiff",
-  ".tif": "image/tiff",
-  ".bmp": "image/bmp",
-  ".mov": "video/quicktime",
-  ".mp4": "video/mp4",
-  ".m4v": "video/x-m4v",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".png": "image/png",
+	".heic": "image/heic",
+	".heif": "image/heif",
+	".gif": "image/gif",
+	".tiff": "image/tiff",
+	".tif": "image/tiff",
+	".bmp": "image/bmp",
+	".mov": "video/quicktime",
+	".mp4": "video/mp4",
+	".m4v": "video/x-m4v",
 };
 
 const DEFAULT_MIME_TYPE = "application/octet-stream";
 
 /** File extensions this connector will pick up when walking the export dir. */
-export const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(Object.keys(EXTENSION_MIME_MAP));
+export const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(
+	Object.keys(EXTENSION_MIME_MAP),
+);
 
 export function hashId(s: string): string {
-  return createHash("sha256").update(s).digest("hex").slice(0, RECORD_ID_HASH_LENGTH);
+	return createHash("sha256")
+		.update(s)
+		.digest("hex")
+		.slice(0, RECORD_ID_HASH_LENGTH);
 }
 
 /** Detects MIME type by file extension. Case-insensitive. */
 export function detectMimeType(filename: string): string {
-  const ext = extname(filename).toLowerCase();
-  return EXTENSION_MIME_MAP[ext] ?? DEFAULT_MIME_TYPE;
+	const ext = extname(filename).toLowerCase();
+	return EXTENSION_MIME_MAP[ext] ?? DEFAULT_MIME_TYPE;
 }
 
 /**
@@ -76,30 +81,30 @@ export function detectMimeType(filename: string): string {
  * content hashing can honestly provide.
  */
 export function buildPhotoRecord(
-  file: DiscoveredFile,
-  filename: string,
-  hydration: MediaHydrationResult
+	file: DiscoveredFile,
+	filename: string,
+	hydration: MediaHydrationResult,
 ): PhotoRecordOut {
-  const contentSha256 = hydration.blobRef?.sha256 ?? hydration.contentSha256;
-  const id = contentSha256
-    ? hashId(`photo|${contentSha256}`)
-    : hashId(`photo|${filename}|${file.sizeBytes}|${file.mtimeIso}`);
-  return {
-    blob_ref: hydration.blobRef,
-    camera_make: null,
-    camera_model: null,
-    content_sha256: contentSha256,
-    content_type: detectMimeType(filename),
-    file_modified_at: file.mtimeIso,
-    filename,
-    hydration_error: hydration.hydrationError,
-    hydration_status: hydration.hydrationStatus,
-    id,
-    latitude: null,
-    longitude: null,
-    size_bytes: hydration.blobRef?.size_bytes ?? hydration.sizeBytes,
-    taken_at: null,
-  };
+	const contentSha256 = hydration.blobRef?.sha256 ?? hydration.contentSha256;
+	const id = contentSha256
+		? hashId(`photo|${contentSha256}`)
+		: hashId(`photo|${filename}|${file.sizeBytes}|${file.mtimeIso}`);
+	return {
+		blob_ref: hydration.blobRef,
+		camera_make: null,
+		camera_model: null,
+		content_sha256: contentSha256,
+		content_type: detectMimeType(filename),
+		file_modified_at: file.mtimeIso,
+		filename,
+		hydration_error: hydration.hydrationError,
+		hydration_status: hydration.hydrationStatus,
+		id,
+		latitude: null,
+		longitude: null,
+		size_bytes: hydration.blobRef?.size_bytes ?? hydration.sizeBytes,
+		taken_at: null,
+	};
 }
 
 // ─── Cursor / watermark helpers ────────────────────────────────────────
@@ -108,14 +113,17 @@ export function buildPhotoRecord(
  * Return true if `modifiedAt` falls on or before the incremental cursor
  * `since`. index.ts uses this to skip already-emitted files.
  */
-export function isBeforeCursor(modifiedAt: string, since: string | undefined): boolean {
-  return Boolean(since && modifiedAt <= since);
+export function isBeforeCursor(
+	modifiedAt: string,
+	since: string | undefined,
+): boolean {
+	return Boolean(since && modifiedAt <= since);
 }
 
 /** Monotonic max of an existing cursor and a new ISO date string. */
 export function advanceCursor(prev: string | undefined, next: string): string {
-  if (!prev || next > prev) {
-    return next;
-  }
-  return prev;
+	if (!prev || next > prev) {
+		return next;
+	}
+	return prev;
 }

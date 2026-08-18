@@ -24,7 +24,10 @@
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
 
-export const APPLE_PHOTOS_DEFAULT_STREAMS = ["photos", "coverage_diagnostics"] as const;
+export const APPLE_PHOTOS_DEFAULT_STREAMS = [
+	"photos",
+	"coverage_diagnostics",
+] as const;
 
 /**
  * `photos` declares `file_modified_at`; `coverage_diagnostics` is the run's own
@@ -33,9 +36,9 @@ export const APPLE_PHOTOS_DEFAULT_STREAMS = ["photos", "coverage_diagnostics"] a
 export const APPLE_PHOTOS_TIME_SCOPABLE_STREAMS = ["photos"] as const;
 
 export const applePhotosCollectorDefinition: LocalCollectorDefinition = {
-  connector_id: "apple_photos",
-  entry: "apple_photos",
-  bindings: { filesystem: { required: true } },
-  streams: APPLE_PHOTOS_DEFAULT_STREAMS,
-  time_scopable_streams: APPLE_PHOTOS_TIME_SCOPABLE_STREAMS,
+	connector_id: "apple_photos",
+	entry: "apple_photos",
+	bindings: { filesystem: { required: true } },
+	streams: APPLE_PHOTOS_DEFAULT_STREAMS,
+	time_scopable_streams: APPLE_PHOTOS_TIME_SCOPABLE_STREAMS,
 };
