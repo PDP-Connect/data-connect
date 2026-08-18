@@ -45,10 +45,9 @@
     "README.md"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@pdpp/collector-runtime --workspace=@pdpp/connector-protocol && rm -rf dist && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
+    "build": "npm run build --workspace=@pdpp/connector-protocol --workspace=@pdpp/collector-runtime && rm -rf dist && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
     "prepack": "npm run build",
     "pack-install-run": "node --import tsx scripts/pack-install-run.ts",
-    "prepare": "npm run build",
     "test": "tsx scripts/run-tests.ts",
     "validate:package": "tsx scripts/validate-package.ts",
     "verify": "npm test && npm run validate:package"
