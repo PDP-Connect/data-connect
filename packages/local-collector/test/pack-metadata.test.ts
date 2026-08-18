@@ -56,10 +56,14 @@ test("npm pack metadata preserves lifecycle diagnostics on failure", async () =>
   );
 });
 
-test("package validation builds once through npm pack prepare", async () => {
+test("package validation builds once through npm pack prepack, not a root-install prepare", async () => {
   const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 
-  assert.equal(packageJson.scripts.prepare, "npm run build");
+  // `prepare` must stay absent: root `npm ci` runs every workspace's `prepare`
+  // in lockfile order, not dependency order, which broke a plain install here
+  // (see ab2146c). `prepack` only fires for `npm pack`/`publish`, so it is the
+  // safe place to build before validate-package's `npmPackMetadata` call.
+  assert.equal(packageJson.scripts.prepare, undefined);
   assert.equal(packageJson.scripts.prepack, "npm run build");
   assert.equal(packageJson.scripts["validate:package"], "tsx scripts/validate-package.ts");
 });
