@@ -522,19 +522,6 @@ export interface CollectorAutoCompactResult {
   reclaimedBytes: number;
 }
 
-// Spawn `cwd`/PATH base for a connector child. This is deliberately the
-// CALLER's process.cwd(), not a path derived from this module's own
-// `import.meta.url`: `connector.args` (e.g. ["connectors/claude_code/index.ts"])
-// is a path relative to wherever the connector content actually lives, and
-// this generic runtime carries no knowledge of that location (moved out of
-// `@pdpp/polyfill-connectors` in the engine-split; deriving from this file's
-// own location would silently point at this package instead). Every real
-// caller (the polyfill-connectors dev bin, its tests, the published
-// `@pdpp/local-collector` bin) already runs with its cwd set to the
-// connector-owning package root, matching pre-move behavior exactly.
-const PACKAGE_ROOT = process.cwd();
-const REPO_ROOT = join(PACKAGE_ROOT, "..", "..");
-
 export interface CollectorEnrollmentConfig {
   baseUrl: string;
   code: string;
@@ -681,6 +668,23 @@ export interface CollectorRunConfig {
   connector: CollectorConnectorSpec;
   deviceId: string;
   deviceToken: string;
+  /**
+   * Absolute, symlink-resolved (`fs.realpathSync`'d) root directory the
+   * connector child process runs under: its spawn `cwd`, the base for
+   * `node_modules/.bin` PATH lookup (this directory's `.bin` and its
+   * grandparent's `.bin`, matching a package nested two levels under an npm
+   * workspace root), and the boundary a relative `connector.args` entrypoint
+   * must resolve beneath.
+   *
+   * There is no default and no fallback to `process.cwd()`: the runtime
+   * itself never inspects ambient shell state or import order to find this
+   * path. Resolving, realpath'ing, and validating it is the composition
+   * layer's job (the CLI's `run`/`connect`/`setup` commands) — see
+   * `resolveExecutionRoot` in `pdpp-local-collector.ts`. This closes the
+   * implicit-cwd-as-API-contract gap: a caller's shell location and import
+   * order used to silently become part of the runtime's behavior.
+   */
+  executionRoot: string;
   /**
    * Optional observer invoked for every protocol message the connector
    * child emits (RECORD, STATE, PROGRESS, DONE, etc.), in emission order,
@@ -1492,11 +1496,15 @@ async function streamConnectorIntoOutbox(
 ): Promise<StreamConnectorIntoOutboxResult> {
   throwIfAborted(input.abortSignal);
 
-  const child = spawnConnector(input.config.connector, {
-    baseUrl: input.config.baseUrl,
-    deviceToken: input.config.deviceToken,
-    ...(input.config.runId ? { runId: input.config.runId } : {}),
-  });
+  const child = spawnConnector(
+    input.config.connector,
+    {
+      baseUrl: input.config.baseUrl,
+      deviceToken: input.config.deviceToken,
+      ...(input.config.runId ? { runId: input.config.runId } : {}),
+    },
+    input.config.executionRoot
+  );
   const stderr = new BoundedStderrBuffer(COLLECTOR_STDERR_MAX_BYTES);
   const inScopeStreams = new Set(input.config.connector.streams);
   const bufferedState: Record<string, unknown> = {};
@@ -3257,22 +3265,24 @@ class BoundedStderrBuffer {
 
 function spawnConnector(
   connector: CollectorConnectorSpec,
-  childContext: CollectorChildContext
+  childContext: CollectorChildContext,
+  executionRoot: string
 ): ChildProcessWithoutNullStreams {
   const env = {
     ...process.env,
     ...buildCollectorChildEnv(childContext),
     ...connector.env,
   };
-  env.PATH = buildCollectorChildPath(env.PATH);
+  env.PATH = buildCollectorChildPath(env.PATH, executionRoot);
   return spawn(connector.command, [...connector.args], {
-    cwd: PACKAGE_ROOT,
+    cwd: executionRoot,
     env,
   });
 }
 
-function buildCollectorChildPath(pathValue: string | undefined): string {
-  return [join(PACKAGE_ROOT, "node_modules", ".bin"), join(REPO_ROOT, "node_modules", ".bin"), pathValue]
+function buildCollectorChildPath(pathValue: string | undefined, executionRoot: string): string {
+  const repoRoot = join(executionRoot, "..", "..");
+  return [join(executionRoot, "node_modules", ".bin"), join(repoRoot, "node_modules", ".bin"), pathValue]
     .filter((part): part is string => Boolean(part))
     .join(delimiter);
 }

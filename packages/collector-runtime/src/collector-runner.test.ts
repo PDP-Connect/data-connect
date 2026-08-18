@@ -34,6 +34,16 @@ import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "./local-device-outb
 import { LocalDeviceQueue } from "./local-device-queue.ts";
 import { RuntimeCapabilityMismatchError } from "./runtime-capabilities.ts";
 
+/**
+ * Test-only stand-in for the composition layer's resolved `executionRoot`
+ * (see `CollectorRunConfig.executionRoot`). Most fixtures here spawn `node`
+ * against an absolute fixture-script path, so this directory only matters as
+ * a valid `cwd`/`.bin`-PATH base, not for entrypoint resolution — mirroring
+ * this package's own root, the same value the removed `PACKAGE_ROOT =
+ * process.cwd()` module constant produced when tests ran from here.
+ */
+const TEST_EXECUTION_ROOT = join(import.meta.dirname, "..");
+
 test("buildCollectorStartMessage emits a stream-only START with no owner credentials", () => {
   const start = buildCollectorStartMessage(["sessions", "messages"]);
   assert.deepEqual(start, {
@@ -158,6 +168,7 @@ test("runCollectorConnector gives changed emitted_at records a distinct local ba
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-batch-identity",
     });
@@ -227,6 +238,7 @@ test("runCollectorConnector summarizes coverage completeness distinct from decla
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-coverage",
     });
@@ -283,6 +295,7 @@ test("runCollectorConnector reports null completeness when no coverage diagnosti
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-no-coverage",
     });
@@ -322,6 +335,7 @@ test("runCollectorConnector.onMessage observes every protocol message in emissio
       deviceId: "device-1",
       deviceToken: "device-token",
       onMessage: (message) => observed.push(message.type),
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-onmessage",
     });
@@ -359,6 +373,7 @@ test("runCollectorConnector.onMessage errors are swallowed and never break the r
       onMessage: () => {
         throw new Error("reporter bug");
       },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-onmessage-throws",
     });
@@ -395,6 +410,7 @@ test("runCollectorConnector rejects failed terminal DONE, preserves records, and
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-failed-done",
         }),
@@ -444,6 +460,7 @@ test("runCollectorConnector rejects a zero-exit child without DONE and never che
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-missing-done",
         }),
@@ -495,6 +512,7 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { retryBackoffMs: 0 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-checkpoint-put-failure",
     });
@@ -519,6 +537,7 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { retryBackoffMs: 0 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-checkpoint-put-failure",
     });
@@ -569,6 +588,7 @@ test("runCollectorConnector auto-prunes over-retention succeeded rows after a cl
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-auto-prune",
     } as const;
@@ -632,6 +652,7 @@ test("runCollectorConnector reports the build-derived agent version on every hea
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-agent-version",
     });
@@ -677,6 +698,7 @@ test("runCollectorConnector leaves succeeded rows intact when auto-prune is disa
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-prune-disabled",
     } as const;
@@ -722,6 +744,7 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-default-prune",
     });
@@ -768,6 +791,7 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-unaccounted",
     });
@@ -864,6 +888,7 @@ test("runCollectorConnector refuses a connector requiring a binding the collecto
         },
         deviceId: "device-1",
         deviceToken: "token-1",
+        executionRoot: TEST_EXECUTION_ROOT,
         queuePath,
         sourceInstanceId: "src-1",
       }),
@@ -888,7 +913,7 @@ test("buildCollectorStartMessage produces no owner-token surface", () => {
   assert.equal("authorization" in message, false);
 });
 
-test("runCollectorConnector spawns connectors from the package root with workspace tools on PATH", async () => {
+test("runCollectorConnector spawns connectors from the configured executionRoot with workspace tools on PATH", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
     const packageRoot = join(import.meta.dirname, "..");
@@ -929,6 +954,7 @@ test("runCollectorConnector spawns connectors from the package root with workspa
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: packageRoot,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -962,6 +988,7 @@ test("runCollectorConnector rejects promptly when the connector command is missi
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -1086,6 +1113,7 @@ test("runCollectorConnector replays prior STATE into the connector's START.state
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1169,6 +1197,7 @@ test("runCollectorConnector skips state PUT when the queue still has retrying it
         maxDrainDurationMs: 2000,
         retryBackoffMs: 100,
       },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1232,6 +1261,7 @@ test("runCollectorConnector does not checkpoint when record work dead-letters", 
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxAttempts: 1 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1290,6 +1320,7 @@ test("runCollectorConnector drops out-of-scope STATE messages with a warning and
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1354,6 +1385,7 @@ test("two-pass replay regression: a second runCollectorConnector call receives t
       } as const,
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     };
@@ -1430,6 +1462,7 @@ test("Gmail attachment backfill cursor replays from durable STATE after restart"
       } as const,
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     };
@@ -1532,6 +1565,7 @@ test("runCollectorConnector drains durable checkpoint work before reading prior 
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1579,6 +1613,7 @@ test("runCollectorConnector validates the reference route before mutating durabl
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -1636,6 +1671,7 @@ test("runCollectorConnector skips source scan when pre-existing durable work can
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1688,6 +1724,7 @@ test("runCollectorConnector fails backlog-skip pass when terminal heartbeat is r
           deviceId: "device-1",
           deviceToken: "device-token",
           outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -1783,6 +1820,7 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
       // actually sleeping ~60s. The backlog stays open either way — only
       // the loop's real sleep is what's being avoided here.
       outboxPolicy: { maxDrainDurationMs: 20, retryBackoffMs: 60_000 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId,
     });
@@ -1830,6 +1868,7 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
       // Same rationale as pass 1: keep the drain's auto-wait loop from
       // sleeping in real wall-clock time for the still-open backoff.
       outboxPolicy: { maxDrainDurationMs: 20, retryBackoffMs: 60_000 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId,
     });
@@ -1872,6 +1911,7 @@ test("runCollectorConnector surfaces state-read failure as a blocked heartbeat a
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -1932,6 +1972,7 @@ test("runCollectorConnector accepts exactly one terminal DONE and checkpoints no
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-after-done",
         }),
@@ -2224,6 +2265,7 @@ test("runCollectorConnector bounds child stderr buffering so verbose connectors 
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -2270,6 +2312,7 @@ test("runCollectorConnector honors AbortSignal at the pre-spawn gate", async () 
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -2373,6 +2416,7 @@ test("runCollectorConnector streams RECORDs into bounded durable batches without
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -2448,6 +2492,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxEnqueuedBatchesPerRun },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-first-backfill-budget",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2491,6 +2536,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxEnqueuedBatchesPerRun },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-first-backfill-budget-same-policy",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2512,6 +2558,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxEnqueuedBatchesPerRun: 16 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-first-backfill-budget-larger-policy",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2578,6 +2625,7 @@ test("runCollectorConnector defers checkpoint until every streamed record batch 
       deviceId: "device-1",
       deviceToken: "device-token",
       outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -2752,6 +2800,7 @@ test("runCollectorConnector persists complete-scan checkpoint across undrained b
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     } as const;
@@ -2870,6 +2919,7 @@ test("runCollectorConnector leaves streamed batches durable when the child fails
           deviceId: "device-1",
           deviceToken: "device-token",
           outboxPolicy: { retryBackoffMs: 60_000 },
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -2952,6 +3002,7 @@ test("runCollectorConnector corrects the heartbeat off 'starting' to an outbox-d
           deviceId: "device-1",
           deviceToken: "device-token",
           outboxPolicy: { retryBackoffMs: 60_000 },
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3056,6 +3107,7 @@ test("runCollectorConnector leaves a failure gap when prior backlog drains but t
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3124,6 +3176,7 @@ test("runCollectorConnector flushes a partial trailing batch when the child fail
           deviceId: "device-1",
           deviceToken: "device-token",
           outboxPolicy: { retryBackoffMs: 60_000 },
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3255,6 +3308,7 @@ test("runCollectorConnector recovers a stale-leased record batch and drains it w
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -3325,6 +3379,7 @@ test("runCollectorConnector auto-recovers transient local-device dead letters be
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-transient-dead-letter",
     });
@@ -3373,6 +3428,7 @@ test("runCollectorConnector preserves terminal local-device dead letters", async
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-terminal-dead-letter",
     });
@@ -3455,6 +3511,7 @@ test("runCollectorConnector drains a prior pass's enqueued backlog before scanni
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     } as const;
@@ -3605,6 +3662,7 @@ test("runCollectorConnector skips spawn and reports blocked when queue depth cro
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -4024,6 +4082,7 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-policy-1",
       sourceInstanceId: "src-gap-policy",
@@ -4072,6 +4131,7 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-policy-2",
       sourceInstanceId: "src-gap-policy",
@@ -4145,6 +4205,7 @@ test("runCollectorConnector records a connector_child_failure gap when the child
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           runId: "run-child-fail-1",
           sourceInstanceId: "src-child-fail",
@@ -4242,6 +4303,7 @@ test("runCollectorConnector surfaces the connector's own terminal DONE error mes
           },
           deviceId: "device-1",
           deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
           queuePath,
           runId: "run-done-error-1",
           sourceInstanceId: "src-done-error",
@@ -4602,6 +4664,7 @@ test("runCollectorConnector does not let a dead-lettered gap row permanently ski
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-dead-gap-2",
       sourceInstanceId: "src-dead-gap",
@@ -4689,6 +4752,7 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-recovered-gap-2",
       sourceInstanceId: "src-recovered-gap",
