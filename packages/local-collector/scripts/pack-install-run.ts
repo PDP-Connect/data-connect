@@ -647,12 +647,15 @@ async function prepareCodexFixture(): Promise<string> {
 
 const IMESSAGE_FIXTURE_MESSAGE_COUNT = 500;
 const IMESSAGE_SAMPLE_LIMIT = 20;
-// An arbitrary positive Apple-epoch-seconds base (some time after
-// 2001-01-01), so every fixture row's `date` is a small positive integer —
-// the connector's `since` cursor query is `WHERE date > ? OR date IS NULL`
-// with `since` defaulting to 0, so a negative or zero date would be
-// silently excluded from every run.
-const IMESSAGE_FIXTURE_DATE_BASE_APPLE_SEC = 700_000_000;
+// Apple-epoch-seconds (seconds since 2001-01-01 -- 978_307_200s after the
+// Unix epoch) for "one hour ago" -- computed at run time, NOT a fixed
+// historical constant. A fixed past constant silently rots if any future
+// enrollment-scope feature defaults an undeclared boundary to a recent-
+// history window: a fixture dated further back than that window reads as
+// genuinely out-of-scope and is correctly filtered to zero records -- not a
+// connector bug, but a stale fixture. Deriving from Date.now() keeps this
+// fixture inside any such window forever.
+const IMESSAGE_FIXTURE_DATE_BASE_APPLE_SEC = Math.floor(Date.now() / 1000) - 3600 - 978_307_200;
 
 /**
  * Build a synthetic chat.db large enough to exercise `--sample` truncation
