@@ -74,6 +74,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+          persist-credentials: false
 
       - name: Verify checked-out release identity
         if: github.event_name == 'release'
