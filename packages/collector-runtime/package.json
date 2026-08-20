@@ -41,8 +41,7 @@
     "verify": "npm run typecheck && npm run check && npm run check:noUnnecessaryConditions-expiry && npm test"
   },
   "dependencies": {
-    "@pdpp/connector-protocol": "*",
-    "@pdpp/reference-contract": "*"
+    "@pdpp/connector-protocol": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

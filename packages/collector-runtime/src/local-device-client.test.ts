@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { test } from "node:test";
-import { canonicalTerminalRunCommitEnvelope } from "@pdpp/reference-contract/common";
 import { COLLECTOR_PROTOCOL_VERSION } from "./collector-protocol.ts";
 import {
   LOCAL_DEVICE_ENDPOINTS,
@@ -15,7 +14,7 @@ import {
   LocalDeviceRequestTimeoutError,
   type TerminalRunCommitRequest,
 } from "./local-device-client.ts";
-import { hashCanonicalJson } from "./local-device-envelope.ts";
+import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "./local-device-envelope.ts";
 
 function terminalRequest(): TerminalRunCommitRequest {
   return {

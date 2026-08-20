@@ -53,6 +53,54 @@ export function hashCanonicalJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
+export interface CanonicalTerminalFactInput {
+  readonly coverage_statuses: readonly string[];
+  readonly scoped?: boolean;
+  readonly stream: string;
+}
+
+export interface TerminalRunCommitEnvelopeInput {
+  readonly collection_boundary: string;
+  readonly commit_id: string;
+  readonly connector_id: string;
+  readonly connector_instance_id: string;
+  readonly device_id: string;
+  readonly run_id: string;
+  readonly source_instance_id: string;
+  readonly state_delta: Readonly<Record<string, unknown>>;
+  readonly terminal_facts: readonly CanonicalTerminalFactInput[];
+  readonly version: 1;
+}
+
+/**
+ * The one hash-authority projection shared by collector and reference server
+ * (`pdpp/reference-implementation/operations/local-device-terminal-collection.ts`
+ * via the real `@pdpp/reference-contract`). Both sides must keep this
+ * function byte-for-byte identical to `packages/reference-contract/src/common/terminal-run-commit.ts`
+ * in `pdpp` — that repo's golden-hash test is the cross-runtime oracle. Connector
+ * identity MUST already be canonical before entry.
+ */
+export function canonicalTerminalRunCommitEnvelope(input: TerminalRunCommitEnvelopeInput): unknown {
+  return toCanonicalValue({
+    collection_boundary: input.collection_boundary,
+    commit_id: input.commit_id,
+    connector_id: input.connector_id,
+    connector_instance_id: input.connector_instance_id,
+    device_id: input.device_id,
+    run_id: input.run_id,
+    source_instance_id: input.source_instance_id,
+    state_delta: input.state_delta,
+    terminal_facts: input.terminal_facts
+      .map((fact) => ({
+        coverage_statuses: [...new Set(fact.coverage_statuses)].sort(),
+        ...(typeof fact.scoped === "boolean" ? { scoped: fact.scoped } : {}),
+        stream: fact.stream,
+      }))
+      .sort((left, right) => left.stream.localeCompare(right.stream)),
+    version: 1,
+  });
+}
+
 /**
  * Canonical string form of a RECORD envelope key (spec-core.md "The RECORD
  * envelope"): a scalar key is used as-is; a compound key is the minified

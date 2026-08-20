@@ -7,6 +7,7 @@ import {
   buildLocalDeviceIngestBatchRequest,
   buildLocalDeviceRecordEnvelope,
   canonicalJson,
+  canonicalTerminalRunCommitEnvelope,
   hashCanonicalJson,
 } from "./local-device-envelope.ts";
 
@@ -114,4 +115,28 @@ test("buildLocalDeviceIngestBatchRequest owns full-envelope hashing and wire pro
       stream: "messages",
     },
   ]);
+});
+
+test("canonicalTerminalRunCommitEnvelope has a stable cross-runtime golden hash matching pdpp's @pdpp/reference-contract oracle", () => {
+  const canonical = canonicalTerminalRunCommitEnvelope({
+    collection_boundary: "unscoped",
+    commit_id: "commit-1",
+    connector_id: "codex",
+    connector_instance_id: "cin-1",
+    device_id: "dev-1",
+    run_id: "run-1",
+    source_instance_id: "src-1",
+    state_delta: { z: { cursor: 2 }, a: { cursor: 1 } },
+    terminal_facts: [
+      { coverage_statuses: ["missing", "collected", "missing"], stream: "z" },
+      { coverage_statuses: ["collected"], scoped: false, stream: "a" },
+    ],
+    version: 1,
+  });
+  const json = JSON.stringify(canonical);
+  assert.equal(
+    json,
+    '{"collection_boundary":"unscoped","commit_id":"commit-1","connector_id":"codex","connector_instance_id":"cin-1","device_id":"dev-1","run_id":"run-1","source_instance_id":"src-1","state_delta":{"a":{"cursor":1},"z":{"cursor":2}},"terminal_facts":[{"coverage_statuses":["collected"],"scoped":false,"stream":"a"},{"coverage_statuses":["collected","missing"],"stream":"z"}],"version":1}'
+  );
+  assert.equal(hashCanonicalJson(canonical), "147b0baeb81e66a5dfb3f0862596d50aeb87fe8a6723306740e9446dddb72648");
 });
