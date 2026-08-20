@@ -54,6 +54,7 @@ import {
   type LocalDeviceOutboxSummary,
 } from "./local-device-outbox.ts";
 import type { LocalDeviceQueue, LocalDeviceQueueItem } from "./local-device-queue.ts";
+import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
 import {
   assertPlacementOrThrow,
   COLLECTOR_RUNTIME_CAPABILITIES,
@@ -3274,7 +3275,10 @@ function spawnConnector(
     ...connector.env,
   };
   env.PATH = buildCollectorChildPath(env.PATH, executionRoot);
-  return spawn(connector.command, [...connector.args], {
+  // Resolve `tsx` to an absolute path rather than trusting the augmented PATH
+  // alone: the augmentation is necessary for the child's own tooling but is
+  // not sufficient for the spawn itself under a minimal-environment supervisor.
+  return spawn(resolveConnectorCommand(connector.command), [...connector.args], {
     cwd: executionRoot,
     env,
   });
