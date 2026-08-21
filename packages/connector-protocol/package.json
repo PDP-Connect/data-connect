@@ -1,9 +1,13 @@
 {
   "name": "@pdpp/connector-protocol",
   "version": "0.0.1",
-  "private": true,
   "description": "The connector authoring contract for PDPP: the JSONL wire-protocol message types, the LocalCollectorDefinition type contract, the bootstrap/emit/scope-filter primitives connector authors import directly, and small text/auth/retry utilities connectors depend on. Bottom of the dependency graph \u2014 depends on nothing in @pdpp/collector-runtime or @pdpp/polyfill-connectors, so connector authors never pull in the runtime package or its release cadence just to get the files they author against.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
+    "directory": "packages/connector-protocol"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -60,6 +64,10 @@
     "node": ">=22.14.0"
   },
   "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",

@@ -1,9 +1,13 @@
 {
   "name": "@pdpp/collector-runtime",
   "version": "0.0.1",
-  "private": true,
   "description": "Generic connector-execution runtime for PDPP local (device-side) collection: the collector loop, device-exporter ingest client, durable outbox, and runtime-capabilities placement gate. Depends on @pdpp/connector-protocol for the connector authoring contract (wire-protocol types, JSONL primitives). Connector-agnostic \u2014 carries no connector definitions or content.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PDP-Connect/data-connect.git",
+    "directory": "packages/collector-runtime"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -41,7 +45,7 @@
     "verify": "npm run typecheck && npm run check && npm run check:noUnnecessaryConditions-expiry && npm test"
   },
   "dependencies": {
-    "@pdpp/connector-protocol": "*"
+    "@pdpp/connector-protocol": ">=0.0.1 <1.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",
@@ -53,6 +57,10 @@
     "node": ">=22.14.0"
   },
   "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
