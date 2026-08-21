@@ -1,0 +1,122 @@
+# @pdpp/connector-protocol and @pdpp/collector-runtime publish in lockstep
+# from a single release channel: 0.x versions released from `main` to npm's
+# default `latest` dist-tag, no prerelease branch. Mirrors PDP-Connect/pdpp's
+# own semantic-release posture (see that repo's .releaserc.yaml) for the same
+# stated reason — a second moving prerelease branch is drift risk with no
+# offsetting benefit at 0.x.
+#
+# UNLIKE pdpp, this repository (PDP-Connect/data-connect) also ships a
+# Tauri desktop app with its own commit history (build/release/ci-scoped
+# commits, and plenty of unscoped feat/fix commits touching connectors,
+# telemetry, and the desktop app itself — none of which should cut an npm
+# release). pdpp's own commit-analyzer config has no scope gate: it
+# republishes on ANY feat/fix/perf commit, relying on pdpp being
+# npm-packages-plus-one-console with no unrelated commit surface. That
+# assumption does not hold here, so releaseRules below explicitly requires
+# a connector-protocol or collector-runtime scope (or a breaking-change
+# footer on such a commit) before a commit can trigger a release — everything
+# else, scoped or not, releases nothing. (@semantic-release/commit-analyzer
+# has no built-in "require this scope" option; this releaseRules allowlist is
+# the documented workaround — see
+# ai/research/semantic-release-monorepo-scoping/ in the dotfiles repo.)
+#
+# IMPORTANT — two things that are NOT how this plugin's docs read at a
+# glance, both confirmed by direct reproduction against the actual installed
+# @semantic-release/commit-analyzer@13.0.1 (what semantic-release@25.0.9
+# resolves), not by reading the README:
+#
+# 1. String `scope` rules match with micromatch (shell-glob syntax), NOT
+#    JavaScript RegExp. `SCOPE_GLOB` below uses micromatch's extglob
+#    alternation (`@(a|b)`) to match "connector-protocol or collector-runtime
+#    is this commit's whole scope, or one comma-separated entry anywhere in a
+#    multi-package scope" (this repo's existing convention for commits
+#    touching several workspaces at once, e.g.
+#    `fix(collector-runtime,connector-protocol,local-collector): ...`).
+#
+# 2. A naive catch-all `{ release: false }` as the last rule does NOT safely
+#    mean "everything else releases nothing" — it means "this rule's
+#    unconditional match beats every other commit in the same release batch",
+#    because analyze-commit.js's own rule-priority comparator treats `false`
+#    as higher-priority than any real release type (an off-by-one in how it
+#    ranks a type that isn't in its known list). Reproduced directly: a
+#    release batch containing one `fix(collector-runtime): ...` commit AND
+#    one unrelated `fix(local-collector): ...` commit produced NO release at
+#    all with a naive catch-all — the unrelated commit silently cancelled the
+#    real one. The two catch-alls below are written to be mutually exclusive
+#    with the five rules above (matching only scopes that are NOT
+#    collector-runtime/connector-protocol, or commits with no scope at all)
+#    so they never co-match the same commit as a real rule and can never
+#    cancel it. Full verified test matrix (18 single-commit cases + 4
+#    multi-commit batch cases, all passing) is not committed here; re-derive
+#    by testing analyzeCommits() directly against this file's exact rules
+#    before changing them.
+branches:
+  - name: main
+tagFormat: "v${version}"
+preset: "conventionalcommits"
+plugins:
+  - - "@semantic-release/commit-analyzer"
+    - preset: conventionalcommits
+      releaseRules:
+        - breaking: true
+          scope: &SCOPE_GLOB "@(collector-runtime|connector-protocol)*|*,@(collector-runtime|connector-protocol)|*,@(collector-runtime|connector-protocol),*"
+          release: major
+        - type: feat
+          scope: *SCOPE_GLOB
+          release: minor
+        - type: fix
+          scope: *SCOPE_GLOB
+          release: patch
+        - type: perf
+          scope: *SCOPE_GLOB
+          release: patch
+        - type: revert
+          scope: *SCOPE_GLOB
+          release: patch
+        # Matches any commit whose scope is a real string that is NOT one of
+        # the target packages (e.g. `fix(local-collector): ...`,
+        # `fix(polyfill-connectors): ...`). Mutually exclusive with the five
+        # rules above by construction.
+        - scope: "!(@(collector-runtime|connector-protocol)*|*,@(collector-runtime|connector-protocol)|*,@(collector-runtime|connector-protocol),*)"
+          release: false
+        # Matches genuinely unscoped commits (conventional-commits-parser
+        # sets `scope: null`, not `undefined`, when a commit has no
+        # `(scope)` at all — this must be `null`, not omitted, or this rule
+        # would match every commit unconditionally, including target-scoped
+        # ones, recreating the same cancellation bug this design avoids).
+        - scope: null
+          release: false
+      presetConfig:
+        types:
+          - type: feat
+            scope: connector-protocol
+            section: "Features (@pdpp/connector-protocol)"
+          - type: fix
+            scope: connector-protocol
+            section: "Bug Fixes (@pdpp/connector-protocol)"
+          - type: perf
+            scope: connector-protocol
+            section: "Performance Improvements (@pdpp/connector-protocol)"
+          - type: feat
+            scope: collector-runtime
+            section: "Features (@pdpp/collector-runtime)"
+          - type: fix
+            scope: collector-runtime
+            section: "Bug Fixes (@pdpp/collector-runtime)"
+          - type: perf
+            scope: collector-runtime
+            section: "Performance Improvements (@pdpp/collector-runtime)"
+          - type: revert
+            section: "Reverts"
+  - - "@semantic-release/npm"
+    - pkgRoot: "packages/connector-protocol"
+  - - "@semantic-release/npm"
+    - pkgRoot: "packages/collector-runtime"
+  - - "@semantic-release/github"
+    - successComment: false
+      failComment: false
+      failTitle: false
+      labels: false
+      releasedLabels: false
+  - - "@semantic-release/exec"
+    - publishCmd: "node --import tsx scripts/semantic-release-github-output.ts publish ${nextRelease.version} ${nextRelease.gitTag}"

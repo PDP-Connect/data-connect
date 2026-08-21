@@ -1,0 +1,128 @@
+name: npm-release
+
+# Publishes @pdpp/connector-protocol and @pdpp/collector-runtime to npm via
+# semantic-release, using OIDC trusted publishing (id-token: write, no
+# NPM_TOKEN) — the same mechanism PDP-Connect/pdpp already runs for
+# @pdpp/cli, @pdpp/mcp-server, and @pdpp/read-core. See .releaserc.yaml for
+# which commits actually trigger a release: this workflow's `quality` and
+# `release` jobs only run at all when resolve-version's dry run found one.
+#
+# Scoped to just these two npm packages: this repo also ships a Tauri
+# desktop app via .github/workflows/release.yml (a completely separate
+# artifact class — GitHub Release installers, not npm packages), which this
+# workflow does not touch.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-version:
+    name: resolve next version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      new-release-published: ${{ steps.version.outputs.new-release-published }}
+      new-release-version: ${{ steps.version.outputs.new-release-version }}
+      new-release-git-tag: ${{ steps.version.outputs.new-release-git-tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine next version
+        id: version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          npm run release:npm:dry-run 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
+          node --import tsx scripts/semantic-release-github-output.ts dry-run "$RUNNER_TEMP/semantic-release-dry-run.log"
+
+  quality:
+    name: release quality checks
+    needs: resolve-version
+    if: needs.resolve-version.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify connector-protocol package
+        run: npm run --workspace packages/connector-protocol verify
+
+      - name: Verify collector-runtime package
+        run: npm run --workspace packages/collector-runtime verify
+
+      - name: Test commit-analyzer scope gate
+        run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
+
+  release:
+    name: publish to npm and GitHub
+    needs: [resolve-version, quality]
+    if: needs.resolve-version.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write # OIDC trusted publishing — no NPM_TOKEN
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run release:npm
