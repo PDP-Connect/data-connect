@@ -3,9 +3,13 @@ name: reference-implementation
 # Move-B groundwork (2026-08-27): this workflow is authored ahead of the actual
 # reference-implementation/server code landing in this repo, so the CI gate is ready
 # the moment Move B's filter-repo import lands rather than being written under time
-# pressure then. Until reference-implementation/ exists here, `classify` always
-# resolves reference_impacting=false and every downstream job skips — this workflow is
-# a structural no-op today, not yet load-bearing.
+# pressure then. The receiving-dock placeholder (reference-implementation/README.md,
+# see the same PR that added this workflow) itself matches this workflow's own
+# reference-impacting path list, so `classify` alone isn't enough to keep the suite
+# jobs skipped pre-Move-B -- they also gate on `has_content`, which checks for
+# reference-implementation/package.json. Until Move B lands real content there, the
+# suite jobs skip regardless of what changed; this workflow is a structural no-op
+# today, not yet load-bearing.
 #
 # Mirrors PDP-Connect/pdpp's .github/workflows/reference-implementation.yml gate shape
 # (same job names, same classify -> per-suite -> aggregate pattern) so the required-check
@@ -36,12 +40,24 @@ jobs:
     timeout-minutes: 5
     outputs:
       reference_impacting: ${{ steps.changes.outputs.reference_impacting }}
+      has_content: ${{ steps.has-content.outputs.has_content }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Check reference-implementation has real content
+        id: has-content
+        run: |
+          set -euo pipefail
+          if [[ -f "reference-implementation/package.json" ]]; then
+            echo "has_content=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_content=false" >> "$GITHUB_OUTPUT"
+            echo "reference-implementation/package.json not found -- Move B hasn't landed real content yet, suite jobs will skip regardless of reference_impacting."
+          fi
 
       - name: Classify reference-impacting changes
         id: changes
@@ -82,7 +98,7 @@ jobs:
   typecheck-reference:
     name: typecheck reference implementation
     needs: classify
-    if: needs.classify.outputs.reference_impacting == 'true'
+    if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -107,7 +123,7 @@ jobs:
   test-reference-implementation:
     name: test reference implementation
     needs: classify
-    if: needs.classify.outputs.reference_impacting == 'true'
+    if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
