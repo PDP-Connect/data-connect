@@ -1,0 +1,164 @@
+name: reference-implementation
+
+# Move-B groundwork (2026-08-27): this workflow is authored ahead of the actual
+# reference-implementation/server code landing in this repo, so the CI gate is ready
+# the moment Move B's filter-repo import lands rather than being written under time
+# pressure then. Until reference-implementation/ exists here, `classify` always
+# resolves reference_impacting=false and every downstream job skips — this workflow is
+# a structural no-op today, not yet load-bearing.
+#
+# Mirrors PDP-Connect/pdpp's .github/workflows/reference-implementation.yml gate shape
+# (same job names, same classify -> per-suite -> aggregate pattern) so the required-check
+# discipline pdpp already has for this code carries over unchanged. Adapted for this
+# repo's package manager (npm workspaces, not pnpm) and Node floor (>=22.14.0 <24, this
+# repo's package.json engines field, vs. pdpp's node-version 24).
+#
+# pdpp's version also gates apps/console and several owner-journey/stream-audit scripts
+# that are pdpp-specific (openspec-driven authoring surfaces not part of this repo's
+# scope). Those jobs are deliberately NOT ported here — only the parts that map to
+# what Move B actually brings into this repo: the reference-implementation package
+# itself. Re-derive the full job list against pdpp's then-current workflow when Move B
+# lands, since pdpp's own reference-implementation.yml will keep evolving until then.
+
+on:
+  pull_request: {}
+  merge_group: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: reference-implementation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: classify reference-impacting changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      reference_impacting: ${{ steps.changes.outputs.reference_impacting }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify reference-impacting changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BASE_SHA}" ]]; then
+            echo "reference_impacting=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch has no PR base; running full reference suite."
+            exit 0
+          fi
+
+          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > "$RUNNER_TEMP/reference-changed-files.txt"
+
+          reference_impacting=false
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/reference-implementation.yml|\
+              package.json|\
+              package-lock.json|\
+              reference-implementation/*|reference-implementation/**)
+                reference_impacting=true
+                break
+                ;;
+            esac
+          done < "$RUNNER_TEMP/reference-changed-files.txt"
+
+          echo "reference_impacting=${reference_impacting}" >> "$GITHUB_OUTPUT"
+          if [[ "${reference_impacting}" == "true" ]]; then
+            echo "Reference-impacting changes detected; running full reference suite."
+          else
+            echo "No reference-impacting changes detected (or reference-implementation/ does not exist in this repo yet); required context will pass without heavy reference tests."
+          fi
+
+  typecheck-reference:
+    name: typecheck reference implementation
+    needs: classify
+    if: needs.classify.outputs.reference_impacting == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck reference implementation
+        run: npm --prefix reference-implementation run typecheck
+
+  test-reference-implementation:
+    name: test reference implementation
+    needs: classify
+    if: needs.classify.outputs.reference_impacting == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test reference implementation
+        run: npm --prefix reference-implementation run test
+
+  gate:
+    name: reference-implementation gate
+    needs:
+      - classify
+      - typecheck-reference
+      - test-reference-implementation
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate required sub-job results
+        run: |
+          set -euo pipefail
+
+          fail=0
+          for job_result in \
+            "typecheck-reference:${{ needs.typecheck-reference.result }}" \
+            "test-reference-implementation:${{ needs.test-reference-implementation.result }}"
+          do
+            name="${job_result%%:*}"
+            result="${job_result##*:}"
+            if [[ "${result}" != "success" && "${result}" != "skipped" ]]; then
+              echo "::error::${name} reported ${result}"
+              fail=1
+            fi
+          done
+
+          if [[ "${{ needs.classify.result }}" != "success" ]]; then
+            echo "::error::classify reported ${{ needs.classify.result }}"
+            fail=1
+          fi
+
+          exit "${fail}"
