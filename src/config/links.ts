@@ -7,7 +7,6 @@ export const LINKS = {
   appSubmissionGuide:
     "https://github.com/PDP-Connect/data-connect/blob/main/ecosystem/submit-data-app.md",
   githubRepo: "https://github.com/PDP-Connect/data-connect",
-  vanaDocs: "https://docs.vana.org",
   vanaDocsProtocol: "https://docs.vana.org/data-portability-protocol",
   vanaDocsPersonalServers:
     "https://docs.vana.org/protocol-reference/personal-servers",
