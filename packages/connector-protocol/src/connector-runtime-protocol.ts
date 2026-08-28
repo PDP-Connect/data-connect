@@ -445,6 +445,17 @@ export interface ProgressExtra {
 }
 
 /** All messages a connector emits over stdout. */
+/**
+ * The closed vocabulary of structured provider-boundary claims a connector may
+ * attach to a `SKIP_RESULT`.
+ *
+ * One member today. It is a named union rather than a bare string so that
+ * adding a second is a deliberate, reviewable protocol change — and so an
+ * emitter that invents a claim fails to compile instead of having it dropped
+ * silently by the reference implementation's persistence allowlist.
+ */
+export type SkipResultBoundaryClaim = "provider_history_boundary";
+
 export type EmittedMessage =
   | {
       type: "RECORD";
@@ -479,9 +490,61 @@ export type EmittedMessage =
       stream: string;
       reason: string;
       message: string;
+      /**
+       * A connector's STRUCTURED claim that the shortfall is a permanent
+       * provider boundary rather than a fetch that could be retried into
+       * success — e.g. the walk reached the oldest item the provider will
+       * serve while its own lifetime total still counted more.
+       *
+       * Deliberately a typed field rather than free-form `diagnostics` prose:
+       * the reference implementation reads this claim and never the message
+       * text. It is NOT sufficient on its own — an independently recorded,
+       * current coverage horizon must agree before anything is excluded from
+       * the servable denominator — so a connector cannot excuse its own gap
+       * by asserting this.
+       *
+       * Optional: a connector that cannot prove a boundary must omit it.
+       *
+       * A CLOSED vocabulary, deliberately not `string`. The reference
+       * implementation's persistence allowlist accepts exactly one value, so a
+       * connector that invents its own claim would have it silently dropped in
+       * transit and be none the wiser. Typing it closed turns that into a
+       * compile error at the emitter instead.
+       */
+      boundary_claim?: SkipResultBoundaryClaim;
       diagnostics?: unknown;
       continuation?: RuntimeContinuationFact;
       recovery_hint?: string | { action: string; retryable?: boolean };
+    }
+  | {
+      /**
+       * Coverage evidence for a `state_stream`-declared detail stream.
+       *
+       * The counterpart to `DETAIL_COVERAGE`, and deliberately disjoint from
+       * it: the reference implementation REJECTS a run that emits
+       * `DETAIL_COVERAGE` for a `state_stream` child, and equally rejects
+       * `STREAM_EVIDENCE` for any stream the manifest does not declare with a
+       * static `state_stream` parent. The two message kinds partition the same
+       * manifest-shape space; a connector picks by manifest declaration, never
+       * by preference.
+       *
+       * `reference_only` is REQUIRED and must be `true`: a state_stream child's
+       * checkpoint status is projected from its declared parent's own commit
+       * outcome, so this message reports what was seen WITHOUT claiming the
+       * authority to settle the child's coverage on its own. That is the
+       * property that makes it honest for a stream whose parent, not itself,
+       * owns the commit.
+       *
+       * `considered`/`covered` are the counts this pass actually measured.
+       * They are not derived from a gap ledger and must never be inferred from
+       * one — an identity like `considered = collected + pending_gaps` can
+       * manufacture `considered === covered` when the ledger undercounts.
+       */
+      type: "STREAM_EVIDENCE";
+      stream: string;
+      considered: number;
+      covered: number;
+      reference_only: true;
     }
   | DetailGapMessage
   | DetailGapAttemptedMessage

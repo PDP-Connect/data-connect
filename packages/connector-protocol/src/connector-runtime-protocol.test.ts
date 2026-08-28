@@ -8,6 +8,7 @@ import {
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
 } from "./connector-runtime-protocol.ts";
+import type { EmittedMessage } from "./index.ts";
 
 const CONTINUATION: RuntimeContinuationFact = {
   boundary: "uidvalidity-123",
@@ -61,4 +62,73 @@ test("selection remains isolated by stream and message kind", () => {
 
   assert.equal(selectAuthoritativeSkip(gaps, "messages"), undefined);
   assert.equal(selectAuthoritativeContinuation(gaps, "messages"), undefined);
+});
+
+test("the public barrel accepts a well-formed STREAM_EVIDENCE message", () => {
+  const evidence: EmittedMessage = {
+    considered: 10,
+    covered: 7,
+    reference_only: true,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+
+  assert.equal(evidence.type, "STREAM_EVIDENCE");
+});
+
+test("STREAM_EVIDENCE requires the literal reference_only value", () => {
+  const evidence: EmittedMessage = {
+    considered: 10,
+    covered: 7,
+    // @ts-expect-error reference_only must be the literal true.
+    reference_only: false,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+  assert.equal(evidence.type, "STREAM_EVIDENCE");
+});
+
+test("STREAM_EVIDENCE requires a string stream", () => {
+  const evidence: EmittedMessage = {
+    considered: 10,
+    covered: 7,
+    reference_only: true,
+    // @ts-expect-error stream must be a string.
+    stream: 42,
+    type: "STREAM_EVIDENCE",
+  };
+  assert.equal(evidence.type, "STREAM_EVIDENCE");
+});
+
+test("STREAM_EVIDENCE requires numeric considered and covered counts", () => {
+  const invalidConsidered: EmittedMessage = {
+    // @ts-expect-error considered must be a number.
+    considered: "10",
+    covered: 7,
+    reference_only: true,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+  const invalidCovered: EmittedMessage = {
+    considered: 10,
+    // @ts-expect-error covered must be a number.
+    covered: "7",
+    reference_only: true,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+  assert.equal(invalidConsidered.type, "STREAM_EVIDENCE");
+  assert.equal(invalidCovered.type, "STREAM_EVIDENCE");
+});
+
+test("SKIP_RESULT rejects an unrecognized boundary claim", () => {
+  const skip: EmittedMessage = {
+    // @ts-expect-error boundary_claim is a closed protocol vocabulary.
+    boundary_claim: "provider_guess",
+    message: "Provider stopped serving history",
+    reason: "provider_history_boundary",
+    stream: "messages",
+    type: "SKIP_RESULT",
+  };
+  assert.equal(skip.type, "SKIP_RESULT");
 });
