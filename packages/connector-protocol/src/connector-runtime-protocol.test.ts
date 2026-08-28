@@ -3,6 +3,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import type {
+  EmittedMessage,
+  SkipResultBoundaryClaim,
+} from "./connector-runtime-protocol.ts";
 import {
   type RuntimeContinuationFact,
   selectAuthoritativeContinuation,
@@ -61,4 +65,36 @@ test("selection remains isolated by stream and message kind", () => {
 
   assert.equal(selectAuthoritativeSkip(gaps, "messages"), undefined);
   assert.equal(selectAuthoritativeContinuation(gaps, "messages"), undefined);
+});
+
+test("SkipResultBoundaryClaim is a closed vocabulary, not a bare string", () => {
+  const claim: SkipResultBoundaryClaim = "provider_history_boundary";
+  assert.equal(claim, "provider_history_boundary");
+
+  // @ts-expect-error widening the vocabulary must fail at build time, not silently pass.
+  const widened: SkipResultBoundaryClaim = "anything";
+  void widened;
+});
+
+test("EmittedMessage SKIP_RESULT accepts an optional boundary_claim without other fields changing", () => {
+  const withoutClaim: EmittedMessage = {
+    type: "SKIP_RESULT",
+    stream: "messages",
+    reason: "auth_failed",
+    message: "boundary reached",
+  };
+  const withClaim: EmittedMessage = {
+    ...withoutClaim,
+    boundary_claim: "provider_history_boundary",
+  };
+
+  assert.equal(withoutClaim.type, "SKIP_RESULT");
+  assert.equal(withClaim.boundary_claim, "provider_history_boundary");
+
+  const invalidClaim: EmittedMessage = {
+    ...withoutClaim,
+    // @ts-expect-error an unrecognized boundary_claim value must fail at build time.
+    boundary_claim: "not_a_real_boundary",
+  };
+  void invalidClaim;
 });

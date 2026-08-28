@@ -444,6 +444,17 @@ export interface ProgressExtra {
   total?: number;
 }
 
+/**
+ * The closed vocabulary a connector may pass as `SKIP_RESULT.boundary_claim`.
+ * A single value today; a named union so a runtime that recognizes more
+ * values later does not need a new protocol field. An unrecognized string
+ * emitted on the wire is not this type, but TypeScript alone cannot stop a
+ * connector authored in JS or a loosely-typed caller from emitting one — the
+ * runtime is the actual gate and drops anything outside this vocabulary
+ * before persisting.
+ */
+export type SkipResultBoundaryClaim = "provider_history_boundary";
+
 /** All messages a connector emits over stdout. */
 export type EmittedMessage =
   | {
@@ -482,6 +493,14 @@ export type EmittedMessage =
       diagnostics?: unknown;
       continuation?: RuntimeContinuationFact;
       recovery_hint?: string | { action: string; retryable?: boolean };
+      /**
+       * A connector's structured claim about a permanent provider boundary:
+       * "the provider will not serve anything older than this point, ever."
+       * Closed vocabulary — not a fetch that can be retried into success, and
+       * not free-form prose, so the runtime can act on it without pattern-
+       * matching `reason`/`message` strings.
+       */
+      boundary_claim?: SkipResultBoundaryClaim;
     }
   | DetailGapMessage
   | DetailGapAttemptedMessage
