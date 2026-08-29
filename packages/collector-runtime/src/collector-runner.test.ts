@@ -929,14 +929,13 @@ test("runCollectorConnector refuses a connector requiring a binding the collecto
 });
 
 test("runCollectorConnector refuses a connector that omits protocol_capabilities before any heartbeat or spawn", async () => {
-  // Negative: a connector input matching NEITHER `ConnectorPlacementInput`
-  // union branch (no `protocol_capabilities` array, no
-  // `protocol_contract_version: "0.0.1"` tag) must be refused before ANY
-  // heartbeat is sent and before the child process is spawned — silently
-  // treating the omission as "requires nothing" is exactly the under-gating
-  // bug this repair closes. TypeScript's discriminated union makes such an
-  // object unconstructable for well-typed callers, so this fixture casts
-  // past the type checker to prove the runtime guard still fires for a
+  // Negative: a connector input missing `protocol_capabilities` (required
+  // by `ConnectorPlacementInput`) must be refused before ANY heartbeat is
+  // sent and before the child process is spawned — silently treating the
+  // omission as "requires nothing" is exactly the under-gating bug this
+  // repair closes. There is no legacy escape hatch anymore: TypeScript
+  // requires this field for well-typed callers, so this fixture casts past
+  // the type checker to prove the runtime guard still fires for a
   // malformed value a plain-JS caller could produce. The fixture would
   // create a marker file if it were ever spawned; its absence after the
   // throw proves the child never started.
@@ -957,10 +956,10 @@ test("runCollectorConnector refuses a connector that omits protocol_capabilities
       () =>
         runCollectorConnector({
           baseUrl: harness.url,
-          // `protocol_capabilities` and `protocol_contract_version` are both
-          // intentionally omitted — neither union branch matches. Cast past
-          // the type checker: this is deliberately testing the runtime
-          // guard against a malformed value, not a well-typed caller.
+          // `protocol_capabilities` is intentionally omitted — there is no
+          // legacy escape hatch. Cast past the type checker: this is
+          // deliberately testing the runtime guard against a malformed
+          // value, not a well-typed caller.
           connector: {
             args: [fixture],
             command: process.execPath,
@@ -987,6 +986,85 @@ test("runCollectorConnector refuses a connector that omits protocol_capabilities
 
     assert.equal(harness.heartbeats.length, 0, "the pre-spawn gate must fire before any heartbeat is sent");
     await assert.rejects(() => readFile(markerPath), "the connector child process must never be spawned");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector fails closed when a connector emits STREAM_EVIDENCE without declaring the capability", async () => {
+  // Wire-level fail-closed: `handleMessage` previously had no branch for
+  // `"STREAM_EVIDENCE"` at all, so it fell through every `if` and was
+  // silently accepted regardless of whether the connector declared the
+  // capability. A connector declaring `protocol_capabilities: []` (i.e. NOT
+  // declaring STREAM_EVIDENCE) whose child process emits a STREAM_EVIDENCE
+  // message must cause the run to reject, not silently succeed.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, covered: 1, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-undeclared-stream-evidence",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-undeclared-stream-evidence",
+        }),
+      /emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability/
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector accepts STREAM_EVIDENCE from a connector that declares the capability", async () => {
+  // Positive companion: the capability gate must not false-positive on a
+  // legitimate emitter that DID declare STREAM_EVIDENCE.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, covered: 1, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-declared-stream-evidence",
+        protocol_capabilities: ["STREAM_EVIDENCE"],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-declared-stream-evidence",
+    });
+
+    assert.equal(result.done?.status, "succeeded");
   } finally {
     await harness.close();
   }

@@ -597,10 +597,9 @@ export function readCollectionScopeFromState(
 
 /**
  * `CollectorConnectorSpec`'s fields beyond the placement-gate contract.
- * Split out because `ConnectorPlacementInput` is now a discriminated union
- * (declared 0.0.2+ vs. legacy 0.0.1), and a TypeScript interface cannot
- * `extends` a union — this intersects with it instead via
- * {@link CollectorConnectorSpec}.
+ * Split out and intersected with `ConnectorPlacementInput` (rather than
+ * folded into one interface) to keep the placement-gate contract itself
+ * minimal and independently reusable — see {@link CollectorConnectorSpec}.
  */
 interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
@@ -1627,6 +1626,14 @@ async function streamConnectorIntoOutbox(
         return;
       }
       bufferedState[message.stream] = message.cursor;
+      return;
+    }
+    if (message.type === "STREAM_EVIDENCE") {
+      if (!input.config.connector.protocol_capabilities.includes("STREAM_EVIDENCE")) {
+        throw new Error(
+          `${input.config.connector.connector_id} emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability`
+        );
+      }
       return;
     }
     if (message.type === "DONE") {

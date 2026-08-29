@@ -38,6 +38,7 @@ import {
   readLocalOutboxDeadLetterErrorSummary,
   recoverLocalCollector,
   removeLocalCollectorProfile,
+  resolveConnectorProtocolCapabilities,
   resolveConnectScopeChoice,
   resolveExecutionRoot,
   resolveInspectionOptions,
@@ -2249,6 +2250,75 @@ test("pdpp-local-collector run refuses --command <bin> without the dev opt-in en
       "/bin/cat",
     ]);
     assert.throws(() => buildConnectorSpec(options), CollectorCustomCommandRefusedError);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ALLOW_CUSTOM_COMMAND_ENV];
+    } else {
+      process.env[ALLOW_CUSTOM_COMMAND_ENV] = previous;
+    }
+  }
+});
+
+test("resolveConnectorProtocolCapabilities forces [] whenever entrypointCommand overrides the launched executable, even if the bundled connector declares capabilities", () => {
+  // The exact defect this fix closes: a bundled connector's declared
+  // protocol_capabilities must NOT carry over to an unrelated, unverified
+  // custom-command binary. None of the 6 real bundled connectors declare a
+  // non-empty protocol_capabilities today, so a fake bundled entry is
+  // constructed here to make the assertion meaningful — this test would
+  // FAIL if the ternary were reverted to `bundled?.protocol_capabilities ??
+  // []` (i.e. ignoring entrypointCommand), because it would then return the
+  // fake connector's declared STREAM_EVIDENCE capability instead of [].
+  const bundledThatDeclaresStreamEvidence = { protocol_capabilities: ["STREAM_EVIDENCE" as const] };
+
+  assert.deepEqual(
+    resolveConnectorProtocolCapabilities(bundledThatDeclaresStreamEvidence, "/some/custom/binary"),
+    [],
+    "a custom-command override must force [] even though the bundled connector declares STREAM_EVIDENCE"
+  );
+
+  // Companion: with no entrypointCommand override, the bundled connector's
+  // declared capabilities pass through unchanged.
+  assert.deepEqual(
+    resolveConnectorProtocolCapabilities(bundledThatDeclaresStreamEvidence, undefined),
+    ["STREAM_EVIDENCE"],
+    "without a custom-command override, the bundled connector's declared capabilities must pass through"
+  );
+
+  // Companion: no bundled connector and no override is the plain custom-command dev path.
+  assert.deepEqual(resolveConnectorProtocolCapabilities(null, "/some/custom/binary"), []);
+  assert.deepEqual(resolveConnectorProtocolCapabilities(null, undefined), []);
+});
+
+test("pdpp-local-collector run --connector <bundled> --command <bin> declares [] protocol_capabilities regardless of the bundled connector's own declaration", () => {
+  // Integration companion at the buildConnectorSpec level, using the real
+  // bundled claude_code connector (whose real protocol_capabilities is []
+  // today, so this alone would not distinguish a reverted ternary — the
+  // unit test above pins the actual behavior difference; this confirms the
+  // real CLI code path reaches resolveConnectorProtocolCapabilities with
+  // entrypointCommand set and bundled non-null, the exact combination the
+  // fix requires).
+  const previous = process.env[ALLOW_CUSTOM_COMMAND_ENV];
+  process.env[ALLOW_CUSTOM_COMMAND_ENV] = "1";
+  try {
+    const options = parseArgs([
+      "run",
+      "--base-url",
+      "http://127.0.0.1:7662",
+      "--connector",
+      "claude_code",
+      "--device-id",
+      "device-1",
+      "--device-token",
+      "token-1",
+      "--connection-id",
+      "src-claude",
+      "--command",
+      "/bin/cat",
+    ]);
+    assert.ok(getBundledConnector("claude_code"), "expected claude_code to resolve as a bundled connector");
+    const spec = buildConnectorSpec(options);
+    assert.equal(spec.command, "/bin/cat");
+    assert.deepEqual([...spec.protocol_capabilities], []);
   } finally {
     if (previous === undefined) {
       delete process.env[ALLOW_CUSTOM_COMMAND_ENV];

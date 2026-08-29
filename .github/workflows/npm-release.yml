@@ -129,38 +129,61 @@ jobs:
 
       # Proves the npm-provenance binding claimed in
       # packages/connector-protocol/scripts/package-artifact.mjs actually
-      # holds for the version just published: `publishConfig.provenance:
-      # true` + this job's OIDC-authenticated publish (id-token: write)
-      # should have made npm record a signed Sigstore attestation binding
-      # the tarball to this exact workflow run (and therefore to
-      # `github.sha`). This has not been exercised against a real npm
-      # registry response yet — neither package has been published from
-      # this workflow before — so the expected `dist.attestations` JSON
-      # shape below should be confirmed against a real `npm view` response
-      # before trusting this gate in production. It is written to fail
-      # loudly (non-zero exit, explicit message) rather than silently pass
-      # if the field is absent or shaped differently than expected.
+      # holds for the version just published — with REAL verification, not
+      # a bare JSON-field presence check. A prior revision of this step only
+      # checked that npm view's `dist.attestations.url` was non-empty, which
+      # proves an attestation URL exists but does not verify the attestation
+      # itself (its Sigstore signature, or that it was produced by THIS
+      # repository's workflow). This step instead:
+      #   1. Downloads the ACTUAL published tarball from the npm registry
+      #      (npm pack <pkg>@<version>) — a real artifact to verify, not a
+      #      local rebuild that could differ from what was published.
+      #   2. Runs `gh attestation verify` against that tarball, which
+      #      downloads the artifact's Sigstore attestation, verifies its
+      #      cryptographic signature, and validates the attestation's
+      #      claimed source repository/workflow identity against an
+      #      expected value — real subject+source+workflow verification.
+      # `--repo PDP-Connect/data-connect` scopes verification to this exact
+      # repository (the strictest single-repo check gh attestation verify
+      # supports via --repo/--owner). `--source-digest "$GITHUB_SHA"`
+      # additionally binds verification to the exact commit SHA that
+      # triggered this workflow run — checked against gh attestation
+      # verify's own --help before adding it, since it is not guaranteed by
+      # --repo alone. Together these prove the published tarball's
+      # attestation was produced by a workflow run in this repository, at
+      # this exact commit — not merely "some repo claiming to be this one."
+      # This has NOT been exercised against a real npm registry response
+      # yet: neither package has been published from this workflow before,
+      # and this sandbox has no working `gh auth` session with real
+      # registry access. It is written to fail loudly (non-zero exit,
+      # explicit message) rather than silently pass if verification fails.
+      # In particular, `--source-digest`'s exact expected format (this uses
+      # the bare `git.commit`-style SHA GitHub Actions attestations
+      # populate) has only been checked against `gh attestation verify
+      # --help`'s description, not against a real attestation from this
+      # workflow — confirm on the first real release and adjust the flag's
+      # value/format if verification fails for a reason unrelated to a
+      # genuine provenance mismatch.
       - name: Verify npm provenance attestation
         if: needs.resolve-version.outputs.new-release-published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version="${{ needs.resolve-version.outputs.new-release-version }}"
           for pkg in "@pdpp/connector-protocol" "@pdpp/collector-runtime"; do
-            echo "Checking npm provenance for ${pkg}@${version}..."
-            metadata="$(npm view "${pkg}@${version}" --json)"
-            attestations_url="$(node -e '
-              const metadata = JSON.parse(process.argv[1]);
-              const url = metadata?.dist?.attestations?.url;
-              if (!url) {
-                console.error(
-                  "FAIL: no dist.attestations.url in npm view output for " + process.argv[2] +
-                  ". Expected an npm-provenance attestation for a package published with " +
-                  "publishConfig.provenance: true from an OIDC-authenticated GitHub Actions job. " +
-                  "Full metadata: " + JSON.stringify(metadata, null, 2)
-                );
-                process.exit(1);
-              }
-              console.log(url);
-            ' "$metadata" "${pkg}@${version}")"
-            echo "Found attestations URL for ${pkg}@${version}: ${attestations_url}"
+            workdir="$(mktemp -d)"
+            echo "Downloading published ${pkg}@${version} from npm registry..."
+            npm pack "${pkg}@${version}" --pack-destination "$workdir" --foreground-scripts=false
+            tarballs=("$workdir"/*.tgz)
+            if [ "${#tarballs[@]}" -ne 1 ]; then
+              echo "FAIL: expected exactly one .tgz in ${workdir} after npm pack ${pkg}@${version}, found ${#tarballs[@]}" >&2
+              exit 1
+            fi
+            tarball="${tarballs[0]}"
+            echo "Verifying Sigstore attestation for ${tarball}..."
+            gh attestation verify "$tarball" \
+              --repo PDP-Connect/data-connect \
+              --source-digest "$GITHUB_SHA"
+            rm -rf "$workdir"
           done

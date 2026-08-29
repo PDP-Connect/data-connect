@@ -3055,6 +3055,29 @@ function backupSqliteDb(outbox: Pick<LocalDeviceOutbox, "backupTo">, dbPath: str
   return backupPath;
 }
 
+/**
+ * Resolve the `protocol_capabilities` for a spec being built by
+ * {@link buildConnectorSpec}.
+ *
+ * Pulled out as its own pure function so the "custom command overrides the
+ * launched executable, so it must also override the capability grant" rule
+ * is independently testable without needing a bundled connector that
+ * actually declares a non-empty `protocol_capabilities` (none of the 6 real
+ * bundled connectors do today).
+ *
+ * Whenever `entrypointCommand` is set, the executable actually launched is
+ * the custom-command override, not `bundled`'s own resolved entry — so the
+ * result MUST be `[]` regardless of what `bundled` declares. The capability
+ * grant binds to the executable that is ACTUALLY launched, not to an
+ * unrelated `connector_id` lookup that happens to resolve alongside it.
+ */
+export function resolveConnectorProtocolCapabilities(
+  bundled: Pick<BundledConnectorEntry, "protocol_capabilities"> | null,
+  entrypointCommand: string | null | undefined
+): BundledConnectorEntry["protocol_capabilities"] {
+  return entrypointCommand ? [] : (bundled?.protocol_capabilities ?? []);
+}
+
 export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec {
   if (!options.connector) {
     throw new CollectorUsageError("connector required");
@@ -3101,20 +3124,22 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
     // boundary honoured; otherwise it is declassified, never falsely claimed.
     ...(bundled?.enforces_source_roots ? { enforcesSourceRoots: true } : {}),
     // Every bundled connector declares protocol_capabilities explicitly
-    // (even as []). The `--command <bin>` monorepo-development escape hatch
-    // (customAllowed) is the one path where `bundled` is null: that path is
-    // an explicit operator opt-in (PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1)
-    // already gated by CollectorCustomCommandRefusedError above, pointing at
-    // an arbitrary operator-supplied dev binary with no `LocalCollectorDefinition`
-    // backing it. That is NOT evidence of a legacy 0.0.1 connector-protocol
-    // wire contract — an operator opt-in to run arbitrary code says nothing
-    // about the wire contract the code speaks. Since a custom-command entry
-    // has no declared connector and cannot possibly emit `STREAM_EVIDENCE`
-    // (it is not a declared, registered connector), it correctly declares
-    // protocol_capabilities: [] — an explicit, honest declaration that this
-    // arbitrary dev binary requires zero protocol capabilities — rather than
-    // asserting a fake legacy identity via `protocol_contract_version`.
-    protocol_capabilities: bundled?.protocol_capabilities ?? [],
+    // (even as []). `options.entrypointCommand` set means the executable
+    // actually being launched is the `--command <bin>` override, not the
+    // bundled connector's own resolved entry — `bundled` can be non-null
+    // alongside it (e.g. `--connector codex --command /some/custom/binary`
+    // resolves `bundled` for codex AND sets entrypointCommand). The
+    // capability declaration must bind to the executable that is ACTUALLY
+    // launched, not to an unrelated `connector_id` lookup: forcing []
+    // whenever entrypointCommand is set means an operator cannot combine a
+    // bundled connector's declared capabilities with an arbitrary,
+    // unverified binary. This path is already gated by an explicit operator
+    // opt-in (PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1, enforced by
+    // CollectorCustomCommandRefusedError above), but that opt-in says
+    // nothing about the wire contract the custom binary actually speaks —
+    // it correctly declares protocol_capabilities: [] regardless of any
+    // bundled connector metadata resolved alongside it.
+    protocol_capabilities: resolveConnectorProtocolCapabilities(bundled, options.entrypointCommand),
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
     runtime_requirements: { bindings: bundled?.bindings ?? {} },
   };

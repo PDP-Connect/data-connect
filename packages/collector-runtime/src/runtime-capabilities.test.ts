@@ -72,19 +72,6 @@ test("collector runtime advertises STREAM_EVIDENCE with its unique protocol vers
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), true);
 });
 
-test("directional compatibility: new runtime accepts an old, legacy 0.0.1 connector", () => {
-  assert.deepEqual(
-    evaluatePlacement(
-      { connector_id: "old-connector", protocol_contract_version: "0.0.1" },
-      COLLECTOR_RUNTIME_CAPABILITIES
-    ),
-    {
-      kind: "ok",
-      satisfied: [],
-    }
-  );
-});
-
 test("directional compatibility: old fail-closed runtime rejects a STREAM_EVIDENCE emitter", () => {
   assert.deepEqual(diffRequiredProtocolCapabilities(streamEvidenceConnector, oldFailClosedRuntime), [
     "STREAM_EVIDENCE",
@@ -121,11 +108,10 @@ test("boundary_claim remains optional and does not require a protocol capability
     type: "SKIP_RESULT",
   } as const;
   assert.equal(skipResult.boundary_claim, "provider_history_boundary");
-  // protocol_contract_version: "0.0.1" stands in for a pre-0.0.2 connector
-  // that predates protocol_capabilities entirely; boundary_claim itself
-  // needs no capability declaration on either side of that line.
+  // An explicitly declared, empty protocol_capabilities connector needs no
+  // capability declaration beyond that to use boundary_claim.
   assert.deepEqual(
-    evaluatePlacement({ connector_id: "boundary-only", protocol_contract_version: "0.0.1" }, oldFailClosedRuntime),
+    evaluatePlacement({ connector_id: "boundary-only", protocol_capabilities: [] }, oldFailClosedRuntime),
     {
       kind: "ok",
       satisfied: [],
@@ -227,20 +213,13 @@ test("assertPlacementOrThrow does not name optional bindings as missing", () => 
   assert.deepEqual([...satisfied], ["network"]);
 });
 
-// TypeScript's discriminated union makes an object matching NEITHER branch
-// (no `protocol_capabilities`, no `protocol_contract_version: "0.0.1"`)
-// unconstructable for well-typed callers. These fixtures cast past the type
-// checker: they deliberately test the runtime guard against a malformed
-// value a plain-JS caller could still produce.
-test("evaluatePlacement: a connector matching neither union branch is undeclared, not ok", () => {
-  const undeclared = { connector_id: "forgot-to-declare" } as unknown as ConnectorPlacementInput;
-  const decision = evaluatePlacement(undeclared, COLLECTOR_RUNTIME_CAPABILITIES);
-  assert.equal(decision.kind, "undeclared_capabilities");
-  if (decision.kind === "undeclared_capabilities") {
-    assert.equal(decision.connectorId, "forgot-to-declare");
-    assert.equal(decision.runtime, "collector");
-  }
-});
+// `ConnectorPlacementInput` requires `protocol_capabilities` as an array at
+// the type level (there is no more `protocol_contract_version: "0.0.1"`
+// legacy escape hatch — that bypass was removed entirely because nothing
+// separated a genuine legacy artifact from a caller merely claiming to be
+// one). These fixtures cast past the type checker: they deliberately test
+// the runtime guard against a malformed value a plain-JS caller (e.g. one
+// round-tripped through `JSON.parse`) could still produce.
 
 test("evaluatePlacement: an explicit empty protocol_capabilities array is always allowed, no trust flag needed", () => {
   const explicitlyEmpty = { connector_id: "explicit-empty", protocol_capabilities: [] };
@@ -250,20 +229,63 @@ test("evaluatePlacement: an explicit empty protocol_capabilities array is always
   });
 });
 
-test("evaluatePlacement: protocol_contract_version '0.0.1' treats an omitted declaration as empty", () => {
-  const legacyContract = { connector_id: "trusted-legacy", protocol_contract_version: "0.0.1" as const };
-  assert.deepEqual(evaluatePlacement(legacyContract, COLLECTOR_RUNTIME_CAPABILITIES), {
-    kind: "ok",
-    satisfied: [],
-  });
+test("evaluatePlacement: protocol_capabilities omitted entirely is rejected as undeclared, not silently []", () => {
+  // Proves there is no silent `[]` fallback for a malformed object: an
+  // object that OMITS `protocol_capabilities` entirely (the exact shape a
+  // forged legacy-bypass caller, or a JSON payload missing the field,
+  // would produce) must be gated as `"undeclared_capabilities"`, never
+  // treated as an empty declaration.
+  const omitted = { connector_id: "forgot-to-declare" } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(omitted, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "forgot-to-declare");
+    assert.equal(decision.runtime, "collector");
+  }
 });
 
-test("evaluatePlacement: an object matching neither union branch is gated as undeclared", () => {
-  const malformed = { connector_id: "explicitly-untrusted" } as unknown as ConnectorPlacementInput;
-  assert.equal(evaluatePlacement(malformed, COLLECTOR_RUNTIME_CAPABILITIES).kind, "undeclared_capabilities");
+test("evaluatePlacement: a non-array protocol_capabilities (string) is rejected, not silently accepted", () => {
+  // The exploit this round's review found: `{ protocol_contract_version:
+  // "forged" }`-shaped objects, or any object where `protocol_capabilities`
+  // is present but not actually an array, previously slipped past the
+  // `"protocol_capabilities" in connector` key-presence check. A string
+  // value (which is iterable/`.filter`-less but not an Array) must be
+  // rejected outright rather than crashing with an unrelated TypeError or
+  // being silently treated as declared.
+  const stringCapabilities = {
+    connector_id: "forged-string-capabilities",
+    protocol_capabilities: "STREAM_EVIDENCE",
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(stringCapabilities, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "forged-string-capabilities");
+  }
 });
 
-test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable code for an undeclared connector", () => {
+test("evaluatePlacement: a null protocol_capabilities is rejected, not silently accepted", () => {
+  const nullCapabilities = {
+    connector_id: "nullish-capabilities",
+    protocol_capabilities: null,
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(nullCapabilities, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "nullish-capabilities");
+  }
+});
+
+// TypeScript itself now refuses `protocol_contract_version` as a field of
+// `ConnectorPlacementInput` — there is no branch of the type that accepts
+// it, so a caller attempting the old legacy-bypass shape gets a compile
+// error, not a runtime decision. (Verified interactively: constructing
+// `{ connector_id: "x", protocol_contract_version: "0.0.1" }` as a
+// `ConnectorPlacementInput` fails `tsc --noEmit` with "Object literal may
+// only specify known properties, and 'protocol_contract_version' does not
+// exist in type 'ConnectorPlacementInput'." This file intentionally
+// contains no such literal — the type deletion itself is the proof.)
+
+test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable code for a malformed connector", () => {
   assert.throws(
     () =>
       assertPlacementOrThrow(
@@ -277,7 +299,7 @@ test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable
         assert.equal(err.connectorId, "forgot-to-declare");
         assert.equal(err.runtime, "collector");
         assert.match(err.message, /protocol_capabilities/);
-        assert.match(err.message, /protocol_contract_version/);
+        assert.doesNotMatch(err.message, /protocol_contract_version/);
       }
       return true;
     }

@@ -143,6 +143,24 @@ async function cloneCommittedSourceTree(ref = "HEAD") {
   // itself is the same fixed input either way a normal `npm install` would
   // produce it.
   await symlink(join(packageRoot, "node_modules"), join(clonedPackageRoot, "node_modules"));
+  // This npm workspace HOISTS shared devDependencies: `@types/node` lives
+  // only at the real repo root's node_modules/@types/node, not inside this
+  // package's own node_modules/@types (which is empty). TypeScript's default
+  // @types auto-inclusion resolves by walking up parent directories looking
+  // for node_modules/@types; in the real repo that walk reaches the repo
+  // root and finds it, but in this isolated clone tree there is no repo
+  // root above the clone to walk up to, so the walk fails with `TS2688:
+  // Cannot find type definition file for 'node'`. Symlinking a second
+  // node_modules at the CLONE TREE'S OWN ROOT (standing in for the repo
+  // root) — not inside clonedPackageRoot — replicates the real repo's shape:
+  // clonedPackageRoot sits at the same relative depth beneath cloneDir
+  // (packages/connector-protocol) as packageRoot does beneath repoRoot, so
+  // the ancestor walk from the cloned package finds the hoisted
+  // @types/node at the same relative depth it would in the real repo. Kept
+  // alongside the package-local symlink above (not replacing it): the
+  // package-local one may resolve some packages faster/differently, and
+  // removing it could change other behavior.
+  await symlink(join(repoRoot, "node_modules"), join(cloneDir, "node_modules"));
   return { cloneDir, clonedPackageRoot };
 }
 
