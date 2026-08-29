@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  CONNECTOR_PROTOCOL_VERSION,
+  STREAM_EVIDENCE_CAPABILITY,
   type RuntimeContinuationFact,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
@@ -137,4 +140,13 @@ test("the public barrel exports the SKIP_RESULT boundary claim", () => {
   const claim: SkipResultBoundaryClaim = "provider_history_boundary";
 
   assert.equal(claim, "provider_history_boundary");
+});
+
+test("the package identity matches the protocol wire-version constant", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    version?: unknown;
+  };
+
+  assert.equal(CONNECTOR_PROTOCOL_VERSION, packageJson.version);
+  assert.equal(STREAM_EVIDENCE_CAPABILITY, "STREAM_EVIDENCE");
 });

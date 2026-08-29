@@ -136,11 +136,13 @@ export {
   type ConnectorPlacementInput,
   type ConnectorRuntimeRequirements,
   diffRequiredBindings,
+  diffRequiredProtocolCapabilities,
   evaluatePlacement,
   type PlacementDecision,
   PROVIDER_RUNTIME_CAPABILITIES,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
   type RuntimeBindingName,
+  type RuntimeCapabilityName,
   RuntimeCapabilityMismatchError,
   type RuntimeCapabilityProfile,
 } from "./runtime-capabilities.ts";

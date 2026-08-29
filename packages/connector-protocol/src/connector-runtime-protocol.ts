@@ -22,6 +22,15 @@
 
 // ─── Protocol message shapes ────────────────────────────────────────────
 
+/** Wire version whose additions require a coordinated runtime rollout. */
+export const CONNECTOR_PROTOCOL_VERSION = "0.0.2" as const;
+
+/** Capability required by a connector that emits STREAM_EVIDENCE. */
+export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
+
+/** Protocol capabilities that can be advertised by a connector or runtime. */
+export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY;
+
 /** A single record passing through emit / emitRecord. */
 export interface RecordData {
   id?: string | number | null;
@@ -491,7 +500,7 @@ export type EmittedMessage =
       reason: string;
       message: string;
       /**
-       * A connector's STRUCTURED claim that the shortfall is a permanent
+       * A connector's STRUCTURED, optional claim that the shortfall is a permanent
        * provider boundary rather than a fetch that could be retried into
        * success — e.g. the walk reached the oldest item the provider will
        * serve while its own lifetime total still counted more.
@@ -503,7 +512,9 @@ export type EmittedMessage =
        * the servable denominator — so a connector cannot excuse its own gap
        * by asserting this.
        *
-       * Optional: a connector that cannot prove a boundary must omit it.
+       * Optional: a connector that cannot prove a boundary must omit it. This
+       * field does not require a protocol capability; it is compatible with
+       * runtimes that ignore unknown optional fields.
        *
        * A CLOSED vocabulary, deliberately not `string`. The reference
        * implementation's persistence allowlist accepts exactly one value, so a

@@ -3089,6 +3089,7 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
     // Only a connector that declared it prunes by root may have a roots
     // boundary honoured; otherwise it is declassified, never falsely claimed.
     ...(bundled?.enforces_source_roots ? { enforcesSourceRoots: true } : {}),
+    ...(bundled?.protocol_capabilities ? { protocol_capabilities: bundled.protocol_capabilities } : {}),
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
     runtime_requirements: { bindings: bundled?.bindings ?? {} },
   };

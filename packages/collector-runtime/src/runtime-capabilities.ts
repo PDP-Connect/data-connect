@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { CONNECTOR_PROTOCOL_VERSION, type ConnectorProtocolCapability } from "@pdpp/connector-protocol";
+
 /**
  * Runtime capability advertisement and pre-spawn placement gate.
  *
@@ -19,6 +21,10 @@
 export type RuntimeBindingName = "network" | "browser" | "filesystem" | "local_device";
 
 export interface RuntimeCapabilityProfile {
+  /** Connector-protocol version this runtime recognizes. */
+  readonly protocolVersion: string;
+  /** Protocol capabilities this runtime advertises as available. */
+  readonly protocolCapabilities: ReadonlySet<ConnectorProtocolCapability>;
   /** Bindings this runtime advertises as available. */
   readonly bindings: ReadonlySet<RuntimeBindingName>;
   /** Stable identifier of the runtime. Used in diagnostics. */
@@ -42,6 +48,8 @@ export interface RuntimeCapabilityProfile {
 export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   bindings: new Set<RuntimeBindingName>(["network", "filesystem"]),
   id: "provider",
+  protocolCapabilities: new Set<ConnectorProtocolCapability>(),
+  protocolVersion: "0.0.1",
 };
 
 /**
@@ -54,6 +62,8 @@ export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   bindings: new Set<RuntimeBindingName>(["network", "browser", "filesystem", "local_device"]),
   id: "collector",
+  protocolCapabilities: new Set<ConnectorProtocolCapability>(["STREAM_EVIDENCE"]),
+  protocolVersion: CONNECTOR_PROTOCOL_VERSION,
 };
 
 export interface ConnectorRuntimeRequirements {
@@ -62,14 +72,18 @@ export interface ConnectorRuntimeRequirements {
 
 export interface ConnectorPlacementInput {
   readonly connector_id: string;
+  /** Protocol capabilities the connector will use on the wire. */
+  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
   readonly runtime_requirements?: ConnectorRuntimeRequirements;
 }
+
+export type RuntimeCapabilityName = RuntimeBindingName | ConnectorProtocolCapability;
 
 export type PlacementDecision =
   | { readonly kind: "ok"; readonly satisfied: readonly RuntimeBindingName[] }
   | {
       readonly kind: "missing_capability";
-      readonly missing: readonly RuntimeBindingName[];
+      readonly missing: readonly RuntimeCapabilityName[];
       readonly runtime: string;
       readonly connectorId: string;
     };
@@ -94,6 +108,17 @@ export function diffRequiredBindings(
 }
 
 /**
+ * Returns the protocol capabilities a connector requires that the runtime
+ * does not advertise. A missing capability is a pre-spawn incompatibility.
+ */
+export function diffRequiredProtocolCapabilities(
+  connector: ConnectorPlacementInput,
+  runtime: RuntimeCapabilityProfile
+): ConnectorProtocolCapability[] {
+  return (connector.protocol_capabilities ?? []).filter((capability) => !runtime.protocolCapabilities.has(capability));
+}
+
+/**
  * Pre-spawn placement decision. Compares connector requirements against
  * runtime capabilities and returns a typed result the orchestrator can
  * branch on.
@@ -102,7 +127,9 @@ export function evaluatePlacement(
   connector: ConnectorPlacementInput,
   runtime: RuntimeCapabilityProfile
 ): PlacementDecision {
-  const missing = diffRequiredBindings(connector, runtime);
+  const missingBindings = diffRequiredBindings(connector, runtime);
+  const missingProtocolCapabilities = diffRequiredProtocolCapabilities(connector, runtime);
+  const missing: RuntimeCapabilityName[] = [...missingBindings, ...missingProtocolCapabilities];
   if (missing.length === 0) {
     const declared = connector.runtime_requirements?.bindings ?? {};
     const satisfied = (Object.keys(declared) as RuntimeBindingName[]).filter(
@@ -126,17 +153,17 @@ export const RUNTIME_CAPABILITY_MISMATCH_CODE = "runtime_capability_mismatch";
 
 export class RuntimeCapabilityMismatchError extends Error {
   readonly code: typeof RUNTIME_CAPABILITY_MISMATCH_CODE;
-  readonly missing: readonly RuntimeBindingName[];
+  readonly missing: readonly RuntimeCapabilityName[];
   readonly runtime: string;
   readonly connectorId: string;
 
   constructor(args: {
     connectorId: string;
     runtime: string;
-    missing: readonly RuntimeBindingName[];
+    missing: readonly RuntimeCapabilityName[];
   }) {
     super(
-      `Runtime '${args.runtime}' cannot satisfy connector '${args.connectorId}': missing bindings [${args.missing.join(", ")}]. ` +
+      `Runtime '${args.runtime}' cannot satisfy connector '${args.connectorId}': missing capabilities [${args.missing.join(", ")}]. ` +
         "Run this connector in a runtime that advertises the required bindings (typically the local collector runtime)."
     );
     this.name = "RuntimeCapabilityMismatchError";

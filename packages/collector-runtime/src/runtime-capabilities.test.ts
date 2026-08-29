@@ -7,6 +7,7 @@ import {
   assertPlacementOrThrow,
   COLLECTOR_RUNTIME_CAPABILITIES,
   diffRequiredBindings,
+  diffRequiredProtocolCapabilities,
   evaluatePlacement,
   PROVIDER_RUNTIME_CAPABILITIES,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
@@ -39,6 +40,73 @@ const localDeviceConnector = {
     },
   },
 };
+
+const oldFailClosedRuntime = {
+  bindings: COLLECTOR_RUNTIME_CAPABILITIES.bindings,
+  id: "collector-v0.0.1",
+  protocolCapabilities: new Set<never>(),
+  protocolVersion: "0.0.1",
+};
+
+const streamEvidenceConnector = {
+  connector_id: "stream-evidence-connector",
+  protocol_capabilities: ["STREAM_EVIDENCE" as const],
+  runtime_requirements: { bindings: {} },
+};
+
+test("collector runtime advertises STREAM_EVIDENCE with its unique protocol version", () => {
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, "0.0.2");
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), true);
+});
+
+test("directional compatibility: new runtime accepts an old connector", () => {
+  assert.deepEqual(evaluatePlacement({ connector_id: "old-connector" }, COLLECTOR_RUNTIME_CAPABILITIES), {
+    kind: "ok",
+    satisfied: [],
+  });
+});
+
+test("directional compatibility: old fail-closed runtime rejects a STREAM_EVIDENCE emitter", () => {
+  assert.deepEqual(diffRequiredProtocolCapabilities(streamEvidenceConnector, oldFailClosedRuntime), [
+    "STREAM_EVIDENCE",
+  ]);
+  const decision = evaluatePlacement(streamEvidenceConnector, oldFailClosedRuntime);
+  assert.equal(decision.kind, "missing_capability");
+  if (decision.kind === "missing_capability") {
+    assert.deepEqual(decision.missing, ["STREAM_EVIDENCE"]);
+    assert.equal(decision.runtime, "collector-v0.0.1");
+  }
+  assert.throws(
+    () => assertPlacementOrThrow(streamEvidenceConnector, oldFailClosedRuntime),
+    (error: unknown) => {
+      assert.ok(error instanceof RuntimeCapabilityMismatchError);
+      if (error instanceof RuntimeCapabilityMismatchError) {
+        assert.deepEqual(error.missing, ["STREAM_EVIDENCE"]);
+        assert.match(error.message, /missing capabilities \[STREAM_EVIDENCE\]/);
+      }
+      return true;
+    }
+  );
+});
+
+test("directional compatibility: new runtime accepts a STREAM_EVIDENCE emitter", () => {
+  assert.equal(evaluatePlacement(streamEvidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES).kind, "ok");
+});
+
+test("boundary_claim remains optional and does not require a protocol capability", () => {
+  const skipResult = {
+    boundary_claim: "provider_history_boundary",
+    message: "provider boundary",
+    reason: "provider_history_boundary",
+    stream: "messages",
+    type: "SKIP_RESULT",
+  } as const;
+  assert.equal(skipResult.boundary_claim, "provider_history_boundary");
+  assert.deepEqual(evaluatePlacement({ connector_id: "boundary-only" }, oldFailClosedRuntime), {
+    kind: "ok",
+    satisfied: [],
+  });
+});
 
 test("provider runtime advertises network and filesystem but not browser or local_device", () => {
   assert.equal(PROVIDER_RUNTIME_CAPABILITIES.bindings.has("network"), true);

@@ -17,3 +17,26 @@ Bottom of the dependency graph — this package depends on nothing in `@pdpp/col
 ## Status
 
 Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), under `packages/connector-protocol`.
+
+## Protocol rollout
+
+The `0.0.2` package adds the `STREAM_EVIDENCE` wire message. It is a breaking
+wire addition for fail-closed runtimes that do not recognize that message, so
+the runtime must be upgraded before a connector that emits it is distributed.
+
+| Connector | Runtime | Result |
+| --- | --- | --- |
+| old connector | new runtime | compatible; no new message is emitted |
+| new connector emitting `STREAM_EVIDENCE` | old fail-closed runtime | incompatible; pre-spawn gate rejects it |
+| new connector | new runtime advertising `STREAM_EVIDENCE` | compatible |
+
+Connectors declare required protocol capabilities with
+`protocol_capabilities`. The runtime advertises `protocolVersion` and
+`protocolCapabilities`, and rejects missing capabilities before spawning a
+connector. `SKIP_RESULT.boundary_claim` is optional and does not require a
+protocol capability.
+
+The committed `artifact.json` binds the package version and source-input digest
+to a reproducible npm tarball digest. Run `npm run artifact:verify` after any
+protocol or package build change. Run `npm run artifact:generate` when the
+expected artifact metadata must be regenerated.

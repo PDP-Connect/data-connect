@@ -17,6 +17,8 @@
  * collector build re-exports.
  */
 
+import type { ConnectorProtocolCapability } from "./connector-runtime-protocol.ts";
+
 /** A runtime binding the connector requires from the collector host. */
 export interface LocalCollectorBinding {
   readonly required: boolean;
@@ -27,6 +29,8 @@ export interface LocalCollectorDefinition {
   readonly bindings: Readonly<Record<string, LocalCollectorBinding>>;
   /** Stable connector id (matches the manifest + ingest envelope). */
   readonly connector_id: string;
+  /** Protocol capabilities this connector requires from its collector runtime. */
+  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
   /**
    * Whether this connector actually ENFORCES an owner-declared path root at
    * enumeration time — pruning subtrees before it opens, reads, or parses their

@@ -40,6 +40,7 @@ export type {
   AssistanceRequest,
   AssistanceResponseContract,
   AssistanceSensitivity,
+  ConnectorProtocolCapability,
   DetailCoverageMessage,
   DetailGapMessage,
   DetailGapRecoveredMessage,
@@ -54,6 +55,7 @@ export type {
   StreamScope,
   ValidateRecord,
 } from "./connector-runtime-protocol.ts";
+export { CONNECTOR_PROTOCOL_VERSION, STREAM_EVIDENCE_CAPABILITY } from "./connector-runtime-protocol.ts";
 export { isMainModule } from "./is-main-module.ts";
 export {
   emitToStdout,
