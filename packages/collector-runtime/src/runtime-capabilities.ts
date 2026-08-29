@@ -62,11 +62,21 @@ export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * A local collector runs on a host the operator owns; it can render a
  * visible browser, reach the network, read the local filesystem, and
  * see local-device-style sources (Codex CLI, Claude Code, iMessage).
+ *
+ * Does NOT advertise `STREAM_EVIDENCE`: no local-collector connector
+ * (`packages/local-collector/src/generated/collector-definitions.generated.ts`)
+ * emits it today, and `collector-runner.ts`'s `handleMessage` only validates a
+ * `STREAM_EVIDENCE` message and discards it — there is no durable outbox path
+ * for it yet. Advertising the capability without a durable delivery path is
+ * false advertising. `STREAM_EVIDENCE` is currently emitted only by the Gmail
+ * connector on the server/reference runtime (a separate runtime profile in a
+ * separate repository). Durable device-side propagation is real future work,
+ * deliberately deferred rather than half-built here.
  */
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   bindings: new Set<RuntimeBindingName>(["network", "browser", "filesystem", "local_device"]),
   id: "collector",
-  protocolCapabilities: new Set<ConnectorProtocolCapability>(["STREAM_EVIDENCE"]),
+  protocolCapabilities: new Set<ConnectorProtocolCapability>(),
   protocolVersion: CONNECTOR_PROTOCOL_VERSION,
 };
 
