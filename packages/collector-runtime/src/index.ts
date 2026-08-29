@@ -141,8 +141,10 @@ export {
   type PlacementDecision,
   PROVIDER_RUNTIME_CAPABILITIES,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
+  RUNTIME_CAPABILITY_UNDECLARED_CODE,
   type RuntimeBindingName,
   type RuntimeCapabilityName,
   RuntimeCapabilityMismatchError,
   type RuntimeCapabilityProfile,
+  RuntimeCapabilityUndeclaredError,
 } from "./runtime-capabilities.ts";

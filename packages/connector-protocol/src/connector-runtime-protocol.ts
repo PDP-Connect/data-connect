@@ -500,17 +500,24 @@ export type EmittedMessage =
       reason: string;
       message: string;
       /**
-       * A connector's STRUCTURED, optional claim that the shortfall is a permanent
-       * provider boundary rather than a fetch that could be retried into
-       * success — e.g. the walk reached the oldest item the provider will
-       * serve while its own lifetime total still counted more.
+       * A connector's STRUCTURED, optional, DISCLOSURE-ONLY claim that the
+       * shortfall is a permanent provider boundary rather than a fetch that
+       * could be retried into success — e.g. the walk reached the oldest
+       * item the provider will serve while its own lifetime total still
+       * counted more.
        *
-       * Deliberately a typed field rather than free-form `diagnostics` prose:
-       * the reference implementation reads this claim and never the message
-       * text. It is NOT sufficient on its own — an independently recorded,
-       * current coverage horizon must agree before anything is excluded from
-       * the servable denominator — so a connector cannot excuse its own gap
-       * by asserting this.
+       * Disclosure-only, full stop: this field NEVER affects, reduces, or
+       * excludes anything from the servable denominator, coverage
+       * calculation, or connection/system health rollup — regardless of
+       * whether an independently recorded coverage horizon happens to agree
+       * with it. There is no corroboration mechanism, today or planned, by
+       * which a matching horizon turns this claim into something that
+       * changes what counts as covered or considered. A connector cannot
+       * excuse its own gap by asserting this; it can only explain one.
+       *
+       * Deliberately a typed field rather than free-form `diagnostics`
+       * prose: the reference implementation reads this claim (for
+       * diagnostics/operator-facing display) and never the message text.
        *
        * Optional: a connector that cannot prove a boundary must omit it. This
        * field does not require a protocol capability; it is compatible with

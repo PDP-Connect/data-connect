@@ -11,12 +11,18 @@ import {
   evaluatePlacement,
   PROVIDER_RUNTIME_CAPABILITIES,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
+  RUNTIME_CAPABILITY_UNDECLARED_CODE,
   RuntimeCapabilityMismatchError,
+  RuntimeCapabilityUndeclaredError,
 } from "./runtime-capabilities.ts";
 
+// These fixtures exercise binding gating only, not protocol-capability
+// declaration, so they mark trusted_legacy_artifact to opt out of the
+// separate "undeclared_capabilities" gate covered by its own tests below.
 const apiConnector = {
   connector_id: "github",
   runtime_requirements: { bindings: { network: { required: true } } },
+  trusted_legacy_artifact: true,
 };
 
 const browserConnector = {
@@ -24,11 +30,13 @@ const browserConnector = {
   runtime_requirements: {
     bindings: { browser: { required: true }, network: { required: true } },
   },
+  trusted_legacy_artifact: true,
 };
 
 const codexConnector = {
   connector_id: "codex",
   runtime_requirements: { bindings: { filesystem: { required: true } } },
+  trusted_legacy_artifact: true,
 };
 
 const localDeviceConnector = {
@@ -39,6 +47,7 @@ const localDeviceConnector = {
       local_device: { required: true },
     },
   },
+  trusted_legacy_artifact: true,
 };
 
 const oldFailClosedRuntime = {
@@ -59,11 +68,14 @@ test("collector runtime advertises STREAM_EVIDENCE with its unique protocol vers
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), true);
 });
 
-test("directional compatibility: new runtime accepts an old connector", () => {
-  assert.deepEqual(evaluatePlacement({ connector_id: "old-connector" }, COLLECTOR_RUNTIME_CAPABILITIES), {
-    kind: "ok",
-    satisfied: [],
-  });
+test("directional compatibility: new runtime accepts an old, trusted-legacy connector", () => {
+  assert.deepEqual(
+    evaluatePlacement({ connector_id: "old-connector", trusted_legacy_artifact: true }, COLLECTOR_RUNTIME_CAPABILITIES),
+    {
+      kind: "ok",
+      satisfied: [],
+    }
+  );
 });
 
 test("directional compatibility: old fail-closed runtime rejects a STREAM_EVIDENCE emitter", () => {
@@ -102,10 +114,16 @@ test("boundary_claim remains optional and does not require a protocol capability
     type: "SKIP_RESULT",
   } as const;
   assert.equal(skipResult.boundary_claim, "provider_history_boundary");
-  assert.deepEqual(evaluatePlacement({ connector_id: "boundary-only" }, oldFailClosedRuntime), {
-    kind: "ok",
-    satisfied: [],
-  });
+  // trusted_legacy_artifact: true stands in for a pre-0.0.2 connector that
+  // predates protocol_capabilities entirely; boundary_claim itself needs no
+  // capability declaration on either side of that line.
+  assert.deepEqual(
+    evaluatePlacement({ connector_id: "boundary-only", trusted_legacy_artifact: true }, oldFailClosedRuntime),
+    {
+      kind: "ok",
+      satisfied: [],
+    }
+  );
 });
 
 test("provider runtime advertises network and filesystem but not browser or local_device", () => {
@@ -195,7 +213,56 @@ test("assertPlacementOrThrow does not name optional bindings as missing", () => 
     runtime_requirements: {
       bindings: { browser: { required: false }, network: { required: true } },
     },
+    trusted_legacy_artifact: true,
   };
   const satisfied = assertPlacementOrThrow(optional, PROVIDER_RUNTIME_CAPABILITIES);
   assert.deepEqual([...satisfied], ["network"]);
+});
+
+test("evaluatePlacement: a connector that omits protocol_capabilities without trusted_legacy_artifact is undeclared, not ok", () => {
+  const undeclared = { connector_id: "forgot-to-declare" };
+  const decision = evaluatePlacement(undeclared, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "forgot-to-declare");
+    assert.equal(decision.runtime, "collector");
+  }
+});
+
+test("evaluatePlacement: an explicit empty protocol_capabilities array is always allowed, no trust flag needed", () => {
+  const explicitlyEmpty = { connector_id: "explicit-empty", protocol_capabilities: [] };
+  assert.deepEqual(evaluatePlacement(explicitlyEmpty, COLLECTOR_RUNTIME_CAPABILITIES), {
+    kind: "ok",
+    satisfied: [],
+  });
+});
+
+test("evaluatePlacement: trusted_legacy_artifact true treats an omitted declaration as empty", () => {
+  const trustedLegacy = { connector_id: "trusted-legacy", trusted_legacy_artifact: true };
+  assert.deepEqual(evaluatePlacement(trustedLegacy, COLLECTOR_RUNTIME_CAPABILITIES), {
+    kind: "ok",
+    satisfied: [],
+  });
+});
+
+test("evaluatePlacement: trusted_legacy_artifact false still gates an omitted declaration as undeclared", () => {
+  const explicitlyUntrusted = { connector_id: "explicitly-untrusted", trusted_legacy_artifact: false };
+  assert.equal(evaluatePlacement(explicitlyUntrusted, COLLECTOR_RUNTIME_CAPABILITIES).kind, "undeclared_capabilities");
+});
+
+test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable code for an undeclared connector", () => {
+  assert.throws(
+    () => assertPlacementOrThrow({ connector_id: "forgot-to-declare" }, COLLECTOR_RUNTIME_CAPABILITIES),
+    (err: unknown) => {
+      assert.ok(err instanceof RuntimeCapabilityUndeclaredError);
+      if (err instanceof RuntimeCapabilityUndeclaredError) {
+        assert.equal(err.code, RUNTIME_CAPABILITY_UNDECLARED_CODE);
+        assert.equal(err.connectorId, "forgot-to-declare");
+        assert.equal(err.runtime, "collector");
+        assert.match(err.message, /protocol_capabilities/);
+        assert.match(err.message, /trusted_legacy_artifact/);
+      }
+      return true;
+    }
+  );
 });

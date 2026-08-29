@@ -628,7 +628,18 @@ async function main(): Promise<void> {
     writeJson({
       runtime: COLLECTOR_RUNTIME_CAPABILITIES.id,
       bindings: [...COLLECTOR_RUNTIME_CAPABILITIES.bindings],
+      // Legacy HTTP-header-versioning concept from @pdpp/collector-runtime's
+      // collector-protocol.ts — distinct from, and unrelated to, the
+      // connector-protocol package version below. Kept for backward
+      // compatibility with existing operator scripts.
       collector_protocol_version: COLLECTOR_PROTOCOL_VERSION,
+      // The @pdpp/connector-protocol package version and capability set this
+      // runtime advertises for pre-spawn placement gating (see
+      // runtime-capabilities.ts). Derived directly from
+      // COLLECTOR_RUNTIME_CAPABILITIES so this output can never drift from
+      // what evaluatePlacement actually checks.
+      protocol_version: COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion,
+      protocol_capabilities: [...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities],
       bundled_connectors: BUNDLED_CONNECTOR_IDS,
     });
     return;
@@ -3090,6 +3101,19 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
     // boundary honoured; otherwise it is declassified, never falsely claimed.
     ...(bundled?.enforces_source_roots ? { enforcesSourceRoots: true } : {}),
     ...(bundled?.protocol_capabilities ? { protocol_capabilities: bundled.protocol_capabilities } : {}),
+    // Every bundled connector now declares protocol_capabilities explicitly
+    // (even as []), so `bundled` never hits the branch above without it. The
+    // `--command <bin>` monorepo-development escape hatch (customAllowed)
+    // is the one path where `bundled` is null and no declaration exists:
+    // that path is an explicit operator opt-in
+    // (PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1) already gated by
+    // CollectorCustomCommandRefusedError above, so it is trusted the same
+    // way a pre-0.0.2 legacy artifact is trusted — not because its
+    // capabilities are verified, but because the operator explicitly chose
+    // to run an arbitrary dev binary outside the declared-connector supply
+    // chain. This must NOT default to every omission, only this one
+    // deliberately opted-in path.
+    ...(bundled ? {} : { trusted_legacy_artifact: true }),
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
     runtime_requirements: { bindings: bundled?.bindings ?? {} },
   };

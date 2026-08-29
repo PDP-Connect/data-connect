@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -34,7 +34,11 @@ import {
 import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "./local-device-envelope.ts";
 import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "./local-device-outbox.ts";
 import { LocalDeviceQueue } from "./local-device-queue.ts";
-import { RuntimeCapabilityMismatchError } from "./runtime-capabilities.ts";
+import {
+  RUNTIME_CAPABILITY_UNDECLARED_CODE,
+  RuntimeCapabilityMismatchError,
+  RuntimeCapabilityUndeclaredError,
+} from "./runtime-capabilities.ts";
 
 /**
  * Test-only stand-in for the composition layer's resolved `executionRoot`
@@ -165,6 +169,7 @@ test("runCollectorConnector gives changed emitted_at records a distinct local ba
         args: [fixture],
         command: "node",
         connector_id: "fixture-batch-identity",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -235,6 +240,7 @@ test("runCollectorConnector summarizes coverage completeness distinct from decla
         args: [fixture],
         command: "node",
         connector_id: "fixture-coverage",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["sessions", "coverage_diagnostics"],
       },
@@ -292,6 +298,7 @@ test("runCollectorConnector reports null completeness when no coverage diagnosti
         args: [fixture],
         command: "node",
         connector_id: "fixture-no-coverage",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -331,6 +338,7 @@ test("runCollectorConnector.onMessage observes every protocol message in emissio
         args: [fixture],
         command: "node",
         connector_id: "fixture-onmessage",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -367,6 +375,7 @@ test("runCollectorConnector.onMessage errors are swallowed and never break the r
         args: [fixture],
         command: "node",
         connector_id: "fixture-onmessage-throws",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -407,6 +416,7 @@ test("runCollectorConnector rejects failed terminal DONE, preserves records, and
             args: [fixture],
             command: "node",
             connector_id: "fixture-failed-done",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -457,6 +467,7 @@ test("runCollectorConnector rejects a zero-exit child without DONE and never che
             args: [fixture],
             command: "node",
             connector_id: "fixture-missing-done",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -508,6 +519,7 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
         args: [fixture],
         command: "node",
         connector_id: "fixture-checkpoint-put-failure",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -533,6 +545,7 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
         args: [fixture],
         command: "node",
         connector_id: "fixture-checkpoint-put-failure",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -585,6 +598,7 @@ test("runCollectorConnector auto-prunes over-retention succeeded rows after a cl
         args: [fixture],
         command: "node",
         connector_id: "fixture-auto-prune",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -649,6 +663,7 @@ test("runCollectorConnector reports the build-derived agent version on every hea
         args: [fixture],
         command: "node",
         connector_id: "fixture-agent-version",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -695,6 +710,7 @@ test("runCollectorConnector leaves succeeded rows intact when auto-prune is disa
         args: [fixture],
         command: "node",
         connector_id: "fixture-prune-disabled",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -741,6 +757,7 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
         args: [fixture],
         command: "node",
         connector_id: "fixture-default-prune",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -788,6 +805,7 @@ test("runCollectorConnector flags an unrecognized coverage status as unaccounted
         args: [fixture],
         command: "node",
         connector_id: "fixture-unaccounted",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["coverage_diagnostics"],
       },
@@ -874,6 +892,7 @@ test("runCollectorConnector refuses a connector requiring a binding the collecto
           args: ["does-not-matter.ts"],
           command: "tsx",
           connector_id: "fictional-quantum-runtime",
+          trusted_legacy_artifact: true,
           runtime_requirements: {
             // `quantum` is not in the RuntimeBindingName set, but
             // assertPlacementOrThrow uses Object.entries on declared
@@ -906,6 +925,64 @@ test("runCollectorConnector refuses a connector requiring a binding the collecto
       return true;
     }
   );
+});
+
+test("runCollectorConnector refuses a connector that omits protocol_capabilities before any heartbeat or spawn", async () => {
+  // Negative: a 0.0.2+ connector definition that forgets to declare
+  // `protocol_capabilities` (and is not `trusted_legacy_artifact`) must be
+  // refused before ANY heartbeat is sent and before the child process is
+  // spawned — silently treating the omission as "requires nothing" is
+  // exactly the under-gating bug this repair closes. The fixture would
+  // create a marker file if it were ever spawned; its absence after the
+  // throw proves the child never started.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const markerDir = await mkdtemp(join(tmpdir(), "pdpp-undeclared-capabilities-"));
+    const markerPath = join(markerDir, "spawned.marker");
+    const fixture = await writeFixtureConnector({
+      script: `
+        const fs = await import("node:fs/promises");
+        await fs.writeFile(${JSON.stringify(markerPath)}, "spawned");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: process.execPath,
+            connector_id: "fixture-undeclared-capabilities",
+            // protocol_capabilities intentionally omitted, and
+            // trusted_legacy_artifact intentionally NOT set.
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-1",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof RuntimeCapabilityUndeclaredError);
+        if (err instanceof RuntimeCapabilityUndeclaredError) {
+          assert.equal(err.code, RUNTIME_CAPABILITY_UNDECLARED_CODE);
+          assert.equal(err.connectorId, "fixture-undeclared-capabilities");
+          assert.equal(err.runtime, "collector");
+        }
+        return true;
+      }
+    );
+
+    assert.equal(harness.heartbeats.length, 0, "the pre-spawn gate must fire before any heartbeat is sent");
+    await assert.rejects(() => readFile(markerPath), "the connector child process must never be spawned");
+  } finally {
+    await harness.close();
+  }
 });
 
 test("buildCollectorStartMessage produces no owner-token surface", () => {
@@ -950,6 +1027,7 @@ test("runCollectorConnector spawns connectors from the configured executionRoot 
         args: [fixture],
         command: process.execPath,
         connector_id: "fixture-spawn-context",
+        trusted_legacy_artifact: true,
         env: { PATH: "operator-bin" },
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -984,6 +1062,7 @@ test("runCollectorConnector rejects promptly when the connector command is missi
             args: ["connectors/claude_code/index.ts"],
             command: "__pdpp_missing_connector_command__",
             connector_id: "fixture-missing-command",
+            trusted_legacy_artifact: true,
             env: { PATH: "operator-bin" },
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
@@ -1149,6 +1228,7 @@ test("runCollectorConnector replays prior STATE into the connector's START.state
         args: [fixture],
         command: "node",
         connector_id: "fixture-replay",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1229,6 +1309,7 @@ test("runCollectorConnector skips state PUT when the queue still has retrying it
         args: [fixture],
         command: "node",
         connector_id: "fixture-retrying",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1296,6 +1377,7 @@ test("runCollectorConnector does not checkpoint when record work dead-letters", 
         args: [fixture],
         command: "node",
         connector_id: "fixture-dead-letter-no-checkpoint",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1356,6 +1438,7 @@ test("runCollectorConnector drops out-of-scope STATE messages with a warning and
         args: [fixture],
         command: "node",
         connector_id: "fixture-scope",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1421,6 +1504,7 @@ test("two-pass replay regression: a second runCollectorConnector call receives t
         args: [fixture],
         command: "node",
         connector_id: "gmail-fixture-resume",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["attachments"],
       } as const,
@@ -1498,6 +1582,7 @@ test("Gmail attachment backfill cursor replays from durable STATE after restart"
         args: [fixture],
         command: "node",
         connector_id: "gmail-fixture-attachment-backfill",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["attachments"],
       } as const,
@@ -1601,6 +1686,7 @@ test("runCollectorConnector drains durable checkpoint work before reading prior 
         args: [fixture],
         command: "node",
         connector_id: "fixture-checkpoint-before-state",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1649,6 +1735,7 @@ test("runCollectorConnector validates the reference route before mutating durabl
             args: [fixture],
             command: "node",
             connector_id: "fixture-route-preflight",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -1706,6 +1793,7 @@ test("runCollectorConnector skips source scan when pre-existing durable work can
         args: [fixture],
         command: "node",
         connector_id: "fixture-backlog-skip",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1759,6 +1847,7 @@ test("runCollectorConnector fails backlog-skip pass when terminal heartbeat is r
             args: [fixture],
             command: "node",
             connector_id: "fixture-backlog-heartbeat-fail",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -1850,6 +1939,7 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
         args: [pass1Fixture],
         command: "node",
         connector_id: "fixture-no-reenqueue",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1901,6 +1991,7 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
         args: [pass2Fixture],
         command: "node",
         connector_id: "fixture-no-reenqueue",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1947,6 +2038,7 @@ test("runCollectorConnector surfaces state-read failure as a blocked heartbeat a
             args: [fixture],
             command: "node",
             connector_id: "fixture-state-read-fail",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -2008,6 +2100,7 @@ test("runCollectorConnector accepts exactly one terminal DONE and checkpoints no
             args: [fixture],
             command: "node",
             connector_id: "fixture-after-done",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -2319,6 +2412,7 @@ test("runCollectorConnector bounds child stderr buffering so verbose connectors 
             args: [fixture],
             command: "node",
             connector_id: "fixture-noisy-stderr",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -2366,6 +2460,7 @@ test("runCollectorConnector honors AbortSignal at the pre-spawn gate", async () 
             args: ["unused.ts"],
             command: "node",
             connector_id: "fixture-aborted",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -2470,6 +2565,7 @@ test("runCollectorConnector streams RECORDs into bounded durable batches without
         args: [fixture],
         command: "node",
         connector_id: "fixture-streaming-bounded",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2545,6 +2641,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
         args: [fixture],
         command: "node",
         connector_id: "fixture-first-backfill-budget",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2589,6 +2686,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
         args: [fixture],
         command: "node",
         connector_id: "fixture-first-backfill-budget",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2611,6 +2709,7 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
         args: [fixture],
         command: "node",
         connector_id: "fixture-first-backfill-budget",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2678,6 +2777,7 @@ test("runCollectorConnector defers checkpoint until every streamed record batch 
         args: [fixture],
         command: "node",
         connector_id: "fixture-streaming-defer-checkpoint",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2854,6 +2954,7 @@ test("runCollectorConnector persists complete-scan checkpoint across undrained b
         args: [pass1Fixture],
         command: "node",
         connector_id: "fixture-durable-checkpoint-backlog",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -2972,6 +3073,7 @@ test("runCollectorConnector leaves streamed batches durable when the child fails
             args: [fixture],
             command: "node",
             connector_id: "fixture-streaming-mid-failure",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -3055,6 +3157,7 @@ test("runCollectorConnector corrects the heartbeat off 'starting' to an outbox-d
             args: [fixture],
             command: "node",
             connector_id: "fixture-mid-stream-heartbeat",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -3161,6 +3264,7 @@ test("runCollectorConnector leaves a failure gap when prior backlog drains but t
             args: [fixture],
             command: "node",
             connector_id: "codex",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["sessions"],
           },
@@ -3229,6 +3333,7 @@ test("runCollectorConnector flushes a partial trailing batch when the child fail
             args: [fixture],
             command: "node",
             connector_id: "fixture-streaming-partial-batch-failure",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -3362,6 +3467,7 @@ test("runCollectorConnector recovers a stale-leased record batch and drains it w
         args: [fixture],
         command: "node",
         connector_id: "fixture-stale-lease-recovery",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -3433,6 +3539,7 @@ test("runCollectorConnector auto-recovers transient local-device dead letters be
         args: [fixture],
         command: "node",
         connector_id: "fixture-transient-dead-letter",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -3482,6 +3589,7 @@ test("runCollectorConnector preserves terminal local-device dead letters", async
         args: [fixture],
         command: "node",
         connector_id: "fixture-terminal-dead-letter",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -3543,6 +3651,7 @@ test("runCollectorConnector rebuilds a rejected terminal commit after a complete
         args: [fixture],
         command: "node",
         connector_id: "fixture-terminal-rebuild",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages", "coverage_diagnostics"],
       },
@@ -3635,6 +3744,7 @@ test("runCollectorConnector drains a prior pass's enqueued backlog before scanni
         args: [pass1Fixture],
         command: "node",
         connector_id: "fixture-2pass-enqueue-before-ack",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -3779,6 +3889,7 @@ test("runCollectorConnector skips spawn and reports blocked when queue depth cro
         args: [fixture],
         command: "node",
         connector_id: "fixture-queue-depth-blocked",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -4218,6 +4329,7 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
         args: [fixture],
         command: "node",
         connector_id: "fixture-gap-policy-budget",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -4267,6 +4379,7 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
         args: [fixture],
         command: "node",
         connector_id: "fixture-gap-policy-budget",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -4346,6 +4459,7 @@ test("runCollectorConnector records a connector_child_failure gap when the child
             args: [fixture],
             command: "node",
             connector_id: "fixture-gap-child-failure",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -4444,6 +4558,7 @@ test("runCollectorConnector surfaces the connector's own terminal DONE error mes
             args: [fixture],
             command: "node",
             connector_id: "fixture-done-error-message",
+            trusted_legacy_artifact: true,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -4805,6 +4920,7 @@ test("runCollectorConnector does not let a dead-lettered gap row permanently ski
         args: [fixture],
         command: "node",
         connector_id: "fixture-dead-gap",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -4893,6 +5009,7 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
         args: [fixture],
         command: "node",
         connector_id: "fixture-recovered-gap",
+        trusted_legacy_artifact: true,
         runtime_requirements: { bindings: {} },
         streams: ["messages", "coverage_diagnostics"],
       },

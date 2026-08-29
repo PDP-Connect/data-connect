@@ -33,8 +33,11 @@ the runtime must be upgraded before a connector that emits it is distributed.
 Connectors declare required protocol capabilities with
 `protocol_capabilities`. The runtime advertises `protocolVersion` and
 `protocolCapabilities`, and rejects missing capabilities before spawning a
-connector. `SKIP_RESULT.boundary_claim` is optional and does not require a
-protocol capability.
+connector. `SKIP_RESULT.boundary_claim` is optional, does not require a
+protocol capability, and is disclosure-only: it never affects, reduces, or
+excludes anything from the servable denominator, coverage calculation, or
+connection/system health rollup, even when an independently recorded
+coverage horizon agrees with it.
 
 The committed `artifact.json` binds the package version and source-input digest
 to a reproducible npm tarball digest. Run `npm run artifact:verify` after any

@@ -65,6 +65,7 @@ const { LOCAL_COLLECTOR_DEFINITIONS } = (await import(
     connector_id: string;
     enforces_source_roots?: boolean;
     entry: string;
+    protocol_capabilities?: readonly string[];
     source_root_scopable_streams?: readonly string[];
     streams: readonly string[];
     time_scopable_streams?: readonly string[];
@@ -86,6 +87,13 @@ function definitionLiteral(definition: (typeof LOCAL_COLLECTOR_DEFINITIONS)[numb
     `    connector_id: ${JSON.stringify(definition.connector_id)},`,
     `    entry: ${JSON.stringify(definition.entry)},`,
     `    bindings: ${bindingsLiteral(definition.bindings)},`,
+    // Mirrors the connector-protocol 0.0.2 mandatory capability-declaration
+    // contract: emit protocol_capabilities whenever the source definition
+    // declares it (including an explicit empty array), never inventing a
+    // value it did not author. See runtime-capabilities.ts.
+    ...(definition.protocol_capabilities
+      ? [`    protocol_capabilities: ${jsonStringArray(definition.protocol_capabilities)},`]
+      : []),
     `    streams: ${jsonStringArray(definition.streams)},`,
   ];
   if (definition.time_scopable_streams) {

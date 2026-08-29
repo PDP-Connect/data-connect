@@ -19,7 +19,9 @@
 export {
   CollectorStateReadError,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
+  RUNTIME_CAPABILITY_UNDECLARED_CODE,
   RuntimeCapabilityMismatchError,
+  RuntimeCapabilityUndeclaredError,
 } from "../../collector-runtime/src/index.ts";
 
 /**
