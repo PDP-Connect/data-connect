@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
+  isConnectorProtocolCapabilityArray,
   STREAM_EVIDENCE_CAPABILITY,
   type RuntimeContinuationFact,
   selectAuthoritativeContinuation,
@@ -149,4 +151,48 @@ test("the package identity matches the protocol wire-version constant", async ()
 
   assert.equal(CONNECTOR_PROTOCOL_VERSION, packageJson.version);
   assert.equal(STREAM_EVIDENCE_CAPABILITY, "STREAM_EVIDENCE");
+});
+
+// isConnectorProtocolCapabilityArray is the ONE vocabulary-authority check
+// every untyped boundary (the placement gate, the collector-definitions
+// generator, the snapshot generator) delegates to. Each case here is
+// mutant-sensitive: flipping `.every` to `.some`, dropping the `Array.isArray`
+// guard, or dropping the membership check against CONNECTOR_PROTOCOL_CAPABILITIES
+// would each let a specific one of these cases wrongly pass.
+
+test("isConnectorProtocolCapabilityArray accepts an empty array", () => {
+  assert.equal(isConnectorProtocolCapabilityArray([]), true);
+});
+
+test("isConnectorProtocolCapabilityArray accepts every allowed capability value", () => {
+  assert.equal(isConnectorProtocolCapabilityArray([...CONNECTOR_PROTOCOL_CAPABILITIES]), true);
+  assert.equal(isConnectorProtocolCapabilityArray(["STREAM_EVIDENCE"]), true);
+});
+
+test("isConnectorProtocolCapabilityArray rejects a forged string member", () => {
+  // Would wrongly pass if the check only verified Array.isArray without
+  // checking membership of each element.
+  assert.equal(isConnectorProtocolCapabilityArray(["FORGED"]), false);
+});
+
+test("isConnectorProtocolCapabilityArray rejects a null member", () => {
+  assert.equal(isConnectorProtocolCapabilityArray([null]), false);
+});
+
+test("isConnectorProtocolCapabilityArray rejects an object member", () => {
+  assert.equal(isConnectorProtocolCapabilityArray([{}]), false);
+});
+
+test("isConnectorProtocolCapabilityArray rejects a mix of one valid and one invalid member", () => {
+  // Would wrongly pass if the check used `.some` instead of `.every` — a
+  // single bad member must invalidate the whole array, not just be filtered.
+  assert.equal(isConnectorProtocolCapabilityArray(["STREAM_EVIDENCE", "FORGED"]), false);
+});
+
+test("isConnectorProtocolCapabilityArray rejects non-array values", () => {
+  assert.equal(isConnectorProtocolCapabilityArray(null), false);
+  assert.equal(isConnectorProtocolCapabilityArray(undefined), false);
+  assert.equal(isConnectorProtocolCapabilityArray("STREAM_EVIDENCE"), false);
+  assert.equal(isConnectorProtocolCapabilityArray({}), false);
+  assert.equal(isConnectorProtocolCapabilityArray(42), false);
 });

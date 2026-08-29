@@ -275,6 +275,67 @@ test("evaluatePlacement: a null protocol_capabilities is rejected, not silently 
   }
 });
 
+// Round 3 review finding: `["FORGED"]`, `[null]`, and `[{}]` are each a
+// well-formed ARRAY, so the old `Array.isArray`-only guard let them all
+// through to `diffRequiredProtocolCapabilities`, which merely `.filter`s
+// against the runtime's advertised set — a forged/garbage element that
+// happens not to match anything the runtime advertises is silently treated
+// as "the runtime doesn't have this yet" (missing_capability) rather than
+// "this declaration itself is malformed" (undeclared_capabilities). Each
+// case below is mutant-sensitive to the per-element vocabulary check
+// specifically, not just the top-level array-shape check above.
+
+test("evaluatePlacement: an array containing a forged string member is rejected as undeclared", () => {
+  const forgedMember = {
+    connector_id: "forged-member",
+    protocol_capabilities: ["FORGED"],
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(forgedMember, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "forged-member");
+  }
+});
+
+test("evaluatePlacement: an array containing a null member is rejected as undeclared", () => {
+  const nullMember = {
+    connector_id: "null-member",
+    protocol_capabilities: [null],
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(nullMember, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "null-member");
+  }
+});
+
+test("evaluatePlacement: an array containing an object member is rejected as undeclared", () => {
+  const objectMember = {
+    connector_id: "object-member",
+    protocol_capabilities: [{}],
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(objectMember, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "object-member");
+  }
+});
+
+test("evaluatePlacement: a mix of one valid and one invalid member is rejected as undeclared", () => {
+  // Would wrongly pass through to missing_capability/ok (and silently drop
+  // the forged member) if the element check used `.some` instead of
+  // `.every` — a single bad member must invalidate the whole declaration.
+  const mixedMembers = {
+    connector_id: "mixed-members",
+    protocol_capabilities: ["STREAM_EVIDENCE", "FORGED"],
+  } as unknown as ConnectorPlacementInput;
+  const decision = evaluatePlacement(mixedMembers, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(decision.kind, "undeclared_capabilities");
+  if (decision.kind === "undeclared_capabilities") {
+    assert.equal(decision.connectorId, "mixed-members");
+  }
+});
+
 // TypeScript itself now refuses `protocol_contract_version` as a field of
 // `ConnectorPlacementInput` — there is no branch of the type that accepts
 // it, so a caller attempting the old legacy-bypass shape gets a compile

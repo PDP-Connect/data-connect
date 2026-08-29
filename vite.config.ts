@@ -26,6 +26,7 @@ export default defineConfig({
       "scripts/release-github.test.mjs",
       "scripts/release-workflow.test.ts",
       "scripts/npm-release-commit-analyzer.test.ts",
+      "scripts/npm-release-signer-workflow.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",

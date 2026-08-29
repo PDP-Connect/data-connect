@@ -10,6 +10,8 @@
  * against real data in this checkout.
  */
 
+import { isConnectorProtocolCapabilityArray } from "@pdpp/connector-protocol";
+
 export interface CollectorDefinitionSource {
   readonly bindings: Readonly<Record<string, { required: boolean }>>;
   readonly connector_id: string;
@@ -34,17 +36,23 @@ export function bindingsLiteral(bindings: Readonly<Record<string, { required: bo
 /**
  * Renders one connector's `LocalCollectorDefinition` as a JS object literal.
  *
- * Throws if `definition.protocol_capabilities` is not an array: the
- * authoring type (`LocalCollectorDefinition`) has required this field for
- * two repair rounds now, so a source definition that lacks it (or has it
- * malformed) is a defect in the upstream source, not something this
- * generator should quietly paper over by omitting the line from its output.
+ * Throws if `definition.protocol_capabilities` is not an array of allowed
+ * {@link ConnectorProtocolCapability} values: the authoring type
+ * (`LocalCollectorDefinition`) has required this field for three repair
+ * rounds now, so a source definition that lacks it, has it malformed, or
+ * declares a member outside the closed vocabulary (a forged string, `null`,
+ * an object, or a mix of one valid and one invalid entry) is a defect in the
+ * upstream source, not something this generator should quietly paper over
+ * by emitting it verbatim. Delegates to `isConnectorProtocolCapabilityArray`
+ * — the ONE place the allowed vocabulary is authored — rather than
+ * re-deriving its own copy of it.
  */
 export function definitionLiteral(definition: CollectorDefinitionSource): string {
-  if (!Array.isArray(definition.protocol_capabilities)) {
+  if (!isConnectorProtocolCapabilityArray(definition.protocol_capabilities)) {
     throw new Error(
       `collector definition '${definition.connector_id}' has a missing or malformed protocol_capabilities ` +
-        "(expected an array, even if empty). Every LocalCollectorDefinition must declare it explicitly."
+        "(expected an array whose every member is an allowed ConnectorProtocolCapability value, even if " +
+        "empty). Every LocalCollectorDefinition must declare it explicitly."
     );
   }
   const lines: string[] = [

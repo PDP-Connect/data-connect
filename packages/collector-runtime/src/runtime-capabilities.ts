@@ -1,7 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { CONNECTOR_PROTOCOL_VERSION, type ConnectorProtocolCapability } from "@pdpp/connector-protocol";
+import {
+  CONNECTOR_PROTOCOL_VERSION,
+  type ConnectorProtocolCapability,
+  isConnectorProtocolCapabilityArray,
+} from "@pdpp/connector-protocol";
 
 /**
  * Runtime capability advertisement and pre-spawn placement gate.
@@ -158,20 +162,25 @@ export function diffRequiredProtocolCapabilities(
 }
 
 /**
- * True when `connector.protocol_capabilities` is not actually an array —
- * i.e. the input is malformed. `ConnectorPlacementInput` requires this field
- * at the type level, so this is unconstructable for well-typed callers; a
- * plain JS caller (or a value that has bypassed the type checker, e.g. via
- * `JSON.parse` producing an object with the field missing or of the wrong
- * shape) can still produce such an object at runtime, so placement must
- * refuse it rather than silently treating it as `[]` — that silent default
- * is exactly how a 0.0.2+ `STREAM_EVIDENCE` emitter that forgot to declare
- * it would slip past a fail-closed runtime. This is a defense against a
- * non-TypeScript caller sending garbage over JSON, not a "declare your
- * legacy identity" path — there is no legacy path anymore.
+ * True when `connector.protocol_capabilities` is not an array, or is an
+ * array containing any member that is not an allowed
+ * {@link ConnectorProtocolCapability} value. `ConnectorPlacementInput`
+ * requires this field at the type level, so this is unconstructable for
+ * well-typed callers; a plain JS caller (or a value that has bypassed the
+ * type checker, e.g. via `JSON.parse` producing an object with the field
+ * missing, of the wrong shape, or containing a forged/garbage element) can
+ * still produce such an object at runtime, so placement must refuse it
+ * rather than silently treating it as `[]` or filtering the bad members out
+ * — either silent handling is exactly how a forged capability (`"FORGED"`,
+ * `null`, `{}`, or a mix of one valid and one invalid entry) would slip past
+ * a fail-closed runtime. This is a defense against a non-TypeScript caller
+ * sending garbage over JSON, not a "declare your legacy identity" path —
+ * there is no legacy path anymore. Delegates to
+ * {@link isConnectorProtocolCapabilityArray} — the ONE place the allowed
+ * vocabulary is authored — rather than re-deriving its own copy of it.
  */
 function hasMalformedCapabilities(connector: ConnectorPlacementInput): boolean {
-  return !Array.isArray(connector.protocol_capabilities);
+  return !isConnectorProtocolCapabilityArray(connector.protocol_capabilities);
 }
 
 /**

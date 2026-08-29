@@ -96,6 +96,9 @@ jobs:
       - name: Test commit-analyzer scope gate
         run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
 
+      - name: Test attestation signer-workflow binding
+        run: npx vitest run scripts/npm-release-signer-workflow.test.ts
+
   release:
     name: publish to npm and GitHub
     needs: [resolve-version, quality]
@@ -147,23 +150,28 @@ jobs:
       # repository (the strictest single-repo check gh attestation verify
       # supports via --repo/--owner). `--source-digest "$GITHUB_SHA"`
       # additionally binds verification to the exact commit SHA that
-      # triggered this workflow run — checked against gh attestation
-      # verify's own --help before adding it, since it is not guaranteed by
-      # --repo alone. Together these prove the published tarball's
-      # attestation was produced by a workflow run in this repository, at
-      # this exact commit — not merely "some repo claiming to be this one."
+      # triggered this workflow run. `--signer-workflow` additionally binds
+      # verification to the EXACT workflow file that must have produced the
+      # attestation ([host/]<owner>/<repo>/<path>/<to>/<workflow>, per `gh
+      # attestation verify --help`) — without it, `--repo` alone would
+      # accept an attestation signed by ANY workflow in this repository, not
+      # just this release workflow, so a compromised or malicious workflow
+      # added to this same repo could forge a passing attestation for an
+      # artifact it built. All three flags together prove the published
+      # tarball's attestation was produced by THIS workflow file, in this
+      # repository, at this exact commit.
       # This has NOT been exercised against a real npm registry response
       # yet: neither package has been published from this workflow before,
       # and this sandbox has no working `gh auth` session with real
       # registry access. It is written to fail loudly (non-zero exit,
       # explicit message) rather than silently pass if verification fails.
-      # In particular, `--source-digest`'s exact expected format (this uses
-      # the bare `git.commit`-style SHA GitHub Actions attestations
-      # populate) has only been checked against `gh attestation verify
-      # --help`'s description, not against a real attestation from this
-      # workflow — confirm on the first real release and adjust the flag's
-      # value/format if verification fails for a reason unrelated to a
-      # genuine provenance mismatch.
+      # `--source-digest` and `--signer-workflow`'s exact expected formats
+      # have only been checked against `gh attestation verify --help`'s
+      # description (see .github/workflows/npm-release-signer-workflow.test.ts
+      # for a static check of the flag/value shape), not against a real
+      # attestation from this workflow — confirm on the first real release
+      # and adjust either flag's value/format if verification fails for a
+      # reason unrelated to a genuine provenance mismatch.
       - name: Verify npm provenance attestation
         if: needs.resolve-version.outputs.new-release-published == 'true'
         env:
@@ -184,6 +192,7 @@ jobs:
             echo "Verifying Sigstore attestation for ${tarball}..."
             gh attestation verify "$tarball" \
               --repo PDP-Connect/data-connect \
-              --source-digest "$GITHUB_SHA"
+              --source-digest "$GITHUB_SHA" \
+              --signer-workflow "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
             rm -rf "$workdir"
           done

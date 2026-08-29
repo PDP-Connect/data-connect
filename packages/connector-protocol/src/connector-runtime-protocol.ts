@@ -31,6 +31,35 @@ export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 /** Protocol capabilities that can be advertised by a connector or runtime. */
 export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY;
 
+/**
+ * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
+ * runtime. This is the ONE place the vocabulary is authored — every
+ * untyped boundary (JSON-deserialized connector definitions, the generated
+ * snapshot, the pre-spawn placement gate) MUST call
+ * {@link isConnectorProtocolCapabilityArray} rather than re-deriving its own
+ * copy of the allowed values, so a new capability is added here once and
+ * every boundary picks it up.
+ */
+export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [STREAM_EVIDENCE_CAPABILITY];
+
+function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
+  return (CONNECTOR_PROTOCOL_CAPABILITIES as readonly unknown[]).includes(value);
+}
+
+/**
+ * True only when `value` is an array whose every element is an allowed
+ * {@link ConnectorProtocolCapability} value. Rejects a non-array outright
+ * (`null`, an object, a string) and rejects an array containing ANY
+ * disallowed member — a forged string (`"FORGED"`), `null`, an object, or a
+ * mix of one valid and one invalid entry all fail this check. There is no
+ * partial acceptance: a single bad member invalidates the whole array,
+ * because a connector's declared capability list is an all-or-nothing
+ * contract with the runtime, not a best-effort filter.
+ */
+export function isConnectorProtocolCapabilityArray(value: unknown): value is readonly ConnectorProtocolCapability[] {
+  return Array.isArray(value) && value.every(isConnectorProtocolCapability);
+}
+
 /** A single record passing through emit / emitRecord. */
 export interface RecordData {
   id?: string | number | null;

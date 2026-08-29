@@ -50,6 +50,7 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isConnectorProtocolCapabilityArray } from "@pdpp/connector-protocol";
 import { type CollectorDefinitionSource, definitionLiteral } from "./collector-definitions-literal.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -67,14 +68,19 @@ const { LOCAL_COLLECTOR_DEFINITIONS } = (await import(
 // Fail fast, naming the offending connector, rather than letting
 // definitionLiteral's own per-definition throw surface without this
 // context. protocol_capabilities is required by LocalCollectorDefinition
-// (the authoring type this snapshot mirrors); a definition that omits it or
-// has it malformed is a source-of-truth defect, not something to paper over
-// by silently truncating this generator's output.
+// (the authoring type this snapshot mirrors); a definition that omits it,
+// has it malformed, or declares a member outside the closed
+// ConnectorProtocolCapability vocabulary (a forged string, null, an object,
+// or a mix of valid and invalid entries) is a source-of-truth defect, not
+// something to paper over by silently truncating or forwarding this
+// generator's output. Delegates to isConnectorProtocolCapabilityArray — the
+// ONE place the allowed vocabulary is authored.
 for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-  if (!Array.isArray(definition.protocol_capabilities)) {
+  if (!isConnectorProtocolCapabilityArray(definition.protocol_capabilities)) {
     throw new Error(
       `LOCAL_COLLECTOR_DEFINITIONS entry '${definition.connector_id}' has a missing or malformed ` +
-        "protocol_capabilities (expected an array, even if empty). Fix the source definition in " +
+        "protocol_capabilities (expected an array whose every member is an allowed " +
+        "ConnectorProtocolCapability value, even if empty). Fix the source definition in " +
         "packages/polyfill-connectors/src/collector-registry.ts before regenerating this snapshot."
     );
   }
