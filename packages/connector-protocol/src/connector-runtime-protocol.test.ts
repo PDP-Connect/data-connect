@@ -12,6 +12,7 @@ import {
   type RuntimeContinuationFact,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
+  validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
 import type { EmittedMessage, SkipResultBoundaryClaim } from "./index.ts";
 
@@ -72,7 +73,7 @@ test("selection remains isolated by stream and message kind", () => {
 test("the public barrel accepts a well-formed STREAM_EVIDENCE message", () => {
   const evidence: EmittedMessage = {
     considered: 10,
-    covered: 7,
+    outcomes: { emitted: 7, gapped: 0, unaccounted: 0, unchanged: 3 },
     reference_only: true,
     stream: "message_bodies",
     type: "STREAM_EVIDENCE",
@@ -84,7 +85,7 @@ test("the public barrel accepts a well-formed STREAM_EVIDENCE message", () => {
 test("STREAM_EVIDENCE requires the literal reference_only value", () => {
   const evidence: EmittedMessage = {
     considered: 10,
-    covered: 7,
+    outcomes: { emitted: 7, gapped: 0, unaccounted: 0, unchanged: 3 },
     // @ts-expect-error reference_only must be the literal true.
     reference_only: false,
     stream: "message_bodies",
@@ -96,7 +97,7 @@ test("STREAM_EVIDENCE requires the literal reference_only value", () => {
 test("STREAM_EVIDENCE requires a string stream", () => {
   const evidence: EmittedMessage = {
     considered: 10,
-    covered: 7,
+    outcomes: { emitted: 7, gapped: 0, unaccounted: 0, unchanged: 3 },
     reference_only: true,
     // @ts-expect-error stream must be a string.
     stream: 42,
@@ -105,25 +106,101 @@ test("STREAM_EVIDENCE requires a string stream", () => {
   assert.equal(evidence.type, "STREAM_EVIDENCE");
 });
 
-test("STREAM_EVIDENCE requires numeric considered and covered counts", () => {
+test("STREAM_EVIDENCE requires a numeric considered count and numeric outcome fields", () => {
   const invalidConsidered: EmittedMessage = {
     // @ts-expect-error considered must be a number.
     considered: "10",
-    covered: 7,
+    outcomes: { emitted: 7, gapped: 0, unaccounted: 0, unchanged: 3 },
     reference_only: true,
     stream: "message_bodies",
     type: "STREAM_EVIDENCE",
   };
-  const invalidCovered: EmittedMessage = {
+  const invalidOutcomes: EmittedMessage = {
     considered: 10,
-    // @ts-expect-error covered must be a number.
-    covered: "7",
+    outcomes: {
+      emitted: 7,
+      gapped: 0,
+      unaccounted: 0,
+      // @ts-expect-error unchanged must be a number.
+      unchanged: "3",
+    },
     reference_only: true,
     stream: "message_bodies",
     type: "STREAM_EVIDENCE",
   };
   assert.equal(invalidConsidered.type, "STREAM_EVIDENCE");
-  assert.equal(invalidCovered.type, "STREAM_EVIDENCE");
+  assert.equal(invalidOutcomes.type, "STREAM_EVIDENCE");
+});
+
+test("STREAM_EVIDENCE has no scalar covered field on the wire", () => {
+  const evidence: EmittedMessage = {
+    considered: 10,
+    // @ts-expect-error covered was replaced by the outcomes partition.
+    covered: 7,
+    outcomes: { emitted: 7, gapped: 0, unaccounted: 0, unchanged: 3 },
+    reference_only: true,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+  assert.equal(evidence.type, "STREAM_EVIDENCE");
+});
+
+test("validateStreamEvidenceCounts accepts a disjoint partition that sums to considered", () => {
+  assert.doesNotThrow(() =>
+    validateStreamEvidenceCounts({
+      considered: 214,
+      outcomes: { emitted: 200, gapped: 2, unaccounted: 1, unchanged: 11 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts rejects a sum that does not equal considered", () => {
+  assert.throws(() =>
+    validateStreamEvidenceCounts({
+      considered: 214,
+      outcomes: { emitted: 200, gapped: 2, unaccounted: 1, unchanged: 10 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts rejects a non-integer outcome field", () => {
+  assert.throws(() =>
+    validateStreamEvidenceCounts({
+      considered: 10,
+      outcomes: { emitted: 7.5, gapped: 0, unaccounted: 0, unchanged: 2.5 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts rejects a negative outcome field", () => {
+  assert.throws(() =>
+    validateStreamEvidenceCounts({
+      considered: 10,
+      outcomes: { emitted: -1, gapped: 0, unaccounted: 0, unchanged: 11 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts rejects a count above Number.MAX_SAFE_INTEGER", () => {
+  assert.throws(() =>
+    validateStreamEvidenceCounts({
+      considered: Number.MAX_SAFE_INTEGER + 1,
+      outcomes: { emitted: Number.MAX_SAFE_INTEGER + 1, gapped: 0, unaccounted: 0, unchanged: 0 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts accepts a count exactly at Number.MAX_SAFE_INTEGER", () => {
+  assert.doesNotThrow(() =>
+    validateStreamEvidenceCounts({
+      considered: Number.MAX_SAFE_INTEGER,
+      outcomes: { emitted: Number.MAX_SAFE_INTEGER, gapped: 0, unaccounted: 0, unchanged: 0 },
+    })
+  );
+});
+
+test("validateStreamEvidenceCounts rejects a missing outcomes object", () => {
+  assert.throws(() => validateStreamEvidenceCounts({ considered: 10 }));
 });
 
 test("SKIP_RESULT rejects an unrecognized boundary claim", () => {

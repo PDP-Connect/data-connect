@@ -24,6 +24,21 @@ The `0.0.2` package adds the `STREAM_EVIDENCE` wire message. It is a breaking
 wire addition for fail-closed runtimes that do not recognize that message, so
 the runtime must be upgraded before a connector that emits it is distributed.
 
+`STREAM_EVIDENCE` carries `considered` (the full count of keys a
+`state_stream`-declared stream's own hydration lane considered this run) and
+`outcomes: { emitted, unchanged, gapped, unaccounted }` — a disjoint
+partition of those `considered` keys, not a scalar `covered` count. There is
+no `covered` field on the wire: a single count can never distinguish
+"emitted", "unchanged", "gapped", and "unaccounted" keys, so a reader that
+wants a `covered` projection derives it as `outcomes.emitted +
+outcomes.unchanged`, deliberately excluding `gapped` and `unaccounted`.
+`outcomes.emitted + outcomes.unchanged + outcomes.gapped +
+outcomes.unaccounted` MUST equal `considered` exactly; every count field is
+capped at `Number.MAX_SAFE_INTEGER`. Call `validateStreamEvidenceCounts` at
+the untyped wire boundary (immediately after `JSON.parse`) to enforce the
+bounds and the sum check — the type system alone cannot, since the value
+arrives as `unknown` JSON.
+
 | Connector | Runtime | Result |
 | --- | --- | --- |
 | old connector | new runtime | compatible; no new message is emitted |

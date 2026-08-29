@@ -52,6 +52,7 @@ export type {
   RecordData,
   SkipResultBoundaryClaim,
   StartMessage,
+  StreamEvidenceOutcomes,
   StreamScope,
   ValidateRecord,
 } from "./connector-runtime-protocol.ts";
@@ -60,6 +61,7 @@ export {
   CONNECTOR_PROTOCOL_VERSION,
   isConnectorProtocolCapabilityArray,
   STREAM_EVIDENCE_CAPABILITY,
+  validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
 export { isMainModule } from "./is-main-module.ts";
 export {

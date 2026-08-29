@@ -60,6 +60,62 @@ export function isConnectorProtocolCapabilityArray(value: unknown): value is rea
   return Array.isArray(value) && value.every(isConnectorProtocolCapability);
 }
 
+/** Largest integer a conformant `STREAM_EVIDENCE` count field may carry. */
+const STREAM_EVIDENCE_MAX_COUNT = Number.MAX_SAFE_INTEGER;
+
+/** The disjoint outcome partition over a `STREAM_EVIDENCE` message's `considered` keys. */
+export interface StreamEvidenceOutcomes {
+  emitted: number;
+  unchanged: number;
+  gapped: number;
+  unaccounted: number;
+}
+
+function isBoundedNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= STREAM_EVIDENCE_MAX_COUNT;
+}
+
+/**
+ * Validates an untyped, JSON-deserialized `STREAM_EVIDENCE` payload at the
+ * wire boundary — the point where a connector's child-process stdout line has
+ * just been `JSON.parse`d and cast to {@link EmittedMessage} with no runtime
+ * check. Throws (fail closed) unless every count field is a non-negative safe
+ * integer no greater than `Number.MAX_SAFE_INTEGER` AND
+ * `outcomes.emitted + outcomes.unchanged + outcomes.gapped +
+ * outcomes.unaccounted` equals `considered` exactly. This is the sum-check a
+ * caller MUST run before trusting a connector-declared `STREAM_EVIDENCE`
+ * message's counts for anything — the type system alone cannot enforce it
+ * because the value arrives as `unknown` JSON, not a constructed object.
+ */
+export function validateStreamEvidenceCounts(
+  value: unknown
+): asserts value is { considered: number; outcomes: StreamEvidenceOutcomes } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const message = value as Record<string, unknown>;
+  const outcomes = message.outcomes;
+  if (typeof outcomes !== "object" || outcomes === null || Array.isArray(outcomes)) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const { emitted, unchanged, gapped, unaccounted } = outcomes as Record<string, unknown>;
+  if (
+    ![
+      isBoundedNonNegativeInteger(message.considered),
+      isBoundedNonNegativeInteger(emitted),
+      isBoundedNonNegativeInteger(unchanged),
+      isBoundedNonNegativeInteger(gapped),
+      isBoundedNonNegativeInteger(unaccounted),
+    ].every(Boolean)
+  ) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const sum = (emitted as number) + (unchanged as number) + (gapped as number) + (unaccounted as number);
+  if (sum !== message.considered) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+}
+
 /** A single record passing through emit / emitRecord. */
 export interface RecordData {
   id?: string | number | null;
@@ -582,15 +638,29 @@ export type EmittedMessage =
        * property that makes it honest for a stream whose parent, not itself,
        * owns the commit.
        *
-       * `considered`/`covered` are the counts this pass actually measured.
-       * They are not derived from a gap ledger and must never be inferred from
-       * one — an identity like `considered = collected + pending_gaps` can
-       * manufacture `considered === covered` when the ledger undercounts.
+       * `considered` and `outcomes` are the counts this pass actually
+       * measured, a disjoint partition (not an independent measurement that
+       * happens to sum correctly by construction): `outcomes.emitted +
+       * outcomes.unchanged + outcomes.gapped + outcomes.unaccounted` MUST
+       * equal `considered` exactly. There is no scalar `covered` field on the
+       * wire — a single count can never distinguish "emitted", "unchanged",
+       * "gapped", and "unaccounted" keys, so a reader that wants a `covered`
+       * projection derives it as `outcomes.emitted + outcomes.unchanged`,
+       * deliberately excluding `gapped` and `unaccounted`. Neither
+       * `considered` nor any `outcomes.*` field may be derived from a gap
+       * ledger or from this run's own successful-emission/gap counts — an
+       * identity like `considered = emitted + gapped` can manufacture a
+       * passing sum when the ledger undercounts.
        */
       type: "STREAM_EVIDENCE";
       stream: string;
       considered: number;
-      covered: number;
+      outcomes: {
+        emitted: number;
+        unchanged: number;
+        gapped: number;
+        unaccounted: number;
+      };
       reference_only: true;
     }
   | DetailGapMessage

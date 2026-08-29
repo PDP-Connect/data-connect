@@ -29,6 +29,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
+import { validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
   type EnrollmentExchangeResponse,
@@ -1632,6 +1633,13 @@ async function streamConnectorIntoOutbox(
       if (!input.config.connector.protocol_capabilities.includes("STREAM_EVIDENCE")) {
         throw new Error(
           `${input.config.connector.connector_id} emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability`
+        );
+      }
+      try {
+        validateStreamEvidenceCounts(message);
+      } catch {
+        throw new Error(
+          `${input.config.connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`
         );
       }
       return;

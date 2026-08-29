@@ -1003,7 +1003,7 @@ test("runCollectorConnector fails closed when a connector emits STREAM_EVIDENCE 
     const fixture = await writeFixtureConnector({
       script: `
         await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
-        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, covered: 1, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, outcomes: { emitted: 1, unchanged: 0, gapped: 0, unaccounted: 0 }, reference_only: true }) + "\\n");
         process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
       `,
     });
@@ -1042,7 +1042,7 @@ test("runCollectorConnector accepts STREAM_EVIDENCE from a connector that declar
     const fixture = await writeFixtureConnector({
       script: `
         await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
-        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, covered: 1, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, outcomes: { emitted: 1, unchanged: 0, gapped: 0, unaccounted: 0 }, reference_only: true }) + "\\n");
         process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
       `,
     });
@@ -1065,6 +1065,82 @@ test("runCollectorConnector accepts STREAM_EVIDENCE from a connector that declar
     });
 
     assert.equal(result.done?.status, "succeeded");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector fails closed when STREAM_EVIDENCE outcomes do not sum to considered", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 10, outcomes: { emitted: 7, unchanged: 0, gapped: 0, unaccounted: 0 }, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-stream-evidence-bad-sum",
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-stream-evidence-bad-sum",
+        }),
+      /emitted STREAM_EVIDENCE with invalid outcome counts for stream 'messages'/
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector fails closed when STREAM_EVIDENCE carries a negative outcome count", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
+        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 10, outcomes: { emitted: -1, unchanged: 11, gapped: 0, unaccounted: 0 }, reference_only: true }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-stream-evidence-negative",
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-stream-evidence-negative",
+        }),
+      /emitted STREAM_EVIDENCE with invalid outcome counts for stream 'messages'/
+    );
   } finally {
     await harness.close();
   }
