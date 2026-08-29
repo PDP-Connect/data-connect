@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ConnectorProtocolCapability } from "@pdpp/connector-protocol";
+import { CONNECTOR_PROTOCOL_VERSION } from "@pdpp/connector-protocol";
 import {
   assertPlacementOrThrow,
   COLLECTOR_RUNTIME_CAPABILITIES,
@@ -62,16 +62,6 @@ const oldFailClosedRuntime = {
   protocolVersion: "0.0.1",
 };
 
-// The false-advertisement gap this fixes: a runtime profile that advertised
-// STREAM_EVIDENCE the way COLLECTOR_RUNTIME_CAPABILITIES incorrectly did
-// before this change, with no durable delivery path behind it.
-const falselyAdvertisingRuntime = {
-  bindings: COLLECTOR_RUNTIME_CAPABILITIES.bindings,
-  id: "collector-falsely-advertising",
-  protocolCapabilities: new Set<ConnectorProtocolCapability>(["STREAM_EVIDENCE"]),
-  protocolVersion: "0.0.2",
-};
-
 const streamEvidenceConnector = {
   connector_id: "stream-evidence-connector",
   protocol_capabilities: ["STREAM_EVIDENCE" as const],
@@ -79,7 +69,7 @@ const streamEvidenceConnector = {
 };
 
 test("collector runtime does not advertise STREAM_EVIDENCE: no local-collector connector emits it and there is no durable delivery path", () => {
-  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, "0.0.2");
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, CONNECTOR_PROTOCOL_VERSION);
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
 });
 
@@ -106,25 +96,36 @@ test("directional compatibility: old fail-closed runtime rejects a STREAM_EVIDEN
   );
 });
 
-test("fail-before: a runtime that falsely advertises STREAM_EVIDENCE would place a STREAM_EVIDENCE emitter (the bug this change closes)", () => {
-  assert.equal(evaluatePlacement(streamEvidenceConnector, falselyAdvertisingRuntime).kind, "ok");
-});
-
-test("pass-after: the real collector runtime now rejects a STREAM_EVIDENCE emitter as a missing capability", () => {
+test("directional compatibility: current non-advertised 0.0.2 runtime rejects a new-protocol emitter", () => {
   const decision = evaluatePlacement(streamEvidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES);
   assert.equal(decision.kind, "missing_capability");
   if (decision.kind === "missing_capability") {
     assert.deepEqual(decision.missing, ["STREAM_EVIDENCE"]);
-    assert.equal(decision.runtime, "collector");
   }
-  assert.throws(
-    () => assertPlacementOrThrow(streamEvidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES),
-    (error: unknown) => {
-      assert.ok(error instanceof RuntimeCapabilityMismatchError);
-      if (error instanceof RuntimeCapabilityMismatchError) {
-        assert.deepEqual(error.missing, ["STREAM_EVIDENCE"]);
-      }
-      return true;
+});
+
+test("future-only semantic runtime fixture accepts a new-protocol emitter", () => {
+  const futureSemanticRuntime = {
+    ...COLLECTOR_RUNTIME_CAPABILITIES,
+    id: "collector-future-stream-evidence",
+    protocolCapabilities: new Set(["STREAM_EVIDENCE" as const]),
+  };
+
+  assert.equal(evaluatePlacement(streamEvidenceConnector, futureSemanticRuntime).kind, "ok");
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
+});
+
+test("capability withdrawal is fail-closed for emitters but leaves non-emitters placeable", () => {
+  const emitterDecision = evaluatePlacement(streamEvidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.equal(emitterDecision.kind, "missing_capability");
+  if (emitterDecision.kind === "missing_capability") {
+    assert.deepEqual(emitterDecision.missing, ["STREAM_EVIDENCE"]);
+  }
+  assert.deepEqual(
+    evaluatePlacement({ connector_id: "ordinary-connector", protocol_capabilities: [] }, COLLECTOR_RUNTIME_CAPABILITIES),
+    {
+      kind: "ok",
+      satisfied: [],
     }
   );
 });

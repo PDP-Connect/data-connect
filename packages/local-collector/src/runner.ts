@@ -148,7 +148,7 @@ export {
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   id: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.id,
   bindings: new Set(["network", "filesystem", "local_device"]),
-  protocolCapabilities: new Set<ConnectorProtocolCapability>(["STREAM_EVIDENCE"]),
+  protocolCapabilities: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities,
   protocolVersion: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion,
 };
 

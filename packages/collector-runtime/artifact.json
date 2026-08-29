@@ -1,0 +1,11 @@
+{
+  "artifact_filename": "pdpp-collector-runtime-0.0.2.tgz",
+  "artifact_sha256": "eaf1eda97a2bf0b8a9e28dd43ed179e9ba254e7547b7e1aa0d88e378195d5f42",
+  "artifact_sha512": "d35a2bda7bd74e83563ffc50fd5d55f8edbb8d3d5e6b917a9256cf3b125e782133f8edb3212a1f1fa6fcb9b91118b86cf0e38386051def1c84ff2119f06f6962",
+  "artifact_sha1": "5691d4d64b3f0373f29647fc19579298a34c31d8",
+  "declarations_sha256": "93c013bb2a484fea532954431f9bef80e489a47333463dceb37ecd6c6174761a",
+  "metadata_version": 1,
+  "package_name": "@pdpp/collector-runtime",
+  "package_version": "0.0.2",
+  "source_inputs_sha256": "34ddadf96d366651f581d31deb5a573dd958963842e99400eb13d7d42fd936fa"
+}

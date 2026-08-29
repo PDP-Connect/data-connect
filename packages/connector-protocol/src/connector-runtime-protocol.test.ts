@@ -14,7 +14,7 @@ import {
   selectAuthoritativeSkip,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
-import type { EmittedMessage, SkipResultBoundaryClaim } from "./index.ts";
+import { parseJsonlLine, stringifyForJsonl, type EmittedMessage, type SkipResultBoundaryClaim } from "./index.ts";
 
 const CONTINUATION: RuntimeContinuationFact = {
   boundary: "uidvalidity-123",
@@ -80,6 +80,18 @@ test("the public barrel accepts a well-formed STREAM_EVIDENCE message", () => {
   };
 
   assert.equal(evidence.type, "STREAM_EVIDENCE");
+});
+
+test("protocol 0.0.2 parses STREAM_EVIDENCE independently of runtime advertisement", () => {
+  const evidence: EmittedMessage = {
+    considered: 1,
+    outcomes: { emitted: 0, gapped: 0, unaccounted: 0, unchanged: 1 },
+    reference_only: true,
+    stream: "message_bodies",
+    type: "STREAM_EVIDENCE",
+  };
+
+  assert.deepEqual(parseJsonlLine(stringifyForJsonl(evidence)), evidence);
 });
 
 test("STREAM_EVIDENCE requires the literal reference_only value", () => {

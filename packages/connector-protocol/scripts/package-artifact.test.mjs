@@ -13,6 +13,12 @@ import {
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(packageRoot, "dist");
+const HEX_256 = /^[0-9a-f]{64}$/;
+const HEX_512 = /^[0-9a-f]{128}$/;
+const HEX_160 = /^[0-9a-f]{40}$/;
+const SOURCE_INPUTS_ERROR = /source_inputs_sha256/;
+const ARTIFACT_SOURCE_INPUTS_ERROR = /artifact metadata drift in source_inputs_sha256/;
+const ARTIFACT_DECLARATIONS_ERROR = /artifact metadata drift in declarations_sha256/;
 
 // `computeDeclarationDigest` reads from dist/**/*.d.ts. On a genuinely clean
 // checkout, dist/ does not exist yet, so every test below that inspects
@@ -42,8 +48,8 @@ test("committed package artifact metadata is internally bound to current source 
 
   assert.equal(metadata.package_name, manifest.name);
   assert.equal(metadata.package_version, manifest.version);
-  assert.match(metadata.artifact_sha256, /^[0-9a-f]{64}$/);
-  assert.match(sourceInputsSha256, /^[0-9a-f]{64}$/);
+  assert.match(metadata.artifact_sha256, HEX_256);
+  assert.match(sourceInputsSha256, HEX_256);
   // The committed digest must actually equal what a fresh computation
   // produces from the current source — not merely be well-formed hex. A
   // digest that is well-formed but stale (computed against different
@@ -65,7 +71,50 @@ test("artifact metadata rejects a changed source digest", async () => {
 
   assert.throws(
     () => assertArtifactMetadata(metadata, manifest, "0".repeat(64), metadata.declarations_sha256, artifact),
-    /source_inputs_sha256/
+    SOURCE_INPUTS_ERROR
+  );
+});
+
+test("artifact metadata rejects every mismatched identity or digest field", async () => {
+  const metadata = JSON.parse(await readFile(new URL("../artifact.json", import.meta.url), "utf8"));
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const sourceInputsSha256 = await computeSourceInputsDigest();
+  const declarationsSha256 = await computeDeclarationDigest();
+  const artifact = {
+    filename: metadata.artifact_filename,
+    sha256: metadata.artifact_sha256,
+    sha512: metadata.artifact_sha512,
+    sha1: metadata.artifact_sha1,
+  };
+  const identityFields = [
+    "artifact_filename",
+    "artifact_sha256",
+    "artifact_sha512",
+    "artifact_sha1",
+    "package_name",
+    "package_version",
+  ];
+
+  for (const field of identityFields) {
+    assert.throws(
+      () =>
+        assertArtifactMetadata(
+          { ...metadata, [field]: `mismatched-${metadata[field]}` },
+          manifest,
+          sourceInputsSha256,
+          declarationsSha256,
+          artifact
+        ),
+      new RegExp(`artifact metadata drift in ${field}`)
+    );
+  }
+  assert.throws(
+    () => assertArtifactMetadata(metadata, manifest, `mismatched-${sourceInputsSha256}`, declarationsSha256, artifact),
+    ARTIFACT_SOURCE_INPUTS_ERROR
+  );
+  assert.throws(
+    () => assertArtifactMetadata(metadata, manifest, sourceInputsSha256, `mismatched-${declarationsSha256}`, artifact),
+    ARTIFACT_DECLARATIONS_ERROR
   );
 });
 
@@ -87,7 +136,7 @@ test("verifyArtifactMetadata succeeds against the real installed npm binary with
   await rm(distDir, { force: true, recursive: true });
 
   const verified = await verifyArtifactMetadata();
-  assert.match(verified.artifact_sha256, /^[0-9a-f]{64}$/);
-  assert.match(verified.artifact_sha512, /^[0-9a-f]{128}$/);
-  assert.match(verified.artifact_sha1, /^[0-9a-f]{40}$/);
+  assert.match(verified.artifact_sha256, HEX_256);
+  assert.match(verified.artifact_sha512, HEX_512);
+  assert.match(verified.artifact_sha1, HEX_160);
 });

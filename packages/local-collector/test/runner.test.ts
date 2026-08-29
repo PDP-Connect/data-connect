@@ -106,6 +106,7 @@ test("runner exports the collector runtime capability profile with collector id"
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.id, "collector");
   const bindings = [...COLLECTOR_RUNTIME_CAPABILITIES.bindings].sort();
   assert.deepEqual(bindings, ["filesystem", "local_device", "network"]);
+  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], []);
 });
 
 test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {

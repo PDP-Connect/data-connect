@@ -1035,20 +1035,18 @@ test("runCollectorConnector fails closed when a connector emits STREAM_EVIDENCE 
 });
 
 test("runCollectorConnector rejects a connector declaring STREAM_EVIDENCE at placement: the collector runtime does not advertise it", async () => {
-  // The collector runtime withdrew its (false) STREAM_EVIDENCE advertisement:
-  // no local-collector connector emits it, and there is no durable outbox
-  // path for it yet (`handleMessage`'s STREAM_EVIDENCE branch still only
-  // validates and discards). A connector that declares the capability must
-  // now fail at pre-spawn placement, before any child process runs, rather
-  // than reach `handleMessage` at all. See runtime-capabilities.test.ts for
-  // the placement-level fail-before/pass-after pair.
+  // The protocol package still parses this message, but the current device
+  // runtime deliberately withdraws the capability until durable terminal
+  // propagation exists. The pre-spawn rejection must happen before a
+  // heartbeat or child process, so this test cannot imply current support.
   const harness = await startCollectorHarness({ priorState: {} });
   try {
+    const markerDir = await mkdtemp(join(tmpdir(), "pdpp-withdrawn-stream-evidence-"));
+    const markerPath = join(markerDir, "spawned.marker");
     const fixture = await writeFixtureConnector({
       script: `
-        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
-        process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1, outcomes: { emitted: 1, unchanged: 0, gapped: 0, unaccounted: 0 }, reference_only: true }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+        const fs = await import("node:fs/promises");
+        await fs.writeFile(${JSON.stringify(markerPath)}, "spawned");
       `,
     });
 
@@ -1075,11 +1073,14 @@ test("runCollectorConnector rejects a connector declaring STREAM_EVIDENCE at pla
       (error: unknown) => {
         assert.ok(error instanceof RuntimeCapabilityMismatchError);
         if (error instanceof RuntimeCapabilityMismatchError) {
-          assert.deepEqual([...error.missing], ["STREAM_EVIDENCE"]);
+          assert.equal(error.runtime, "collector");
+          assert.deepEqual(error.missing, ["STREAM_EVIDENCE"]);
         }
         return true;
       }
     );
+    assert.equal(harness.heartbeats.length, 0, "withdrawn capability must reject before any heartbeat");
+    await assert.rejects(() => readFile(markerPath), "withdrawn capability must prevent child spawn");
   } finally {
     await harness.close();
   }
