@@ -29,8 +29,18 @@ export interface LocalCollectorDefinition {
   readonly bindings: Readonly<Record<string, LocalCollectorBinding>>;
   /** Stable connector id (matches the manifest + ingest envelope). */
   readonly connector_id: string;
-  /** Protocol capabilities this connector requires from its collector runtime. */
-  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
+  /**
+   * Protocol capabilities this connector requires from its collector
+   * runtime. Required (even as `[]` for a non-emitter): every real bundled
+   * connector already declares this explicitly, and making it required here
+   * — the root authoring type feeding the whole placement pipeline — closes
+   * off constructing an invalid 0.0.2+ definition that simply omits it.
+   * There is no separate optional/legacy path at this layer: a genuinely
+   * legacy (pre-0.0.2) connector is identified downstream, at the
+   * `ConnectorPlacementInput` placement-gate boundary, via
+   * `protocol_contract_version: "0.0.1"` — not by omitting this field here.
+   */
+  readonly protocol_capabilities: readonly ConnectorProtocolCapability[];
   /**
    * Whether this connector actually ENFORCES an owner-declared path root at
    * enumeration time — pruning subtrees before it opens, reads, or parses their

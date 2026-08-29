@@ -307,10 +307,22 @@ if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
     // cannot contain its own SHA without invalidating itself (the commit's
     // hash is a function of its own tree, which would have to include the
     // very field claiming to describe it). That provenance is real only
-    // once the commit exists, i.e. at release time — see
-    // scripts/semantic-release-github-output.ts, which semantic-release
-    // invokes after the release commit and tag are already known, and
-    // which attaches the SHA as external release provenance rather than
-    // in-repo package metadata.
+    // once the commit exists, i.e. at release time — via npm provenance,
+    // not via scripts/semantic-release-github-output.ts (that script only
+    // emits new-release-published/version/git-tag/major-minor as GitHub
+    // Actions outputs; it does not bind anything to the published tarball).
+    // The actual mechanism: packages/connector-protocol/package.json's
+    // publishConfig.provenance: true, combined with
+    // .github/workflows/npm-release.yml's `release` job publishing over
+    // OIDC (id-token: write, no NPM_TOKEN), makes `@semantic-release/npm`
+    // request a signed Sigstore attestation binding the published tarball's
+    // exact contents (its integrity hash) to the exact GitHub Actions
+    // workflow run that published it — which is itself bound to the exact
+    // commit SHA (`github.sha`) that triggered the run. This is
+    // independently verifiable after publish via
+    // `npm view @pdpp/connector-protocol --json` (look for a
+    // `dist.attestations` / provenance field) or `gh attestation verify`
+    // against the downloaded tarball. See the `verify provenance` step in
+    // npm-release.yml's `release` job for an automated check of this.
   }
 }

@@ -3100,20 +3100,21 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
     // Only a connector that declared it prunes by root may have a roots
     // boundary honoured; otherwise it is declassified, never falsely claimed.
     ...(bundled?.enforces_source_roots ? { enforcesSourceRoots: true } : {}),
-    ...(bundled?.protocol_capabilities ? { protocol_capabilities: bundled.protocol_capabilities } : {}),
-    // Every bundled connector now declares protocol_capabilities explicitly
-    // (even as []), so `bundled` never hits the branch above without it. The
-    // `--command <bin>` monorepo-development escape hatch (customAllowed)
-    // is the one path where `bundled` is null and no declaration exists:
-    // that path is an explicit operator opt-in
-    // (PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1) already gated by
-    // CollectorCustomCommandRefusedError above, so it is trusted the same
-    // way a pre-0.0.2 legacy artifact is trusted — not because its
-    // capabilities are verified, but because the operator explicitly chose
-    // to run an arbitrary dev binary outside the declared-connector supply
-    // chain. This must NOT default to every omission, only this one
-    // deliberately opted-in path.
-    ...(bundled ? {} : { trusted_legacy_artifact: true }),
+    // Every bundled connector declares protocol_capabilities explicitly
+    // (even as []). The `--command <bin>` monorepo-development escape hatch
+    // (customAllowed) is the one path where `bundled` is null: that path is
+    // an explicit operator opt-in (PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1)
+    // already gated by CollectorCustomCommandRefusedError above, pointing at
+    // an arbitrary operator-supplied dev binary with no `LocalCollectorDefinition`
+    // backing it. That is NOT evidence of a legacy 0.0.1 connector-protocol
+    // wire contract — an operator opt-in to run arbitrary code says nothing
+    // about the wire contract the code speaks. Since a custom-command entry
+    // has no declared connector and cannot possibly emit `STREAM_EVIDENCE`
+    // (it is not a declared, registered connector), it correctly declares
+    // protocol_capabilities: [] — an explicit, honest declaration that this
+    // arbitrary dev binary requires zero protocol capabilities — rather than
+    // asserting a fake legacy identity via `protocol_contract_version`.
+    protocol_capabilities: bundled?.protocol_capabilities ?? [],
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
     runtime_requirements: { bindings: bundled?.bindings ?? {} },
   };

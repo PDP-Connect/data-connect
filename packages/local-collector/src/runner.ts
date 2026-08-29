@@ -172,8 +172,13 @@ export interface BundledConnectorEntry {
   readonly command: string;
   /** Stable connector id (matches the manifest + ingest envelope). */
   readonly connector_id: string;
-  /** Protocol capabilities this connector requires from its collector runtime. */
-  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
+  /**
+   * Protocol capabilities this connector requires from its collector
+   * runtime. Required: all 6 bundled connectors already declare it
+   * explicitly (even as `[]`), so this documents reality and prevents a 7th
+   * connector from being added without it.
+   */
+  readonly protocol_capabilities: readonly ConnectorProtocolCapability[];
   /** Whether the connector enforces path roots at enumeration time. */
   readonly enforces_source_roots?: boolean;
   /** Streams whose enumeration honors declared source roots. */
@@ -224,9 +229,9 @@ function toBundledEntry(definition: LocalCollectorDefinition): BundledConnectorE
     command: commandForEntry(resolvedEntry),
     args: Object.freeze([resolvedEntry]) as readonly string[],
     bindings: definition.bindings,
-    ...(definition.protocol_capabilities
-      ? { protocol_capabilities: Object.freeze([...definition.protocol_capabilities]) as readonly ConnectorProtocolCapability[] }
-      : {}),
+    protocol_capabilities: Object.freeze([
+      ...definition.protocol_capabilities,
+    ]) as readonly ConnectorProtocolCapability[],
     streams: Object.freeze([...definition.streams]) as readonly string[],
     ...(definition.time_scopable_streams
       ? {

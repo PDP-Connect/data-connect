@@ -70,32 +70,44 @@ export interface ConnectorRuntimeRequirements {
   readonly bindings?: Partial<Record<RuntimeBindingName, { readonly required?: boolean }>>;
 }
 
-export interface ConnectorPlacementInput {
+interface ConnectorPlacementInputBase {
   readonly connector_id: string;
-  /**
-   * Protocol capabilities the connector will use on the wire.
-   *
-   * Omitting this field is only tolerated for a connector whose definition
-   * predates the connector-protocol 0.0.2 capability-declaration contract —
-   * see {@link ConnectorPlacementInput.trusted_legacy_artifact}. A 0.0.2+
-   * connector definition MUST declare this explicitly, even as `[]`, or
-   * placement fails with `"undeclared_capabilities"` rather than silently
-   * treating the omission as "requires nothing".
-   */
-  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
   readonly runtime_requirements?: ConnectorRuntimeRequirements;
-  /**
-   * Narrow escape hatch for a connector definition authored against the
-   * legacy connector-protocol 0.0.1 contract, from before
-   * `protocol_capabilities` existed. Set this ONLY for such an artifact.
-   * When `true` and `protocol_capabilities` is omitted, placement treats the
-   * omission as `[]` (today's pre-0.0.2 behavior). Defaults to `false`, so an
-   * unmarked connector that omits `protocol_capabilities` is a hard
-   * placement failure rather than a silently under-gated one — see
-   * `diffRequiredProtocolCapabilities`.
-   */
-  readonly trusted_legacy_artifact?: boolean;
 }
+
+/**
+ * A connector-protocol 0.0.2+ definition. `protocol_capabilities` is
+ * REQUIRED here (even as `[]` for a non-emitter) — this is what makes an
+ * invalid 0.0.2 definition (one that simply omits the field) impossible to
+ * construct at the type level.
+ */
+export interface DeclaredConnectorPlacementInput extends ConnectorPlacementInputBase {
+  readonly protocol_capabilities: readonly ConnectorProtocolCapability[];
+}
+
+/**
+ * A connector definition authored against the legacy connector-protocol
+ * 0.0.1 contract, from before `protocol_capabilities` existed. The
+ * discriminant is a closed literal identity tag, not a boolean: JS has no
+ * runtime cryptographic attestation, so this is still caller-supplied, but
+ * the discriminant name and literal type make clear this branch means
+ * specifically "this is a pre-0.0.2 connector-protocol contract" — it can no
+ * longer be set as a blanket trust bypass for unrelated code paths (e.g. an
+ * arbitrary custom-command dev entrypoint), because the type system makes
+ * "legacy" and "declares capabilities" mutually exclusive branches of the
+ * union: this variant MUST NOT also carry `protocol_capabilities`.
+ */
+export interface LegacyConnectorPlacementInput extends ConnectorPlacementInputBase {
+  readonly protocol_contract_version: "0.0.1";
+}
+
+/**
+ * Discriminated union: either a 0.0.2+ connector that explicitly declares
+ * its protocol capabilities, or a legacy 0.0.1 connector identified by a
+ * closed literal tag. Omission of `protocol_capabilities` is only legal via
+ * the latter branch — there is no freeform boolean escape hatch.
+ */
+export type ConnectorPlacementInput = DeclaredConnectorPlacementInput | LegacyConnectorPlacementInput;
 
 export type RuntimeCapabilityName = RuntimeBindingName | ConnectorProtocolCapability;
 
@@ -109,10 +121,16 @@ export type PlacementDecision =
     }
   | {
       /**
-       * A 0.0.2+ connector omitted `protocol_capabilities` without setting
-       * `trusted_legacy_artifact`. Distinct from `"missing_capability"`
-       * because there is no known list of capabilities to diff against the
-       * runtime yet — the connector must declare its capabilities first.
+       * The input object matches NEITHER union branch: it has no
+       * `protocol_capabilities` array AND no `protocol_contract_version:
+       * "0.0.1"` tag. TypeScript's discriminated union prevents this for
+       * well-typed callers, but plain JS callers (not just TS) can still
+       * construct a malformed object at runtime that satisfies neither
+       * branch, so this runtime guard stays even though the type system
+       * now makes the two legitimate branches exhaustive. Distinct from
+       * `"missing_capability"` because there is no known list of
+       * capabilities to diff against the runtime yet — the connector must
+       * declare its capabilities (or its legacy identity) first.
        */
       readonly kind: "undeclared_capabilities";
       readonly runtime: string;
@@ -142,10 +160,11 @@ export function diffRequiredBindings(
  * Returns the protocol capabilities a connector requires that the runtime
  * does not advertise. A missing capability is a pre-spawn incompatibility.
  *
- * `connector.protocol_capabilities` being `undefined` is NOT the same as
- * `[]`: an omitted declaration only defaults to "requires nothing" when the
- * connector is marked `trusted_legacy_artifact` (a pre-0.0.2 connector that
- * predates this field). Any other omission is a caller error — call
+ * A legacy (`protocol_contract_version: "0.0.1"`) connector has no
+ * `protocol_capabilities` array by construction — its omission defaults to
+ * "requires nothing" (today's pre-0.0.2 behavior). Any other connector that
+ * lacks a `protocol_capabilities` array is a malformed, runtime-only input
+ * that neither union branch permits statically — call
  * `hasUndeclaredCapabilities` first and route it to the
  * `"undeclared_capabilities"` decision rather than calling this function.
  */
@@ -153,19 +172,23 @@ export function diffRequiredProtocolCapabilities(
   connector: ConnectorPlacementInput,
   runtime: RuntimeCapabilityProfile
 ): ConnectorProtocolCapability[] {
-  return (connector.protocol_capabilities ?? []).filter((capability) => !runtime.protocolCapabilities.has(capability));
+  const declared = "protocol_capabilities" in connector ? connector.protocol_capabilities : [];
+  return declared.filter((capability) => !runtime.protocolCapabilities.has(capability));
 }
 
 /**
- * True when a connector's protocol capabilities cannot be trusted as "none
- * required": `protocol_capabilities` is omitted and the connector is not
- * marked as a trusted legacy (pre-0.0.2) artifact. Placement must refuse
- * such a connector rather than silently treating the omission as `[]` —
- * that silent default is exactly how a 0.0.2+ `STREAM_EVIDENCE` emitter
- * that forgot to declare it would slip past a fail-closed runtime.
+ * True when a connector input satisfies NEITHER legitimate union branch: it
+ * has no `protocol_capabilities` array and no `protocol_contract_version:
+ * "0.0.1"` tag. TypeScript's discriminated union makes this unconstructable
+ * for well-typed callers, but a plain JS caller (or a value that has
+ * bypassed the type checker, e.g. via `JSON.parse`) can still produce such
+ * an object at runtime, so placement must refuse it rather than silently
+ * treating the omission as `[]` — that silent default is exactly how a
+ * 0.0.2+ `STREAM_EVIDENCE` emitter that forgot to declare it would slip past
+ * a fail-closed runtime.
  */
 function hasUndeclaredCapabilities(connector: ConnectorPlacementInput): boolean {
-  return connector.protocol_capabilities === undefined && connector.trusted_legacy_artifact !== true;
+  return !("protocol_capabilities" in connector) && !("protocol_contract_version" in connector);
 }
 
 /**
@@ -232,13 +255,13 @@ export class RuntimeCapabilityMismatchError extends Error {
 }
 
 /**
- * Stable error code surfaced when a connector definition omits
- * `protocol_capabilities` without the narrow `trusted_legacy_artifact`
- * escape hatch. Distinct from {@link RUNTIME_CAPABILITY_MISMATCH_CODE}: this
- * is a connector-authoring defect (the declaration is missing, not merely
- * incompatible with the runtime), so callers should not present it as "run
- * this on a different runtime" — the connector itself must declare its
- * capabilities before it can run anywhere.
+ * Stable error code surfaced when a connector definition matches neither
+ * `ConnectorPlacementInput` union branch. Distinct from
+ * {@link RUNTIME_CAPABILITY_MISMATCH_CODE}: this is a connector-authoring
+ * defect (the declaration is missing, not merely incompatible with the
+ * runtime), so callers should not present it as "run this on a different
+ * runtime" — the connector itself must declare its capabilities (or its
+ * legacy identity) before it can run anywhere.
  */
 export const RUNTIME_CAPABILITY_UNDECLARED_CODE = "runtime_capability_undeclared";
 
@@ -249,11 +272,12 @@ export class RuntimeCapabilityUndeclaredError extends Error {
 
   constructor(args: { connectorId: string; runtime: string }) {
     super(
-      `Connector '${args.connectorId}' omits 'protocol_capabilities' and is not marked ` +
-        "'trusted_legacy_artifact'. A connector-protocol 0.0.2+ connector definition must " +
-        "declare its protocol capabilities explicitly (even as an empty array) before it can " +
-        `be placed on runtime '${args.runtime}'. Only a connector authored against the legacy ` +
-        "0.0.1 contract may omit this field, and only when explicitly marked trusted."
+      `Connector '${args.connectorId}' omits 'protocol_capabilities' and does not carry ` +
+        "'protocol_contract_version: \"0.0.1\"'. A connector-protocol 0.0.2+ connector " +
+        "definition must declare its protocol capabilities explicitly (even as an empty array) " +
+        `before it can be placed on runtime '${args.runtime}'. Only a connector authored ` +
+        "against the legacy 0.0.1 contract may omit 'protocol_capabilities', and only by " +
+        "carrying the 'protocol_contract_version: \"0.0.1\"' identity tag."
     );
     this.name = "RuntimeCapabilityUndeclaredError";
     this.code = RUNTIME_CAPABILITY_UNDECLARED_CODE;

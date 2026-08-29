@@ -595,7 +595,14 @@ export function readCollectionScopeFromState(
   };
 }
 
-export interface CollectorConnectorSpec extends ConnectorPlacementInput {
+/**
+ * `CollectorConnectorSpec`'s fields beyond the placement-gate contract.
+ * Split out because `ConnectorPlacementInput` is now a discriminated union
+ * (declared 0.0.2+ vs. legacy 0.0.1), and a TypeScript interface cannot
+ * `extends` a union — this intersects with it instead via
+ * {@link CollectorConnectorSpec}.
+ */
+interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
@@ -633,6 +640,8 @@ export interface CollectorConnectorSpec extends ConnectorPlacementInput {
    */
   readonly timeScopableStreams?: readonly string[];
 }
+
+export type CollectorConnectorSpec = ConnectorPlacementInput & CollectorConnectorSpecExtra;
 
 export interface CollectorRunConfig {
   /**

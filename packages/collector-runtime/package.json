@@ -45,7 +45,7 @@
     "verify": "npm run typecheck && npm run check && npm run check:noUnnecessaryConditions-expiry && npm test"
   },
   "dependencies": {
-    "@pdpp/connector-protocol": ">=0.0.2 <1.0.0"
+    "@pdpp/connector-protocol": "0.0.2"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

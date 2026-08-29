@@ -126,3 +126,41 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run release:npm
+
+      # Proves the npm-provenance binding claimed in
+      # packages/connector-protocol/scripts/package-artifact.mjs actually
+      # holds for the version just published: `publishConfig.provenance:
+      # true` + this job's OIDC-authenticated publish (id-token: write)
+      # should have made npm record a signed Sigstore attestation binding
+      # the tarball to this exact workflow run (and therefore to
+      # `github.sha`). This has not been exercised against a real npm
+      # registry response yet — neither package has been published from
+      # this workflow before — so the expected `dist.attestations` JSON
+      # shape below should be confirmed against a real `npm view` response
+      # before trusting this gate in production. It is written to fail
+      # loudly (non-zero exit, explicit message) rather than silently pass
+      # if the field is absent or shaped differently than expected.
+      - name: Verify npm provenance attestation
+        if: needs.resolve-version.outputs.new-release-published == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve-version.outputs.new-release-version }}"
+          for pkg in "@pdpp/connector-protocol" "@pdpp/collector-runtime"; do
+            echo "Checking npm provenance for ${pkg}@${version}..."
+            metadata="$(npm view "${pkg}@${version}" --json)"
+            attestations_url="$(node -e '
+              const metadata = JSON.parse(process.argv[1]);
+              const url = metadata?.dist?.attestations?.url;
+              if (!url) {
+                console.error(
+                  "FAIL: no dist.attestations.url in npm view output for " + process.argv[2] +
+                  ". Expected an npm-provenance attestation for a package published with " +
+                  "publishConfig.provenance: true from an OIDC-authenticated GitHub Actions job. " +
+                  "Full metadata: " + JSON.stringify(metadata, null, 2)
+                );
+                process.exit(1);
+              }
+              console.log(url);
+            ' "$metadata" "${pkg}@${version}")"
+            echo "Found attestations URL for ${pkg}@${version}: ${attestations_url}"
+          done

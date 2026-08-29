@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   assertPlacementOrThrow,
   COLLECTOR_RUNTIME_CAPABILITIES,
+  type ConnectorPlacementInput,
   diffRequiredBindings,
   diffRequiredProtocolCapabilities,
   evaluatePlacement,
@@ -17,37 +18,40 @@ import {
 } from "./runtime-capabilities.ts";
 
 // These fixtures exercise binding gating only, not protocol-capability
-// declaration, so they mark trusted_legacy_artifact to opt out of the
-// separate "undeclared_capabilities" gate covered by its own tests below.
+// declaration, so they declare protocol_capabilities: [] (the ordinary
+// declared-empty-capabilities path) to opt out of the separate
+// "undeclared_capabilities" gate covered by its own tests below. None of
+// these are testing genuine 0.0.1 legacy-omission behavior, so they use the
+// declared variant, not the legacy protocol_contract_version escape hatch.
 const apiConnector = {
   connector_id: "github",
+  protocol_capabilities: [],
   runtime_requirements: { bindings: { network: { required: true } } },
-  trusted_legacy_artifact: true,
 };
 
 const browserConnector = {
   connector_id: "usaa",
+  protocol_capabilities: [],
   runtime_requirements: {
     bindings: { browser: { required: true }, network: { required: true } },
   },
-  trusted_legacy_artifact: true,
 };
 
 const codexConnector = {
   connector_id: "codex",
+  protocol_capabilities: [],
   runtime_requirements: { bindings: { filesystem: { required: true } } },
-  trusted_legacy_artifact: true,
 };
 
 const localDeviceConnector = {
   connector_id: "imessage",
+  protocol_capabilities: [],
   runtime_requirements: {
     bindings: {
       filesystem: { required: true },
       local_device: { required: true },
     },
   },
-  trusted_legacy_artifact: true,
 };
 
 const oldFailClosedRuntime = {
@@ -68,9 +72,12 @@ test("collector runtime advertises STREAM_EVIDENCE with its unique protocol vers
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), true);
 });
 
-test("directional compatibility: new runtime accepts an old, trusted-legacy connector", () => {
+test("directional compatibility: new runtime accepts an old, legacy 0.0.1 connector", () => {
   assert.deepEqual(
-    evaluatePlacement({ connector_id: "old-connector", trusted_legacy_artifact: true }, COLLECTOR_RUNTIME_CAPABILITIES),
+    evaluatePlacement(
+      { connector_id: "old-connector", protocol_contract_version: "0.0.1" },
+      COLLECTOR_RUNTIME_CAPABILITIES
+    ),
     {
       kind: "ok",
       satisfied: [],
@@ -114,11 +121,11 @@ test("boundary_claim remains optional and does not require a protocol capability
     type: "SKIP_RESULT",
   } as const;
   assert.equal(skipResult.boundary_claim, "provider_history_boundary");
-  // trusted_legacy_artifact: true stands in for a pre-0.0.2 connector that
-  // predates protocol_capabilities entirely; boundary_claim itself needs no
-  // capability declaration on either side of that line.
+  // protocol_contract_version: "0.0.1" stands in for a pre-0.0.2 connector
+  // that predates protocol_capabilities entirely; boundary_claim itself
+  // needs no capability declaration on either side of that line.
   assert.deepEqual(
-    evaluatePlacement({ connector_id: "boundary-only", trusted_legacy_artifact: true }, oldFailClosedRuntime),
+    evaluatePlacement({ connector_id: "boundary-only", protocol_contract_version: "0.0.1" }, oldFailClosedRuntime),
     {
       kind: "ok",
       satisfied: [],
@@ -175,6 +182,7 @@ test("evaluatePlacement: filesystem-only connector is eligible on both runtimes"
 test("diffRequiredBindings ignores non-required declarations", () => {
   const optional = {
     connector_id: "x",
+    protocol_capabilities: [],
     runtime_requirements: { bindings: { browser: { required: false } } },
   };
   assert.deepEqual(diffRequiredBindings(optional, PROVIDER_RUNTIME_CAPABILITIES), []);
@@ -210,17 +218,22 @@ test("assertPlacementOrThrow does not name optional bindings as missing", () => 
   // runtime that lacks browser.
   const optional = {
     connector_id: "soft-browser",
+    protocol_capabilities: [],
     runtime_requirements: {
       bindings: { browser: { required: false }, network: { required: true } },
     },
-    trusted_legacy_artifact: true,
   };
   const satisfied = assertPlacementOrThrow(optional, PROVIDER_RUNTIME_CAPABILITIES);
   assert.deepEqual([...satisfied], ["network"]);
 });
 
-test("evaluatePlacement: a connector that omits protocol_capabilities without trusted_legacy_artifact is undeclared, not ok", () => {
-  const undeclared = { connector_id: "forgot-to-declare" };
+// TypeScript's discriminated union makes an object matching NEITHER branch
+// (no `protocol_capabilities`, no `protocol_contract_version: "0.0.1"`)
+// unconstructable for well-typed callers. These fixtures cast past the type
+// checker: they deliberately test the runtime guard against a malformed
+// value a plain-JS caller could still produce.
+test("evaluatePlacement: a connector matching neither union branch is undeclared, not ok", () => {
+  const undeclared = { connector_id: "forgot-to-declare" } as unknown as ConnectorPlacementInput;
   const decision = evaluatePlacement(undeclared, COLLECTOR_RUNTIME_CAPABILITIES);
   assert.equal(decision.kind, "undeclared_capabilities");
   if (decision.kind === "undeclared_capabilities") {
@@ -237,22 +250,26 @@ test("evaluatePlacement: an explicit empty protocol_capabilities array is always
   });
 });
 
-test("evaluatePlacement: trusted_legacy_artifact true treats an omitted declaration as empty", () => {
-  const trustedLegacy = { connector_id: "trusted-legacy", trusted_legacy_artifact: true };
-  assert.deepEqual(evaluatePlacement(trustedLegacy, COLLECTOR_RUNTIME_CAPABILITIES), {
+test("evaluatePlacement: protocol_contract_version '0.0.1' treats an omitted declaration as empty", () => {
+  const legacyContract = { connector_id: "trusted-legacy", protocol_contract_version: "0.0.1" as const };
+  assert.deepEqual(evaluatePlacement(legacyContract, COLLECTOR_RUNTIME_CAPABILITIES), {
     kind: "ok",
     satisfied: [],
   });
 });
 
-test("evaluatePlacement: trusted_legacy_artifact false still gates an omitted declaration as undeclared", () => {
-  const explicitlyUntrusted = { connector_id: "explicitly-untrusted", trusted_legacy_artifact: false };
-  assert.equal(evaluatePlacement(explicitlyUntrusted, COLLECTOR_RUNTIME_CAPABILITIES).kind, "undeclared_capabilities");
+test("evaluatePlacement: an object matching neither union branch is gated as undeclared", () => {
+  const malformed = { connector_id: "explicitly-untrusted" } as unknown as ConnectorPlacementInput;
+  assert.equal(evaluatePlacement(malformed, COLLECTOR_RUNTIME_CAPABILITIES).kind, "undeclared_capabilities");
 });
 
 test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable code for an undeclared connector", () => {
   assert.throws(
-    () => assertPlacementOrThrow({ connector_id: "forgot-to-declare" }, COLLECTOR_RUNTIME_CAPABILITIES),
+    () =>
+      assertPlacementOrThrow(
+        { connector_id: "forgot-to-declare" } as unknown as ConnectorPlacementInput,
+        COLLECTOR_RUNTIME_CAPABILITIES
+      ),
     (err: unknown) => {
       assert.ok(err instanceof RuntimeCapabilityUndeclaredError);
       if (err instanceof RuntimeCapabilityUndeclaredError) {
@@ -260,7 +277,7 @@ test("assertPlacementOrThrow throws RuntimeCapabilityUndeclaredError with stable
         assert.equal(err.connectorId, "forgot-to-declare");
         assert.equal(err.runtime, "collector");
         assert.match(err.message, /protocol_capabilities/);
-        assert.match(err.message, /trusted_legacy_artifact/);
+        assert.match(err.message, /protocol_contract_version/);
       }
       return true;
     }
