@@ -49,6 +49,7 @@ export type {
   InteractionRequest,
   InteractionResponse,
   RecordData,
+  SkipResultBoundaryClaim,
   StartMessage,
   StreamScope,
   ValidateRecord,

@@ -8,7 +8,7 @@ import {
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
 } from "./connector-runtime-protocol.ts";
-import type { EmittedMessage } from "./index.ts";
+import type { EmittedMessage, SkipResultBoundaryClaim } from "./index.ts";
 
 const CONTINUATION: RuntimeContinuationFact = {
   boundary: "uidvalidity-123",
@@ -131,4 +131,10 @@ test("SKIP_RESULT rejects an unrecognized boundary claim", () => {
     type: "SKIP_RESULT",
   };
   assert.equal(skip.type, "SKIP_RESULT");
+});
+
+test("the public barrel exports the SKIP_RESULT boundary claim", () => {
+  const claim: SkipResultBoundaryClaim = "provider_history_boundary";
+
+  assert.equal(claim, "provider_history_boundary");
 });
