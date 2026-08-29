@@ -1,9 +1,9 @@
 {
   "artifact_filename": "pdpp-connector-protocol-0.0.2.tgz",
-  "artifact_sha256": "b51e3b12caacea148dcc84b363300dc427b8d28b4fd8e9fa3f96a13c89b67789",
-  "artifact_sha512": "5e278c217a697bf0734cf4298fd3d3bb7b1993a6d359ed18798d9658a3537248014ee320274b6dc99d0b16a6cea2f0b838219b72944a0a71495bc306f20a7975",
-  "artifact_sha1": "45c4824c48fc53c7041f3bcbdc1435f117b7d79c",
-  "declarations_sha256": "aad50f0409c5970809bfe427f36676ddd3f9c26544737b280fea72d2e7eee22d",
+  "artifact_sha256": "f4839d477e5354e522b332d19b0191208f85cc8a752ca7916d9d8b991e9f340a",
+  "artifact_sha512": "ce8d07a340d30fe4e2130f79bebc48f6fb12696b0ddd47fe12cbe9b0f3d047448633277c93383cf22b92f190e0989024c103bd41a9490a4ea07747f2fb2b857b",
+  "artifact_sha1": "a3385105e0e0207a15af08f96441b311e69e9c84",
+  "declarations_sha256": "088b3097321cd9690ca8ef98e3caedfdb5bf53527de8c1ccac73b863b961d858",
   "metadata_version": 1,
   "package_name": "@pdpp/connector-protocol",
   "package_version": "0.0.2",
