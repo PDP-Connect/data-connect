@@ -3,16 +3,17 @@ import { appendFile, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { computeSourceInputsDigest as computeProtocolSourceInputsDigest } from "../../connector-protocol/scripts/package-artifact.mjs";
 import {
   assertProtocolBuildMatchesReceipt,
   cloneCommittedSourceTree,
   computeSourceInputsDigest,
 } from "./package-artifact.mjs";
-import { computeSourceInputsDigest as computeProtocolSourceInputsDigest } from "../../connector-protocol/scripts/package-artifact.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const protocolRoot = resolve(packageRoot, "..", "connector-protocol");
 const protocolSourcePath = resolve(packageRoot, "..", "connector-protocol", "src", "auth.ts");
+const PROTOCOL_DECLARATIONS_DRIFT_ERROR = /connector-protocol declarations drift/;
 
 test("runtime source inputs bind the connector-protocol source receipt", async () => {
   const original = await readFile(protocolSourcePath, "utf8");
@@ -35,7 +36,7 @@ test("runtime artifact validation rejects a stale connector-protocol declaration
 
   assert.throws(
     () => assertProtocolBuildMatchesReceipt(metadata, sourceInputsSha256, "0".repeat(64)),
-    /connector-protocol declarations drift/
+    PROTOCOL_DECLARATIONS_DRIFT_ERROR
   );
 });
 
