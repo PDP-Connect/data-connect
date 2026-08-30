@@ -30,14 +30,18 @@ async function sourceInputPaths() {
   const sourcePaths = [];
   const visit = async (directory) => {
     const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      const fullPath = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(fullPath);
-      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-        sourcePaths.push(relative(packageRoot, fullPath));
-      }
-    }
+    await Promise.all(
+      entries
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map(async (entry) => {
+          const fullPath = join(directory, entry.name);
+          if (entry.isDirectory()) {
+            await visit(fullPath);
+          } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+            sourcePaths.push(relative(packageRoot, fullPath));
+          }
+        })
+    );
   };
 
   await visit(join(packageRoot, "src"));
@@ -45,13 +49,12 @@ async function sourceInputPaths() {
 }
 
 export async function computeSourceInputsDigest() {
-  const entries = [];
-  for (const inputPath of await sourceInputPaths()) {
-    entries.push({
+  const entries = await Promise.all(
+    (await sourceInputPaths()).map(async (inputPath) => ({
       path: inputPath,
       sha256: sha256(await readFile(join(packageRoot, inputPath))),
-    });
-  }
+    }))
+  );
   return sha256(JSON.stringify(entries));
 }
 
@@ -59,14 +62,18 @@ async function declarationPaths(root) {
   const paths = [];
   const visit = async (directory) => {
     const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      const fullPath = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(fullPath);
-      } else if (entry.name.endsWith(".d.ts")) {
-        paths.push(relative(root, fullPath));
-      }
-    }
+    await Promise.all(
+      entries
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map(async (entry) => {
+          const fullPath = join(directory, entry.name);
+          if (entry.isDirectory()) {
+            await visit(fullPath);
+          } else if (entry.name.endsWith(".d.ts")) {
+            paths.push(relative(root, fullPath));
+          }
+        })
+    );
   };
 
   await visit(join(root, "dist"));
@@ -74,13 +81,12 @@ async function declarationPaths(root) {
 }
 
 async function computeDeclarationDigestAt(root) {
-  const entries = [];
-  for (const declarationPath of await declarationPaths(root)) {
-    entries.push({
+  const entries = await Promise.all(
+    (await declarationPaths(root)).map(async (declarationPath) => ({
       path: declarationPath,
       sha256: sha256(await readFile(join(root, declarationPath))),
-    });
-  }
+    }))
+  );
   return sha256(JSON.stringify(entries));
 }
 
@@ -194,13 +200,13 @@ async function packOnce(root) {
         `expected exactly one .tgz in ${destination} after npm pack, found ${produced.length}: ${JSON.stringify(produced)}`
       );
     }
-    const filename = produced[0];
+    const [filename] = produced;
     const bytes = await readFile(join(destination, filename));
     return {
       filename,
+      sha1: sha1(bytes),
       sha256: sha256(bytes),
       sha512: sha512(bytes),
-      sha1: sha1(bytes),
     };
   } finally {
     await rm(destination, { force: true, recursive: true });
@@ -210,9 +216,9 @@ async function packOnce(root) {
 export function assertArtifactMetadata(metadata, manifest, sourceInputsSha256, declarationsSha256, artifact) {
   const expected = {
     artifact_filename: artifact.filename,
+    artifact_sha1: artifact.sha1,
     artifact_sha256: artifact.sha256,
     artifact_sha512: artifact.sha512,
-    artifact_sha1: artifact.sha1,
     declarations_sha256: declarationsSha256,
     package_name: manifest.name,
     package_version: manifest.version,
@@ -279,9 +285,9 @@ export async function generateArtifactMetadata() {
   const { artifact, declarationsSha256 } = await reproducibleArtifact();
   const metadata = {
     artifact_filename: artifact.filename,
+    artifact_sha1: artifact.sha1,
     artifact_sha256: artifact.sha256,
     artifact_sha512: artifact.sha512,
-    artifact_sha1: artifact.sha1,
     declarations_sha256: declarationsSha256,
     metadata_version: ARTIFACT_METADATA_VERSION,
     package_name: manifest.name,
@@ -302,17 +308,14 @@ export async function verifyArtifactMetadata() {
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  const command = process.argv[2];
-  const metadata =
-    command === "generate"
-      ? await generateArtifactMetadata()
-      : command === "verify"
-        ? await verifyArtifactMetadata()
-        : null;
-  if (!metadata) {
-    console.error("usage: node scripts/package-artifact.mjs <generate|verify>");
-    process.exitCode = 2;
-  } else {
+  const [, , command] = process.argv;
+  let metadata = null;
+  if (command === "generate") {
+    metadata = await generateArtifactMetadata();
+  } else if (command === "verify") {
+    metadata = await verifyArtifactMetadata();
+  }
+  if (metadata) {
     console.log(`${command}: ${metadata.package_name}@${metadata.package_version}`);
     console.log(`artifact: ${metadata.artifact_filename}`);
     console.log(`sha256: ${metadata.artifact_sha256}`);
@@ -342,5 +345,8 @@ if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
     // `dist.attestations` / provenance field) or `gh attestation verify`
     // against the downloaded tarball. See the `verify provenance` step in
     // npm-release.yml's `release` job for an automated check of this.
+  } else {
+    console.error("usage: node scripts/package-artifact.mjs <generate|verify>");
+    process.exitCode = 2;
   }
 }

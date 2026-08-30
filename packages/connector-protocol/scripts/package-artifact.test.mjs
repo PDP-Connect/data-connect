@@ -64,9 +64,9 @@ test("artifact metadata rejects a changed source digest", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const artifact = {
     filename: metadata.artifact_filename,
+    sha1: metadata.artifact_sha1,
     sha256: metadata.artifact_sha256,
     sha512: metadata.artifact_sha512,
-    sha1: metadata.artifact_sha1,
   };
 
   assert.throws(
@@ -82,9 +82,9 @@ test("artifact metadata rejects every mismatched identity or digest field", asyn
   const declarationsSha256 = await computeDeclarationDigest();
   const artifact = {
     filename: metadata.artifact_filename,
+    sha1: metadata.artifact_sha1,
     sha256: metadata.artifact_sha256,
     sha512: metadata.artifact_sha512,
-    sha1: metadata.artifact_sha1,
   };
   const identityFields = [
     "artifact_filename",

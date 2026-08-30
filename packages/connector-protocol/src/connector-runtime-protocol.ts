@@ -66,9 +66,9 @@ const STREAM_EVIDENCE_MAX_COUNT = Number.MAX_SAFE_INTEGER;
 /** The disjoint outcome partition over a `STREAM_EVIDENCE` message's `considered` keys. */
 export interface StreamEvidenceOutcomes {
   emitted: number;
-  unchanged: number;
   gapped: number;
   unaccounted: number;
+  unchanged: number;
 }
 
 function isBoundedNonNegativeInteger(value: unknown): value is number {
@@ -94,7 +94,7 @@ export function validateStreamEvidenceCounts(
     throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
   }
   const message = value as Record<string, unknown>;
-  const outcomes = message.outcomes;
+  const { outcomes } = message;
   if (typeof outcomes !== "object" || outcomes === null || Array.isArray(outcomes)) {
     throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
   }

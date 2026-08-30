@@ -8,13 +8,13 @@ import {
   CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
   isConnectorProtocolCapabilityArray,
-  STREAM_EVIDENCE_CAPABILITY,
   type RuntimeContinuationFact,
+  STREAM_EVIDENCE_CAPABILITY,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
-import { parseJsonlLine, stringifyForJsonl, type EmittedMessage, type SkipResultBoundaryClaim } from "./index.ts";
+import { type EmittedMessage, parseJsonlLine, type SkipResultBoundaryClaim, stringifyForJsonl } from "./index.ts";
 
 const CONTINUATION: RuntimeContinuationFact = {
   boundary: "uidvalidity-123",
