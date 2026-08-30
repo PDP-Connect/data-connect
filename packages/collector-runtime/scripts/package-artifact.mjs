@@ -158,7 +158,7 @@ export async function generateArtifactMetadata() {
     package_version: manifest.version,
     source_inputs_sha256: sourceInputsSha256,
   };
-  await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+  await writeFile(metadataPath, `${JSON.stringify(metadata, null, "\t")}\n`);
   return metadata;
 }
 
