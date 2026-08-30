@@ -2,12 +2,12 @@
   "name": "@pdpp/collector-runtime",
   "version": "0.0.2",
   "description": "Generic connector-execution runtime for PDPP local (device-side) collection: the collector loop, device-exporter ingest client, durable outbox, and runtime-capabilities placement gate. Depends on @pdpp/connector-protocol for the connector authoring contract (wire-protocol types, JSONL primitives). Connector-agnostic \u2014 carries no connector definitions or content.",
-  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PDP-Connect/data-connect.git",
     "directory": "packages/collector-runtime"
   },
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
@@ -35,12 +35,12 @@
     "dist/"
   ],
   "scripts": {
+    "artifact:generate": "node scripts/package-artifact.mjs generate",
+    "artifact:verify": "node scripts/package-artifact.mjs verify",
     "build": "node --experimental-strip-types scripts/build.ts",
     "check": "ultracite check",
     "check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
     "fix": "ultracite fix",
-    "artifact:generate": "node scripts/package-artifact.mjs generate",
-    "artifact:verify": "node scripts/package-artifact.mjs verify",
     "prepack": "npm run build",
     "test": "node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
@@ -60,9 +60,6 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true,
-    "registry": "https://registry.npmjs.org/",
-    "tag": "latest",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -84,6 +81,9 @@
         "types": "./dist/local-device-envelope.d.ts",
         "import": "./dist/local-device-envelope.js"
       }
-    }
+    },
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest"
   }
 }

@@ -528,7 +528,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     outbox.enqueue({
       id: oldId,
       kind: "terminal_run_commit",
-      payload: { ...terminalIdentity, commit_id: "old-commit", terminal_facts: [], state_delta: {}, version: 1 },
+      payload: { ...terminalIdentity, commit_id: "old-commit", state_delta: {}, terminal_facts: [], version: 1 },
       sourceInstanceId: "src-terminal",
     });
     const [oldClaim] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "src-terminal" });
@@ -555,8 +555,8 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
         ...terminalIdentity,
         commit_id: "new-commit",
         run_id: "run-new",
-        terminal_facts: [],
         state_delta: {},
+        terminal_facts: [],
         version: 1,
       },
       sourceInstanceId: "src-terminal",
@@ -598,8 +598,8 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     assert.deepEqual(retained?.payload, {
       ...terminalIdentity,
       commit_id: "old-commit",
-      terminal_facts: [],
       state_delta: {},
+      terminal_facts: [],
       version: 1,
     });
     assert.equal(outbox.isTerminalCommitSuperseded(oldId), true);

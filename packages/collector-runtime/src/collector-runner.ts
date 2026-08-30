@@ -1395,6 +1395,32 @@ function coverageEntryFromRecord(message: Extract<EmittedMessage, { type: "RECOR
 }
 
 /**
+ * Validate a STREAM_EVIDENCE message against the connector's declared
+ * capability and the protocol's outcome-count invariants, throwing with a
+ * connector-attributed message on either violation. Split out of
+ * `handleMessage` to keep that dispatcher's cognitive complexity within the
+ * project's max.
+ */
+function assertValidStreamEvidence(
+  message: Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>,
+  connector: CollectorConnectorSpec
+): void {
+  if (!connector.protocol_capabilities.includes("STREAM_EVIDENCE")) {
+    throw new Error(
+      `${connector.connector_id} emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability`
+    );
+  }
+  try {
+    validateStreamEvidenceCounts(message);
+  } catch (error) {
+    throw new Error(
+      `${connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`,
+      { cause: error }
+    );
+  }
+}
+
+/**
  * Fold the per-store coverage map collected during a run into the safe
  * {@link CollectorCompletenessSummary} surfaced on the run result. Returns
  * `null` when no coverage diagnostic was observed so absence reads as
@@ -1630,18 +1656,7 @@ async function streamConnectorIntoOutbox(
       return;
     }
     if (message.type === "STREAM_EVIDENCE") {
-      if (!input.config.connector.protocol_capabilities.includes("STREAM_EVIDENCE")) {
-        throw new Error(
-          `${input.config.connector.connector_id} emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability`
-        );
-      }
-      try {
-        validateStreamEvidenceCounts(message);
-      } catch {
-        throw new Error(
-          `${input.config.connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`
-        );
-      }
+      assertValidStreamEvidence(message, input.config.connector);
       return;
     }
     if (message.type === "DONE") {

@@ -112,9 +112,9 @@ async function packOnce(root) {
     const bytes = await readFile(join(destination, filename));
     return {
       filename,
+      sha1: digest(bytes, "sha1"),
       sha256: digest(bytes, "sha256"),
       sha512: digest(bytes, "sha512"),
-      sha1: digest(bytes, "sha1"),
     };
   } finally {
     await rm(destination, { force: true, recursive: true });
@@ -149,16 +149,16 @@ export async function generateArtifactMetadata() {
   const { artifact, declarationsSha256 } = await reproducibleArtifact();
   const metadata = {
     artifact_filename: artifact.filename,
+    artifact_sha1: artifact.sha1,
     artifact_sha256: artifact.sha256,
     artifact_sha512: artifact.sha512,
-    artifact_sha1: artifact.sha1,
     declarations_sha256: declarationsSha256,
     metadata_version: METADATA_VERSION,
     package_name: manifest.name,
     package_version: manifest.version,
     source_inputs_sha256: sourceInputsSha256,
   };
-  await writeFile(metadataPath, `${JSON.stringify(metadata, null, "\t")}\n`);
+  await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
   return metadata;
 }
 

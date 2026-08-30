@@ -345,8 +345,8 @@ test("runCollectorConnector.onMessage observes every protocol message in emissio
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      onMessage: (message) => observed.push(message.type),
       executionRoot: TEST_EXECUTION_ROOT,
+      onMessage: (message) => observed.push(message.type),
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-onmessage",
     });
@@ -382,10 +382,10 @@ test("runCollectorConnector.onMessage errors are swallowed and never break the r
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       onMessage: () => {
         throw new Error("reporter bug");
       },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath: await tempQueuePath(),
       sourceInstanceId: "src-onmessage-throws",
     });
@@ -526,8 +526,8 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { retryBackoffMs: 0 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { retryBackoffMs: 0 },
       queuePath,
       sourceInstanceId: "src-checkpoint-put-failure",
     });
@@ -552,8 +552,8 @@ test("checkpoint PUT failure keeps the committed-run cursor durable and a later 
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { retryBackoffMs: 0 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { retryBackoffMs: 0 },
       queuePath,
       sourceInstanceId: "src-checkpoint-put-failure",
     });
@@ -1128,8 +1128,8 @@ test("runCollectorConnector spawns connectors from the configured executionRoot 
         args: [fixture],
         command: process.execPath,
         connector_id: "fixture-spawn-context",
-        protocol_capabilities: [],
         env: { PATH: "operator-bin" },
+        protocol_capabilities: [],
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -1163,8 +1163,8 @@ test("runCollectorConnector rejects promptly when the connector command is missi
             args: ["connectors/claude_code/index.ts"],
             command: "__pdpp_missing_connector_command__",
             connector_id: "fixture-missing-command",
-            protocol_capabilities: [],
             env: { PATH: "operator-bin" },
+            protocol_capabilities: [],
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
           },
@@ -1416,11 +1416,11 @@ test("runCollectorConnector skips state PUT when the queue still has retrying it
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       outboxPolicy: {
         maxDrainDurationMs: 2000,
         retryBackoffMs: 100,
       },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1484,8 +1484,8 @@ test("runCollectorConnector does not checkpoint when record work dead-letters", 
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxAttempts: 1 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxAttempts: 1 },
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1900,8 +1900,8 @@ test("runCollectorConnector skips source scan when pre-existing durable work can
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -1954,8 +1954,8 @@ test("runCollectorConnector fails backlog-skip pass when terminal heartbeat is r
           },
           deviceId: "device-1",
           deviceToken: "device-token",
-          outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
           executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -2046,13 +2046,13 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       // maxDrainDurationMs is set well below retryBackoffMs so the drain's
       // auto-wait loop (which sleeps in real wall-clock time for a
       // backoff-delayed retry) exits on its duration budget instead of
       // actually sleeping ~60s. The backlog stays open either way — only
       // the loop's real sleep is what's being avoided here.
       outboxPolicy: { maxDrainDurationMs: 20, retryBackoffMs: 60_000 },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId,
     });
@@ -2098,10 +2098,10 @@ test("a backlog-open second pass re-enqueues nothing: the durable rows are byte-
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       // Same rationale as pass 1: keep the drain's auto-wait loop from
       // sleeping in real wall-clock time for the still-open backoff.
       outboxPolicy: { maxDrainDurationMs: 20, retryBackoffMs: 60_000 },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId,
     });
@@ -2748,8 +2748,8 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxEnqueuedBatchesPerRun },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxEnqueuedBatchesPerRun },
       queuePath,
       runId: "run-first-backfill-budget",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2793,8 +2793,8 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxEnqueuedBatchesPerRun },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxEnqueuedBatchesPerRun },
       queuePath,
       runId: "run-first-backfill-budget-same-policy",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2816,8 +2816,8 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxEnqueuedBatchesPerRun: 16 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxEnqueuedBatchesPerRun: 16 },
       queuePath,
       runId: "run-first-backfill-budget-larger-policy",
       sourceInstanceId: "src-first-backfill-budget",
@@ -2884,8 +2884,8 @@ test("runCollectorConnector defers checkpoint until every streamed record batch 
       },
       deviceId: "device-1",
       deviceToken: "device-token",
-      outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
       executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -3180,8 +3180,8 @@ test("runCollectorConnector leaves streamed batches durable when the child fails
           },
           deviceId: "device-1",
           deviceToken: "device-token",
-          outboxPolicy: { retryBackoffMs: 60_000 },
           executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { retryBackoffMs: 60_000 },
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3264,8 +3264,8 @@ test("runCollectorConnector corrects the heartbeat off 'starting' to an outbox-d
           },
           deviceId: "device-1",
           deviceToken: "device-token",
-          outboxPolicy: { retryBackoffMs: 60_000 },
           executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { retryBackoffMs: 60_000 },
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3440,8 +3440,8 @@ test("runCollectorConnector flushes a partial trailing batch when the child fail
           },
           deviceId: "device-1",
           deviceToken: "device-token",
-          outboxPolicy: { retryBackoffMs: 60_000 },
           executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { retryBackoffMs: 60_000 },
           queuePath,
           sourceInstanceId: "src-1",
         }),
@@ -3996,6 +3996,7 @@ test("runCollectorConnector skips spawn and reports blocked when queue depth cro
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       // Long retry backoff so the seeded batches stay retrying rather
       // than collapsing to ready during a possible second drain pass.
       outboxPolicy: {
@@ -4003,7 +4004,6 @@ test("runCollectorConnector skips spawn and reports blocked when queue depth cro
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       sourceInstanceId: "src-1",
     });
@@ -4345,8 +4345,8 @@ async function startTogglableHarness(options: {
     gapRecoveries,
     heartbeats,
     ingestedBatches,
-    terminalCommits,
     stateOps,
+    terminalCommits,
     url: `http://127.0.0.1:${address.port}`,
   };
 }
@@ -4436,12 +4436,12 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       outboxPolicy: {
         maxDrainDurationMs: 100,
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-policy-1",
       sourceInstanceId: "src-gap-policy",
@@ -4486,12 +4486,12 @@ test("runCollectorConnector enqueues a policy-budget gap row when queue depth bl
       },
       deviceId: "device-1",
       deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
       outboxPolicy: {
         maxDrainDurationMs: 100,
         maxQueueDepth,
         retryBackoffMs: 60_000,
       },
-      executionRoot: TEST_EXECUTION_ROOT,
       queuePath,
       runId: "run-policy-2",
       sourceInstanceId: "src-gap-policy",

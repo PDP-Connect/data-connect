@@ -143,8 +143,8 @@ export {
   RUNTIME_CAPABILITY_MISMATCH_CODE,
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
   type RuntimeBindingName,
-  type RuntimeCapabilityName,
   RuntimeCapabilityMismatchError,
+  type RuntimeCapabilityName,
   type RuntimeCapabilityProfile,
   RuntimeCapabilityUndeclaredError,
 } from "./runtime-capabilities.ts";

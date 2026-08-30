@@ -25,14 +25,14 @@ import {
 export type RuntimeBindingName = "network" | "browser" | "filesystem" | "local_device";
 
 export interface RuntimeCapabilityProfile {
-  /** Connector-protocol version this runtime recognizes. */
-  readonly protocolVersion: string;
-  /** Protocol capabilities this runtime advertises as available. */
-  readonly protocolCapabilities: ReadonlySet<ConnectorProtocolCapability>;
   /** Bindings this runtime advertises as available. */
   readonly bindings: ReadonlySet<RuntimeBindingName>;
   /** Stable identifier of the runtime. Used in diagnostics. */
   readonly id: string;
+  /** Protocol capabilities this runtime advertises as available. */
+  readonly protocolCapabilities: ReadonlySet<ConnectorProtocolCapability>;
+  /** Connector-protocol version this runtime recognizes. */
+  readonly protocolVersion: string;
 }
 
 /**

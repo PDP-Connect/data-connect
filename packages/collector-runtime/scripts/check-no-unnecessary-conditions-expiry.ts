@@ -19,13 +19,38 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const BIOME_BIN = join(PACKAGE_ROOT, "node_modules", ".bin", "biome");
+
+/**
+ * Walk up from `startDir` looking for `node_modules/.bin/biome`. npm
+ * workspaces hoist `@biomejs/biome` to the monorepo root, so it is never
+ * present directly under this package's own `node_modules` — only an
+ * ancestor's.
+ */
+function resolveBiomeBinary(startDir: string): string | null {
+  let cursor = resolve(startDir);
+  const seen = new Set<string>();
+  while (!seen.has(cursor)) {
+    seen.add(cursor);
+    const candidate = join(cursor, "node_modules", ".bin", "biome");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      break;
+    }
+    cursor = parent;
+  }
+  return null;
+}
+
+const BIOME_BIN = resolveBiomeBinary(PACKAGE_ROOT);
 
 const REPRO_SOURCE = `
 function contentType(headers: Record<string, string>): string {
@@ -46,6 +71,13 @@ const REPRO_CONFIG = JSON.stringify({
 });
 
 function main(): void {
+  if (!BIOME_BIN) {
+    console.error(
+      "[check-noUnnecessaryConditions-expiry] Could not locate a biome binary in this package's " +
+        "node_modules or any ancestor's. Run `npm install` at the monorepo root before verifying."
+    );
+    process.exit(1);
+  }
   const dir = mkdtempSync(join(tmpdir(), "pdpp-biome-nuc-expiry-"));
   try {
     writeFileSync(join(dir, "biome.jsonc"), REPRO_CONFIG);

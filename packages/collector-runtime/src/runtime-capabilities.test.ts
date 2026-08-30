@@ -122,7 +122,10 @@ test("capability withdrawal is fail-closed for emitters but leaves non-emitters 
     assert.deepEqual(emitterDecision.missing, ["STREAM_EVIDENCE"]);
   }
   assert.deepEqual(
-    evaluatePlacement({ connector_id: "ordinary-connector", protocol_capabilities: [] }, COLLECTOR_RUNTIME_CAPABILITIES),
+    evaluatePlacement(
+      { connector_id: "ordinary-connector", protocol_capabilities: [] },
+      COLLECTOR_RUNTIME_CAPABILITIES
+    ),
     {
       kind: "ok",
       satisfied: [],
