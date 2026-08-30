@@ -147,6 +147,10 @@ export async function cloneCommittedSourceTree(ref = "HEAD") {
   // runtime's nearest protocol dependency is an archived sibling, so neither
   // clone can resolve the workspace's ambient, untracked protocol dist.
   await symlink(join(repoRoot, "node_modules"), join(cloneDir, "node_modules"));
+  // Keep the protocol build's dependency layout identical to its standalone
+  // artifact verifier. This link contains third-party dependencies only;
+  // protocol source and dist remain in the archived sibling above.
+  await symlink(join(protocolPackageRoot, "node_modules"), join(clonedProtocolRoot, "node_modules"));
   const scopedDependencies = join(clonedRuntimeRoot, "node_modules", "@pdpp");
   await mkdir(scopedDependencies, { recursive: true });
   const clonedProtocolLink = join(scopedDependencies, "connector-protocol");
