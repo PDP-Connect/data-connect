@@ -27,7 +27,11 @@ permissions:
 jobs:
   resolve-version:
     name: resolve next version
-    if: github.ref == 'refs/heads/main'
+    # TEMPORARY — owner-authorized provisional prerelease for PR #36, scoped
+    # to this exact ref only. MUST be reverted on this branch immediately
+    # after the prerelease publish succeeds; this loosening must not reach
+    # main. See PR #36 for the verification evidence.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/protocol-stream-evidence-boundary-claim-0828'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
