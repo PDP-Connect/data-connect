@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { execFileSync, spawnSync } from "node:child_process"
 import { EventEmitter } from "node:events"
 import {

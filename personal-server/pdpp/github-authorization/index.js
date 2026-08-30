@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { resolveSelectedInstalledManifest } from "../installed-manifest.js"
 import {
   createLocalTimelineAuthorizationRequest,

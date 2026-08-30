@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Custom Personal Server routes that may disclose owner identity or mutate
  * Gateway state. They use the ephemeral dev token that createServer() already

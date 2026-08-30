@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Restore the pkg personal-server binary after Tauri's Linux bundler runs

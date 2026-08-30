@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { createHash } from "node:crypto"
 import { recoverMessageAddress } from "viem"
 

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { requireDesktopAuth } from "../../protected-routes.js"
 import { verifyWeb3SignedRequester } from "./web3-signed.js"
 

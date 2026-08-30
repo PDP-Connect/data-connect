@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 export const PDPP_DATA_ACCESS_TYPE = "https://pdpp.org/data-access"
 
 const DETAIL_FIELDS = new Set([

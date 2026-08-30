@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest"
 import { createMacosDmg } from "./create-macos-dmg.mjs"
 

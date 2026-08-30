@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { fileURLToPath, pathToFileURL } from "node:url"
