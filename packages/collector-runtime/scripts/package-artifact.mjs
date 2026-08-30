@@ -1,11 +1,15 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { assertArtifactMetadata } from "../../connector-protocol/scripts/package-artifact.mjs";
+import {
+  assertArtifactMetadata,
+  buildPackage as buildProtocolPackage,
+  computeSourceInputsDigest as computeProtocolSourceInputsDigest,
+} from "../../connector-protocol/scripts/package-artifact.mjs";
 
 const execFile = promisify(execFileCallback);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -13,6 +17,9 @@ const repoRoot = resolve(packageRoot, "..", "..");
 const metadataPath = join(packageRoot, "artifact.json");
 const FIXED_INPUTS = ["README.md", "package.json", "scripts/build.ts", "tsconfig.build.json"];
 const METADATA_VERSION = 1;
+const protocolPackageRoot = resolve(packageRoot, "..", "connector-protocol");
+const runtimePackageRelPath = relative(repoRoot, packageRoot);
+const protocolPackageRelPath = relative(repoRoot, protocolPackageRoot);
 
 function digest(bytes, algorithm) {
   return createHash(algorithm).update(bytes).digest("hex");
@@ -39,7 +46,7 @@ async function sourceInputPaths() {
   return [...FIXED_INPUTS, ...paths].sort((left, right) => left.localeCompare(right));
 }
 
-export async function computeSourceInputsDigest() {
+async function computeRuntimeSourceInputsDigest() {
   const entries = await Promise.all(
     (await sourceInputPaths()).map(async (inputPath) => ({
       path: inputPath,
@@ -47,6 +54,24 @@ export async function computeSourceInputsDigest() {
     }))
   );
   return digest(JSON.stringify(entries), "sha256");
+}
+
+export async function computeClosedSourceInputs() {
+  const [runtimeSourceInputsSha256, connectorProtocolSourceInputsSha256] = await Promise.all([
+    computeRuntimeSourceInputsDigest(),
+    computeProtocolSourceInputsDigest(),
+  ]);
+  return {
+    connectorProtocolSourceInputsSha256,
+    sourceInputsSha256: digest(
+      JSON.stringify({ connectorProtocolSourceInputsSha256, runtimeSourceInputsSha256 }),
+      "sha256"
+    ),
+  };
+}
+
+export async function computeSourceInputsDigest() {
+  return (await computeClosedSourceInputs()).sourceInputsSha256;
 }
 
 async function declarationPaths(root) {
@@ -88,16 +113,48 @@ async function buildPackage(root) {
   await execFile("npm", ["run", "build"], { cwd: root });
 }
 
-async function cloneCommittedSourceTree(ref = "HEAD") {
+async function protocolArtifactMetadata(root) {
+  return JSON.parse(await readFile(join(root, "artifact.json"), "utf8"));
+}
+
+export function assertProtocolBuildMatchesReceipt(metadata, sourceInputsSha256, declarationsSha256) {
+  if (metadata.source_inputs_sha256 !== sourceInputsSha256) {
+    throw new Error(
+      `connector-protocol source inputs drift: expected ${JSON.stringify(metadata.source_inputs_sha256)}, got ${JSON.stringify(sourceInputsSha256)}`
+    );
+  }
+  if (metadata.declarations_sha256 !== declarationsSha256) {
+    throw new Error(
+      `connector-protocol declarations drift: expected ${JSON.stringify(metadata.declarations_sha256)}, got ${JSON.stringify(declarationsSha256)}`
+    );
+  }
+}
+
+export async function cloneCommittedSourceTree(ref = "HEAD") {
   const cloneDir = await mkdtemp(join(tmpdir(), "pdpp-collector-runtime-clone-"));
-  const packageRelPath = relative(repoRoot, packageRoot);
   const archivePath = join(cloneDir, "source.tar");
-  await execFile("git", ["archive", "--output", archivePath, ref, "--", packageRelPath], { cwd: repoRoot });
+  await execFile(
+    "git",
+    ["archive", "--output", archivePath, ref, "--", runtimePackageRelPath, protocolPackageRelPath],
+    { cwd: repoRoot }
+  );
   await execFile("tar", ["-xf", archivePath, "-C", cloneDir]);
   await rm(archivePath, { force: true });
-  const clonedPackageRoot = join(cloneDir, packageRelPath);
+  const clonedRuntimeRoot = join(cloneDir, runtimePackageRelPath);
+  const clonedProtocolRoot = join(cloneDir, protocolPackageRelPath);
+
+  // The shared root node_modules supplies only the installed toolchain. The
+  // runtime's nearest protocol dependency is an archived sibling, so neither
+  // clone can resolve the workspace's ambient, untracked protocol dist.
   await symlink(join(repoRoot, "node_modules"), join(cloneDir, "node_modules"));
-  return { cloneDir, clonedPackageRoot };
+  const scopedDependencies = join(clonedRuntimeRoot, "node_modules", "@pdpp");
+  await mkdir(scopedDependencies, { recursive: true });
+  const clonedProtocolLink = join(scopedDependencies, "connector-protocol");
+  await symlink(clonedProtocolRoot, clonedProtocolLink);
+  if ((await realpath(clonedProtocolLink)) !== (await realpath(clonedProtocolRoot))) {
+    throw new Error("collector-runtime clone did not resolve connector-protocol from its archived sibling");
+  }
+  return { cloneDir, clonedProtocolRoot, clonedRuntimeRoot };
 }
 
 async function packOnce(root) {
@@ -124,20 +181,40 @@ async function packOnce(root) {
 async function reproducibleArtifact() {
   const clones = [await cloneCommittedSourceTree(), await cloneCommittedSourceTree()];
   try {
-    await Promise.all(clones.map(({ clonedPackageRoot }) => buildPackage(clonedPackageRoot)));
+    const protocolDeclarations = await Promise.all(
+      clones.map(async ({ clonedProtocolRoot }) => {
+        await buildProtocolPackage(clonedProtocolRoot);
+        const [metadata, sourceInputsSha256, declarationsSha256] = await Promise.all([
+          protocolArtifactMetadata(clonedProtocolRoot),
+          computeProtocolSourceInputsDigest(clonedProtocolRoot),
+          computeDeclarationDigestAt(clonedProtocolRoot),
+        ]);
+        assertProtocolBuildMatchesReceipt(metadata, sourceInputsSha256, declarationsSha256);
+        return declarationsSha256;
+      })
+    );
+    const [firstProtocolDeclarations, secondProtocolDeclarations] = protocolDeclarations;
+    if (firstProtocolDeclarations !== secondProtocolDeclarations) {
+      throw new Error(`connector-protocol declarations are not reproducible: ${JSON.stringify(protocolDeclarations)}`);
+    }
+    await Promise.all(clones.map(({ clonedRuntimeRoot }) => buildPackage(clonedRuntimeRoot)));
     const declarations = await Promise.all(
-      clones.map(({ clonedPackageRoot }) => computeDeclarationDigestAt(clonedPackageRoot))
+      clones.map(({ clonedRuntimeRoot }) => computeDeclarationDigestAt(clonedRuntimeRoot))
     );
     const [firstDeclaration, secondDeclaration] = declarations;
     if (firstDeclaration !== secondDeclaration) {
       throw new Error(`declaration output is not reproducible: ${JSON.stringify(declarations)}`);
     }
-    const artifacts = await Promise.all(clones.map(({ clonedPackageRoot }) => packOnce(clonedPackageRoot)));
+    const artifacts = await Promise.all(clones.map(({ clonedRuntimeRoot }) => packOnce(clonedRuntimeRoot)));
     const [firstArtifact, secondArtifact] = artifacts;
     if (JSON.stringify(firstArtifact) !== JSON.stringify(secondArtifact)) {
       throw new Error(`npm pack is not reproducible: ${JSON.stringify(artifacts)}`);
     }
-    return { artifact: firstArtifact, declarationsSha256: firstDeclaration };
+    return {
+      artifact: firstArtifact,
+      connectorProtocolDeclarationsSha256: firstProtocolDeclarations,
+      declarationsSha256: firstDeclaration,
+    };
   } finally {
     await Promise.all(clones.map(({ cloneDir }) => rm(cloneDir, { force: true, recursive: true })));
   }
@@ -145,13 +222,15 @@ async function reproducibleArtifact() {
 
 export async function generateArtifactMetadata() {
   const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-  const sourceInputsSha256 = await computeSourceInputsDigest();
-  const { artifact, declarationsSha256 } = await reproducibleArtifact();
+  const { connectorProtocolSourceInputsSha256, sourceInputsSha256 } = await computeClosedSourceInputs();
+  const { artifact, connectorProtocolDeclarationsSha256, declarationsSha256 } = await reproducibleArtifact();
   const metadata = {
     artifact_filename: artifact.filename,
     artifact_sha1: artifact.sha1,
     artifact_sha256: artifact.sha256,
     artifact_sha512: artifact.sha512,
+    connector_protocol_declarations_sha256: connectorProtocolDeclarationsSha256,
+    connector_protocol_source_inputs_sha256: connectorProtocolSourceInputsSha256,
     declarations_sha256: declarationsSha256,
     metadata_version: METADATA_VERSION,
     package_name: manifest.name,
@@ -165,9 +244,15 @@ export async function generateArtifactMetadata() {
 export async function verifyArtifactMetadata() {
   const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
   const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-  const sourceInputsSha256 = await computeSourceInputsDigest();
-  const { artifact, declarationsSha256 } = await reproducibleArtifact();
+  const { connectorProtocolSourceInputsSha256, sourceInputsSha256 } = await computeClosedSourceInputs();
+  const { artifact, connectorProtocolDeclarationsSha256, declarationsSha256 } = await reproducibleArtifact();
   assertArtifactMetadata(metadata, manifest, sourceInputsSha256, declarationsSha256, artifact);
+  if (metadata.connector_protocol_source_inputs_sha256 !== connectorProtocolSourceInputsSha256) {
+    throw new Error("artifact metadata drift in connector_protocol_source_inputs_sha256");
+  }
+  if (metadata.connector_protocol_declarations_sha256 !== connectorProtocolDeclarationsSha256) {
+    throw new Error("artifact metadata drift in connector_protocol_declarations_sha256");
+  }
   return metadata;
 }
 

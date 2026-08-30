@@ -26,7 +26,7 @@ function sha1(bytes) {
   return createHash("sha1").update(bytes).digest("hex");
 }
 
-async function sourceInputPaths() {
+async function sourceInputPaths(root = packageRoot) {
   const sourcePaths = [];
   const visit = async (directory) => {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -38,21 +38,21 @@ async function sourceInputPaths() {
           if (entry.isDirectory()) {
             await visit(fullPath);
           } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-            sourcePaths.push(relative(packageRoot, fullPath));
+            sourcePaths.push(relative(root, fullPath));
           }
         })
     );
   };
 
-  await visit(join(packageRoot, "src"));
+  await visit(join(root, "src"));
   return [...FIXED_INPUTS, ...sourcePaths].sort((left, right) => left.localeCompare(right));
 }
 
-export async function computeSourceInputsDigest() {
+export async function computeSourceInputsDigest(root = packageRoot) {
   const entries = await Promise.all(
-    (await sourceInputPaths()).map(async (inputPath) => ({
+    (await sourceInputPaths(root)).map(async (inputPath) => ({
       path: inputPath,
-      sha256: sha256(await readFile(join(packageRoot, inputPath))),
+      sha256: sha256(await readFile(join(root, inputPath))),
     }))
   );
   return sha256(JSON.stringify(entries));
