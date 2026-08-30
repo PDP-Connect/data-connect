@@ -1863,14 +1863,21 @@ function seedLegacyV1Outbox(
        ) VALUES (?, ?, 'record_batch', 'succeeded', ?, 'hash', 0, ?, ?, ?)`
     );
     const stamp = "2026-05-19T12:00:00.000Z";
-    for (const row of rows) {
-      const payload = JSON.stringify({
-        records: row.streams.map((stream, index) => ({
-          data: { id: `${stream}-${index}` },
-          stream,
-        })),
-      });
-      insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const payload = JSON.stringify({
+          records: row.streams.map((stream, index) => ({
+            data: { id: `${stream}-${index}` },
+            stream,
+          })),
+        });
+        insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
   } finally {
     db.close();
