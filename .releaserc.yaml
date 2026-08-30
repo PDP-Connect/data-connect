@@ -52,16 +52,6 @@
 #    before changing them.
 branches:
   - name: main
-  # TEMPORARY — owner-authorized provisional prerelease to prove the
-  # attestation gate on PR #36 before it merges. Scoped to this exact branch
-  # name only (not a glob), publishes 0.0.2-rc.1 under npm dist-tag `rc`
-  # (semantic-release derives the dist-tag from `channel`, defaulting to the
-  # prerelease identifier when `channel` is omitted). MUST be reverted on
-  # this branch immediately after the prerelease publish succeeds — this
-  # entry must not reach main. See PR #36 for the verification evidence.
-  - name: fix/protocol-stream-evidence-boundary-claim-0828
-    channel: rc
-    prerelease: rc
 tagFormat: "v${version}"
 preset: "conventionalcommits"
 plugins:
