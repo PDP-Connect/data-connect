@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { type ComponentProps } from "react"
 import { AdaptiveIcon } from "@/components/icons/adaptive-icon"
 import type { AdaptiveIconVariant } from "@/components/icons/adaptive-icon"

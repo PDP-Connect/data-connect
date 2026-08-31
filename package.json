@@ -19,6 +19,7 @@
     "connectors:upgrade": "npm run connectors:resolve",
     "connectors:check": "npm run connectors:resolve -- --check",
     "connectors:resolve:check": "npm run connectors:check",
+    "spdx-headers:check": "node scripts/check-spdx-headers.mjs",
     "platform-registry:generate": "node scripts/generate-platform-registry.js",
     "test:honest-telemetry-conformance": "node playwright-runner/result-classifier.conformance.test.cjs",
     "pretauri:dev": "npm run prebuild:all",

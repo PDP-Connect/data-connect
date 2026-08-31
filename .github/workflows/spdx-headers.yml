@@ -1,0 +1,32 @@
+name: SPDX headers
+
+# Guards the Apache-2.0 SPDX header sweep from PR #4 (chore: add Apache-2.0 SPDX
+# license headers): fails when a first-party source file is missing its header.
+# scripts/check-spdx-headers.mjs only reads scripts/spdx-header-config.mjs and
+# `git ls-files` output, so this job needs neither `npm ci` nor a working build —
+# a bare checkout and Node are enough.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check-spdx-headers:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Check SPDX headers on first-party source files
+        run: npm run spdx-headers:check
