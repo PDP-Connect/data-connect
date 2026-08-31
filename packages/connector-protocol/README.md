@@ -20,7 +20,9 @@ Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-co
 
 ## Protocol rollout
 
-The `0.0.2` package adds the `STREAM_EVIDENCE` wire message. It is a breaking
+Protocol version `0.0.2` (the `CONNECTOR_PROTOCOL_VERSION` constant exported
+from `connector-runtime-protocol.ts`, tracked independently of this package's
+own release version) adds the `STREAM_EVIDENCE` wire message. It is a breaking
 wire addition for fail-closed runtimes that do not recognize that message, so
 the runtime must be upgraded before a connector that emits it is distributed.
 

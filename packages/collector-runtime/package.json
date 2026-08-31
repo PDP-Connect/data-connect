@@ -1,6 +1,6 @@
 {
   "name": "@pdpp/collector-runtime",
-  "version": "0.0.2",
+  "version": "0.0.1",
   "description": "Generic connector-execution runtime for PDPP local (device-side) collection: the collector loop, device-exporter ingest client, durable outbox, and runtime-capabilities placement gate. Depends on @pdpp/connector-protocol for the connector authoring contract (wire-protocol types, JSONL primitives). Connector-agnostic \u2014 carries no connector definitions or content.",
   "repository": {
     "type": "git",
@@ -47,7 +47,7 @@
     "verify": "npm run typecheck && npm run check && npm run check:noUnnecessaryConditions-expiry && npm test && npm run artifact:verify"
   },
   "dependencies": {
-    "@pdpp/connector-protocol": "0.0.2"
+    "@pdpp/connector-protocol": "0.0.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

@@ -1,6 +1,6 @@
 {
   "name": "@pdpp/connector-protocol",
-  "version": "0.0.2",
+  "version": "0.0.1",
   "description": "The connector authoring contract for PDPP: the JSONL wire-protocol message types, the LocalCollectorDefinition type contract, the bootstrap/emit/scope-filter primitives connector authors import directly, and small text/auth/retry utilities connectors depend on. Bottom of the dependency graph \u2014 depends on nothing in @pdpp/collector-runtime or @pdpp/polyfill-connectors, so connector authors never pull in the runtime package or its release cadence just to get the files they author against.",
   "repository": {
     "type": "git",

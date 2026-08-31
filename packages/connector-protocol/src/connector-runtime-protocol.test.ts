@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   CONNECTOR_PROTOCOL_CAPABILITIES,
@@ -233,12 +232,12 @@ test("the public barrel exports the SKIP_RESULT boundary claim", () => {
   assert.equal(claim, "provider_history_boundary");
 });
 
-test("the package identity matches the protocol wire-version constant", async () => {
-  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
-    version?: unknown;
-  };
-
-  assert.equal(CONNECTOR_PROTOCOL_VERSION, packageJson.version);
+test("the protocol wire-version constant is independent of the package release version", () => {
+  // CONNECTOR_PROTOCOL_VERSION tracks the wire contract (bumped only when the
+  // message shapes change); package.json's version tracks release cadence
+  // and is owned by semantic-release. They are unrelated numbers that happen
+  // to look similar today — this package must never assert they're equal.
+  assert.equal(CONNECTOR_PROTOCOL_VERSION, "0.0.2");
   assert.equal(STREAM_EVIDENCE_CAPABILITY, "STREAM_EVIDENCE");
 });
 
