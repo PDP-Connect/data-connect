@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { listProductionDependencyPaths } from "./build.js"

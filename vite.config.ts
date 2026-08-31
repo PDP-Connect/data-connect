@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { defineConfig } from "vitest/config"
 import react from "@vitejs/plugin-react"
 import { execSync } from "child_process"

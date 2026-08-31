@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"

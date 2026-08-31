@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { getPlatformRegistryEntry } from "@/lib/platform/utils"
 import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import {

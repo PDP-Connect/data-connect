@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 const DATA_SOURCE_LABELS: Record<string, string> = {
   chatgpt: "ChatGPT",
   reddit: "Reddit",

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { Platform } from "@/types"
 import { PLATFORM_REGISTRY, type PlatformRegistryEntry } from "./registry"
 

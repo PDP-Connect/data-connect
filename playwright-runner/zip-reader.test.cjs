@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Unit test for the runner's dependency-free ZIP reader (readZipJsonEntries),
  * which backs page.extractZipEntries(). Builds real ZIP archives in-memory

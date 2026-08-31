@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"

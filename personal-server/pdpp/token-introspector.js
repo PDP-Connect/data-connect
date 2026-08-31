@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { CoreOperationError } from "./operations.js"
 
 /** Resolve opaque bearer credentials without inspecting their syntax locally. */

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { ComponentPropsWithoutRef, ReactNode } from "react"
 import { LINKS } from "@/config/links"
 import { OpenExternalLink } from "./link-open-external"

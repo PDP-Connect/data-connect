@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /* Taken from the Rainbow Wallet repo a long time ago… */
 
 import type { ComponentPropsWithoutRef } from "react"

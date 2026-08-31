@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { PageContainer } from "@/components/elements/page-container"
 import { Spinner } from "@/components/elements/spinner"
 import { PageHeading } from "@/components/typography/page-heading"

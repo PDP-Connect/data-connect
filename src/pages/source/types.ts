@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import type { MouseEventHandler, ReactNode } from "react"
 import type { SourceExportPreview } from "@/lib/tauri-paths"
 import type { Platform } from "@/types"

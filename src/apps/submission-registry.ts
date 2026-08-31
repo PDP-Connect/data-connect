@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { z } from "zod"
 import { isAllowedSubmittedAppExternalUrl } from "./external-url"
 import {

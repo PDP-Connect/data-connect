@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import Database from "better-sqlite3"
 
 export const GITHUB_STREAMS = Object.freeze({

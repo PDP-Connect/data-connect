@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 function installStoragePolyfill(target: "localStorage" | "sessionStorage") {
   const current = globalThis[target] as Storage | undefined
   if (

@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 /**
  * Cross-boundary oracle for the DataConnect GitHub PDPP export contract.
  *

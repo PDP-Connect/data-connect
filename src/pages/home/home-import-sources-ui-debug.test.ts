@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest"
 import type { Platform, Run } from "@/types"
 import { resolveHomeImportSourcesUiDebugState } from "./home-import-sources-ui-debug"

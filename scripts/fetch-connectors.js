@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 
 // Legacy wrapper kept for existing install/dev entrypoints during the migration.
 

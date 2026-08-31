@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 // Typed telemetry constructors.
 //
 // These are the only way to emit events. Each function takes exactly the

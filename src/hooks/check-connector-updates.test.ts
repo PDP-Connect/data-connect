@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { checkConnectorUpdates } from "./check-connector-updates"
 import { setConnectorUpdates, setIsCheckingUpdates } from "../state/store"

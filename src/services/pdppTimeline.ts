@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { PersonalServerError } from "./personalServer"
 
 const LOCAL_TIMELINE_CLIENT_ID = "dataconnect.timeline"

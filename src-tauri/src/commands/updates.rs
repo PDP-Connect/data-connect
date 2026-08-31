@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::{Deserialize, Serialize};

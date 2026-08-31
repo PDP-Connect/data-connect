@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { invoke } from "@tauri-apps/api/core"
 import {
   setConnectorUpdates,

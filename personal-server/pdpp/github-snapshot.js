@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 

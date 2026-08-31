@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 const PERSONAL_SERVER_HOSTNAME = '127.0.0.1';
 
 function createPersonalServerServeOptions(fetch, port) {
