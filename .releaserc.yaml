@@ -108,6 +108,15 @@ plugins:
             section: "Performance Improvements (@pdpp/collector-runtime)"
           - type: revert
             section: "Reverts"
+  # Pins collector-runtime's dependency on connector-protocol to this
+  # release's actual computed version before either @semantic-release/npm
+  # prepare step below runs `npm version`/`npm pack`. Both packages share
+  # one nextRelease.version (lockstep release, not independent monorepo
+  # versioning) — see the script for why a naive fixed pin breaks a
+  # published install whenever connector-protocol adds exports
+  # collector-runtime depends on.
+  - - "@semantic-release/exec"
+    - prepareCmd: "node --import tsx scripts/pin-collector-runtime-protocol-dependency.ts ${nextRelease.version}"
   - - "@semantic-release/npm"
     - pkgRoot: "packages/connector-protocol"
   - - "@semantic-release/npm"
