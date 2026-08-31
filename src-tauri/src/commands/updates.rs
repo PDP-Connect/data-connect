@@ -344,7 +344,7 @@ fn calculate_checksum(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(result))
 }
 
 fn verify_checksum(data: &[u8], expected: &str) -> bool {

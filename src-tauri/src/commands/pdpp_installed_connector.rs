@@ -1878,7 +1878,7 @@ fn required_hash<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str, Str
 fn verify_file_hash(path: &Path, expected: Option<&str>, label: &str) -> Result<(), String> {
     let expected = expected.expect("caller must provide required PDPP file hash");
     let bytes = fs::read(path).map_err(|e| format!("Failed to hash {label}: {e}"))?;
-    let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let actual = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
     if actual != expected {
         return Err(format!(
             "{label} checksum mismatch: expected {expected}, got {actual}"
@@ -2094,11 +2094,11 @@ mod tests {
         let provenance_bytes = serde_json::to_vec_pretty(&provenance).unwrap();
         fs::write(temp.path().join("provenance.json"), &provenance_bytes).unwrap();
         let manifest_sha = format!(
-            "sha256:{:x}",
-            Sha256::digest(&serde_json::to_vec_pretty(&manifest).unwrap())
+            "sha256:{}",
+            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
         );
-        let entrypoint_sha = format!("sha256:{:x}", Sha256::digest(script.as_bytes()));
-        let provenance_sha = format!("sha256:{:x}", Sha256::digest(&provenance_bytes));
+        let entrypoint_sha = format!("sha256:{}", hex::encode(Sha256::digest(script.as_bytes())));
+        let provenance_sha = format!("sha256:{}", hex::encode(Sha256::digest(&provenance_bytes)));
         (
             temp,
             ActiveConnectorInstall {
@@ -2169,7 +2169,7 @@ mod tests {
     }
 
     fn sha256_for(path: &Path) -> String {
-        format!("sha256:{:x}", Sha256::digest(fs::read(path).unwrap()))
+        format!("sha256:{}", hex::encode(Sha256::digest(fs::read(path).unwrap())))
     }
 
     fn unpacked_actual_chatgpt_install(
@@ -3490,8 +3490,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         .unwrap();
         install.connector_id = "not-github".into();
         install.manifest_sha256 = Some(format!(
-            "sha256:{:x}",
-            Sha256::digest(&serde_json::to_vec_pretty(&manifest).unwrap())
+            "sha256:{}",
+            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
         ));
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()

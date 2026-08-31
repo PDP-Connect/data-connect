@@ -33,6 +33,7 @@ futures-util = "0.3"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
+hex = "0.4"
 sigstore = { version = "0.13", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls-native-roots"] }
 semver = "1.0"
 dirs = "6.0"

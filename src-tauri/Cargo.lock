@@ -1197,6 +1197,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "hex",
  "libc",
  "log",
  "mime_guess",
