@@ -196,3 +196,17 @@ jobs:
               --signer-workflow "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
             rm -rf "$workdir"
           done
+
+      # Attestation verification (above) proves provenance — that the
+      # published tarballs were built by this workflow at this commit. It
+      # says nothing about semantic compatibility between the two packages'
+      # published versions. This step installs both just-published packages
+      # together into an empty scratch directory (real npm install against
+      # the real registry, no workspace/local resolution) and imports every
+      # @pdpp/connector-protocol export collector-runtime's source uses,
+      # asserting the resolved connector-protocol version matches this
+      # release. See scripts/verify-packed-install-capability-exports.mjs.
+      - name: Verify packed install exposes required capability exports
+        if: needs.resolve-version.outputs.new-release-published == 'true'
+        run: |
+          node scripts/verify-packed-install-capability-exports.mjs "${{ needs.resolve-version.outputs.new-release-version }}"
