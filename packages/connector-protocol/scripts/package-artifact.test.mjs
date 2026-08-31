@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
