@@ -325,7 +325,7 @@ fn reset_profile_in(root: &Path, connector_id: &str, owner_id: &str) -> Result<(
 }
 
 fn stable_segment(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn lease_id(connector_id: &str, owner_id: &str, run_id: &str) -> String {
