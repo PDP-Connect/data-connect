@@ -83,11 +83,6 @@
         "desktopTemplate": "desktop-template.desktop",
         "postInstallScript": "scripts/post-install.sh",
         "postRemoveScript": "scripts/post-remove.sh"
-      },
-      "rpm": {
-        "desktopTemplate": "desktop-template.desktop",
-        "postInstallScript": "scripts/post-install.sh",
-        "postRemoveScript": "scripts/post-remove.sh"
       }
     },
     "windows": {
