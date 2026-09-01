@@ -6,6 +6,7 @@ export const ROUTES = {
   apps: "/apps",
   timeline: "/apps/timeline",
   personalServer: "/personal-server",
+  serverRepairs: "/server-repairs",
   docs: "/docs",
   source: "/sources/:platformId",
   settings: "/settings",

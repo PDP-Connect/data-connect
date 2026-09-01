@@ -31,6 +31,9 @@ const Timeline = lazy(() =>
 const PersonalServer = lazy(() =>
   import("./pages/personal-server").then(m => ({ default: m.PersonalServer }))
 )
+const ServerRepairs = lazy(() =>
+  import("./pages/server-repairs").then(m => ({ default: m.ServerRepairs }))
+)
 const Docs = lazy(() => import("./pages/docs").then(m => ({ default: m.Docs })))
 const SourceOverview = lazy(() =>
   import("./pages/source").then(m => ({ default: m.SourceOverview }))
@@ -91,6 +94,10 @@ function AppContent() {
                 <Route
                   path={ROUTES.personalServer}
                   element={<PersonalServer />}
+                />
+                <Route
+                  path={ROUTES.serverRepairs}
+                  element={<ServerRepairs />}
                 />
                 <Route path={ROUTES.docs} element={<Docs />} />
                 <Route path={ROUTES.source} element={<SourceOverview />} />

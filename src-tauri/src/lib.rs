@@ -6,20 +6,21 @@ mod processors;
 use commands::{
     check_browser_available, check_connected_platforms, check_connector_updates,
     cleanup_installed_pdpp_connector_runs, cleanup_personal_server, cleanup_playwright_processes,
-    clear_browser_session, clear_personal_server_data, debug_connector_paths, delete_exported_run,
-    download_browser, download_chromium_rust, download_connector, get_app_config,
-    get_installed_connectors, get_log_path, get_personal_server_data_path,
-    get_personal_server_status, get_platforms, get_registry_url, get_run_files, get_user_data_path,
-    handle_download, list_browser_sessions, load_latest_source_export_full,
-    load_latest_source_export_preview, load_run_export_data, load_runs, load_source_export_full_from_path,
-    load_source_export_preview_from_path, mark_export_synced,
-    open_folder, open_personal_server_scope_folder, open_platform_export_folder, set_app_config,
+    cleanup_reference_server, clear_browser_session, clear_personal_server_data,
+    close_reference_server_view, debug_connector_paths, delete_exported_run, download_browser,
+    download_chromium_rust, download_connector, get_app_config, get_installed_connectors,
+    get_log_path, get_personal_server_data_path, get_personal_server_status, get_platforms,
+    get_reference_server_status, get_registry_url, get_run_files, get_user_data_path,
+    handle_download, hide_reference_server_view, is_installed_pdpp_browser_setup_complete,
+    list_browser_sessions, load_latest_source_export_full, load_latest_source_export_preview,
+    load_run_export_data, load_runs, load_source_export_full_from_path,
+    load_source_export_preview_from_path, login_reference_server, mark_export_synced, open_folder,
+    open_personal_server_scope_folder, open_platform_export_folder, open_reference_server_view,
+    reset_installed_pdpp_browser_profile, resize_reference_server_view, set_app_config,
     start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
-    is_installed_pdpp_browser_setup_complete, reset_installed_pdpp_browser_profile,
-    stop_connector_run, stop_installed_pdpp_connector_run,
-    submit_installed_pdpp_interaction_response,
-    stop_personal_server, test_nodejs,
-    write_export_data,
+    start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
+    stop_personal_server, stop_reference_server, submit_installed_pdpp_interaction_response,
+    test_nodejs, write_export_data,
 };
 use tauri::{Listener, Manager};
 
@@ -122,12 +123,21 @@ pub fn run() {
             list_browser_sessions,
             clear_browser_session,
             mark_export_synced,
+            start_reference_server,
+            stop_reference_server,
+            get_reference_server_status,
+            login_reference_server,
+            open_reference_server_view,
+            resize_reference_server_view,
+            hide_reference_server_view,
+            close_reference_server_view,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 cleanup_personal_server();
+                cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
                 cleanup_playwright_processes();
             }
