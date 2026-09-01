@@ -12,12 +12,12 @@ import {
 import { ROUTES } from "@/config/routes"
 import { cn } from "@/lib/classes"
 import type { LucideIcon } from "lucide-react"
-import { HomeIcon, UserRoundCogIcon, BoxIcon } from "lucide-react"
+import { HomeIcon, UserRoundCogIcon, BoxIcon, WrenchIcon } from "lucide-react"
 import type { CSSProperties } from "react"
 import { NavLink } from "react-router-dom"
 
 type NavItem = {
-  id: "home" | "apps" | "docs" | "settings"
+  id: "home" | "apps" | "docs" | "settings" | "server-repairs"
   to: string
   label: string
   Icon: LucideIcon | React.ComponentType<{ className?: string }>
@@ -38,6 +38,12 @@ const navItems: NavItem[] = [
   // },
   // { to: "/activity", label: "Activity", Icon: ActivityIcon },
   { id: "apps", to: ROUTES.apps, label: "Apps", Icon: BoxIcon },
+  {
+    id: "server-repairs",
+    to: ROUTES.serverRepairs,
+    label: "Server & Repairs",
+    Icon: WrenchIcon,
+  },
   {
     id: "settings",
     to: ROUTES.settings,
