@@ -571,11 +571,16 @@ test("picker states the purpose once, naming its origin, with no purpose-code UR
     false,
     "the purpose block must not carry the 'they claim' eyebrow — no purpose arrived in this request to attribute to the app"
   );
+  // Purpose and retention share one block now — both are things this server
+  // says, and heading each with its own "Your server describes" eyebrow made
+  // the page say that phrase twice in a row. What must not change is the
+  // authorship class: this is server-generated text, never a client claim.
   assert.match(
     html,
-    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Assigned purpose"/,
+    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said"/,
     "the purpose block renders as server-generated text (manifest authorship), not a client claim"
   );
+  assert.match(html, /Set by this server because/, "the purpose sentence names its own origin");
 });
 
 // ── FIX 1: retention is a structured policy declaration, not enforcement ─────
@@ -603,14 +608,21 @@ test("picker never states a retention the client did not declare", async () => {
   assert.equal(/\b90 days\b/.test(html), false, "no fabricated retention window anywhere on the owner surface");
   assert.equal(html.includes("P90D"), false, "no retention bound is asserted at all");
 
-  // Retention now lives on the approval artifact, as one of the exact terms
-  // the owner binds to (spec-core.md:873-877), rather than as a standalone
-  // block above the list that repeated the same sentence.
+  // Retention also lives on the approval artifact, as one of the exact terms
+  // the owner binds to (spec-core.md:873-877), so the two can never drift.
   assert.match(
     html,
     /data-hosted-mcp-review[\s\S]*ChatGPT did not say how long it keeps the data it receives\./,
     "the retention state is stated on the artifact the owner approves"
   );
+  // Shares the server-authored block with purpose (see above). The class is
+  // what carries the spec obligation, not the heading.
+  assert.match(
+    html,
+    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said"/,
+    "retention is a structured policy declaration (spec-core.md:706-730), not a protocol-enforced constraint"
+  );
+  assert.match(html, /Keeping your data/, "the retention row still renders under that block");
   assert.equal(
     /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/.test(html),
     false,
@@ -757,6 +769,31 @@ test("picker states the resolved field/time-range scope once, on the approval ar
     /data-hosted-mcp-review[\s\S]*Everything in each data type you check, with no date limit\./,
     "the coverage term renders on the artifact the owner approves"
   );
+});
+
+// ── One eyebrow per register change, not one per block ───────────────────────
+
+test("the server-authored register announces itself once, not once per fact", async () => {
+  // The owner read "Your server describes" twice in a row — heading purpose,
+  // then heading retention, two facts of one category. spec-core.md:716
+  // requires the three authorship classes stay DISTINCT; it does not require
+  // a printed banner over every group, and repeating the label per block is
+  // what turned a trust model into the visual noise that made this page read
+  // as a debug dump.
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  const eyebrows = [...html.matchAll(/hosted-ui-authorship-eyebrow[^>]*>([^<]+)</g)].map((m) => (m[1] ?? "").trim());
+  const counts = new Map<string, number>();
+  for (const label of eyebrows) {
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  for (const [label, n] of counts) {
+    assert.equal(n, 1, `"${label}" must head its register once, not ${n} times`);
+  }
+
+  // Both facts still render, and still in the server's voice — collapsing the
+  // eyebrow must not collapse the distinction it carries.
+  assert.match(html, /Set by this server because ChatGPT didn&#39;t give one/, "purpose survives");
+  assert.match(html, /ChatGPT did not say how long it keeps the data it receives/, "retention survives");
 });
 
 // ── The empty picker must not be a dead end ──────────────────────────────────
