@@ -113,9 +113,13 @@ export interface HostedMcpPickerRow {
 
 // Authorization-details constants.
 
-export const HOSTED_MCP_PICKER_PURPOSE_CODE = "https://pdpp.dev/purpose/personal_ai_assistant";
+// Registry code (spec-core.md Appendix A) — "Providing context to a personal
+// AI agent." This is the closest registered fit for a hosted MCP connector
+// (e.g. ChatGPT, Claude) reading data through the picker; the previous value,
+// `personal_ai_assistant`, was not a registry code.
+export const HOSTED_MCP_PICKER_PURPOSE_CODE = "https://pdpp.dev/purpose/agent_context";
 export const HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION =
-  "Allow this MCP client to read selected personal data through PDPP.";
+  "Provide selected personal data as context to this MCP client acting as your personal AI agent.";
 export const HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE = "continuous";
 export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new Set(["single_use", "continuous"]);
 
@@ -317,8 +321,8 @@ export function buildHostedMcpAuthorizationDetailsForConnector(
   return [
     {
       access_mode: "continuous",
-      purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
-      purpose_description: "Allow this MCP client to read selected personal data through PDPP.",
+      purpose_code: HOSTED_MCP_PICKER_PURPOSE_CODE,
+      purpose_description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
       source,
       streams: [{ name: "*" }],
       type: "https://pdpp.dev/data-access",
@@ -641,9 +645,17 @@ interface PendingClientClaims {
   [key: string]: unknown;
 }
 
+export interface PendingGrantRequestClientDisplay {
+  logo_uri?: string | null;
+  name?: string | null;
+  policy_uri?: string | null;
+  tos_uri?: string | null;
+  uri?: string | null;
+}
+
 export interface PendingGrantRequest {
   client?: {
-    client_display?: { name?: string | null } | null;
+    client_display?: PendingGrantRequestClientDisplay | null;
     client_id?: string | null;
     registration_mode?: string | null;
   } | null;
@@ -843,6 +855,19 @@ function renderAuthorshipBlock(
 interface ConsentClientDisplay {
   // CLIENT: the client's own self-described display (its app name).
   clientFacts: Array<{ label: string; value?: unknown; html?: string }>;
+  // Whether to render an "Unverified app" indicator. This reference
+  // implementation has no trust-registry source of a positive trust signal
+  // for any client, so every client is currently unverified
+  // (client-display:675) — this flag exists so callers can render the
+  // indicator without re-deriving the (always-true) policy inline.
+  isUnverified: boolean;
+  // A short text/CSS monogram placeholder for client identity — the spec
+  // (client-display:676) prohibits fetching/rendering a remote client-supplied
+  // logo for an unverified client; this is the safe fallback, never a URL.
+  monogram: string;
+  // MAY-level secondary disclosures (client-display:674): the client's own
+  // policy_uri/tos_uri, when the resolved metadata carries them.
+  policyLinks: Array<{ href: string; label: string }>;
   // PROTOCOL: server-resolved identity facts (the client_id origin / metadata
   // document URL). Empty for pre-registered clients with no derived identity.
   protocolFacts: Array<{ label: string; value?: unknown; html?: string }>;
@@ -860,17 +885,50 @@ function clientOriginFromClientId(clientId: string | null | undefined): string |
   }
 }
 
+function buildClientMonogram(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return "?";
+  }
+  // First letter of up to two whitespace-separated words (e.g. "ChatGPT" →
+  // "C", "Claude Code" → "CC"), uppercased. Pure text — never an image URL.
+  const letters = trimmed
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((word) => word.charAt(0))
+    .join("")
+    .toUpperCase();
+  return letters || trimmed.charAt(0).toUpperCase();
+}
+
+function buildClientPolicyLinks(
+  clientDisplay: PendingGrantRequestClientDisplay | null | undefined
+): Array<{ href: string; label: string }> {
+  const links: Array<{ href: string; label: string }> = [];
+  if (clientDisplay?.policy_uri) {
+    links.push({ href: clientDisplay.policy_uri, label: "Privacy policy" });
+  }
+  if (clientDisplay?.tos_uri) {
+    links.push({ href: clientDisplay.tos_uri, label: "Terms of service" });
+  }
+  return links;
+}
+
 function buildConsentClientDisplay(
   client: NonNullable<PendingGrantRequest["client"]>,
   ui: ConsentUiRenderer
 ): ConsentClientDisplay {
   const clientId = typeof client.client_id === "string" ? client.client_id : null;
   const clientName = client.client_display?.name || clientId || "Client application";
+  const policyLinks = buildClientPolicyLinks(client.client_display);
   if (client.registration_mode !== "client_id_metadata_document") {
     // Pre-registered/public client: the "Requesting app" name is whatever the
     // client supplied at registration — a client-authored claim, not a fact.
     return {
       clientFacts: [{ label: "Requesting app", value: clientName }],
+      isUnverified: true,
+      monogram: buildClientMonogram(clientName),
+      policyLinks,
       protocolFacts: [],
       titleName: clientName,
     };
@@ -890,7 +948,14 @@ function buildConsentClientDisplay(
   if (clientName && clientName !== identity) {
     clientFacts.push({ label: "Self-described app name", value: clientName });
   }
-  return { clientFacts, protocolFacts, titleName: identity };
+  return {
+    clientFacts,
+    isUnverified: true,
+    monogram: buildClientMonogram(clientName || identity),
+    policyLinks,
+    protocolFacts,
+    titleName: identity,
+  };
 }
 
 /**
@@ -1755,6 +1820,82 @@ interface AuthorizeQueryParams {
 }
 
 /**
+ * Renders the picker's client-identity header: the requester's resolved
+ * identity (protocol fact, wrapped `data-authorship="protocol"`) and its
+ * self-described display name (client-authored claim, wrapped
+ * `data-authorship="client"`) — the same two-class split
+ * `buildConsentClientDisplay` already produces for the reviewed/single/batch
+ * consent pages, applied here for the first time. A text monogram and an
+ * "Unverified app" badge stand in for a remote logo fetch, which spec
+ * client-display:676 forbids for a client this AS has no positive trust
+ * signal for (every CIMD-resolved client, today).
+ */
+function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay, ui: ConsentUiRenderer): string {
+  const badge = clientDisplay.isUnverified
+    ? `<span class="hosted-ui-unverified-badge" role="status">Unverified app</span>`
+    : "";
+  const header = `<div class="hosted-ui-client-identity"><span class="hosted-ui-client-monogram" aria-hidden="true">${ui.escapeHtml(
+    clientDisplay.monogram
+  )}</span><span class="hosted-ui-client-identity-name">${ui.escapeHtml(
+    clientDisplay.titleName
+  )}</span>${badge}</div>`;
+  const policyLinksHtml =
+    clientDisplay.policyLinks.length > 0
+      ? `<p class="hosted-ui-client-policy-links">${clientDisplay.policyLinks
+          .map(
+            (link) =>
+              `<a href="${ui.escapeHtml(link.href)}" target="_blank" rel="noopener noreferrer">${ui.escapeHtml(
+                link.label
+              )}</a>`
+          )
+          .join("")}</p>`
+      : "";
+  const protocolBlock =
+    clientDisplay.protocolFacts.length > 0
+      ? renderAuthorshipBlock("protocol", "Client identity", ui.renderKeyValueList(clientDisplay.protocolFacts), ui)
+      : "";
+  const clientBlock =
+    clientDisplay.clientFacts.length > 0 || policyLinksHtml
+      ? renderAuthorshipBlock(
+          "client",
+          "Client-authored display",
+          [
+            clientDisplay.clientFacts.length > 0 ? ui.renderKeyValueList(clientDisplay.clientFacts) : "",
+            policyLinksHtml,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          ui
+        )
+      : "";
+  return ui.renderSurface({
+    ariaLabel: "Requesting app identity",
+    children: [header, protocolBlock, clientBlock].filter(Boolean).join("\n"),
+    surface: "human",
+  });
+}
+
+/**
+ * Renders the picker's purpose statement. `purpose_code`/`purpose_description`
+ * are an attributed claim in this reference implementation's existing
+ * convention — `renderPendingGrantConsentHtml` puts the same fields in its
+ * CLIENT block (see "Stated purpose" there); this mirrors that precedent
+ * rather than introducing a fourth authorship category the `ConsentAuthorship`
+ * type does not define.
+ */
+function renderHostedMcpPurposeBlock(ui: ConsentUiRenderer): string {
+  return renderAuthorshipBlock(
+    "client",
+    "Stated purpose",
+    ui.renderKeyValueList([
+      { label: "Purpose", value: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION },
+      { html: `<code>${ui.escapeHtml(HOSTED_MCP_PICKER_PURPOSE_CODE)}</code>`, label: "Purpose code" },
+    ]),
+    ui
+  );
+}
+
+/**
  * Renders the hosted MCP multi-source picker page for GET /oauth/authorize
  * when no `authorization_details` or `connector_id` is specified.
  */
@@ -1765,9 +1906,20 @@ export async function renderHostedMcpSourceSelection(
   providerName: string,
   caps: ConsentPickerCapabilities,
   ui: ConsentUiRenderer,
-  opts: { validationError?: string | null } = {}
+  opts: { validationError?: string | null; client?: PendingGrantRequest["client"] | null } = {}
 ): Promise<string> {
   const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
+
+  // Client identity (client-display:672-677): resolve the same way the
+  // reviewed/single-consent pages do, and render it here too — this picker is
+  // the only approval surface a real hosted-MCP connector (ChatGPT, Claude,
+  // any MCP client) ever reaches, and it previously showed no requester
+  // identity at all.
+  const clientDisplay = opts.client ? buildConsentClientDisplay(opts.client, ui) : null;
+  const clientIdentityBlock = clientDisplay
+    ? renderHostedMcpClientIdentityBlock(clientDisplay, ui)
+    : "";
+  const purposeBlock = renderHostedMcpPurposeBlock(ui);
 
   const hidden = [
     "client_id",
@@ -2090,13 +2242,27 @@ export async function renderHostedMcpSourceSelection(
 </script>`
     : "";
 
+  const pickerTitle = clientDisplay ? `${clientDisplay.titleName} wants access to your data` : "Choose what this app can read";
+
+  // PROTOCOL: the stream-selection controls and the access-mode fieldset are
+  // both server-enforced (spec section 706) — wrap them together so the whole
+  // picker, not only the new client-identity/purpose additions above, keeps
+  // its categories visually distinct.
+  const protocolSelectionBlock = renderAuthorshipBlock(
+    "protocol",
+    "Streams and access mode your server will enforce",
+    `<div class="hosted-ui-option-group">${options}</div>${accessModeControl}`,
+    ui
+  );
+
   return ui.renderHostedDocument({
     body: [
       ui.renderPageIntro({
         eyebrow: "Data access request",
         lede: "Pick the streams this app may read. Anything you leave unchecked stays private.",
-        title: "Choose what this app can read",
+        title: pickerTitle,
       }),
+      clientIdentityBlock,
       ui.renderSurface({
         children: `
             ${pickerBehaviorStyles}
@@ -2105,16 +2271,18 @@ export async function renderHostedMcpSourceSelection(
               <input type="hidden" name="_csrf" value="${ui.escapeHtml(csrfToken)}" />
               ${hidden}
               ${validationBanner}
+              ${purposeBlock}
               ${bulkControls}
-              <div class="hosted-ui-option-group">${options}</div>
-              ${accessModeControl}
+              ${protocolSelectionBlock}
               ${submit}
             </form>
             ${pickerBehaviorScript}
           `,
         surface: "human",
       }),
-    ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
     providerName,
     title: `${providerName} — Choose data sources`,
   });

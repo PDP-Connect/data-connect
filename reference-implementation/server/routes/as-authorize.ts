@@ -25,7 +25,12 @@
 
 import { randomBytes } from "node:crypto";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
-import type { ConsentPickerBinding, ConsentPickerCapabilities, ConsentUiRenderer } from "./as-consent-ui-helpers.ts";
+import type {
+  ConsentPickerBinding,
+  ConsentPickerCapabilities,
+  ConsentUiRenderer,
+  PendingGrantRequest,
+} from "./as-consent-ui-helpers.ts";
 import {
   ActiveBindingLookupError,
   buildHostedMcpAuthorizationDetailForConnector,
@@ -72,8 +77,40 @@ const OAUTH_AUTHORIZATION_ERROR_CODES: Readonly<Record<string, string>> = {
 };
 
 // Shape expected by requireRegisteredRedirectUri (mirrors as-consent-ui-helpers.ts internal type).
+// Widened (beyond just redirect_uris) so the picker can also resolve and
+// render client identity (client-display:672-677) — the same
+// `getRegisteredClient` result the redirect-URI check already fetches.
 interface OAuthClient {
-  readonly metadata?: { redirect_uris?: string[] } | null;
+  readonly client_id?: string | null;
+  readonly metadata?: {
+    client_name?: string | null;
+    client_uri?: string | null;
+    logo_uri?: string | null;
+    policy_uri?: string | null;
+    redirect_uris?: string[];
+    tos_uri?: string | null;
+  } | null;
+  readonly registration_mode?: string | null;
+}
+
+/**
+ * Maps a resolved `OAuthClient` (from `getRegisteredClient`) into the
+ * `PendingGrantRequest["client"]` shape `buildConsentClientDisplay` expects —
+ * mirrors `applyRegisteredClientToPendingRequestClient` in auth.ts, which is
+ * not exported for route-layer use.
+ */
+function toPendingGrantRequestClient(client: OAuthClient): PendingGrantRequest["client"] {
+  return {
+    client_display: {
+      logo_uri: client.metadata?.logo_uri ?? null,
+      name: client.metadata?.client_name ?? null,
+      policy_uri: client.metadata?.policy_uri ?? null,
+      tos_uri: client.metadata?.tos_uri ?? null,
+      uri: client.metadata?.client_uri ?? null,
+    },
+    client_id: client.client_id ?? null,
+    registration_mode: client.registration_mode ?? "pre_registered_public",
+  };
 }
 
 interface ConsentStoreOutput {
@@ -522,7 +559,8 @@ async function renderHostedMcpPickerValidationPage(
   req: RouteRequest,
   res: RouteResponse,
   ctx: Pick<MountAsAuthorizeContext, "consentPickerCaps" | "consentUi" | "ensureCsrfToken" | "providerName">,
-  message: string
+  message: string,
+  client: OAuthClient | null = null
 ): Promise<unknown> {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
@@ -534,7 +572,7 @@ async function renderHostedMcpPickerValidationPage(
     ctx.providerName,
     ctx.consentPickerCaps,
     ctx.consentUi,
-    { validationError: message }
+    { client: client ? toPendingGrantRequestClient(client) : null, validationError: message }
   );
   return res.status(400).send(html);
 }
@@ -546,7 +584,8 @@ function rejectMissingHostedMcpSelection(
     MountAsAuthorizeContext,
     "consentPickerCaps" | "consentUi" | "ensureCsrfToken" | "oauthError" | "providerName"
   >,
-  rawSelection: unknown
+  rawSelection: unknown,
+  client: OAuthClient | null = null
 ): Promise<unknown> | unknown {
   if (hasSubmittedSelectionInput(rawSelection)) {
     return ctx.oauthError(res, 400, "invalid_request", "At least one source must be selected");
@@ -555,7 +594,8 @@ function rejectMissingHostedMcpSelection(
     req,
     res,
     ctx,
-    "Select at least one source and one stream inside each selected source before approving."
+    "Select at least one source and one stream inside each selected source before approving.",
+    client
   );
 }
 
@@ -583,7 +623,8 @@ async function buildPackageAndRedirect(
     | "oauthError"
     | "providerName"
     | "stageOAuthAuthorizationCodeRequest"
-  >
+  >,
+  client: OAuthClient | null = null
 ): Promise<unknown> {
   if (acc.sourcesWithEmptyStreams.length > 0) {
     // A checked source without checked streams is ambiguous owner intent. Re-render
@@ -595,11 +636,18 @@ async function buildPackageAndRedirect(
       ctx,
       labels
         ? `Choose at least one stream for ${labels}, or clear that source.`
-        : "Choose at least one stream inside each selected source, or clear that source."
+        : "Choose at least one stream inside each selected source, or clear that source.",
+      client
     );
   }
   if (acc.authorizationDetails.length === 0) {
-    return renderHostedMcpPickerValidationPage(req, res, ctx, "Select at least one source before approving.");
+    return renderHostedMcpPickerValidationPage(
+      req,
+      res,
+      ctx,
+      "Select at least one source before approving.",
+      client
+    );
   }
   const packageResult = await ctx.createHostedMcpGrantPackage({
     authorizationDetails: acc.authorizationDetails,
@@ -616,6 +664,7 @@ async function buildPackageAndRedirect(
 // ─── Request-intake resolution (extracted to reduce POST handler complexity) ─
 
 interface McpPackageIntake {
+  client: OAuthClient;
   packageAccessMode: string;
   selections: Array<{ connectorId: string; connectionId: string | null }>;
   streamSelectionsBySource: Map<string, Set<string>>;
@@ -655,7 +704,7 @@ async function resolveMcpPackageIntake(
 
   const selections = ctx.selectionParsers.parseHostedMcpSelections(body.selection);
   if (selections.length === 0) {
-    await rejectMissingHostedMcpSelection(req, res, ctx, body.selection);
+    await rejectMissingHostedMcpSelection(req, res, ctx, body.selection, client);
     return null;
   }
 
@@ -673,7 +722,7 @@ async function resolveMcpPackageIntake(
     return null;
   }
 
-  return { packageAccessMode, selections, streamSelectionsBySource };
+  return { client, packageAccessMode, selections, streamSelectionsBySource };
 }
 
 // ─── Route mount ─────────────────────────────────────────────────────────────
@@ -734,7 +783,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
             csrfToken,
             ctx.providerName,
             ctx.consentPickerCaps,
-            ctx.consentUi
+            ctx.consentUi,
+            { client: toPendingGrantRequestClient(client) }
           )
         );
       }
@@ -795,7 +845,7 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         if (!intake) {
           return;
         }
-        const { selections, streamSelectionsBySource, packageAccessMode } = intake;
+        const { client, selections, streamSelectionsBySource, packageAccessMode } = intake;
 
         // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
         const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
@@ -829,7 +879,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           acc,
           { clientId, codeChallenge, codeChallengeMethod, redirectUri, state },
           ownerSubjectId,
-          ctx
+          ctx,
+          client
         );
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };

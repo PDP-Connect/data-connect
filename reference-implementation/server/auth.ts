@@ -5446,10 +5446,12 @@ function normalizeCimdRegisteredClient(value: unknown): RegisteredClient {
       client_name: isNonEmptyString(value.metadata.client_name) ? value.metadata.client_name : null,
       client_uri: isNonEmptyString(value.metadata.client_uri) ? value.metadata.client_uri : null,
       logo_uri: isNonEmptyString(value.metadata.logo_uri) ? value.metadata.logo_uri : null,
+      policy_uri: isNonEmptyString(value.metadata.policy_uri) ? value.metadata.policy_uri : null,
       redirect_uris: Array.isArray(value.metadata.redirect_uris)
         ? value.metadata.redirect_uris.filter(isNonEmptyString)
         : [],
       token_endpoint_auth_method: tokenEndpointAuthMethod,
+      tos_uri: isNonEmptyString(value.metadata.tos_uri) ? value.metadata.tos_uri : null,
     },
     registration_mode: isNonEmptyString(value.registration_mode)
       ? value.registration_mode

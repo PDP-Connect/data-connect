@@ -307,6 +307,58 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
 }
 
+/* ─── Client identity header (monogram + unverified badge) ──────────────
+ * Text-only monogram placeholder — never a remote client-supplied logo, per
+ * client-display:676 (untrusted logo_uri MUST NOT be fetched/rendered for an
+ * unverified client). */
+.hosted-ui-client-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.hosted-ui-client-monogram {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.625rem;
+  background: var(--muted, oklch(0.94 0.005 85));
+  color: var(--muted-foreground);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.hosted-ui-client-identity-name {
+  font-weight: 600;
+}
+.hosted-ui-unverified-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hosted-ui-client-policy-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+}
+.hosted-ui-client-policy-links a {
+  color: var(--muted-foreground);
+  text-decoration: underline;
+}
+
 /* ─── Hosted-ui layout ──────────────────────────────────────────────── */
 .hosted-ui-page {
   max-width: 640px;

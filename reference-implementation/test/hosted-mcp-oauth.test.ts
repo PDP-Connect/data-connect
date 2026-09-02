@@ -1575,7 +1575,7 @@ test("hosted MCP source selection uses hosted-ui option styles", async () => {
     const resp = await fetch(authorizeUrl);
     assert.equal(resp.status, 200);
     const html = await resp.text();
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /class="hosted-ui-option-group"/);
     assert.match(html, /class="hosted-ui-option"/);
     assert.match(html, /<details class="hosted-ui-option-source"[^>]*>/);
@@ -3133,7 +3133,7 @@ test("POST /oauth/authorize/mcp-package renders picker error when a selected sou
     assert.equal(resp.status, 400);
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /Choose at least one stream for/i);
     assert.match(html, /data-hosted-mcp-picker-error/);
     assert.match(html, /class="hosted-ui-error hosted-ui-picker-error"/);
@@ -3356,7 +3356,7 @@ test("POST /oauth/authorize/mcp-package renders picker error when streams are su
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
 
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /data-hosted-mcp-picker-error/);
     assert.match(html, /Select at least one source and one stream inside each selected source before approving/);
     assert.equal(
