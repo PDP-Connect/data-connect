@@ -410,23 +410,43 @@ test("picker runtime: bulk controls behave distinctly (select / clear / expand /
   }
 });
 
-test("picker runtime: clearing a source via its per-source button collapses only that source", async () => {
+test("picker runtime: the parent checkbox selects and clears its own source, with no per-source buttons", async () => {
+  // The 54 per-source `Select every stream` / `Clear this source` buttons are
+  // gone. They existed because 27 sources made bulk affordances feel
+  // necessary, but the tri-state parent checkbox already does exactly this
+  // job — and a control that needs two buttons to explain it is a control
+  // that is not working. This proves the parent alone covers both directions.
   const p = await openPickerDom();
   try {
     const source = mustExist(p.sources()[0], "at least one source must render");
-    // Select the whole source (opens it), then use the per-source clear button.
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-clear-streams]"),
+      null,
+      "no per-source clear button remains"
+    );
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-select-streams]"),
+      null,
+      "no per-source select-every button remains"
+    );
+
     const sourceBox = mustExist(p.sourceBoxIn(source), "the source checkbox must render");
     sourceBox.checked = true;
     p.fire(sourceBox, "change");
+    assert.ok(
+      p.streamsIn(source).every((s) => s.checked),
+      "checking the parent selects every stream in that source"
+    );
     assert.equal(source.open, true, "selecting a source opens it");
+    assert.equal(source.dataset.sourceSelected, "true", "the source reads as selected");
 
-    source.querySelector("[data-hosted-mcp-clear-streams]")?.click();
+    sourceBox.checked = false;
+    p.fire(sourceBox, "change");
     assert.ok(
       p.streamsIn(source).every((s) => !s.checked),
-      "per-source clear unchecks its streams"
+      "unchecking the parent clears every stream in that source"
     );
-    assert.equal(source.open, false, "per-source clear collapses that source");
-    assert.equal(source.dataset.sourceSelected, "false", "per-source clear deselects the source");
+    assert.equal(source.dataset.sourceSelected, "false", "the source reads as deselected");
   } finally {
     await p.close();
   }
