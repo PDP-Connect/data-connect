@@ -74,9 +74,9 @@
     "verify": "pnpm typecheck && pnpm check && pnpm test"
   },
   "dependencies": {
-    "@pdpp/brand": "workspace:*",
-    "@pdpp/display": "workspace:*",
-    "@pdpp/list-envelope": "workspace:*",
+    "@pdpp/brand": "*",
+    "@pdpp/display": "*",
+    "@pdpp/list-envelope": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.37.0",
@@ -85,7 +85,7 @@
   },
   "peerDependencies": {
     "@base-ui/react": "^1.3.0",
-    "next": "16.3.0-canary.93",
+    "next": "^16.0.0 || 16.3.0-canary.93",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

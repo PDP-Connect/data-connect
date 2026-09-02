@@ -18,7 +18,7 @@ const REGEXP_10 = /buildConnectionSetupPlan/;
 const REGEXP_11 = /staticSecretCredentialCaptureFromManifest/;
 
 const FILES = {
-  cliSetup: new URL("../../packages/cli/src/owner-agent/setup.ts", import.meta.url),
+  cliSetup: new URL("../vendor/cli/src/owner-agent/setup.ts", import.meta.url),
   consoleCatalog: new URL("../../apps/console/src/app/(console)/lib/connection-catalog.ts", import.meta.url),
   ownerIntentRoute: new URL("../server/routes/owner-connection-intent.ts", import.meta.url),
   setupPlanner: new URL("../server/connection-setup-plan.ts", import.meta.url),

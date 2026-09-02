@@ -19,8 +19,8 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
-    "@pdpp/brand": "workspace:*",
-    "@pdpp/display": "workspace:*",
+    "@pdpp/brand": "*",
+    "@pdpp/display": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.6.0"
@@ -39,7 +39,7 @@
     "ultracite": "7.10.7"
   },
   "peerDependencies": {
-    "next": "16.3.0-canary.93",
+    "next": "^16.0.0 || 16.3.0-canary.93",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   }

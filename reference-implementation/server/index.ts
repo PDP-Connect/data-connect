@@ -20,7 +20,7 @@ import {
   createPdppCliCommand,
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
-} from "../../packages/cli/src/package-info.ts";
+} from "../vendor/cli/src/package-info.ts";
 import type { ProviderAuthManifestLike } from "../../packages/polyfill-connectors/src/provider-auth-adapter.ts";
 import {
   evaluateStreamHealthAuthority,

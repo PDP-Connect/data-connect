@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import type { IncomingHttpHeaders } from "node:http";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
-import { createPdppCliCommand, getPdppCliPackageInfo } from "../../packages/cli/src/package-info.ts";
+import { createPdppCliCommand, getPdppCliPackageInfo } from "../vendor/cli/src/package-info.ts";
 import { createCimdDocument } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { resolvePublicUrl, resolveSiblingPublicUrl } from "../server/metadata.ts";

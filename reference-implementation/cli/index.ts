@@ -4,8 +4,8 @@
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { runCli as runPublicCli } from "../../packages/cli/src/index.ts";
-import { createPdppCliCommand, PDPP_CLI_BIN_NAME, PDPP_CLI_PACKAGE_NAME } from "../../packages/cli/src/package-info.ts";
+import { runCli as runPublicCli } from "../vendor/cli/src/index.ts";
+import { createPdppCliCommand, PDPP_CLI_BIN_NAME, PDPP_CLI_PACKAGE_NAME } from "../vendor/cli/src/package-info.ts";
 import { runAgent } from "./commands/agent.ts";
 import { runAuth } from "./commands/auth.ts";
 import { runGrant } from "./commands/grant.ts";

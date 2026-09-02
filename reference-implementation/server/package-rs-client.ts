@@ -40,7 +40,7 @@ import {
   type QueryValue,
   RsClient,
   type RsResponse,
-} from "../../packages/mcp-server/src/rs-client.ts";
+} from "../vendor/mcp-server/src/rs-client.ts";
 import { schemaSourceOptions } from "../operations/rs-schema-get/compact-view.ts";
 import type { ConnectorSchemaItem } from "../operations/rs-schema-get/index.ts";
 
