@@ -5511,3 +5511,154 @@ test("hosted MCP picker headers the configured instance name alone, with PDPP as
     await closeServer(server);
   }
 });
+
+// --- Refusal (RFC 6749 §4.1.2.1) -------------------------------------------
+//
+// Before the cancel route existed, the picker had 59 buttons and every one of
+// them was affirmative. The only way out was to close the tab, which leaves
+// the client waiting for a response that never arrives — and no code path in
+// the reference implementation could return an OAuth error to a client at
+// all (both redirect builders set only `code` and `state`).
+//
+// `/consent/deny` exists, but it operates on a pending-consent row the picker
+// flow never writes, so it cannot serve this surface.
+
+test("POST /oauth/authorize/mcp-package/cancel redirects with error=access_denied and the original state", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const state = "refusal-state";
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const params = new URLSearchParams();
+    params.append("client_id", client.client_id);
+    params.append("redirect_uri", "https://client.example/callback");
+    params.append("state", state);
+    params.append("decision", "cancel");
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package/cancel`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 302, "refusal must redirect the owner back to the client");
+    const location = new URL(
+      mustExist(resp.headers.get("location"), "refusal redirect must carry a Location header")
+    );
+    assert.equal(location.origin, "https://client.example");
+    assert.equal(location.pathname, "/callback");
+    assert.equal(location.searchParams.get("error"), "access_denied", "RFC 6749 §4.1.2.1 error code");
+    assert.equal(location.searchParams.get("state"), state, "the client's state must round-trip");
+    assert.equal(location.searchParams.get("code"), null, "a refusal must never carry an authorization code");
+
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "a refusal must mint nothing"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package/cancel refuses to redirect to an unregistered redirect_uri", async () => {
+  // The refusal echoes the client's own redirect_uri back as a redirect
+  // target, so it must be validated exactly as hard as an approval is. An
+  // unregistered URI is an open-redirect vector whether it carries a code or
+  // an error.
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+
+    const params = new URLSearchParams();
+    params.append("client_id", client.client_id);
+    params.append("redirect_uri", "https://attacker.example/steal");
+    params.append("state", "open-redirect-attempt");
+    params.append("decision", "cancel");
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package/cancel`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 400, "an unregistered redirect_uri must be rejected, not redirected to");
+    assert.equal(resp.headers.get("location"), null, "no redirect to an unregistered origin, error or otherwise");
+    const body = (await resp.json()) as Record<string, unknown>;
+    assert.equal(body.error, "invalid_request");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package/cancel rejects an unknown client without redirecting", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const params = new URLSearchParams();
+    params.append("client_id", "https://not-registered.example/client.json");
+    params.append("redirect_uri", "https://client.example/callback");
+    params.append("state", "unknown-client");
+    params.append("decision", "cancel");
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package/cancel`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 400);
+    assert.equal(resp.headers.get("location"), null, "an unknown client gets no redirect");
+    const body = (await resp.json()) as Record<string, unknown>;
+    // A URL-shaped client_id is resolved as a CIMD document first, so the
+    // typed failure is whichever resolution step rejects it. What matters
+    // here is that an unresolvable client never becomes a redirect target.
+    assert.ok(
+      body.error === "invalid_client" || body.error === "cimd_fetch_failed",
+      `refusal must fail closed on an unresolvable client, got ${JSON.stringify(body)}`
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("the picker renders Cancel as a first-class action beside Allow", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+
+    assert.match(
+      html,
+      /formaction="\/oauth\/authorize\/mcp-package\/cancel"/,
+      "Cancel must post to the refusal route"
+    );
+    assert.match(html, />Cancel</, "the refusal is labelled Cancel, not Deny — declining is not an error");
+    assert.match(html, />Allow access</, "the affirmative action sits beside it");
+    // `formnovalidate` plus the submitter check in the picker script keep
+    // selection validation from blocking a refusal: an owner with nothing
+    // selected is exactly the owner most likely to be refusing.
+    assert.match(html, /formnovalidate/, "Cancel must not be gated by selection validation");
+    assert.match(
+      html,
+      /event\.submitter && event\.submitter\.value === "cancel"/,
+      "the client-side submit guard must let a refusal through"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
