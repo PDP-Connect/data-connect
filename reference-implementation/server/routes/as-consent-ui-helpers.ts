@@ -146,7 +146,7 @@ export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new
 //
 // `null` is the honest resolution — the grant records no recipient
 // commitment, and the consent surface states the absence
-// (`renderHostedMcpRetentionBlock`). If an operator later wants a retention
+// (`buildHostedMcpRetentionSentence`). If an operator later wants a retention
 // term, it must be described as a requirement THIS SERVER imposes and must
 // not be written as the client's commitment until the client has accepted it.
 export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } | null = null;
@@ -2270,10 +2270,19 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
  * eyebrow, which would misattribute authorship to an app that declared
  * nothing (spec-core.md:706-730 semantic classes).
  */
-function renderHostedMcpPurposeBlock(clientName: string, ui: ConsentUiRenderer): string {
+function renderHostedMcpTermsBlock(clientName: string, ui: ConsentUiRenderer): string {
+  // One eyebrow, because this is one register. Purpose and retention are both
+  // things THIS SERVER says — the owner was reading "Your server describes"
+  // twice in a row, heading two facts of a single category.
+  //
+  // spec-core.md:716 requires the three authorship classes stay DISTINCT. It
+  // does not require a printed banner above every group: typography,
+  // placement, and one attribution carry a distinction perfectly well, and
+  // repeating the label per block is what turned the trust model into the
+  // visual noise that made this page read as a debug dump.
   return renderAuthorshipBlock(
     "manifest",
-    "Assigned purpose",
+    "What this server sets and what the app said",
     ui.renderKeyValueList([
       {
         label: "Purpose",
@@ -2285,6 +2294,7 @@ function renderHostedMcpPurposeBlock(clientName: string, ui: ConsentUiRenderer):
         // owner-facing copy; it stays in the grant and the audit record.
         value: `Set by this server because ${clientName} didn't give one: use the data you select as context for your AI assistant.`,
       },
+      { label: "Keeping your data", value: buildHostedMcpRetentionSentence(clientName) },
     ]),
     ui
   );
@@ -2304,29 +2314,29 @@ const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
  * so the client has said nothing — and the only honest rendering is to say
  * so, naming the app whose silence it is.
  *
- * This block previously read "No retention commitment was declared by this
- * app. Your server's default applies: data it reads is deleted within 90
- * days." The second sentence's subject is what the APP does, so it told the
- * owner ChatGPT deletes their data — a promise ChatGPT never made and this
- * server cannot cause. The `Your server describes` framing did not cure it.
- * If `HOSTED_MCP_PICKER_RETENTION` is ever set by an operator, it renders as
+ * This previously read "No retention commitment was declared by this app.
+ * Your server's default applies: data it reads is deleted within 90 days."
+ * The second sentence's subject is what the APP does, so it told the owner
+ * ChatGPT deletes their data — a promise ChatGPT never made and this server
+ * cannot cause. The `Your server describes` framing did not cure it. If
+ * `HOSTED_MCP_PICKER_RETENTION` is ever set by an operator, it renders as
  * this server's own requirement, never as the client's acceptance.
  */
 /**
  * The single retention sentence, used by both the terms block and the review
  * panel so the two can never drift into saying different things.
  */
-function buildRetentionSentence(clientName: string): string {
-  const absence = `${clientName} did not say how long it keeps the data it receives.`;
+function buildHostedMcpRetentionSentence(clientName: string): string {
+  const silence = `${clientName} did not say how long it keeps the data it receives.`;
   if (!HOSTED_MCP_PICKER_RETENTION) {
-    return absence;
+    return silence;
   }
   const onExpiry =
     RETENTION_ON_EXPIRY_COPY[HOSTED_MCP_PICKER_RETENTION.on_expiry] ?? HOSTED_MCP_PICKER_RETENTION.on_expiry;
   const days = HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days");
-  // The subject of the second sentence is this server's requirement, never
-  // the client's behavior — the client has accepted nothing.
-  return `${absence} This server requires that it ${onExpiry} the data within ${days}.`;
+  // The subject is this server's requirement, never the client's behavior —
+  // the client has accepted nothing.
+  return `${silence} This server requires that it ${onExpiry} the data within ${days}.`;
 }
 
 /**
@@ -2367,7 +2377,12 @@ export async function renderHostedMcpSourceSelection(
   // The name the owner reads, used in every sentence that talks about the
   // requester, so the page never says "this app" where it knows the name.
   const clientName = clientDisplay?.displayName ?? "This app";
-  const purposeBlock = renderHostedMcpPurposeBlock(clientName, ui);
+  // Purpose and retention are one register and now one block — see
+  // `renderHostedMcpTermsBlock`. Rendered only when there is something to
+  // grant: on an empty picker the terms of a grant that cannot be made are
+  // noise in front of the one thing that page needs to do, which is let the
+  // owner leave.
+  const termsBlock = rows.length ? renderHostedMcpTermsBlock(clientName, ui) : "";
 
   // Stale-review-revision rejection (AS-conformance #15): bind exactly what
   // this render offered as choosable into a digest the POST must reproduce
@@ -2541,7 +2556,7 @@ export async function renderHostedMcpSourceSelection(
             <dt>Coverage</dt><dd>Everything in each data type you check, with no date limit.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
             <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
-            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildRetentionSentence(clientName))}</dd>
+            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
           </dl>
         </section>`
     : "";
@@ -2582,11 +2597,6 @@ export async function renderHostedMcpSourceSelection(
       // selection) and the copy was apologizing for a control that works.
       `<p class="pdpp-body">You can revoke this access later from your grants page.</p>`
     : "";
-  // Retention has no standalone block on the picker: it is one of the exact
-  // terms the approval artifact states (spec-core.md:873-877), and repeating
-  // it above the list said the same sentence twice. `buildRetentionSentence`
-  // is its single source.
-  const retentionBlock = "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
   // Independent of `rows.length`: a validation error (e.g. the
@@ -3129,8 +3139,7 @@ export async function renderHostedMcpSourceSelection(
               <input type="hidden" name="decision_digest" value="" data-hosted-mcp-decision-digest />
               ${hidden}
               ${validationBanner}
-              ${purposeBlock}
-              ${retentionBlock}
+              ${termsBlock}
               ${bulkControls}
               ${protocolSelectionBlock}
               ${reviewPanel}
