@@ -63,7 +63,15 @@ FROM deps AS source
 
 COPY . .
 
-RUN npm run build --workspace=packages/connector-protocol --workspace=packages/collector-runtime
+# mcp-server ships as dist/-built output (not source-resolved), and depends
+# on both vendor/cli and vendor/read-core (also dist/-built) -- mcp-server's
+# own build script builds cli first, but not read-core, so that one needs
+# its own explicit build step. Confirmed live: without vendor/read-core's
+# build, the server crashes at boot with ERR_MODULE_NOT_FOUND on
+# @pdpp/read-core/dist/index.js, imported from mcp-server's own dist output.
+RUN npm run build --workspace=packages/connector-protocol --workspace=packages/collector-runtime \
+  && npm run build --workspace=reference-implementation/vendor/read-core \
+  && npm run build --workspace=reference-implementation/vendor/mcp-server
 
 FROM base AS reference
 
