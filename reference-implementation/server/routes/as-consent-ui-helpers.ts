@@ -692,7 +692,7 @@ async function buildConnectorPickerRows(
         connectorId,
         connectorTypeLabel: connectorLabel,
         formValue: caps.encodeHostedMcpSelection({ connectionId: connectionId ?? null, connectorId }),
-        meta: buildPickerRowMeta({ connectorKey: connectorMetaToken, connectorLabel, streamCount: heldStreamCount }),
+        meta: buildPickerRowMeta({ streamCount: heldStreamCount }),
         sourceKey: caps.hostedMcpSourceKey({ connectionId: connectionId ?? null, connectorId }),
         sourceKind,
         streams: streamSummaries,
@@ -772,13 +772,9 @@ function normalizeConnectorLabel(value: string): string {
 }
 
 function buildPickerRowMeta({
-  connectorLabel,
-  connectorKey,
   streamCount,
   suffix,
 }: {
-  connectorLabel: string;
-  connectorKey: string;
   streamCount: number;
   suffix?: string;
 }): string {
@@ -794,11 +790,18 @@ function buildPickerRowMeta({
   // agreed to learn, and it means nothing on a screen about sharing data.
   const availabilityPhrase = streamCount === 1 ? "1 data type" : `${streamCount} data types`;
   parts.push(availabilityPhrase);
-  // Only surface the technical connector key when the owner-facing label does
-  // not already carry it, so we never repeat the same identity twice.
-  if (normalizeConnectorLabel(connectorLabel) !== normalizeConnectorLabel(connectorKey)) {
-    parts.push(connectorKey);
-  }
+  // The connector key used to be appended here whenever it differed from the
+  // display label — so a row read "5 data types · chase-bank". That is a
+  // registry identifier, and its audience is a protocol engineer inspecting a
+  // registration, not the person deciding whether to share their bank
+  // transactions. It is the same defect as the metadata-document URL and the
+  // `connector` badge, both already removed from this surface for exactly
+  // this reason, just wearing a shorter string.
+  //
+  // The label alone identifies the source; where two connections of one
+  // source need telling apart, `connectionName` does that in the owner's own
+  // words. The key stays in the form value (the enforced scope) and the
+  // audit record.
   if (suffix) {
     parts.push(suffix);
   }
@@ -2455,8 +2458,16 @@ export async function renderHostedMcpSourceSelection(
           // summary, one tap on a phone had two plausible outcomes and the
           // control could be neither labelled nor sized.
           const disclosureLabel = `Show what ${row.connectorTypeLabel} can share`;
+          // What the filter matches against: the source name, the connected
+          // account, and the data types it holds — the three things an owner
+          // would actually type. Precomputed here so the filter never has to
+          // read the DOM's rendered text.
+          const filterText = [row.connectorTypeLabel, row.connectionName ?? "", streamPreview]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
           return `
-          <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false">
+          <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false" data-filter-text="${ui.escapeHtml(filterText)}">
             <summary class="hosted-ui-option-source-legend hosted-ui-option-summary">
               <label class="hosted-ui-option">
                 <input type="checkbox" name="selection" value="${ui.escapeHtml(row.formValue)}" data-hosted-mcp-source-checkbox data-source-selection-mode="streams" data-source-key="${sourceKey}" aria-describedby="${summaryId}"${sourceDisabledAttrs} />
@@ -2568,8 +2579,35 @@ export async function renderHostedMcpSourceSelection(
       ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Choose at least one data type to continue."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
       : "";
 
+  // A filter earns its place only once the list stops being scannable. On
+  // four rows it is chrome; on a real deployment's 27 collapsed sources
+  // spanning a very long scroll it is the difference between finding Chase
+  // and giving up. It deliberately carries no `name`: this form's field set
+  // IS the grant, and a named input would post the owner's search string
+  // into the authorization request.
+  const SOURCE_FILTER_THRESHOLD = 8;
+  const sourceFilter =
+    rows.length > SOURCE_FILTER_THRESHOLD
+      ? `
+        <div class="hosted-ui-picker-filter">
+          <label class="hosted-ui-picker-filter-label" for="hosted-mcp-filter">Filter sources</label>
+          <input id="hosted-mcp-filter" type="search" class="hosted-ui-picker-filter-input" placeholder="Search ${rows.length} sources" autocomplete="off" data-hosted-mcp-filter />
+          <p class="hosted-ui-picker-filter-empty" data-hosted-mcp-filter-empty hidden>No sources match that search.</p>
+        </div>
+      `
+      : "";
+
+  // The owner's running answer to "what am I about to allow", kept beside the
+  // controls that change it. It starts honest — before any interaction the
+  // answer is nothing — and it is the one place the page states the size of
+  // the decision without the owner having to count checkboxes.
+  const selectionCounter = rows.length
+    ? `<p class="hosted-ui-picker-counter" role="status" aria-live="polite" data-hosted-mcp-counter>Nothing selected yet.</p>`
+    : "";
+
   const bulkControls = rows.length
     ? `
+        ${sourceFilter}
         <div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Source bulk controls">
           <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Select every source</button>
           <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Clear selection</button>
@@ -2577,6 +2615,7 @@ export async function renderHostedMcpSourceSelection(
           <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Show all data types</button>
           <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Hide all data types</button>
         </div>
+        ${selectionCounter}
       `
     : "";
 
@@ -2641,6 +2680,45 @@ export async function renderHostedMcpSourceSelection(
 .hosted-ui-picker-error {
   margin: 0 0 1rem;
 }
+.hosted-ui-picker-filter {
+  margin: 0 0 0.75rem;
+}
+.hosted-ui-picker-filter-label {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.hosted-ui-picker-filter-input {
+  width: 100%;
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.5rem 0.75rem;
+  min-height: 44px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--foreground);
+}
+.hosted-ui-picker-filter-input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  border-color: var(--primary);
+}
+.hosted-ui-picker-filter-empty {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.hosted-ui-picker-counter {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.hosted-ui-option-source[hidden] {
+  display: none;
+}
 </style>`
     : "";
 
@@ -2662,6 +2740,21 @@ export async function renderHostedMcpSourceSelection(
       error.textContent = "";
       error.hidden = true;
     }
+  };
+  // The running total, recomputed from the checkboxes themselves rather than
+  // tracked incrementally — there is no second source of truth to drift.
+  const counter = form.querySelector("[data-hosted-mcp-counter]");
+  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+  const updateCounter = () => {
+    if (!counter) return;
+    const streams = Array.from(form.querySelectorAll("[data-hosted-mcp-stream-checkbox]")).filter((b) => b.checked);
+    if (streams.length === 0) {
+      counter.textContent = "Nothing selected yet.";
+      return;
+    }
+    const sourceCount = sources.filter((s) => streamsFor(s).some((b) => b.checked)).length;
+    counter.textContent =
+      plural(sourceCount, "source", "sources") + " · " + plural(streams.length, "data type", "data types");
   };
   // Keep the disclosure's own state in sync with the <details>. The label and
   // aria-expanded are on a real control now, so both must track "open"
@@ -2698,6 +2791,7 @@ export async function renderHostedMcpSourceSelection(
       source.open = true;
     }
     syncDisclosure(source);
+    updateCounter();
   };
   for (const source of sources) {
     // The summary hosts two controls that do different things, so neither may
@@ -2752,8 +2846,13 @@ export async function renderHostedMcpSourceSelection(
       });
     }
   }
+  // Bulk select applies only to what the owner can currently SEE. With a
+  // filter active, selecting rows hidden behind the search would grant
+  // sources they never looked at — the exact over-granting the filter is
+  // supposed to make less likely, not more.
+  const visibleSources = () => sources.filter((source) => !source.hidden);
   form.querySelector("[data-hosted-mcp-select-sources]")?.addEventListener("click", () => {
-    for (const source of sources) {
+    for (const source of visibleSources()) {
       const sourceBox = source.querySelector("[data-hosted-mcp-source-checkbox]");
       if (sourceBox?.disabled) continue;
       for (const streamBox of streamsFor(source)) {
@@ -2763,6 +2862,9 @@ export async function renderHostedMcpSourceSelection(
     }
     setError("");
   });
+  // Clear stays unscoped, deliberately: clearing a row the filter is hiding
+  // can only ever narrow the grant, and an owner who clicks "Clear selection"
+  // means all of it, not "all of it except what I searched away".
   form.querySelector("[data-hosted-mcp-clear-sources]")?.addEventListener("click", () => {
     for (const source of sources) {
       for (const streamBox of streamsFor(source)) {
@@ -2771,6 +2873,22 @@ export async function renderHostedMcpSourceSelection(
       syncSource(source);
     }
     setError("");
+  });
+  // Filtering hides rows; it never changes what is selected. A source the
+  // owner already checked stays checked and stays in the grant even while it
+  // is filtered out of view — hiding a row must not silently narrow the
+  // decision, and un-selecting on filter would do exactly that.
+  const filterInput = form.querySelector("[data-hosted-mcp-filter]");
+  const filterEmpty = form.querySelector("[data-hosted-mcp-filter-empty]");
+  filterInput?.addEventListener("input", () => {
+    const needle = filterInput.value.trim().toLowerCase();
+    let shown = 0;
+    for (const source of sources) {
+      const match = !needle || (source.dataset.filterText || "").includes(needle);
+      source.hidden = !match;
+      if (match) shown += 1;
+    }
+    if (filterEmpty) filterEmpty.hidden = shown > 0;
   });
   form.querySelector("[data-hosted-mcp-expand-all]")?.addEventListener("click", () => {
     for (const source of sources) {
