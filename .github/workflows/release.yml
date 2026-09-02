@@ -58,7 +58,15 @@ jobs:
             pkg_target: node22-linux-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
-          - platform: windows-latest
+          # Pinned to windows-2022 (not windows-latest) because that runner image's Visual
+          # Studio install path changed to a bare "\18\" (VS 2026 naming) that node-gyp's
+          # bundled-with-npm version can't parse ("unknown version \"undefined\"" when
+          # building better-sqlite3). npm_config_node_gyp does not work around this: npm's
+          # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
+          # during `npm ci`, ignoring that config (npm/cli#2839). Unpin once actions/setup-node's
+          # Node 22 LTS bundles npm>=11.6.3 (node-gyp>=12.1.0, which added VS2026 detection).
+          # TODO(2026-09-02): revisit and unpin — see PDP-Connect/data-connect#47.
+          - platform: windows-2022
             os_family: windows
             target: x86_64-pc-windows-msvc
             artifact_key: windows-x64
@@ -92,20 +100,6 @@ jobs:
         with:
           node-version: "22.23.1"
           cache: npm
-
-      - name: Install node-gyp with Visual Studio 2026 detection support
-        # windows-latest ships a Visual Studio install under a bare "\18\" path (VS 2026's
-        # naming scheme). The node-gyp bundled with Node 22.23.1's npm (10.9.8) predates the
-        # VS18 detection fix and fails with `unknown version "undefined"`. node-gyp>=12.1.0
-        # (see nodejs/node-gyp#3240) recognizes it; pin a modern node-gyp for this job only.
-        # TODO: drop this step once actions/setup-node's Node 22 LTS bundles npm>=11.6.3.
-        # Ref: https://github.com/PDP-Connect/data-connect/issues/47
-        if: matrix.os_family == 'windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm install --global node-gyp@latest
-          echo "npm_config_node_gyp=$(npm prefix --location=global)/node_modules/node-gyp/bin/node-gyp.js" >> "$GITHUB_ENV"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
