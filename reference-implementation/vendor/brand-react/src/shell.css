@@ -1,0 +1,404 @@
+/*
+ * Copyright The PDP-Connect Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   INK CARBON — Shell frame
+   packages/pdpp-brand-react/src/shell.css
+
+   The owner-console frame: left sidebar (the rack), main column (the paper),
+   sticky header, and the mobile drawer. Token-driven; no hard-coded colors.
+   Adapted from the Recordroom design's console.css + mobile.css.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Frame ───────────────────────────────────────────────────────── */
+/* `.rr-app` sizes itself to the viewport and clips, but that alone does NOT
+   stop the DOCUMENT from scrolling. `overflow: hidden` clips PAINT; it does
+   not remove the clipped content from the root scroller's scrollable extent,
+   and html/body keep the UA default `overflow: visible`. So on a phone the
+   owner scrolls `.rr-content` (the intended scroller) AND can then drag the
+   whole document down into dead space — measured on /sources at 375×667:
+   a real wheel over the page background moved window.scrollY to 436px of
+   empty space below the frame. Two competing scroll contexts, one of them
+   scrolling into nothing.
+
+   Locking the root scroller off the shell's own PRESENCE (rather than
+   unconditionally on html) keeps the rule scoped to pages that actually
+   render this fixed-viewport frame — routes without it, and the print
+   stylesheet, still scroll the document normally. Same selector grammar as
+   the stream dialog's `html:has(.pdpp-stream-dialog)` lock in
+   syncs/[runId]/stream/stream.css, which fixed this same defect class for
+   one route; the shell owns the general case. */
+html:has(.rr-app) {
+  overflow: hidden;
+}
+.rr-app {
+  display: grid;
+  grid-template-columns: var(--spacing-sidebar) 1fr;
+  height: 100vh;
+  /* biome-ignore lint/suspicious/noDuplicateProperties: 100vh is the legacy fallback; 100dvh corrects dynamic mobile viewport height where supported. */
+  height: 100dvh;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--foreground);
+  background: var(--background);
+}
+/* The sidebar brand block and the main header both draw a bottom rule, and
+   they meet at the sidebar's right border. They only read as ONE line when
+   they are the same height, so both derive from this single token rather
+   than from independently-tuned padding.
+   THE ONLY definition of this token (`shell-masthead-seam.test.ts` pins that
+   count at exactly one — two can drift apart silently, which is the defect
+   the owner reported twice). It carries BOTH selectors because the mobile
+   drawer is portaled to `body` (#107) and so sits outside `.rr-app`'s
+   subtree; it cannot inherit the value and must be named explicitly. Adding
+   a second definition inside `.rr-app` would be redundant, not scoping. */
+.rr-app,
+.pdpp-dialog.rr-drawer {
+  --rr-masthead-height: 52px;
+}
+
+/* ─── Sidebar — the rack ──────────────────────────────────────────── */
+.rr-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* No top padding: the brand block owns the masthead band so its rule lands
+     at exactly --rr-masthead-height, level with .rr-head's rule. */
+  padding: 0 0 14px;
+  background: color-mix(in oklab, var(--background) 88%, oklch(0 0 0));
+  border-right: 1px solid var(--border);
+}
+.rr-side__brand {
+  box-sizing: border-box;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  height: var(--rr-masthead-height);
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+/* the mark is the PDPP split-P: warm human/holder half + cool protocol/issuer
+   half, seamed on the optical vertical. Hues track the active surface via the
+   --pdpp-mark-* tokens below (matching operator-ui's PdppLogo). */
+.rr-side__mark {
+  display: block;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+/* Light surface — standard hues. */
+.rr-app,
+.pdpp-dialog.rr-drawer {
+  --pdpp-mark-warm: oklch(0.52 0.11 45);
+  --pdpp-mark-cool: oklch(0.58 0.18 253);
+  --pdpp-mark-counter: oklch(0.985 0.005 85);
+}
+/* Dark surface — the elevated "night" pair. */
+[data-theme="dark"] .rr-app,
+[data-theme="dark"] .pdpp-dialog.rr-drawer {
+  --pdpp-mark-warm: oklch(0.72 0.12 45);
+  --pdpp-mark-cool: oklch(0.74 0.16 253);
+  --pdpp-mark-counter: oklch(0.16 0.01 60);
+}
+.rr-side__name {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.rr-side__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  padding: 12px 10px;
+  overflow-y: auto;
+}
+.rr-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rr-side__group {
+  padding: 14px 10px 4px;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.rr-nav-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  /* The primary navigation, present on every route — a real touch target,
+     not a decorative chrome control. min-height (not more padding) hits the
+     44px bar without changing the row's visual density. */
+  min-height: 44px;
+  /* Left padding leaves room for the 2px active accent bar so text never
+     shifts between resting/hover/active states (the bar paints in the gutter). */
+  padding: 9px 10px 9px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  text-align: left;
+  text-decoration: none;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  transition:
+    color var(--duration-state) var(--ease-standard),
+    background var(--duration-state) var(--ease-standard),
+    box-shadow var(--duration-state) var(--ease-standard);
+}
+/* Hover is a QUIET neutral lift — distinct from the protocol-blue active state. */
+.rr-nav-item:hover {
+  color: var(--foreground);
+  background: var(--muted);
+}
+/* Active = the current location, in the protocol-blue temperature: a 2px
+   left accent bar (radius 0, painted as an inset box-shadow so it hugs the
+   square edge), a subtle --primary tint fill, and lifted text weight +
+   foreground. Reads clearly as "you are here" in both dark and light. */
+.rr-nav-item.is-active {
+  font-weight: 700;
+  color: var(--foreground);
+  background: var(--primary-tint);
+  box-shadow: inset 2px 0 0 0 var(--primary);
+}
+/* Keep the active item legible (not pulled to the quieter neutral) on hover,
+   while still nudging the tint a touch warmer so it stays interactive. */
+.rr-nav-item.is-active:hover {
+  background: color-mix(in oklab, var(--primary-tint) 70%, var(--muted));
+}
+.rr-side__spacer {
+  flex: 1;
+}
+.rr-side__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 18px 0;
+  border-top: 1px solid var(--border);
+}
+.rr-side__host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.rr-side__motto {
+  padding-top: 3px;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  color: var(--primary);
+  letter-spacing: 0.06em;
+}
+
+/* ─── Main column ─────────────────────────────────────────────────── */
+.rr-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.rr-head {
+  box-sizing: border-box;
+  display: flex;
+  flex-shrink: 0;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  /* Height is shared with .rr-side__brand so the two bottom rules form one
+     continuous line across the sidebar seam. */
+  height: var(--rr-masthead-height);
+  padding: 0 32px;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
+}
+.rr-head__brand {
+  display: none; /* mobile-only; shown ≤860px */
+  gap: 10px;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+/* The `{host} · {build}` crumb no longer renders in the header (it lives once in
+   the sidebar/drawer footer). `.rr-head__actions` keeps a `margin-left: auto` so
+   the header actions stay right-aligned whether or not the mobile-only brand
+   shows on the left. */
+.rr-head__actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+.rr-chrome-btn {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  padding: 6px 12px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-control);
+  transition:
+    color var(--duration-state) var(--ease-standard),
+    border-color var(--duration-state) var(--ease-standard),
+    background var(--duration-state) var(--ease-standard);
+}
+.rr-chrome-btn:hover {
+  color: var(--foreground);
+  background: var(--muted);
+  border-color: var(--border-strong);
+}
+.rr-kbd {
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.rr-menu-btn {
+  display: none; /* mobile-only */
+}
+.rr-content {
+  flex: 1;
+  min-height: 0;
+  padding: 28px 32px 56px;
+  overflow-y: auto;
+}
+
+/* ─── Mobile drawer ───────────────────────────────────────────────── */
+/* P1 — sliver fix: rr-app has overflow:hidden + pseudo transforms making it
+   a containing block for fixed. Use position:fixed with explicit 100vw/100dvh
+   to guarantee full-viewport coverage regardless of the parent grid sizing
+   (the 1fr column at mobile can be a subpixel narrower than 100vw). */
+.pdpp-dialog-backdrop.rr-drawer-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 70;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: oklch(0 0 0 / 0.5);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pdpp-dialog-backdrop.rr-drawer-overlay {
+    animation: rr-fade-in var(--duration-fast) ease both;
+  }
+}
+.pdpp-dialog.rr-drawer {
+  position: fixed;
+  top: 0;
+  right: auto;
+  bottom: 0;
+  left: 0;
+  z-index: 71;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: min(300px, 84vw);
+  max-width: none;
+  padding: 18px 0 14px;
+  margin: 0;
+  overflow-y: auto;
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--background) 88%, oklch(0 0 0));
+  border: 0;
+  border-right: 1px solid var(--border-strong);
+  border-radius: 0;
+  box-shadow: none;
+  transform: none;
+}
+.pdpp-dialog.rr-drawer > nav {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.pdpp-dialog.rr-drawer .rr-drawer__close {
+  margin-left: auto;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pdpp-dialog.rr-drawer {
+    animation: rr-drawer-in var(--duration-base) ease both;
+  }
+}
+.rr-drawer__nav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+}
+.pdpp-dialog.rr-drawer .rr-nav-item {
+  padding: 12px;
+  font-size: 15px;
+}
+.pdpp-dialog.rr-drawer .rr-side__group {
+  padding: 16px 12px 5px;
+}
+.pdpp-dialog.rr-drawer .rr-side__foot {
+  margin-top: auto;
+}
+
+@keyframes rr-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rr-drawer-in {
+  from {
+    transform: translateX(-14px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* ─── Phone grammar (≤860px) — rack folds into the drawer ─────────── */
+@media (max-width: 860px) {
+  .rr-app {
+    grid-template-columns: 1fr;
+  }
+  .rr-side {
+    display: none;
+  }
+  .rr-content {
+    padding: 20px 16px 24px;
+    overflow-x: hidden;
+  }
+  .rr-head {
+    padding: 10px 16px;
+  }
+  .rr-head__brand {
+    display: flex;
+  }
+  .rr-menu-btn {
+    display: inline-flex;
+  }
+  .rr-kbd {
+    display: none;
+  }
+}
