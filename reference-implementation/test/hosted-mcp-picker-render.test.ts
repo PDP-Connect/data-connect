@@ -630,6 +630,26 @@ test("picker never states a retention the client did not declare", async () => {
   );
 });
 
+// ── Trust varies, which is what makes the unverified state mean anything ──
+
+test("a client that proved no domain stays unverified, with a monogram and no logo", async () => {
+  // The counterpart to the domain-verified case: this client registered
+  // without publishing a metadata document at an https client_id, so nothing
+  // about it has been verified and the surface must say so plainly.
+  const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
+
+  assert.match(
+    html,
+    /This app isn't registered with your server\. Its name and logo are self-reported\./,
+    "an unverified client is named as such"
+  );
+  assert.equal(html.includes("Verified domain"), false, "nothing was verified, so nothing is claimed");
+  // spec-core.md:676 — never a remote logo for a client with no positive
+  // trust signal. The monogram is the safe stand-in.
+  assert.match(html, /hosted-ui-client-monogram[^>]*>DA</, "a two-letter monogram stands in for the logo");
+  assert.equal(/<img[^>]+logo/i.test(html), false, "no logo image is fetched or rendered for an unverified client");
+});
+
 // ── The H1 names the requester and the verb; the URL is not headline material ──
 
 test("H1 uses the resolved display name, never the client_id URL", async () => {
@@ -645,13 +665,19 @@ test("H1 uses the resolved display name, never the client_id URL", async () => {
     "no URL in the headline — the domain does its anti-phishing job in the identity block, quietly"
   );
   // The domain is still shown, as its own quiet line, and the trust status
-  // sits with it so a resolved name is never presented as verified.
+  // sits with it so a resolved name is never presented as more than it is.
   assert.match(html, /hosted-ui-client-identity-domain[^>]*>chatgpt\.com</, "the domain renders as a quiet second line");
+  // This client published a valid metadata document at its own https
+  // client_id, which proves control of that domain — a positive trust signal
+  // spec-core.md:675 requires to be rendered distinctly.
   assert.match(
     html,
-    /This app isn't registered with your server\. Its name and logo are self-reported\./,
-    "trust status is a neutral fact adjacent to the name"
+    /Verified domain: chatgpt\.com — this app controls that domain\./,
+    "the trust status names what was actually proven"
   );
+  // The claim never widens past domain control. "Verified app" would be the
+  // more flattering phrasing and the more dangerous one.
+  assert.equal(html.includes("Verified app"), false, "domain control is not an endorsement of the application");
   assert.equal(
     html.includes("Unverified app"),
     false,
