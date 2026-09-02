@@ -951,6 +951,17 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   .hosted-ui-option-streams {
     padding-left: 1rem;
   }
+
+  /* Two columns of a max-content label plus prose is a desktop shape. At
+   * 390px it squeezes the value into a ~20ch gutter and wraps every sentence
+   * to five lines. Stack the label above its value instead. */
+  .hosted-ui-kv {
+    grid-template-columns: 1fr;
+    gap: 0.125rem;
+  }
+  .hosted-ui-kv dd + dt {
+    margin-top: 0.625rem;
+  }
 }
 `;
 
