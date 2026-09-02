@@ -163,7 +163,7 @@ async function renderApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "You can revoke this access any time from the grants dashboard. The exchange code is single-use and expires shortly.",
+          body: "You can revoke this access later from your grants page. The exchange code is single-use and expires shortly.",
           title: "Grant issued",
           tone: "success",
         }),
@@ -204,7 +204,14 @@ async function renderPackageApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "You can revoke any single source grant independently from the grants dashboard.",
+          // Not "revoke any single source grant independently": that promise
+          // is not deliverable. `POST /grants/:grantId/revoke` exists and the
+          // console proxies it, but no UI calls it — the only revoke control
+          // that ships is the all-or-nothing package cascade at
+          // `/grants/packages/:packageId`. Reversibility is what makes "yes"
+          // feel safe, so promising a granularity the owner cannot reach is
+          // worse than saying less.
+          body: "You can revoke this access later from your grants page.",
           title: `${childGrants.length} grant${childGrants.length === 1 ? "" : "s"} issued`,
           tone: "success",
         }),
