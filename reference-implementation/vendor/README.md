@@ -33,12 +33,19 @@ Same interim mechanism as `@pdpp/reference-contract` above: a committed tarball 
 with a plain `npm pack`, referenced via a `file:` dependency, digest recorded in
 `SHA256SUMS`. This one pins `packages/polyfill-connectors` from `PDP-Connect/data-connectors`
 — the canonical connector package Move A made real — at commit
-`d2832953d999241f40129f0a8a14f0bd800c2923` (`main`, 2026-09-02), which merged
-`data-connectors#56` adding the 33 export subpaths this moved server needs
+`cfb747b2cf17788a353d3d6e6ac1d2f5a86d9180` (`main`, 2026-09-02), which merged
+`data-connectors#60` fixing the package's `install-patchright-browser.mjs` postinstall
+hook's `spawnSync("patchright", ...)` call to pass `shell: true` on win32 — without it,
+the bare command name only resolves via a plain PATH lookup, which misses the `.cmd`
+shim npm writes for bin entries, so every Windows install of a consumer package
+(including this one, via this vendored tarball) failed with `spawnSync patchright
+ENOENT` (see `PDP-Connect/data-connect#47`). Superseding the earlier pin at
+`d2832953d999241f40129f0a8a14f0bd800c2923`, which merged `data-connectors#56` adding the
+33 export subpaths this moved server needs
 (`connector-runtime`, `browser-handoff`, `credential-probe`, the `apple_health` /
 `google_maps` / `google_maps_data_portability` / `netflix_export` / `whatsapp` connector
-packages, etc. — see that PR for the full list), superseding the earlier pin at
-`870b4cd495569f901671a7835be0696a787cf192` to also carry `data-connectors#57`'s fix for
+packages, etc. — see that PR for the full list) and, before that, superseding the pin at
+`870b4cd495569f901671a7835be0696a787cf192` which carried `data-connectors#57`'s fix for
 the package's own `postinstall` hook (previously raw TypeScript, which crashed a plain
 `npm ci` in any repo that vendors this tarball — see that PR).
 
