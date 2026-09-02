@@ -5095,6 +5095,163 @@ test("hosted MCP grant.issued spine event carries a non-null review_digest bindi
   }
 });
 
+// --- client_claims and ai_training: structurally unreachable, not silently
+// --- accepted (client-claims:693, ai-training-consent:745-747) -----------
+//
+// CONSENT-UI-SPEC-GAP-0902.md §3/§7 found these MISSING on the hosted-MCP
+// picker/package flow: `client_claims` has no field in the picker POST body
+// at all (this flow is owner-driven checkbox selection, not a client-sent
+// `authorization_details` payload — there is no client input channel a
+// `client_claims` value could ever arrive through), and the AI-training
+// explicit-consent gate can never trigger because the picker hardcodes
+// `purpose_code: agent_context` for every grant it issues. Both are real
+// gaps in the audit's sense (the spec describes obligations this flow
+// cannot satisfy), but the fix is not "invent a field" — inventing a
+// `client_claims` or `purpose_code` input on a flow the picker's own
+// owner-driven selection model doesn't have would fabricate protocol
+// surface no real hosted-MCP client sends, not close the gap. What IS a
+// real, testable defect is a flow that silently ACCEPTS and ignores such
+// fields rather than proving they have no effect — i.e. that an attacker
+// (or a future client hoping this input is honored) cannot smuggle
+// `client_claims` or an `ai_training` purpose into an issued grant by
+// simply including them in the POST body. These tests are that proof.
+test("POST /oauth/authorize/mcp-package ignores an injected client_claims field — no field exists to bind it", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "client-claims-injection-attempt";
+    const challenge = pkceChallenge(verifier);
+
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+    // Not a real picker field — an attempt to smuggle client-authored claims
+    // through a flow that has no client_claims plumbing at all.
+    params.append("client_claims", JSON.stringify({ commitments: ["injected claim"] }));
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(
+      approveResp.status,
+      302,
+      `an unrecognized extra field must not affect minting: ${await approveResp.clone().text()}`
+    );
+    const location = mustExist(approveResp.headers.get("location"), "redirect must carry a Location header");
+    const code = mustExist(new URL(location).searchParams.get("code"), "redirect must carry an authorization code");
+
+    const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: "https://client.example/callback",
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(status, 200);
+    const access = mustExist(
+      await getGrantPackageAccess(body.grant_package_id),
+      "package access must exist"
+    ) as GrantPackageAccess;
+    const childGrantId = mustExist(access.members[0], "package must carry one member").grant.grant_id as string;
+    const { status: timelineStatus, body: timeline } = await fetchJson(
+      `${asUrl}/_ref/grants/${encodeURIComponent(childGrantId)}/timeline`
+    );
+    assert.equal(timelineStatus, 200);
+    const timelineEvents = timeline.data as Record<string, unknown>[];
+    const issuedEvent = mustExist(
+      timelineEvents.find((e) => e.event_type === "grant.issued"),
+      "child grant timeline must contain a grant.issued event"
+    );
+    const issuedEventData = issuedEvent.data as Record<string, unknown>;
+    assert.ok(
+      JSON.stringify(issuedEventData).indexOf("injected claim") === -1,
+      "an injected client_claims field must never reach the issued grant's audit event"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package ignores an injected ai_training purpose_code — the AI-training gate cannot be bypassed on this flow", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "ai-training-injection-attempt";
+    const challenge = pkceChallenge(verifier);
+
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+    // Not a real picker field — the picker hardcodes HOSTED_MCP_PICKER_PURPOSE_CODE
+    // (agent_context); this attempts to override it to the one purpose code
+    // with a mandatory-consent requirement, with no consent checkbox submitted.
+    params.append("purpose_code", "https://pdpp.dev/purpose/ai_training");
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(
+      approveResp.status,
+      302,
+      `an unrecognized extra field must not affect minting: ${await approveResp.clone().text()}`
+    );
+    const location = mustExist(approveResp.headers.get("location"), "redirect must carry a Location header");
+    const code = mustExist(new URL(location).searchParams.get("code"), "redirect must carry an authorization code");
+
+    const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: "https://client.example/callback",
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(status, 200);
+    const access = mustExist(
+      await getGrantPackageAccess(body.grant_package_id),
+      "package access must exist"
+    ) as GrantPackageAccess;
+    const childGrantId = mustExist(access.members[0], "package must carry one member").grant.grant_id as string;
+    const { status: timelineStatus, body: timeline } = await fetchJson(
+      `${asUrl}/_ref/grants/${encodeURIComponent(childGrantId)}/timeline`
+    );
+    assert.equal(timelineStatus, 200);
+    const timelineEvents = timeline.data as Record<string, unknown>[];
+    const issuedEvent = mustExist(
+      timelineEvents.find((e) => e.event_type === "grant.issued"),
+      "child grant timeline must contain a grant.issued event"
+    );
+    const issuedEventData = issuedEvent.data as Record<string, unknown>;
+    assert.ok(
+      JSON.stringify(issuedEventData).indexOf("ai_training") === -1,
+      "an injected ai_training purpose_code must never reach the issued grant — the picker always mints its own fixed purpose"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
 // --- Stale-review-revision rejection (AS-conformance #15) -----------------
 //
 // These exercise `rejectIfHostedMcpReviewDigestStale` (as-authorize.ts): a
