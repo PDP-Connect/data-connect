@@ -36,6 +36,7 @@ import {
   buildConsentClientDisplay,
   buildHostedMcpAuthorizationDetailForConnector,
   buildHostedMcpAuthorizationDetailsForConnector,
+  computeHostedMcpDecisionDigest,
   computeHostedMcpPickerReviewDigest,
   HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE,
   HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES,
@@ -228,6 +229,15 @@ export interface MountAsAuthorizeContext {
 interface SourceEntryAccumulator {
   authorizationDetails: unknown[];
   connectionIds: Array<string | null>;
+  /**
+   * The exact decision this POST resolved, in the same shape the picker's
+   * review panel displayed and digested. Accumulated from the server's own
+   * manifest re-resolution, never from anything the form supplied beyond the
+   * selections themselves, so the digest comparison in
+   * `rejectIfHostedMcpDecisionUnbound` compares what the owner said they
+   * approved against what would actually be granted.
+   */
+  decisionSources: Array<{ sourceKey: string; streamNames: string[] }>;
   seenChildKeys: Set<string>;
   sourceMetadata: Array<{ connector_display_name: string; display_name: string | null }>;
   sourcesWithEmptyStreams: Array<{ connectorId: string; connectionId: string | null; connectorLabel: string }>;
@@ -359,6 +369,18 @@ async function accumulateSourceEntry(
   );
   acc.storageBindings.push({ connector_id: connectorId });
   acc.connectionIds.push(connectionId || null);
+  // `narrowedStreamNames === null` is the canonical wildcard: every stream
+  // the manifest declares. The decision digest must name them explicitly,
+  // because "all of them" is not a term the owner can review — and because a
+  // manifest that gained a stream between render and submit would otherwise
+  // silently widen what "all" means.
+  acc.decisionSources.push({
+    sourceKey: caps.hostedMcpSourceKey({ connectionId, connectorId }),
+    streamNames: [
+      ...(narrowedStreamNames ??
+        (manifest.streams ?? []).map((stream) => stream.name).filter((name): name is string => typeof name === "string")),
+    ].sort(),
+  });
   acc.sourceMetadata.push({
     connector_display_name: manifest.display_name || manifest.name || connectorId,
     display_name: caps.projectBindingForWire(matchedBinding as ConsentPickerBinding)?.display_name ?? null,
@@ -466,6 +488,7 @@ async function buildSourceAccumulator(
   const acc: SourceEntryAccumulator = {
     authorizationDetails: [],
     connectionIds: [],
+    decisionSources: [],
     seenChildKeys: new Set(),
     sourceMetadata: [],
     sourcesWithEmptyStreams: [],
@@ -696,8 +719,13 @@ async function buildPackageAndRedirect(
     | "providerName"
     | "stageOAuthAuthorizationCodeRequest"
   >,
-  client: OAuthClient | null = null
+  client: OAuthClient | null,
+  // Required, with no default: a default would silently disable the approval
+  // binding for any future caller that forgot it — the exact fail-open shape
+  // this check exists to remove.
+  approval: { body: Record<string, unknown>; packageAccessMode: string }
 ): Promise<unknown> {
+  const { body, packageAccessMode } = approval;
   if (acc.sourcesWithEmptyStreams.length > 0) {
     // A checked source without checked streams is ambiguous owner intent. Re-render
     // the picker instead of silently dropping it or returning a raw JSON error.
@@ -716,16 +744,42 @@ async function buildPackageAndRedirect(
     return renderHostedMcpPickerValidationPage(req, res, ctx, "Choose at least one data source to continue.", client);
   }
 
-  // Final-approval artifact completeness + digest binding (grant:873-877,
-  // AS-conformance #15). Scoped down from a full two-step reviewed-confirm
-  // flow (see as-consent-ui-helpers.ts's `computeHostedMcpPickerReviewDigest`
-  // doc comment for why): rather than an interactive round-trip, this
-  // computes a digest over the exact resolved decision — the same
-  // `acc.authorizationDetails` `createHostedMcpGrantPackage` is about to mint,
-  // never client-supplied — and binds it into the audit trail via
-  // `reviewDigest`, which flows into every child grant's `grant.issued` spine
-  // event (see auth.ts). This makes "what was resolved" reconstructable and
-  // auditable without adding a second click to the existing single-step POST.
+  // Approval binding (spec-core.md:873-877, :881-885, AS-conformance #15).
+  //
+  // The owner's submitted `decision_digest` covers the exact terms the review
+  // panel displayed. Recompute it here from the decision this request
+  // independently RESOLVED — the manifests it re-read, the streams it
+  // narrowed to — and require a match before anything is minted. A missing
+  // digest fails closed: an approval that never claimed to have reviewed
+  // anything is exactly the approval that must not mint a grant.
+  //
+  // This is the check the old guard could not perform. `review_digest` covers
+  // the menu of available choices, so checking three streams or thirty
+  // produced the same value; and its handler opened with
+  // `if (!carriedDigest) return false;`, so omitting the field skipped the
+  // check entirely rather than failing.
+  const submittedDecisionDigest = typeof body.decision_digest === "string" ? body.decision_digest.trim() : "";
+  const resolvedDecisionDigest = computeHostedMcpDecisionDigest({
+    accessMode: packageAccessMode,
+    clientId: pkce.clientId,
+    sources: acc.decisionSources,
+  });
+  if (submittedDecisionDigest !== resolvedDecisionDigest) {
+    return renderHostedMcpPickerValidationPage(
+      req,
+      res,
+      ctx,
+      submittedDecisionDigest
+        ? "This request changed since you reviewed it. Check what you're allowing and approve again."
+        : "We couldn't confirm what you approved. Review this request and approve again.",
+      client
+    );
+  }
+
+  // The audit-trail digest over the full resolved authorization_details —
+  // richer than the decision digest (it carries resolved instance_ids and the
+  // minted entries verbatim) and bound into every child grant's `grant.issued`
+  // spine event, so "what was resolved" stays reconstructable.
   const reviewDigest = computeHostedMcpPickerReviewDigest({
     authorizationDetails: acc.authorizationDetails,
     clientId: pkce.clientId,
@@ -1037,7 +1091,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           { clientId, codeChallenge, codeChallengeMethod, redirectUri, state },
           ownerSubjectId,
           ctx,
-          client
+          client,
+          { body, packageAccessMode }
         );
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };
