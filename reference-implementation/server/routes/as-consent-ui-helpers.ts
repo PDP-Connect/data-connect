@@ -15,6 +15,11 @@
 //   test/security-consent-risk-disclosure.test.js
 //   test/security-consent-token-handoff.test.js
 
+import {
+  type StreamScopeCapability,
+  type StreamScopeSelection,
+  resolveStreamScopeCapability,
+} from "../hosted-mcp-stream-scope.ts";
 import { base64UrlSha256 } from "../oauth-substrate/primitives.ts";
 
 // Hosted-UI rendering surface (injected to avoid importing .js directly).
@@ -78,7 +83,18 @@ export interface ConsentPickerManifest {
   readonly source_declaration?: {
     readonly source?: { readonly id?: string | null; readonly kind?: string | null } | null;
   } | null;
-  readonly streams?: Array<{ name: string; description?: string | null }> | null;
+  // Widened from `{ name, description }` to carry the per-stream capability
+  // signals the scope controls need: `selection.fields` gates field narrowing
+  // and `consent_time_field` gates date narrowing (spec-core.md:547). The
+  // stored manifest has always had these; the route layer simply dropped them,
+  // which is why the picker could only offer all-fields-no-dates.
+  readonly streams?: Array<{
+    name: string;
+    consent_time_field?: string | null;
+    description?: string | null;
+    schema?: { properties?: Record<string, unknown> | null; required?: readonly string[] | null } | null;
+    selection?: { fields?: boolean | null } | null;
+  }> | null;
 }
 
 export interface ConsentPickerBinding {
@@ -112,7 +128,12 @@ export interface HostedMcpPickerRow {
   sourceKey: string;
   /** Resolved public source identity kind (source-kinds:731-743), or null if the manifest has no valid source declaration. */
   sourceKind: string | null;
-  streams: Array<{ name: string; description: string | null }>;
+  streams: Array<{
+    name: string;
+    description: string | null;
+    /** What this stream's declaration permits the picker to offer. */
+    scope: StreamScopeCapability;
+  }>;
 }
 
 // Authorization-details constants.
@@ -401,7 +422,15 @@ export function buildHostedMcpAuthorizationDetailForConnector(
   streamNames: string[] | null = null,
   accessMode: string | null = null,
   connectionId: string | null = null,
-  source: HostedMcpSourceDescriptor = { id: connectorId, kind: "connector" }
+  source: HostedMcpSourceDescriptor = { id: connectorId, kind: "connector" },
+  /**
+   * Per-stream narrowing, keyed by stream name. Absent entries mean "no
+   * narrowing", which is the pre-existing behavior: the resolver reads an
+   * omitted `fields` as every field and an omitted `time_range` as no bound
+   * (spec-core.md:775). A wildcard selection carries no scope, because there
+   * is no named stream to attach it to until the wildcard is expanded.
+   */
+  streamScopes: ReadonlyMap<string, StreamScopeSelection> | null = null
 ): {
   type: string;
   source: { kind: string; id: string };
@@ -409,12 +438,34 @@ export function buildHostedMcpAuthorizationDetailForConnector(
   purpose_description: string;
   access_mode: string;
   retention?: { max_duration: string; on_expiry: "anonymize" | "delete" };
-  streams: Array<{ name: string; instance_ids?: string[] }>;
+  streams: Array<{
+    name: string;
+    instance_ids?: string[];
+    fields?: string[];
+    time_range?: { since?: string; until?: string };
+  }>;
 } {
   const pinnedConnectionId = typeof connectionId === "string" && connectionId.trim() ? connectionId.trim() : null;
-  const withPin = (name: string): { name: string; instance_ids?: string[] } =>
-    pinnedConnectionId ? { instance_ids: [pinnedConnectionId], name } : { name };
-  let streams: Array<{ name: string; instance_ids?: string[] }>;
+  const withPin = (
+    name: string
+  ): { name: string; instance_ids?: string[]; fields?: string[]; time_range?: { since?: string; until?: string } } => {
+    const scope = streamScopes?.get(name) ?? null;
+    return {
+      ...(pinnedConnectionId ? { instance_ids: [pinnedConnectionId] } : {}),
+      // Omitted rather than nulled when nothing was narrowed: an absent key
+      // asks the AS to resolve the full permitted set, while an explicit empty
+      // list would be a different (and invalid) request.
+      ...(scope?.fields ? { fields: [...scope.fields] } : {}),
+      name,
+      ...(scope?.timeRange ? { time_range: { ...scope.timeRange } } : {}),
+    };
+  };
+  let streams: Array<{
+    name: string;
+    instance_ids?: string[];
+    fields?: string[];
+    time_range?: { since?: string; until?: string };
+  }>;
   if (Array.isArray(streamNames) && streamNames.length > 0) {
     streams = streamNames.map((name) => withPin(name));
   } else {
@@ -556,11 +607,20 @@ export function computeHostedMcpPickerReviewDigest(decision: HostedMcpPickerRevi
 // error uses; nothing is minted. No interactive round-trip is added: real
 // MCP OAuth clients still get their single POST -> redirect.
 //
-// Time range and per-stream client_claims are not part of this digest: the
-// hosted-MCP picker POST has no fields for either (see
-// CONSENT-UI-SPEC-GAP-0902.md §3 and §5) — there is nothing resolvable to
-// bind. Grant expiry is not a picker input either; it is a property of the
-// issued token, not of what the owner reviewed.
+// The digest covers what the GET rendered as CHOOSABLE, so it must grow
+// whenever the page offers a new choice. Field and date narrowing are now
+// offered per stream, so each stream contributes the capability that decided
+// which controls it showed: if a manifest revision changes a stream's field
+// list, drops `selection.fields`, or removes `consent_time_field` between
+// page-load and submission, the owner reviewed controls the server would no
+// longer honor, and this rejects rather than mints. Binding the capability
+// rather than the owner's choices is deliberate — the choices are carried in
+// the POST and validated against a fresh declaration read; this guards the
+// menu they were chosen from.
+//
+// Grant expiry is not part of the digest: the options are server constants,
+// not manifest-derived, so there is nothing about them that can drift between
+// GET and POST. Per-stream client_claims remain absent from the picker.
 export interface HostedMcpPickerSnapshotClientFacts {
   isUnverified: boolean;
   protocolFacts: Array<{ label: string; value?: unknown; html?: string }>;
@@ -579,6 +639,18 @@ function computeHostedMcpPickerSnapshotDigest(
       sourceKey: row.sourceKey,
       sourceKind: row.sourceKind,
       streamNames: [...row.streams.map((stream) => stream.name)].sort(),
+      // The per-stream scope surface the page offered. Sorted so an
+      // insignificant reordering in the manifest cannot invalidate a form the
+      // owner is still filling in.
+      streamScopes: [...row.streams]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((stream) => ({
+          name: stream.name,
+          optionalFields: [...stream.scope.optionalFields].sort(),
+          requiredFields: [...stream.scope.requiredFields].sort(),
+          supportsFieldNarrowing: stream.scope.supportsFieldNarrowing,
+          timeField: stream.scope.timeField,
+        })),
     }));
   const snapshot = {
     accessModes: [...HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES].sort(),
@@ -643,6 +715,10 @@ async function buildConnectorPickerRows(
   const streamSummaries = manifestStreams.map((stream) => ({
     description: typeof stream.description === "string" ? stream.description : null,
     name: stream.name,
+    // Resolved here rather than at render time so the capability check happens
+    // once per row, and so no surface can offer a control the declaration does
+    // not support (which would 400 at issuance, after the owner chose).
+    scope: resolveStreamScopeCapability(stream),
   }));
   let connections: ConsentPickerBinding[];
   try {
