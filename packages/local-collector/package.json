@@ -56,8 +56,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@pdpp/collector-runtime": "*",
-    "@pdpp/connector-protocol": "*",
+    "@pdpp/collector-runtime": "0.0.1",
+    "@pdpp/connector-protocol": "0.0.1",
     "playwright": "^1.62.1",
     "tsx": "^4.23.11"
   },

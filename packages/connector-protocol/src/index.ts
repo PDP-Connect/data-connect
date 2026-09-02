@@ -40,6 +40,7 @@ export type {
   AssistanceRequest,
   AssistanceResponseContract,
   AssistanceSensitivity,
+  ConnectorProtocolCapability,
   DetailCoverageMessage,
   DetailGapMessage,
   DetailGapRecoveredMessage,
@@ -49,9 +50,18 @@ export type {
   InteractionRequest,
   InteractionResponse,
   RecordData,
+  SkipResultBoundaryClaim,
   StartMessage,
+  StreamEvidenceOutcomes,
   StreamScope,
   ValidateRecord,
+} from "./connector-runtime-protocol.ts";
+export {
+  CONNECTOR_PROTOCOL_CAPABILITIES,
+  CONNECTOR_PROTOCOL_VERSION,
+  isConnectorProtocolCapabilityArray,
+  STREAM_EVIDENCE_CAPABILITY,
+  validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
 export { isMainModule } from "./is-main-module.ts";
 export {

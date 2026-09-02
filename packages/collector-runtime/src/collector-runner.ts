@@ -29,6 +29,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
+import { validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
   type EnrollmentExchangeResponse,
@@ -595,7 +596,13 @@ export function readCollectionScopeFromState(
   };
 }
 
-export interface CollectorConnectorSpec extends ConnectorPlacementInput {
+/**
+ * `CollectorConnectorSpec`'s fields beyond the placement-gate contract.
+ * Split out and intersected with `ConnectorPlacementInput` (rather than
+ * folded into one interface) to keep the placement-gate contract itself
+ * minimal and independently reusable — see {@link CollectorConnectorSpec}.
+ */
+interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
@@ -633,6 +640,8 @@ export interface CollectorConnectorSpec extends ConnectorPlacementInput {
    */
   readonly timeScopableStreams?: readonly string[];
 }
+
+export type CollectorConnectorSpec = ConnectorPlacementInput & CollectorConnectorSpecExtra;
 
 export interface CollectorRunConfig {
   /**
@@ -1386,6 +1395,32 @@ function coverageEntryFromRecord(message: Extract<EmittedMessage, { type: "RECOR
 }
 
 /**
+ * Validate a STREAM_EVIDENCE message against the connector's declared
+ * capability and the protocol's outcome-count invariants, throwing with a
+ * connector-attributed message on either violation. Split out of
+ * `handleMessage` to keep that dispatcher's cognitive complexity within the
+ * project's max.
+ */
+function assertValidStreamEvidence(
+  message: Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>,
+  connector: CollectorConnectorSpec
+): void {
+  if (!connector.protocol_capabilities.includes("STREAM_EVIDENCE")) {
+    throw new Error(
+      `${connector.connector_id} emitted STREAM_EVIDENCE without declaring the STREAM_EVIDENCE protocol capability`
+    );
+  }
+  try {
+    validateStreamEvidenceCounts(message);
+  } catch (error) {
+    throw new Error(
+      `${connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`,
+      { cause: error }
+    );
+  }
+}
+
+/**
  * Fold the per-store coverage map collected during a run into the safe
  * {@link CollectorCompletenessSummary} surfaced on the run result. Returns
  * `null` when no coverage diagnostic was observed so absence reads as
@@ -1618,6 +1653,10 @@ async function streamConnectorIntoOutbox(
         return;
       }
       bufferedState[message.stream] = message.cursor;
+      return;
+    }
+    if (message.type === "STREAM_EVIDENCE") {
+      assertValidStreamEvidence(message, input.config.connector);
       return;
     }
     if (message.type === "DONE") {

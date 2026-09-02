@@ -528,7 +528,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     outbox.enqueue({
       id: oldId,
       kind: "terminal_run_commit",
-      payload: { ...terminalIdentity, commit_id: "old-commit", terminal_facts: [], state_delta: {}, version: 1 },
+      payload: { ...terminalIdentity, commit_id: "old-commit", state_delta: {}, terminal_facts: [], version: 1 },
       sourceInstanceId: "src-terminal",
     });
     const [oldClaim] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "src-terminal" });
@@ -555,8 +555,8 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
         ...terminalIdentity,
         commit_id: "new-commit",
         run_id: "run-new",
-        terminal_facts: [],
         state_delta: {},
+        terminal_facts: [],
         version: 1,
       },
       sourceInstanceId: "src-terminal",
@@ -598,8 +598,8 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
     assert.deepEqual(retained?.payload, {
       ...terminalIdentity,
       commit_id: "old-commit",
-      terminal_facts: [],
       state_delta: {},
+      terminal_facts: [],
       version: 1,
     });
     assert.equal(outbox.isTerminalCommitSuperseded(oldId), true);
@@ -1863,14 +1863,21 @@ function seedLegacyV1Outbox(
        ) VALUES (?, ?, 'record_batch', 'succeeded', ?, 'hash', 0, ?, ?, ?)`
     );
     const stamp = "2026-05-19T12:00:00.000Z";
-    for (const row of rows) {
-      const payload = JSON.stringify({
-        records: row.streams.map((stream, index) => ({
-          data: { id: `${stream}-${index}` },
-          stream,
-        })),
-      });
-      insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const payload = JSON.stringify({
+          records: row.streams.map((stream, index) => ({
+            data: { id: `${stream}-${index}` },
+            stream,
+          })),
+        });
+        insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
   } finally {
     db.close();

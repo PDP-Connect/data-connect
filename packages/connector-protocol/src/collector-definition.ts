@@ -17,6 +17,8 @@
  * collector build re-exports.
  */
 
+import type { ConnectorProtocolCapability } from "./connector-runtime-protocol.ts";
+
 /** A runtime binding the connector requires from the collector host. */
 export interface LocalCollectorBinding {
   readonly required: boolean;
@@ -53,6 +55,20 @@ export interface LocalCollectorDefinition {
    * the definition stays a pure, platform-independent value.
    */
   readonly entry: string;
+  /**
+   * Protocol capabilities this connector requires from its collector
+   * runtime. Required (even as `[]` for a non-emitter): every real bundled
+   * connector already declares this explicitly, and making it required here
+   * — the root authoring type feeding the whole placement pipeline — closes
+   * off constructing an invalid definition that simply omits it. There is no
+   * legacy path at this layer or downstream: an earlier revision tried a
+   * caller-supplied `protocol_contract_version: "0.0.1"` identity tag at the
+   * `ConnectorPlacementInput` placement-gate boundary to let a connector omit
+   * this field; it was removed because nothing separated a genuine legacy
+   * artifact from a caller merely claiming to be one. Every connector must
+   * declare `protocol_capabilities` explicitly, full stop.
+   */
+  readonly protocol_capabilities: readonly ConnectorProtocolCapability[];
   /** Streams whose enumeration honors declared source roots. */
   readonly source_root_scopable_streams?: readonly string[];
   /**

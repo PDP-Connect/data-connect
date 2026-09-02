@@ -17,3 +17,46 @@ Bottom of the dependency graph — this package depends on nothing in `@pdpp/col
 ## Status
 
 Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), under `packages/connector-protocol`.
+
+## Protocol rollout
+
+Protocol version `0.0.2` (the `CONNECTOR_PROTOCOL_VERSION` constant exported
+from `connector-runtime-protocol.ts`, tracked independently of this package's
+own release version) adds the `STREAM_EVIDENCE` wire message. It is a breaking
+wire addition for fail-closed runtimes that do not recognize that message, so
+the runtime must be upgraded before a connector that emits it is distributed.
+
+`STREAM_EVIDENCE` carries `considered` (the full count of keys a
+`state_stream`-declared stream's own hydration lane considered this run) and
+`outcomes: { emitted, unchanged, gapped, unaccounted }` — a disjoint
+partition of those `considered` keys, not a scalar `covered` count. There is
+no `covered` field on the wire: a single count can never distinguish
+"emitted", "unchanged", "gapped", and "unaccounted" keys, so a reader that
+wants a `covered` projection derives it as `outcomes.emitted +
+outcomes.unchanged`, deliberately excluding `gapped` and `unaccounted`.
+`outcomes.emitted + outcomes.unchanged + outcomes.gapped +
+outcomes.unaccounted` MUST equal `considered` exactly; every count field is
+capped at `Number.MAX_SAFE_INTEGER`. Call `validateStreamEvidenceCounts` at
+the untyped wire boundary (immediately after `JSON.parse`) to enforce the
+bounds and the sum check — the type system alone cannot, since the value
+arrives as `unknown` JSON.
+
+| Connector | Runtime | Result |
+| --- | --- | --- |
+| old connector | new runtime | compatible; no new message is emitted |
+| new connector emitting `STREAM_EVIDENCE` | old fail-closed runtime | incompatible; pre-spawn gate rejects it |
+| new connector | new runtime advertising `STREAM_EVIDENCE` | compatible |
+
+Connectors declare required protocol capabilities with
+`protocol_capabilities`. The runtime advertises `protocolVersion` and
+`protocolCapabilities`, and rejects missing capabilities before spawning a
+connector. `SKIP_RESULT.boundary_claim` is optional, does not require a
+protocol capability, and is disclosure-only: it never affects, reduces, or
+excludes anything from the servable denominator, coverage calculation, or
+connection/system health rollup, even when an independently recorded
+coverage horizon agrees with it.
+
+The committed `artifact.json` binds the package version and source-input digest
+to a reproducible npm tarball digest. Run `npm run artifact:verify` after any
+protocol or package build change. Run `npm run artifact:generate` when the
+expected artifact metadata must be regenerated.

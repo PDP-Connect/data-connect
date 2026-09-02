@@ -47,6 +47,7 @@ import {
   COLLECTOR_PROTOCOL_VERSION as PROTOCOL_VERSION,
   type RuntimeCapabilityProfile,
 } from "../../collector-runtime/src/index.ts";
+import type { ConnectorProtocolCapability } from "../../connector-protocol/src/connector-runtime-protocol.ts";
 import type { LocalCollectorDefinition } from "../../connector-protocol/src/collector-definition.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
@@ -75,6 +76,7 @@ export {
   collectorScopeFingerprint,
   deriveLocalCollectorLifecycleState,
   diffRequiredBindings,
+  diffRequiredProtocolCapabilities,
   drainCollectorQueue,
   type EnrollmentExchangeResponse,
   enrollCollector,
@@ -113,6 +115,7 @@ export {
   PROVIDER_RUNTIME_CAPABILITIES,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
   type RuntimeBindingName,
+  type RuntimeCapabilityName,
   RuntimeCapabilityMismatchError,
   type RuntimeCapabilityProfile,
   readCollectionScopeFromState,
@@ -145,6 +148,8 @@ export {
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   id: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.id,
   bindings: new Set(["network", "filesystem", "local_device"]),
+  protocolCapabilities: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities,
+  protocolVersion: POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion,
 };
 
 /**
@@ -167,6 +172,13 @@ export interface BundledConnectorEntry {
   readonly command: string;
   /** Stable connector id (matches the manifest + ingest envelope). */
   readonly connector_id: string;
+  /**
+   * Protocol capabilities this connector requires from its collector
+   * runtime. Required: all 6 bundled connectors already declare it
+   * explicitly (even as `[]`), so this documents reality and prevents a 7th
+   * connector from being added without it.
+   */
+  readonly protocol_capabilities: readonly ConnectorProtocolCapability[];
   /** Whether the connector enforces path roots at enumeration time. */
   readonly enforces_source_roots?: boolean;
   /** Streams whose enumeration honors declared source roots. */
@@ -176,7 +188,6 @@ export interface BundledConnectorEntry {
   /** Streams an owner-declared `since` can be proven against. */
   readonly time_scopable_streams?: readonly string[];
 }
-
 /** A frozen, id-keyed registry of runnable bundled connector entries. */
 export type BundledConnectorRegistry = Readonly<Record<string, BundledConnectorEntry>>;
 
@@ -218,6 +229,9 @@ function toBundledEntry(definition: LocalCollectorDefinition): BundledConnectorE
     command: commandForEntry(resolvedEntry),
     args: Object.freeze([resolvedEntry]) as readonly string[],
     bindings: definition.bindings,
+    protocol_capabilities: Object.freeze([
+      ...definition.protocol_capabilities,
+    ]) as readonly ConnectorProtocolCapability[],
     streams: Object.freeze([...definition.streams]) as readonly string[],
     ...(definition.time_scopable_streams
       ? {

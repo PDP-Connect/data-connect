@@ -126,7 +126,7 @@ test("canonicalTerminalRunCommitEnvelope has a stable cross-runtime golden hash 
     device_id: "dev-1",
     run_id: "run-1",
     source_instance_id: "src-1",
-    state_delta: { z: { cursor: 2 }, a: { cursor: 1 } },
+    state_delta: { a: { cursor: 1 }, z: { cursor: 2 } },
     terminal_facts: [
       { coverage_statuses: ["missing", "collected", "missing"], stream: "z" },
       { coverage_statuses: ["collected"], scoped: false, stream: "a" },

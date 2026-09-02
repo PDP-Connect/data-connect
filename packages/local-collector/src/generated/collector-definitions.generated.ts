@@ -36,6 +36,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["sessions", "messages", "attachments", "memory_notes", "skills", "slash_commands", "file_history", "cache_inventory", "coverage_diagnostics", "backup_inventory", "config_inventory"],
     time_scopable_streams: ["sessions", "messages", "attachments"],
     source_root_scopable_streams: ["sessions", "messages", "attachments"],
@@ -47,6 +48,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["sessions", "messages", "function_calls", "rules", "prompts", "skills", "history", "session_index", "shell_snapshots", "config_inventory", "cache_inventory", "coverage_diagnostics"],
     time_scopable_streams: ["sessions", "messages", "function_calls"],
     source_root_scopable_streams: ["sessions", "messages", "function_calls"],
@@ -58,6 +60,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["location_history", "youtube_watch_history", "search_history", "photos", "coverage_diagnostics"],
     time_scopable_streams: ["location_history", "youtube_watch_history", "search_history", "photos"],
   },
@@ -67,6 +70,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["messages", "participants", "attachments"],
     time_scopable_streams: ["messages"],
   },
@@ -76,6 +80,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["photos", "coverage_diagnostics"],
     time_scopable_streams: ["photos"],
   },
@@ -85,6 +90,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     bindings: {
       "filesystem": { required: true },
     },
+    protocol_capabilities: [],
     streams: ["messages", "coverage_diagnostics"],
     time_scopable_streams: ["messages"],
   },

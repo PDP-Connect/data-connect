@@ -108,8 +108,29 @@ plugins:
             section: "Performance Improvements (@pdpp/collector-runtime)"
           - type: revert
             section: "Reverts"
+  # Pins collector-runtime's dependency on connector-protocol to this
+  # release's actual computed version before either @semantic-release/npm
+  # prepare step below runs `npm version`/`npm pack`. Both packages share
+  # one nextRelease.version (lockstep release, not independent monorepo
+  # versioning) — see the script for why a naive fixed pin breaks a
+  # published install whenever connector-protocol adds exports
+  # collector-runtime depends on.
+  - - "@semantic-release/exec"
+    - prepareCmd: "node --import tsx scripts/pin-collector-runtime-protocol-dependency.ts ${nextRelease.version}"
   - - "@semantic-release/npm"
     - pkgRoot: "packages/connector-protocol"
+  # Explicit publish-ordering barrier, not an implicit reliance on
+  # plugins-array position: semantic-release's publish lifecycle already
+  # awaits each step in order (connector-protocol's `npm publish` above
+  # only returns once the registry has accepted the tarball), so
+  # collector-runtime's publish step below can never start before
+  # connector-protocol is live — but that guarantee is easy to silently
+  # break (a reorder, an inserted plugin). This step makes it fail loudly
+  # instead: it re-fetches connector-protocol@<this release's version>
+  # from the same registry npm publish just used and aborts the release
+  # before collector-runtime is published if it isn't there.
+  - - "@semantic-release/exec"
+    - publishCmd: "node --import tsx scripts/verify-connector-protocol-published.ts ${nextRelease.version}"
   - - "@semantic-release/npm"
     - pkgRoot: "packages/collector-runtime"
   - - "@semantic-release/github"

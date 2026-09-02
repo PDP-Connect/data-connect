@@ -15,3 +15,11 @@ Depends on `@pdpp/connector-protocol` for the connector authoring contract (wire
 ## Status
 
 Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-connect), under `packages/collector-runtime`.
+
+## Release artifact verification
+
+The committed `artifact.json` binds this package's source inputs, declaration
+output, and reproducible `npm pack` tarball digests. Run `npm run
+artifact:verify` after a committed package change. The npm release workflow is
+the authority for publication and provenance; local verification does not claim
+that a tarball has been published.

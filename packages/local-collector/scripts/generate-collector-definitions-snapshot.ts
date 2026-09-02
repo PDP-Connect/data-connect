@@ -50,6 +50,8 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isConnectorProtocolCapabilityArray } from "@pdpp/connector-protocol";
+import { type CollectorDefinitionSource, definitionLiteral } from "./collector-definitions-literal.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageDir = resolve(scriptDir, "..");
@@ -60,44 +62,28 @@ const targetPath = process.argv[2]
 const { LOCAL_COLLECTOR_DEFINITIONS } = (await import(
   resolve(packageDir, "../polyfill-connectors/src/collector-registry.ts")
 )) as {
-  LOCAL_COLLECTOR_DEFINITIONS: readonly {
-    bindings: Readonly<Record<string, { required: boolean }>>;
-    connector_id: string;
-    enforces_source_roots?: boolean;
-    entry: string;
-    source_root_scopable_streams?: readonly string[];
-    streams: readonly string[];
-    time_scopable_streams?: readonly string[];
-  }[];
+  LOCAL_COLLECTOR_DEFINITIONS: readonly CollectorDefinitionSource[];
 };
 
-function jsonStringArray(values: readonly string[]): string {
-  return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
-}
-
-function bindingsLiteral(bindings: Readonly<Record<string, { required: boolean }>>): string {
-  const keys = Object.keys(bindings).sort((a, b) => a.localeCompare(b));
-  const lines = keys.map((key) => `      ${JSON.stringify(key)}: { required: ${bindings[key]?.required === true} },`);
-  return `{\n${lines.join("\n")}\n    }`;
-}
-
-function definitionLiteral(definition: (typeof LOCAL_COLLECTOR_DEFINITIONS)[number]): string {
-  const lines: string[] = [
-    `    connector_id: ${JSON.stringify(definition.connector_id)},`,
-    `    entry: ${JSON.stringify(definition.entry)},`,
-    `    bindings: ${bindingsLiteral(definition.bindings)},`,
-    `    streams: ${jsonStringArray(definition.streams)},`,
-  ];
-  if (definition.time_scopable_streams) {
-    lines.push(`    time_scopable_streams: ${jsonStringArray(definition.time_scopable_streams)},`);
+// Fail fast, naming the offending connector, rather than letting
+// definitionLiteral's own per-definition throw surface without this
+// context. protocol_capabilities is required by LocalCollectorDefinition
+// (the authoring type this snapshot mirrors); a definition that omits it,
+// has it malformed, or declares a member outside the closed
+// ConnectorProtocolCapability vocabulary (a forged string, null, an object,
+// or a mix of valid and invalid entries) is a source-of-truth defect, not
+// something to paper over by silently truncating or forwarding this
+// generator's output. Delegates to isConnectorProtocolCapabilityArray — the
+// ONE place the allowed vocabulary is authored.
+for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+  if (!isConnectorProtocolCapabilityArray(definition.protocol_capabilities)) {
+    throw new Error(
+      `LOCAL_COLLECTOR_DEFINITIONS entry '${definition.connector_id}' has a missing or malformed ` +
+        "protocol_capabilities (expected an array whose every member is an allowed " +
+        "ConnectorProtocolCapability value, even if empty). Fix the source definition in " +
+        "packages/polyfill-connectors/src/collector-registry.ts before regenerating this snapshot."
+    );
   }
-  if (definition.source_root_scopable_streams) {
-    lines.push(`    source_root_scopable_streams: ${jsonStringArray(definition.source_root_scopable_streams)},`);
-  }
-  if (definition.enforces_source_roots) {
-    lines.push("    enforces_source_roots: true,");
-  }
-  return `  {\n${lines.join("\n")}\n  },`;
 }
 
 const entriesBody = LOCAL_COLLECTOR_DEFINITIONS.map((definition) => definitionLiteral(definition)).join("\n");

@@ -22,6 +22,100 @@
 
 // ─── Protocol message shapes ────────────────────────────────────────────
 
+/** Wire version whose additions require a coordinated runtime rollout. */
+export const CONNECTOR_PROTOCOL_VERSION = "0.0.2" as const;
+
+/** Capability required by a connector that emits STREAM_EVIDENCE. */
+export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
+
+/** Protocol capabilities that can be advertised by a connector or runtime. */
+export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY;
+
+/**
+ * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
+ * runtime. This is the ONE place the vocabulary is authored — every
+ * untyped boundary (JSON-deserialized connector definitions, the generated
+ * snapshot, the pre-spawn placement gate) MUST call
+ * {@link isConnectorProtocolCapabilityArray} rather than re-deriving its own
+ * copy of the allowed values, so a new capability is added here once and
+ * every boundary picks it up.
+ */
+export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [STREAM_EVIDENCE_CAPABILITY];
+
+function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
+  return (CONNECTOR_PROTOCOL_CAPABILITIES as readonly unknown[]).includes(value);
+}
+
+/**
+ * True only when `value` is an array whose every element is an allowed
+ * {@link ConnectorProtocolCapability} value. Rejects a non-array outright
+ * (`null`, an object, a string) and rejects an array containing ANY
+ * disallowed member — a forged string (`"FORGED"`), `null`, an object, or a
+ * mix of one valid and one invalid entry all fail this check. There is no
+ * partial acceptance: a single bad member invalidates the whole array,
+ * because a connector's declared capability list is an all-or-nothing
+ * contract with the runtime, not a best-effort filter.
+ */
+export function isConnectorProtocolCapabilityArray(value: unknown): value is readonly ConnectorProtocolCapability[] {
+  return Array.isArray(value) && value.every(isConnectorProtocolCapability);
+}
+
+/** Largest integer a conformant `STREAM_EVIDENCE` count field may carry. */
+const STREAM_EVIDENCE_MAX_COUNT = Number.MAX_SAFE_INTEGER;
+
+/** The disjoint outcome partition over a `STREAM_EVIDENCE` message's `considered` keys. */
+export interface StreamEvidenceOutcomes {
+  emitted: number;
+  gapped: number;
+  unaccounted: number;
+  unchanged: number;
+}
+
+function isBoundedNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= STREAM_EVIDENCE_MAX_COUNT;
+}
+
+/**
+ * Validates an untyped, JSON-deserialized `STREAM_EVIDENCE` payload at the
+ * wire boundary — the point where a connector's child-process stdout line has
+ * just been `JSON.parse`d and cast to {@link EmittedMessage} with no runtime
+ * check. Throws (fail closed) unless every count field is a non-negative safe
+ * integer no greater than `Number.MAX_SAFE_INTEGER` AND
+ * `outcomes.emitted + outcomes.unchanged + outcomes.gapped +
+ * outcomes.unaccounted` equals `considered` exactly. This is the sum-check a
+ * caller MUST run before trusting a connector-declared `STREAM_EVIDENCE`
+ * message's counts for anything — the type system alone cannot enforce it
+ * because the value arrives as `unknown` JSON, not a constructed object.
+ */
+export function validateStreamEvidenceCounts(
+  value: unknown
+): asserts value is { considered: number; outcomes: StreamEvidenceOutcomes } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const message = value as Record<string, unknown>;
+  const { outcomes } = message;
+  if (typeof outcomes !== "object" || outcomes === null || Array.isArray(outcomes)) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const { emitted, unchanged, gapped, unaccounted } = outcomes as Record<string, unknown>;
+  if (
+    ![
+      isBoundedNonNegativeInteger(message.considered),
+      isBoundedNonNegativeInteger(emitted),
+      isBoundedNonNegativeInteger(unchanged),
+      isBoundedNonNegativeInteger(gapped),
+      isBoundedNonNegativeInteger(unaccounted),
+    ].every(Boolean)
+  ) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+  const sum = (emitted as number) + (unchanged as number) + (gapped as number) + (unaccounted as number);
+  if (sum !== message.considered) {
+    throw new Error("Connector emitted invalid STREAM_EVIDENCE counts");
+  }
+}
+
 /** A single record passing through emit / emitRecord. */
 export interface RecordData {
   id?: string | number | null;
@@ -445,6 +539,17 @@ export interface ProgressExtra {
 }
 
 /** All messages a connector emits over stdout. */
+/**
+ * The closed vocabulary of structured provider-boundary claims a connector may
+ * attach to a `SKIP_RESULT`.
+ *
+ * One member today. It is a named union rather than a bare string so that
+ * adding a second is a deliberate, reviewable protocol change — and so an
+ * emitter that invents a claim fails to compile instead of having it dropped
+ * silently by the reference implementation's persistence allowlist.
+ */
+export type SkipResultBoundaryClaim = "provider_history_boundary";
+
 export type EmittedMessage =
   | {
       type: "RECORD";
@@ -479,9 +584,84 @@ export type EmittedMessage =
       stream: string;
       reason: string;
       message: string;
+      /**
+       * A connector's STRUCTURED, optional, DISCLOSURE-ONLY claim that the
+       * shortfall is a permanent provider boundary rather than a fetch that
+       * could be retried into success — e.g. the walk reached the oldest
+       * item the provider will serve while its own lifetime total still
+       * counted more.
+       *
+       * Disclosure-only, full stop: this field NEVER affects, reduces, or
+       * excludes anything from the servable denominator, coverage
+       * calculation, or connection/system health rollup — regardless of
+       * whether an independently recorded coverage horizon happens to agree
+       * with it. There is no corroboration mechanism, today or planned, by
+       * which a matching horizon turns this claim into something that
+       * changes what counts as covered or considered. A connector cannot
+       * excuse its own gap by asserting this; it can only explain one.
+       *
+       * Deliberately a typed field rather than free-form `diagnostics`
+       * prose: the reference implementation reads this claim (for
+       * diagnostics/operator-facing display) and never the message text.
+       *
+       * Optional: a connector that cannot prove a boundary must omit it. This
+       * field does not require a protocol capability; it is compatible with
+       * runtimes that ignore unknown optional fields.
+       *
+       * A CLOSED vocabulary, deliberately not `string`. The reference
+       * implementation's persistence allowlist accepts exactly one value, so a
+       * connector that invents its own claim would have it silently dropped in
+       * transit and be none the wiser. Typing it closed turns that into a
+       * compile error at the emitter instead.
+       */
+      boundary_claim?: SkipResultBoundaryClaim;
       diagnostics?: unknown;
       continuation?: RuntimeContinuationFact;
       recovery_hint?: string | { action: string; retryable?: boolean };
+    }
+  | {
+      /**
+       * Coverage evidence for a `state_stream`-declared detail stream.
+       *
+       * The counterpart to `DETAIL_COVERAGE`, and deliberately disjoint from
+       * it: the reference implementation REJECTS a run that emits
+       * `DETAIL_COVERAGE` for a `state_stream` child, and equally rejects
+       * `STREAM_EVIDENCE` for any stream the manifest does not declare with a
+       * static `state_stream` parent. The two message kinds partition the same
+       * manifest-shape space; a connector picks by manifest declaration, never
+       * by preference.
+       *
+       * `reference_only` is REQUIRED and must be `true`: a state_stream child's
+       * checkpoint status is projected from its declared parent's own commit
+       * outcome, so this message reports what was seen WITHOUT claiming the
+       * authority to settle the child's coverage on its own. That is the
+       * property that makes it honest for a stream whose parent, not itself,
+       * owns the commit.
+       *
+       * `considered` and `outcomes` are the counts this pass actually
+       * measured, a disjoint partition (not an independent measurement that
+       * happens to sum correctly by construction): `outcomes.emitted +
+       * outcomes.unchanged + outcomes.gapped + outcomes.unaccounted` MUST
+       * equal `considered` exactly. There is no scalar `covered` field on the
+       * wire — a single count can never distinguish "emitted", "unchanged",
+       * "gapped", and "unaccounted" keys, so a reader that wants a `covered`
+       * projection derives it as `outcomes.emitted + outcomes.unchanged`,
+       * deliberately excluding `gapped` and `unaccounted`. Neither
+       * `considered` nor any `outcomes.*` field may be derived from a gap
+       * ledger or from this run's own successful-emission/gap counts — an
+       * identity like `considered = emitted + gapped` can manufacture a
+       * passing sum when the ledger undercounts.
+       */
+      type: "STREAM_EVIDENCE";
+      stream: string;
+      considered: number;
+      outcomes: {
+        emitted: number;
+        unchanged: number;
+        gapped: number;
+        unaccounted: number;
+      };
+      reference_only: true;
     }
   | DetailGapMessage
   | DetailGapAttemptedMessage

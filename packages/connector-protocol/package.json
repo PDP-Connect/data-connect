@@ -2,12 +2,12 @@
   "name": "@pdpp/connector-protocol",
   "version": "0.0.1",
   "description": "The connector authoring contract for PDPP: the JSONL wire-protocol message types, the LocalCollectorDefinition type contract, the bootstrap/emit/scope-filter primitives connector authors import directly, and small text/auth/retry utilities connectors depend on. Bottom of the dependency graph \u2014 depends on nothing in @pdpp/collector-runtime or @pdpp/polyfill-connectors, so connector authors never pull in the runtime package or its release cadence just to get the files they author against.",
-  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PDP-Connect/data-connect.git",
     "directory": "packages/connector-protocol"
   },
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
@@ -43,13 +43,15 @@
     "dist/"
   ],
   "scripts": {
+    "artifact:generate": "node scripts/package-artifact.mjs generate",
+    "artifact:verify": "node scripts/package-artifact.mjs verify",
     "build": "node --experimental-strip-types scripts/build.ts",
     "check": "ultracite check",
     "fix": "ultracite fix",
     "prepack": "npm run build",
-    "test": "node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\"",
+    "test": "node --test --import tsx --test-concurrency=2 --test-timeout=120000 \"src/**/*.test.ts\" \"scripts/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm run check && npm test"
+    "verify": "npm run typecheck && npm run check && npm test && npm run artifact:verify"
   },
   "dependencies": {
     "zod": "^4.4.3"
@@ -65,9 +67,6 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true,
-    "registry": "https://registry.npmjs.org/",
-    "tag": "latest",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -97,6 +96,9 @@
         "types": "./dist/safe-text-preview.d.ts",
         "import": "./dist/safe-text-preview.js"
       }
-    }
+    },
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest"
   }
 }
