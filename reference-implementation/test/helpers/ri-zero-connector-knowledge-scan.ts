@@ -31,6 +31,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { isExemptDataLoadPath, scanFileDataLoads } from "./ri-zero-connector-knowledge-data-load-scan.ts";
 import { scanFileIdentity } from "./ri-zero-connector-knowledge-identity-scan.ts";
@@ -49,7 +50,11 @@ export interface Violation {
 
 const PRODUCTION_SCAN_ROOTS = ["cli", "lib", "operations", "runtime", "scripts", "server"];
 
-const MANIFEST_ROOTS = ["reference-implementation/fixtures/seed-manifests", "packages/polyfill-connectors/manifests"];
+// Reference-fixture manifests are still a real repo-relative directory. The
+// first-party polyfill manifests are NOT — they ship inside the
+// `@pdpp/polyfill-connectors` package, read via its own `readPolyfillManifests()`
+// export (see the two functions below), never by walking a repo path.
+const REFERENCE_FIXTURE_MANIFEST_ROOT = "reference-implementation/fixtures/seed-manifests";
 
 /**
  * `packages/polyfill-connectors/src/` is the connector-agnostic SHARED
@@ -229,41 +234,64 @@ function connectorKeyFromManifestId(id: unknown): string | null {
   return id.slice(REGISTRY_ID_PREFIX.length);
 }
 
-/** Reads `connector_key`/`connector_id` from every manifest across both roots.
- * This is the guard's sole source of "known connector identity" — never
- * hand-typed. */
+/** Every reference-fixture manifest under `reference-implementation/fixtures/seed-manifests`,
+ * parsed. Malformed/unreadable entries are skipped, matching this scanner's
+ * long-standing posture: a broken manifest contributes no policy, it does not
+ * crash the guard. */
+function readReferenceFixtureManifests(repoRoot: string): Record<string, unknown>[] {
+  const dir = join(repoRoot, REFERENCE_FIXTURE_MANIFEST_ROOT);
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const parsedManifests: Record<string, unknown>[] = [];
+  for (const file of files) {
+    try {
+      parsedManifests.push(JSON.parse(readFileSync(join(dir, file), "utf8")));
+    } catch {
+      // Skip: a broken reference-fixture manifest contributes no policy.
+    }
+  }
+  return parsedManifests;
+}
+
+/** Every manifest `@pdpp/polyfill-connectors` ships, parsed. An unreadable
+ * manifest set contributes zero entries (matching this scanner's posture for
+ * the reference-fixture root above) rather than crashing the guard. */
+function readShippedPolyfillManifests(): Record<string, unknown>[] {
+  try {
+    return readPolyfillManifests().map((entry) => entry.manifest as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+function allShippedManifests(repoRoot: string): Record<string, unknown>[] {
+  return [...readShippedPolyfillManifests(), ...readReferenceFixtureManifests(repoRoot)];
+}
+
+/** Reads `connector_key`/`connector_id` from every manifest across both
+ * sources. This is the guard's sole source of "known connector identity" —
+ * never hand-typed. */
 export function manifestDerivedConnectorKeys({ repoRoot }: ScanRoots): Set<string> {
   const keys = new Set<string>();
-  for (const manifestRoot of MANIFEST_ROOTS) {
-    const dir = join(repoRoot, manifestRoot);
-    let files: string[];
-    try {
-      files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-    } catch {
-      continue;
+  for (const parsed of allShippedManifests(repoRoot)) {
+    const key = parsed.connector_key;
+    if (typeof key === "string" && key.length > 0) {
+      keys.add(key);
     }
-    for (const file of files) {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(readFileSync(join(dir, file), "utf8"));
-      } catch {
-        continue;
-      }
-      const key = parsed.connector_key;
-      if (typeof key === "string" && key.length > 0) {
-        keys.add(key);
-      }
-      const derivedFromId = connectorKeyFromManifestId(parsed.connector_id);
-      if (derivedFromId) {
-        keys.add(derivedFromId);
-      }
+    const derivedFromId = connectorKeyFromManifestId(parsed.connector_id);
+    if (derivedFromId) {
+      keys.add(derivedFromId);
     }
   }
   return keys;
 }
 
 /** Reads `setup.manual_or_upload.validation.kind` from every manifest across
- * both roots — a SEPARATE identity namespace from `connector_key`/`connector_id`
+ * both sources — a SEPARATE identity namespace from `connector_key`/`connector_id`
  * (e.g. `"whatsapp_chat_export"` vs `"whatsapp"`), added after a real
  * violation shipped that a `kind ===` string match against a manifest's own
  * `validation.kind` value is just as much hardcoded connector knowledge as a
@@ -271,26 +299,11 @@ export function manifestDerivedConnectorKeys({ repoRoot }: ScanRoots): Set<strin
  * second namespace at all. */
 export function manifestDerivedValidationKinds({ repoRoot }: ScanRoots): Set<string> {
   const kinds = new Set<string>();
-  for (const manifestRoot of MANIFEST_ROOTS) {
-    const dir = join(repoRoot, manifestRoot);
-    let files: string[];
-    try {
-      files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(readFileSync(join(dir, file), "utf8"));
-      } catch {
-        continue;
-      }
-      const setup = parsed.setup as { manual_or_upload?: { validation?: { kind?: unknown } } } | undefined;
-      const kind = setup?.manual_or_upload?.validation?.kind;
-      if (typeof kind === "string" && kind.length > 0) {
-        kinds.add(kind);
-      }
+  for (const parsed of allShippedManifests(repoRoot)) {
+    const setup = parsed.setup as { manual_or_upload?: { validation?: { kind?: unknown } } } | undefined;
+    const kind = setup?.manual_or_upload?.validation?.kind;
+    if (typeof kind === "string" && kind.length > 0) {
+      kinds.add(kind);
     }
   }
   return kinds;

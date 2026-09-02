@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../scripts/hermetic/guard.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
@@ -539,9 +540,11 @@ async function makeClaudeCodeFixture() {
 test("composed controller runs ingest against the internal RS, not the public browser origin", async () => {
   const publicOrigin = await startPublicOriginTrap();
   const fixture = await makeClaudeCodeFixture();
-  const manifest = JSON.parse(
-    await readFile(join(REPO_ROOT, "packages/polyfill-connectors/manifests/claude_code.json"), "utf8")
-  );
+  const claudeCodeManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "claude_code.json");
+  if (!claudeCodeManifestEntry) {
+    throw new Error("no polyfill manifest found for claude_code.json");
+  }
+  const manifest = claudeCodeManifestEntry.manifest;
   const previousEnv = {
     CLAUDE_CODE_HOME: process.env.CLAUDE_CODE_HOME,
     CLAUDE_CODE_PROJECTS_DIR: process.env.CLAUDE_CODE_PROJECTS_DIR,

@@ -49,6 +49,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { resolveNekoBrowserSurfaceControllerOptions } from "../server/index.ts";
 import type { BrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
@@ -223,9 +224,11 @@ test("ChatGPT large-history guardrails are wired into Docker runtime config", as
 });
 
 test("USAA remains an owner-present managed n.eko connector in the committed runtime config, not background-safe", async () => {
-  const usaaManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}packages/polyfill-connectors/manifests/usaa.json`, "utf8")
-  );
+  const usaaManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "usaa.json");
+  if (!usaaManifestEntry) {
+    throw new Error("no polyfill manifest found for usaa.json");
+  }
+  const usaaManifest = usaaManifestEntry.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(usaaManifest.connector_id, USAA_CONNECTOR_ID);
@@ -237,9 +240,11 @@ test("USAA remains an owner-present managed n.eko connector in the committed run
 });
 
 test("Amazon stays owner-present managed on n.eko while declaring a persistent session", async () => {
-  const amazonManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}packages/polyfill-connectors/manifests/amazon.json`, "utf8")
-  );
+  const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+  if (!amazonManifestEntry) {
+    throw new Error("no polyfill manifest found for amazon.json");
+  }
+  const amazonManifest = amazonManifestEntry.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(amazonManifest.connector_id, AMAZON_CONNECTOR_ID);
@@ -260,9 +265,11 @@ test("Amazon stays owner-present managed on n.eko while declaring a persistent s
 });
 
 test("Reddit stays owner-present managed on n.eko while declaring a persistent session", async () => {
-  const redditManifest = JSON.parse(
-    await readFile(`${REPO_ROOT}packages/polyfill-connectors/manifests/reddit.json`, "utf8")
-  );
+  const redditManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "reddit.json");
+  if (!redditManifestEntry) {
+    throw new Error("no polyfill manifest found for reddit.json");
+  }
+  const redditManifest = redditManifestEntry.manifest as Record<string, any>;
   const envExample = await readFile(ENV_EXAMPLE_FILE, "utf8");
 
   assert.equal(redditManifest.connector_id, REDDIT_CONNECTOR_ID);

@@ -28,7 +28,7 @@
  *      connector does not emit.
  *
  *   2. The shipped polyfill manifest at
- *      `packages/polyfill-connectors/manifests/github.json` declares streams
+ *      `@pdpp/polyfill-connectors`'s `manifests/github.json` declares streams
  *      that the real connector's `SCHEMAS` registry does not cover. The
  *      polyfill runtime validates emitted records against `SCHEMAS[stream]`,
  *      so a manifest-declared stream with no schema cannot be emitted as
@@ -46,9 +46,18 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..");
+// Resolved from the installed `@pdpp/polyfill-connectors` package (never a
+// hardcoded relative repo path) so this scan covers the real, currently
+// shipping connector source, not a local vendoring copy.
+const POLYFILL_CONNECTORS_DIR = join(
+  dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+  "..",
+  "connectors"
+);
 
 interface ManifestStream {
   name: string;
@@ -67,6 +76,18 @@ function readJson(path: string): Manifest {
 function manifestStreamNames(manifestPath: string): string[] {
   const manifest = readJson(manifestPath);
   return (manifest.streams || []).map((s) => s.name).sort();
+}
+
+function readShippedGithubManifest(): Manifest {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "github.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for github.json");
+  }
+  return entry.manifest as Manifest;
+}
+
+function shippedGithubManifestStreamNames(): string[] {
+  return (readShippedGithubManifest().streams || []).map((s) => s.name).sort();
 }
 
 test("reference fixture manifest only advertises streams the seed connector emits", () => {
@@ -105,35 +126,33 @@ test("reference fixture manifest only advertises streams the seed connector emit
 });
 
 test("polyfill manifest only advertises streams the GitHub connector has schemas for", async () => {
-  const polyfillManifestPath = join(REPO_ROOT, "packages", "polyfill-connectors", "manifests", "github.json");
-  const manifestStreams = manifestStreamNames(polyfillManifestPath);
+  const manifestStreams = shippedGithubManifestStreamNames();
+  const githubSchemasPath = join(POLYFILL_CONNECTORS_DIR, "github", "schemas.ts");
 
-  const { SCHEMAS } = await import(
-    join(REPO_ROOT, "packages", "polyfill-connectors", "connectors", "github", "schemas.ts")
+  const { SCHEMAS } = await import(githubSchemasPath)
     // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
-  ).catch(async () => {
-    // Node strips TS via --experimental-strip-types under v22+; if that
-    // fails (older runtime, no loader), fall back to source inspection.
-    const source = readFileSync(
-      join(REPO_ROOT, "packages", "polyfill-connectors", "connectors", "github", "schemas.ts"),
-      "utf8"
-    );
-    const keys = new Set<string>();
-    // Match: `key: someSchema,` inside the SCHEMAS block - capture the key.
-    // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    const schemasBlockMatch = source.match(/SCHEMAS[^=]*=\s*{([\s\S]*?)};/);
-    const schemasBlock = schemasBlockMatch?.[1];
-    if (schemasBlock) {
-      for (const m of schemasBlock.matchAll(/^\s*(\w+):/gm)) {
-        // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
-        const key = m[1];
-        if (key) {
-          keys.add(key);
+    .catch(async () => {
+      // Node strips TS via --experimental-strip-types under v22+, but never
+      // for a `.ts` file under node_modules (which this package now is); if
+      // the dynamic import fails for that or any other reason, fall back to
+      // source inspection.
+      const source = readFileSync(githubSchemasPath, "utf8");
+      const keys = new Set<string>();
+      // Match: `key: someSchema,` inside the SCHEMAS block - capture the key.
+      // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
+      const schemasBlockMatch = source.match(/SCHEMAS[^=]*=\s*{([\s\S]*?)};/);
+      const schemasBlock = schemasBlockMatch?.[1];
+      if (schemasBlock) {
+        for (const m of schemasBlock.matchAll(/^\s*(\w+):/gm)) {
+          // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
+          const key = m[1];
+          if (key) {
+            keys.add(key);
+          }
         }
       }
-    }
-    return { SCHEMAS: Object.fromEntries([...keys].map((k) => [k, true])) };
-  });
+      return { SCHEMAS: Object.fromEntries([...keys].map((k) => [k, true])) };
+    });
 
   const schemaStreams = new Set(Object.keys(SCHEMAS));
   const orphans = manifestStreams.filter((name: string) => !schemaStreams.has(name));
@@ -147,9 +166,8 @@ test("polyfill manifest only advertises streams the GitHub connector has schemas
 
 test("reference fixture and shipped polyfill manifests share the same connector identity", () => {
   const fixturePath = join(REPO_ROOT, "reference-implementation", "fixtures", "seed-manifests", "github.json");
-  const polyfillPath = join(REPO_ROOT, "packages", "polyfill-connectors", "manifests", "github.json");
   const fixture = readJson(fixturePath);
-  const polyfill = readJson(polyfillPath);
+  const polyfill = readShippedGithubManifest();
 
   // The polyfill reconciler keys off `connector_id`: the persisted (fixture)
   // and shipped (polyfill) manifests MUST agree on identity or the
@@ -169,17 +187,21 @@ test("reference fixture and shipped polyfill manifests share the same connector 
 const RETIRED_GITHUB_STREAM_NAMES = ["commits", "starred_repos"];
 
 test("no shipped GitHub manifest re-declares a retired phantom stream", () => {
-  const manifestPaths = [
-    join(REPO_ROOT, "reference-implementation", "fixtures", "seed-manifests", "github.json"),
-    join(REPO_ROOT, "packages", "polyfill-connectors", "manifests", "github.json"),
+  const manifestSources: { label: string; streams: string[] }[] = [
+    {
+      label: join(REPO_ROOT, "reference-implementation", "fixtures", "seed-manifests", "github.json"),
+      streams: manifestStreamNames(
+        join(REPO_ROOT, "reference-implementation", "fixtures", "seed-manifests", "github.json")
+      ),
+    },
+    { label: "@pdpp/polyfill-connectors's manifests/github.json", streams: shippedGithubManifestStreamNames() },
   ];
-  for (const manifestPath of manifestPaths) {
-    const streams = manifestStreamNames(manifestPath);
+  for (const { label, streams } of manifestSources) {
     const reintroduced = RETIRED_GITHUB_STREAM_NAMES.filter((name) => streams.includes(name));
     assert.deepStrictEqual(
       reintroduced,
       [],
-      `${manifestPath} re-advertises retired phantom stream(s): ${reintroduced.join(", ")}. ` +
+      `${label} re-advertises retired phantom stream(s): ${reintroduced.join(", ")}. ` +
         "These names map to no emission path in the GitHub connector; declaring them re-creates " +
         `the orphan stream-list/404/stale-projection bug. Got streams: ${streams.join(", ")}`
     );

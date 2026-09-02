@@ -28,10 +28,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
-
-const MANIFESTS_DIR = new URL("../../packages/polyfill-connectors/manifests/", import.meta.url);
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 test("no manifest with a filesystem binding advertises capabilities.proven.local_collector unless it also has runtime_requirements.bindings.filesystem", () => {
   // Guards the inverse direction: a manifest cannot claim the local-collector
@@ -39,11 +37,8 @@ test("no manifest with a filesystem binding advertises capabilities.proven.local
   // meaningful. This is the regression the task's method explicitly calls
   // out: "a malformed manifest ever claims a capability its declared setup
   // modality cannot support."
-  for (const entry of readdirSync(MANIFESTS_DIR)) {
-    if (!entry.endsWith(".json")) {
-      continue;
-    }
-    const raw = JSON.parse(readFileSync(new URL(entry, MANIFESTS_DIR), "utf8")) as {
+  for (const { file: entry, manifest } of readPolyfillManifests()) {
+    const raw = manifest as {
       connector_key?: string;
       runtime_requirements?: { bindings?: Record<string, unknown> };
       capabilities?: { proven?: { local_collector?: unknown } };

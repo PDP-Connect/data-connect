@@ -7,7 +7,7 @@
  * Regression: the reference fixture manifest and the shipped polyfill
  * manifest can share a `connector_id`. GitHub is the live example today:
  * both reference-implementation/fixtures/seed-manifests/github.json and
- * packages/polyfill-connectors/manifests/github.json use connector_id
+ * @pdpp/polyfill-connectors's manifests/github.json use connector_id
  * https://registry.pdpp.dev/connectors/github. Before the fix in
  * runtime/controller.ts, a controller-triggered polyfill GitHub run
  * executed the reference seed connector, whose GitHub fixture emits a
@@ -30,6 +30,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import {
   __resetControllerPathResolverCachesForTests,
@@ -38,11 +39,11 @@ import {
 } from "../runtime/controller.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 
-const TOP_LEVEL_REGEX_1 = /packages\/polyfill-connectors\/connectors\/github\/index\.(ts|js)$/;
+const TOP_LEVEL_REGEX_1 = /@pdpp\/polyfill-connectors\/connectors\/github\/index\.(ts|js)$/;
 const TOP_LEVEL_REGEX_2 = /reference-implementation\/connectors\/seed\/index\.ts$/;
 const TOP_LEVEL_REGEX_3 = /reference-implementation\/connectors\/seed\/index\.ts$/;
-const TOP_LEVEL_REGEX_4 = /packages\/polyfill-connectors\/connectors\/github\/index\.(ts|js)$/;
-const TOP_LEVEL_REGEX_5 = /packages\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
+const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/github\/index\.(ts|js)$/;
+const TOP_LEVEL_REGEX_5 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
 const TOP_LEVEL_REGEX_6 = /reference-implementation\/connectors\/seed\/index\.ts$/;
 
 interface FixtureManifest extends ConnectorManifest {
@@ -52,8 +53,15 @@ interface FixtureManifest extends ConnectorManifest {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-const POLYFILL_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests");
 const REFERENCE_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manifests");
+
+function readPolyfillManifest(file: string): FixtureManifest {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${file}`);
+  }
+  return entry.manifest as FixtureManifest;
+}
 
 function readManifest(dir: string, file: string): FixtureManifest {
   return JSON.parse(readFileSync(join(dir, file), "utf8"));
@@ -61,7 +69,7 @@ function readManifest(dir: string, file: string): FixtureManifest {
 
 test("resolves polyfill GitHub connector when active manifest is the polyfill manifest", () => {
   __resetControllerPathResolverCachesForTests();
-  const polyfillGithub = readManifest(POLYFILL_MANIFESTS_DIR, "github.json");
+  const polyfillGithub = readPolyfillManifest("github.json");
   const referenceGithub = readManifest(REFERENCE_MANIFESTS_DIR, "github.json");
 
   // Sanity: the collision is real, otherwise this regression cannot trip.
@@ -92,7 +100,7 @@ test("resolves reference seed when active manifest is the reference GitHub fixtu
 
 test("prefers polyfill path when no manifest is provided and a polyfill implementation exists", () => {
   __resetControllerPathResolverCachesForTests();
-  const polyfillGithub = readManifest(POLYFILL_MANIFESTS_DIR, "github.json");
+  const polyfillGithub = readPolyfillManifest("github.json");
   // Call without a manifest argument. The legacy behavior returned the
   // seed connector for any reference fixture id; the fixed behavior
   // prefers the shipped polyfill implementation when one exists.
@@ -103,7 +111,7 @@ test("prefers polyfill path when no manifest is provided and a polyfill implemen
 
 test("still resolves polyfill-only connectors (no reference fixture collision) to polyfill path", () => {
   __resetControllerPathResolverCachesForTests();
-  const ynab = readManifest(POLYFILL_MANIFESTS_DIR, "ynab.json");
+  const ynab = readPolyfillManifest("ynab.json");
   const resolved = resolveDefaultConnectorPath(ynab.connector_id, ynab);
   assert.ok(resolved, "ynab must resolve to a runnable connector path");
   assert.match(resolved, TOP_LEVEL_REGEX_5, `expected polyfill ynab connector, got ${resolved}`);

@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import type { ConnectionRefreshEvidence } from "../runtime/connection-health.ts";
 import { isAssistedRefresh, isManualRefreshOnly } from "../runtime/connection-health.ts";
 import { synthesizeRenderedVerdict } from "../runtime/rendered-verdict.ts";
@@ -30,9 +28,6 @@ import { projectConnectorSummaryConnectionHealth } from "../server/ref-control.t
 // `projectConnectorSummaryConnectionHealth` calls `buildRefreshEvidence(input.refreshPolicy)`
 // internally, so feeding it the REAL manifest refresh_policy exercises the whole path.
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFEST_DIR = join(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
-
 const NOW = "2026-06-15T12:00:00.000Z";
 const STALE_FRESHNESS: ReferenceFreshness = { captured_at: NOW, status: "stale" };
 
@@ -44,7 +39,11 @@ interface RefreshPolicyManifest {
 }
 
 function readRefreshPolicy(connector: string): RefreshPolicyManifest {
-  const manifest = JSON.parse(readFileSync(join(MANIFEST_DIR, `${connector}.json`), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${connector}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${connector}.json`);
+  }
+  const manifest = entry.manifest as { capabilities?: { refresh_policy?: RefreshPolicyManifest } };
   // Mirror ref-control's extractRefreshPolicy: capabilities.refresh_policy.
   return manifest.capabilities?.refresh_policy ?? {};
 }

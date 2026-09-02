@@ -21,12 +21,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ResolvedConnectorOptionsSchema } from "../../packages/polyfill-connectors/src/connector-options-schema.ts";
-import { ConnectorOptionsSchemaError } from "../../packages/polyfill-connectors/src/connector-options-schema.ts";
+import type { ResolvedConnectorOptionsSchema } from "@pdpp/polyfill-connectors/connector-options-schema";
+import { ConnectorOptionsSchemaError } from "@pdpp/polyfill-connectors/connector-options-schema";
 import {
   platformOptionKind,
   resolveEnforcedOptionKind,
-} from "../../packages/polyfill-connectors/src/connector-config-option-kind-registry.ts";
+} from "@pdpp/polyfill-connectors/connector-config-option-kind-registry";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { mountOwnerConnectionConfig } from "../server/routes/owner-connection-config.ts";
 import { codeToStatus } from "../server/routes/ref-error-status.ts";

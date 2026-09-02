@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expectedLocalCoverageStoreDescriptors } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+import { expectedLocalCoverageStoreDescriptors } from "@pdpp/polyfill-connectors/local-source-inventory";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
 import { createPostgresConnectorStateStore } from "../server/stores/connector-state-store.ts";

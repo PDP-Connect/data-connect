@@ -19,11 +19,12 @@
 // a helper in isolation.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { expectedLocalCoverageStoreDescriptors } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+import { expectedLocalCoverageStoreDescriptors } from "@pdpp/polyfill-connectors/local-source-inventory";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
@@ -54,9 +55,11 @@ interface TestManifest {
 }
 
 function readManifest(name: string): TestManifest {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as TestManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as TestManifest;
 }
 
 /** Manifest-required streams — the denominator this suite must never shrink. */

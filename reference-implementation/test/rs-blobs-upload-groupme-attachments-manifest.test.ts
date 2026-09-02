@@ -23,8 +23,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import {
   type BlobsUploadDependencies,
@@ -33,9 +33,11 @@ import {
   executeBlobsUpload,
 } from "../operations/rs-blobs-upload/index.ts";
 
-const GROUPME_MANIFEST = JSON.parse(
-  readFileSync(new URL("../../packages/polyfill-connectors/manifests/groupme.json", import.meta.url), "utf8")
-) as { streams: Array<{ name: string }> };
+const GROUPME_MANIFEST_ENTRY = readPolyfillManifests().find((candidate) => candidate.file === "groupme.json");
+if (!GROUPME_MANIFEST_ENTRY) {
+  throw new Error("no polyfill manifest found for groupme.json");
+}
+const GROUPME_MANIFEST = GROUPME_MANIFEST_ENTRY.manifest as { streams: Array<{ name: string }> };
 
 const STREAM_NOT_FOUND_PATTERN = /Stream 'attachments' not found for connector groupme/;
 

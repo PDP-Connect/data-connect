@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildLocalDeviceRecordEnvelope, LocalDeviceClient } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
@@ -20,10 +21,15 @@ const STATIC_SECRET = "synthetic fixture app password";
 const FIXTURE_TIME = "2026-08-06T12:00:00.000Z";
 const CSRF_FIELD_RE = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 const CLOSURE_MCP_MISSING_RE = /scoped MCP must read exactly the newly accepted fixture record/;
+// Read from the installed @pdpp/polyfill-connectors package (not the
+// repo-root packages/polyfill-connectors/ vendoring-trick copy, which RI no
+// longer imports): the package has no subpath export for its fixtures, so
+// this reaches the on-disk file directly, same as
+// remote-surface-reference-boundary.test.ts does for the package's src/.
 const GMAIL_FIXTURE_PATH =
-  "../../packages/polyfill-connectors/fixtures/gmail/scrubbed/pilot-real-shape/records/messages.jsonl";
+  "../../node_modules/@pdpp/polyfill-connectors/fixtures/gmail/scrubbed/pilot-real-shape/records/messages.jsonl";
 const CODEX_FIXTURE_PATH =
-  "../../packages/polyfill-connectors/fixtures/codex/scrubbed/pilot-real-shape/records/messages.jsonl";
+  "../../node_modules/@pdpp/polyfill-connectors/fixtures/codex/scrubbed/pilot-real-shape/records/messages.jsonl";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 type JsonRecord = Record<string, unknown>;
@@ -178,9 +184,11 @@ function startClosureServer(): Promise<StartedServer> {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  const raw = JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  const raw = entry.manifest as ConnectorManifest;
   const canonical = canonicalConnectorKeyFromManifest(raw);
   assert.ok(canonical, `${name} manifest must have a canonical connector key`);
   return { ...raw, connector_id: canonical };

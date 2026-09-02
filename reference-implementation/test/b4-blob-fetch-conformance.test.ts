@@ -22,19 +22,14 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const POLYFILL_MANIFESTS_DIR = join(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -284,7 +279,11 @@ interface RecordsListBody {
 }
 
 function readGmailManifest(): ConnectorManifest {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "gmail.json"), "utf8")) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for gmail.json");
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function withGmailHarness(fn: (ctx: { asUrl: string; rsUrl: string; connectorId: string }) => Promise<void>) {

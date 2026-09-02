@@ -19,11 +19,11 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -43,17 +43,12 @@ import {
 // real store down to exactly the shape `maybeTerminateGap` declares it needs.
 type MaybeTerminateGapStore = Parameters<typeof maybeTerminateGap>[0];
 
-const MANIFESTS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "packages",
-  "polyfill-connectors",
-  "manifests"
-);
-
 function loadRawManifest(name: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8")) as Record<string, unknown>;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 // ─── terminalGapProfileForConnector: manifest-declared value, NO default ─────

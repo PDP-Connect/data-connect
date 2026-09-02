@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import test from "node:test";
-import type { RecoveredStaticSecret } from "../../packages/polyfill-connectors/src/static-secret-injection.ts";
+import type { RecoveredStaticSecret } from "@pdpp/polyfill-connectors/static-secret-injection";
 import {
   __resetControllerInteractionStateForTests,
   createController,
@@ -139,7 +139,7 @@ function seedConnectorInstance({
 function buildRealResolver(): StaticSecretRunEnvResolver {
   return async ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
     const { isStaticSecretConnector, buildConnectionScopedSecretEnv } = await import(
-      "../../packages/polyfill-connectors/src/static-secret-injection.ts"
+      "@pdpp/polyfill-connectors/static-secret-injection"
     );
     if (!isStaticSecretConnector(connectorId)) {
       return null;

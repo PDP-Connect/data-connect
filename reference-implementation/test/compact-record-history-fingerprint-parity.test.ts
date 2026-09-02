@@ -72,14 +72,14 @@ function tsxLoaderActive() {
 }
 
 /** The canonical helper's real signature, from
- *  packages/polyfill-connectors/src/fingerprint-cursor.ts:recordFingerprint. */
+ *  `@pdpp/polyfill-connectors/fingerprint-cursor`'s `recordFingerprint`. */
 type CanonicalRecordFingerprint = (record: Record<string, unknown>, excludeKeys?: readonly string[]) => string;
 
 let canonicalRecordFingerprint: CanonicalRecordFingerprint | undefined;
 let canonicalLoadError: unknown = null;
 try {
   // Loaded via tsx — the canonical helper lives in TypeScript.
-  const mod = await import("../../packages/polyfill-connectors/src/fingerprint-cursor.ts");
+  const mod = await import("@pdpp/polyfill-connectors/fingerprint-cursor");
   canonicalRecordFingerprint = mod.recordFingerprint;
 } catch (err) {
   canonicalLoadError = err;
@@ -94,7 +94,7 @@ if (!canonicalRecordFingerprint) {
       const errMessage = canonicalLoadError instanceof Error ? canonicalLoadError.message : canonicalLoadError;
       assert.fail(
         "tsx loader is active but the canonical recordFingerprint helper could not be loaded " +
-          "from packages/polyfill-connectors/src/fingerprint-cursor.ts — the parity gate cannot " +
+          "from @pdpp/polyfill-connectors/fingerprint-cursor — the parity gate cannot " +
           "run, which would let connector/compaction fingerprint drift go undetected. " +
           `Underlying load error: ${errMessage}`
       );

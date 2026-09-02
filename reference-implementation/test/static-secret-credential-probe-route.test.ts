@@ -14,8 +14,8 @@
 //   - the submitted secret never appears in the response, body, or audit event.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { getDb } from "../server/db.ts";
@@ -205,9 +205,11 @@ interface ConnectorManifest {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function registerManifest(asUrl: string, manifest: ConnectorManifest): Promise<void> {

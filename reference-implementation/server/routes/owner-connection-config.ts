@@ -67,11 +67,11 @@
 import type {
   ResolvedConfigOption,
   ResolvedConnectorOptionsSchema,
-} from "../../../packages/polyfill-connectors/src/connector-options-schema.ts";
+} from "@pdpp/polyfill-connectors/connector-options-schema";
 import {
   ConnectorOptionsSchemaError,
   connectorOptionsSchema as defaultConnectorOptionsSchema,
-} from "../../../packages/polyfill-connectors/src/connector-options-schema.ts";
+} from "@pdpp/polyfill-connectors/connector-options-schema";
 import type {
   ConfigOrigin,
   ConfigRevision,

@@ -20,7 +20,7 @@ import {
   type ManualUploadValidationResult,
   validateManualUploadArtifactByKind,
   validateManualUploadArtifactFromFileByKind,
-} from "../../../packages/polyfill-connectors/src/manual-upload-validation.ts";
+} from "@pdpp/polyfill-connectors/manual-upload-validation";
 import { getCurrentBootEpoch } from "../../lib/spine.ts";
 import {
   type ConnectorManifestLike,

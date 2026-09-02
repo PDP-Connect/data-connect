@@ -20,6 +20,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 import pg from "pg";
@@ -60,47 +61,56 @@ const SCRIPT_PATH = path.resolve(__dirname, "..", "scripts", "compact-record-his
 const { Pool } = pg;
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
-// Repo-root-relative manifest roots, read directly from disk (test-only
+// Reference-fixture manifests are read directly from disk (test-only
 // static-file access — the same pattern connector-key.test.ts already uses —
 // NOT the runtime `getConnectorManifest` DB-catalog lookup version-disposition
-// callers use in production). Used below to independently re-derive which
-// (connector, stream) pairs declare each `compaction_class`, so the
-// server-list-matches-script-list guardrail tests keep proving the two stay
-// in sync without importing any list out of version-disposition.ts (which no
-// longer exports one — compaction_class now lives on the manifest itself).
-const MANIFEST_ROOTS_FOR_TEST = [
-  path.resolve(__dirname, "..", "fixtures", "seed-manifests"),
-  path.resolve(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests"),
-];
+// callers use in production). The first-party polyfill manifests are read via
+// `@pdpp/polyfill-connectors`'s own `readPolyfillManifests()` export, since
+// that package — not this repo — owns their on-disk layout. Used below to
+// independently re-derive which (connector, stream) pairs declare each
+// `compaction_class`, so the server-list-matches-script-list guardrail tests
+// keep proving the two stay in sync without importing any list out of
+// version-disposition.ts (which no longer exports one — compaction_class now
+// lives on the manifest itself).
+const REFERENCE_FIXTURE_MANIFESTS_DIR = path.resolve(__dirname, "..", "fixtures", "seed-manifests");
+
+interface ManifestForCompactionClassScan {
+  connector_key?: string;
+  connector_id?: string;
+  streams?: { name?: string; compaction_class?: string }[];
+}
+
+function allShippedManifestsForTest(): ManifestForCompactionClassScan[] {
+  const manifests: ManifestForCompactionClassScan[] = [];
+  for (const entry of readPolyfillManifests()) {
+    manifests.push(entry.manifest as ManifestForCompactionClassScan);
+  }
+  let referenceFixtureFiles: string[];
+  try {
+    referenceFixtureFiles = readdirSync(REFERENCE_FIXTURE_MANIFESTS_DIR).filter((f) => f.endsWith(".json"));
+  } catch {
+    referenceFixtureFiles = [];
+  }
+  for (const file of referenceFixtureFiles) {
+    try {
+      manifests.push(JSON.parse(readFileSync(path.join(REFERENCE_FIXTURE_MANIFESTS_DIR, file), "utf8")));
+    } catch {
+      // Skip malformed reference-fixture manifests.
+    }
+  }
+  return manifests;
+}
 
 function manifestStreamPairsByCompactionClass(compactionClass: string): { connector: string; stream: string }[] {
   const pairs: { connector: string; stream: string }[] = [];
-  for (const dir of MANIFEST_ROOTS_FOR_TEST) {
-    let files: string[];
-    try {
-      files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-    } catch {
+  for (const manifest of allShippedManifestsForTest()) {
+    const connector = manifest.connector_key || manifest.connector_id;
+    if (!(connector && Array.isArray(manifest.streams))) {
       continue;
     }
-    for (const file of files) {
-      let manifest: {
-        connector_key?: string;
-        connector_id?: string;
-        streams?: { name?: string; compaction_class?: string }[];
-      };
-      try {
-        manifest = JSON.parse(readFileSync(path.join(dir, file), "utf8"));
-      } catch {
-        continue;
-      }
-      const connector = manifest.connector_key || manifest.connector_id;
-      if (!(connector && Array.isArray(manifest.streams))) {
-        continue;
-      }
-      for (const stream of manifest.streams) {
-        if (stream?.compaction_class === compactionClass && stream.name) {
-          pairs.push({ connector, stream: stream.name });
-        }
+    for (const stream of manifest.streams) {
+      if (stream?.compaction_class === compactionClass && stream.name) {
+        pairs.push({ connector, stream: stream.name });
       }
     }
   }

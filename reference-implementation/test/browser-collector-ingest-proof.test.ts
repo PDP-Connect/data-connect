@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
@@ -158,9 +159,11 @@ function authHeaders(deviceToken: string): Record<string, string> {
 }
 
 async function registerAmazonConnector(asUrl: string): Promise<void> {
-  const manifest = JSON.parse(
-    readFileSync(new URL("../../packages/polyfill-connectors/manifests/amazon.json", import.meta.url), "utf8")
-  );
+  const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+  if (!amazonManifestEntry) {
+    throw new Error("no polyfill manifest found for amazon.json");
+  }
+  const manifest = amazonManifestEntry.manifest;
   const resp = await fetch(`${asUrl}/connectors`, {
     body: JSON.stringify(manifest),
     headers: { "Content-Type": "application/json" },

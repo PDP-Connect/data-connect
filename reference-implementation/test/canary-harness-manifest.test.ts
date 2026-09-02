@@ -13,11 +13,11 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
 import { redact, renderRunArgs } from "../scripts/canary/deploy-canary.ts";
@@ -65,9 +65,6 @@ const DOCKER_NAME_ILLEGAL_CHARS_PATTERN = /[:.]/u;
 const REDACTED_OWNER_TOKEN_PATTERN = /PDPP_OWNER_TOKEN=<redacted>/u;
 const VISIBLE_DB_PATH_PATTERN = /PDPP_DB_PATH=\/root\/\.pdpp\/pdpp\.sqlite/u;
 const VISIBLE_NTFY_TOPIC_PATTERN = /NTFY_TOPIC=pdpp/u;
-
-/** Repo root, resolved from this file rather than cwd. */
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * Writes `manifests` into a scratch directory and derives the denylist from
@@ -128,18 +125,19 @@ test("OTP denylist catches wholefoods, which the hand-maintained list missed", (
 });
 
 test("OTP denylist equals every manifest that declares an OTP posture, computed independently of the harness", () => {
-  // Recomputed here straight from the manifest files, so this asserts against
-  // the ground truth rather than re-running the harness's own derivation.
-  const manifestDir = join(repoRoot, "packages/polyfill-connectors/manifests");
-  const declaredOtp = readdirSync(manifestDir)
-    .filter((entry) => entry.endsWith(".json"))
+  // Recomputed here straight from the shipped manifests, so this asserts
+  // against the ground truth rather than re-running the harness's own
+  // derivation.
+  const declaredOtp = readPolyfillManifests()
     .filter((entry) => {
-      const capabilities = JSON.parse(readFileSync(join(manifestDir, entry), "utf8")).capabilities ?? {};
-      const posture = capabilities.refresh_policy?.interaction_posture;
+      const manifest = entry.manifest as { capabilities?: Record<string, unknown> };
+      const capabilities = manifest.capabilities ?? {};
+      const refreshPolicy = capabilities.refresh_policy as { interaction_posture?: string } | undefined;
+      const posture = refreshPolicy?.interaction_posture;
       const interactions = capabilities.human_interaction;
       return posture === "otp_likely" || (Array.isArray(interactions) && interactions.includes("otp"));
     })
-    .map((entry) => entry.slice(0, -".json".length))
+    .map((entry) => entry.file.slice(0, -".json".length))
     .sort();
 
   assert.deepEqual(

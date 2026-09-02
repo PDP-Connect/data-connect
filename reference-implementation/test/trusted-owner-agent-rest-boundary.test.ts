@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { registerConnector as registerConnectorCatalog } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
@@ -105,14 +106,20 @@ interface ConnectorManifest {
   [extension: string]: unknown;
 }
 
+function loadShippedPolyfillManifest(file: string): ConnectorManifest {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${file}`);
+  }
+  return entry.manifest as ConnectorManifest;
+}
+
 function loadGmailManifest(): ConnectorManifest {
-  const path = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", "gmail.json");
-  return JSON.parse(readFileSync(path, "utf8"));
+  return loadShippedPolyfillManifest("gmail.json");
 }
 
 function loadSpotifyManifest(): ConnectorManifest {
-  const path = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", "spotify.json");
-  return JSON.parse(readFileSync(path, "utf8"));
+  return loadShippedPolyfillManifest("spotify.json");
 }
 
 function loadNorthstarManifest(): NorthstarManifest {

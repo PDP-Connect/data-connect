@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -2019,8 +2020,11 @@ test("backend identity change flips index_state to stale until rebuild restores"
 // coverage reaches existing records without connector re-ingest.
 
 function loadShippedManifest(name: string): Record<string, unknown> {
-  const p = path.resolve(TEST_DIR, "..", "..", "packages", "polyfill-connectors", "manifests", name);
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === name);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 function stripSemanticFields(manifest: Record<string, unknown>): Record<string, unknown> {

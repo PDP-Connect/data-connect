@@ -4,18 +4,15 @@
 import {
   KNOWN_SCAFFOLD_CONNECTORS,
   PRODUCTION_READY_CONNECTORS,
-} from "../../packages/polyfill-connectors/src/connector-conformance-roster.ts";
-import {
-  type CredentialValidationMode,
-  credentialValidationMode,
-} from "../../packages/polyfill-connectors/src/credential-probe.ts";
+} from "@pdpp/polyfill-connectors/connector-conformance-roster";
+import { type CredentialValidationMode, credentialValidationMode } from "@pdpp/polyfill-connectors/credential-probe";
 import {
   type NormalizedStaticSecretCredentialCapture,
   type NormalizedStaticSecretField,
   normalizeStaticSecretCredentialCapture,
   type StaticSecretCredentialCaptureFieldLike,
   type StaticSecretFieldType,
-} from "../../packages/polyfill-connectors/src/static-secret-credential-capture.ts";
+} from "@pdpp/polyfill-connectors/static-secret-credential-capture";
 import { legacyLocalAliasMap } from "./connector-key.ts";
 import {
   BROWSER_BOUND_KEYS,

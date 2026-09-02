@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import type { SourceDeclaration } from "@pdpp/reference-contract/public/source";
 import { requireSourceDeclaration, snapshotSourceDeclaration } from "../server/source-declaration.ts";
 import {
@@ -295,12 +296,9 @@ test("legacy adapter normalizes only the exact append semantics alias and reject
 });
 
 test("legacy corpus projects into the neutral SourceDeclaration contract", () => {
-  const manifestDirectory = fileURLToPath(new URL("../../packages/polyfill-connectors/manifests/", import.meta.url));
   const rejected = new Map<string, string>();
-  for (const filename of readdirSync(manifestDirectory)
-    .filter((name) => name.endsWith(".json"))
-    .sort()) {
-    const manifest = JSON.parse(readFileSync(`${manifestDirectory}/${filename}`, "utf8")) as Record<string, unknown>;
+  for (const { file: filename, manifest: rawManifest } of readPolyfillManifests()) {
+    const manifest = rawManifest as Record<string, unknown>;
     try {
       sourceDeclarationFromLegacyConnectorManifest(manifest, {
         connectorImplementationId:

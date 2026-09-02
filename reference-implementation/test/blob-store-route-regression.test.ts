@@ -20,10 +20,8 @@ const TOP_LEVEL_REGEX_1 = /^blob_sha256_/;
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
@@ -32,9 +30,6 @@ import {
   createSqliteConnectorInstanceStore,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REFERENCE_IMPL_DIR = join(__dirname, "..");
 
 type TestServer = Awaited<ReturnType<typeof startServer>> & {
   asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
@@ -137,8 +132,11 @@ interface ConnectorManifest {
 }
 
 function loadGmailManifest(): ConnectorManifest {
-  const path = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", "gmail.json");
-  return JSON.parse(readFileSync(path, "utf8")) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for gmail.json");
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function registerConnector(asUrl: string, manifest: ConnectorManifest) {

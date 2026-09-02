@@ -1,7 +1,7 @@
 const TOP_LEVEL_REGEX_1 = /^(started|in_progress)$/;
 const TOP_LEVEL_REGEX_2 = /interval_seconds/;
 const TOP_LEVEL_REGEX_3 = /^(assisted|manual_only|unattended)$/;
-const TOP_LEVEL_REGEX_4 = /packages\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
+const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
 const TOP_LEVEL_REGEX_5 = /manual runs|background-safe|scheduling is disabled/;
 const TOP_LEVEL_REGEX_6 = /background-safe/;
 const TOP_LEVEL_REGEX_7 = /manual runs|background-safe|paused/;
@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { listOperations, validateRequest } from "@pdpp/reference-contract";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch, type SourceObject } from "../lib/spine.ts";
 import { createAttention } from "../runtime/attention.ts";
@@ -41,7 +42,6 @@ import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-ru
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-const POLYFILL_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests");
 
 // The connector catalog, run summaries, and schedule rows are all keyed by the
 // canonical connector key (Decision 1): registering the URL-shaped manifest
@@ -875,9 +875,11 @@ test("POST /_ref/connectors/:connectorId/run starts an async background run and 
 });
 
 test("runtime controller resolves shipped polyfill connectors from TypeScript entrypoints", () => {
-  const ynabManifest = JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "ynab.json"), "utf8")) as {
-    connector_id: string;
-  };
+  const ynabManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "ynab.json");
+  if (!ynabManifestEntry) {
+    throw new Error("no polyfill manifest found for ynab.json");
+  }
+  const ynabManifest = ynabManifestEntry.manifest as { connector_id: string };
   const connectorPath = resolveDefaultConnectorPath(ynabManifest.connector_id);
   assert.ok(connectorPath, "ynab should resolve to a runnable local connector path");
   assert.match(connectorPath, TOP_LEVEL_REGEX_4);

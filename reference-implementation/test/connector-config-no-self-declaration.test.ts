@@ -26,8 +26,14 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const CONNECTORS_DIR = join(REPO_ROOT, "packages", "polyfill-connectors", "connectors");
+// Resolved from the installed `@pdpp/polyfill-connectors` package (never a
+// hardcoded relative repo path) so this scan covers the real, currently
+// shipping connector source, not a local vendoring copy.
+const CONNECTORS_DIR = join(
+  dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+  "..",
+  "connectors"
+);
 
 const FORBIDDEN_IMPORT_PATTERNS = [
   /from\s+["']better-sqlite3["']/,

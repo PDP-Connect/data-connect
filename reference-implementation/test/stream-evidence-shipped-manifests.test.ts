@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import type { CollectionReportEntry, RuntimeCollectionFact } from "../server/ref-control.ts";
 import { buildCollectionReport } from "../server/ref-control.ts";
 
@@ -19,22 +17,15 @@ type ManifestStreamFixture = Parameters<typeof buildCollectionReport>[0]["manife
 // drops a strategy, or a classifier change that stops honoring one, fails
 // here by name rather than resting unmeasured on the live instance.
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const MANIFESTS_DIR = join(HERE, "..", "..", "packages", "polyfill-connectors", "manifests");
-
 interface ShippedManifest {
   file: string;
   manifest: Record<string, unknown>;
 }
 
 function shippedPolyfillManifests(): ShippedManifest[] {
-  return readdirSync(MANIFESTS_DIR)
-    .filter((file) => file.endsWith(".json"))
-    .sort()
-    .map((file) => ({
-      file,
-      manifest: JSON.parse(readFileSync(join(MANIFESTS_DIR, file), "utf8")) as Record<string, unknown>,
-    }));
+  return readPolyfillManifests()
+    .map(({ file, manifest }) => ({ file, manifest: manifest as Record<string, unknown> }))
+    .sort((a, b) => a.file.localeCompare(b.file));
 }
 
 function manifestStreamsFromValue(manifest: Record<string, unknown>): ManifestStreamFixture[] {
@@ -44,7 +35,11 @@ function manifestStreamsFromValue(manifest: Record<string, unknown>): ManifestSt
 }
 
 function manifestStreams(connectorId: string): ManifestStreamFixture[] {
-  const manifest: unknown = JSON.parse(readFileSync(join(MANIFESTS_DIR, `${connectorId}.json`), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${connectorId}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${connectorId}.json`);
+  }
+  const manifest: unknown = entry.manifest;
   assert.ok(
     manifest && typeof manifest === "object" && !Array.isArray(manifest),
     `${connectorId} manifest is an object`

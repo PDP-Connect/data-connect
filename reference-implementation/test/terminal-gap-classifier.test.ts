@@ -19,10 +19,8 @@
 // terminal-gap-class.test.ts).
 
 import { strict as assert } from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -33,11 +31,12 @@ import {
   terminalGapProfileForConnector,
 } from "../server/stores/terminal-gap-classifier.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFESTS_DIR = join(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
-
 function loadRawManifest(name: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8")) as Record<string, unknown>;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 function withTempDb(fn: () => Promise<void>) {

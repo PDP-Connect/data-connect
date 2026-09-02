@@ -18,7 +18,7 @@
 
 import { randomBytes } from "node:crypto";
 
-import { credentialValidationMode } from "../../../packages/polyfill-connectors/src/credential-probe.ts";
+import { credentialValidationMode } from "@pdpp/polyfill-connectors/credential-probe";
 import {
   type ConnectorManifestLike,
   displayNameForConnector,

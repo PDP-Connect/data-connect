@@ -666,8 +666,7 @@ test("controller.listSchedules suppresses stale error code and next_due_at when 
   const { startServer } = await import("../server/index.ts");
   const { getDefaultSchedulerStore } = await import("../server/stores/scheduler-store.ts");
   const { closeDb } = await import("../server/db.ts");
-  const { readFileSync } = await import("node:fs");
-  const REFERENCE_IMPL_DIR = join(__dirname, "..");
+  const { readPolyfillManifests } = await import("@pdpp/polyfill-connectors/manifests");
   // Use the polyfill USAA manifest directly — it is the live shape the
   // manifest reconcile installs at startup, with refresh_policy
   // {recommended_mode: 'manual', background_safe: false}. Pinning the
@@ -675,8 +674,11 @@ test("controller.listSchedules suppresses stale error code and next_due_at when 
   // relaxes USAA's policy back to automatic without owner intent. (Reddit
   // and Amazon are no longer usable here: both now declare
   // background_safe: true for owner opt-in scheduling.)
-  const POLYFILL_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests");
-  const gatedManifest = JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "usaa.json"), "utf8"));
+  const usaaManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "usaa.json");
+  if (!usaaManifestEntry) {
+    throw new Error("no polyfill manifest found for usaa.json");
+  }
+  const gatedManifest = usaaManifestEntry.manifest as Record<string, any>;
   // Schedule rows and history are keyed by the canonical connector key. The
   // store-direct seeds below bypass the controller, so they must use the
   // canonical key themselves to match what listSchedules/getSchedule read.

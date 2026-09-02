@@ -43,11 +43,12 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -55,23 +56,15 @@ import { defaultPolyfillManifestsDir, reconcilePolyfillManifests } from "../serv
 import { listConnectorSummaries, listPublicCatalogConnectorIds } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const POLYFILL_MANIFESTS_DIR = resolve(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
 const REFERENCE_OWNER_SUBJECT_ID = "owner_local";
-
-function listFirstPartyManifestNames() {
-  return readdirSync(POLYFILL_MANIFESTS_DIR)
-    .filter((name) => name.endsWith(".json"))
-    .sort();
-}
 
 interface FirstPartyManifestFixture {
   capabilities?: { public_listing?: { tier?: string } };
   connector_id?: unknown;
 }
 
-function readManifest(filename: string): FirstPartyManifestFixture {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, filename), "utf8"));
+function firstPartyManifests(): FirstPartyManifestFixture[] {
+  return readPolyfillManifests().map((entry) => entry.manifest as FirstPartyManifestFixture);
 }
 
 // The operator catalog projects connectors under their canonical connector
@@ -81,8 +74,7 @@ function readManifest(filename: string): FirstPartyManifestFixture {
 // untouched, matching the runtime's own identity function.
 function ownerVisibleConnectorIds(): string[] {
   const ids: string[] = [];
-  for (const filename of listFirstPartyManifestNames()) {
-    const manifest = readManifest(filename);
+  for (const manifest of firstPartyManifests()) {
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
     const tier = manifest?.capabilities?.public_listing?.tier;
     if ((tier === "supported" || tier === "preview") && typeof manifest.connector_id === "string") {
@@ -95,8 +87,7 @@ function ownerVisibleConnectorIds(): string[] {
 
 function developmentConnectorIds(): string[] {
   const ids: string[] = [];
-  for (const filename of listFirstPartyManifestNames()) {
-    const manifest = readManifest(filename);
+  for (const manifest of firstPartyManifests()) {
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
     if (manifest?.capabilities?.public_listing?.tier === "development" && typeof manifest.connector_id === "string") {
       ids.push(canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id);
@@ -122,17 +113,22 @@ function withTmpDb(fn: () => Promise<void>): () => Promise<void> {
 test("defaultPolyfillManifestsDir resolves to the shipped first-party manifests dir", () => {
   // Defensive: if defaultPolyfillManifestsDir() ever drifts, every
   // subsequent assertion in this file becomes vacuously true. Pin the
-  // expected location so the gap repair stays load-bearing.
-  assert.equal(defaultPolyfillManifestsDir(), POLYFILL_MANIFESTS_DIR);
+  // expected location so the gap repair stays load-bearing — computed
+  // independently via the installed package's own `./manifests` export
+  // rather than a hardcoded path, since the manifests now ship inside
+  // `@pdpp/polyfill-connectors`, not a repo-relative directory.
+  const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
+  const expectedDir = join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
+  assert.equal(defaultPolyfillManifestsDir(), expectedDir);
 });
 
 test("every shipped first-party manifest passes the live registration validator", () => {
   const failures: string[] = [];
-  for (const filename of listFirstPartyManifestNames()) {
+  for (const entry of readPolyfillManifests()) {
     try {
-      validateConnectorManifest(JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, filename), "utf8")));
+      validateConnectorManifest(entry.manifest as Record<string, unknown>);
     } catch (error) {
-      failures.push(`${filename}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${entry.file}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   assert.deepEqual(

@@ -1,12 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { connectorRetainsSurfaceProcess as policyRetainsSurfaceProcess } from "../../../packages/polyfill-connectors/src/browser-surface-policy.ts";
+import { connectorRetainsSurfaceProcess as policyRetainsSurfaceProcess } from "@pdpp/polyfill-connectors/browser-surface-policy";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
 
 /**
  * Reference-side adapter over the shared connector-runtime browser-surface
- * policy (`packages/polyfill-connectors/src/browser-surface-policy.ts`). That
+ * policy (`@pdpp/polyfill-connectors/browser-surface-policy`). That
  * policy is the single source of truth for both page preservation (consumed by
  * the connector-runtime child) and surface-process retention (consumed here, by
  * the reference implementation's surface-lease caller). This adapter only maps

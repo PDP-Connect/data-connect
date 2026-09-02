@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   expectedLocalCoverageStoreDescriptors,
   expectedLocalCoverageStores,
-} from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+} from "@pdpp/polyfill-connectors/local-source-inventory";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { evaluateStreamHealthAuthority } from "../scripts/stream-health-audit/authority.ts";
 import type { CollectionRateSnapshot, CoverageAxis, OutboxAxis } from "../runtime/connection-health.ts";
 import type { CoverageEvidenceStrategy } from "../server/connector-coverage-policy.ts";
@@ -800,9 +801,11 @@ test(
 test(
   "shipped ChatGPT account projection keeps every required stream unmeasured after a session-required scheduler failure",
   withTmpDb(async () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL("../../packages/polyfill-connectors/manifests/chatgpt.json", import.meta.url), "utf8")
-    ) as { connector_id: string; streams: readonly { name: string }[] };
+    const chatgptManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "chatgpt.json");
+    if (!chatgptManifestEntry) {
+      throw new Error("no polyfill manifest found for chatgpt.json");
+    }
+    const manifest = chatgptManifestEntry.manifest as { connector_id: string; streams: readonly { name: string }[] };
     const connectorId = manifest.connector_id;
     const instanceId = "cin_shipped_chatgpt_session_required";
     const requiredStreams = manifest.streams.map((stream) => stream.name).sort();
@@ -2043,9 +2046,11 @@ interface TestRefreshPolicy {
 }
 
 function readRealRefreshPolicy(name: string): TestRefreshPolicy | null {
-  const manifest = JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as { capabilities?: { refresh_policy?: TestRefreshPolicy } };
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  const manifest = entry.manifest as { capabilities?: { refresh_policy?: TestRefreshPolicy } };
   return manifest.capabilities?.refresh_policy ?? null;
 }
 

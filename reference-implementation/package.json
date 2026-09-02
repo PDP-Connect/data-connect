@@ -64,6 +64,7 @@
     "@pdpp/connector-protocol": "*",
     "@pdpp/display": "*",
     "@pdpp/mcp-server": "*",
+    "@pdpp/polyfill-connectors": "file:./vendor/pdpp-polyfill-connectors-0.0.1.tgz",
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",

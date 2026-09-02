@@ -124,8 +124,19 @@ test("reference streaming routes adapt package session APIs while owning the PDP
 
 test("run-target registry and connector handoff remain reference-owned host orchestration", () => {
   const registry = read("reference-implementation/server/streaming/run-target-registry.ts");
-  const handoff = read("packages/polyfill-connectors/src/browser-handoff.ts");
-  const registration = read("packages/polyfill-connectors/src/streaming-target-registration.ts");
+  // Read from the installed @pdpp/polyfill-connectors package (not the
+  // repo-root packages/polyfill-connectors/ vendoring-trick copy, which RI no
+  // longer imports): both source files' content is what these assertions
+  // check, and the package copy is the one actually reachable/loaded at
+  // runtime.
+  const handoff = readFileSync(
+    new URL("../../node_modules/@pdpp/polyfill-connectors/src/browser-handoff.ts", import.meta.url),
+    "utf8"
+  );
+  const registration = readFileSync(
+    new URL("../../node_modules/@pdpp/polyfill-connectors/src/streaming-target-registration.ts", import.meta.url),
+    "utf8"
+  );
 
   assert.doesNotMatch(registry, REGEXP_3);
   assert.doesNotMatch(handoff, REGEXP_4);

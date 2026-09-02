@@ -31,16 +31,11 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const POLYFILL_MANIFESTS_DIR = join(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
@@ -139,7 +134,11 @@ async function registerManifest(asUrl: string, manifest: Manifest): Promise<void
 }
 
 function loadManifest(filename: string): Manifest {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, filename), "utf8")) as Manifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === filename);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${filename}`);
+  }
+  return entry.manifest as Manifest;
 }
 
 async function seedRecords(

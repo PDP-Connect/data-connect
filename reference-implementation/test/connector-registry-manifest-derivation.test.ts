@@ -65,6 +65,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { seedableConnectorsFromManifests } from "../cli/commands/seed.ts";
 import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../connectors/seed/index.ts";
@@ -96,10 +97,8 @@ const trackedRegistry = {
 };
 
 const riRoot = fileURLToPath(new URL("..", import.meta.url));
-const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const generatorScript = join(riRoot, "scripts/generate-connector-registry.ts");
 const trackedRegistryPath = join(riRoot, "server/generated/connector-registry.generated.ts");
-const polyfillManifestsDir = join(repoRoot, "packages/polyfill-connectors/manifests");
 const OMISSION_PROBE_KEY_RE = /zzz-test-omission-probe/;
 
 test("connector-registry.generated.ts has not drifted from what regenerating from the manifests on disk would produce", () => {
@@ -123,18 +122,16 @@ test("connector-registry.generated.ts has not drifted from what regenerating fro
 });
 
 test("the generator throws (does not silently drop the claim) when a manifest declares capabilities.proven.local_collector=true with no matching LOCAL_COLLECTOR_DEFINITIONS entry", () => {
-  // Isolated scratch manifests dir, never the real
-  // packages/polyfill-connectors/manifests: seeded with a copy of every real
-  // polyfill manifest (so the generator's other derived sets stay realistic)
-  // plus the probe. Pointed at via PDPP_POLYFILL_MANIFESTS_DIR so a parallel
-  // test run or a killed process can never leave the probe behind in shared,
-  // live manifest state.
+  // Isolated scratch manifests dir, never @pdpp/polyfill-connectors's real
+  // shipped manifests: seeded with a copy of every real polyfill manifest (so
+  // the generator's other derived sets stay realistic) plus the probe.
+  // Pointed at via PDPP_POLYFILL_MANIFESTS_DIR so a parallel test run or a
+  // killed process can never leave the probe behind in shared, live manifest
+  // state.
   const scratchDir = mkdtempSync(join(tmpdir(), "connector-registry-omission-probe-"));
   try {
-    for (const file of readdirSync(polyfillManifestsDir)) {
-      if (file.endsWith(".json")) {
-        writeFileSync(join(scratchDir, file), readFileSync(join(polyfillManifestsDir, file)));
-      }
+    for (const { file, manifest } of readPolyfillManifests()) {
+      writeFileSync(join(scratchDir, file), JSON.stringify(manifest));
     }
 
     const probeConnectorKey = "zzz-test-omission-probe";

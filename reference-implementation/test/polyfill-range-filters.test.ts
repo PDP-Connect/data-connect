@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 
@@ -72,19 +70,24 @@ interface Manifest {
   [key: string]: unknown;
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..", "..");
-const POLYFILL_MANIFEST_DIR = join(REPO_ROOT, "packages/polyfill-connectors/manifests");
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 const SUPPORTED_RANGE_OPERATORS = new Set(["gte", "gt", "lte", "lt"]);
 const AGGREGATION_DECLARED_CONNECTORS = ["ynab", "chase", "usaa", "gmail", "slack"];
-const POLYFILL_MANIFEST_NAMES = readdirSync(POLYFILL_MANIFEST_DIR)
-  .filter((fileName) => fileName.endsWith(".json"))
-  .map((fileName) => fileName.replace(REGEXP_1, ""))
-  .sort();
+const POLYFILL_MANIFESTS_BY_NAME = new Map(
+  readPolyfillManifests().map((entry) => [entry.file.replace(REGEXP_1, ""), entry.manifest as Manifest])
+);
+const POLYFILL_MANIFEST_NAMES = [...POLYFILL_MANIFESTS_BY_NAME.keys()].sort();
 
 function readManifest(name: string): Manifest {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFEST_DIR, `${name}.json`), "utf8"));
+  const manifest = POLYFILL_MANIFESTS_BY_NAME.get(name);
+  if (!manifest) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  // Every caller gets its own object graph — several tests mutate the
+  // manifest they read (e.g. pushing an invalid group_by entry) to probe
+  // validation, and the shared cache above would otherwise leak that
+  // mutation into every later read of the same manifest.
+  return structuredClone(manifest);
 }
 
 function hasQueryRangeFilters(manifest: Manifest): boolean {

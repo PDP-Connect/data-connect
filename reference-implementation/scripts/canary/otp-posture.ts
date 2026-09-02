@@ -57,16 +57,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Repo-relative location of the connector manifests. Resolved from this
- * module's own URL so the harness works regardless of the caller's cwd.
+ * Location of the connector manifests: the installed `@pdpp/polyfill-connectors`
+ * package's own `manifests/` directory, resolved via the package's
+ * `./manifests` export so the harness never drifts from that package's
+ * on-disk layout.
  */
 const MANIFEST_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
+  dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
   "..",
-  "..",
-  "..",
-  "packages",
-  "polyfill-connectors",
   "manifests"
 );
 

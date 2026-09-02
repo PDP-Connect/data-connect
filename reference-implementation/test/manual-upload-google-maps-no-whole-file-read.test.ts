@@ -133,10 +133,12 @@ async function login(asUrl: string): Promise<string> {
 }
 
 async function registerConnector(asUrl: string, name: string): Promise<void> {
-  const { readFileSync } = await import("node:fs");
-  const manifest = JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  );
+  const { readPolyfillManifests } = await import("@pdpp/polyfill-connectors/manifests");
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  const manifest = entry.manifest;
   const resp = await fetch(`${asUrl}/connectors`, {
     body: JSON.stringify(manifest),
     headers: { "Content-Type": "application/json" },

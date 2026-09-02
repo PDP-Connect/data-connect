@@ -36,16 +36,11 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { initiateOwnerDeviceAuthorization } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REFERENCE_IMPL_DIR = join(__dirname, "..");
 
 const TEST_PASSWORD = "explore-vs-records-list-parity-owner-password";
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
@@ -213,8 +208,11 @@ interface ConnectorManifest {
 }
 
 function loadGmailManifest(): ConnectorManifest {
-  const path = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", "gmail.json");
-  return JSON.parse(readFileSync(path, "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for gmail.json");
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function registerConnector(asUrl: string, manifest: ConnectorManifest): Promise<void> {

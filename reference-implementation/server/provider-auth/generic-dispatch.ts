@@ -21,8 +21,8 @@ import type {
   DeploymentConfigResolver,
   ProviderAuthAdapter,
   ProviderAuthManifestLike,
-} from "../../../packages/polyfill-connectors/src/provider-auth-adapter.ts";
-import { resolveProviderAuthAdapter } from "../../../packages/polyfill-connectors/src/provider-auth-adapters.ts";
+} from "@pdpp/polyfill-connectors/provider-auth-adapter";
+import { resolveProviderAuthAdapter } from "@pdpp/polyfill-connectors/provider-auth-adapters";
 import type { ProviderAccount, ProviderAuthExchanger, ProviderAuthTokens } from "../routes/ref-provider-auth.ts";
 
 export class GenericProviderAuthDispatchError extends Error {

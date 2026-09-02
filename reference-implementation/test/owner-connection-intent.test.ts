@@ -38,6 +38,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
@@ -275,9 +276,11 @@ interface PackageManifest extends ConnectorManifestLike {
 }
 
 function loadPackageManifest(name: string): PackageManifest {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as PackageManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as PackageManifest;
 }
 
 function withExplicitTestSourceDeclaration(manifest: PackageManifest): PackageManifest {
@@ -592,12 +595,11 @@ test("owner-agent initiating Amazon gets browser runtime class plus static-secre
     // Amazon must be a registered connector for its manifest (and thus its
     // browser binding) to resolve. An operator with the Amazon connector
     // available is the motivating second-account case.
-    const manifest = JSON.parse(
-      (await import("node:fs")).readFileSync(
-        new URL("../../packages/polyfill-connectors/manifests/amazon.json", import.meta.url),
-        "utf8"
-      )
-    );
+    const amazonManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "amazon.json");
+    if (!amazonManifestEntry) {
+      throw new Error("no polyfill manifest found for amazon.json");
+    }
+    const manifest = amazonManifestEntry.manifest;
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },
@@ -778,12 +780,11 @@ test("owner-agent initiating a static-secret API connector gets a non-secret cap
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
     // gmail must be a registered connector for the manifest to resolve.
-    const manifest = JSON.parse(
-      (await import("node:fs")).readFileSync(
-        new URL("../../packages/polyfill-connectors/manifests/gmail.json", import.meta.url),
-        "utf8"
-      )
-    );
+    const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+    if (!gmailManifestEntry) {
+      throw new Error("no polyfill manifest found for gmail.json");
+    }
+    const manifest = gmailManifestEntry.manifest;
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },
@@ -1005,12 +1006,11 @@ test("owner-agent intent rejects display_name values over the contract length ca
 test("owner-agent intent rejects a client grant token with 403 and audits the failure", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     // Register codex so a client grant is well-formed against a real connector.
-    const manifest = JSON.parse(
-      (await import("node:fs")).readFileSync(
-        new URL("../../packages/polyfill-connectors/manifests/codex.json", import.meta.url),
-        "utf8"
-      )
-    );
+    const codexManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "codex.json");
+    if (!codexManifestEntry) {
+      throw new Error("no polyfill manifest found for codex.json");
+    }
+    const manifest = codexManifestEntry.manifest as PackageManifest;
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },

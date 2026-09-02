@@ -3,8 +3,17 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer } from "../server/index.ts";
+
+function readShippedPolyfillManifest(file: string): unknown {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${file}`);
+  }
+  return entry.manifest;
+}
 
 /**
  * Both Google-family connectors (Data Portability, Calendar, Contacts) must
@@ -72,14 +81,9 @@ test("both Google provider-auth adapters are simultaneously reachable through on
   })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
-    const readManifest = async (path: string) =>
-      JSON.parse(await (await import("node:fs/promises")).readFile(new URL(path, import.meta.url), "utf8"));
-
-    const dataPortabilityManifest = await readManifest(
-      "../../packages/polyfill-connectors/manifests/google_maps_data_portability.json"
-    );
-    const calendarManifest = await readManifest("../../packages/polyfill-connectors/manifests/google_calendar.json");
-    const contactsManifest = await readManifest("../../packages/polyfill-connectors/manifests/google_contacts.json");
+    const dataPortabilityManifest = readShippedPolyfillManifest("google_maps_data_portability.json");
+    const calendarManifest = readShippedPolyfillManifest("google_calendar.json");
+    const contactsManifest = readShippedPolyfillManifest("google_contacts.json");
 
     for (const manifest of [dataPortabilityManifest, calendarManifest, contactsManifest]) {
       // biome-ignore lint/performance/noAwaitInLoops: sequential registration over a fixed short list reads clearer than Promise.all here.
@@ -155,14 +159,7 @@ test("generic dispatcher is always mounted; an unconfigured Google-family connec
   })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
-    const calendarManifest = JSON.parse(
-      await (
-        await import("node:fs/promises")
-      ).readFile(
-        new URL("../../packages/polyfill-connectors/manifests/google_calendar.json", import.meta.url),
-        "utf8"
-      )
-    );
+    const calendarManifest = readShippedPolyfillManifest("google_calendar.json");
     await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(calendarManifest),
       headers: { "Content-Type": "application/json" },

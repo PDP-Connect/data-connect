@@ -110,7 +110,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const REFERENCE_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manifests");
 const SEED_CONNECTOR_PATH = join(REFERENCE_IMPL_DIR, "connectors", "seed", "index.ts");
-const POLYFILL_ROOT = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors");
+// Resolved from the installed `@pdpp/polyfill-connectors` package (never a
+// hardcoded relative repo path) so this reference never drifts from that
+// package's own on-disk layout.
+const POLYFILL_PACKAGE_SRC_DIR = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
+const POLYFILL_ROOT = join(POLYFILL_PACKAGE_SRC_DIR, "..");
 const POLYFILL_MANIFESTS_DIR = join(POLYFILL_ROOT, "manifests");
 const POLYFILL_CONNECTORS_DIR = join(POLYFILL_ROOT, "connectors");
 
@@ -1818,7 +1822,7 @@ async function fireNtfy(args: {
   log: ControllerLogger;
 }): Promise<void> {
   try {
-    const { notify } = await import("../../packages/polyfill-connectors/src/ntfy.ts");
+    const { notify } = await import("@pdpp/polyfill-connectors/ntfy");
     const { interaction, connectorDisplayName, runId } = args;
     const message = typeof interaction.message === "string" ? interaction.message : "";
     const webBaseUrl = resolveWebBaseUrl();

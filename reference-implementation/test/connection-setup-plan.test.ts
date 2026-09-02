@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import {
@@ -23,6 +24,15 @@ function manifest(
     runtime_requirements: { bindings },
     ...extra,
   };
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: matches the looseness of the JSON-import-attribute form this replaces.
+function readShippedPolyfillManifest(file: string): any {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${file}`);
+  }
+  return entry.manifest;
 }
 
 function staticSecretManifest(connectorId: string, credentialKind = "api_key"): ConnectorManifestLike {
@@ -355,11 +365,7 @@ test("setup planner distinguishes provider app readiness from owner authorizatio
 });
 
 test("setup planner classifies Google Maps Data Portability as deployment-blocked provider auth", async () => {
-  const googleMapsManifest = (
-    await import("../../packages/polyfill-connectors/manifests/google_maps_data_portability.json", {
-      with: { type: "json" },
-    })
-  ).default;
+  const googleMapsManifest = readShippedPolyfillManifest("google_maps_data_portability.json");
   const plan = buildConnectionSetupPlan({
     connectorKey: "google-maps-data-portability",
     manifest: googleMapsManifest as unknown as ConnectorManifestLike,
@@ -390,7 +396,7 @@ test("setup planner classifies Google Maps Data Portability as deployment-blocke
   );
   assert.equal(
     // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
-    googleMapsManifest.capabilities.auth.scopes.some((scope) => /gmail|userinfo|timeline/i.test(scope)),
+    googleMapsManifest.capabilities.auth.scopes.some((scope: string) => /gmail|userinfo|timeline/i.test(scope)),
     false
   );
 });
@@ -428,10 +434,7 @@ const EXPERIMENTAL_WAVE_0807_MANIFEST_FIXTURES = ["steam", "jellyfin", "apple_co
 
 test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) surface as experimental opt-in, not hidden", async () => {
   for (const connectorId of EXPERIMENTAL_WAVE_0807_MANIFEST_FIXTURES) {
-    const shippedManifest =
-      // biome-ignore lint/performance/noAwaitInLoops: sequential fixture loads over a fixed short list read clearer than Promise.all here.
-      (await import(`../../packages/polyfill-connectors/manifests/${connectorId}.json`, { with: { type: "json" } }))
-        .default;
+    const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
     const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest });
     assert.equal(plan.setupModality, "static_secret", `${connectorId}: setupModality`);
     assert.equal(plan.supportState, "experimental", `${connectorId}: supportState`);
@@ -448,9 +451,7 @@ test("iMessage is a supported local_collector_enroll connector, not proof-gated"
   // registered in SUPPORTED_LOCAL_COLLECTOR_CONNECTORS — the enroll path
   // must reflect that, not the older filesystem-shaped-but-unproven state.
   const connectorId = "imessage";
-  const shippedManifest = (
-    await import(`../../packages/polyfill-connectors/manifests/${connectorId}.json`, { with: { type: "json" } })
-  ).default;
+  const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
   const plan = buildConnectionSetupPlan({ connectorKey: connectorId, manifest: shippedManifest });
   assert.equal(plan.connectorModality, "local_collector", `${connectorId}: connectorModality`);
   assert.equal(plan.catalogDisposition, "local_collector_enroll", `${connectorId}: catalogDisposition`);
@@ -469,9 +470,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
   // gets before it ships in that bundle (see the synthetic-manifest test
   // above asserting that disposition directly).
   const connectorId = "google_takeout";
-  const shippedManifest = (
-    await import(`../../packages/polyfill-connectors/manifests/${connectorId}.json`, { with: { type: "json" } })
-  ).default;
+  const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
   const plan = buildConnectionSetupPlan({ connectorKey: "google-takeout", manifest: shippedManifest });
   assert.equal(plan.connectorModality, "local_collector");
   assert.equal(plan.catalogDisposition, "local_collector_enroll");
@@ -492,10 +491,7 @@ test("Apple Photos and Google Messages are supported local_collector_enroll conn
     ["google_messages", "google-messages"],
   ];
   for (const [connectorId, connectorKey] of cases) {
-    const shippedManifest =
-      // biome-ignore lint/performance/noAwaitInLoops: sequential fixture loads over a fixed short list read clearer than Promise.all here.
-      (await import(`../../packages/polyfill-connectors/manifests/${connectorId}.json`, { with: { type: "json" } }))
-        .default;
+    const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
     const plan = buildConnectionSetupPlan({ connectorKey, manifest: shippedManifest });
     assert.equal(plan.connectorModality, "local_collector", `${connectorId}: connectorModality`);
     assert.equal(plan.catalogDisposition, "local_collector_enroll", `${connectorId}: catalogDisposition`);
@@ -514,9 +510,7 @@ test("wave-0807 GroupMe manifest is a static-secret experimental connector, not 
   // become) a member of STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS, so it must
   // land on the unproven "experimental" branch, never the fully-supported
   // "static_secret_connect"/supported branch that live-proven connectors get.
-  const groupmeManifest = (
-    await import("../../packages/polyfill-connectors/manifests/groupme.json", { with: { type: "json" } })
-  ).default;
+  const groupmeManifest = readShippedPolyfillManifest("groupme.json");
   assert.equal(
     STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS.includes("groupme" as never),
     false,
@@ -533,10 +527,7 @@ test("wave-0807 GroupMe manifest is a static-secret experimental connector, not 
 
 test("wave-0807 Google Calendar/Contacts keep the deployment-app vs owner-account split untouched", async () => {
   for (const connectorId of ["google_calendar", "google_contacts"]) {
-    const shippedManifest =
-      // biome-ignore lint/performance/noAwaitInLoops: sequential fixture loads over a fixed short list read clearer than Promise.all here.
-      (await import(`../../packages/polyfill-connectors/manifests/${connectorId}.json`, { with: { type: "json" } }))
-        .default;
+    const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
     // Both halves state the deployment explicitly: readiness is measured
     // against the manifest's declared settings, so an empty environment is
     // what "no deployment config" means and the assertion cannot be flipped

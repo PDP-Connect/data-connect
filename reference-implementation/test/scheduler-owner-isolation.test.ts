@@ -21,7 +21,7 @@ import {
   isStaticSecretCaptureOptional,
   isStaticSecretConnector,
   type RecoveredStaticSecret,
-} from "../../packages/polyfill-connectors/src/static-secret-injection.ts";
+} from "@pdpp/polyfill-connectors/static-secret-injection";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { ConnectorSchedule, RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";

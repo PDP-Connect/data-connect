@@ -12,17 +12,13 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-06-01T00:00:00.000Z";
 
@@ -186,9 +182,11 @@ async function approveClientGrant(
 }
 
 function loadManifest(name: string): Record<string, unknown> {
-  return JSON.parse(
-    readFileSync(join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", `${name}.json`), "utf8")
-  ) as Record<string, unknown>;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 async function registerConnector(asUrl: string, manifest: Record<string, unknown>): Promise<Record<string, unknown>> {

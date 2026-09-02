@@ -32,8 +32,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
@@ -73,8 +73,12 @@ async function fetchJson(url: string | URL, opts: RequestInit = {}): Promise<Jso
   return { body: text ? JSON.parse(text) : null, status: resp.status };
 }
 
-async function readManifest(path: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
+function readShippedPolyfillManifest(file: string): Record<string, unknown> {
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === file);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${file}`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 // Mocks the token-exchange (POST .../token) and userinfo (GET .../userinfo)
@@ -152,8 +156,8 @@ test("terminal journey: configure Google app once -> add Calendar + Contacts -> 
   const asUrl = `http://localhost:${server.asPort}`;
 
   try {
-    const calendarManifest = await readManifest("../../packages/polyfill-connectors/manifests/google_calendar.json");
-    const contactsManifest = await readManifest("../../packages/polyfill-connectors/manifests/google_contacts.json");
+    const calendarManifest = readShippedPolyfillManifest("google_calendar.json");
+    const contactsManifest = readShippedPolyfillManifest("google_contacts.json");
     for (const manifest of [calendarManifest, contactsManifest]) {
       // biome-ignore lint/performance/noAwaitInLoops: sequential registration over a fixed short list reads clearer than Promise.all here.
       await fetch(`${asUrl}/connectors`, {

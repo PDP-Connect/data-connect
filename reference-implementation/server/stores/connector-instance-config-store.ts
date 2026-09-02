@@ -38,7 +38,7 @@
  * from this transaction.
  */
 
-import { resolveEnforcedOptionKind } from "../../../packages/polyfill-connectors/src/connector-config-option-kind-registry.ts";
+import { resolveEnforcedOptionKind } from "@pdpp/polyfill-connectors/connector-config-option-kind-registry";
 import { getMany, getOne, referenceQueries, writeTransaction } from "../../lib/db.ts";
 import { getDb } from "../db.ts";
 import { getStorageBackendKind, isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";

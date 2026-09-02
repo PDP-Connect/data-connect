@@ -8,7 +8,7 @@
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -21,7 +21,8 @@ import {
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
 } from "../vendor/cli/src/package-info.ts";
-import type { ProviderAuthManifestLike } from "../../packages/polyfill-connectors/src/provider-auth-adapter.ts";
+import type { ProviderAuthManifestLike } from "@pdpp/polyfill-connectors/provider-auth-adapter";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
@@ -1370,11 +1371,11 @@ function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
     return null;
   }
   try {
-    const raw = readFileSync(
-      new URL(`../../packages/polyfill-connectors/manifests/${entryName}`, import.meta.url),
-      "utf8"
-    );
-    const manifest = JSON.parse(raw);
+    const entry = readPolyfillManifests().find((candidate) => candidate.file === entryName);
+    if (!entry) {
+      throw new Error(`no polyfill manifest found for ${entryName}`);
+    }
+    const manifest = entry.manifest as Record<string, unknown>;
     return {
       ...manifest,
       connector_id: connectorKey,
@@ -2095,7 +2096,7 @@ function createRequestRecordRejectionStore() {
 let staticSecretInjectionModulePromise: Promise<Record<string, unknown>> | null = null;
 function loadStaticSecretInjectionHelpers() {
   if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("../../packages/polyfill-connectors/src/static-secret-injection.ts");
+    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
   }
   return staticSecretInjectionModulePromise;
 }
@@ -2110,8 +2111,8 @@ function loadStaticSecretInjectionHelpers() {
 // stays synchronous and tests inject a deterministic double instead.
 async function buildStaticSecretCredentialProber() {
   const [probe, transport, adapter] = await Promise.all([
-    import("../../packages/polyfill-connectors/src/credential-probe.ts"),
-    import("../../packages/polyfill-connectors/src/credential-probe-transport.ts"),
+    import("@pdpp/polyfill-connectors/credential-probe"),
+    import("@pdpp/polyfill-connectors/credential-probe-transport"),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return (adapter.createStaticSecretCredentialProber as unknown as (args: Record<string, unknown>) => unknown)({

@@ -62,11 +62,10 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
-const repoRoot = resolve(riRoot, "..");
 const targetPath = process.argv[2]
   ? resolve(process.argv[2])
   : resolve(riRoot, "server/generated/connector-registry.generated.ts");
@@ -86,16 +85,26 @@ interface ManifestLike {
 }
 
 // Polyfill-connector manifest enumeration/loading is connector-package
-// knowledge, not RI knowledge: this generator consumes the package's own
-// `readPolyfillManifests` export rather than walking
-// `packages/polyfill-connectors/manifests` itself. Loaded via a direct file
-// path (not the `@pdpp/polyfill-connectors/manifests` specifier) because
-// this script runs standalone via `node --experimental-strip-types`,
-// without workspace package resolution — matching the existing
-// `collector-registry.ts` import below.
-const { readPolyfillManifests } = (await import(
-  pathToFileURL(resolve(repoRoot, "packages/polyfill-connectors/src/manifest-registry.ts")).href
-)) as { readPolyfillManifests: () => { file: string; manifest: ManifestLike }[] };
+// knowledge, not RI knowledge: this generator mirrors the package's own
+// `readPolyfillManifests` export (same directory resolution, same
+// `PDPP_POLYFILL_MANIFESTS_DIR` override) rather than walking a hardcoded
+// repo-relative path. It cannot `import()` that export directly: this script
+// runs standalone via plain `node --experimental-strip-types`, which refuses
+// to type-strip `.ts` files under `node_modules` — so it resolves the
+// package's real on-disk manifests directory via `import.meta.resolve` (pure
+// path resolution, not module loading) instead.
+function readPolyfillManifests(): { file: string; manifest: ManifestLike }[] {
+  const packageSrcDir = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
+  const manifestsDir = process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..", "manifests");
+  const out: { file: string; manifest: ManifestLike }[] = [];
+  for (const file of readdirSync(manifestsDir)) {
+    if (!file.endsWith(".json")) {
+      continue;
+    }
+    out.push({ file, manifest: JSON.parse(readFileSync(resolve(manifestsDir, file), "utf8")) as ManifestLike });
+  }
+  return out;
+}
 
 /** Parses one reference-implementation manifest JSON file at `manifestPath`. */
 function readReferenceManifestFile(manifestPath: string): ManifestLike {
@@ -153,9 +162,23 @@ const nativeConnectorKeys = referenceManifests
 // own connector_id (bundle directory name) against its manifest's canonical
 // connector_key. An alias entry exists only where the two differ — this is
 // the connector package's own bundling convention, not RI-invented knowledge.
-const { LOCAL_COLLECTOR_DEFINITIONS } = (await import(
-  pathToFileURL(resolve(repoRoot, "packages/polyfill-connectors/src/collector-registry.ts")).href
-)) as { LOCAL_COLLECTOR_DEFINITIONS: readonly { connector_id: string }[] };
+//
+// KNOWN GAP: unlike the manifests above (plain JSON, read directly off disk),
+// `@pdpp/polyfill-connectors/collectors` is real executable TypeScript that
+// imports six connector modules — it cannot be re-derived from data the way
+// the manifests dir can, so it MUST be loaded via `import()`. This script
+// runs standalone via plain `node --experimental-strip-types`
+// (package.json's `generate:connector-registry` script and this test file's
+// drift check both invoke it exactly that way), and Node refuses to
+// type-strip `.ts` files under `node_modules` — so this `import()` throws
+// `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING` today. The path below is the
+// correct, real one now that this package is an installed dependency rather
+// than a local copy; making it LOAD requires this script's own invocation to
+// gain a TS loader (e.g. `node --import tsx`, matching the test runner's
+// invocation), which is a real but separate decision from the import path.
+const { LOCAL_COLLECTOR_DEFINITIONS } = (await import("@pdpp/polyfill-connectors/collectors")) as {
+  LOCAL_COLLECTOR_DEFINITIONS: readonly { connector_id: string }[];
+};
 
 const manifestByBundleSlug = new Map<string, ManifestLike>();
 for (const { manifest } of polyfillManifests) {

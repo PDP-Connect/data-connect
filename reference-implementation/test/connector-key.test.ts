@@ -16,6 +16,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import {
   canonicalConnectorKey,
@@ -31,10 +32,41 @@ import {
 } from "../server/connector-key.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const POLYFILL_MANIFESTS_DIR = resolve(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
 const REFERENCE_MANIFESTS_DIR = resolve(__dirname, "..", "fixtures", "seed-manifests");
 
 const REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
+
+interface ManifestFileEntry {
+  name: string;
+  manifest: Record<string, unknown>;
+}
+
+/** Every manifest under a real repo-relative directory (the reference-fixture
+ * manifests root), read and parsed. Malformed entries are skipped. */
+function readManifestsFromDir(dir: string): ManifestFileEntry[] {
+  const out: ManifestFileEntry[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) {
+      continue;
+    }
+    try {
+      out.push({ manifest: JSON.parse(readFileSync(join(dir, name), "utf8")), name });
+    } catch {
+      // Skip: not this function's job to validate manifest well-formedness.
+    }
+  }
+  return out;
+}
+
+/** Every manifest `@pdpp/polyfill-connectors` ships, in the same
+ * `{ name, manifest }` shape `readManifestsFromDir` produces for the
+ * reference-fixture root, so both sources compose identically below. */
+function readShippedPolyfillManifestEntries(): ManifestFileEntry[] {
+  return readPolyfillManifests().map((entry) => ({
+    manifest: entry.manifest as Record<string, unknown>,
+    name: entry.file,
+  }));
+}
 
 test("connectorKeyFromRegistryUrl returns the canonical slug for every first-party URL", () => {
   for (const key of firstPartyConnectorKeys()) {
@@ -122,14 +154,15 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
   // connector whose bundle id and manifest key differ without an alias here
   // reproduces the "no registered manifest declares a 'filesystem' or
   // 'browser' binding" 400 the google_takeout enroll smoke hit.
-  const { LOCAL_COLLECTOR_DEFINITIONS } = await import("../../packages/polyfill-connectors/src/collector-registry.ts");
+  const { LOCAL_COLLECTOR_DEFINITIONS } = await import("@pdpp/polyfill-connectors/collectors");
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-    const manifestPath = new URL(
-      `../../packages/polyfill-connectors/manifests/${definition.entry}.json`,
-      import.meta.url
+    const manifestEntry = readPolyfillManifests().find(
+      (candidate) => candidate.file === `${definition.entry}.json`
     );
-    const manifestText = readFileSync(fileURLToPath(manifestPath), "utf8");
-    const manifest = JSON.parse(manifestText) as { connector_key?: string; connector_id?: string };
+    if (!manifestEntry) {
+      throw new Error(`no polyfill manifest found for ${definition.entry}.json`);
+    }
+    const manifest = manifestEntry.manifest as { connector_key?: string; connector_id?: string };
     const manifestCanonicalKey = manifest.connector_key ?? canonicalConnectorKey(manifest.connector_id);
     const bundleIdCanonicalKey = canonicalConnectorKey(definition.connector_id);
     assert.ok(
@@ -252,19 +285,9 @@ test("canonicalConnectorKeyFromManifest returns null for unrecognized manifests"
 // (or removed) without updating `connector-key.js`, the test fails loudly
 // rather than silently dropping the new connector to `null`.
 
-function readShippedConnectorKeys(dir: string): Set<string> {
+function shippedConnectorKeysFromEntries(entries: ManifestFileEntry[]): Set<string> {
   const keys = new Set<string>();
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json")) {
-      continue;
-    }
-    const raw = readFileSync(join(dir, name), "utf8");
-    let manifest: Record<string, unknown>;
-    try {
-      manifest = JSON.parse(raw);
-    } catch {
-      continue;
-    }
+  for (const { manifest } of entries) {
     const explicitKey = typeof manifest.connector_key === "string" ? manifest.connector_key.trim() : "";
     if (explicitKey) {
       keys.add(explicitKey);
@@ -290,19 +313,9 @@ function readShippedConnectorKeys(dir: string): Set<string> {
   return keys;
 }
 
-function readRegistryBackedManifests(dir: string) {
+function registryBackedManifestsFromEntries(entries: ManifestFileEntry[]) {
   const manifests: { name: string; manifest: Record<string, unknown>; connectorId: string }[] = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json")) {
-      continue;
-    }
-    const raw = readFileSync(join(dir, name), "utf8");
-    let manifest: Record<string, unknown>;
-    try {
-      manifest = JSON.parse(raw);
-    } catch {
-      continue;
-    }
+  for (const { name, manifest } of entries) {
     const connectorId = typeof manifest.connector_id === "string" ? manifest.connector_id.trim() : "";
     if (!connectorId.startsWith(REGISTRY_PREFIX)) {
       continue;
@@ -313,12 +326,8 @@ function readRegistryBackedManifests(dir: string) {
 }
 
 test("shipped registry manifests use the canonical .dev origin", () => {
-  for (const dir of [POLYFILL_MANIFESTS_DIR, REFERENCE_MANIFESTS_DIR]) {
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith(".json")) {
-        continue;
-      }
-      const manifest = JSON.parse(readFileSync(join(dir, name), "utf8")) as { connector_id?: unknown };
+  for (const entries of [readShippedPolyfillManifestEntries(), readManifestsFromDir(REFERENCE_MANIFESTS_DIR)]) {
+    for (const { name, manifest } of entries) {
       const connectorId = typeof manifest.connector_id === "string" ? manifest.connector_id.trim() : "";
       if (connectorId.startsWith("https://registry.pdpp.")) {
         assert.ok(connectorId.startsWith(REGISTRY_PREFIX), `${name} must use ${REGISTRY_PREFIX}`);
@@ -328,8 +337,8 @@ test("shipped registry manifests use the canonical .dev origin", () => {
 });
 
 test("registry-backed first-party manifests declare connector_key and manifest_uri", () => {
-  for (const dir of [POLYFILL_MANIFESTS_DIR, REFERENCE_MANIFESTS_DIR]) {
-    for (const { name, manifest, connectorId } of readRegistryBackedManifests(dir)) {
+  for (const entries of [readShippedPolyfillManifestEntries(), readManifestsFromDir(REFERENCE_MANIFESTS_DIR)]) {
+    for (const { name, manifest, connectorId } of registryBackedManifestsFromEntries(entries)) {
       const key = connectorKeyFromRegistryUrl(connectorId);
       assert.ok(key, `${name} must use a known first-party registry URI`);
       assert.equal(manifest.connector_key, key, `${name} must declare canonical connector_key`);
@@ -339,7 +348,7 @@ test("registry-backed first-party manifests declare connector_key and manifest_u
 });
 
 test("allowlist covers every shipped polyfill-connectors manifest", () => {
-  const shipped = readShippedConnectorKeys(POLYFILL_MANIFESTS_DIR);
+  const shipped = shippedConnectorKeysFromEntries(readShippedPolyfillManifestEntries());
   const known = new Set([...firstPartyConnectorKeys(), ...nativeConnectorKeys()]);
   // biome-ignore lint/suspicious/useArraySortCompare: the test relies on the platform default lexical sort behavior.
   const missing = [...shipped].filter((key) => !known.has(key)).sort();
@@ -347,7 +356,7 @@ test("allowlist covers every shipped polyfill-connectors manifest", () => {
 });
 
 test("allowlist covers every shipped reference-implementation manifest", () => {
-  const shipped = readShippedConnectorKeys(REFERENCE_MANIFESTS_DIR);
+  const shipped = shippedConnectorKeysFromEntries(readManifestsFromDir(REFERENCE_MANIFESTS_DIR));
   const known = new Set([...firstPartyConnectorKeys(), ...nativeConnectorKeys()]);
   // biome-ignore lint/suspicious/useArraySortCompare: the test relies on the platform default lexical sort behavior.
   const missing = [...shipped].filter((key) => !known.has(key)).sort();

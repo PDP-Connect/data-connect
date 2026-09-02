@@ -10,10 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  credentialValidationMode,
-  hasCredentialProbe,
-} from "../../packages/polyfill-connectors/src/credential-probe.ts";
+import { credentialValidationMode, hasCredentialProbe } from "@pdpp/polyfill-connectors/credential-probe";
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import { buildConnectionSetupPlan } from "../server/connection-setup-plan.ts";
 

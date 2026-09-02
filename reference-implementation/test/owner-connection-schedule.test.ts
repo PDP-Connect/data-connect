@@ -39,6 +39,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { exec, referenceQueries } from "../lib/db.ts";
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
@@ -229,9 +230,11 @@ interface ReferenceManifest {
 }
 
 function loadPackageManifest(name: string): ReferenceManifest {
-  return JSON.parse(
-    readFileSync(join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests", `${name}.json`), "utf8")
-  );
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as ReferenceManifest;
 }
 
 // The reference-implementation's own spotify manifest declares no restrictive

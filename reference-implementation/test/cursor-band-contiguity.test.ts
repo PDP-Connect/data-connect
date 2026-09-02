@@ -25,18 +25,14 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import {
   CURSOR_BAND_SPECS,
   describeCursorBandViolation,
   evaluateCursorBand,
   findCursorBandSpec,
 } from "../runtime/cursor-band-contiguity.ts";
-
-const REPO_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 const BAND_SIZE_RE = /297/;
 const CEILING_RE = /323723/;
@@ -229,9 +225,11 @@ test("gmail's messages stream still declares the shape that opts it into this ch
   // The RI no longer names that stream, so the wiring is only real if the
   // manifest still declares it — this is the drift guard for that, and it
   // reads the manifest as DATA rather than importing connector code.
-  const manifest = JSON.parse(
-    readFileSync(join(REPO_ROOT, "packages/polyfill-connectors/manifests/gmail.json"), "utf8")
-  ) as { streams?: { cursor_shape?: unknown; name?: string }[] };
+  const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  if (!gmailManifestEntry) {
+    throw new Error("no polyfill manifest found for gmail.json");
+  }
+  const manifest = gmailManifestEntry.manifest as { streams?: { cursor_shape?: unknown; name?: string }[] };
   const messages = (manifest.streams ?? []).find((s) => s.name === "messages");
   assert.ok(messages, "gmail must still declare a messages stream");
   assert.equal(

@@ -20,7 +20,7 @@
  * before invoking.
  */
 
-import type { IsolatedBrowser } from "../../../packages/polyfill-connectors/src/browser-launch.ts";
+import type { IsolatedBrowser } from "@pdpp/polyfill-connectors/browser-launch";
 import { emitRemoteTelemetry } from "./remote-telemetry-registry.ts";
 import type { RunTargetRegistry } from "./run-target-registry.ts";
 
@@ -1034,8 +1034,8 @@ export function createPlayground(options?: PlaygroundFactoryOptions) {
     // Dynamic import: keeps patchright off the cold-start path for
     // production builds that never instantiate the playground. The two
     // imports follow the same conventions as the connector runtime.
-    const { acquireIsolatedBrowser } = await import("../../../packages/polyfill-connectors/src/browser-launch.ts");
-    const { resolveWsUrlForExactPage } = await import("../../../packages/polyfill-connectors/src/browser-handoff.ts");
+    const { acquireIsolatedBrowser } = await import("@pdpp/polyfill-connectors/browser-launch");
+    const { resolveWsUrlForExactPage } = await import("@pdpp/polyfill-connectors/browser-handoff");
 
     log("info", "playground_launching");
     const isolated = await acquireIsolatedBrowser({
@@ -1151,8 +1151,8 @@ export function createPlayground(options?: PlaygroundFactoryOptions) {
     const remoteCdpUrl = String(
       env.PDPP_STREAM_PLAYGROUND_NEKO_CDP_HTTP_URL || env.PDPP_NEKO_CDP_HTTP_URL || "http://neko:9223"
     ).trim();
-    const { acquireBrowserForConnector } = await import("../../../packages/polyfill-connectors/src/browser-launch.ts");
-    const { resolveWsUrlForExactPage } = await import("../../../packages/polyfill-connectors/src/browser-handoff.ts");
+    const { acquireBrowserForConnector } = await import("@pdpp/polyfill-connectors/browser-launch");
+    const { resolveWsUrlForExactPage } = await import("@pdpp/polyfill-connectors/browser-handoff");
 
     log("info", "playground_launching", { backend: "neko-remote-cdp", remoteCdpUrl });
     const isolated = await acquireBrowserForConnector({

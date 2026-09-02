@@ -14,21 +14,10 @@
  */
 
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { deriveRecommendedMode } from "../runtime/refresh-mode-derivation.ts";
 import { refreshPolicyContradictions } from "../server/refresh-policy-consistency.ts";
-
-const MANIFEST_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "packages",
-  "polyfill-connectors",
-  "manifests"
-);
 
 test("derivation: postures with no per-run gesture derive automatic", () => {
   assert.equal(deriveRecommendedMode({ interaction_posture: "none" }), "automatic");
@@ -170,17 +159,10 @@ interface ShippedManifest {
   readonly connector_id?: unknown;
 }
 
-async function readShippedPolicies(): Promise<ReadonlyArray<{ file: string; policy: Record<string, unknown> }>> {
-  const entries = await readdir(MANIFEST_DIR);
-  const files = entries.filter((f) => f.endsWith(".json")).sort();
-  const parsed = await Promise.all(
-    files.map(async (file) => {
-      const raw = await readFile(join(MANIFEST_DIR, file), "utf8");
-      return { file, manifest: JSON.parse(raw) as ShippedManifest };
-    })
-  );
+function readShippedPolicies(): ReadonlyArray<{ file: string; policy: Record<string, unknown> }> {
   const out: Array<{ file: string; policy: Record<string, unknown> }> = [];
-  for (const { file, manifest } of parsed) {
+  for (const { file, manifest: rawManifest } of readPolyfillManifests()) {
+    const manifest = rawManifest as ShippedManifest;
     const policy = manifest.capabilities?.refresh_policy;
     if (policy && typeof policy === "object") {
       out.push({ file, policy });

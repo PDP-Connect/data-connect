@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { getDb } from "../server/db.ts";
@@ -126,9 +127,11 @@ async function fetchJson(url: string | URL, opts: RequestInit = {}): Promise<Jso
 }
 
 function loadManifest(name: string): unknown {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  );
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest;
 }
 
 async function registerConnector(asUrl: string, name: string): Promise<void> {

@@ -24,7 +24,7 @@ import {
   type CoverageRecord,
   LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR,
   parseCoverageDiagnosticsStateSnapshot,
-} from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+} from "@pdpp/polyfill-connectors/local-source-inventory";
 import { COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
 import { deriveLocalCoverageAxis, projectCollectionReport } from "../server/ref-control.ts";
 

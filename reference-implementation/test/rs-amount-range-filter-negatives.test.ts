@@ -2,16 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer } from "../server/index.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..", "..");
-const POLYFILL_MANIFEST_DIR = join(REPO_ROOT, "packages/polyfill-connectors/manifests");
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
 type HarnessServer = Awaited<ReturnType<typeof startServer>>;
@@ -54,7 +49,11 @@ interface HarnessUrls {
 }
 
 function readManifest(name: string): { connector_id: string; [key: string]: unknown } {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFEST_DIR, `${name}.json`), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as { connector_id: string; [key: string]: unknown };
 }
 
 async function closeServer(server: HarnessServer): Promise<void> {

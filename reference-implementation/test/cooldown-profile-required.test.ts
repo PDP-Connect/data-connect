@@ -38,6 +38,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import {
   assertCooldownProfile,
   computeConnectionSourcePressureCooldown,
@@ -53,11 +54,12 @@ const TOP_LEVEL_REGEX_2 = /\bcomputeSourcePressureCooldown\b/;
 const TOP_LEVEL_REGEX_3 = /\bcomputeConnectionSourcePressureCooldown\b/;
 const TOP_LEVEL_REGEX_4 = /\.(ts|js)$/;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFESTS_DIR = join(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
-
 function loadRawManifest(name: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, `${name}.json`), "utf8")) as Record<string, unknown>;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as Record<string, unknown>;
 }
 
 function withTempDb(fn: () => Promise<void>) {

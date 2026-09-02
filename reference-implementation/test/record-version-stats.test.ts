@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -80,31 +81,30 @@ async function withReviewedCompactionResidueFixture<T>(fn: () => T | Promise<T>)
 // connectors' shipped manifests declare, without requiring a DB seed per
 // connector under test.
 //
-// packages/polyfill-connectors/manifests/ is checked FIRST: it is the real
-// first-party manifest source registerConnector()/polyfill-manifest-
-// reconcile.ts registers into the DB catalog at runtime (see
-// defaultPolyfillManifestsDir in polyfill-manifest-reconcile.ts), so it is
-// the one production getConnectorManifest actually resolves for a real
+// @pdpp/polyfill-connectors's shipped manifests are checked FIRST: that
+// package is the real first-party manifest source registerConnector()/
+// polyfill-manifest-reconcile.ts registers into the DB catalog at runtime
+// (see defaultPolyfillManifestsDir in polyfill-manifest-reconcile.ts), so it
+// is the one production getConnectorManifest actually resolves for a real
 // connection. reference-implementation/fixtures/seed-manifests/ is a SEPARATE, older
 // "reference fixture" set used only by `pdpp seed`'s demo connectors
 // (defaultReferenceFixturesDir) and must not shadow the real manifest here.
-const MANIFEST_ROOTS_FOR_TEST = [
-  fileURLToPath(new URL("../../packages/polyfill-connectors/manifests", import.meta.url)),
-  fileURLToPath(new URL("../fixtures/seed-manifests", import.meta.url)),
-];
+const REFERENCE_FIXTURE_MANIFESTS_DIR = fileURLToPath(new URL("../fixtures/seed-manifests", import.meta.url));
 
 // biome-ignore lint/suspicious/useAwait: localized test double preserves the real resolver's async contract.
 async function manifestBackedCompactionClassResolver(connectorId: unknown): Promise<Record<string, unknown> | null> {
   if (typeof connectorId !== "string" || !connectorId) {
     return null;
   }
-  for (const root of MANIFEST_ROOTS_FOR_TEST) {
-    const candidatePath = join(root, `${connectorId.replace(/-/g, "_")}.json`);
-    try {
-      return JSON.parse(readFileSync(candidatePath, "utf8"));
-    } catch {
-      // Not this root / not this filename convention; try the next root.
-    }
+  const entryName = `${connectorId.replace(/-/g, "_")}.json`;
+  const polyfillEntry = readPolyfillManifests().find((candidate) => candidate.file === entryName);
+  if (polyfillEntry) {
+    return polyfillEntry.manifest as Record<string, unknown>;
+  }
+  try {
+    return JSON.parse(readFileSync(join(REFERENCE_FIXTURE_MANIFESTS_DIR, entryName), "utf8"));
+  } catch {
+    // Not this filename convention in the fixture root either.
   }
   return null;
 }

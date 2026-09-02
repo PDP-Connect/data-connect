@@ -15,11 +15,8 @@
  */
 
 import { stat } from "node:fs/promises";
-import type {
-  CredentialProbeContext,
-  CredentialProbeTransport,
-} from "../../packages/polyfill-connectors/src/credential-probe.ts";
-import type { RecoveredStaticSecret } from "../../packages/polyfill-connectors/src/static-secret-injection.ts";
+import type { CredentialProbeContext, CredentialProbeTransport } from "@pdpp/polyfill-connectors/credential-probe";
+import type { RecoveredStaticSecret } from "@pdpp/polyfill-connectors/static-secret-injection";
 import { resolveProviderAuthRunEnv } from "./stores/provider-auth-run-credentials.ts";
 import { resolveStaticSecretRunEnv, type StaticSecretCredentialStore } from "./stores/static-secret-run-credentials.ts";
 
@@ -72,11 +69,11 @@ function isManualUploadBinding(value: unknown): value is ManualUploadBinding {
 // this mirrors the controller's `await import("../../packages/...")` idiom and
 // caches the resolved module after the first run.
 let staticSecretInjectionModulePromise: Promise<
-  typeof import("../../packages/polyfill-connectors/src/static-secret-injection.ts")
+  typeof import("@pdpp/polyfill-connectors/static-secret-injection")
 > | null = null;
 export function loadStaticSecretInjectionHelpers() {
   if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("../../packages/polyfill-connectors/src/static-secret-injection.ts");
+    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
   }
   return staticSecretInjectionModulePromise;
 }
@@ -91,8 +88,8 @@ export function loadStaticSecretInjectionHelpers() {
 // stays synchronous and tests inject a deterministic double instead.
 export async function buildStaticSecretCredentialProber() {
   const [probe, transportModule, adapter] = await Promise.all([
-    import("../../packages/polyfill-connectors/src/credential-probe.ts"),
-    import("../../packages/polyfill-connectors/src/credential-probe-transport.ts"),
+    import("@pdpp/polyfill-connectors/credential-probe"),
+    import("@pdpp/polyfill-connectors/credential-probe-transport"),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return adapter.createStaticSecretCredentialProber({

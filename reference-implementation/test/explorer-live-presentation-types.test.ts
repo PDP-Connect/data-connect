@@ -33,9 +33,9 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer as startServerUntyped } from "../server/index.ts";
 
@@ -84,13 +84,11 @@ interface PilotSpec {
   untypedField: string;
 }
 
-const __dir = dirname(fileURLToPath(import.meta.url));
-// Resolve the first-party manifest directory. Defaults to the workspace's
-// `packages/polyfill-connectors/manifests`; an override lets the suite run
-// against a specific checkout's manifests when the test host's node_modules
+// Resolve the first-party manifests. Defaults to the manifests
+// `@pdpp/polyfill-connectors` ships; an override lets the suite run against a
+// specific checkout's manifests directory when the test host's node_modules
 // live in a different worktree (the manifests are plain JSON read at runtime).
-const MANIFESTS_DIR =
-  process.env.PDPP_TEST_MANIFESTS_DIR || join(__dir, "../../packages/polyfill-connectors/manifests");
+const TEST_MANIFESTS_DIR_OVERRIDE = process.env.PDPP_TEST_MANIFESTS_DIR;
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
@@ -159,7 +157,14 @@ function classifyByDeclaredTypes(typesByField: Record<string, string>): string |
 // ─── HTTP harness (mirrors rs-streams-field-declared-type.test.js) ───────────
 
 function loadManifest(name: string): ConnectorManifest {
-  return JSON.parse(readFileSync(join(MANIFESTS_DIR, name), "utf8")) as ConnectorManifest;
+  if (TEST_MANIFESTS_DIR_OVERRIDE) {
+    return JSON.parse(readFileSync(join(TEST_MANIFESTS_DIR_OVERRIDE, name), "utf8")) as ConnectorManifest;
+  }
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === name);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}`);
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<{ status: number; body: unknown }> {

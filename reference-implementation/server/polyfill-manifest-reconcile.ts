@@ -65,13 +65,14 @@ const deleteAllRecordsForConnectorTyped: DeleteAllRecordsForConnector =
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Resolve the shipped polyfill-connectors manifests directory relative
- * to this file's location. Kept explicit so the reference doesn't
- * wander into arbitrary user directories.
+ * Resolve the shipped polyfill-connectors manifests directory: the
+ * `@pdpp/polyfill-connectors` package's own `manifests/` directory,
+ * resolved via the package's `./manifests` export so this reference never
+ * hardcodes (or drifts from) that package's on-disk layout.
  */
 export function defaultPolyfillManifestsDir(): string {
-  // server/polyfill-manifest-reconcile.ts → ../../packages/polyfill-connectors/manifests
-  return resolve(__dirname, "..", "..", "packages", "polyfill-connectors", "manifests");
+  const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
+  return join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
 }
 
 /**

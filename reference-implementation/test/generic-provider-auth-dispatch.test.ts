@@ -18,10 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  type ProviderAuthAdapter,
-  registerProviderAuthAdapter,
-} from "../../packages/polyfill-connectors/src/provider-auth-adapter.ts";
+import { type ProviderAuthAdapter, registerProviderAuthAdapter } from "@pdpp/polyfill-connectors/provider-auth-adapter";
 import { createGenericProviderAuthDispatch } from "../server/provider-auth/generic-dispatch.ts";
 
 const TEST_KIND = "generic_dispatch_test_kind__unit_only";

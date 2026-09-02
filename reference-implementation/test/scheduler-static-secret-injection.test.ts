@@ -41,14 +41,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { configuredBrowserChannel } from "../../packages/polyfill-connectors/src/browser-launch.ts";
-import { resolveBrowserRuntimeVisibility } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { isRunningInContainer } from "../../packages/polyfill-connectors/src/runtime-environment.ts";
+import { configuredBrowserChannel } from "@pdpp/polyfill-connectors/browser-launch";
+import { resolveBrowserRuntimeVisibility } from "@pdpp/polyfill-connectors/connector-runtime";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { isRunningInContainer } from "@pdpp/polyfill-connectors/runtime-environment";
 import {
   buildConnectionScopedSecretEnv,
   type RecoveredStaticSecret,
   STATIC_SECRET_CONNECTOR_REGISTRY,
-} from "../../packages/polyfill-connectors/src/static-secret-injection.ts";
+} from "@pdpp/polyfill-connectors/static-secret-injection";
 import { getRunTerminalEvent } from "../lib/spine.ts";
 import {
   type ConnectorConnectionEnvironment,
@@ -676,15 +677,20 @@ test("scheduled runs inject store credentials env-absent for every static-secret
 
 test("startServer controller and scheduler-manager pass operator policy into spawned connector children", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-prod-env-policy-"));
-  const providerManifest = JSON.parse(
-    readFileSync(
-      new URL("../../packages/polyfill-connectors/manifests/google_maps_data_portability.json", import.meta.url),
-      "utf8"
-    )
+  const providerManifestEntry = readPolyfillManifests().find(
+    (candidate) => candidate.file === "google_maps_data_portability.json"
   );
-  const manualManifest = JSON.parse(
-    readFileSync(new URL("../../packages/polyfill-connectors/manifests/whatsapp.json", import.meta.url), "utf8")
-  );
+  if (!providerManifestEntry) {
+    throw new Error("no polyfill manifest found for google_maps_data_portability.json");
+  }
+  // biome-ignore lint/suspicious/noExplicitAny: matches the looseness of the JSON.parse(...) form this replaces.
+  const providerManifest = providerManifestEntry.manifest as any;
+  const manualManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "whatsapp.json");
+  if (!manualManifestEntry) {
+    throw new Error("no polyfill manifest found for whatsapp.json");
+  }
+  // biome-ignore lint/suspicious/noExplicitAny: matches the looseness of the JSON.parse(...) form this replaces.
+  const manualManifest = manualManifestEntry.manifest as any;
   const nestedManifest = minimalNestedAuthManifest("nested-auth-policy-test");
   const observedNames = [
     "GOOGLE_DATAPORTABILITY_CLIENT_ID",

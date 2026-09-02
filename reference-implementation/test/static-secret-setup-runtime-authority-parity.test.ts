@@ -19,21 +19,28 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import {
   type ConnectorManifestLike,
   isStaticSecretConnector as isStaticSecretConnectorForSetup,
 } from "../server/connection-setup-plan.ts";
 
-const polyfillManifestsDir = new URL("../../packages/polyfill-connectors/manifests", import.meta.url).pathname;
 const LABEL_DIAGNOSTIC = /label/i;
 const ENV_DIAGNOSTIC = /env/i;
 
-function readManifest(path: string): ConnectorManifestLike {
-  return JSON.parse(readFileSync(path, "utf8")) as ConnectorManifestLike;
+/** Writes every manifest `@pdpp/polyfill-connectors` ships into `scratchDir`,
+ * so a test can seed a scratch manifest directory (for
+ * `PDPP_POLYFILL_MANIFESTS_DIR`-overridden regeneration) that starts from the
+ * real shipped set. */
+function seedScratchDirWithShippedManifests(scratchDir: string): void {
+  for (const entry of readPolyfillManifests()) {
+    writeFileSync(join(scratchDir, entry.file), JSON.stringify(entry.manifest));
+  }
 }
 
 function connectorKeyOf(manifest: ConnectorManifestLike): string | null {
@@ -42,14 +49,14 @@ function connectorKeyOf(manifest: ConnectorManifestLike): string | null {
 
 test("every shipped manifest: setup's isStaticSecretConnector and runtime injection's isStaticSecretConnector agree", async () => {
   const { isStaticSecretConnector: isStaticSecretConnectorForInjection } = await import(
-    "../../packages/polyfill-connectors/src/static-secret-injection.ts"
+    "@pdpp/polyfill-connectors/static-secret-injection"
   );
-  const files = readdirSync(polyfillManifestsDir).filter((file) => file.endsWith(".json"));
-  assert.ok(files.length > 0, "expected at least one shipped connector manifest");
+  const entries = readPolyfillManifests();
+  assert.ok(entries.length > 0, "expected at least one shipped connector manifest");
 
   const disagreements: string[] = [];
-  for (const file of files) {
-    const manifest = readManifest(join(polyfillManifestsDir, file));
+  for (const entry of entries) {
+    const manifest = entry.manifest as ConnectorManifestLike;
     const connectorKey = connectorKeyOf(manifest);
     if (!connectorKey) {
       continue;
@@ -70,9 +77,13 @@ test("every shipped manifest: setup's isStaticSecretConnector and runtime inject
 
 test("venmo specifically: setup and runtime agree it is a static-secret connector (regression for the fixed gap)", async () => {
   const { isStaticSecretConnector: isStaticSecretConnectorForInjection } = await import(
-    "../../packages/polyfill-connectors/src/static-secret-injection.ts"
+    "@pdpp/polyfill-connectors/static-secret-injection"
   );
-  const manifest = readManifest(join(polyfillManifestsDir, "venmo.json"));
+  const venmoEntry = readPolyfillManifests().find((candidate) => candidate.file === "venmo.json");
+  if (!venmoEntry) {
+    throw new Error("no polyfill manifest found for venmo.json");
+  }
+  const manifest = venmoEntry.manifest as ConnectorManifestLike;
   assert.equal(isStaticSecretConnectorForSetup("venmo", manifest), true);
   assert.equal(isStaticSecretConnectorForInjection("venmo"), true);
 });
@@ -81,11 +92,7 @@ test("password-without-secret probe: setup and runtime agree it is static-secret
   const scratchDir = mkdtempSync(join(tmpdir(), "static-secret-authority-parity-pwtype-"));
   const probeKey = "zzz-test-authority-parity-pwtype";
   try {
-    for (const file of readdirSync(polyfillManifestsDir)) {
-      if (file.endsWith(".json")) {
-        writeFileSync(join(scratchDir, file), readFileSync(join(polyfillManifestsDir, file)));
-      }
-    }
+    seedScratchDirWithShippedManifests(scratchDir);
     // No explicit secret:true — only type:"password". Before the shared
     // normalizer, setup's normalizeStaticSecretFieldType treated this as
     // secret while the generator's normalizeField (secret === true only) did
@@ -116,7 +123,19 @@ test("password-without-secret probe: setup and runtime agree it is static-secret
     );
 
     const { execFileSync } = await import("node:child_process");
-    const packageDir = new URL("../../packages/polyfill-connectors", import.meta.url).pathname;
+    // Resolved from the installed @pdpp/polyfill-connectors package (never a
+    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
+    // scripts/generate-static-secret-registry.ts via plain
+    // `node --experimental-strip-types`, and that script now lives under
+    // node_modules — Node refuses to type-strip a `.ts` file there
+    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
+    // documented in scripts/generate-connector-registry.ts. Fixing it
+    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
+    // separate decision from the import path.
+    const packageDir = join(
+      dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+      ".."
+    );
     const outPath = join(scratchDir, "static-secret-registry.pwtype-probe.generated.ts");
     execFileSync(
       "node",
@@ -138,11 +157,7 @@ test("missing-label probe: a secret field with no label fails manifest generatio
   const scratchDir = mkdtempSync(join(tmpdir(), "static-secret-authority-parity-nolabel-"));
   const probeKey = "zzz-test-authority-parity-nolabel";
   try {
-    for (const file of readdirSync(polyfillManifestsDir)) {
-      if (file.endsWith(".json")) {
-        writeFileSync(join(scratchDir, file), readFileSync(join(polyfillManifestsDir, file)));
-      }
-    }
+    seedScratchDirWithShippedManifests(scratchDir);
     // Before the shared normalizer, setup silently dropped a label-less
     // secret field (returning null / not-static-secret) while the generator
     // kept it (no label requirement at all) — runtime would inject a
@@ -171,7 +186,19 @@ test("missing-label probe: a secret field with no label fails manifest generatio
     );
 
     const { execFileSync } = await import("node:child_process");
-    const packageDir = new URL("../../packages/polyfill-connectors", import.meta.url).pathname;
+    // Resolved from the installed @pdpp/polyfill-connectors package (never a
+    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
+    // scripts/generate-static-secret-registry.ts via plain
+    // `node --experimental-strip-types`, and that script now lives under
+    // node_modules — Node refuses to type-strip a `.ts` file there
+    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
+    // documented in scripts/generate-connector-registry.ts. Fixing it
+    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
+    // separate decision from the import path.
+    const packageDir = join(
+      dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+      ".."
+    );
     const outPath = join(scratchDir, "static-secret-registry.nolabel-probe.generated.ts");
     assert.throws(
       () =>
@@ -193,11 +220,7 @@ test("empty-env probe: a secret field with zero env aliases fails manifest gener
   const scratchDir = mkdtempSync(join(tmpdir(), "static-secret-authority-parity-emptyenv-"));
   const probeKey = "zzz-test-authority-parity-emptyenv";
   try {
-    for (const file of readdirSync(polyfillManifestsDir)) {
-      if (file.endsWith(".json")) {
-        writeFileSync(join(scratchDir, file), readFileSync(join(polyfillManifestsDir, file)));
-      }
-    }
+    seedScratchDirWithShippedManifests(scratchDir);
     const probeManifest = {
       connector_id: `https://registry.pdpp.dev/connectors/${probeKey}`,
       connector_key: probeKey,
@@ -221,7 +244,19 @@ test("empty-env probe: a secret field with zero env aliases fails manifest gener
     );
 
     const { execFileSync } = await import("node:child_process");
-    const packageDir = new URL("../../packages/polyfill-connectors", import.meta.url).pathname;
+    // Resolved from the installed @pdpp/polyfill-connectors package (never a
+    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
+    // scripts/generate-static-secret-registry.ts via plain
+    // `node --experimental-strip-types`, and that script now lives under
+    // node_modules — Node refuses to type-strip a `.ts` file there
+    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
+    // documented in scripts/generate-connector-registry.ts. Fixing it
+    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
+    // separate decision from the import path.
+    const packageDir = join(
+      dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+      ".."
+    );
     const outPath = join(scratchDir, "static-secret-registry.emptyenv-probe.generated.ts");
     assert.throws(
       () =>
@@ -243,11 +278,7 @@ test("fail-before counterweight: a synthetic new static-secret manifest is recog
   const scratchDir = mkdtempSync(join(tmpdir(), "static-secret-authority-parity-probe-"));
   const probeKey = "zzz-test-authority-parity-probe";
   try {
-    for (const file of readdirSync(polyfillManifestsDir)) {
-      if (file.endsWith(".json")) {
-        writeFileSync(join(scratchDir, file), readFileSync(join(polyfillManifestsDir, file)));
-      }
-    }
+    seedScratchDirWithShippedManifests(scratchDir);
     const probeManifest: ConnectorManifestLike = {
       connector_id: `https://registry.pdpp.dev/connectors/${probeKey}`,
       connector_key: probeKey,
@@ -281,7 +312,19 @@ test("fail-before counterweight: a synthetic new static-secret manifest is recog
     // authority is the manifest, not a hand-maintained list this test would
     // otherwise have to remember to update too.
     const { execFileSync } = await import("node:child_process");
-    const packageDir = new URL("../../packages/polyfill-connectors", import.meta.url).pathname;
+    // Resolved from the installed @pdpp/polyfill-connectors package (never a
+    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
+    // scripts/generate-static-secret-registry.ts via plain
+    // `node --experimental-strip-types`, and that script now lives under
+    // node_modules — Node refuses to type-strip a `.ts` file there
+    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
+    // documented in scripts/generate-connector-registry.ts. Fixing it
+    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
+    // separate decision from the import path.
+    const packageDir = join(
+      dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
+      ".."
+    );
     const outPath = join(scratchDir, "static-secret-registry.probe.generated.ts");
     execFileSync(
       "node",

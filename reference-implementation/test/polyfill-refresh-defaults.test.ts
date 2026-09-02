@@ -6,8 +6,7 @@
  * in `openspec/changes/add-connector-refresh-policy-controls/design-notes/
  * 2026-04-26-first-party-refresh-defaults.md`.
  *
- * Shape rules for every manifest under
- * `packages/polyfill-connectors/manifests/`:
+ * Shape rules for every manifest `@pdpp/polyfill-connectors` ships:
  *
  *   1. `capabilities.refresh_policy` is present and validator-clean.
  *   2. `recommended_mode` is one of `automatic` or `manual`.
@@ -30,10 +29,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 const TOP_LEVEL_REGEX_1 = /\.json$/;
 
@@ -57,17 +54,21 @@ interface Manifest {
   [key: string]: unknown;
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..", "..");
-const POLYFILL_MANIFEST_DIR = join(REPO_ROOT, "packages/polyfill-connectors/manifests");
-
-const POLYFILL_MANIFEST_NAMES = readdirSync(POLYFILL_MANIFEST_DIR)
-  .filter((fileName) => fileName.endsWith(".json"))
-  .map((fileName) => fileName.replace(TOP_LEVEL_REGEX_1, ""))
-  .sort();
+const POLYFILL_MANIFESTS_BY_NAME = new Map(
+  readPolyfillManifests().map((entry) => [entry.file.replace(TOP_LEVEL_REGEX_1, ""), entry.manifest as Manifest])
+);
+const POLYFILL_MANIFEST_NAMES = [...POLYFILL_MANIFESTS_BY_NAME.keys()].sort();
 
 function readManifest(name: string): Manifest {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFEST_DIR, `${name}.json`), "utf8"));
+  const manifest = POLYFILL_MANIFESTS_BY_NAME.get(name);
+  if (!manifest) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  // Every caller gets its own object graph, matching the old readFileSync +
+  // JSON.parse-per-call behavior this replaced (the cache above is shared
+  // module state; a caller that mutates its result must not corrupt later
+  // reads of the same manifest).
+  return structuredClone(manifest);
 }
 
 const RECOMMENDED_MODES = new Set(["automatic", "manual"]);
@@ -76,7 +77,7 @@ const KNOWN_POSTURES = new Set(["none", "credentials", "otp_likely", "manual_act
 test("every first-party manifest declares capabilities.refresh_policy", () => {
   assert.ok(
     POLYFILL_MANIFEST_NAMES.length > 0,
-    "expected at least one polyfill manifest under packages/polyfill-connectors/manifests"
+    "expected at least one polyfill manifest from @pdpp/polyfill-connectors"
   );
   for (const name of POLYFILL_MANIFEST_NAMES) {
     const manifest = readManifest(name);

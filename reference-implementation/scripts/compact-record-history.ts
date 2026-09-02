@@ -112,6 +112,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
@@ -128,12 +129,13 @@ const { Pool } = pg;
  * fact written into `.ts` source, just reached via a different seam — see
  * `reference-implementation/test/ri-zero-connector-knowledge-conformance.test.ts`).
  *
- * This script reads every manifest under both shipped manifest roots
- * (`packages/polyfill-connectors/manifests/`, `reference-implementation/
- * manifests/` — mirroring `scripts/generate-connector-registry.ts`'s own
- * static, load-time enumeration of the same two roots, the sanctioned
- * pattern for RI tooling that needs the full manifest set rather than one
- * connector at a time via the runtime installed-connector catalog) and
+ * This script reads every manifest under both shipped manifest sets
+ * (`@pdpp/polyfill-connectors`'s `readPolyfillManifests()`,
+ * `reference-implementation/manifests/` — mirroring
+ * `scripts/generate-connector-registry.ts`'s own enumeration of the same two
+ * sets, the sanctioned pattern for RI tooling that needs the full manifest
+ * set rather than one connector at a time via the runtime installed-connector
+ * catalog) and
  * builds `COMPACTION_POLICIES` GENERICALLY from whichever streams declare a
  * `compaction_fingerprint` field — this script contains no connector-name
  * branch anywhere. `compaction_fingerprint.exclude_keys` (and the optional
@@ -168,7 +170,6 @@ interface ManifestLike {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
-const repoRoot = resolve(riRoot, "..");
 
 const REGISTRY_ID_PREFIX = "https://registry.pdpp.dev/connectors/";
 
@@ -182,38 +183,20 @@ function connectorKeyFromManifest(manifest: ManifestLike): string | null {
   return null;
 }
 
-/** Every `*.json` manifest directly under `packages/polyfill-connectors/
- * manifests/`, parsed. Malformed/non-JSON entries are skipped (this mirrors
- * the scanner's own manifest-derivation posture — a broken manifest simply
- * contributes no policy, it does not crash the tool). One function per
- * manifest root (not a shared parameterized/looped helper), each with its
- * OWN uniquely-named local directory constant (`polyfillConnectorsManifestsDir`,
- * not a shared `dir` — the zero-connector-knowledge scanner's bounded
- * resolver treats a name bound to more than one syntactically distinct
- * initializer ANYWHERE in the file as ambiguous and drops it, so two
- * same-named `const dir = ...` in sibling functions would make BOTH
- * unresolvable even though each is independently a compile-time-fixed
- * sanctioned root) so the resolver can statically prove this function's own
- * `readFileSync` call resolves inside the sanctioned manifest root —
- * matching `scripts/generate-connector-registry.ts`'s own
- * `readReferenceManifests` shape. */
+/** Every manifest the `@pdpp/polyfill-connectors` package ships, parsed. This
+ * package owns that manifest set — this reference-implementation tool must
+ * not walk its `manifests/` directory itself, so it goes through the
+ * package's own `readPolyfillManifests()` export instead of `node:fs`
+ * directly. A failure reading the package's manifest set is treated the same
+ * as "no polyfill manifests" (this mirrors the scanner's own
+ * manifest-derivation posture — a broken/unreadable manifest set simply
+ * contributes no policy, it does not crash the tool). */
 function readPolyfillConnectorsManifests(): ManifestLike[] {
-  const polyfillConnectorsManifestsDir = resolve(repoRoot, "packages/polyfill-connectors/manifests");
-  const out: ManifestLike[] = [];
-  let files: string[];
   try {
-    files = readdirSync(polyfillConnectorsManifestsDir).filter((f) => f.endsWith(".json"));
+    return readPolyfillManifests().map((entry) => entry.manifest as ManifestLike);
   } catch {
-    return out;
+    return [];
   }
-  for (const file of files) {
-    try {
-      out.push(JSON.parse(readFileSync(resolve(polyfillConnectorsManifestsDir, file), "utf8")));
-    } catch {
-      // Skip: not this tool's job to validate manifest well-formedness.
-    }
-  }
-  return out;
 }
 
 /** Every `*.json` manifest directly under `reference-implementation/

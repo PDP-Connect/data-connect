@@ -19,10 +19,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { computeSourcePressureCooldown } from "../runtime/scheduler-source-pressure-cooldown.ts";
 
@@ -170,20 +168,11 @@ test("§10-B computeSourcePressureCooldown: without consecutiveCooldownCycles (d
 // intentional.
 
 test("§10-B ChatGPT manifest declares a finite positive-integer max_cooldown_cycles", () => {
-  const manifest = JSON.parse(
-    readFileSync(
-      join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "..",
-        "packages",
-        "polyfill-connectors",
-        "manifests",
-        "chatgpt.json"
-      ),
-      "utf8"
-    )
-  ) as { capabilities: { refresh_policy: { max_cooldown_cycles: number } } };
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "chatgpt.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for chatgpt.json");
+  }
+  const manifest = entry.manifest as { capabilities: { refresh_policy: { max_cooldown_cycles: number } } };
   const value = manifest.capabilities.refresh_policy.max_cooldown_cycles;
   assert.ok(Number.isInteger(value) && value > 0, `max_cooldown_cycles must be a positive integer, got ${value}`);
   assert.equal(value, 8, "ChatGPT's declared cooldown-cycle budget must stay 8 (live-number preservation)");

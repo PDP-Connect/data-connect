@@ -14,7 +14,7 @@ import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
-} from "../../packages/polyfill-connectors/src/static-secret-credential-capture.ts";
+} from "@pdpp/polyfill-connectors/static-secret-credential-capture";
 import { canonicalConnectorKey, isConnectorKey } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";

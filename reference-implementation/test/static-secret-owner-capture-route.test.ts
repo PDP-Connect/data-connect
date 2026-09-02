@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { startServer } from "../server/index.ts";
@@ -172,9 +172,11 @@ interface ConnectorManifest {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 async function registerConnector(asUrl: string, name: string): Promise<void> {

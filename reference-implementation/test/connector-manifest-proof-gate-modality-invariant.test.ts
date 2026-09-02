@@ -33,10 +33,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
-
-const MANIFESTS_DIR = new URL("../../packages/polyfill-connectors/manifests/", import.meta.url);
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 interface ManifestProvenCapabilities {
   capabilities?: {
@@ -54,11 +52,8 @@ test("no manifest claims a proven capability its declared setup modality cannot 
   // able to claim static_secret_live proof without declaring the
   // static_secret setup modality, or provider_auth_lifecycle proof without
   // declaring the provider_authorization setup modality.
-  for (const entry of readdirSync(MANIFESTS_DIR)) {
-    if (!entry.endsWith(".json")) {
-      continue;
-    }
-    const raw = JSON.parse(readFileSync(new URL(entry, MANIFESTS_DIR), "utf8")) as ManifestProvenCapabilities & {
+  for (const { file: entry, manifest } of readPolyfillManifests()) {
+    const raw = manifest as ManifestProvenCapabilities & {
       setup?: { modality?: unknown };
     };
     const proven = raw.capabilities?.proven;

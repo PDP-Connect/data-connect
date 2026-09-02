@@ -19,10 +19,11 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { createTraceContext, emitSpineEvent } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
@@ -32,7 +33,6 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-const POLYFILL_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "..", "packages", "polyfill-connectors", "manifests");
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 interface JsonObject {
   [key: string]: any;
@@ -217,7 +217,11 @@ function setUniqueConnectorKey(manifest: JsonObject, key: string): JsonObject {
 }
 
 function readGmailManifest() {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "gmail.json"), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for gmail.json");
+  }
+  return entry.manifest as JsonObject;
 }
 
 function addTestRefreshPolicy(manifest: JsonObject, overrides: JsonObject = {}): void {
@@ -2168,7 +2172,11 @@ test("gmail message expansion rejects missing child grant and reverse thread rel
 });
 
 function readSlackManifest() {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "slack.json"), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "slack.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for slack.json");
+  }
+  return entry.manifest as JsonObject;
 }
 
 async function seedSlackStream(
@@ -2296,12 +2304,11 @@ async function seedSlackExpansionFixture(rsUrl: string, ownerToken: string, conn
 }
 
 test("first-party manifests declare only parent-to-child query.expand entries with FK on child", () => {
-  const manifests = readdirSync(POLYFILL_MANIFESTS_DIR)
-    .filter((name) => name.endsWith(".json"))
-    .map((filename) => ({
-      manifest: JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, filename), "utf8")),
+  const manifests = readPolyfillManifests()
+    .map(({ file, manifest }) => ({
+      manifest: manifest as JsonObject,
       // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
-      manifestName: filename.replace(/\.json$/, ""),
+      manifestName: file.replace(/\.json$/, ""),
     }))
     .filter(({ manifest }) => manifest.streams.some((stream: JsonObject) => Array.isArray(stream.query?.expand)));
 
@@ -2363,7 +2370,11 @@ test("first-party manifests declare only parent-to-child query.expand entries wi
 //   openspec/changes/add-record-relationship-navigation/.
 
 function readGithubManifest() {
-  return JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, "github.json"), "utf8"));
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === "github.json");
+  if (!entry) {
+    throw new Error("no polyfill manifest found for github.json");
+  }
+  return entry.manifest as JsonObject;
 }
 
 async function seedGithubStream(

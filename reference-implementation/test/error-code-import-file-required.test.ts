@@ -21,8 +21,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { startServer } from "../server/index.ts";
 
@@ -71,9 +71,11 @@ interface ErrorEnvelope {
 }
 
 function loadManifest(name: string): ConnectorManifest {
-  return JSON.parse(
-    readFileSync(new URL(`../../packages/polyfill-connectors/manifests/${name}.json`, import.meta.url), "utf8")
-  ) as ConnectorManifest;
+  const entry = readPolyfillManifests().find((candidate) => candidate.file === `${name}.json`);
+  if (!entry) {
+    throw new Error(`no polyfill manifest found for ${name}.json`);
+  }
+  return entry.manifest as ConnectorManifest;
 }
 
 test("manual-upload validation-preview refuses an empty body with import_file_required (400)", async () => {

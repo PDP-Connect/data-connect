@@ -21,22 +21,15 @@
  */
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { BROWSER_SURFACE_KINDS } from "../runtime/connector-gap-bounding.ts";
 
-const MANIFESTS_DIR = new URL("../../packages/polyfill-connectors/manifests/", import.meta.url);
-
 function manifestDeclaredBrowserSurfaceKinds(): string[] {
   const kinds: string[] = [];
-  for (const entry of readdirSync(MANIFESTS_DIR)) {
-    if (!entry.endsWith(".json")) {
-      continue;
-    }
-    const raw = JSON.parse(readFileSync(new URL(entry, MANIFESTS_DIR), "utf8")) as {
-      capabilities?: { browser_surface_kind?: unknown };
-    };
+  for (const entry of readPolyfillManifests()) {
+    const raw = entry.manifest as { capabilities?: { browser_surface_kind?: unknown } };
     const kind = raw.capabilities?.browser_surface_kind;
     if (typeof kind === "string" && kind.trim().length > 0) {
       kinds.push(kind);
