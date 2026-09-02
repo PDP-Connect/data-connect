@@ -75,6 +75,19 @@ test("the decision actions become a sticky bar on small screens", () => {
   );
 });
 
+test("fact lists stack their labels on small screens instead of squeezing the value", () => {
+  // A max-content label column beside prose is a desktop shape. At 390px it
+  // squeezed each value into a ~20ch gutter and wrapped every sentence to
+  // five lines.
+  const mobileBlock = extractMediaBlock(HOSTED_UI_CSS, /@media\s*\(max-width:\s*600px\)/);
+  assert.ok(mobileBlock, "a small-screen breakpoint must exist");
+  assert.match(
+    mobileBlock,
+    /\.hosted-ui-kv\s*\{[^}]*grid-template-columns:\s*1fr/,
+    "the key/value grid collapses to one column on mobile"
+  );
+});
+
 test("the disclosure chevron is its own hit target, separate from the checkbox", () => {
   // The accordion's disclosure affordance was `::after` generated text sharing
   // a row with a checkbox that does something different — on a phone, one tap
