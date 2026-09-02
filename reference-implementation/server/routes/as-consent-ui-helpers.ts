@@ -16,6 +16,11 @@
 //   test/security-consent-token-handoff.test.js
 
 import {
+  type OperatorTrustConfig,
+  EMPTY_OPERATOR_TRUST_CONFIG,
+  resolveClientTrust,
+} from "../client-trust-registry.ts";
+import {
   type StreamScopeCapability,
   type StreamScopeSelection,
   resolveStreamScopeCapability,
@@ -1253,12 +1258,18 @@ function renderAuthorshipBlock(
 export interface ConsentClientDisplay {
   // CLIENT: the client's own self-described display (its app name).
   clientFacts: Array<{ label: string; value?: unknown; html?: string }>;
-  // Whether to render an "Unverified app" indicator. This reference
-  // implementation has no trust-registry source of a positive trust signal
-  // for any client, so every client is currently unverified
-  // (client-display:675) — this flag exists so callers can render the
-  // indicator without re-deriving the (always-true) policy inline.
+  // Whether to render an "unverified" indicator (client-display:675). No
+  // longer always true: a client that published a valid metadata document at
+  // its own https client_id has proven control of that domain, which is a
+  // positive trust signal the spec requires to be rendered distinctly. See
+  // `verifiedDomain` for what that verification actually covers.
   isUnverified: boolean;
+  // The domain the client proved it controls, or null when nothing was
+  // verified. Rendered as "Verified domain: chatgpt.com" — deliberately the
+  // domain, not the app: domain control says who published the metadata, not
+  // that the application is trustworthy, and the copy must not imply more
+  // than was proven.
+  verifiedDomain: string | null;
   // A short text/CSS monogram placeholder for client identity — the spec
   // (client-display:676) prohibits fetching/rendering a remote client-supplied
   // logo for an unverified client; this is the safe fallback, never a URL.
@@ -1352,24 +1363,37 @@ function buildClientPolicyLinks(
 
 export function buildConsentClientDisplay(
   client: NonNullable<PendingGrantRequest["client"]>,
-  ui: ConsentUiRenderer
+  ui: ConsentUiRenderer,
+  /** Operator overrides; the automatic CIMD path needs no configuration. */
+  trustConfig: OperatorTrustConfig = EMPTY_OPERATOR_TRUST_CONFIG
 ): ConsentClientDisplay {
   const clientId = typeof client.client_id === "string" ? client.client_id : null;
   const clientName = client.client_display?.name || clientId || "Client application";
   const policyLinks = buildClientPolicyLinks(client.client_display);
+  // What this server actually verified, if anything. Domain control for a
+  // CIMD client; an explicit operator decision otherwise (spec-core.md:672
+  // puts local registration first in the precedence).
+  const trust = resolveClientTrust(
+    { client_id: clientId, registration_mode: client.registration_mode ?? null },
+    trustConfig
+  );
   if (client.registration_mode !== "client_id_metadata_document") {
     // Pre-registered/public client: the "Requesting app" name is whatever the
     // client supplied at registration — a client-authored claim, not a fact.
+    // An operator override may vouch for this client and supply the name it
+    // vouches for, which outranks the self-asserted one.
+    const vouchedName = trust.operatorDisplayName || clientName;
     return {
-      clientFacts: [{ label: "Requesting app", value: clientName }],
-      displayName: clientName,
+      clientFacts: [{ label: "Requesting app", value: vouchedName }],
+      displayName: vouchedName,
       domainLabel: null,
-      isUnverified: true,
-      monogram: buildClientMonogram(clientName),
+      isUnverified: !trust.isTrusted,
+      monogram: buildClientMonogram(vouchedName),
       policyLinks,
       protocolFacts: [],
       selfDescribedName: null,
-      titleName: clientName,
+      titleName: vouchedName,
+      verifiedDomain: trust.verifiedDomain,
     };
   }
 
@@ -1397,7 +1421,7 @@ export function buildConsentClientDisplay(
     // client_id is only the fallback.
     displayName: resolvedDisplayName,
     domainLabel: hostLabelFromClientId(clientId) ?? (identity === resolvedDisplayName ? null : identity),
-    isUnverified: true,
+    isUnverified: !trust.isTrusted,
     // Monogram from the name the owner actually reads, so "ChatGPT" yields
     // `CH`, not a `C` derived from the URL string.
     monogram: buildClientMonogram(resolvedDisplayName),
@@ -1405,6 +1429,7 @@ export function buildConsentClientDisplay(
     protocolFacts,
     selfDescribedName: clientName && clientName !== identity ? clientName : null,
     titleName: identity,
+    verifiedDomain: trust.verifiedDomain,
   };
 }
 
@@ -2288,14 +2313,24 @@ interface AuthorizeQueryParams {
 function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay, ui: ConsentUiRenderer): string {
   // Trust status as a neutral fact, not a warning badge. spec-core.md:675 has
   // two limbs — render a positive signal distinctly when one exists, and
-  // treat a client with none as unverified. Only the second is implementable
-  // today (this AS has no trust registry), so every client sees this line;
-  // a badge that cannot vary carries no information and reads as an
-  // accusation against an app that has done nothing wrong. It states what the
-  // server does and does not know, and names the consequence for the logo.
+  // treat a client with none as unverified. Both are now reachable: a client
+  // that published a valid metadata document at its own https client_id has
+  // proven control of that domain, which is what makes the unverified state
+  // meaningful for everyone else. A badge that cannot vary carries no
+  // information and reads as an accusation against an app that has done
+  // nothing wrong.
+  //
+  // The verified line names the DOMAIN, not the app. Domain control proves who
+  // published the metadata; it says nothing about whether the application is
+  // honest or safe. "Verified app" would be the more flattering phrasing and
+  // the more dangerous one, because an owner would act on it.
   const trustLine = clientDisplay.isUnverified
     ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">This app isn't registered with your server. Its name and logo are self-reported.</p>`
-    : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registered with your server</p>`;
+    : clientDisplay.verifiedDomain
+      ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status">Verified domain: ${ui.escapeHtml(
+          clientDisplay.verifiedDomain
+        )} — this app controls that domain. Your server hasn't checked anything else about it.</p>`
+      : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registered with your server by you.</p>`;
   const domainLine = clientDisplay.domainLabel
     ? `<span class="hosted-ui-client-identity-domain">${ui.escapeHtml(clientDisplay.domainLabel)}</span>`
     : "";
