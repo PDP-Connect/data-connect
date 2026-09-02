@@ -1575,7 +1575,7 @@ test("hosted MCP source selection uses hosted-ui option styles", async () => {
     const resp = await fetch(authorizeUrl);
     assert.equal(resp.status, 200);
     const html = await resp.text();
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /class="hosted-ui-option-group"/);
     assert.match(html, /class="hosted-ui-option"/);
     assert.match(html, /<details class="hosted-ui-option-source"[^>]*>/);
@@ -2785,6 +2785,73 @@ async function exchangePackageCode({
   return approveResp;
 }
 
+// Fetches the real picker GET and extracts its `review_digest` hidden
+// field — the exact snapshot digest `rejectIfHostedMcpReviewDigestStale`
+// (as-authorize.ts) will require a POST to reproduce fresh. Tests exercising
+// the stale-review-revision guard build their form with this helper (never
+// `buildHostedMcpPickerForm` directly) so the digest they carry is genuine,
+// not fabricated.
+async function fetchHostedMcpReviewDigest(asUrl: string, client: RegisteredClient, state: string): Promise<string> {
+  const verifier = randomBytes(32).toString("base64url");
+  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+  authorizeUrl.searchParams.set("client_id", client.client_id);
+  authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("state", state);
+  authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
+  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  const resp = await fetch(authorizeUrl);
+  assert.equal(resp.status, 200, "picker GET must render 200 to extract a real review_digest");
+  const html = await resp.text();
+  const match = html.match(/name="review_digest" value="([^"]+)"/);
+  return mustExist(match?.[1], "picker HTML must carry a review_digest hidden field");
+}
+
+test("hosted MCP picker surfaces each row's resolved source kind as a protocol fact (source-kinds:731-743)", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+
+    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", client.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("state", "source-kind-render");
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+    const resp = await fetch(authorizeUrl);
+    assert.equal(resp.status, 200);
+    const html = await resp.text();
+
+    // FIX 3: with every row resolving to the same kind (the common case, and
+    // the only case this fixture exercises), the picker states it once above
+    // the list rather than repeating the full sentence on every row; each row
+    // still carries a compact protocol-fact badge.
+    assert.match(
+      html,
+      /aria-label="Streams and access mode your server will enforce">[\s\S]*?class="hosted-ui-source-kind-summary">All sources below are <code>connector<\/code>-backed/,
+      "picker must state the uniform resolved source.kind once above the list, inside the protocol-enforced block"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-option-source-kind-badge" data-authorship="protocol" title="Source kind: connector"><code>connector<\/code>/,
+      `picker must still carry a compact per-row protocol-fact badge (server-resolved, spotify.connector_id=${spotify.connector_id})`
+    );
+    assert.equal(
+      html.includes('class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>connector</code>'),
+      false,
+      "picker must not repeat the full 'Source kind: connector' sentence on every row once a uniform summary is shown"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("hosted MCP picker renders collapsed source summaries with per-stream controls", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
@@ -3133,7 +3200,7 @@ test("POST /oauth/authorize/mcp-package renders picker error when a selected sou
     assert.equal(resp.status, 400);
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /Choose at least one stream for/i);
     assert.match(html, /data-hosted-mcp-picker-error/);
     assert.match(html, /class="hosted-ui-error hosted-ui-picker-error"/);
@@ -3356,7 +3423,7 @@ test("POST /oauth/authorize/mcp-package renders picker error when streams are su
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
 
-    assert.match(html, /Choose what this app can read/);
+    assert.match(html, /Hosted MCP test client wants access to your data/);
     assert.match(html, /data-hosted-mcp-picker-error/);
     assert.match(html, /Select at least one source and one stream inside each selected source before approving/);
     assert.equal(
@@ -3503,15 +3570,21 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
 
     // Retention copy honesty: the picker must not promise an
     // owner-narrowable retention knob, must not advertise the
-    // off-spec `client_policy` classification, and must say plainly
-    // that the page does not set a retention limit for data saved by
-    // the app after it reads from the owner's server.
+    // off-spec `client_policy` classification, and must state the real
+    // server-generated retention bound (request-params:726) rather than
+    // the old "no time limit" disclaimer, which was accurate only before
+    // any retention policy existed.
     assert.ok(!html.includes("client-policy retention"), "picker must not assert the legacy client-policy phrase");
     assert.ok(!html.includes("client_policy"), "picker must not surface the off-spec retention.classification value");
     assert.match(
       html,
-      /does not set a time limit on data the app keeps/i,
-      "picker should tell the owner that this page does not set a retention/time limit for data the app keeps"
+      /No retention commitment was declared by this app[\s\S]*deleted within 90\s*days/i,
+      "picker should state the real server-generated retention default, not a no-limit disclaimer, and must not attribute it to the app as a declared commitment"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
+      "retention is a structured policy declaration, not a protocol-enforced constraint — it must not render under 'Your server enforces'"
     );
   } finally {
     await closeServer(server);
@@ -3677,7 +3750,7 @@ test("POST /oauth/authorize/mcp-package rejects an unsupported access_mode value
   }
 });
 
-test("hosted MCP child-grant grant.issued spine event records access_mode, stream_names, and an explicit retention: null", async () => {
+test("hosted MCP child-grant grant.issued spine event records access_mode, stream_names, and the server-generated retention bound", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
 
@@ -3743,19 +3816,17 @@ test("hosted MCP child-grant grant.issued spine event records access_mode, strea
     const issuedEventData = issuedEvent.data as Record<string, unknown>;
     assert.equal(issuedEventData.access_mode, "single_use");
     assert.deepEqual(issuedEventData.stream_names, ["saved_tracks"]);
-    // The picker intentionally does NOT encode a machine-readable
-    // retention bound (no Core `{ max_duration, on_expiry }` commitment
-    // exists for this generic ceremony). The event still surfaces the
-    // field as an explicit `null` so a dashboard reading the timeline
-    // can see absence rather than guessing why retention is missing.
-    assert.ok(
-      Object.hasOwn(issuedEventData, "retention"),
-      "grant.issued must surface a retention key so absence is visible to operators"
-    );
-    assert.equal(
+    // The picker now encodes a fixed, server-generated Core
+    // `{ max_duration, on_expiry }` retention bound
+    // (HOSTED_MCP_PICKER_RETENTION, request-params:726) on every hosted-MCP
+    // package grant. The event surfaces the exact resolved bound so a
+    // dashboard reading the timeline sees what was actually granted, not an
+    // absent/null placeholder.
+    assert.ok(Object.hasOwn(issuedEventData, "retention"), "grant.issued must surface a retention key");
+    assert.deepEqual(
       issuedEventData.retention,
-      null,
-      "hosted MCP picker must not encode a non-Core retention shape; absence is rendered as null"
+      { max_duration: "P90D", on_expiry: "delete" },
+      "hosted MCP picker must encode the server-generated retention bound on every grant"
     );
   } finally {
     await closeServer(server);
@@ -4707,6 +4778,694 @@ test("hosted MCP picker pins the wildcard stream entry when the whole source is 
         `wildcard-expanded stream "${stream.name}" must freeze the selected instance; got ${JSON.stringify(stream)}`
       );
     }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// ─── Picker client-identity, purpose, and review-digest rendering ──────────
+//
+// Covers the consent-UI spec audit's picker-flow gaps: client identity
+// (client-display:672-677), policy_uri/tos_uri secondary links
+// (client-display:674), the registry purpose code (Appendix A), three-class
+// semantic separation on the picker (semantic-classes:716), and the
+// final-approval digest binding (AS-conformance #15).
+
+// A ChatGPT-shaped external CIMD client: an https:// client_id metadata
+// document URL resolved via network fetch (not the local
+// `_ref/cimd-client-documents` same-origin store, which has no
+// policy_uri/tos_uri fields — see cimd.ts's `createCimdDocument`). Injecting
+// `cimdFetchDependencies` lets the test exercise the exact resolution path a
+// real hosted MCP connector (ChatGPT, Claude, ...) takes without touching the
+// network.
+function startServerWithCimdDocFetch(doc: Record<string, unknown>) {
+  return startServer({
+    asPort: 0,
+    cimdFetchDependencies: {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: async () =>
+        new Response(JSON.stringify(doc), { headers: { "Content-Type": "application/json" }, status: 200 }),
+      isGlobalUnicastAddressImpl: () => true,
+    },
+    dbPath: ":memory:",
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+  }) as Promise<CloseableTestServer>;
+}
+
+// `fetchCimdDocument` caches by client_id in a module-level (process-wide)
+// Map — see cimd.ts's `cimdCache`. Every test that fetches a CIMD doc MUST
+// use its own unique client_id (a fresh path segment), or it will silently
+// read back a different test's cached document instead of exercising its own
+// fetchImpl.
+function chatgptShapedClientId(): string {
+  return `https://chatgpt.example/oauth/${randomBytes(6).toString("hex")}/client.json`;
+}
+
+function chatgptShapedRedirectUri(clientId: string): string {
+  const url = new URL(clientId);
+  return `${url.origin}/connector/oauth/${url.pathname.split("/").at(-2)}`;
+}
+
+function chatgptShapedCimdDoc(clientId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    client_id: clientId,
+    client_name: "ChatGPT",
+    redirect_uris: [chatgptShapedRedirectUri(clientId)],
+    token_endpoint_auth_method: "none",
+    ...overrides,
+  };
+}
+
+async function fetchHostedMcpPickerHtml(
+  asUrl: string,
+  clientId: string,
+  redirectUri = "https://client.example/callback"
+): Promise<string> {
+  const verifier = randomBytes(32).toString("base64url");
+  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+  authorizeUrl.searchParams.set("client_id", clientId);
+  authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("state", "chatgpt-shape-state");
+  authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
+  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  const resp = await fetch(authorizeUrl);
+  assert.equal(resp.status, 200);
+  return await resp.text();
+}
+
+test("hosted MCP picker renders the CIMD client's resolved display name and marks it unverified", async () => {
+  const clientId = chatgptShapedClientId();
+  const server = await startServerWithCimdDocFetch(chatgptShapedCimdDoc(clientId));
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+
+    // CIMD identity precedent (existing, unchanged): the URL-origin is the
+    // PROTOCOL fact (it's what the client authenticated as); the CIMD
+    // client_name is a CLIENT-authored claim, rendered separately. See
+    // `buildConsentClientDisplay`'s CIMD branch.
+    assert.match(
+      html,
+      /class="hosted-ui-client-identity-name"[^>]*>\s*https:\/\/chatgpt\.example/,
+      "picker header must render the resolved protocol identity (origin)"
+    );
+    assert.match(
+      html,
+      /Self-described app name<\/dt><dd>ChatGPT/,
+      "self-described name must be attributed as a client claim"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-unverified-badge"[^>]*>\s*Unverified app/,
+      "picker must render an Unverified app badge for a CIMD client with no trust-registry signal"
+    );
+    assert.doesNotMatch(
+      html,
+      /<img[^>]*chatgpt\.example/i,
+      "picker must never fetch/render a remote client-supplied logo"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker renders a text monogram, never an <img>, for client identity", async () => {
+  const clientId = chatgptShapedClientId();
+  const server = await startServerWithCimdDocFetch(
+    chatgptShapedCimdDoc(clientId, { logo_uri: "https://chatgpt.example/logo.png" })
+  );
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+
+    const monogramMatch = html.match(/<span class="hosted-ui-client-monogram"[^>]*>([^<]*)<\/span>/);
+    assert.ok(monogramMatch, "picker must render a monogram element for client identity");
+    assert.equal(
+      monogramMatch?.[1]?.trim(),
+      "C",
+      "monogram must be a short text placeholder derived from the display name"
+    );
+    assert.doesNotMatch(
+      html,
+      /<img[^>]*src="https:\/\/chatgpt\.example\/logo\.png"/,
+      "picker must not render the client-supplied logo_uri as an <img> even when present in the CIMD doc"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker renders CIMD policy_uri/tos_uri as secondary links when present", async () => {
+  const clientId = chatgptShapedClientId();
+  const server = await startServerWithCimdDocFetch(
+    chatgptShapedCimdDoc(clientId, {
+      policy_uri: "https://chatgpt.example/privacy",
+      tos_uri: "https://chatgpt.example/terms",
+    })
+  );
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+
+    assert.match(
+      html,
+      /<a href="https:\/\/chatgpt\.example\/privacy"[^>]*>Privacy policy<\/a>/,
+      "picker must render policy_uri as a secondary link"
+    );
+    assert.match(
+      html,
+      /<a href="https:\/\/chatgpt\.example\/terms"[^>]*>Terms of service<\/a>/,
+      "picker must render tos_uri as a secondary link"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker omits policy/tos links when the CIMD doc carries neither", async () => {
+  const clientId = chatgptShapedClientId();
+  const server = await startServerWithCimdDocFetch(chatgptShapedCimdDoc(clientId));
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+
+    assert.doesNotMatch(
+      html,
+      /class="hosted-ui-client-policy-links"/,
+      "no policy-links block should render with no data"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker names the requester in its title instead of a generic app-agnostic title", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+
+    assert.match(
+      html,
+      /<h1[^>]*>Hosted MCP test client wants access to your data<\/h1>/,
+      "picker title must name the resolved requester"
+    );
+    assert.doesNotMatch(
+      html,
+      /<h1[^>]*>Choose what this app can read<\/h1>/,
+      "the old generic app-agnostic title must not remain as the page heading"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker renders the registry purpose code and description, not the invented personal_ai_assistant code", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+
+    assert.match(
+      html,
+      /<code>https:\/\/pdpp\.dev\/purpose\/agent_context<\/code>/,
+      "picker must render the Appendix A registry purpose code agent_context"
+    );
+    assert.doesNotMatch(
+      html,
+      /personal_ai_assistant/,
+      "picker must not render the unregistered personal_ai_assistant purpose code"
+    );
+    assert.match(
+      html,
+      /Providing context to a personal AI agent|personal AI agent/i,
+      "picker must render a purpose description"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP picker wraps stream selection and access mode in the protocol authorship class", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+
+    const protocolBlockMatch = html.match(
+      /<div class="hosted-ui-authorship" data-authorship="protocol"[^>]*>[\s\S]*?<\/div>\s*<\/div>/
+    );
+    assert.ok(protocolBlockMatch, 'picker must render a data-authorship="protocol" block');
+    // The protocol block wrapping the picker's own selection controls must
+    // contain the option group and access-mode fieldset, not merely exist
+    // somewhere on the page (the reviewed-artifact pages already had
+    // data-authorship="protocol" blocks before this change; this locks that
+    // the picker's OWN controls are now wrapped too).
+    assert.match(html, /data-authorship="protocol"[^>]*>[\s\S]*?hosted-ui-option-group/);
+    assert.match(html, /data-authorship="protocol"[^>]*>[\s\S]*?hosted-ui-access-mode/);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP grant.issued spine event carries a non-null review_digest binding the resolved decision", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "review-digest-state";
+    const challenge = pkceChallenge(verifier);
+
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(approveResp.status, 302);
+    const code = mustExist(
+      new URL(mustExist(approveResp.headers.get("location"), "redirect must carry a Location header")).searchParams.get(
+        "code"
+      ),
+      "redirect must carry an authorization code"
+    );
+    const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: "https://client.example/callback",
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(status, 200);
+    const access = mustExist(
+      await getGrantPackageAccess(body.grant_package_id),
+      "package access must exist"
+    ) as GrantPackageAccess;
+    const childGrantId = mustExist(access.members[0], "package must carry one member").grant.grant_id as string;
+
+    const { status: timelineStatus, body: timeline } = await fetchJson(
+      `${asUrl}/_ref/grants/${encodeURIComponent(childGrantId)}/timeline`
+    );
+    assert.equal(timelineStatus, 200);
+    const timelineEvents = timeline.data as Record<string, unknown>[];
+    const issuedEvent = mustExist(
+      timelineEvents.find((e) => e.event_type === "grant.issued"),
+      "child grant timeline must contain a grant.issued event"
+    );
+    const issuedEventData = issuedEvent.data as Record<string, unknown>;
+    assert.equal(typeof issuedEventData.review_digest, "string", "grant.issued must carry a review_digest string");
+    assert.match(
+      issuedEventData.review_digest as string,
+      /^sha256:/,
+      "review_digest must be a sha256 digest binding the resolved decision"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// --- client_claims and ai_training: structurally unreachable, not silently
+// --- accepted (client-claims:693, ai-training-consent:745-747) -----------
+//
+// CONSENT-UI-SPEC-GAP-0902.md §3/§7 found these MISSING on the hosted-MCP
+// picker/package flow: `client_claims` has no field in the picker POST body
+// at all (this flow is owner-driven checkbox selection, not a client-sent
+// `authorization_details` payload — there is no client input channel a
+// `client_claims` value could ever arrive through), and the AI-training
+// explicit-consent gate can never trigger because the picker hardcodes
+// `purpose_code: agent_context` for every grant it issues. Both are real
+// gaps in the audit's sense (the spec describes obligations this flow
+// cannot satisfy), but the fix is not "invent a field" — inventing a
+// `client_claims` or `purpose_code` input on a flow the picker's own
+// owner-driven selection model doesn't have would fabricate protocol
+// surface no real hosted-MCP client sends, not close the gap. What IS a
+// real, testable defect is a flow that silently ACCEPTS and ignores such
+// fields rather than proving they have no effect — i.e. that an attacker
+// (or a future client hoping this input is honored) cannot smuggle
+// `client_claims` or an `ai_training` purpose into an issued grant by
+// simply including them in the POST body. These tests are that proof.
+test("POST /oauth/authorize/mcp-package ignores an injected client_claims field — no field exists to bind it", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "client-claims-injection-attempt";
+    const challenge = pkceChallenge(verifier);
+
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+    // Not a real picker field — an attempt to smuggle client-authored claims
+    // through a flow that has no client_claims plumbing at all.
+    params.append("client_claims", JSON.stringify({ commitments: ["injected claim"] }));
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(
+      approveResp.status,
+      302,
+      `an unrecognized extra field must not affect minting: ${await approveResp.clone().text()}`
+    );
+    const location = mustExist(approveResp.headers.get("location"), "redirect must carry a Location header");
+    const code = mustExist(new URL(location).searchParams.get("code"), "redirect must carry an authorization code");
+
+    const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: "https://client.example/callback",
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(status, 200);
+    const access = mustExist(
+      await getGrantPackageAccess(body.grant_package_id),
+      "package access must exist"
+    ) as GrantPackageAccess;
+    const childGrantId = mustExist(access.members[0], "package must carry one member").grant.grant_id as string;
+    const { status: timelineStatus, body: timeline } = await fetchJson(
+      `${asUrl}/_ref/grants/${encodeURIComponent(childGrantId)}/timeline`
+    );
+    assert.equal(timelineStatus, 200);
+    const timelineEvents = timeline.data as Record<string, unknown>[];
+    const issuedEvent = mustExist(
+      timelineEvents.find((e) => e.event_type === "grant.issued"),
+      "child grant timeline must contain a grant.issued event"
+    );
+    const issuedEventData = issuedEvent.data as Record<string, unknown>;
+    assert.ok(
+      JSON.stringify(issuedEventData).indexOf("injected claim") === -1,
+      "an injected client_claims field must never reach the issued grant's audit event"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package ignores an injected ai_training purpose_code — the AI-training gate cannot be bypassed on this flow", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "ai-training-injection-attempt";
+    const challenge = pkceChallenge(verifier);
+
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+    // Not a real picker field — the picker hardcodes HOSTED_MCP_PICKER_PURPOSE_CODE
+    // (agent_context); this attempts to override it to the one purpose code
+    // with a mandatory-consent requirement, with no consent checkbox submitted.
+    params.append("purpose_code", "https://pdpp.dev/purpose/ai_training");
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(
+      approveResp.status,
+      302,
+      `an unrecognized extra field must not affect minting: ${await approveResp.clone().text()}`
+    );
+    const location = mustExist(approveResp.headers.get("location"), "redirect must carry a Location header");
+    const code = mustExist(new URL(location).searchParams.get("code"), "redirect must carry an authorization code");
+
+    const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: "https://client.example/callback",
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(status, 200);
+    const access = mustExist(
+      await getGrantPackageAccess(body.grant_package_id),
+      "package access must exist"
+    ) as GrantPackageAccess;
+    const childGrantId = mustExist(access.members[0], "package must carry one member").grant.grant_id as string;
+    const { status: timelineStatus, body: timeline } = await fetchJson(
+      `${asUrl}/_ref/grants/${encodeURIComponent(childGrantId)}/timeline`
+    );
+    assert.equal(timelineStatus, 200);
+    const timelineEvents = timeline.data as Record<string, unknown>[];
+    const issuedEvent = mustExist(
+      timelineEvents.find((e) => e.event_type === "grant.issued"),
+      "child grant timeline must contain a grant.issued event"
+    );
+    const issuedEventData = issuedEvent.data as Record<string, unknown>;
+    assert.ok(
+      JSON.stringify(issuedEventData).indexOf("ai_training") === -1,
+      "an injected ai_training purpose_code must never reach the issued grant — the picker always mints its own fixed purpose"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// --- Stale-review-revision rejection (AS-conformance #15) -----------------
+//
+// These exercise `rejectIfHostedMcpReviewDigestStale` (as-authorize.ts): a
+// picker POST that carries a `review_digest` must reproduce it from a FRESH
+// re-resolve of the picker's eligibility snapshot before anything mints.
+
+test("POST /oauth/authorize/mcp-package mints normally when the carried review_digest is unchanged", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "digest-happy-path";
+    const challenge = pkceChallenge(verifier);
+
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(
+      approveResp.status,
+      302,
+      `an unmodified digest must still mint and redirect exactly as before: ${await approveResp.clone().text()}`
+    );
+    const location = mustExist(approveResp.headers.get("location"), "redirect must carry a Location header");
+    assert.ok(new URL(location).searchParams.get("code"), "redirect must carry an authorization code");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package rejects a tampered review_digest and mints nothing", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "digest-tampered";
+    const challenge = pkceChallenge(verifier);
+
+    const packageCountBefore = await countGrantPackagesForOwner();
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    // A well-formed but wrong digest — not merely absent. Absence is a
+    // different, intentionally unchecked case (see
+    // `rejectIfHostedMcpReviewDigestStale`'s doc comment).
+    params.append("review_digest", "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(approveResp.status, 400, "a tampered digest must be rejected, not redirected");
+    const html = await approveResp.text();
+    assert.match(
+      html,
+      /changed since you loaded the page/i,
+      "rejection must tell the owner to review and approve again"
+    );
+    // The re-rendered page must carry a fresh digest for the CURRENT state,
+    // not the tampered one, so the owner's next submission can succeed.
+    const freshMatch = html.match(/name="review_digest" value="([^"]+)"/);
+    assert.ok(freshMatch, "rejected re-render must still carry a review_digest for the current state");
+    assert.notEqual(
+      freshMatch?.[1],
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "the re-rendered digest must not echo the tampered one back"
+    );
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "a rejected tampered-digest submission must not create a package"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package rejects a stale review_digest after a connection is revoked mid-flow, mints nothing", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const state = "digest-drift-revoked";
+    const challenge = pkceChallenge(verifier);
+
+    // Owner loads the picker: spotify is offered because its default hosted
+    // instance is active.
+    const reviewDigest = await fetchHostedMcpReviewDigest(asUrl, client, state);
+
+    // Between page-load and submission, the owner's spotify connection is
+    // revoked (e.g. from another tab, or an automated policy). The picker's
+    // eligibility snapshot has now genuinely changed.
+    await createSqliteConnectorInstanceStore().upsert({
+      connectorId: spotify.connector_id,
+      connectorInstanceId: defaultHostedInstanceId(spotify.connector_id),
+      createdAt: new Date().toISOString(),
+      displayName: "spotify test account",
+      ownerSubjectId: "owner_local",
+      sourceBinding: { fixture: defaultHostedInstanceId(spotify.connector_id) },
+      sourceBindingKey: defaultHostedInstanceId(spotify.connector_id),
+      sourceKind: "account",
+      status: "revoked",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const packageCountBefore = await countGrantPackagesForOwner();
+    const params = buildHostedMcpPickerForm({
+      challenge,
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state,
+    });
+    params.append("review_digest", reviewDigest);
+
+    const approveResp = await exchangePackageCode({ asUrl, client, params });
+    assert.equal(approveResp.status, 400, "a request that drifted from what was rendered must be rejected");
+    const html = await approveResp.text();
+    assert.match(
+      html,
+      /changed since you loaded the page/i,
+      "rejection must tell the owner the request changed since page-load"
+    );
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "a rejected drifted submission must not create a package"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// --- Instance branding (PDPP_INSTANCE_NAME) --------------------------------
+
+test("hosted MCP picker renders the configured instance name and monogram, never a hardcoded string, while keeping the PDPP protocol wordmark fixed", async () => {
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    ownerAuthPassword: "",
+    providerName: "Tim's Data Server",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const client = await registerAuthCodeClient(asUrl);
+    const verifier = randomBytes(32).toString("base64url");
+    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", client.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("state", "instance-branding");
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+    const resp = await fetch(authorizeUrl);
+    assert.equal(resp.status, 200);
+    const html = await resp.text();
+
+    assert.match(
+      html,
+      /<title>Tim&#39;s Data Server — Choose data sources<\/title>/,
+      "page title must carry the configured instance name"
+    );
+    assert.match(
+      html,
+      /<span class="hosted-ui-provider" aria-label="Provider">Tim&#39;s Data Server<\/span>/,
+      "operator label must render the configured instance name"
+    );
+    assert.match(
+      html,
+      /<span class="hosted-ui-instance-monogram" aria-hidden="true">TD<\/span>/,
+      'instance monogram must be derived from the configured name ("Tim\'s Data Server" -> "TD")'
+    );
+    // The protocol wordmark is a separate invariant from the operator label —
+    // it must stay "PDPP" regardless of instance branding (mirrors the
+    // console's own "wordmark is PDPP, never Recordroom" test).
+    assert.match(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "protocol wordmark must stay PDPP");
   } finally {
     await closeServer(server);
   }

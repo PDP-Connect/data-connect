@@ -12,7 +12,7 @@
  * package version with the lockfile importer when it supplies an exact version.
  */
 
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 interface PackageManifest {
@@ -214,10 +214,29 @@ async function invalidDependency(
   return undefined;
 }
 
+/**
+ * True when this workspace root is a pnpm workspace (has its own
+ * `pnpm-lock.yaml`). This check's YAML parsing is pnpm-lockfile-specific;
+ * a workspace root that instead uses npm (`package-lock.json`) has no
+ * equivalent lockfile this check can read, so callers should skip it there
+ * rather than fail on a missing pnpm artifact that was never going to exist.
+ */
+async function hasPnpmLockfile(workspaceRoot: string): Promise<boolean> {
+  try {
+    await stat(join(workspaceRoot, "pnpm-lock.yaml"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Return every invalid direct runtime dependency in this workspace installation. */
 export async function invalidWorkspaceRuntimeDependencies(
   workspaceRoot: string
 ): Promise<InvalidWorkspaceRuntimeDependency[]> {
+  if (!(await hasPnpmLockfile(workspaceRoot))) {
+    return [];
+  }
   const packages = await Promise.all(
     (await workspaceDirectories(workspaceRoot)).map((relativeDirectory) =>
       packageManifestForDirectory(workspaceRoot, relativeDirectory)

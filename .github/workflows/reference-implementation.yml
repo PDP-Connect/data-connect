@@ -117,6 +117,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace packages
+        run: npx tsc -b
+
       - name: Typecheck reference implementation
         run: npm --prefix reference-implementation run typecheck
 
@@ -142,7 +145,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace packages
+        run: npx tsc -b
+
       - name: Test reference implementation
+        env:
+          PDPP_OWNER_PASSWORD: reference-implementation-ci
+          PDPP_TEST_PROFILE: "memory-default"
         run: npm --prefix reference-implementation run test
 
   gate:

@@ -25,17 +25,25 @@
 
 import { randomBytes } from "node:crypto";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
-import type { ConsentPickerBinding, ConsentPickerCapabilities, ConsentUiRenderer } from "./as-consent-ui-helpers.ts";
+import type {
+  ConsentPickerBinding,
+  ConsentPickerCapabilities,
+  ConsentUiRenderer,
+  PendingGrantRequest,
+} from "./as-consent-ui-helpers.ts";
 import {
   ActiveBindingLookupError,
+  buildConsentClientDisplay,
   buildHostedMcpAuthorizationDetailForConnector,
   buildHostedMcpAuthorizationDetailsForConnector,
+  computeHostedMcpPickerReviewDigest,
   HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE,
   HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES,
   parseAuthorizeAuthorizationDetails,
   renderHostedMcpSourceSelection,
   requireAuthorizeString,
   requireRegisteredRedirectUri,
+  resolveHostedMcpPickerSnapshotDigest,
   resolveHostedMcpSourceDescriptor,
   validateAuthorizePkce,
 } from "./as-consent-ui-helpers.ts";
@@ -72,8 +80,40 @@ const OAUTH_AUTHORIZATION_ERROR_CODES: Readonly<Record<string, string>> = {
 };
 
 // Shape expected by requireRegisteredRedirectUri (mirrors as-consent-ui-helpers.ts internal type).
+// Widened (beyond just redirect_uris) so the picker can also resolve and
+// render client identity (client-display:672-677) — the same
+// `getRegisteredClient` result the redirect-URI check already fetches.
 interface OAuthClient {
-  readonly metadata?: { redirect_uris?: string[] } | null;
+  readonly client_id?: string | null;
+  readonly metadata?: {
+    client_name?: string | null;
+    client_uri?: string | null;
+    logo_uri?: string | null;
+    policy_uri?: string | null;
+    redirect_uris?: string[];
+    tos_uri?: string | null;
+  } | null;
+  readonly registration_mode?: string | null;
+}
+
+/**
+ * Maps a resolved `OAuthClient` (from `getRegisteredClient`) into the
+ * `PendingGrantRequest["client"]` shape `buildConsentClientDisplay` expects —
+ * mirrors `applyRegisteredClientToPendingRequestClient` in auth.ts, which is
+ * not exported for route-layer use.
+ */
+function toPendingGrantRequestClient(client: OAuthClient): NonNullable<PendingGrantRequest["client"]> {
+  return {
+    client_display: {
+      logo_uri: client.metadata?.logo_uri ?? null,
+      name: client.metadata?.client_name ?? null,
+      policy_uri: client.metadata?.policy_uri ?? null,
+      tos_uri: client.metadata?.tos_uri ?? null,
+      uri: client.metadata?.client_uri ?? null,
+    },
+    client_id: client.client_id ?? null,
+    registration_mode: client.registration_mode ?? "pre_registered_public",
+  };
 }
 
 interface ConsentStoreOutput {
@@ -127,7 +167,8 @@ export interface MountAsAuthorizeContext {
     authorizationDetails: unknown[];
     clientId: string;
     connectionIds: Array<string | null>;
-    opts: Record<string, never>;
+    /** `reviewDigest` binds the final-approval digest (AS-conformance #15) onto every child grant's `grant.issued` event. */
+    opts: { reviewDigest?: string | null };
     sourceMetadata: Array<{ connector_display_name: string; display_name: string | null }>;
     storageBindings: Array<{ connector_id: string }>;
     subjectId: string;
@@ -522,7 +563,8 @@ async function renderHostedMcpPickerValidationPage(
   req: RouteRequest,
   res: RouteResponse,
   ctx: Pick<MountAsAuthorizeContext, "consentPickerCaps" | "consentUi" | "ensureCsrfToken" | "providerName">,
-  message: string
+  message: string,
+  client: OAuthClient | null = null
 ): Promise<unknown> {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
@@ -534,7 +576,7 @@ async function renderHostedMcpPickerValidationPage(
     ctx.providerName,
     ctx.consentPickerCaps,
     ctx.consentUi,
-    { validationError: message }
+    { client: client ? toPendingGrantRequestClient(client) : null, validationError: message }
   );
   return res.status(400).send(html);
 }
@@ -546,7 +588,8 @@ function rejectMissingHostedMcpSelection(
     MountAsAuthorizeContext,
     "consentPickerCaps" | "consentUi" | "ensureCsrfToken" | "oauthError" | "providerName"
   >,
-  rawSelection: unknown
+  rawSelection: unknown,
+  client: OAuthClient | null = null
 ): Promise<unknown> | unknown {
   if (hasSubmittedSelectionInput(rawSelection)) {
     return ctx.oauthError(res, 400, "invalid_request", "At least one source must be selected");
@@ -555,8 +598,77 @@ function rejectMissingHostedMcpSelection(
     req,
     res,
     ctx,
-    "Select at least one source and one stream inside each selected source before approving."
+    "Select at least one source and one stream inside each selected source before approving.",
+    client
   );
+}
+
+// ─── Stale-review-revision rejection ───────────────────────────────────────
+//
+// The picker GET stamps a `review_digest` hidden field over exactly what it
+// rendered as choosable (see `resolveHostedMcpPickerSnapshotDigest` in
+// as-consent-ui-helpers.ts). Every real hosted-MCP client (ChatGPT, Claude,
+// any MCP connector) reaches the POST only via that GET, so every real
+// submission carries one. Before any source is validated or accumulated,
+// re-resolve that same snapshot FRESH — a real second read of connector
+// manifests and active bindings, not a reuse of anything from the GET — and
+// require the freshly computed digest to match what the POST carried.
+// Reject if the carried digest is present but tampered/mismatched, or if the
+// fresh re-resolve itself fails: a failed re-resolve is not evidence the
+// original digest was still valid, so it must not silently pass through to
+// minting. On rejection: typed re-render with a digest for the CURRENT
+// state (so the owner's next submission binds to what's actually there
+// now), nothing minted, no side effect has run yet.
+//
+// A submission with NO `review_digest` field at all skips this check
+// entirely rather than being rejected as stale — "absent" and "stale" are
+// different failures with different existing contracts (a request missing
+// required picker fields already fails downstream, e.g.
+// `rejectMissingHostedMcpSelection`; a request whose active-binding lookup
+// itself fails already has its own typed 500 in `accumulateSourceEntry`).
+// Conflating "never carried a digest" with "carried a stale one" would
+// duplicate and reshape those existing, independently-tested error
+// contracts. This keeps the guard strictly additive: it can only make a
+// request that DID carry a digest fail closed when that digest turns out
+// to be wrong; it never changes what happens to a request that never
+// claimed to have reviewed anything.
+async function rejectIfHostedMcpReviewDigestStale(
+  req: RouteRequest,
+  res: RouteResponse,
+  body: Record<string, unknown>,
+  ownerSubjectId: string,
+  client: OAuthClient,
+  ctx: Pick<MountAsAuthorizeContext, "consentPickerCaps" | "consentUi" | "ensureCsrfToken" | "providerName">
+): Promise<boolean> {
+  const carriedDigest = typeof body.review_digest === "string" ? body.review_digest : null;
+  if (!carriedDigest) {
+    return false;
+  }
+  const clientDisplay = buildConsentClientDisplay(toPendingGrantRequestClient(client), ctx.consentUi);
+  let freshDigest: string;
+  try {
+    freshDigest = await resolveHostedMcpPickerSnapshotDigest(ctx.consentPickerCaps, ownerSubjectId, clientDisplay);
+  } catch {
+    await renderHostedMcpPickerValidationPage(
+      req,
+      res,
+      ctx,
+      "Unable to verify this request is still current. Review and approve again.",
+      client
+    );
+    return true;
+  }
+  if (carriedDigest !== freshDigest) {
+    await renderHostedMcpPickerValidationPage(
+      req,
+      res,
+      ctx,
+      "This request changed since you loaded the page — review and approve again.",
+      client
+    );
+    return true;
+  }
+  return false;
 }
 
 // Builds the package grant and issues the auth code redirect.
@@ -583,7 +695,8 @@ async function buildPackageAndRedirect(
     | "oauthError"
     | "providerName"
     | "stageOAuthAuthorizationCodeRequest"
-  >
+  >,
+  client: OAuthClient | null = null
 ): Promise<unknown> {
   if (acc.sourcesWithEmptyStreams.length > 0) {
     // A checked source without checked streams is ambiguous owner intent. Re-render
@@ -595,17 +708,34 @@ async function buildPackageAndRedirect(
       ctx,
       labels
         ? `Choose at least one stream for ${labels}, or clear that source.`
-        : "Choose at least one stream inside each selected source, or clear that source."
+        : "Choose at least one stream inside each selected source, or clear that source.",
+      client
     );
   }
   if (acc.authorizationDetails.length === 0) {
-    return renderHostedMcpPickerValidationPage(req, res, ctx, "Select at least one source before approving.");
+    return renderHostedMcpPickerValidationPage(req, res, ctx, "Select at least one source before approving.", client);
   }
+
+  // Final-approval artifact completeness + digest binding (grant:873-877,
+  // AS-conformance #15). Scoped down from a full two-step reviewed-confirm
+  // flow (see as-consent-ui-helpers.ts's `computeHostedMcpPickerReviewDigest`
+  // doc comment for why): rather than an interactive round-trip, this
+  // computes a digest over the exact resolved decision — the same
+  // `acc.authorizationDetails` `createHostedMcpGrantPackage` is about to mint,
+  // never client-supplied — and binds it into the audit trail via
+  // `reviewDigest`, which flows into every child grant's `grant.issued` spine
+  // event (see auth.ts). This makes "what was resolved" reconstructable and
+  // auditable without adding a second click to the existing single-step POST.
+  const reviewDigest = computeHostedMcpPickerReviewDigest({
+    authorizationDetails: acc.authorizationDetails,
+    clientId: pkce.clientId,
+  });
+
   const packageResult = await ctx.createHostedMcpGrantPackage({
     authorizationDetails: acc.authorizationDetails,
     clientId: pkce.clientId,
     connectionIds: acc.connectionIds,
-    opts: {},
+    opts: { reviewDigest },
     sourceMetadata: acc.sourceMetadata,
     storageBindings: acc.storageBindings,
     subjectId: ownerSubjectId,
@@ -616,6 +746,7 @@ async function buildPackageAndRedirect(
 // ─── Request-intake resolution (extracted to reduce POST handler complexity) ─
 
 interface McpPackageIntake {
+  client: OAuthClient;
   packageAccessMode: string;
   selections: Array<{ connectorId: string; connectionId: string | null }>;
   streamSelectionsBySource: Map<string, Set<string>>;
@@ -655,7 +786,7 @@ async function resolveMcpPackageIntake(
 
   const selections = ctx.selectionParsers.parseHostedMcpSelections(body.selection);
   if (selections.length === 0) {
-    await rejectMissingHostedMcpSelection(req, res, ctx, body.selection);
+    await rejectMissingHostedMcpSelection(req, res, ctx, body.selection, client);
     return null;
   }
 
@@ -673,7 +804,7 @@ async function resolveMcpPackageIntake(
     return null;
   }
 
-  return { packageAccessMode, selections, streamSelectionsBySource };
+  return { client, packageAccessMode, selections, streamSelectionsBySource };
 }
 
 // ─── Route mount ─────────────────────────────────────────────────────────────
@@ -734,7 +865,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
             csrfToken,
             ctx.providerName,
             ctx.consentPickerCaps,
-            ctx.consentUi
+            ctx.consentUi,
+            { client: toPendingGrantRequestClient(client) }
           )
         );
       }
@@ -795,10 +927,15 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         if (!intake) {
           return;
         }
-        const { selections, streamSelectionsBySource, packageAccessMode } = intake;
+        const { client, selections, streamSelectionsBySource, packageAccessMode } = intake;
 
         // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
         const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
+
+        if (await rejectIfHostedMcpReviewDigestStale(req, res, body, ownerSubjectId, client, ctx)) {
+          return;
+        }
+
         const acc = await buildSourceAccumulator(
           selections,
           streamSelectionsBySource,
@@ -829,7 +966,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           acc,
           { clientId, codeChallenge, codeChallengeMethod, redirectUri, state },
           ownerSubjectId,
-          ctx
+          ctx,
+          client
         );
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };

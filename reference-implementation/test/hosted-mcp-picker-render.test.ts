@@ -35,7 +35,7 @@ import {
   encodeHostedMcpStreamSelection,
   hostedMcpSourceKey,
 } from "../server/hosted-mcp-selection.ts";
-import { escapeHtml } from "../server/hosted-ui.ts";
+import { escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
 import {
   ActiveBindingLookupError,
   type ConsentPickerBinding,
@@ -54,7 +54,7 @@ const ui: ConsentUiRenderer = {
   escapeHtml,
   renderActionRow: (actions) => actions.map((a) => `<button>${escapeHtml(a.label)}</button>`).join("\n"),
   renderHostedDocument: ({ body }) => `<!doctype html><html><body>${body}</body></html>`,
-  renderKeyValueList: (items) => items.map((i) => `<div>${escapeHtml(i.label)}</div>`).join("\n"),
+  renderKeyValueList,
   renderPageIntro: ({ title }) => `<h1>${escapeHtml(title)}</h1>`,
   renderResultState: ({ title, body }) => `<div>${escapeHtml(title)}${escapeHtml(body)}</div>`,
   renderSurface: ({ children }) => `<section>${children}</section>`,
@@ -73,12 +73,14 @@ const INTERNAL_ID = "pdpp-internal-audit";
 
 interface FixtureManifest {
   display_name: string;
+  source_declaration?: { source: { id: string; kind: string } };
   streams: Array<{ name: string; description: string | null }>;
 }
 
 const MANIFESTS: Record<string, FixtureManifest> = {
   [SPOTIFY_ID]: {
     display_name: "Spotify",
+    source_declaration: { source: { id: SPOTIFY_ID, kind: "connector" } },
     streams: [
       { description: "Tracks you saved", name: "saved_tracks" },
       { description: null, name: "top_artists" },
@@ -86,6 +88,7 @@ const MANIFESTS: Record<string, FixtureManifest> = {
   },
   [GITHUB_ID]: {
     display_name: "GitHub",
+    source_declaration: { source: { id: GITHUB_ID, kind: "connector" } },
     streams: [
       { description: "Repos you own", name: "repositories" },
       { description: "Repos you starred", name: "starred_repos" },
@@ -157,9 +160,31 @@ function mustExist<T>(value: T | null | undefined, description: string): T {
 }
 
 // biome-ignore lint/suspicious/useAwait: preserve the async helper contract used by the async render tests.
-async function renderPicker(caps: ConsentPickerCapabilities = makeCaps()): Promise<string> {
-  return renderHostedMcpSourceSelection("owner_local", AUTHORIZE_QUERY, "csrf-token", "PDPP", caps, ui);
+async function renderPicker(
+  caps: ConsentPickerCapabilities = makeCaps(),
+  opts: Parameters<typeof renderHostedMcpSourceSelection>[6] = {}
+): Promise<string> {
+  return renderHostedMcpSourceSelection("owner_local", AUTHORIZE_QUERY, "csrf-token", "PDPP", caps, ui, opts);
 }
+
+// A CIMD client whose self-described `client_display.name` ("ChatGPT")
+// differs from its verified origin identity ("https://chatgpt.com") — the
+// scenario FIX 3's H1 must distinguish (verified origin vs. self-described
+// name, never presenting the latter as verified).
+const CIMD_CLIENT_SELF_DESCRIBED = {
+  client_display: { name: "ChatGPT" },
+  client_id: "https://chatgpt.com/oauth/abc123/client.json",
+  registration_mode: "client_id_metadata_document",
+};
+
+// A pre-registered client with no distinct self-described name beyond its
+// registration-time display name — the H1 must fall back to the single-name
+// form (no parenthetical) since there is nothing to distinguish.
+const PREREGISTERED_CLIENT = {
+  client_display: { name: "Demo App" },
+  client_id: "client_demo",
+  registration_mode: "pre_registered_public",
+};
 
 // Returns the array of full `<input ...>` tags matching a marker attribute.
 function inputsWith(html: string, marker: string): string[] {
@@ -462,12 +487,13 @@ test("picker copy states the source-is-its-streams model in owner-facing languag
   );
   assert.match(html, /Check one stream to share just that stream/i, "copy makes single-stream grants discoverable");
 
-  // Retention honesty: a calm, separate caveat — not a security pitch, not a
-  // promise of an owner-narrowable retention knob.
+  // Retention honesty: a calm, separate caveat stating the server's own
+  // default policy, not attributed to the app as something it promised, and
+  // not the old (now-stale) "no time limit" disclaimer — see FIX 1.
   assert.match(
     html,
-    /does not set a time limit on data the app keeps/i,
-    "copy is honest that the page sets no machine-readable retention bound"
+    /No retention commitment was declared by this app/i,
+    "copy is honest that no retention was declared by the client, not a machine-readable bound this server enforces"
   );
   assert.equal(html.includes("retention limit"), false, 'copy avoids the jargon "retention limit"');
 
@@ -505,4 +531,153 @@ test("empty connector set renders a calm owner message with no form controls", a
   assert.match(html, /No sources are available on this server yet/i, "owner sees a plain empty-state message");
   assert.equal(inputsWith(html, "data-hosted-mcp-source-checkbox").length, 0, "no source checkboxes in empty state");
   assert.equal(html.includes("data-hosted-mcp-select-sources"), false, "no bulk toolbar in empty state");
+});
+
+// ── FIX 2: purpose is server-assigned, not a client claim ────────────────────
+// The hosted-MCP authorize shortcut never receives `authorization_details`
+// from the client — this picker mints its own fixed purpose and assigns it
+// to every grant it issues. The old "They claim — not verified by your
+// server" framing misattributed authorship to an app that declared nothing.
+
+test("picker states the purpose was assigned by the server, not claimed by an app that declared none", async () => {
+  const html = await renderPicker();
+  assert.match(
+    html,
+    /Assigned by your server \(the app did not declare a purpose\)/i,
+    "picker must state the server assigned the purpose, not that the app claimed it"
+  );
+  assert.equal(
+    html.includes("They claim — not verified by your server"),
+    false,
+    "the purpose block must not carry the 'they claim' eyebrow — no purpose arrived in this request to attribute to the app"
+  );
+  assert.match(
+    html,
+    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Assigned purpose"/,
+    "the purpose block renders as server-generated text (manifest authorship), not a client claim"
+  );
+});
+
+// ── FIX 1: retention is a structured policy declaration, not enforcement ─────
+
+test("picker states retention as an undeclared-by-the-app server default, not something 'your server enforces'", async () => {
+  const html = await renderPicker();
+  assert.match(
+    html,
+    /No retention commitment was declared by this app/i,
+    "picker must say no retention was declared, not attribute a 90-day promise to the app"
+  );
+  assert.match(
+    html,
+    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
+    "retention is a structured policy declaration (spec-core.md:706-730), not a protocol-enforced constraint"
+  );
+  assert.equal(
+    /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/.test(html),
+    false,
+    "retention must not render under the 'Your server enforces' eyebrow"
+  );
+});
+
+// ── FIX 3: H1 shows the self-described name distinctly from the verified origin ──
+
+test("H1 shows only the single name when the client has no separately-verified origin identity", async () => {
+  // Pre-registered/public clients (registration_mode !== client_id_metadata_document)
+  // have no verifiable origin distinct from their registered display name — see
+  // `buildConsentClientDisplay`'s pre-registered branch, where `titleName` IS the
+  // client-authored name. There is nothing to distinguish, so the H1 must render
+  // the single-name form, never a spurious "(name) wants access" parenthetical.
+  const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
+  assert.match(html, /<h1>Demo App wants access to your data<\/h1>/, "H1 falls back to the single-name form");
+});
+
+test("H1 shows the self-described name next to the verified origin, and the origin stays the enforced anchor", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  assert.match(
+    html,
+    /<h1>ChatGPT \(https:\/\/chatgpt\.com\) wants access<\/h1>/,
+    "H1 must show the self-described name next to its verified origin, not replace the origin with it"
+  );
+  // The unverified marker for the self-described name lives in the adjacent
+  // client-identity block, right below the H1 — not fabricated as verified.
+  assert.match(html, /hosted-ui-unverified-badge[^>]*>Unverified app/, "the self-described name carries an unverified marker");
+});
+
+// ── FIX 3: source-kind summary — uniform vs. mixed ────────────────────────────
+
+test("uniform source kind across all rows renders once above the list plus a compact per-row badge", async () => {
+  const html = await renderPicker();
+  assert.match(
+    html,
+    /All sources below are <code>connector<\/code>-backed/i,
+    "a single summary line states the shared kind once"
+  );
+  const fullLineCount = [...html.matchAll(/Source kind: <code>connector<\/code>/g)].length;
+  assert.equal(fullLineCount, 0, "no row repeats the full 'Source kind: connector' sentence once uniform");
+  const badgeCount = [...html.matchAll(/hosted-ui-option-source-kind-badge/g)].length;
+  assert.ok(badgeCount >= 2, "each row still carries a compact per-row protocol-fact badge");
+});
+
+test("mixed source kinds across rows fall back to a full per-row line, no false summary", async () => {
+  const caps = makeCaps({
+    getConnectorManifest: async (connectorId: string) => {
+      const base = MANIFESTS[connectorId];
+      if (!base) {
+        return null;
+      }
+      // GitHub resolves to provider_native, Spotify stays connector — a real
+      // mixed-kind picker (rare, but the summary must not lie about it).
+      const kind = connectorId === GITHUB_ID ? "provider_native" : "connector";
+      return { ...base, source_declaration: { source: { id: connectorId, kind } } };
+    },
+  });
+  const html = await renderPicker(caps);
+  assert.equal(
+    html.includes("All sources below are"),
+    false,
+    "mixed kinds must not render a uniform summary line that would misstate one of the kinds"
+  );
+  assert.match(html, /Source kind: <code>connector<\/code>/, "Spotify's row still states its real kind");
+  assert.match(html, /Source kind: <code>provider_native<\/code>/, "GitHub's row still states its real kind");
+});
+
+// ── FIX 4: grant expiry is stated, tied to the access-mode control ───────────
+
+test("picker states grant expiry under 'Your server enforces', tied to the access-mode choice", async () => {
+  const html = await renderPicker();
+  assert.match(
+    html,
+    /No expiry — access lasts until you revoke it/i,
+    "picker must state that grants from this flow carry no expiry"
+  );
+  // The expiry statement must sit immediately after the access-mode fieldset
+  // (same protocol-enforced block), so the two can never silently contradict
+  // each other. Assert ordering: access-mode fieldset close, then the expiry
+  // note, before the block itself closes.
+  const accessModeIndex = html.indexOf('class="hosted-ui-access-mode"');
+  const expiryIndex = html.indexOf("No expiry — access lasts until you revoke it");
+  assert.ok(accessModeIndex >= 0, "access-mode fieldset must be present");
+  assert.ok(expiryIndex > accessModeIndex, "expiry note must render after the access-mode fieldset, not before it");
+  const protocolLabelIndex = html.indexOf('aria-label="Streams and access mode your server will enforce"');
+  assert.ok(protocolLabelIndex >= 0, "the protocol-enforced streams/access-mode block must be present");
+  assert.ok(
+    protocolLabelIndex < accessModeIndex && accessModeIndex < expiryIndex,
+    "the expiry statement must be co-located inside the same protocol-enforced block as the access-mode control"
+  );
+});
+
+// ── FIX 5: resolved fields and time range are stated ──────────────────────────
+
+test("picker states the resolved field/time-range scope once, as a protocol-enforced fact", async () => {
+  const html = await renderPicker();
+  assert.match(
+    html,
+    /All fields of each stream you check; no date-range limit/i,
+    "picker must state the resolved field/time-range scope since this flow has no field-projection or time-range UI"
+  );
+  assert.match(
+    html,
+    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}All fields of each stream you check/,
+    "the fields/time-range statement must render inside the protocol-enforced block, above the source list"
+  );
 });

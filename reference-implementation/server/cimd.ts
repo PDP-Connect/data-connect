@@ -574,8 +574,13 @@ export function buildCimdRegisteredClient(clientId: string, doc: CimdDocument) {
       client_name: doc.client_name || null,
       client_uri: doc.client_uri || null,
       logo_uri: doc.logo_uri || null,
+      // Client-display metadata (spec-core.md:674) — carried through so the
+      // consent surface can render the client's own policy/terms links as
+      // secondary disclosures. RFC 7591-aligned field names.
+      policy_uri: doc.policy_uri || null,
       redirect_uris: Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [],
       token_endpoint_auth_method: doc.token_endpoint_auth_method || "none",
+      tos_uri: doc.tos_uri || null,
     },
     registration_mode: "client_id_metadata_document",
     token_endpoint_auth_method: doc.token_endpoint_auth_method || "none",

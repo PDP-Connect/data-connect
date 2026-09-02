@@ -307,6 +307,58 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
 }
 
+/* ─── Client identity header (monogram + unverified badge) ──────────────
+ * Text-only monogram placeholder — never a remote client-supplied logo, per
+ * client-display:676 (untrusted logo_uri MUST NOT be fetched/rendered for an
+ * unverified client). */
+.hosted-ui-client-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.hosted-ui-client-monogram {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.625rem;
+  background: var(--muted, oklch(0.94 0.005 85));
+  color: var(--muted-foreground);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.hosted-ui-client-identity-name {
+  font-weight: 600;
+}
+.hosted-ui-unverified-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hosted-ui-client-policy-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+}
+.hosted-ui-client-policy-links a {
+  color: var(--muted-foreground);
+  text-decoration: underline;
+}
+
 /* ─── Hosted-ui layout ──────────────────────────────────────────────── */
 .hosted-ui-page {
   max-width: 640px;
@@ -482,6 +534,30 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   overflow-wrap: anywhere;
 }
 
+/* Compact per-row source-kind badge (FIX 3: presenter clutter) — used
+ * instead of the full "Source kind: connector" text line when every row on
+ * the picker shares one resolved kind and a single summary line above the
+ * list already states it. */
+.hosted-ui-option-source-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0.25rem;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+}
+.hosted-ui-option-source-kind-badge code {
+  font-family: var(--font-mono);
+}
+.hosted-ui-source-kind-summary,
+.hosted-ui-fields-timerange-summary {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+
 .hosted-ui-option-source {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
@@ -584,6 +660,12 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--foreground);
 }
 .hosted-ui-access-mode-meta {
+  color: var(--muted-foreground);
+}
+
+.hosted-ui-expiry-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
   color: var(--muted-foreground);
 }
 
@@ -796,13 +878,41 @@ ${body}
 }
 
 /**
- * Brand header: PDPP mark + wordmark + provider name.
+ * Short text monogram for the operator-facing instance name (e.g. "Tim's
+ * Data Server" -> "TD"). Pure text, never an image — this instance has no
+ * uploaded-logo concept, and an instance-name monogram is a distinct thing
+ * from the per-CLIENT monogram consent rendering uses for untrusted
+ * `logo_uri` (see `buildClientMonogram` in as-consent-ui-helpers.ts) — this
+ * one identifies the SERVER, not a requesting app.
+ */
+function buildInstanceMonogram(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return "?";
+  }
+  const letters = trimmed
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((word) => word.charAt(0))
+    .join("")
+    .toUpperCase();
+  return letters || trimmed.charAt(0).toUpperCase();
+}
+
+/**
+ * Brand header: PDPP protocol mark + wordmark (always "PDPP" — the protocol
+ * identity, never configurable) + the operator-facing instance name and its
+ * derived monogram (PDPP_INSTANCE_NAME, or PDPP_PROVIDER_NAME as a fallback
+ * for existing deployments — see `resolveProviderName` in server/index.ts).
  */
 export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
-  const safeProvider = escapeHtml(providerName);
+  const providerNameString = String(providerName ?? "");
+  const safeProvider = escapeHtml(providerNameString);
+  const safeMonogram = escapeHtml(buildInstanceMonogram(providerNameString));
   return `<header class="hosted-ui-header">
   ${renderPdppMark({ size: 28 })}
   <span class="hosted-ui-wordmark">PDPP</span>
+  <span class="hosted-ui-instance-monogram" aria-hidden="true">${safeMonogram}</span>
   <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
 </header>`;
 }
