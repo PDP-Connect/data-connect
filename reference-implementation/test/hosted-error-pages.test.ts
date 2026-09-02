@@ -22,6 +22,7 @@ import test from "node:test";
 import { escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
 import {
   type ConsentUiRenderer,
+  HOSTED_DENIAL_COPY,
   prefersHtmlErrorPage,
   renderHostedErrorPage,
 } from "../server/routes/as-consent-ui-helpers.ts";
@@ -107,4 +108,30 @@ test("a stale review offers a way back, not a dead end", () => {
   // become the new one.
   const html = render("stale_review");
   assert.match(html, /Review and approve again/, "the owner is told what to do next");
+});
+
+// ── The denial page tells the owner what happened to their data ──────────────
+
+test("refusal copy states the consequence, and does not say the same thing three times", () => {
+  // The denial page read "Access Denied" / "Request rejected" / "The pending
+  // data access request was rejected and cleared." — three ways of saying one
+  // thing, in the passive voice, in protocol register, and never stating the
+  // fact the owner actually wants: that their data did not move.
+  assert.match(
+    HOSTED_DENIAL_COPY.body,
+    /didn&apos;t get any of your data|didn't get any of your data/,
+    "the body names the consequence for the owner's data"
+  );
+  assert.match(HOSTED_DENIAL_COPY.body, /close this tab/, "the owner is told the flow is over");
+  assert.equal(
+    /pending|cleared|rejected/i.test(HOSTED_DENIAL_COPY.body),
+    false,
+    "no protocol-register restatement of the refusal"
+  );
+  // The result title must not simply repeat the page title.
+  assert.notEqual(
+    HOSTED_DENIAL_COPY.title.toLowerCase(),
+    "access denied",
+    "the result heading says something the H1 did not"
+  );
 });

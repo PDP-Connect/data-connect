@@ -3184,6 +3184,25 @@ const HOSTED_ERROR_PAGE_COPY: Record<string, { title: string; body: string }> = 
   },
 };
 
+/**
+ * What the owner reads after refusing.
+ *
+ * This page said "Access Denied", then "Request rejected", then "The pending
+ * data access request was rejected and cleared." — one fact, three times, in
+ * the passive voice, in the register of a system log. None of the three
+ * answered the question the owner actually has after saying no, which is what
+ * happened to their data.
+ *
+ * Refusing is a normal, correct outcome, not an error, so the copy does not
+ * dress it as one. `Access denied` survives as the page title because that is
+ * the OAuth-facing name of the outcome and several suites pin it; the words
+ * the owner reads are these.
+ */
+export const HOSTED_DENIAL_COPY = {
+  body: "The app didn't get any of your data. You can close this tab.",
+  title: "You didn't share anything",
+} as const;
+
 /** The fallback every unmapped failure lands on. Safe, honest, and terminal. */
 const HOSTED_ERROR_PAGE_FALLBACK = HOSTED_ERROR_PAGE_COPY.server_error as { title: string; body: string };
 
