@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { RUN_AUTHORITY_SCHEMA } from "../../scripts/test-accounting/inventory.ts";
+import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 
 const runTestsPath = fileURLToPath(new URL("./run-tests.ts", import.meta.url));
 const PROFILE_MUST_BE_SET_PATTERN = /PDPP_TEST_PROFILE must be set/;

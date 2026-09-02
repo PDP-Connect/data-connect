@@ -9,15 +9,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
-import { RUN_AUTHORITY_SCHEMA } from "../../scripts/test-accounting/inventory.ts";
-import type { StructuredSummary } from "../../scripts/test-accounting/receipt.ts";
+import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
+import type { StructuredSummary } from "./test-accounting/receipt.ts";
 import {
   accountingResultLine,
   assertNamedSkipMappingsFullyConsumed,
   repositoryPaths,
   riConfiguredNamedSkipMappingIdentities,
   structuredNodeSummary,
-} from "../../scripts/test-accounting/receipt.ts";
+} from "./test-accounting/receipt.ts";
 import { provisionTestDatabase } from "../server/postgres-test-database-guard.ts";
 import {
   dedicatedPostgresTestUrl,
@@ -99,7 +99,7 @@ if (PER_FILE_HARD_TIMEOUT_MS < PER_FILE_IDLE_TIMEOUT_MS) {
 }
 if (!effectiveArgs.some((arg) => arg === "--test-reporter" || arg.startsWith("--test-reporter="))) {
   effectiveArgs.push(
-    `--test-reporter=${fileURLToPath(new URL("../../scripts/test-accounting/node-reporter.ts", import.meta.url))}`
+    `--test-reporter=${fileURLToPath(new URL("./test-accounting/node-reporter.ts", import.meta.url))}`
   );
 }
 if (!effectiveArgs.some((arg) => arg === "--import" || arg.startsWith("--import="))) {
@@ -114,7 +114,7 @@ if (!effectiveArgs.some((arg) => arg === "--import" || arg.startsWith("--import=
 // tsx is registered first (above) so the `.ts` preload can be type-stripped.
 const hermeticGuardEnabled = process.env.PDPP_HERMETIC_GUARD !== "0";
 if (hermeticGuardEnabled) {
-  effectiveArgs.push("--import", fileURLToPath(new URL("../../scripts/hermetic/preload.ts", import.meta.url)));
+  effectiveArgs.push("--import", fileURLToPath(new URL("./hermetic/preload.ts", import.meta.url)));
 }
 const accountingAuthority: AccountingAuthority | undefined = accountingPath
   ? JSON.parse(await readFile(accountingPath, "utf8"))

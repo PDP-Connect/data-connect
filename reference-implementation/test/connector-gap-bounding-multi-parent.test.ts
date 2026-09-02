@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateStreamCoherence } from "../../packages/reference-contract/src/evidence/coherence.ts";
+import { evaluateStreamCoherence } from "@pdpp/reference-contract/evidence";
 import { buildCollectionFacts } from "../runtime/connector-gap-bounding.ts";
 
 test("collection facts aggregate every parent of a shared detail stream", () => {

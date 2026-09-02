@@ -10,7 +10,7 @@ import { Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
-import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../../scripts/hermetic/guard.ts";
+import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../scripts/hermetic/guard.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";

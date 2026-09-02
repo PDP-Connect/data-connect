@@ -3,7 +3,7 @@
 
 /** Pure owner-fleet health composition over already-read typed evidence. */
 
-import type { StreamHealthAuthorityResult } from "../../scripts/stream-health-audit/authority.ts";
+import type { StreamHealthAuthorityResult } from "../scripts/stream-health-audit/authority.ts";
 import type {
   AttentionAxis,
   ConnectionHealthSnapshot,

@@ -63,11 +63,11 @@ import { fileURLToPath } from "node:url";
 import accountingReporter, {
   redactStructuredHeaders,
   redactStructuredHeadersWithBudget,
-} from "../../scripts/test-accounting/node-reporter.ts";
-import { structuredNodeSummary } from "../../scripts/test-accounting/receipt.ts";
+} from "../scripts/test-accounting/node-reporter.ts";
+import { structuredNodeSummary } from "../scripts/test-accounting/receipt.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
-const REPORTER_PATH = fileURLToPath(new URL("../../scripts/test-accounting/node-reporter.ts", import.meta.url));
+const REPORTER_PATH = fileURLToPath(new URL("../scripts/test-accounting/node-reporter.ts", import.meta.url));
 const TARGET_TEST_FILE = "reference-implementation/test/compact-record-history.test.ts";
 const RUN_COUNT = 6;
 const REPORTER_FAILURE_NAME = "reporter preserves intentional failure diagnostics";

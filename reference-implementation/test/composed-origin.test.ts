@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../../scripts/hermetic/guard.ts";
+import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../scripts/hermetic/guard.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";

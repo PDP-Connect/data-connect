@@ -14,7 +14,7 @@
 import {
   type CoverageProofStrategy,
   evaluateStreamCoherence,
-} from "../../packages/reference-contract/src/evidence/index.ts";
+} from "@pdpp/reference-contract/evidence";
 
 type JsonObject = Record<string, unknown>;
 

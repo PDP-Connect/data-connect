@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { storageProfileEnvironment } from "../../reference-implementation/scripts/test-profile-env.ts";
+import { storageProfileEnvironment } from "../test-profile-env.ts";
 import { runAuthority, suiteEnvironment } from "./authority.ts";
 import {
   checkInventory,

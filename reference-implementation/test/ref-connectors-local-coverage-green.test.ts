@@ -10,7 +10,7 @@ import {
   expectedLocalCoverageStoreDescriptors,
   expectedLocalCoverageStores,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
-import { evaluateStreamHealthAuthority } from "../../scripts/stream-health-audit/authority.ts";
+import { evaluateStreamHealthAuthority } from "../scripts/stream-health-audit/authority.ts";
 import type { CollectionRateSnapshot, CoverageAxis, OutboxAxis } from "../runtime/connection-health.ts";
 import type { CoverageEvidenceStrategy } from "../server/connector-coverage-policy.ts";
 import {

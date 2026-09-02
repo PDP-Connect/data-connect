@@ -26,7 +26,7 @@ import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
   type StreamHealthAuthorityResult,
-} from "../../scripts/stream-health-audit/authority.ts";
+} from "../scripts/stream-health-audit/authority.ts";
 import { emitControllerBootedAndStashEpoch, reconcileOrphanedRunsAtBoot } from "../lib/controller-boot.ts";
 import { exec, getOne, referenceQueries, transaction } from "../lib/db.ts";
 import { checkOrphanedRecordsAtBoot } from "../lib/orphaned-record-check.ts";

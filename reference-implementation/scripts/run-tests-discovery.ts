@@ -4,7 +4,7 @@
 import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { compareStrings, containedPath } from "../../scripts/test-accounting/inventory.ts";
+import { compareStrings, containedPath } from "./test-accounting/inventory.ts";
 
 export const NODE_TEST_EXTENSIONS = [".test.js", ".test.mjs", ".test.ts"];
 
