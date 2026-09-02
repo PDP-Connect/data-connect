@@ -53,7 +53,7 @@
     "verify": "npm test && npm run validate:package"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "zod": "^4.5.2"
   },
   "devDependencies": {
     "@pdpp/collector-runtime": "0.0.1",

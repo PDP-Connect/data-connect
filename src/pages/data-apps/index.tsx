@@ -7,7 +7,8 @@ import { LearnMoreLink } from "@/components/typography/link-learn-more"
 import { Text } from "@/components/typography/text"
 import { LINKS } from "@/config/links"
 import { MotionConfig } from "motion/react"
-import { GithubIcon, BoxIcon } from "lucide-react"
+import { BoxIcon } from "lucide-react"
+import { PlatformGithubIcon } from "@/components/icons/platform-github"
 import { ConnectedAppsList } from "./components/connected-apps-list"
 import { RegistryAppCard } from "./components/registry-app-card"
 import { cn } from "@/lib/utils"
@@ -86,7 +87,7 @@ export function DataApps() {
                 withIcon
                 className="flex gap-1.5"
               >
-                <GithubIcon aria-hidden="true" />
+                <PlatformGithubIcon aria-hidden="true" />
                 <span>
                   Already have an app?&nbsp;
                   <LearnMoreLink href={LINKS.appSubmissionGuide}>

@@ -76,6 +76,12 @@ export function AdaptiveIcon({
     setLoadedImageSrc(null)
   }, [activeImageSrc])
 
+  // Covers the case where the browser resolves the image from cache
+  // synchronously (complete + real pixel data before this effect runs).
+  // A `complete: true` with no naturalWidth is not a reliable failure
+  // signal on its own — some environments report `complete` before a
+  // load has even started — so only trust it once real pixel data shows
+  // up, and otherwise wait for the img's own onLoad/onError.
   useEffect(() => {
     const image = imageRef.current
     if (!activeImageSrc || !image || !image.complete) {
@@ -84,10 +90,7 @@ export function AdaptiveIcon({
 
     if (image.naturalWidth > 0) {
       setLoadedImageSrc(activeImageSrc)
-      return
     }
-
-    setImageIndex(current => current + 1)
   }, [activeImageSrc])
 
   const handleImageLoad = () => {
