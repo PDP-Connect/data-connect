@@ -603,15 +603,18 @@ test("picker never states a retention the client did not declare", async () => {
   assert.equal(/\b90 days\b/.test(html), false, "no fabricated retention window anywhere on the owner surface");
   assert.equal(html.includes("P90D"), false, "no retention bound is asserted at all");
 
+  // Retention now lives on the approval artifact, as one of the exact terms
+  // the owner binds to (spec-core.md:873-877), rather than as a standalone
+  // block above the list that repeated the same sentence.
   assert.match(
     html,
-    /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
-    "retention is a structured policy declaration (spec-core.md:706-730), not a protocol-enforced constraint"
+    /data-hosted-mcp-review[\s\S]*ChatGPT did not say how long it keeps the data it receives\./,
+    "the retention state is stated on the artifact the owner approves"
   );
   assert.equal(
     /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/.test(html),
     false,
-    "retention must not render under the 'Your server enforces' eyebrow"
+    "retention must never render under the 'Your server enforces' eyebrow — it is not enforced"
   );
 });
 
@@ -742,16 +745,16 @@ test("picker states grant expiry under 'Your server enforces', tied to the acces
 
 // ── FIX 5: resolved fields and time range are stated ──────────────────────────
 
-test("picker states the resolved field/time-range scope once, as a protocol-enforced fact", async () => {
+test("picker states the resolved field/time-range scope once, on the approval artifact", async () => {
   const html = await renderPicker();
+  // This flow has no field-projection or time-range UI, so every checked
+  // data type resolves to all of its fields with no temporal bound — an
+  // exact resolved term the artifact must carry (spec-core.md:873-877).
+  const occurrences = [...html.matchAll(/Everything in each data type you check, with no date limit\./g)];
+  assert.equal(occurrences.length, 1, "the coverage term is stated exactly once");
   assert.match(
     html,
-    /Everything in each data type you check, with no date limit\./,
-    "picker must state the resolved field/time-range scope since this flow has no field-projection or time-range UI"
-  );
-  assert.match(
-    html,
-    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}Everything in each data type you check/,
-    "the fields/time-range statement must render inside the protocol-enforced block, above the source list"
+    /data-hosted-mcp-review[\s\S]*Everything in each data type you check, with no date limit\./,
+    "the coverage term renders on the artifact the owner approves"
   );
 });
