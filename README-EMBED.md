@@ -97,15 +97,20 @@ the app — both the health check and the login/embed calls use it.
 ## What's stubbed / honestly incomplete
 
 - **Bundling**: the reference server is not a binary this app ships yet.
-  `reference-implementation/` doesn't exist in this repo — it's an
-  intentionally-empty placeholder waiting on Move B (see
-  `reference-implementation/README.md` in this repo). Until that lands,
-  "start" means spawning `pnpm dev` in a checkout you point at, the same
-  "real child process, supervised, health-checked" shape a bundled binary
-  spawn would need — the branch to change is `start_reference_server`'s
-  `Some(checkout_dir)` arm, swapping the `pnpm dev` `Command` for a resolved
-  bundled-binary path (mirror `get_bundled_personal_server` in
-  `commands/server.rs`).
+  `reference-implementation/` now exists in this repo (Move B landed it as a
+  real, first-party workspace member here — this correction supersedes the
+  original prototype's claim that it was still an empty placeholder), but
+  `start_reference_server` still spawns `pnpm dev` in an externally-pointed
+  checkout directory rather than this repo's own local
+  `reference-implementation/` tree or a bundled binary. "start" still means
+  spawning `pnpm dev` in a checkout you point at, the same "real child
+  process, supervised, health-checked" shape a bundled binary spawn would
+  need — the branch to change is `start_reference_server`'s
+  `Some(checkout_dir)` arm, swapping the `pnpm dev` `Command` for either this
+  repo's own `reference-implementation` (now local, no external checkout
+  needed) or a resolved bundled-binary path (mirror
+  `get_bundled_personal_server` in `commands/server.rs`). Separate work, not
+  done as part of landing Move B itself.
 - **Password source**: `PDPP_OWNER_PASSWORD` must currently be set in the
   app's own environment, matching whatever the reference server was started
   with. There's no UI to enter it and no secure-storage integration. A real
