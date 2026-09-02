@@ -26,6 +26,7 @@ import test from "node:test";
 import {
   describeStreamScope,
   describeTimeField,
+  encodeScopeStreamKey,
   normalizeScopeBound,
   parseSubmittedStreamScopes,
   resolveStreamScopeCapability,
@@ -221,14 +222,17 @@ test("time fields humanize to the verb an owner reads", () => {
 
 // ─── Form encoding and parsing ───────────────────────────────────────────────
 
+const SOURCE_A = JSON.stringify(["https://registry.pdpp.dev/connectors/chatgpt", "conn_a"]);
+const SOURCE_B = JSON.stringify(["https://registry.pdpp.dev/connectors/chatgpt", "conn_b"]);
+
 test("submitted scope is recovered per stream, by name", () => {
   const body = {
-    [scopeFieldsInputName(0, "messages")]: ["content", "id"],
-    [scopeSinceInputName(0, "messages")]: "2026-03-01",
-    [scopeUntilInputName(0, "messages")]: "2026-03-31",
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content", "id"],
+    [scopeSinceInputName(SOURCE_A, "messages")]: "2026-03-01",
+    [scopeUntilInputName(SOURCE_A, "messages")]: "2026-03-31",
   };
 
-  const scopes = parseSubmittedStreamScopes(body, 0);
+  const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
 
   assert.deepEqual(scopes.get("messages"), {
     fields: ["content", "id"],
@@ -238,68 +242,70 @@ test("submitted scope is recovered per stream, by name", () => {
 });
 
 test("one source's controls never narrow another's", () => {
-  // Source 0 and source 1 both have a `messages` stream. Reading source 1's
-  // inputs while resolving source 0 would silently apply the wrong scope.
+  // Two connected accounts of the same connector share every stream name, so
+  // cross-applying their windows would silently grant the wrong scope. Keying
+  // on the source identity (not a render position) is what prevents it, since
+  // the POST iterates submitted selections rather than the GET's row order.
   const body = {
-    [scopeFieldsInputName(0, "messages")]: ["content"],
-    [scopeFieldsInputName(1, "messages")]: ["author"],
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content"],
+    [scopeFieldsInputName(SOURCE_B, "messages")]: ["author"],
   };
 
-  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content"]);
-  assert.deepEqual(parseSubmittedStreamScopes(body, 1).get("messages")?.fields, ["author"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_B).get("messages")?.fields, ["author"]);
 });
 
 test("a stream name with separators or unicode round-trips intact", () => {
   // The encoding exists so a stream name cannot collide with the `__`
   // separator the input name uses.
   for (const name of ["month_categories", "a__b", "naïve", "with space"]) {
-    const body = { [scopeFieldsInputName(2, name)]: ["x"] };
-    const scopes = parseSubmittedStreamScopes(body, 2);
+    const body = { [scopeFieldsInputName(SOURCE_A, name)]: ["x"] };
+    const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
     assert.deepEqual(scopes.get(name)?.fields, ["x"], `expected ${name} to round-trip`);
   }
 });
 
 test("a single checked field arrives as a list, not a bare string", () => {
   // Form encoders send one value as a string and several as an array.
-  const body = { [scopeFieldsInputName(0, "messages")]: "content" };
+  const body = { [scopeFieldsInputName(SOURCE_A, "messages")]: "content" };
 
-  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content"]);
 });
 
 test("numeric-keyed objects from qs arrayLimit overflow are read as lists", () => {
   // Per-field checkboxes across many streams exceed qs's arrayLimit, after
   // which it yields {0: ..., 1: ...} instead of an array.
-  const body = { [scopeFieldsInputName(0, "messages")]: { 0: "content", 1: "id" } };
+  const body = { [scopeFieldsInputName(SOURCE_A, "messages")]: { 0: "content", 1: "id" } };
 
-  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content", "id"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content", "id"]);
 });
 
 test("unrelated and malformed inputs are ignored rather than guessed at", () => {
   const body = {
     _csrf: "token",
     access_mode: "continuous",
-    narrow_fields_0__: "orphan",
-    "narrow_fields_0__!!!not-base64!!!": "junk",
+    [`narrow_fields_${encodeScopeStreamKey(SOURCE_A)}__`]: "orphan",
+    [`narrow_fields_${encodeScopeStreamKey(SOURCE_A)}__!!!not-base64!!!`]: "junk",
     selection: "abc",
   };
 
-  const scopes = parseSubmittedStreamScopes(body, 0);
+  const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
   // Nothing decodes to a usable stream name, so nothing is claimed.
   assert.equal(scopes.size, 0);
 });
 
 test("an absent body yields no scopes instead of throwing", () => {
-  assert.equal(parseSubmittedStreamScopes(null, 0).size, 0);
-  assert.equal(parseSubmittedStreamScopes(undefined, 0).size, 0);
-  assert.equal(parseSubmittedStreamScopes({}, 0).size, 0);
+  assert.equal(parseSubmittedStreamScopes(null, SOURCE_A).size, 0);
+  assert.equal(parseSubmittedStreamScopes(undefined, SOURCE_A).size, 0);
+  assert.equal(parseSubmittedStreamScopes({}, SOURCE_A).size, 0);
 });
 
 test("a parsed submission resolves against the declaration end to end", () => {
   const body = {
-    [scopeFieldsInputName(0, "messages")]: ["content"],
-    [scopeSinceInputName(0, "messages")]: "2026-03-01",
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content"],
+    [scopeSinceInputName(SOURCE_A, "messages")]: "2026-03-01",
   };
-  const submitted = parseSubmittedStreamScopes(body, 0).get("messages") ?? {};
+  const submitted = parseSubmittedStreamScopes(body, SOURCE_A).get("messages") ?? {};
   const result = resolveStreamScopeSelection(messagesStream(), submitted);
 
   assert.ok("selection" in result);
