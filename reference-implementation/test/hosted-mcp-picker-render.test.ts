@@ -759,6 +759,28 @@ test("picker states the resolved field/time-range scope once, on the approval ar
   );
 });
 
+// ── The empty picker must not be a dead end ──────────────────────────────────
+
+test("an owner with nothing connected gets a way out, with or without a console link", async () => {
+  const emptyCaps = makeCaps({ listRegisteredConnectorIds: async () => [] });
+
+  // Without a resolvable console URL the page still refuses cleanly: an owner
+  // who cannot proceed must always be able to tell the client no, rather than
+  // abandoning the tab and leaving it with no response at all.
+  const bare = await renderPicker(emptyCaps);
+  assert.match(bare, /value="cancel"/, "the empty picker always offers a refusal");
+  assert.equal(/<a\s[^>]*href/.test(bare), false, "no link is invented when the route resolved no URL");
+
+  // With one, it points somewhere the owner can actually act.
+  const linked = await renderPicker(emptyCaps, { connectionsUrl: "https://console.example/connections" });
+  assert.match(
+    linked,
+    /<a[^>]*href="https:\/\/console\.example\/connections"[^>]*>/,
+    "the empty picker links to the console when the route supplies a URL"
+  );
+  assert.match(linked, /value="cancel"/, "the refusal survives alongside the link");
+});
+
 // ── The connector key is a protocol identifier, not owner copy ───────────────
 
 test("a source row's meta line states holdings, never the connector key", async () => {
