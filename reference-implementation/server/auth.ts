@@ -8293,6 +8293,7 @@ async function persistChildGrantForPackage({
   resolvedStreams,
   traceContext,
   reviewDigest = null,
+  grantExpiresAt = null,
 }: {
   request: PendingRequest;
   registeredClient: RegisteredClient;
@@ -8300,6 +8301,16 @@ async function persistChildGrantForPackage({
   storageBinding: StorageBinding;
   resolvedStreams: ResolvedGrantStream[];
   traceContext: TraceContext;
+  /**
+   * Owner-chosen grant expiry (Grant fields: `expires_at`) from the hosted-MCP
+   * picker, as an ISO instant. `null` means the owner chose no scheduled end
+   * date, or the surface offered no choice — both resolve to a grant with no
+   * expiry, which is the pre-existing behavior for `continuous`.
+   *
+   * Only consulted for `continuous`: a `single_use` grant is consumed at first
+   * token issuance (spec-core.md:920), and keeps its existing 24h backstop.
+   */
+  grantExpiresAt?: string | null;
   /**
    * Digest binding the hosted-MCP picker's resolved decision (grant:873-877,
    * AS-conformance #15) — computed server-side over the exact
@@ -8322,8 +8333,15 @@ async function persistChildGrantForPackage({
 
   const grantId = generateId("grt");
   const issuedAt = nowIso();
+  // single_use keeps its 24h backstop: the grant is consumed at first token
+  // issuance (spec-core.md:920), so a longer window would only widen the
+  // period in which an unused code stays live. continuous now honors the
+  // owner's choice, defaulting to no expiry when none was made — which is
+  // what this flow always did before the control existed.
   const expiresAt =
-    selection.access_mode === "single_use" ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null;
+    selection.access_mode === "single_use"
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      : grantExpiresAt;
 
   const persistedStorageBinding = normalizeStorageBinding(storageBinding);
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
@@ -8435,6 +8453,12 @@ export async function createHostedMcpGrantPackage({
      * every child grant's `grant.issued` spine event.
      */
     reviewDigest?: string | null;
+    /**
+     * Owner-chosen grant expiry (`expires_at`) as an ISO instant, applied to
+     * every `continuous` child grant in the package. `null`/absent means no
+     * scheduled end date.
+     */
+    grantExpiresAt?: string | null;
   };
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(clientId)) {
@@ -8499,6 +8523,7 @@ export async function createHostedMcpGrantPackage({
     await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
     const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
     const { grant, token } = await persistChildGrantForPackage({
+      grantExpiresAt: opts.grantExpiresAt ?? null,
       registeredClient: childRegisteredClient,
       request,
       resolvedStreams,

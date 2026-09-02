@@ -32,6 +32,7 @@ import type {
   ConsentUiRenderer,
   PendingGrantRequest,
 } from "./as-consent-ui-helpers.ts";
+import { resolveGrantExpiry } from "../hosted-mcp-grant-expiry.ts";
 import {
   type StreamScopeError,
   type StreamScopeSelection,
@@ -175,8 +176,11 @@ export interface MountAsAuthorizeContext {
     authorizationDetails: unknown[];
     clientId: string;
     connectionIds: Array<string | null>;
-    /** `reviewDigest` binds the final-approval digest (AS-conformance #15) onto every child grant's `grant.issued` event. */
-    opts: { reviewDigest?: string | null };
+    /**
+     * `reviewDigest` binds the final-approval digest (AS-conformance #15) onto every child grant's `grant.issued` event.
+     * `grantExpiresAt` is the owner's chosen expiry, applied to continuous child grants.
+     */
+    opts: { reviewDigest?: string | null; grantExpiresAt?: string | null };
     sourceMetadata: Array<{ connector_display_name: string; display_name: string | null }>;
     storageBindings: Array<{ connector_id: string }>;
     subjectId: string;
@@ -792,7 +796,9 @@ async function buildPackageAndRedirect(
   // Required, with no default: a default would silently disable the approval
   // binding for any future caller that forgot it — the exact fail-open shape
   // this check exists to remove.
-  approval: { body: Record<string, unknown>; packageAccessMode: string }
+  approval: { body: Record<string, unknown>; packageAccessMode: string },
+  /** Owner-chosen grant expiry; null means no scheduled end date. */
+  grantExpiresAt: string | null = null
 ): Promise<unknown> {
   const { body, packageAccessMode } = approval;
   if (acc.sourcesWithEmptyStreams.length > 0) {
@@ -858,7 +864,7 @@ async function buildPackageAndRedirect(
     authorizationDetails: acc.authorizationDetails,
     clientId: pkce.clientId,
     connectionIds: acc.connectionIds,
-    opts: { reviewDigest },
+    opts: { grantExpiresAt, reviewDigest },
     sourceMetadata: acc.sourceMetadata,
     storageBindings: acc.storageBindings,
     subjectId: ownerSubjectId,
@@ -1143,6 +1149,14 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           return;
         }
 
+        // Owner-chosen grant expiry (Grant fields: `expires_at`). Resolved
+        // after the sources, so an invalid choice here cannot mask a more
+        // specific selection error the owner would rather see first.
+        const expiryResult = resolveGrantExpiry(body.grant_expiry, packageAccessMode);
+        if ("error" in expiryResult) {
+          return ctx.oauthError(res, 400, "invalid_request", expiryResult.error);
+        }
+
         // Stage, issue, and redirect — or error if all streams were deselected.
         //
         // MUST be awaited (not bare-returned) inside this try block: a
@@ -1162,7 +1176,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           ownerSubjectId,
           ctx,
           client,
-          { body, packageAccessMode }
+          { body, packageAccessMode },
+          expiryResult.expiresAt
         );
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };
