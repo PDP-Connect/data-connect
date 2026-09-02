@@ -2828,10 +2828,24 @@ test("hosted MCP picker surfaces each row's resolved source kind as a protocol f
     assert.equal(resp.status, 200);
     const html = await resp.text();
 
+    // FIX 3: with every row resolving to the same kind (the common case, and
+    // the only case this fixture exercises), the picker states it once above
+    // the list rather than repeating the full sentence on every row; each row
+    // still carries a compact protocol-fact badge.
     assert.match(
       html,
-      /class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>connector<\/code>/,
-      `picker must render the resolved source.kind (server-resolved, spotify.connector_id=${spotify.connector_id}) as a protocol fact per row`
+      /aria-label="Streams and access mode your server will enforce">[\s\S]*?class="hosted-ui-source-kind-summary">All sources below are <code>connector<\/code>-backed/,
+      "picker must state the uniform resolved source.kind once above the list, inside the protocol-enforced block"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-option-source-kind-badge" data-authorship="protocol" title="Source kind: connector"><code>connector<\/code>/,
+      `picker must still carry a compact per-row protocol-fact badge (server-resolved, spotify.connector_id=${spotify.connector_id})`
+    );
+    assert.equal(
+      html.includes('class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>connector</code>'),
+      false,
+      "picker must not repeat the full 'Source kind: connector' sentence on every row once a uniform summary is shown"
     );
   } finally {
     await closeServer(server);
@@ -3564,8 +3578,13 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
     assert.ok(!html.includes("client_policy"), "picker must not surface the off-spec retention.classification value");
     assert.match(
       html,
-      /deleted after 90\s*days/i,
-      "picker should state the real server-generated retention bound, not a no-limit disclaimer"
+      /No retention commitment was declared by this app[\s\S]*deleted within 90\s*days/i,
+      "picker should state the real server-generated retention default, not a no-limit disclaimer, and must not attribute it to the app as a declared commitment"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
+      "retention is a structured policy declaration, not a protocol-enforced constraint — it must not render under 'Your server enforces'"
     );
   } finally {
     await closeServer(server);

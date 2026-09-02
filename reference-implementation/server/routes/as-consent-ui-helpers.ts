@@ -133,12 +133,24 @@ export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new
 // uniformly: 90 days is a conservative default matching neither indefinite
 // retention nor same-session-only, and `delete` (not `anonymize`) because the
 // hosted-MCP picker grants raw stream reads, not aggregate/derived data.
-// Server-determined — never client-asserted — so it renders in the protocol
-// authorship class, same as access_mode.
+// Structured policy declaration (spec-core.md:706-730), not a protocol-
+// enforced constraint (spec-core.md:1602) — this server does not enforce
+// client-side retention, it only states its default policy. Renders in the
+// `manifest` authorship class ("Your server describes"), not `protocol`.
 export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } = {
   max_duration: "P90D",
   on_expiry: "delete",
 };
+
+// Grant expiry (Grant fields: `expires_at`) for every hosted-MCP package
+// grant, independent of the chosen access mode: auth.ts's package-minting
+// path (`buildPackageAndRedirect` -> child-grant loop) only applies a
+// non-null `expires_at` to `single_use` grants from a review-artifact expiry
+// this picker flow never sets, so in practice both access modes always issue
+// with no expiry. Stated once here, tied to the access-mode control, so this
+// copy can never drift into contradicting whichever mode the owner picks.
+export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY =
+  "No expiry — access lasts until you revoke it, whichever access mode you choose above.";
 
 // Input normalization helpers.
 
@@ -1018,6 +1030,13 @@ export interface ConsentClientDisplay {
   // PROTOCOL: server-resolved identity facts (the client_id origin / metadata
   // document URL). Empty for pre-registered clients with no derived identity.
   protocolFacts: Array<{ label: string; value?: unknown; html?: string }>;
+  // CLIENT: the client's self-described display name, only when it differs
+  // from `titleName` (the enforced identity). Callers MAY render this next to
+  // `titleName` with an unverified marker (spec-core.md:706-730 allows
+  // displaying a resolved name alongside its trust status); it MUST NOT
+  // replace `titleName` as the sole identity shown, since `titleName` is the
+  // one the server actually verified.
+  selfDescribedName: string | null;
   titleName: string;
 }
 
@@ -1077,6 +1096,7 @@ export function buildConsentClientDisplay(
       monogram: buildClientMonogram(clientName),
       policyLinks,
       protocolFacts: [],
+      selfDescribedName: null,
       titleName: clientName,
     };
   }
@@ -1101,6 +1121,7 @@ export function buildConsentClientDisplay(
     monogram: buildClientMonogram(clientName || identity),
     policyLinks,
     protocolFacts,
+    selfDescribedName: clientName && clientName !== identity ? clientName : null,
     titleName: identity,
   };
 }
@@ -2021,19 +2042,23 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
 }
 
 /**
- * Renders the picker's purpose statement. `purpose_code`/`purpose_description`
- * are an attributed claim in this reference implementation's existing
- * convention — `renderPendingGrantConsentHtml` puts the same fields in its
- * CLIENT block (see "Stated purpose" there); this mirrors that precedent
- * rather than introducing a fourth authorship category the `ConsentAuthorship`
- * type does not define.
+ * Renders the picker's purpose statement. The hosted-MCP authorize shortcut
+ * never receives `authorization_details` from the client (source-selection
+ * requests carry no purpose_code) — this picker mints
+ * `HOSTED_MCP_PICKER_PURPOSE_CODE`/`_DESCRIPTION` itself and assigns it to
+ * every grant it issues. That is a server assignment, not a claim the client
+ * made about itself, so this renders in the CLIENT-adjacent "server assigned"
+ * framing rather than `renderAuthorshipBlock("client", ...)`'s "they claim"
+ * eyebrow, which would misattribute authorship to an app that declared
+ * nothing (spec-core.md:706-730 semantic classes).
  */
 function renderHostedMcpPurposeBlock(ui: ConsentUiRenderer): string {
   return renderAuthorshipBlock(
-    "client",
-    "Stated purpose",
+    "manifest",
+    "Assigned purpose",
     ui.renderKeyValueList([
-      { label: "Purpose", value: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION },
+      { label: "Purpose", value: "Assigned by your server (the app did not declare a purpose)" },
+      { label: "Purpose description", value: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION },
       { html: `<code>${ui.escapeHtml(HOSTED_MCP_PICKER_PURPOSE_CODE)}</code>`, label: "Purpose code" },
     ]),
     ui
@@ -2046,23 +2071,29 @@ const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
 };
 
 /**
- * Renders the picker's retention bound (request-params:726). Server-
- * determined and identical for every hosted-MCP package grant today
- * (`HOSTED_MCP_PICKER_RETENTION`) — a protocol fact, not a client claim,
- * unlike the purpose block above. Replaces the prior "this page does not set
- * a time limit" disclaimer, which was true only because no retention policy
- * existed yet.
+ * Renders the picker's retention bound (request-params:726). Retention is a
+ * *structured policy declaration* per spec-core.md:706-730 — a policy
+ * commitment by the data recipient, not a protocol-enforced constraint
+ * (spec-core.md:1602). The hosted-MCP authorize shortcut never receives a
+ * client-declared `retention` (the request carries no `authorization_details`
+ * at all), so `HOSTED_MCP_PICKER_RETENTION` is this server's own fixed
+ * default — no one has declared a retention commitment for this specific
+ * request. Rendered as server-generated text (`manifest` authorship, "Your
+ * server describes") rather than "Your server enforces", and worded as the
+ * server's own default rather than attributing it to the app, since the app
+ * declared nothing. Replaces the prior "this page does not set a time limit"
+ * disclaimer, which was true only because no retention policy existed yet.
  */
 function renderHostedMcpRetentionBlock(ui: ConsentUiRenderer): string {
   const onExpiry =
     RETENTION_ON_EXPIRY_COPY[HOSTED_MCP_PICKER_RETENTION.on_expiry] ?? HOSTED_MCP_PICKER_RETENTION.on_expiry;
   return renderAuthorshipBlock(
-    "protocol",
+    "manifest",
     "Data retention",
     ui.renderKeyValueList([
       {
         label: "Retention",
-        value: `Data this app reads is ${onExpiry} after ${HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days")}.`,
+        value: `No retention commitment was declared by this app. Your server's default applies: data it reads is ${onExpiry} within ${HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days")}.`,
       },
     ]),
     ui
@@ -2144,6 +2175,17 @@ export async function renderHostedMcpSourceSelection(
     return `<div class="hosted-ui-option-streams" data-hosted-mcp-streams data-streams-enabled="true" aria-disabled="false">${items}</div>`;
   };
 
+  // If every row's resolved source.kind is the same (the common case), state
+  // it once above the list instead of repeating "Source kind: connector" on
+  // every one of N rows; rows still carry a compact badge as the per-row
+  // protocol-fact hook. `null` (unresolved) rows break uniformity so their
+  // per-row line stays visible.
+  const resolvedSourceKinds = rows.map((row) => row.sourceKind);
+  const uniformSourceKind =
+    resolvedSourceKinds.length > 0 && resolvedSourceKinds.every((kind) => kind && kind === resolvedSourceKinds[0])
+      ? resolvedSourceKinds[0]
+      : null;
+
   const options = rows.length
     ? rows
         .map((row, index) => {
@@ -2155,8 +2197,20 @@ export async function renderHostedMcpSourceSelection(
           const previewBlock = streamPreview
             ? `<span class="hosted-ui-option-preview">${ui.escapeHtml(streamPreview)}</span>`
             : "";
+          // Source-kind (source-kinds:731-743) is a protocol fact per row, but
+          // with every source on real deployments resolving to the same kind
+          // (`connector` today — `provider_native` sources are rare), a full
+          // "Source kind: connector" text line repeated on every row is
+          // presenter clutter, not signal. When every row shares one kind, a
+          // single summary line above the list (`uniformSourceKindSummary`
+          // below) states it once, and each row gets a compact badge instead
+          // of the full sentence. When kinds are mixed (or a row's kind
+          // couldn't be resolved), the per-row line stays so the one
+          // distinguishing fact per source is still visible.
           const sourceKindBlock = row.sourceKind
-            ? `<span class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>${ui.escapeHtml(row.sourceKind)}</code></span>`
+            ? uniformSourceKind
+              ? `<span class="hosted-ui-option-source-kind-badge" data-authorship="protocol" title="Source kind: ${ui.escapeHtml(row.sourceKind)}"><code>${ui.escapeHtml(row.sourceKind)}</code></span>`
+              : `<span class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>${ui.escapeHtml(row.sourceKind)}</code></span>`
             : "";
           return `
           <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false">
@@ -2239,6 +2293,7 @@ export async function renderHostedMcpSourceSelection(
             </span>
           </label>
         </fieldset>
+        <p class="hosted-ui-expiry-note">${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</p>
       `
     : "";
 
@@ -2430,9 +2485,37 @@ export async function renderHostedMcpSourceSelection(
 </script>`
     : "";
 
+  // The origin (`titleName`) is the enforced identity and stays in the title
+  // as the verified anchor; when a self-described name is also present,
+  // render it too so the human-readable app name isn't buried. `renderPageIntro`
+  // escapes `title` as plain text (no HTML), so the trust-status marker itself
+  // lives in the adjacent `clientIdentityBlock`'s existing "Unverified app"
+  // badge, not inline in the H1 — the H1 states which name is which, the
+  // badge right below it states the self-described one isn't verified
+  // (spec-core.md:706-730 allows showing a resolved name next to its trust
+  // status; it must not be presented as verified on its own).
   const pickerTitle = clientDisplay
-    ? `${clientDisplay.titleName} wants access to your data`
+    ? clientDisplay.selfDescribedName
+      ? `${clientDisplay.selfDescribedName} (${clientDisplay.titleName}) wants access`
+      : `${clientDisplay.titleName} wants access to your data`
     : "Choose what this app can read";
+
+  const sourceKindSummaryInline = uniformSourceKind
+    ? `<p class="hosted-ui-source-kind-summary">All sources below are <code>${ui.escapeHtml(uniformSourceKind)}</code>-backed.</p>`
+    : "";
+
+  // Resolved field/time-range scope (Grant fields: `streams[].fields`,
+  // `streams[].time_constraint`; approval-artifact requirement,
+  // spec-core.md:873-880). This picker has no field-projection or
+  // time-range UI (`buildHostedMcpAuthorizationDetailForConnector` always
+  // submits bare `{ name }` stream entries — request-params:726's `fields`/
+  // `time_range` are never set), so every stream every row grants resolves
+  // to all of that stream's fields with no temporal limit, uniformly. Stated
+  // once above the list rather than per-row, since there is no per-stream
+  // variance to distinguish (no stream on this picker can ever request a
+  // narrower scope than "everything").
+  const fieldsAndTimeRangeSummary =
+    '<p class="hosted-ui-fields-timerange-summary">All fields of each stream you check; no date-range limit.</p>';
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
@@ -2441,7 +2524,7 @@ export async function renderHostedMcpSourceSelection(
   const protocolSelectionBlock = renderAuthorshipBlock(
     "protocol",
     "Streams and access mode your server will enforce",
-    `<div class="hosted-ui-option-group">${options}</div>${accessModeControl}`,
+    `${sourceKindSummaryInline}${fieldsAndTimeRangeSummary}<div class="hosted-ui-option-group">${options}</div>${accessModeControl}`,
     ui
   );
 

@@ -534,6 +534,30 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   overflow-wrap: anywhere;
 }
 
+/* Compact per-row source-kind badge (FIX 3: presenter clutter) — used
+ * instead of the full "Source kind: connector" text line when every row on
+ * the picker shares one resolved kind and a single summary line above the
+ * list already states it. */
+.hosted-ui-option-source-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0.25rem;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+}
+.hosted-ui-option-source-kind-badge code {
+  font-family: var(--font-mono);
+}
+.hosted-ui-source-kind-summary,
+.hosted-ui-fields-timerange-summary {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+
 .hosted-ui-option-source {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
@@ -636,6 +660,12 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--foreground);
 }
 .hosted-ui-access-mode-meta {
+  color: var(--muted-foreground);
+}
+
+.hosted-ui-expiry-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
   color: var(--muted-foreground);
 }
 
