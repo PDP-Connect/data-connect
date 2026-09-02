@@ -32,6 +32,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+#[cfg(unix)]
 use super::server::kill_process_group;
 
 static REF_SERVER_PROCESS: Mutex<Option<std::process::Child>> = Mutex::new(None);
