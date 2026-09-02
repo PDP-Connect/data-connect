@@ -218,13 +218,15 @@ test("picker exposes Select all / Clear all / Expand all / Collapse all controls
   assert.match(html, /data-hosted-mcp-expand-all/, "expand-all hook present");
   assert.match(html, /data-hosted-mcp-collapse-all/, "collapse-all hook present");
   // Owner-facing labels.
-  assert.match(html, />Select all</, "Select all is owner-labelled");
-  assert.match(html, />Clear all</, "Clear all is owner-labelled");
-  assert.match(html, />Expand all</, "Expand all is owner-labelled");
-  assert.match(html, />Collapse all</, "Collapse all is owner-labelled");
-  // Per-source affordances too.
-  assert.match(html, /data-hosted-mcp-select-streams/, "per-source select-every-stream hook present");
-  assert.match(html, /data-hosted-mcp-clear-streams/, "per-source clear hook present");
+  assert.match(html, />Select every source</, "bulk select is owner-labelled");
+  assert.match(html, />Clear selection</, "bulk clear is owner-labelled");
+  assert.match(html, />Show all data types</, "expand is owner-labelled");
+  assert.match(html, />Hide all data types</, "collapse is owner-labelled");
+  // The 54 per-source buttons are gone: the tri-state parent checkbox already
+  // selects and clears its own source, and 27 sources x 2 buttons was the
+  // page compensating for a list that should have been shorter.
+  assert.equal(html.includes("data-hosted-mcp-select-streams"), false, "no per-source select-every button");
+  assert.equal(html.includes("data-hosted-mcp-clear-streams"), false, "no per-source clear button");
 });
 
 // ── Acceptance criterion 3: nothing preselected on first render ──────────────
@@ -304,7 +306,8 @@ test("picker row meta never repeats a URL-shaped connector id as the technical k
   for (const meta of metas) {
     assert.equal(meta.includes("https"), false, "row meta must not echo a registry URL");
     assert.equal(meta.includes("/connectors/"), false, "row meta must not echo a registry URL path");
-    assert.match(meta, /streams? available/, "row meta still summarizes available stream count");
+    assert.match(meta, /\d+ data types?/, "row meta still summarizes the count of data the owner holds");
+    assert.equal(/\bstreams?\b/.test(meta), false, '"stream" is a protocol noun, not owner-facing copy');
   }
 });
 
@@ -419,7 +422,7 @@ test("a held connector's 'streams available' count reflects real per-connection 
   const row = mustExist(rows[0], "the GitHub connection row must exist");
 
   // Real holdings (2), not the manifest's full offering (3) and not 0.
-  assert.match(row.meta, /\b2 streams available\b/, `expected the real held count of 2, got meta: ${row.meta}`);
+  assert.match(row.meta, /\b2 data types\b/, `expected the real held count of 2, got meta: ${row.meta}`);
   assert.equal(row.meta.includes("3 streams available"), false, "must not fall back to the manifest catalog count");
 
   // The full manifest catalog must still be present in the grantable stream
@@ -453,11 +456,11 @@ test("picker carries the source-first validation guards and an inline error bann
 
   // The two guard messages that keep an orphaned stream / sourceless submit
   // from ever reaching the server as a confusing grant.
-  assert.match(html, /Select at least one source/i, "guards against a sourceless submit");
+  assert.match(html, /Choose at least one data type to continue/i, "guards against a sourceless submit");
   assert.match(
     html,
-    /Choose at least one stream inside each selected source/i,
-    "guards against a selected source with no checked stream"
+    /Choose data from each selected source, or clear the source/i,
+    "guards against a selected source with no checked data"
   );
 
   // The picker JS derives the source checkbox from its checked streams, so a
@@ -474,27 +477,30 @@ test("picker carries the source-first validation guards and an inline error bann
 // its-streams model, the "no streams checked = not shared" rule, and the honest
 // retention caveat survive future refactors of the pure render helper.
 
-test("picker copy states the source-is-its-streams model in owner-facing language", async () => {
+test("picker copy carries no instructions for its own checkbox, and no revoke promise the product cannot keep", async () => {
   const html = await renderPicker();
 
-  // The model statement: selecting a source means selecting its streams, so a
-  // "parent selected, zero streams" state has no meaning the owner can create.
-  assert.match(html, /A source is its streams/i, "copy names the source = its-streams model");
-  assert.match(
-    html,
-    /A source with no streams checked is not shared/i,
-    "copy states that an unchecked source is simply not shared (no orphan-parent state)"
+  // The ~70 words that used to teach the owner how a tri-state checkbox
+  // works are gone. Explanatory copy at that density signals a broken
+  // control, and this one was never broken — the parent already goes
+  // `indeterminate` on partial selection. Pin the deletion so it does not
+  // creep back.
+  assert.equal(html.includes("A source is its streams"), false, "the checkbox model is not explained in prose");
+  assert.equal(
+    html.includes("Check one stream to share just that stream"),
+    false,
+    "single-stream grants are discoverable from the control, not from a sentence about it"
   );
-  assert.match(html, /Check one stream to share just that stream/i, "copy makes single-stream grants discoverable");
 
-  // Retention honesty: a calm, separate caveat stating the server's own
-  // default policy, not attributed to the app as something it promised, and
-  // not the old (now-stale) "no time limit" disclaimer — see FIX 1.
-  assert.match(
-    html,
-    /No retention commitment was declared by this app/i,
-    "copy is honest that no retention was declared by the client, not a machine-readable bound this server enforces"
+  // The revoke promise is stated at the granularity the product actually
+  // delivers. Per-source revoke has a route and no UI, so promising it is a
+  // reversibility claim the owner cannot act on.
+  assert.equal(
+    /revoke any source you approve/i.test(html),
+    false,
+    "no per-source revoke promise: the route exists but no UI calls it"
   );
+  assert.match(html, /You can revoke this access later from your grants page/i, "the package-level promise is kept");
   assert.equal(html.includes("retention limit"), false, 'copy avoids the jargon "retention limit"');
 
   // No technical-demo phrasing or registry leakage in the *visible prose*. The
@@ -508,19 +514,20 @@ test("picker copy states the source-is-its-streams model in owner-facing languag
   }
 });
 
-test("picker does not explain the selection model in two competing paragraphs", async () => {
-  const html = await renderPicker();
-  // The page lede orients ("Pick the streams…"); the risk paragraph carries the
-  // model detail. Guard against re-introducing the old duplicate lede sentence
-  // that restated stream selection a second time.
-  assert.equal(
-    html.includes("Select streams from the sources this app may use"),
-    false,
-    "the lede must not duplicate the model explanation carried by the risk copy"
-  );
-  // Exactly one owner-facing "Share only what this app needs" model paragraph.
-  const modelParagraphs = [...html.matchAll(/Share only what this app needs/g)];
-  assert.equal(modelParagraphs.length, 1, "the model is stated once, not repeated");
+test("no owner-facing sentence appears twice on the page", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  // Rendered text only — the connector id legitimately repeats inside opaque
+  // machine carriers (`data-source-key`, base64url form values).
+  const sentences = [...html.matchAll(/>([^<]+)</g)]
+    .map((m) => mustExist(m[1], "capture group must exist").trim())
+    // Long enough to be prose rather than a label, number, or stream name.
+    .filter((text) => text.length > 40);
+  const seen = new Map<string, number>();
+  for (const sentence of sentences) {
+    seen.set(sentence, (seen.get(sentence) ?? 0) + 1);
+  }
+  const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([text]) => text);
+  assert.deepEqual(duplicated, [], "every owner-facing sentence is said once");
 });
 
 // ── Empty-state: no sources registered ───────────────────────────────────────
@@ -528,7 +535,11 @@ test("picker does not explain the selection model in two competing paragraphs", 
 test("empty connector set renders a calm owner message with no form controls", async () => {
   const caps = makeCaps({ listRegisteredConnectorIds: async () => [INTERNAL_ID] });
   const html = await renderPicker(caps);
-  assert.match(html, /No sources are available on this server yet/i, "owner sees a plain empty-state message");
+  assert.match(html, /You haven&#39;t connected any data sources yet/i, "owner sees a plain empty-state message");
+  // The empty picker must not be a dead end — an owner who reaches it can
+  // still refuse, and is told what to do next.
+  assert.match(html, /Connect one, then start this request again/i, "the empty state names the way out");
+  assert.match(html, /value="cancel"/, "refusal is reachable even with nothing to grant");
   assert.equal(inputsWith(html, "data-hosted-mcp-source-checkbox").length, 0, "no source checkboxes in empty state");
   assert.equal(html.includes("data-hosted-mcp-select-sources"), false, "no bulk toolbar in empty state");
 });
@@ -539,13 +550,22 @@ test("empty connector set renders a calm owner message with no form controls", a
 // to every grant it issues. The old "They claim — not verified by your
 // server" framing misattributed authorship to an app that declared nothing.
 
-test("picker states the purpose was assigned by the server, not claimed by an app that declared none", async () => {
-  const html = await renderPicker();
+test("picker states the purpose once, naming its origin, with no purpose-code URI on the owner surface", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  // One sentence carrying both facts — who assigned it and what it is —
+  // replacing three rows (`Purpose`, `Purpose description`, `Purpose code`)
+  // that said one idea three times, one of them as a URI.
   assert.match(
     html,
-    /Assigned by your server \(the app did not declare a purpose\)/i,
-    "picker must state the server assigned the purpose, not that the app claimed it"
+    /Set by this server because ChatGPT didn&#39;t give one: use the data you select as context for your AI assistant\./,
+    "purpose is one sentence that names its own origin"
   );
+  assert.equal(
+    html.includes("https://pdpp.dev/purpose/agent_context"),
+    false,
+    "the registry purpose code is a protocol identifier, not owner-facing copy — it stays in the grant and audit record"
+  );
+  assert.equal(html.includes("Purpose description"), false, "no label-plus-sentence redundancy");
   assert.equal(
     html.includes("They claim — not verified by your server"),
     false,
@@ -560,13 +580,29 @@ test("picker states the purpose was assigned by the server, not claimed by an ap
 
 // ── FIX 1: retention is a structured policy declaration, not enforcement ─────
 
-test("picker states retention as an undeclared-by-the-app server default, not something 'your server enforces'", async () => {
-  const html = await renderPicker();
+test("picker never states a retention the client did not declare", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+
+  // The defect this pins: the page told the owner "data it reads is deleted
+  // within 90 days". Read plainly, the subject is what the APP does —
+  // ChatGPT never promised it, and this server has no mechanism to cause it
+  // (spec-core.md:948 — PDPP does not retroactively reach into client-side
+  // data stores; :951 — retention is a commitment BY the recipient). No
+  // feature can make that sentence true, so the only fix is to state the
+  // absence.
   assert.match(
     html,
-    /No retention commitment was declared by this app/i,
-    "picker must say no retention was declared, not attribute a 90-day promise to the app"
+    /ChatGPT did not say how long it keeps the data it receives\./,
+    "the absence is stated, naming the app whose silence it is"
   );
+  assert.equal(
+    /deleted within 90\s*days/i.test(html),
+    false,
+    "the server must never tell the owner the client deletes their data on a schedule the client never accepted"
+  );
+  assert.equal(/\b90 days\b/.test(html), false, "no fabricated retention window anywhere on the owner surface");
+  assert.equal(html.includes("P90D"), false, "no retention bound is asserted at all");
+
   assert.match(
     html,
     /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
@@ -579,43 +615,68 @@ test("picker states retention as an undeclared-by-the-app server default, not so
   );
 });
 
-// ── FIX 3: H1 shows the self-described name distinctly from the verified origin ──
+// ── The H1 names the requester and the verb; the URL is not headline material ──
 
-test("H1 shows only the single name when the client has no separately-verified origin identity", async () => {
-  // Pre-registered/public clients (registration_mode !== client_id_metadata_document)
-  // have no verifiable origin distinct from their registered display name — see
-  // `buildConsentClientDisplay`'s pre-registered branch, where `titleName` IS the
-  // client-authored name. There is nothing to distinguish, so the H1 must render
-  // the single-name form, never a spurious "(name) wants access" parenthetical.
-  const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
-  assert.match(html, /<h1>Demo App wants access to your data<\/h1>/, "H1 falls back to the single-name form");
-});
-
-test("H1 shows the self-described name next to the verified origin, and the origin stays the enforced anchor", async () => {
+test("H1 uses the resolved display name, never the client_id URL", async () => {
   const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  // spec-core.md:673 requires the resolved display name when it is available,
+  // and makes client_id the fallback for when it is not. ChatGPT's metadata
+  // document carries `"client_name": "ChatGPT"`, so headlining
+  // `https://chatgpt.com` was showing the fallback while holding the answer.
+  assert.match(html, /<h1[^>]*>ChatGPT wants to read your data<\/h1>/, "H1 is the name plus the verb");
+  assert.equal(
+    /<h1[^>]*>[^<]*https:\/\//.test(html),
+    false,
+    "no URL in the headline — the domain does its anti-phishing job in the identity block, quietly"
+  );
+  // The domain is still shown, as its own quiet line, and the trust status
+  // sits with it so a resolved name is never presented as verified.
+  assert.match(html, /hosted-ui-client-identity-domain[^>]*>chatgpt\.com</, "the domain renders as a quiet second line");
   assert.match(
     html,
-    /<h1>ChatGPT \(https:\/\/chatgpt\.com\) wants access<\/h1>/,
-    "H1 must show the self-described name next to its verified origin, not replace the origin with it"
+    /This app isn't registered with your server\. Its name and logo are self-reported\./,
+    "trust status is a neutral fact adjacent to the name"
   );
-  // The unverified marker for the self-described name lives in the adjacent
-  // client-identity block, right below the H1 — not fabricated as verified.
-  assert.match(html, /hosted-ui-unverified-badge[^>]*>Unverified app/, "the self-described name carries an unverified marker");
+  assert.equal(
+    html.includes("Unverified app"),
+    false,
+    "the unconditional badge is replaced by a fact line — a badge that cannot vary carries no information"
+  );
+});
+
+test("H1 falls back to the registered name for a client with no distinct origin identity", async () => {
+  // Pre-registered/public clients have no verifiable origin distinct from
+  // their registered display name — `titleName` IS the client-authored name.
+  const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
+  assert.match(html, /<h1[^>]*>Demo App wants to read your data<\/h1>/, "H1 uses the single registered name");
+});
+
+test("the metadata-document URL never reaches the owner surface", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  // A client_id with a `token_endpoint_auth_method` query parameter is debug
+  // output: it means something to an engineer inspecting a registration and
+  // nothing to the person deciding whether to share their bank transactions.
+  assert.equal(html.includes("Metadata document"), false, "no metadata-document row on the consent surface");
+  assert.equal(
+    html.includes("token_endpoint_auth_method"),
+    false,
+    "no auth-method query parameter rendered to the owner"
+  );
 });
 
 // ── FIX 3: source-kind summary — uniform vs. mixed ────────────────────────────
 
-test("uniform source kind across all rows renders once above the list plus a compact per-row badge", async () => {
+test("a uniform source kind is not rendered at all — it carries no bits for the owner", async () => {
   const html = await renderPicker();
-  assert.match(
-    html,
-    /All sources below are <code>connector<\/code>-backed/i,
-    "a single summary line states the shared kind once"
-  );
-  const fullLineCount = [...html.matchAll(/Source kind: <code>connector<\/code>/g)].length;
-  assert.equal(fullLineCount, 0, "no row repeats the full 'Source kind: connector' sentence once uniform");
-  const badgeCount = [...html.matchAll(/hosted-ui-option-source-kind-badge/g)].length;
-  assert.ok(badgeCount >= 2, "each row still carries a compact per-row protocol-fact badge");
+  // `source.kind` is real protocol (source-kinds:731-743) but its audience is
+  // the CLIENT, which reads it as a trust expectation about declaration
+  // provenance. To the owner, "connector" answers a question nobody asked —
+  // and because every row resolved to the same kind, it consumed a badge slot
+  // on all 27 rows while distinguishing nothing. It stays in the grant and
+  // the audit record.
+  assert.equal(html.includes("All sources below are"), false, "no uniform-kind summary line");
+  assert.equal(html.includes("hosted-ui-option-source-kind-badge"), false, "no per-row connector badge");
+  assert.equal(/>connector</.test(html), false, 'the raw enum never renders as owner-facing copy');
 });
 
 test("mixed source kinds across rows fall back to a full per-row line, no false summary", async () => {
@@ -637,8 +698,12 @@ test("mixed source kinds across rows fall back to a full per-row line, no false 
     false,
     "mixed kinds must not render a uniform summary line that would misstate one of the kinds"
   );
-  assert.match(html, /Source kind: <code>connector<\/code>/, "Spotify's row still states its real kind");
-  assert.match(html, /Source kind: <code>provider_native<\/code>/, "GitHub's row still states its real kind");
+  // When provenance genuinely differs between rows, the difference IS worth
+  // surfacing — but worded as a consequence for the owner, never as the raw
+  // enum.
+  assert.match(html, /Read directly from this source/, "the connector-backed row names its consequence");
+  assert.match(html, /Read from data you imported/, "the provider-native row names its consequence");
+  assert.equal(/>provider_native</.test(html), false, "the raw enum never reaches the owner surface");
 });
 
 // ── FIX 4: grant expiry is stated, tied to the access-mode control ───────────
@@ -647,15 +712,24 @@ test("picker states grant expiry under 'Your server enforces', tied to the acces
   const html = await renderPicker();
   assert.match(
     html,
-    /No expiry — access lasts until you revoke it/i,
-    "picker must state that grants from this flow carry no expiry"
+    /This authorization has no scheduled end date\./,
+    "picker must state grant expiry as its own fact"
+  );
+  // Expiry is orthogonal to access mode (spec-core.md:889 — grant validity,
+  // data temporal scope, and access pattern must not be conflated). The old
+  // copy restated the mode and contradicted "One-time access" directly above
+  // it.
+  assert.equal(
+    /whichever access mode/i.test(html),
+    false,
+    "the expiry row must not restate the access mode"
   );
   // The expiry statement must sit immediately after the access-mode fieldset
   // (same protocol-enforced block), so the two can never silently contradict
   // each other. Assert ordering: access-mode fieldset close, then the expiry
   // note, before the block itself closes.
   const accessModeIndex = html.indexOf('class="hosted-ui-access-mode"');
-  const expiryIndex = html.indexOf("No expiry — access lasts until you revoke it");
+  const expiryIndex = html.indexOf("This authorization has no scheduled end date.");
   assert.ok(accessModeIndex >= 0, "access-mode fieldset must be present");
   assert.ok(expiryIndex > accessModeIndex, "expiry note must render after the access-mode fieldset, not before it");
   const protocolLabelIndex = html.indexOf('aria-label="Streams and access mode your server will enforce"');
@@ -672,12 +746,12 @@ test("picker states the resolved field/time-range scope once, as a protocol-enfo
   const html = await renderPicker();
   assert.match(
     html,
-    /All fields of each stream you check; no date-range limit/i,
+    /Everything in each data type you check, with no date limit\./,
     "picker must state the resolved field/time-range scope since this flow has no field-projection or time-range UI"
   );
   assert.match(
     html,
-    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}All fields of each stream you check/,
+    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}Everything in each data type you check/,
     "the fields/time-range statement must render inside the protocol-enforced block, above the source list"
   );
 });
