@@ -383,6 +383,7 @@ import {
   mountRefDatasetTop,
   mountRefRecordsVersionStats,
 } from "./routes/ref-dataset.ts";
+import { mountRefDesignConsentIcons } from "./routes/ref-design-consent-icons.ts";
 import { mountRefDesignConsentMock } from "./routes/ref-design-consent-mock.ts";
 import {
   sanitizeDeviceExporterDiagnostic,
@@ -5155,6 +5156,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefDesignConsentMock>[1]);
+  mountRefDesignConsentIcons(app, {
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefDesignConsentIcons>[1]);
 
   mountRefGrantPackagesList(app, refGrantsContext as unknown as Parameters<typeof mountRefGrantPackagesList>[1]);
   mountRefGrantPackagesCount(app, refGrantsContext as unknown as Parameters<typeof mountRefGrantPackagesCount>[1]);

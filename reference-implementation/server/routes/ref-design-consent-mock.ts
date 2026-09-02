@@ -27,26 +27,47 @@
 //     point: the design can move ahead of the implementation without any
 //     risk to the surface that actually issues grants.
 //
-// The live column is 640px and has no width breakpoints; the design needs a
-// two-column composition with a sticky review panel, so this file carries its
-// own layout stylesheet layered on the shared Ink Carbon token sheet at
-// `/__pdpp/hosted-ui.css`. Tokens are inherited, never redefined.
+// Design-system posture (owner feedback round 2, item 8): this route does
+// NOT define a bespoke stylesheet with its own class vocabulary. It composes
+// the SAME semantic component classes `hosted-ui.ts` already exports for
+// every other hosted page (`.hosted-ui-surface`, `.hosted-ui-option`,
+// `.hosted-ui-client-identity`, `.hosted-ui-button`, etc.), loaded from the
+// same `/__pdpp/hosted-ui.css` these pages already share. `CONSENT_LAYOUT_CSS`
+// below adds only the structural rules hosted-ui.ts has no equivalent for — a
+// sticky two-column decision rail and its mobile collapse — and every value
+// in it is a `var(--token)` reference into that same shared sheet. Zero new
+// colors, zero new radii, zero bespoke palette.
 //
 // Variants, all reachable by URL:
 //   /_ref/design/consent                    — the consent screen (desktop)
 //   /_ref/design/consent?width=mobile       — the mobile rendering
-//   /_ref/design/consent?trust=verified     — the same screen with a positive
-//                                             trust signal, so both limbs of
-//                                             spec-core.md:675 are reviewable
+//   /_ref/design/consent?trust=unverified   — monogram, self-reported (default)
+//   /_ref/design/consent?trust=domain       — CIMD domain-verified: automatic,
+//                                             no client participation, proxied
+//                                             cached logo (spec-core.md:672's
+//                                             "trust-registry metadata" tier
+//                                             reached via automatic domain
+//                                             control rather than an operator)
+//   /_ref/design/consent?trust=verified     — operator allowlist / trust
+//                                             registry membership: a human
+//                                             action, the strongest signal,
+//                                             rendered distinctly per
+//                                             spec-core.md:675
 //   /_ref/design/consent?state=signin       — owner sign-in
 //   /_ref/design/consent?state=deny         — the owner cancelled
 //   /_ref/design/consent?state=error        — a terminal server error
 //   /_ref/design/consent?state=receipt      — the post-approval receipt
+//   /_ref/design/consent?theme=dark         — force dark mode for review
 //
 // Auth posture: owner session, same as every other `/_ref/` surface. This is
 // an internal design surface, not a PDPP protocol surface.
 
-import { escapeHtml, HOSTED_UI_CSS_PATH, renderPdppMark } from "../hosted-ui.ts";
+import {
+  escapeHtml,
+  HOSTED_UI_CSS_PATH,
+  normalizeHostedThemeChoice,
+  renderPdppMark,
+} from "../hosted-ui.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
 // ─── Minimal structural types ────────────────────────────────────────────────
@@ -81,10 +102,29 @@ export interface MountRefDesignConsentMockContext {
 const CLIENT = {
   domain: "chatgpt.com",
   // Two letters from the resolved display name, per spec-core.md:676. Shown
-  // only while unverified; a verified client would render its cached logo.
+  // only while unverified; domain-verified and verified clients render their
+  // (mock, proxied) logo instead.
   monogram: "CH",
   name: "ChatGPT",
 } as const;
+
+// Only sources with a real bundled connector icon (server/assets/source-icons,
+// served by `ref-design-consent-icons.ts`) appear here; every other mock
+// source falls back to the neutral placeholder rendered inline below — never
+// initials where no real logo exists, per owner feedback round 1 item 7.
+const SOURCE_ICONS: Record<string, string> = {
+  amazon: "amazon.svg",
+  apple_contacts: "icloud.svg",
+  apple_health: "icloud.svg",
+  chatgpt_history: "chatgpt.svg",
+  doordash: "doordash.svg",
+  github: "github.svg",
+  goodreads: "goodreads.svg",
+  instagram: "instagram.svg",
+  linkedin: "linkedin.svg",
+  spotify: "spotify.svg",
+  uber: "uber.svg",
+};
 
 interface MockStream {
   readonly fieldsSelected?: number;
@@ -96,8 +136,11 @@ interface MockStream {
   // Humanized temporal phrasing, per spec-core.md:545. Present only where the
   // stream declares `consent_time_field`; absent means the control is
   // suppressed, which is the correct rendering of an inapplicable control.
+  // This is the DATA TIME RANGE axis (StreamGrant.time_constraint) — distinct
+  // from grant validity (Grant.expires_at), which lives only in the rail.
   readonly timePhrase?: string;
-  readonly timeSelected?: string;
+  readonly timeSince?: string;
+  readonly timeUntil?: string;
 }
 
 interface MockSource {
@@ -109,7 +152,9 @@ interface MockSource {
 
 // 27 sources. The three that carry a selection are first, so the design's
 // populated states — partial selection, narrowed fields, a date bound — are
-// visible without interacting.
+// visible without interacting. The owner's own worked example (round 2, item
+// 12) is a CPA reading 2025 transaction data across several sources for a
+// grant that only lasts 30 days, so Chase/YNAB carry a 2025 range here.
 const SOURCES: readonly MockSource[] = [
   {
     account: "Personal · ••4417",
@@ -131,7 +176,8 @@ const SOURCES: readonly MockSource[] = [
         selected: true,
         sentence: "Every purchase, payment, and transfer, with amounts and merchants.",
         timePhrase: "Transactions dated",
-        timeSelected: "1 March 2026",
+        timeSince: "2025-01-01",
+        timeUntil: "2025-12-31",
       },
       {
         fieldsTotal: 9,
@@ -167,7 +213,6 @@ const SOURCES: readonly MockSource[] = [
         selected: true,
         sentence: "The full text of your email, including attachment names.",
         timePhrase: "Messages sent",
-        timeSelected: "1 March 2026",
       },
       {
         fieldsTotal: 6,
@@ -177,18 +222,8 @@ const SOURCES: readonly MockSource[] = [
         sentence: "How your messages group into conversations.",
         timePhrase: "Threads started",
       },
-      {
-        fieldsTotal: 4,
-        label: "Labels",
-        name: "labels",
-        sentence: "The labels and folders you file mail under.",
-      },
-      {
-        fieldsTotal: 8,
-        label: "Contacts",
-        name: "contacts",
-        sentence: "The people you email and their addresses.",
-      },
+      { fieldsTotal: 4, label: "Labels", name: "labels", sentence: "The labels and folders you file mail under." },
+      { fieldsTotal: 8, label: "Contacts", name: "contacts", sentence: "The people you email and their addresses." },
       {
         fieldsTotal: 11,
         label: "Attachments",
@@ -240,20 +275,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "The code snippets you published as gists.",
         timePhrase: "Gists created",
       },
-      {
-        fieldsTotal: 12,
-        label: "Profile",
-        name: "user",
-        sentence: "Your public profile — name, bio, company, and location.",
-        timePhrase: "Profile updated",
-      },
-      {
-        fieldsTotal: 9,
-        label: "Contribution counts",
-        name: "user_stats",
-        sentence: "How much you have committed, reviewed, and starred.",
-        timePhrase: "Counted on or after",
-      },
     ],
   },
   {
@@ -269,38 +290,11 @@ const SOURCES: readonly MockSource[] = [
         timePhrase: "Conversations started",
       },
       {
-        fieldsTotal: 6,
-        label: "Messages",
-        name: "messages",
-        sentence: "Individual turns within each conversation.",
-        timePhrase: "Messages sent",
-      },
-      {
         fieldsTotal: 5,
         label: "Memories",
         name: "memories",
         sentence: "What the assistant saved to remember about you.",
         timePhrase: "Saved on or after",
-      },
-      {
-        fieldsTotal: 4,
-        label: "Custom instructions",
-        name: "custom_instructions",
-        sentence: "The standing instructions you gave the assistant.",
-      },
-      {
-        fieldsTotal: 7,
-        label: "Shared conversations",
-        name: "shared_conversations",
-        sentence: "Conversations you published as links.",
-        timePhrase: "Shared on or after",
-      },
-      {
-        fieldsTotal: 8,
-        label: "Custom GPTs",
-        name: "custom_gpts",
-        sentence: "The assistants you built and their instructions.",
-        timePhrase: "Created on or after",
       },
     ],
   },
@@ -337,23 +331,10 @@ const SOURCES: readonly MockSource[] = [
         name: "transactions",
         sentence: "Every transaction you have categorized.",
         timePhrase: "Transactions dated",
+        timeSince: "2025-01-01",
+        timeUntil: "2025-12-31",
       },
       { fieldsTotal: 9, label: "Categories", name: "categories", sentence: "Your budget categories and targets." },
-      {
-        fieldsTotal: 12,
-        label: "Monthly budgets",
-        name: "month_categories",
-        sentence: "What you budgeted and spent in each category, month by month.",
-        timePhrase: "Months beginning",
-      },
-      { fieldsTotal: 6, label: "Payees", name: "payees", sentence: "The people and businesses you pay." },
-      {
-        fieldsTotal: 8,
-        label: "Scheduled transactions",
-        name: "scheduled_transactions",
-        sentence: "Transactions you set up to repeat.",
-        timePhrase: "Next due on or after",
-      },
     ],
   },
   {
@@ -367,20 +348,6 @@ const SOURCES: readonly MockSource[] = [
         name: "recently_played",
         sentence: "What you played and when.",
         timePhrase: "Played on or after",
-      },
-      {
-        fieldsTotal: 8,
-        label: "Playlists",
-        name: "playlists",
-        sentence: "Your playlists and what is in them.",
-        timePhrase: "Playlists created",
-      },
-      {
-        fieldsTotal: 6,
-        label: "Saved tracks",
-        name: "saved_tracks",
-        sentence: "Songs you have saved to your library.",
-        timePhrase: "Saved on or after",
       },
       { fieldsTotal: 5, label: "Top artists", name: "top_artists", sentence: "The artists you listen to most." },
     ],
@@ -417,8 +384,6 @@ const SOURCES: readonly MockSource[] = [
         name: "contacts",
         sentence: "Names, numbers, addresses, and birthdays in your address book.",
       },
-      { fieldsTotal: 5, label: "Address books", name: "address_books", sentence: "Which address books you keep." },
-      { fieldsTotal: 4, label: "Groups", name: "contact_groups", sentence: "How you have grouped your contacts." },
     ],
   },
   {
@@ -432,13 +397,6 @@ const SOURCES: readonly MockSource[] = [
         name: "timeline_points",
         sentence: "Where your phone has been, minute by minute.",
         timePhrase: "Locations recorded",
-      },
-      {
-        fieldsTotal: 8,
-        label: "Trips",
-        name: "timeline_segments",
-        sentence: "Journeys your phone inferred between places, with how you travelled.",
-        timePhrase: "Trips taken",
       },
     ],
   },
@@ -455,9 +413,6 @@ const SOURCES: readonly MockSource[] = [
         timePhrase: "Messages sent",
       },
       { fieldsTotal: 7, label: "Channels", name: "channels", sentence: "The channels you belong to." },
-      { fieldsTotal: 6, label: "Reactions", name: "reactions", sentence: "The emoji you reacted with." },
-      { fieldsTotal: 5, label: "Files", name: "files", sentence: "Files you shared in Slack." },
-      { fieldsTotal: 8, label: "People", name: "users", sentence: "Everyone in the workspace and their profiles." },
     ],
   },
   {
@@ -472,8 +427,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "Money you sent and received, with notes.",
         timePhrase: "Payments dated",
       },
-      { fieldsTotal: 6, label: "Friends", name: "friends", sentence: "The people you pay and get paid by." },
-      { fieldsTotal: 8, label: "Profile", name: "profile", sentence: "Your Venmo profile and username." },
     ],
   },
   {
@@ -487,19 +440,6 @@ const SOURCES: readonly MockSource[] = [
         name: "messages",
         sentence: "The text of your chats.",
         timePhrase: "Messages sent",
-      },
-      {
-        fieldsTotal: 7,
-        label: "Chats",
-        name: "chats",
-        sentence: "Who you talk to, one-to-one and in groups.",
-        timePhrase: "Chats started",
-      },
-      {
-        fieldsTotal: 8,
-        label: "Attachments",
-        name: "attachments",
-        sentence: "Photos, videos, and voice notes you exchanged.",
       },
     ],
   },
@@ -515,21 +455,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "Threads you submitted.",
         timePhrase: "Posts submitted",
       },
-      {
-        fieldsTotal: 9,
-        label: "Comments",
-        name: "comments",
-        sentence: "Comments you left anywhere on Reddit.",
-        timePhrase: "Comments posted",
-      },
-      { fieldsTotal: 5, label: "Saved", name: "saved", sentence: "Posts and comments you saved." },
-      {
-        fieldsTotal: 4,
-        label: "Upvoted",
-        name: "upvoted",
-        sentence: "Posts you upvoted.",
-        timePhrase: "Upvoted on or after",
-      },
     ],
   },
   {
@@ -544,7 +469,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "Photos and videos you published.",
         timePhrase: "Posts published",
       },
-      { fieldsTotal: 9, label: "Profile", name: "profile", sentence: "Your bio, links, and profile photo." },
     ],
   },
   {
@@ -553,15 +477,6 @@ const SOURCES: readonly MockSource[] = [
     name: "LinkedIn",
     streams: [
       { fieldsTotal: 14, label: "Profile", name: "profile", sentence: "Your work history, education, and skills." },
-      {
-        fieldsTotal: 9,
-        label: "Work history",
-        name: "experience",
-        sentence: "The roles you have held and when.",
-        timePhrase: "Roles starting",
-      },
-      { fieldsTotal: 7, label: "Education", name: "education", sentence: "The schools you attended." },
-      { fieldsTotal: 6, label: "Skills", name: "skills", sentence: "The skills listed on your profile." },
     ],
   },
   {
@@ -576,8 +491,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "What you watched and when.",
         timePhrase: "Watched on or after",
       },
-      { fieldsTotal: 5, label: "Ratings", name: "ratings", sentence: "Titles you rated." },
-      { fieldsTotal: 4, label: "My list", name: "my_list", sentence: "Titles you saved to watch later." },
     ],
   },
   {
@@ -606,7 +519,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "What you ordered, from where, and what you paid.",
         timePhrase: "Orders placed",
       },
-      { fieldsTotal: 5, label: "Order items", name: "order_items", sentence: "The individual dishes in each order." },
     ],
   },
   {
@@ -635,13 +547,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "Books on your shelves and their status.",
         timePhrase: "Shelved on or after",
       },
-      {
-        fieldsTotal: 8,
-        label: "Reviews",
-        name: "reviews",
-        sentence: "Reviews and ratings you wrote.",
-        timePhrase: "Reviews posted",
-      },
     ],
   },
   {
@@ -656,8 +561,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "What you posted in servers and DMs.",
         timePhrase: "Messages sent",
       },
-      { fieldsTotal: 5, label: "Servers", name: "guilds", sentence: "The servers you belong to." },
-      { fieldsTotal: 4, label: "Friends", name: "relationships", sentence: "Your friends list." },
     ],
   },
   {
@@ -671,13 +574,6 @@ const SOURCES: readonly MockSource[] = [
         name: "pages",
         sentence: "The content of your pages.",
         timePhrase: "Pages edited",
-      },
-      {
-        fieldsTotal: 9,
-        label: "Databases",
-        name: "databases",
-        sentence: "Your databases and every row in them.",
-        timePhrase: "Rows edited",
       },
     ],
   },
@@ -693,13 +589,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "What you posted, including replies.",
         timePhrase: "Posts published",
       },
-      {
-        fieldsTotal: 7,
-        label: "Direct messages",
-        name: "direct_messages",
-        sentence: "Your private conversations.",
-        timePhrase: "Messages sent",
-      },
     ],
   },
   {
@@ -714,20 +603,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "Your photos and videos, with the place and time each was taken.",
         timePhrase: "Taken on or after",
       },
-      {
-        fieldsTotal: 9,
-        label: "Search history",
-        name: "search_history",
-        sentence: "What you searched for on Google.",
-        timePhrase: "Searched on or after",
-      },
-      {
-        fieldsTotal: 8,
-        label: "YouTube watch history",
-        name: "youtube_watch_history",
-        sentence: "What you watched on YouTube.",
-        timePhrase: "Watched on or after",
-      },
     ],
   },
   {
@@ -740,20 +615,6 @@ const SOURCES: readonly MockSource[] = [
         label: "Group messages",
         name: "group_messages",
         sentence: "What you posted in group chats.",
-        timePhrase: "Messages sent",
-      },
-      {
-        fieldsTotal: 5,
-        label: "Groups",
-        name: "groups",
-        sentence: "The groups you belong to.",
-        timePhrase: "Groups joined",
-      },
-      {
-        fieldsTotal: 7,
-        label: "Direct messages",
-        name: "direct_messages",
-        sentence: "Your one-to-one conversations.",
         timePhrase: "Messages sent",
       },
     ],
@@ -770,14 +631,6 @@ const SOURCES: readonly MockSource[] = [
         sentence: "The text of your conversations.",
         timePhrase: "Messages sent",
       },
-      {
-        fieldsTotal: 6,
-        label: "Conversations",
-        name: "conversations",
-        sentence: "Who you talk to, one-to-one and in groups.",
-      },
-      { fieldsTotal: 5, label: "Reactions", name: "reactions", sentence: "The emoji you reacted with." },
-      { fieldsTotal: 7, label: "Attachments", name: "attachments", sentence: "Photos and files you exchanged." },
     ],
   },
 ];
@@ -802,283 +655,193 @@ function computeSelection(): Selection {
   };
 }
 
-// "All 12 fields" / "4 of 12 fields", per §4.2. The summary line is what the
-// owner reads on the default path; the field list itself stays behind the
-// disclosure, because 154 streams times a dozen fields each is not a screen
-// anyone can read.
+// "All 12 fields" / "4 of 12 fields", per §4.2.
 function fieldSummary(stream: MockStream): string {
   return stream.fieldsSelected === undefined
     ? `All ${stream.fieldsTotal} fields`
     : `${stream.fieldsSelected} of ${stream.fieldsTotal} fields`;
 }
 
-// Humanized temporal consent, per spec-core.md:545 — the field name in words,
-// never the parameter. Streams that declare no `consent_time_field` render
-// nothing at all: silence is the correct rendering of an inapplicable control.
-function timeSummary(stream: MockStream): string | null {
+// DATA TIME RANGE (StreamGrant.time_constraint) — distinct from grant
+// validity (Grant.expires_at), which never appears in this function or in
+// the source-list body at all; it lives only in the decision rail.
+function dataRangeSummary(stream: MockStream): string | null {
   if (!stream.timePhrase) {
     return null;
   }
-  return stream.timeSelected ? `${stream.timePhrase} on or after ${stream.timeSelected}` : "All dates";
+  if (stream.timeSince && stream.timeUntil) {
+    return `Data from ${stream.timeSince} to ${stream.timeUntil}`;
+  }
+  if (stream.timeSince) {
+    return `Data from ${stream.timeSince} onward`;
+  }
+  return "All dates";
 }
 
-// ─── Design layout stylesheet ────────────────────────────────────────────────
+function iconMarkup(sourceId: string, sourceName: string): string {
+  const file = SOURCE_ICONS[sourceId];
+  if (file) {
+    return `<img class="consent-source-icon" src="/_ref/design/consent/icons/${escapeHtml(file)}" alt="" width="24" height="24" />`;
+  }
+  // Neutral placeholder — never initials where no real logo exists (owner
+  // feedback round 1, item 7). A plain muted square, not a monogram: a
+  // monogram claims to BE the identity; this only marks "no icon on file."
+  return `<span class="consent-source-icon consent-source-icon-placeholder" role="img" aria-label="${escapeHtml(sourceName)}"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></span>`;
+}
 
-// Layered on `/__pdpp/hosted-ui.css`, which supplies the Ink Carbon tokens and
-// the type scale. Nothing here redefines a token; this is composition only —
-// the parts of §4.1/§4.3 the live stylesheet has no equivalent for.
+// ─── Layout-only CSS ──────────────────────────────────────────────────────────
 //
-// The live sheet is a fixed 640px column with zero width-based media queries.
-// The design needs a two-column desktop composition with a sticky review panel
-// (structural, not decorative: once the last thing the owner reads is the exact
-// summary they are binding to, that summary needs a column), plus a real mobile
-// rendering with 44px touch targets and a disclosure control that does not
-// share a hit area with a checkbox.
-const DESIGN_CSS = `
-.design-shell {
+// Structural rules `hosted-ui.ts`'s shared sheet has no equivalent for: a
+// sticky two-column decision rail and its mobile collapse to a fixed bottom
+// bar. Every color/spacing/radius value below is a `var(--token)` reference
+// into the SAME token set `/__pdpp/hosted-ui.css` defines — no hardcoded
+// oklch/hex, no parallel palette (owner feedback round 2, item 8).
+const CONSENT_LAYOUT_CSS = `
+/* hosted-ui.ts's shared .hosted-ui-page caps at 640px for the single-column
+ * live pages (device/owner-login/etc). This route's two-column decision-rail
+ * composition needs more room; widen only here, only this one property. */
+.consent-page {
   max-width: 960px;
-  margin: 0 auto;
-  padding: 2.5rem 1.5rem 4rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
 }
-
-.design-header {
-  display: flex;
-  align-items: center;
-  padding-bottom: 0.25rem;
-}
-.design-instance {
-  font-weight: 600;
-  font-size: 0.9375rem;
-  letter-spacing: -0.01em;
-}
-
-.design-columns {
+.consent-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 336px;
   gap: 2rem;
   align-items: start;
 }
-.design-main {
+.consent-body {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1.25rem;
   min-width: 0;
 }
-
-/* ─── Identity ─────────────────────────────────────────────────────────── */
-.design-identity {
+.consent-rail {
+  position: sticky;
+  top: 1.5rem;
   display: flex;
+  flex-direction: column;
   gap: 1rem;
-  align-items: flex-start;
 }
-.design-monogram {
-  flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--border);
-  background: var(--muted);
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 0.9375rem;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  border-radius: var(--radius);
-}
-.design-identity-body { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
-.design-client-name { font-size: 1.0625rem; font-weight: 600; letter-spacing: -0.01em; }
-.design-client-domain { color: var(--muted-foreground); font-size: 0.8125rem; }
 
-/* Unverified is a neutral fact line, not a badge shouting at a client that has
- * done nothing wrong. A positive trust signal renders distinctly (spec-core.md:675). */
-.design-trust {
-  margin-top: 0.375rem;
-  font-size: 0.8125rem;
-  color: var(--muted-foreground);
+.consent-rail-summary {
+  font-size: 0.875rem;
+  color: var(--foreground);
   line-height: 1.5;
 }
-.design-trust[data-trust="registered"] {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.125rem 0.5rem;
-  border: 1px solid color-mix(in oklch, var(--success) 45%, transparent);
-  background: color-mix(in oklch, var(--success) 10%, transparent);
-  color: var(--success);
-  border-radius: var(--radius);
-  font-weight: 500;
+.consent-rail-summary strong {
+  font-variant-numeric: tabular-nums;
 }
 
-.design-headline {
-  font-size: 1.75rem;
-  font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-  margin: 0;
-}
-.design-lede { color: var(--muted-foreground); margin: 0.5rem 0 0; font-size: 1rem; line-height: 1.6; }
-
-/* ─── Sections ─────────────────────────────────────────────────────────── */
-.design-section {
-  border: 1px solid var(--border);
-  background: var(--card);
-  border-radius: var(--radius);
-  padding: 1.25rem;
-}
-.design-section-head {
+/* Grant validity — the ONE date global to the grant (Grant.expires_at). Lives
+ * only here, in the rail, never in the per-stream body (see
+ * .consent-stream-range below, which is deliberately a different class). */
+.consent-grant-expiry {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.875rem;
-}
-.design-section-title { font-size: 0.9375rem; font-weight: 600; margin: 0; }
-.design-counter { font-size: 0.8125rem; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
-
-.design-terms { display: flex; flex-direction: column; gap: 0.875rem; }
-.design-term-label {
-  display: block;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--muted-foreground);
-  margin-bottom: 0.1875rem;
-}
-.design-term-value { font-size: 0.9375rem; line-height: 1.55; margin: 0; }
-
-/* ─── Duration ─────────────────────────────────────────────────────────── */
-.design-radio-group { display: flex; flex-direction: column; gap: 0.5rem; border: 0; margin: 0; padding: 0; }
-.design-radio {
-  display: flex;
-  gap: 0.75rem;
-  align-items: flex-start;
-  padding: 0.75rem;
-  min-height: 44px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-.design-radio:has(input:checked) {
-  border-color: var(--human);
-  background: var(--human-wash);
-}
-.design-radio input { margin: 0.25rem 0 0; width: 18px; height: 18px; accent-color: var(--human); flex: 0 0 auto; }
-.design-radio-label { font-size: 0.9375rem; font-weight: 500; }
-.design-radio-meta { display: block; margin-top: 0.1875rem; font-size: 0.8125rem; color: var(--muted-foreground); line-height: 1.5; }
-
-.design-expiry-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 0.5rem;
-  margin-top: 0.875rem;
-  padding-top: 0.875rem;
+  padding-top: 0.75rem;
   border-top: 1px solid var(--border);
 }
-.design-chip {
-  padding: 0.375rem 0.75rem;
-  min-height: 32px;
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--foreground);
+.consent-grant-expiry-label { font-size: 0.75rem; font-weight: 500; color: var(--muted-foreground); }
+.consent-grant-expiry-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.consent-grant-expiry-row input[type="date"] {
   font: inherit;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-.design-chip[aria-pressed="true"] { border-color: var(--human); background: var(--human-wash); color: var(--human); font-weight: 500; }
-
-/* ─── Source list ──────────────────────────────────────────────────────── */
-.design-search {
-  width: 100%;
-  padding: 0.625rem 0.75rem;
-  min-height: 44px;
+  padding: 0.5rem 0.625rem;
   border: 1px solid var(--input);
   border-radius: var(--radius-control);
   background: var(--card);
   color: var(--foreground);
+}
+.consent-grant-expiry-row input[type="date"]:disabled {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+.consent-no-end-date { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--muted-foreground); }
+.consent-chip {
+  padding: 0.3125rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--foreground);
   font: inherit;
-  font-size: 0.875rem;
-  margin-bottom: 0.75rem;
-}
-.design-sources { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
-.design-source { border-bottom: 1px solid var(--border); }
-
-/* The disclosure control is its own element with its own hit area, separated
- * from the checkbox. On the live page both share one row, so a phone tap has
- * two possible outcomes. */
-.design-source-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 52px;
-  padding: 0.5rem 0;
-}
-.design-source-check {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 44px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
-.design-source-check input { width: 20px; height: 20px; margin: 0; accent-color: var(--human); flex: 0 0 auto; }
-.design-source-text { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
-.design-source-name { font-size: 0.9375rem; font-weight: 500; }
-.design-source-account { font-size: 0.8125rem; color: var(--muted-foreground); }
-.design-source-count { font-size: 0.8125rem; color: var(--muted-foreground); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.design-disclosure {
-  flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border: 1px solid transparent;
+.consent-chip[aria-pressed="true"] { border-color: var(--human); background: var(--human-tint); color: var(--human); font-weight: 500; }
+.consent-rail-ends {
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+
+.consent-rail-actions { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* Source list search */
+.consent-search-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; position: relative; }
+.consent-search-row input[type="search"] {
+  flex: 1 1 auto;
+  font: inherit;
+  padding: 0.625rem 2.25rem 0.625rem 0.75rem;
+  border: 1px solid var(--input);
   border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--foreground);
+}
+/* Suppress the browser's own native search-cancel glyph — this route renders
+ * its own clear button (.consent-search-clear) with count/empty-state wiring
+ * the native control doesn't have, so both showing at once is redundant. */
+.consent-search-row input[type="search"]::-webkit-search-cancel-button { display: none; }
+.consent-search-clear {
+  position: absolute;
+  right: 0.5rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
 }
-.design-disclosure:hover { background: var(--muted); }
-.design-disclosure svg { display: block; transition: transform 120ms ease; }
-.design-source[open] .design-disclosure svg { transform: rotate(90deg); }
+.consent-search-clear[data-visible="true"] { display: inline-flex; }
+.consent-search-count { font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.5rem; }
+.consent-search-empty { display: none; font-size: 0.8125rem; color: var(--muted-foreground); padding: 0.75rem 0; }
+.consent-search-empty[data-visible="true"] { display: block; }
+.consent-source-row[data-hidden="true"] { display: none; }
+.consent-source-row[data-active="true"] { outline: 2px solid var(--primary); outline-offset: -2px; }
 
-/* ─── Stream list ──────────────────────────────────────────────────────── */
-.design-streams { list-style: none; margin: 0 0 0.75rem; padding: 0 0 0 2.75rem; display: flex; flex-direction: column; gap: 0.125rem; }
-.design-stream { padding: 0.5rem 0; }
-.design-stream-check { display: flex; gap: 0.75rem; align-items: flex-start; min-height: 44px; cursor: pointer; }
-.design-stream-check input { width: 20px; height: 20px; margin: 0.125rem 0 0; accent-color: var(--human); flex: 0 0 auto; }
-.design-stream-body { display: flex; flex-direction: column; gap: 0.1875rem; min-width: 0; }
-.design-stream-label { font-size: 0.875rem; font-weight: 500; }
-.design-stream-sentence { font-size: 0.8125rem; color: var(--muted-foreground); line-height: 1.5; }
-
-/* Field and date narrowing is progressive disclosure: the summary line is the
- * default path, the controls open only on request. */
-.design-narrow { margin-top: 0.375rem; }
-.design-narrow-summary {
+.consent-source-icon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-control);
+  object-fit: contain;
+}
+.consent-source-icon-placeholder {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  min-height: 32px;
+  justify-content: center;
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+/* Per-stream disclosure: field picker + DATA TIME RANGE (distinct axis from
+ * grant validity above). Expands in place, never a modal. */
+.consent-narrow-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
   font-size: 0.75rem;
   color: var(--muted-foreground);
   cursor: pointer;
   list-style: none;
 }
-.design-narrow-summary::-webkit-details-marker { display: none; }
-.design-narrow-summary::after {
-  content: "Edit";
+.consent-narrow-summary::-webkit-details-marker { display: none; }
+.consent-narrow-change {
   color: var(--primary);
   border-bottom: 1px solid currentColor;
 }
-.design-narrow[open] .design-narrow-summary::after { content: "Done"; }
-.design-narrow-body {
+.consent-narrow-body {
   margin-top: 0.5rem;
   padding: 0.75rem;
   border: 1px solid var(--border);
@@ -1088,169 +851,104 @@ const DESIGN_CSS = `
   flex-direction: column;
   gap: 0.75rem;
 }
-.design-narrow-title { font-size: 0.75rem; font-weight: 500; margin: 0 0 0.375rem; }
-.design-fields { display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; }
-.design-field { display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.75rem; min-height: 28px; }
-.design-field input { width: 16px; height: 16px; margin: 0; accent-color: var(--human); }
-.design-field[data-required="true"] { color: var(--muted-foreground); }
-.design-field-required { font-size: 0.6875rem; color: var(--muted-foreground); }
-.design-date-row { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; }
-
-/* ─── Review panel — the approval artifact ─────────────────────────────── */
-.design-review {
-  position: sticky;
-  top: 1.5rem;
-  border: 1px solid var(--human);
-  border-radius: var(--radius);
-  background: var(--card);
-  display: flex;
-  flex-direction: column;
-}
-.design-review-head {
-  padding: 1rem 1.25rem 0.875rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--human-wash);
-}
-.design-review-title { font-size: 0.9375rem; font-weight: 600; margin: 0; }
-.design-review-body { padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; max-height: 52vh; overflow-y: auto; }
-.design-review-row { display: flex; flex-direction: column; gap: 0.1875rem; }
-.design-review-label { font-size: 0.6875rem; font-weight: 500; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.06em; }
-.design-review-value { font-size: 0.875rem; line-height: 1.5; }
-.design-review-source { font-size: 0.8125rem; line-height: 1.5; }
-.design-review-source + .design-review-source { margin-top: 0.5rem; }
-.design-review-source-name { font-weight: 500; }
-.design-review-streams { color: var(--muted-foreground); }
-.design-review-empty { font-size: 0.875rem; color: var(--muted-foreground); }
-
-.design-actions {
-  padding: 1rem 1.25rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.design-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 0.625rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--card);
-  color: var(--foreground);
+.consent-fields { display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; }
+.consent-field { display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.75rem; }
+.consent-field[data-required="true"] { color: var(--muted-foreground); }
+.consent-stream-range { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; }
+.consent-stream-range input[type="date"] {
   font: inherit;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  text-decoration: none;
-}
-.design-btn:hover { background: var(--muted); }
-/* Copper is reserved for owner consent acts, so Allow is the only copper
- * element on the screen. */
-.design-btn[data-variant="human"] {
-  background: var(--human);
-  border-color: var(--human);
-  color: var(--human-foreground);
-}
-.design-btn[data-variant="human"]:hover { filter: brightness(1.06); }
-.design-footnote { font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.5; margin: 0.25rem 0 0; }
-
-.design-footer {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--border);
-  color: var(--muted-foreground);
   font-size: 0.75rem;
-}
-
-/* ─── Terminal states ──────────────────────────────────────────────────── */
-/* Left-aligned under the instance name rather than centred in the 960px
- * shell: a terminal state is the same page, not a different one, and a block
- * that drifts away from the header reads as a separate screen. */
-.design-terminal { max-width: 480px; margin: 3rem 0 0; text-align: left; display: flex; flex-direction: column; gap: 0.75rem; }
-.design-terminal-mark {
-  width: 40px; height: 40px; display: grid; place-items: center;
-  border-radius: var(--radius); background: var(--muted); color: var(--muted-foreground); font-size: 1.125rem;
-}
-.design-terminal-mark[data-tone="success"] { background: color-mix(in oklch, var(--success) 14%, transparent); color: var(--success); }
-.design-terminal-mark[data-tone="danger"] { background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); }
-.design-terminal-title { font-size: 1.375rem; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
-.design-terminal-body { color: var(--muted-foreground); line-height: 1.6; margin: 0; font-size: 0.9375rem; }
-.design-terminal-actions { margin-top: 0.75rem; display: flex; gap: 0.5rem; }
-
-/* Sign-in */
-.design-signin { max-width: 380px; margin: 3rem 0 0; display: flex; flex-direction: column; gap: 1rem; }
-.design-field-block { display: flex; flex-direction: column; gap: 0.375rem; }
-.design-field-block label { font-size: 0.8125rem; font-weight: 500; }
-.design-input {
-  width: 100%;
-  padding: 0.625rem 0.75rem;
-  min-height: 44px;
+  padding: 0.25rem 0.5rem;
   border: 1px solid var(--input);
   border-radius: var(--radius-control);
   background: var(--card);
   color: var(--foreground);
+}
+.consent-range-apply-all {
+  align-self: flex-start;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--primary);
   font: inherit;
-  font-size: 0.9375rem;
+  font-size: 0.6875rem;
+  cursor: pointer;
 }
 
-/* ─── Receipt ──────────────────────────────────────────────────────────── */
-.design-receipt-rows { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem; }
+/* Terminal-state pages reuse .hosted-ui-result; nothing new needed there. */
 
-/* ─── Mobile ───────────────────────────────────────────────────────────── */
-/* The live stylesheet has zero width-based media queries. Both the real
- * viewport breakpoint and the forced \`?width=mobile\` class render the same
- * rules, so the preview is honest about what a phone actually gets. */
+/* Default (desktop): the grant-validity control lives only in the rail, so
+ * this near-top-of-body copy stays hidden. Declared BEFORE the mobile media
+ * query below — cascade order matters here, since both rules target the same
+ * selector at equal specificity and the later one wins regardless of which
+ * is inside a media query. */
+.consent-mobile-expiry { display: none; }
+
+/* ─── Mobile: rail collapses to a fixed bottom bar ────────────────────────
+ * \`fixed\`, not \`sticky\`: the rail's own content is far shorter than the
+ * single-column page once the source list is above it, so a sticky child
+ * would stick only within its own (already-scrolled-past) box. \`fixed\`
+ * escapes document flow, matching what "reachable no matter where you
+ * scroll" requires. \`.consent-body\` gets matching bottom padding so nothing
+ * — including the Retention text — renders underneath it (owner feedback
+ * round 2, item 11). */
 @media (max-width: 899px) {
-  .design-columns { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
-  .design-review { position: static; }
-}
-
-@media (max-width: 599px) {
-  .design-shell { padding: 1.5rem 1rem 7.5rem; }
-  .design-section { border-left: 0; border-right: 0; border-radius: 0; margin: 0 -1rem; padding: 1.25rem 1rem; }
-  .design-headline { font-size: 1.5rem; }
-  .design-streams { padding-left: 2rem; }
-  /* Actions leave the panel and become a bottom bar. Our list is far longer
-   * than a five-row scope card, so the action must stay reachable. */
-  .design-actions {
+  .consent-grid { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+  .consent-rail {
     position: fixed;
     left: 0; right: 0; bottom: 0;
-    flex-direction: row;
-    padding: 0.75rem 1rem;
+    top: auto;
+    padding: 0.625rem 1rem 0.75rem;
     background: var(--card);
     border-top: 1px solid var(--border);
     z-index: 10;
+    gap: 0.5rem;
   }
-  .design-btn { flex: 1 1 0; }
-  .design-actions .design-footnote { display: none; }
+  .consent-rail-summary,
+  .consent-grant-expiry { display: none; }
+  .consent-rail-mobile-summary {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+    text-align: center;
+  }
+  .consent-rail-actions { flex-direction: row; }
+  .consent-rail-actions .hosted-ui-button { flex: 1 1 0; }
+  .consent-body { padding-bottom: 6.5rem; }
+  /* The grant-validity date INPUT itself stays reachable in normal flow near
+   * the top of the mobile body — only its rail copy is hidden above. */
+  .consent-mobile-expiry { display: block; }
 }
 
-/* \`?width=mobile\` forces the same rules at any viewport, so the mobile
- * rendering can be screenshotted and reviewed on a desktop. */
-.design-force-mobile .design-columns { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
-.design-force-mobile .design-review { position: static; }
-.design-force-mobile .design-shell { max-width: 420px; padding: 1.5rem 1rem 7.5rem; }
-.design-force-mobile .design-headline { font-size: 1.5rem; }
-.design-force-mobile .design-streams { padding-left: 2rem; }
-.design-force-mobile .design-actions {
-  position: sticky;
-  bottom: 0;
-  flex-direction: row;
-  padding: 0.75rem 1rem;
+/* \`?width=mobile\` forces the same rules at any viewport for screenshot
+ * review on desktop. */
+.consent-force-mobile .consent-grid { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+.consent-force-mobile .consent-rail {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  top: auto;
+  padding: 0.625rem 1rem 0.75rem;
   background: var(--card);
   border-top: 1px solid var(--border);
+  z-index: 10;
+  gap: 0.5rem;
 }
-.design-force-mobile .design-btn { flex: 1 1 0; }
-.design-force-mobile .design-actions .design-footnote { display: none; }
+.consent-force-mobile .consent-rail-summary,
+.consent-force-mobile .consent-grant-expiry { display: none; }
+.consent-force-mobile .consent-rail-mobile-summary {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.consent-force-mobile .consent-rail-actions { flex-direction: row; }
+.consent-force-mobile .consent-rail-actions .hosted-ui-button { flex: 1 1 0; }
+.consent-force-mobile .consent-body { padding-bottom: 6.5rem; }
+.consent-force-mobile .consent-mobile-expiry { display: block; }
+.consent-force-mobile .hosted-ui-page { max-width: 420px; }
 
 /* ─── Preview chrome ───────────────────────────────────────────────────── */
-/* Marks the page as a design preview so nobody mistakes it for the live
- * consent screen. Not part of the design. */
 .design-banner {
   background: var(--warning);
   color: oklch(0.16 0.01 70);
@@ -1264,20 +962,16 @@ const DESIGN_CSS = `
 
 // ─── Document shell ──────────────────────────────────────────────────────────
 
-const CHEVRON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-
-// `indeterminate` is a DOM property with no HTML attribute, so the tri-state
-// parent checkbox — the control that replaces 54 per-source buttons — cannot be
-// rendered server-side. This sets it from `data-indeterminate` and keeps it in
-// sync as the owner clicks, so the preview shows the real behaviour of the
-// control rather than a picture of it. It reads and writes only checkbox state
-// on this page; it submits nothing.
-const TRISTATE_SCRIPT = `
+// Client-side behavior only: tri-state parent checkbox, keyboard-navigable
+// search filter, and the grant-validity / apply-to-all-ranges wiring. Reads
+// and writes only this page's own DOM state; submits nothing.
+const CONSENT_SCRIPT = `
 (function () {
-  var sources = document.querySelectorAll(".design-source");
+  // ─── Tri-state parent checkbox per source ──────────────────────────────
+  var sources = document.querySelectorAll(".consent-source-row");
   sources.forEach(function (source) {
-    var parent = source.querySelector(".design-source-check input");
-    var children = source.querySelectorAll(".design-stream-check input");
+    var parent = source.querySelector(".hosted-ui-option-source-legend input");
+    var children = source.querySelectorAll(".consent-stream-check input");
     if (!parent || !children.length) return;
     function sync() {
       var checked = 0;
@@ -1292,392 +986,468 @@ const TRISTATE_SCRIPT = `
     children.forEach(function (child) { child.addEventListener("change", sync); });
     sync();
   });
-  // The disclosure chevron is inside the <summary>, so a click on it would
-  // toggle twice. Let the summary own the toggle.
-  document.querySelectorAll(".design-source-check").forEach(function (label) {
-    label.addEventListener("click", function (event) { event.stopPropagation(); });
+
+  // ─── Search filter: type-ahead, keyboard nav, clear, count, empty state ──
+  var input = document.querySelector(".consent-search-row input[type=search]");
+  var clearBtn = document.querySelector(".consent-search-clear");
+  var countEl = document.querySelector(".consent-search-count");
+  var emptyEl = document.querySelector(".consent-search-empty");
+  var rows = Array.prototype.slice.call(document.querySelectorAll(".consent-source-row"));
+  var activeIndex = -1;
+
+  function rowText(row) {
+    return (row.getAttribute("data-search-text") || "").toLowerCase();
+  }
+
+  function applyFilter() {
+    var query = (input.value || "").trim().toLowerCase();
+    clearBtn.setAttribute("data-visible", query.length > 0 ? "true" : "false");
+    var visible = [];
+    rows.forEach(function (row) {
+      var match = query.length === 0 || rowText(row).indexOf(query) !== -1;
+      row.setAttribute("data-hidden", match ? "false" : "true");
+      row.setAttribute("data-active", "false");
+      if (match) visible.push(row);
+    });
+    activeIndex = -1;
+    countEl.textContent = query.length === 0
+      ? visible.length + " sources"
+      : visible.length + " of " + rows.length + " sources match";
+    emptyEl.setAttribute("data-visible", visible.length === 0 ? "true" : "false");
+    emptyEl.textContent = "No sources match \\u201c" + input.value + "\\u201d. Clear the search to see everything.";
+  }
+
+  function visibleRows() {
+    return rows.filter(function (row) { return row.getAttribute("data-hidden") !== "true"; });
+  }
+
+  function setActive(index) {
+    var visible = visibleRows();
+    visible.forEach(function (row) { row.setAttribute("data-active", "false"); });
+    if (index < 0 || index >= visible.length) { activeIndex = -1; return; }
+    activeIndex = index;
+    visible[index].setAttribute("data-active", "true");
+    visible[index].scrollIntoView({ block: "nearest" });
+  }
+
+  if (input) {
+    input.addEventListener("input", applyFilter);
+    input.addEventListener("keydown", function (event) {
+      var visible = visibleRows();
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setActive(activeIndex + 1 >= visible.length ? 0 : activeIndex + 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setActive(activeIndex <= 0 ? visible.length - 1 : activeIndex - 1);
+      } else if (event.key === "Enter" && activeIndex >= 0) {
+        event.preventDefault();
+        var checkbox = visible[activeIndex].querySelector(".hosted-ui-option-source-legend input");
+        if (checkbox) checkbox.click();
+      } else if (event.key === "Escape") {
+        input.value = "";
+        applyFilter();
+      }
+    });
+    applyFilter();
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener("click", function () {
+      input.value = "";
+      applyFilter();
+      input.focus();
+    });
+  }
+
+  // ─── Grant validity: date input + no-end-date + quick-fill chips ────────
+  var expiryInputs = document.querySelectorAll("input[data-role=grant-expiry-date]");
+  var noEndInputs = document.querySelectorAll("input[data-role=grant-no-end-date]");
+  var chips = document.querySelectorAll(".consent-chip[data-days]");
+  var railEndsEls = document.querySelectorAll("[data-role=rail-ends-summary]");
+
+  function todayPlusDays(days) {
+    var d = new Date();
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function updateEndsSummary() {
+    var noEnd = noEndInputs[0] && noEndInputs[0].checked;
+    var text = noEnd ? "No end date" : "Access ends " + (expiryInputs[0] ? expiryInputs[0].value : "");
+    railEndsEls.forEach(function (el) { el.textContent = text; });
+  }
+
+  function setExpiryDate(value) {
+    expiryInputs.forEach(function (el) { el.value = value; });
+    updateEndsSummary();
+  }
+
+  chips.forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      chips.forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      chip.setAttribute("aria-pressed", "true");
+      noEndInputs.forEach(function (el) { el.checked = false; });
+      expiryInputs.forEach(function (el) { el.disabled = false; });
+      setExpiryDate(todayPlusDays(Number(chip.getAttribute("data-days"))));
+    });
+  });
+  expiryInputs.forEach(function (el) {
+    el.addEventListener("input", function () {
+      chips.forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      updateEndsSummary();
+    });
+  });
+  noEndInputs.forEach(function (el) {
+    el.addEventListener("change", function () {
+      expiryInputs.forEach(function (input) { input.disabled = el.checked; });
+      chips.forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      updateEndsSummary();
+    });
+  });
+  updateEndsSummary();
+
+  // ─── Per-stream data range: "apply to all selected" copies dates ────────
+  document.querySelectorAll(".consent-range-apply-all").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var since = button.getAttribute("data-since");
+      var until = button.getAttribute("data-until");
+      var allSourceRows = document.querySelectorAll(".consent-source-row");
+      allSourceRows.forEach(function (row) {
+        row.querySelectorAll(".consent-stream-check input:checked").forEach(function (checkbox) {
+          var stream = checkbox.closest(".hosted-ui-stream-option");
+          if (!stream) return;
+          var sinceInput = stream.querySelector("input[data-role=range-since]");
+          var untilInput = stream.querySelector("input[data-role=range-until]");
+          if (sinceInput && since) sinceInput.value = since;
+          if (untilInput && until) untilInput.value = until;
+        });
+      });
+    });
+  });
+
+  // Disclosure toggles the visible "Change"/"Done" label.
+  document.querySelectorAll(".consent-narrow").forEach(function (details) {
+    var label = details.querySelector(".consent-narrow-change");
+    function sync() {
+      if (label) label.textContent = details.open ? "Done" : "Change";
+    }
+    details.addEventListener("toggle", sync);
+    sync();
   });
 })();
 `;
-
-// A banner, not a watermark: this route is reachable on a running instance and
-// must never be mistaken for the screen that issues grants.
-function renderPreviewBanner(): string {
-  return `<div class="design-banner">Design preview — mock data, nothing here is submitted. Variants:
-<a href="/_ref/design/consent">consent</a> ·
-<a href="/_ref/design/consent?width=mobile">mobile</a> ·
-<a href="/_ref/design/consent?trust=verified">verified</a> ·
-<a href="/_ref/design/consent?state=signin">sign-in</a> ·
-<a href="/_ref/design/consent?state=deny">cancelled</a> ·
-<a href="/_ref/design/consent?state=error">error</a> ·
-<a href="/_ref/design/consent?state=receipt">receipt</a></div>`;
-}
 
 function renderDocument({
   body,
   forceMobile,
   providerName,
+  theme,
   title,
 }: {
   body: string;
   forceMobile: boolean;
   providerName: string;
+  theme: "light" | "dark" | "system";
   title: string;
 }): string {
-  const bodyClass = forceMobile ? ' class="design-force-mobile"' : "";
+  const bodyClass = forceMobile ? ' class="consent-force-mobile"' : "";
+  const markSurface = theme === "dark" ? "dark" : "light";
   return `<!DOCTYPE html>
-<html lang="en" data-theme="system">
+<html lang="en" data-theme="${theme}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="${HOSTED_UI_CSS_PATH}" />
-<style>${DESIGN_CSS}</style>
+<style>${CONSENT_LAYOUT_CSS}</style>
 </head>
 <body${bodyClass}>
 ${renderPreviewBanner()}
-<main class="design-shell">
-<header class="design-header"><span class="design-instance">${escapeHtml(providerName)}</span></header>
+<main class="hosted-ui-page consent-page">
+<header class="hosted-ui-header"><span class="hosted-ui-provider">${escapeHtml(providerName)}</span></header>
 ${body}
-<footer class="design-footer">${renderPdppMark({ size: 14 })}<span>Secured by PDPP</span></footer>
+<footer class="hosted-ui-footer">
+  <a class="hosted-ui-footer-attribution-link" href="https://pdpp.dev">
+  ${renderPdppMark({ size: 14, surface: markSurface })}
+  <span class="hosted-ui-footer-attribution">Secured by PDPP</span>
+  </a>
+</footer>
 </main>
-<script>${TRISTATE_SCRIPT}</script>
+<script>${CONSENT_SCRIPT}</script>
 </body>
 </html>`;
 }
 
+function renderPreviewBanner(): string {
+  return `<div class="design-banner">Design preview — mock data, nothing here is submitted. Variants:
+<a href="/_ref/design/consent">consent</a> ·
+<a href="/_ref/design/consent?width=mobile">mobile</a> ·
+<a href="/_ref/design/consent?trust=domain">domain-verified</a> ·
+<a href="/_ref/design/consent?trust=verified">verified</a> ·
+<a href="/_ref/design/consent?theme=dark">dark</a> ·
+<a href="/_ref/design/consent?state=signin">sign-in</a> ·
+<a href="/_ref/design/consent?state=deny">cancelled</a> ·
+<a href="/_ref/design/consent?state=error">error</a> ·
+<a href="/_ref/design/consent?state=receipt">receipt</a></div>`;
+}
+
 // ─── The consent screen ──────────────────────────────────────────────────────
 
-function renderIdentity(verified: boolean): string {
-  // spec-core.md:675 has two limbs — render a positive trust signal
-  // distinctly, and treat a client with no signal as unverified. Both are
-  // reachable here (`?trust=verified`), because a badge that cannot vary
-  // carries no information.
-  const trust = verified
-    ? `<p class="design-trust" data-trust="registered">Registered with your server</p>`
-    : `<p class="design-trust">This app isn't registered with your server. Its name and logo are self-reported.</p>`;
-  return `<section class="design-identity">
-  <span class="design-monogram" aria-hidden="true">${escapeHtml(CLIENT.monogram)}</span>
-  <div class="design-identity-body">
-    <span class="design-client-name">${escapeHtml(CLIENT.name)}</span>
-    <span class="design-client-domain">${escapeHtml(CLIENT.domain)}</span>
-    ${trust}
-  </div>
-</section>`;
-}
+type TrustTier = "unverified" | "domain" | "verified";
 
-// Purpose is stated once, in the server's voice, with the origin named in the
-// same sentence. Retention states the absence rather than inventing a promise
-// the client never made (spec-core.md:951).
-function renderTerms(): string {
-  return `<section class="design-section">
-  <div class="design-section-head"><h2 class="design-section-title">Terms</h2></div>
-  <div class="design-terms">
-    <div>
-      <span class="design-term-label">Purpose</span>
-      <p class="design-term-value">Set by this server because ${escapeHtml(CLIENT.name)} didn't give one: use the data you select as context for your AI assistant.</p>
-    </div>
-    <div>
-      <span class="design-term-label">Retention</span>
-      <p class="design-term-value">${escapeHtml(CLIENT.name)} did not say how long it keeps the data it receives.</p>
-    </div>
-  </div>
-</section>`;
-}
-
-// `access_mode` and `expires_at` are orthogonal (spec-core.md:889), so expiry
-// is its own row and never restates the access mode.
-function renderDuration(): string {
-  return `<section class="design-section">
-  <div class="design-section-head"><h2 class="design-section-title">Access duration</h2></div>
-  <fieldset class="design-radio-group">
-    <legend class="design-term-label">How long ${escapeHtml(CLIENT.name)} can read</legend>
-    <label class="design-radio">
-      <input type="radio" name="design-access-mode" value="continuous" checked />
-      <span>
-        <span class="design-radio-label">Ongoing access</span>
-        <span class="design-radio-meta">${escapeHtml(CLIENT.name)} can read the data you select, including new matching records, until you revoke access.</span>
-      </span>
-    </label>
-    <label class="design-radio">
-      <input type="radio" name="design-access-mode" value="single_use" />
-      <span>
-        <span class="design-radio-label">One-time access</span>
-        <span class="design-radio-meta">${escapeHtml(CLIENT.name)} can start one retrieval. It can't start another without your approval.</span>
-      </span>
-    </label>
-  </fieldset>
-  <div class="design-expiry-row">
-    <span class="design-term-label" style="margin:0">Access ends 1 December 2026.</span>
-    <button type="button" class="design-chip" aria-pressed="true">90 days</button>
-    <button type="button" class="design-chip" aria-pressed="false">1 year</button>
-    <button type="button" class="design-chip" aria-pressed="false">No end date</button>
-  </div>
-</section>`;
-}
-
-// Field narrowing: schema-required fields render checked and disabled — the
-// per-stream consent floor (spec-core.md:772). Date narrowing appears only
-// where the stream declares `consent_time_field`.
-function renderNarrowing(source: MockSource, stream: MockStream): string {
-  const summaryParts = [fieldSummary(stream)];
-  const time = timeSummary(stream);
-  if (time) {
-    summaryParts.push(time);
+// Three tiers, per spec-core.md:672's resolution precedence (local
+// registration/trust-registry, then software-statement metadata, then inline
+// client_display, then client_id fallback) and :675 (a positive trust signal
+// MUST render distinctly from "no signal"):
+//   unverified — no signal resolved. Monogram only (spec-core.md:676: never
+//     fetch/render a client-supplied logo for an unverified client).
+//   domain — CIMD: the AS fetched a metadata document from the client_id's
+//     own origin over HTTPS and it was self-consistent. Automatic, requires
+//     NO participation from the client itself. Renders a proxied/cached logo.
+//   verified — an operator explicitly registered/allowlisted this client
+//     (trust-registry membership). A human action, the strongest tier;
+//     renders a distinct badge in addition to the logo.
+function renderIdentity(trust: TrustTier): string {
+  let logo: string;
+  let trustLine: string;
+  if (trust === "unverified") {
+    logo = `<span class="hosted-ui-client-monogram" aria-hidden="true">${escapeHtml(CLIENT.monogram)}</span>`;
+    trustLine = `<p class="hosted-ui-client-trust">This app isn't registered with your server. Its name and logo are self-reported.</p>`;
+  } else if (trust === "domain") {
+    logo = `<img class="hosted-ui-client-monogram" src="/_ref/design/consent/icons/chatgpt.svg" alt="" width="40" height="40" />`;
+    trustLine = `<p class="hosted-ui-client-trust">${escapeHtml(CLIENT.domain)}'s own metadata confirms this app's identity. This check ran automatically — ${escapeHtml(CLIENT.name)} did not need to do anything.</p>`;
+  } else {
+    logo = `<img class="hosted-ui-client-monogram" src="/_ref/design/consent/icons/chatgpt.svg" alt="" width="40" height="40" />`;
+    trustLine = `<p class="hosted-ui-client-trust" data-trust="registered">An operator registered this app with your server.</p>`;
   }
+  return `<section class="hosted-ui-client-identity">
+  ${logo}
+  <div class="hosted-ui-client-identity-body">
+    <span class="hosted-ui-client-identity-name">${escapeHtml(CLIENT.name)}</span>
+    <span class="hosted-ui-client-identity-domain">${escapeHtml(CLIENT.domain)}</span>
+    ${trustLine}
+  </div>
+</section>`;
+}
+
+function renderTerms(): string {
+  return `<section class="hosted-ui-surface" data-surface="protocol">
+  <h2 class="pdpp-title">Terms</h2>
+  <p class="pdpp-body">${escapeHtml(`Purpose: set by this server because ${CLIENT.name} didn't give one — use the data you select as context for your AI assistant.`)}</p>
+  <p class="pdpp-body">Retention: ${escapeHtml(CLIENT.name)} did not say how long it keeps the data it receives.</p>
+</section>`;
+}
+
+function renderStreamNarrowing(source: MockSource, stream: MockStream): string {
   const checkedFields = stream.fieldsSelected ?? stream.fieldsTotal;
   const fields: string[] = [];
   for (let index = 0; index < stream.fieldsTotal; index += 1) {
     const required = index < 2;
     const checked = required || index < checkedFields;
     fields.push(
-      `<label class="design-field" data-required="${required}">` +
+      `<label class="consent-field" data-required="${required}">` +
         `<input type="checkbox"${checked ? " checked" : ""}${required ? " disabled" : ""} />` +
-        `<span>field_${index + 1}</span>` +
-        (required ? `<span class="design-field-required">required</span>` : "") +
+        `<span>field_${index + 1}${required ? " (required)" : ""}</span>` +
         "</label>"
     );
   }
-  const dateBlock = stream.timePhrase
-    ? `<div>
-      <p class="design-narrow-title">Dates</p>
-      <div class="design-date-row">
-        <button type="button" class="design-chip" aria-pressed="${stream.timeSelected ? "false" : "true"}">All dates</button>
-        <button type="button" class="design-chip" aria-pressed="false">Last 30 days</button>
-        <button type="button" class="design-chip" aria-pressed="${stream.timeSelected ? "true" : "false"}">Last 12 months</button>
-        <input class="design-input" style="min-height:32px;width:auto;padding:0.25rem 0.5rem;font-size:0.75rem" type="date" value="${stream.timeSelected ? "2026-03-01" : ""}" aria-label="${escapeHtml(stream.timePhrase)} on or after" />
-      </div>
+  const rangeBlock = stream.timePhrase
+    ? `<div class="consent-stream-range">
+      <span class="pdpp-caption">${escapeHtml(dataRangeSummary(stream) ?? "All dates")}</span>
+      <label class="pdpp-caption">from <input type="date" data-role="range-since" value="${escapeHtml(stream.timeSince ?? "")}" aria-label="${escapeHtml(stream.timePhrase)} since" /></label>
+      <label class="pdpp-caption">to <input type="date" data-role="range-until" value="${escapeHtml(stream.timeUntil ?? "")}" aria-label="${escapeHtml(stream.timePhrase)} until" /></label>
+      <button type="button" class="consent-range-apply-all" data-since="${escapeHtml(stream.timeSince ?? "")}" data-until="${escapeHtml(stream.timeUntil ?? "")}">Apply to all selected streams</button>
     </div>`
     : "";
-  return `<details class="design-narrow" data-source="${escapeHtml(source.id)}" data-stream="${escapeHtml(stream.name)}">
-    <summary class="design-narrow-summary">${escapeHtml(summaryParts.join(" · "))}</summary>
-    <div class="design-narrow-body">
-      <div>
-        <p class="design-narrow-title">Fields</p>
-        <div class="design-fields">${fields.join("")}</div>
-      </div>
-      ${dateBlock}
+  return `<details class="consent-narrow">
+    <summary class="consent-narrow-summary">${escapeHtml(fieldSummary(stream))} <span class="consent-narrow-change">Change</span></summary>
+    <div class="consent-narrow-body">
+      <div class="consent-fields">${fields.join("")}</div>
+      ${rangeBlock}
     </div>
   </details>`;
 }
 
 function renderStream(source: MockSource, stream: MockStream): string {
   const checked = stream.selected ? " checked" : "";
-  return `<li class="design-stream">
-  <label class="design-stream-check">
-    <input type="checkbox"${checked} />
-    <span class="design-stream-body">
-      <span class="design-stream-label">${escapeHtml(stream.label)}</span>
-      <span class="design-stream-sentence">${escapeHtml(stream.sentence)}</span>
-    </span>
-  </label>
-  ${stream.selected ? renderNarrowing(source, stream) : ""}
-</li>`;
+  return `<label class="hosted-ui-stream-option consent-stream-check">
+  <input type="checkbox"${checked} />
+  <span class="hosted-ui-stream-option-body">
+    <span>${escapeHtml(stream.label)}</span>
+    <span class="pdpp-caption">${escapeHtml(stream.sentence)}</span>
+    ${stream.selected ? renderStreamNarrowing(source, stream) : ""}
+  </span>
+</label>`;
 }
 
-// The tri-state parent checkbox does the job the 54 per-source buttons were
-// doing, so there is no per-source button pair and no paragraph teaching the
-// owner how a checkbox works.
 function renderSource(source: MockSource): string {
   const selectedCount = source.streams.filter((stream) => stream.selected).length;
   const total = source.streams.length;
   const allSelected = selectedCount === total;
-  const open = selectedCount > 0;
-  const count = selectedCount > 0 ? `${selectedCount} of ${total} data types` : `${total} data types`;
-  let checkboxState = "";
-  if (allSelected) {
-    checkboxState = " checked";
-  } else if (selectedCount > 0) {
-    checkboxState = ` data-indeterminate="true"`;
-  }
-  return `<li class="design-source-item"><details class="design-source"${open ? " open" : ""}>
-  <summary class="design-source-row">
-    <span class="design-source-check">
+  const checkboxState = allSelected ? " checked" : selectedCount > 0 ? ' data-indeterminate="true"' : "";
+  const searchText = [source.name, source.account, ...source.streams.map((s) => `${s.label} ${s.name}`)]
+    .join(" ")
+    .toLowerCase();
+  return `<fieldset class="hosted-ui-option-source consent-source-row" data-search-text="${escapeHtml(searchText)}" data-hidden="false" data-active="false">
+  <legend class="hosted-ui-option-source-legend">
+    <label class="hosted-ui-option">
       <input type="checkbox"${checkboxState} aria-label="Share data from ${escapeHtml(source.name)}" />
-      <span class="design-source-text">
-        <span class="design-source-name">${escapeHtml(source.name)}</span>
-        <span class="design-source-account">${escapeHtml(source.account)}</span>
+      <span class="hosted-ui-option-body">
+        <span class="hosted-ui-option-title">${iconMarkup(source.id, source.name)}<span>${escapeHtml(source.name)}</span><span class="hosted-ui-connection-name">${escapeHtml(source.account)}</span></span>
+        <span class="hosted-ui-option-meta">${selectedCount > 0 ? `${selectedCount} of ${total}` : total} data types</span>
       </span>
-    </span>
-    <span class="design-source-count">${escapeHtml(count)}</span>
-    <span class="design-disclosure" role="presentation">${CHEVRON}</span>
-  </summary>
-  <ul class="design-streams">
+    </label>
+  </legend>
+  <div class="hosted-ui-option-streams">
     ${source.streams.map((stream) => renderStream(source, stream)).join("\n")}
-  </ul>
-</details></li>`;
+  </div>
+</fieldset>`;
 }
 
-// The review panel IS the approval artifact: the exact decision, not the menu
-// of choices (spec-core.md:873-877). In the real screen the digest is computed
-// over exactly this summary and its absence fails closed. Here it renders
-// static, because this route binds nothing.
-function renderReview(selection: Selection): string {
-  const { selectedSources, selectedStreamCount } = selection;
-  if (selectedStreamCount === 0) {
-    return `<p class="design-review-empty">Nothing selected yet.</p>`;
-  }
-  const sourceRows = selectedSources
-    .map((source) => {
-      const streams = source.streams.filter((stream) => stream.selected);
-      const detail = streams
-        .map((stream) => {
-          const parts = [stream.label, fieldSummary(stream)];
-          const time = timeSummary(stream);
-          if (time) {
-            parts.push(time);
-          }
-          return escapeHtml(parts.join(" · "));
-        })
-        .join("<br />");
-      return `<div class="design-review-source">
-        <span class="design-review-source-name">${escapeHtml(source.name)}</span>
-        <span class="design-review-streams"> — ${escapeHtml(source.account)}</span>
-        <div class="design-review-streams">${detail}</div>
-      </div>`;
-    })
-    .join("\n");
-  return `<div class="design-review-row">
-    <span class="design-review-label">App</span>
-    <span class="design-review-value">${escapeHtml(CLIENT.name)} · ${escapeHtml(CLIENT.domain)}</span>
-  </div>
-  <div class="design-review-row">
-    <span class="design-review-label">Data</span>
-    <span class="design-review-value">${selectedStreamCount} data types from ${selectedSources.length} sources</span>
-    ${sourceRows}
-  </div>
-  <div class="design-review-row">
-    <span class="design-review-label">Duration</span>
-    <span class="design-review-value">Ongoing access</span>
-  </div>
-  <div class="design-review-row">
-    <span class="design-review-label">Ends</span>
-    <span class="design-review-value">1 December 2026</span>
-  </div>
-  <div class="design-review-row">
-    <span class="design-review-label">Retention</span>
-    <span class="design-review-value">${escapeHtml(CLIENT.name)} made no retention promise</span>
-  </div>`;
-}
-
-function renderConsent(verified: boolean): string {
-  const selection = computeSelection();
+function renderRail(selection: Selection): string {
   const { selectedSources, selectedStreamCount, totalStreamCount } = selection;
-  return `${renderIdentity(verified)}
-<div>
-  <h1 class="design-headline">${escapeHtml(CLIENT.name)} wants to read your data</h1>
-  <p class="design-lede">Choose what it can read. Anything you leave unchecked stays private.</p>
-</div>
-<div class="design-columns">
-  <div class="design-main">
-    ${renderTerms()}
-    <section class="design-section">
-      <div class="design-section-head">
-        <h2 class="design-section-title">What ${escapeHtml(CLIENT.name)} can read</h2>
-        <span class="design-counter">${selectedSources.length} sources · ${selectedStreamCount} of ${totalStreamCount} streams</span>
-      </div>
-      <input class="design-search" type="search" placeholder="Search sources" aria-label="Search sources" />
-      <ul class="design-sources">
-        ${SOURCES.map((source) => renderSource(source)).join("\n")}
-      </ul>
-    </section>
-    ${renderDuration()}
+  const defaultExpiry = new Date();
+  defaultExpiry.setUTCDate(defaultExpiry.getUTCDate() + 90);
+  const defaultExpiryValue = defaultExpiry.toISOString().slice(0, 10);
+  return `<aside class="consent-rail" aria-label="What you're allowing">
+  <div class="consent-rail-summary">
+    <strong>${selectedSources.length}</strong> sources · <strong>${selectedStreamCount}</strong> of ${totalStreamCount} streams selected
   </div>
-  <aside class="design-review" aria-label="What you're allowing">
-    <div class="design-review-head"><h2 class="design-review-title">What you're allowing</h2></div>
-    <div class="design-review-body">${renderReview(selection)}</div>
-    <div class="design-actions">
-      <a class="design-btn" data-variant="human" href="/_ref/design/consent?state=receipt">Allow access</a>
-      <a class="design-btn" href="/_ref/design/consent?state=deny">Cancel</a>
-      <p class="design-footnote">You'll return to ${escapeHtml(CLIENT.domain)}</p>
+  <p class="consent-rail-mobile-summary"><span data-role="rail-ends-summary">Access ends ${escapeHtml(defaultExpiryValue)}</span> · ${selectedStreamCount} streams</p>
+
+  <div class="consent-grant-expiry">
+    <span class="consent-grant-expiry-label">Access duration — how long ${escapeHtml(CLIENT.name)} can read</span>
+    <div class="consent-grant-expiry-row">
+      <input type="date" data-role="grant-expiry-date" value="${escapeHtml(defaultExpiryValue)}" aria-label="Access ends" />
+      <button type="button" class="consent-chip" data-days="90" aria-pressed="true">90 days</button>
+      <button type="button" class="consent-chip" data-days="365" aria-pressed="false">1 year</button>
     </div>
-  </aside>
+    <label class="consent-no-end-date"><input type="checkbox" data-role="grant-no-end-date" /> No end date</label>
+    <p class="consent-rail-ends" data-role="rail-ends-summary">Access ends ${escapeHtml(defaultExpiryValue)}</p>
+  </div>
+
+  <div class="consent-rail-actions">
+    <a class="hosted-ui-button" data-variant="primary" href="/_ref/design/consent?state=receipt">Allow access</a>
+    <a class="hosted-ui-button" href="/_ref/design/consent?state=deny">Cancel</a>
+  </div>
+  <p class="hosted-ui-footnote">You'll return to ${escapeHtml(CLIENT.domain)}</p>
+</aside>`;
+}
+
+function renderConsent(trust: TrustTier): string {
+  const selection = computeSelection();
+  const defaultExpiry = new Date();
+  defaultExpiry.setUTCDate(defaultExpiry.getUTCDate() + 90);
+  const defaultExpiryValue = defaultExpiry.toISOString().slice(0, 10);
+  return `${renderIdentity(trust)}
+<h1 class="pdpp-heading">${escapeHtml(CLIENT.name)} wants to read your data</h1>
+<p class="pdpp-body-lg">Choose what it can read. Anything you leave unchecked stays private.</p>
+
+<div class="consent-mobile-expiry hosted-ui-surface">
+  <span class="consent-grant-expiry-label">Access duration — how long ${escapeHtml(CLIENT.name)} can read</span>
+  <div class="consent-grant-expiry-row">
+    <input type="date" data-role="grant-expiry-date" value="${escapeHtml(defaultExpiryValue)}" aria-label="Access ends" />
+    <button type="button" class="consent-chip" data-days="90" aria-pressed="true">90 days</button>
+    <button type="button" class="consent-chip" data-days="365" aria-pressed="false">1 year</button>
+  </div>
+  <label class="consent-no-end-date"><input type="checkbox" data-role="grant-no-end-date" /> No end date</label>
+</div>
+
+<div class="consent-grid">
+  <div class="consent-body">
+    ${renderTerms()}
+    <section class="hosted-ui-surface">
+      <h2 class="pdpp-title">What ${escapeHtml(CLIENT.name)} can read</h2>
+      <div class="consent-search-row">
+        <input type="search" placeholder="Search sources" aria-label="Search sources" />
+        <button type="button" class="consent-search-clear" aria-label="Clear search" data-visible="false">×</button>
+      </div>
+      <p class="consent-search-count">${SOURCES.length} sources</p>
+      <p class="consent-search-empty" data-visible="false"></p>
+      <div class="hosted-ui-option-group">
+        ${SOURCES.map((source) => renderSource(source)).join("\n")}
+      </div>
+    </section>
+  </div>
+  ${renderRail(selection)}
 </div>`;
 }
 
 // ─── The other screens ───────────────────────────────────────────────────────
 
-function renderTerminal({
-  actions,
+function renderResultPage({
   body,
+  glyph,
   title,
   tone,
 }: {
-  actions?: string;
   body: string;
+  glyph?: string;
   title: string;
   tone: "success" | "neutral" | "danger";
 }): string {
-  const glyphs = { danger: "!", neutral: "—", success: "✓" } as const;
-  const glyph = glyphs[tone];
-  return `<section class="design-terminal">
-  <span class="design-terminal-mark" data-tone="${tone}" aria-hidden="true">${glyph}</span>
-  <h1 class="design-terminal-title">${escapeHtml(title)}</h1>
-  <p class="design-terminal-body">${escapeHtml(body)}</p>
-  ${actions ?? ""}
-</section>`;
+  return `<div class="hosted-ui-result">
+  <span class="hosted-ui-result-mark" data-tone="${tone}" aria-hidden="true">${escapeHtml(glyph ?? "")}</span>
+  <div class="hosted-ui-result-body">
+    <span class="pdpp-heading">${escapeHtml(title)}</span>
+    <p class="pdpp-body">${body}</p>
+    <div class="hosted-ui-decision-actions"><a class="hosted-ui-button" href="/_ref/design/consent">Back to the preview</a></div>
+  </div>
+</div>`;
 }
 
-// Declining is not an error, so it is not dressed as one. The real screen also
-// redirects to the client with `error=access_denied` (RFC 6749 §4.1.2.1); this
-// preview only shows what the owner sees.
 function renderDeny(): string {
-  return renderTerminal({
-    actions: `<div class="design-terminal-actions"><a class="design-btn" href="/_ref/design/consent">Back to the preview</a></div>`,
-    body: `${CLIENT.name} didn't get any of your data. You can close this tab.`,
+  return renderResultPage({
+    body: `${escapeHtml(CLIENT.name)} didn't get any of your data. You can close this tab.`,
+    glyph: "—",
     title: "You didn't share anything",
     tone: "neutral",
   });
 }
 
-// Replaces one of the ~30 failures that return raw JSON to the browser today.
 function renderError(): string {
-  return renderTerminal({
-    actions: `<div class="design-terminal-actions"><a class="design-btn" href="/_ref/design/consent">Back to the preview</a></div>`,
+  return renderResultPage({
     body: "Something went wrong on your server. Nothing was shared.",
+    glyph: "!",
     title: "Nothing was shared",
     tone: "danger",
   });
 }
 
-// The OAuth path shows the owner no receipt at all today — the redirect is a
-// bare 302. This is what an owner-facing record would look like.
 function renderReceipt(providerName: string): string {
   const selection = computeSelection();
   const rows = selection.selectedSources
     .map((source) => {
       const streams = source.streams.filter((stream) => stream.selected).map((stream) => stream.label);
-      return `<div class="design-review-row">
-      <span class="design-review-label">${escapeHtml(source.name)}</span>
-      <span class="design-review-value">${escapeHtml(streams.join(", "))} — ${escapeHtml(source.account)}</span>
+      return `<div class="hosted-ui-kv">
+      <dt>${iconMarkup(source.id, source.name)} ${escapeHtml(source.name)}</dt>
+      <dd>${escapeHtml(streams.join(", "))} — ${escapeHtml(source.account)}</dd>
     </div>`;
     })
     .join("\n");
-  return `<section class="design-terminal" style="max-width:560px">
-  <span class="design-terminal-mark" data-tone="success" aria-hidden="true">✓</span>
-  <h1 class="design-terminal-title">${escapeHtml(CLIENT.name)} can now read what you chose</h1>
-  <p class="design-terminal-body">Ongoing access, ending 1 December 2026. ${escapeHtml(CLIENT.name)} made no retention promise.</p>
-  <div class="design-receipt-rows">${rows}</div>
-  <div class="design-terminal-actions">
-    <a class="design-btn" href="/_ref/design/consent">Back to the preview</a>
+  return `<div class="hosted-ui-result">
+  <span class="hosted-ui-result-mark" data-tone="success" aria-hidden="true">✓</span>
+  <div class="hosted-ui-result-body">
+    <span class="pdpp-heading">${escapeHtml(CLIENT.name)} can now read what you chose</span>
+    <p class="pdpp-body">${escapeHtml(CLIENT.name)} made no retention promise.</p>
+    ${rows}
+    <div class="hosted-ui-decision-actions"><a class="hosted-ui-button" href="/_ref/design/consent">Back to the preview</a></div>
+    <p class="hosted-ui-footnote">Returning you to ${escapeHtml(CLIENT.domain)}. This record stays on ${escapeHtml(providerName)}.</p>
   </div>
-  <p class="design-footnote">Returning you to ${escapeHtml(CLIENT.domain)}. This record stays on ${escapeHtml(providerName)}.</p>
-</section>`;
+</div>`;
 }
 
 function renderSignin(providerName: string): string {
-  return `<section class="design-signin">
-  <div>
-    <h1 class="design-terminal-title">Sign in to ${escapeHtml(providerName)}</h1>
-    <p class="design-terminal-body">${escapeHtml(CLIENT.name)} is asking to read your data. Sign in to decide what it can see.</p>
-  </div>
-  <div class="design-field-block">
+  return `<section class="hosted-ui-surface">
+  <h1 class="pdpp-heading">Sign in to ${escapeHtml(providerName)}</h1>
+  <p class="pdpp-body">${escapeHtml(CLIENT.name)} is asking to read your data. Sign in to decide what it can see.</p>
+  <div class="hosted-ui-field">
     <label for="design-owner-password">Owner password</label>
-    <input class="design-input" id="design-owner-password" type="password" autocomplete="current-password" />
+    <input class="hosted-ui-field-input" id="design-owner-password" type="password" autocomplete="current-password" />
   </div>
-  <a class="design-btn" data-variant="human" href="/_ref/design/consent">Sign in</a>
-  <p class="design-footnote">You'll come back to this request after you sign in.</p>
+  <a class="hosted-ui-button" data-variant="primary" href="/_ref/design/consent">Sign in</a>
+  <p class="hosted-ui-footnote">You'll come back to this request after you sign in.</p>
 </section>`;
 }
 
@@ -1689,13 +1459,27 @@ function parseState(value: unknown): DesignState {
   return value === "deny" || value === "error" || value === "receipt" || value === "signin" ? value : "consent";
 }
 
+function parseTrust(value: unknown): TrustTier {
+  if (value === "domain") {
+    return "domain";
+  }
+  // `?trust=verified` alone (without an intermediate `domain` hop) still
+  // resolves to the top tier — a client can be operator-registered without
+  // this preview needing to model the domain-check step separately.
+  if (value === "verified") {
+    return "verified";
+  }
+  return "unverified";
+}
+
 // GET /_ref/design/consent
 export function mountRefDesignConsentMock(app: AppLike, ctx: MountRefDesignConsentMockContext): void {
   app.get("/_ref/design/consent", ctx.requireOwnerSession, (req: RouteRequest, res: RouteResponse) => {
     const { providerName } = ctx;
     const state = parseState(req.query?.state);
     const forceMobile = req.query?.width === "mobile";
-    const verified = req.query?.trust === "verified";
+    const trust = parseTrust(req.query?.trust);
+    const theme = normalizeHostedThemeChoice(req.query?.theme);
 
     let body: string;
     let title: string;
@@ -1717,12 +1501,12 @@ export function mountRefDesignConsentMock(app: AppLike, ctx: MountRefDesignConse
         title = `${providerName} — Sign in`;
         break;
       default:
-        body = renderConsent(verified);
+        body = renderConsent(trust);
         title = `${providerName} — ${CLIENT.name} wants to read your data`;
         break;
     }
 
     res.setHeader("Cache-Control", "no-store");
-    res.send(renderDocument({ body, forceMobile, providerName, title }));
+    res.send(renderDocument({ body, forceMobile, providerName, theme, title }));
   });
 }
