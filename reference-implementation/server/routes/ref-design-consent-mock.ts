@@ -882,8 +882,12 @@ const CONSENT_LAYOUT_CSS = `
  * this near-top-of-body copy stays hidden. Declared BEFORE the mobile media
  * query below — cascade order matters here, since both rules target the same
  * selector at equal specificity and the later one wins regardless of which
- * is inside a media query. */
-.consent-mobile-expiry { display: none; }
+ * is inside a media query. .consent-rail-mobile-summary is the rail's own
+ * one-line echo of "Access ends" for the mobile sticky bar — on desktop the
+ * full .consent-grant-expiry block already shows that date, so this must
+ * default to hidden too or the rail says "Access ends <date>" twice. */
+.consent-mobile-expiry,
+.consent-rail-mobile-summary { display: none; }
 
 /* ─── Mobile: rail collapses to a fixed bottom bar ────────────────────────
  * \`fixed\`, not \`sticky\`: the rail's own content is far shorter than the
