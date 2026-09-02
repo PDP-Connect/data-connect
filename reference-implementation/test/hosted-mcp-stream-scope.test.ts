@@ -210,14 +210,41 @@ test("an unnarrowed scope says so plainly", () => {
 });
 
 test("time fields humanize to the verb an owner reads", () => {
+  // The cases below are the actual consent_time_field values declared across
+  // the shipped manifests, not invented shapes.
   assert.equal(describeTimeField("create_time"), "created");
   assert.equal(describeTimeField("created_at"), "created");
+  assert.equal(describeTimeField("created_utc"), "created");
+  assert.equal(describeTimeField("date_created"), "created");
   assert.equal(describeTimeField("updated_at"), "updated");
   assert.equal(describeTimeField("sent_at"), "sent");
   assert.equal(describeTimeField("played_at"), "played");
-  // An unrecognized field must never print raw at the owner.
+  assert.equal(describeTimeField("order_date"), "ordered");
+  assert.equal(describeTimeField("watched_at"), "watched");
+  assert.equal(describeTimeField("added_at"), "added");
+  assert.equal(describeTimeField("starred_at"), "starred");
+  assert.equal(describeTimeField("taken_at"), "taken");
+  assert.equal(describeTimeField("start_date"), "started");
+  assert.equal(describeTimeField("observed_on"), "recorded");
+  assert.equal(describeTimeField("timestamp"), "recorded");
+  // Both affix positions occur in the fleet and must reduce alike.
+  assert.equal(describeTimeField("date_received"), "received");
+  assert.equal(describeTimeField("message_received_at"), "received");
+  assert.equal(describeTimeField("rtime_last_played"), "played");
+  // An unrecognized field must never print raw at the owner — a slightly
+  // generic sentence beats a leaked internal identifier.
   assert.equal(describeTimeField("weird_internal_ts"), "dated");
   assert.equal(describeTimeField(null), "dated");
+});
+
+test("no shipped consent_time_field renders as a raw identifier", () => {
+  // Guards the whole fleet, not just the cases enumerated above: whatever a
+  // manifest declares, the owner must never read the field name itself.
+  for (const field of ["day", "month", "as_of", "export_time", "friend_since", "file_modified_at"]) {
+    const verb = describeTimeField(field);
+    assert.equal(verb.includes("_"), false, `${field} must not surface an underscore`);
+    assert.equal(verb, verb.toLowerCase(), `${field} must render as a plain lowercase verb`);
+  }
 });
 
 // ─── Form encoding and parsing ───────────────────────────────────────────────
