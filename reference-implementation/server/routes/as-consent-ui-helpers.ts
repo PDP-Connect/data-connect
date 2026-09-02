@@ -127,20 +127,29 @@ export const HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION =
 export const HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE = "continuous";
 export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new Set(["single_use", "continuous"]);
 
-// Server-generated retention bound (request-params:726) for every hosted-MCP
-// package grant. This reference implementation has no per-connector or
-// per-client retention negotiation, so a single fixed policy applies
-// uniformly: 90 days is a conservative default matching neither indefinite
-// retention nor same-session-only, and `delete` (not `anonymize`) because the
-// hosted-MCP picker grants raw stream reads, not aggregate/derived data.
-// Structured policy declaration (spec-core.md:706-730), not a protocol-
-// enforced constraint (spec-core.md:1602) — this server does not enforce
-// client-side retention, it only states its default policy. Renders in the
-// `manifest` authorship class ("Your server describes"), not `protocol`.
-export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } = {
-  max_duration: "P90D",
-  on_expiry: "delete",
-};
+// Retention for hosted-MCP package grants: none, because none was declared.
+//
+// spec-core.md:951 classes retention as a policy commitment BY THE DATA
+// RECIPIENT (the client): "PDPP does not technically enforce retention.
+// Enforcement is through legal agreements, contractual obligations, or trust
+// registry mechanisms." A hosted-MCP authorize request carries no
+// `authorization_details` at all, so the client has declared no retention —
+// and this server has no reach into the client's data stores once data
+// crosses (spec-core.md:948: "PDPP does not retroactively reach into
+// client-side data stores").
+//
+// This previously held `{ max_duration: "P90D", on_expiry: "delete" }`, which
+// was written into every issued grant and rendered to the owner as "data it
+// reads is deleted within 90 days". Both were fabrications: the server
+// recorded a commitment the client never made, and told the owner the client
+// would honor it. Nothing this server can build makes that sentence true.
+//
+// `null` is the honest resolution — the grant records no recipient
+// commitment, and the consent surface states the absence
+// (`renderHostedMcpRetentionBlock`). If an operator later wants a retention
+// term, it must be described as a requirement THIS SERVER imposes and must
+// not be written as the client's commitment until the client has accepted it.
+export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } | null = null;
 
 // Grant expiry (Grant fields: `expires_at`) for every hosted-MCP package
 // grant, independent of the chosen access mode: auth.ts's package-minting
@@ -149,8 +158,17 @@ export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "an
 // this picker flow never sets, so in practice both access modes always issue
 // with no expiry. Stated once here, tied to the access-mode control, so this
 // copy can never drift into contradicting whichever mode the owner picks.
-export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY =
-  "No expiry — access lasts until you revoke it, whichever access mode you choose above.";
+// Grant expiry (`expires_at`) is its own protocol fact, orthogonal to
+// `access_mode` — spec-core.md:889 lists grant validity, data temporal scope,
+// and access pattern as three concepts that MUST NOT be conflated.
+//
+// The prior copy ("No expiry — access lasts until you revoke it, whichever
+// access mode you choose above") restated the access mode and contradicted
+// the control directly above it: under `One-time access`, "access lasts until
+// you revoke it" is false, because a single_use grant is consumed at first
+// token issuance (spec-core.md:920). This states the expiry fact alone and
+// never mentions the mode.
+export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY = "This authorization has no scheduled end date.";
 
 // Input normalization helpers.
 
@@ -352,7 +370,10 @@ export function buildHostedMcpAuthorizationDetailsForConnector(
       access_mode: "continuous",
       purpose_code: HOSTED_MCP_PICKER_PURPOSE_CODE,
       purpose_description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
-      retention: HOSTED_MCP_PICKER_RETENTION,
+      // `retention` is omitted, not nulled, when the client declared none —
+      // see HOSTED_MCP_PICKER_RETENTION. An absent key records "no recipient
+      // commitment"; a present one would assert a promise nobody made.
+      ...(HOSTED_MCP_PICKER_RETENTION ? { retention: HOSTED_MCP_PICKER_RETENTION } : {}),
       source,
       streams: [{ name: "*" }],
       type: "https://pdpp.dev/data-access",
@@ -387,7 +408,7 @@ export function buildHostedMcpAuthorizationDetailForConnector(
   purpose_code: string;
   purpose_description: string;
   access_mode: string;
-  retention: { max_duration: string; on_expiry: "anonymize" | "delete" };
+  retention?: { max_duration: string; on_expiry: "anonymize" | "delete" };
   streams: Array<{ name: string; instance_ids?: string[] }>;
 } {
   const pinnedConnectionId = typeof connectionId === "string" && connectionId.trim() ? connectionId.trim() : null;
@@ -406,7 +427,9 @@ export function buildHostedMcpAuthorizationDetailForConnector(
     access_mode: resolvedAccessMode,
     purpose_code: HOSTED_MCP_PICKER_PURPOSE_CODE,
     purpose_description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
-    retention: HOSTED_MCP_PICKER_RETENTION,
+    // Omitted when the client declared no retention — see
+    // HOSTED_MCP_PICKER_RETENTION.
+    ...(HOSTED_MCP_PICKER_RETENTION ? { retention: HOSTED_MCP_PICKER_RETENTION } : {}),
     source,
     streams,
     type: "https://pdpp.dev/data-access",
@@ -714,7 +737,9 @@ function buildPickerRowMeta({
   // connected-but-not-yet-synced source says "0 streams available": that IS
   // the true current holdings, and "available" there means "available right
   // now", not "will exist".
-  const availabilityPhrase = streamCount === 1 ? "1 stream available" : `${streamCount} streams available`;
+  // "Data types", not "streams": `stream` is a protocol noun the owner never
+  // agreed to learn, and it means nothing on a screen about sharing data.
+  const availabilityPhrase = streamCount === 1 ? "1 data type" : `${streamCount} data types`;
   parts.push(availabilityPhrase);
   // Only surface the technical connector key when the owner-facing label does
   // not already carry it, so we never repeat the same identity twice.
@@ -727,25 +752,107 @@ function buildPickerRowMeta({
   return parts.join(" · ");
 }
 
-// A short, owner-readable preview of the streams a collapsed source holds, so
+// ─── Owner-facing stream copy ────────────────────────────────────────────────
+//
+// Manifest `streams[].name` is a schema key (`month_categories`) and
+// `streams[].description` is documentation written for connector engineers.
+// Neither was authored for the screen where someone decides whether to hand
+// their financial history to an AI agent, and both were rendering there
+// verbatim — including our own scraping strategy:
+//
+//   "Chase retail accounts (checking, savings, credit cards). Hybrid-sourced:
+//    identity + account type come from the QFX ACCTINFO response; friendly
+//    name, open date, and tier come from chase.com dashboard scrape."
+//
+// The durable fix is a first-class consent-copy field on the manifest,
+// reviewed like product copy (P2 in the design spec — real content work
+// across 43 manifests and 162 streams). Until that field exists, the honest
+// interim is to humanize the label and SUPPRESS the description rather than
+// ship it: a missing sentence is a gap, a wrong-register one is a leak.
+
+/** Manifest-key acronyms that must not be title-cased into "Url"/"Id". */
+const STREAM_LABEL_ACRONYMS = new Set(["api", "id", "ids", "url", "urls", "ui", "sms", "os", "pr", "prs", "qa"]);
+
+/**
+ * Humanizes a manifest stream key for the consent surface: `month_categories`
+ * → `Month categories`, `user_stats` → `User stats`. Sentence case, not title
+ * case — the corpus writes permissions as human sentences, and Title Case On
+ * Every Word reads like a settings menu.
+ */
+export function humanizeStreamLabel(name: string): string {
+  const words = name
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean);
+  if (words.length === 0) {
+    return name;
+  }
+  const spelled = words.map((word) =>
+    STREAM_LABEL_ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : word.toLowerCase()
+  );
+  const [first = "", ...rest] = spelled;
+  return [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(" ");
+}
+
+// Markers of connector-engineering register. A description carrying any of
+// these is documentation for whoever maintains the scraper, not an
+// explanation of what sharing this data means. Matching is deliberately
+// conservative: suppressing a usable sentence costs the owner a little
+// context, but shipping an unusable one leaks implementation detail onto a
+// consent screen and mismatches the register entirely.
+const ENGINEERING_PROSE_MARKERS: readonly RegExp[] = [
+  /\bscrape[ds]?\b|\bscraping\b/i,
+  /\bendpoint\b|\bAPI\b|\bpayload\b|\bresponse\b/i,
+  /\bmilliunits?\b/i,
+  /\bRFC\s*\d+/i,
+  /\bschema\b|\bhybrid-sourced\b|\bdenormali[sz]ed\b/i,
+  /\bQFX\b|\bACCTINFO\b|\bCardDAV\b|\bJSON\b|\bXML\b/,
+  // ALL-CAPS protocol/field tokens (ACCTINFO, HKQuantityTypeIdentifier).
+  /\b[A-Z]{4,}\b/,
+];
+
+/**
+ * Returns a stream description fit for the consent surface, or null when the
+ * manifest text is engineering documentation that must not be shown.
+ */
+export function consentSafeStreamDescription(description: string | null | undefined): string | null {
+  const trimmed = typeof description === "string" ? description.trim() : "";
+  if (!trimmed) {
+    return null;
+  }
+  if (ENGINEERING_PROSE_MARKERS.some((marker) => marker.test(trimmed))) {
+    return null;
+  }
+  // A paragraph is documentation regardless of vocabulary; consent copy is
+  // one plain sentence about what sharing this means.
+  if (trimmed.length > 160) {
+    return null;
+  }
+  return trimmed;
+}
+
+// A short, owner-readable preview of the data a collapsed source holds, so
 // the owner can tell a one-stream grant is possible without opening the row.
-// Names are the manifest stream names; we cap the list to keep the summary
-// scannable and append a "+N more" tail when truncated.
+// Labels are humanized (never raw manifest keys); we cap the list to keep the
+// summary scannable and spell out the tail rather than printing "+N more".
 function buildStreamPreview(streams: Array<{ name: string; description: string | null }> | null | undefined): string {
   if (!Array.isArray(streams) || streams.length === 0) {
     return "";
   }
-  const names = streams.map((stream) => stream.name).filter((name) => typeof name === "string" && name);
-  if (names.length === 0) {
+  const labels = streams
+    .map((stream) => stream.name)
+    .filter((name) => typeof name === "string" && name)
+    .map((name) => humanizeStreamLabel(name));
+  if (labels.length === 0) {
     return "";
   }
   const MAX_SHOWN = 4;
-  if (names.length <= MAX_SHOWN) {
-    return names.join(", ");
+  if (labels.length <= MAX_SHOWN) {
+    return labels.join(", ");
   }
-  const shown = names.slice(0, MAX_SHOWN);
-  const remaining = names.length - shown.length;
-  return `${shown.join(", ")} +${remaining} more`;
+  const shown = labels.slice(0, MAX_SHOWN);
+  const remaining = labels.length - shown.length;
+  return `${shown.join(", ")}, and ${remaining} more`;
 }
 
 export async function listHostedMcpPickerRows(
@@ -1038,6 +1145,21 @@ export interface ConsentClientDisplay {
   // one the server actually verified.
   selfDescribedName: string | null;
   titleName: string;
+  /**
+   * The name to call this app in owner-facing prose: the resolved display
+   * name when the metadata carries one, else the origin.
+   *
+   * spec-core.md:673 requires the AS to display the resolved display name
+   * when it is available, and makes `client_id` the FALLBACK for when it is
+   * not. The picker previously headlined `titleName` (the origin) even when
+   * a name was resolved, so a request from ChatGPT — whose metadata document
+   * does carry `"client_name": "ChatGPT"` — rendered as
+   * `https://chatgpt.com`. `titleName` remains the server-verified anchor and
+   * is still shown, as the domain, beside this.
+   */
+  displayName: string;
+  /** Origin shown as the quiet second identity line (e.g. `chatgpt.com`). */
+  domainLabel: string | null;
 }
 
 function clientOriginFromClientId(clientId: string | null | undefined): string | null {
@@ -1051,20 +1173,36 @@ function clientOriginFromClientId(clientId: string | null | undefined): string |
   }
 }
 
+/**
+ * Host label for the quiet second identity line — `chatgpt.com`, not
+ * `https://chatgpt.com/`. Returns null when the client_id is not a URL.
+ */
+function hostLabelFromClientId(clientId: string | null | undefined): string | null {
+  if (!clientId) {
+    return null;
+  }
+  try {
+    return new URL(clientId).hostname.replace(/^www\./, "") || null;
+  } catch {
+    return null;
+  }
+}
+
 function buildClientMonogram(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) {
     return "?";
   }
-  // First letter of up to two whitespace-separated words (e.g. "ChatGPT" →
-  // "C", "Claude Code" → "CC"), uppercased. Pure text — never an image URL.
-  const letters = trimmed
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((word) => word.charAt(0))
-    .join("")
-    .toUpperCase();
-  return letters || trimmed.charAt(0).toUpperCase();
+  // Always a two-letter mark, matching the design system's `.pdpp-monogram`.
+  // Multi-word names take one letter per word ("Claude Code" → "CC");
+  // a single word takes its first two ("ChatGPT" → "CH"). Taking only the
+  // first letter of a one-word name produced a lone "C" sitting in a
+  // two-letter slot. Pure text — never an image URL (client-display:676).
+  const [first = "", second] = trimmed.split(/\s+/).filter(Boolean);
+  if (second) {
+    return (first.charAt(0) + second.charAt(0)).toUpperCase();
+  }
+  return first.slice(0, 2).toUpperCase();
 }
 
 function buildClientPolicyLinks(
@@ -1092,6 +1230,8 @@ export function buildConsentClientDisplay(
     // client supplied at registration — a client-authored claim, not a fact.
     return {
       clientFacts: [{ label: "Requesting app", value: clientName }],
+      displayName: clientName,
+      domainLabel: null,
       isUnverified: true,
       monogram: buildClientMonogram(clientName),
       policyLinks,
@@ -1105,20 +1245,30 @@ export function buildConsentClientDisplay(
   // verifiable identifier the client authenticated as); the self-described
   // app name is a client-authored claim (see the CIMD consent-display spec).
   const identity = clientOriginFromClientId(clientId) || clientId || "Client application";
+  // The metadata-document URL is deliberately NOT a protocol fact on the
+  // owner surface. It is a `client_id` with a `token_endpoint_auth_method`
+  // query parameter hanging off it — debug output that means something to an
+  // engineer inspecting a registration and nothing to the person deciding
+  // whether to share their bank transactions. It stays in the audit record
+  // (`grant.issued` carries the full client_id) where it is genuinely useful.
   const protocolFacts: Array<{ label: string; value?: unknown; html?: string }> = [
     { html: `<code>${ui.escapeHtml(identity)}</code>`, label: "Client identity" },
   ];
-  if (clientId) {
-    protocolFacts.push({ html: `<code>${ui.escapeHtml(clientId)}</code>`, label: "Metadata document" });
-  }
   const clientFacts: Array<{ label: string; value?: unknown; html?: string }> = [];
   if (clientName && clientName !== identity) {
     clientFacts.push({ label: "Self-described app name", value: clientName });
   }
+  const resolvedDisplayName = clientName && clientName !== identity ? clientName : identity;
   return {
     clientFacts,
+    // spec-core.md:673 — display the resolved name when available; the
+    // client_id is only the fallback.
+    displayName: resolvedDisplayName,
+    domainLabel: hostLabelFromClientId(clientId) ?? (identity === resolvedDisplayName ? null : identity),
     isUnverified: true,
-    monogram: buildClientMonogram(clientName || identity),
+    // Monogram from the name the owner actually reads, so "ChatGPT" yields
+    // `CH`, not a `C` derived from the URL string.
+    monogram: buildClientMonogram(resolvedDisplayName),
     policyLinks,
     protocolFacts,
     selfDescribedName: clientName && clientName !== identity ? clientName : null,
@@ -1988,23 +2138,44 @@ interface AuthorizeQueryParams {
 }
 
 /**
- * Renders the picker's client-identity header: the requester's resolved
- * identity (protocol fact, wrapped `data-authorship="protocol"`) and its
- * self-described display name (client-authored claim, wrapped
- * `data-authorship="client"`) — the same two-class split
- * `buildConsentClientDisplay` already produces for the reviewed/single/batch
- * consent pages, applied here for the first time. A text monogram and an
- * "Unverified app" badge stand in for a remote logo fetch, which spec
- * client-display:676 forbids for a client this AS has no positive trust
- * signal for (every CIMD-resolved client, today).
+ * Renders the picker's client-identity block: monogram, the resolved display
+ * name, its domain, and one trust status.
+ *
+ * The three-class authorship distinction (spec-core.md:716 MUST NOT flatten
+ * protocol facts, server descriptions, and client claims) is preserved, but
+ * carried by typography, placement, and ONE attributed line rather than by an
+ * eyebrow banner over every block. The rule requires the distinction be
+ * preserved; it does not require a printed label per group, and three
+ * repeated eyebrows over facts that were all one category turned the trust
+ * model into the visual noise that made this page read as a debug dump.
+ *
+ * A text monogram stands in for a remote logo fetch, which client-display:676
+ * forbids for a client with no positive trust signal (every CIMD-resolved
+ * client today).
  */
 function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay, ui: ConsentUiRenderer): string {
-  const badge = clientDisplay.isUnverified
-    ? `<span class="hosted-ui-unverified-badge" role="status">Unverified app</span>`
+  // Trust status as a neutral fact, not a warning badge. spec-core.md:675 has
+  // two limbs — render a positive signal distinctly when one exists, and
+  // treat a client with none as unverified. Only the second is implementable
+  // today (this AS has no trust registry), so every client sees this line;
+  // a badge that cannot vary carries no information and reads as an
+  // accusation against an app that has done nothing wrong. It states what the
+  // server does and does not know, and names the consequence for the logo.
+  const trustLine = clientDisplay.isUnverified
+    ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">This app isn't registered with your server. Its name and logo are self-reported.</p>`
+    : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registered with your server</p>`;
+  const domainLine = clientDisplay.domainLabel
+    ? `<span class="hosted-ui-client-identity-domain">${ui.escapeHtml(clientDisplay.domainLabel)}</span>`
     : "";
+  // Name first (spec-core.md:673), domain as the quiet second line. The
+  // origin used to BE the name here, so a request from ChatGPT headlined as
+  // `https://chatgpt.com` while the resolved name sat below it labelled
+  // "Self-described app name".
   const header = `<div class="hosted-ui-client-identity"><span class="hosted-ui-client-monogram" aria-hidden="true">${ui.escapeHtml(
     clientDisplay.monogram
-  )}</span><span class="hosted-ui-client-identity-name">${ui.escapeHtml(clientDisplay.titleName)}</span>${badge}</div>`;
+  )}</span><span class="hosted-ui-client-identity-body"><span class="hosted-ui-client-identity-name">${ui.escapeHtml(
+    clientDisplay.displayName
+  )}</span>${domainLine}</span></div>${trustLine}`;
   const policyLinksHtml =
     clientDisplay.policyLinks.length > 0
       ? `<p class="hosted-ui-client-policy-links">${clientDisplay.policyLinks
@@ -2016,27 +2187,18 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
           )
           .join("")}</p>`
       : "";
-  const protocolBlock =
-    clientDisplay.protocolFacts.length > 0
-      ? renderAuthorshipBlock("protocol", "Client identity", ui.renderKeyValueList(clientDisplay.protocolFacts), ui)
-      : "";
-  const clientBlock =
-    clientDisplay.clientFacts.length > 0 || policyLinksHtml
-      ? renderAuthorshipBlock(
-          "client",
-          "Client-authored display",
-          [
-            clientDisplay.clientFacts.length > 0 ? ui.renderKeyValueList(clientDisplay.clientFacts) : "",
-            policyLinksHtml,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-          ui
-        )
-      : "";
+  // The identity facts the two blocks below used to print — `Client
+  // identity: https://chatgpt.com` and `Self-described app name: ChatGPT` —
+  // are both in the header now, as the domain line and the name. Reprinting
+  // them under two eyebrows said the same two things three times. The
+  // client-authored register survives where it still carries information:
+  // policy/terms links the client published, attributed once.
+  const clientBlock = policyLinksHtml
+    ? renderAuthorshipBlock("client", "Links this app published", policyLinksHtml, ui)
+    : "";
   return ui.renderSurface({
     ariaLabel: "Requesting app identity",
-    children: [header, protocolBlock, clientBlock].filter(Boolean).join("\n"),
+    children: [header, clientBlock].filter(Boolean).join("\n"),
     surface: "human",
   });
 }
@@ -2052,48 +2214,74 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
  * eyebrow, which would misattribute authorship to an app that declared
  * nothing (spec-core.md:706-730 semantic classes).
  */
-function renderHostedMcpPurposeBlock(ui: ConsentUiRenderer): string {
+function renderHostedMcpPurposeBlock(clientName: string, ui: ConsentUiRenderer): string {
   return renderAuthorshipBlock(
     "manifest",
     "Assigned purpose",
     ui.renderKeyValueList([
-      { label: "Purpose", value: "Assigned by your server (the app did not declare a purpose)" },
-      { label: "Purpose description", value: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION },
-      { html: `<code>${ui.escapeHtml(HOSTED_MCP_PICKER_PURPOSE_CODE)}</code>`, label: "Purpose code" },
+      {
+        label: "Purpose",
+        // One sentence, said once, with its origin named inside it.
+        // This was three rows — a `Purpose` row saying the server assigned
+        // it, a `Purpose description` row saying what it was, and a
+        // `Purpose code` row printing `https://pdpp.dev/purpose/agent_context`
+        // — for one idea. The registry code is a protocol identifier, not
+        // owner-facing copy; it stays in the grant and the audit record.
+        value: `Set by this server because ${clientName} didn't give one: use the data you select as context for your AI assistant.`,
+      },
     ]),
     ui
   );
 }
 
 const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
-  anonymize: "anonymized",
-  delete: "deleted",
+  anonymize: "anonymizes",
+  delete: "deletes",
 };
 
 /**
- * Renders the picker's retention bound (request-params:726). Retention is a
- * *structured policy declaration* per spec-core.md:706-730 — a policy
- * commitment by the data recipient, not a protocol-enforced constraint
- * (spec-core.md:1602). The hosted-MCP authorize shortcut never receives a
- * client-declared `retention` (the request carries no `authorization_details`
- * at all), so `HOSTED_MCP_PICKER_RETENTION` is this server's own fixed
- * default — no one has declared a retention commitment for this specific
- * request. Rendered as server-generated text (`manifest` authorship, "Your
- * server describes") rather than "Your server enforces", and worded as the
- * server's own default rather than attributing it to the app, since the app
- * declared nothing. Replaces the prior "this page does not set a time limit"
- * disclaimer, which was true only because no retention policy existed yet.
+ * States what the requesting app said about keeping the data it receives.
+ *
+ * Retention is a commitment by the RECIPIENT (spec-core.md:951); this server
+ * neither enforces it nor can reach data the client already holds
+ * (spec-core.md:948). A hosted-MCP request carries no `authorization_details`,
+ * so the client has said nothing — and the only honest rendering is to say
+ * so, naming the app whose silence it is.
+ *
+ * This block previously read "No retention commitment was declared by this
+ * app. Your server's default applies: data it reads is deleted within 90
+ * days." The second sentence's subject is what the APP does, so it told the
+ * owner ChatGPT deletes their data — a promise ChatGPT never made and this
+ * server cannot cause. The `Your server describes` framing did not cure it.
+ * If `HOSTED_MCP_PICKER_RETENTION` is ever set by an operator, it renders as
+ * this server's own requirement, never as the client's acceptance.
  */
-function renderHostedMcpRetentionBlock(ui: ConsentUiRenderer): string {
+function renderHostedMcpRetentionBlock(clientName: string, ui: ConsentUiRenderer): string {
+  if (!HOSTED_MCP_PICKER_RETENTION) {
+    return renderAuthorshipBlock(
+      "manifest",
+      "Data retention",
+      ui.renderKeyValueList([
+        {
+          label: "Keeping your data",
+          value: `${clientName} did not say how long it keeps the data it receives.`,
+        },
+      ]),
+      ui
+    );
+  }
   const onExpiry =
     RETENTION_ON_EXPIRY_COPY[HOSTED_MCP_PICKER_RETENTION.on_expiry] ?? HOSTED_MCP_PICKER_RETENTION.on_expiry;
+  const days = HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days");
   return renderAuthorshipBlock(
     "manifest",
     "Data retention",
     ui.renderKeyValueList([
       {
-        label: "Retention",
-        value: `No retention commitment was declared by this app. Your server's default applies: data it reads is ${onExpiry} within ${HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days")}.`,
+        label: "Keeping your data",
+        // The subject is this server's requirement, never the client's
+        // behavior — the client has accepted nothing.
+        value: `${clientName} did not say how long it keeps the data it receives. This server requires that it ${onExpiry} the data within ${days}.`,
       },
     ]),
     ui
@@ -2122,7 +2310,10 @@ export async function renderHostedMcpSourceSelection(
   // identity at all.
   const clientDisplay = opts.client ? buildConsentClientDisplay(opts.client, ui) : null;
   const clientIdentityBlock = clientDisplay ? renderHostedMcpClientIdentityBlock(clientDisplay, ui) : "";
-  const purposeBlock = renderHostedMcpPurposeBlock(ui);
+  // The name the owner reads, used in every sentence that talks about the
+  // requester, so the page never says "this app" where it knows the name.
+  const clientName = clientDisplay?.displayName ?? "This app";
+  const purposeBlock = renderHostedMcpPurposeBlock(clientName, ui);
 
   // Stale-review-revision rejection (AS-conformance #15): bind exactly what
   // this render offered as choosable into a digest the POST must reproduce
@@ -2149,7 +2340,7 @@ export async function renderHostedMcpSourceSelection(
 
   const renderRowStreams = (row: HostedMcpPickerRow): string => {
     if (!Array.isArray(row.streams) || row.streams.length === 0) {
-      return '<p class="hosted-ui-option-streams-empty">This source does not list any grantable streams yet.</p>';
+      return '<p class="hosted-ui-option-streams-empty">No data is available to share from this source.</p>';
     }
     const items = row.streams
       .map((stream) => {
@@ -2158,14 +2349,19 @@ export async function renderHostedMcpSourceSelection(
           connectorId: row.connectorId,
           streamName: stream.name,
         });
-        const description = stream.description
-          ? `<span class="hosted-ui-stream-meta">${ui.escapeHtml(stream.description)}</span>`
+        // Engineering documentation is suppressed rather than shipped — see
+        // `consentSafeStreamDescription`. The canonical stream name stays in
+        // the form value (the enforced scope) and the audit record; only the
+        // owner-facing label is humanized.
+        const safeDescription = consentSafeStreamDescription(stream.description);
+        const description = safeDescription
+          ? `<span class="hosted-ui-stream-meta">${ui.escapeHtml(safeDescription)}</span>`
           : "";
         return `
             <label class="hosted-ui-stream-option">
               <input type="checkbox" name="stream" value="${ui.escapeHtml(streamFormValue)}" data-hosted-mcp-stream-checkbox data-source-key="${ui.escapeHtml(row.sourceKey)}" />
               <span class="hosted-ui-stream-option-body">
-                <span class="hosted-ui-stream-name">${ui.escapeHtml(stream.name)}</span>
+                <span class="hosted-ui-stream-name">${ui.escapeHtml(humanizeStreamLabel(stream.name))}</span>
                 ${description}
               </span>
             </label>
@@ -2197,21 +2393,23 @@ export async function renderHostedMcpSourceSelection(
           const previewBlock = streamPreview
             ? `<span class="hosted-ui-option-preview">${ui.escapeHtml(streamPreview)}</span>`
             : "";
-          // Source-kind (source-kinds:731-743) is a protocol fact per row, but
-          // with every source on real deployments resolving to the same kind
-          // (`connector` today — `provider_native` sources are rare), a full
-          // "Source kind: connector" text line repeated on every row is
-          // presenter clutter, not signal. When every row shares one kind, a
-          // single summary line above the list (`uniformSourceKindSummary`
-          // below) states it once, and each row gets a compact badge instead
-          // of the full sentence. When kinds are mixed (or a row's kind
-          // couldn't be resolved), the per-row line stays so the one
-          // distinguishing fact per source is still visible.
-          const sourceKindBlock = row.sourceKind
-            ? uniformSourceKind
-              ? `<span class="hosted-ui-option-source-kind-badge" data-authorship="protocol" title="Source kind: ${ui.escapeHtml(row.sourceKind)}"><code>${ui.escapeHtml(row.sourceKind)}</code></span>`
-              : `<span class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>${ui.escapeHtml(row.sourceKind)}</code></span>`
-            : "";
+          // `source.kind` (source-kinds:731-743) is real protocol, but its
+          // audience is the CLIENT, which reads it as a trust expectation
+          // about declaration provenance. To the owner, "connector" answers a
+          // question nobody asked — and because every row on a real
+          // deployment resolves to the same kind, it carried zero bits while
+          // occupying a badge slot on all 27 rows.
+          //
+          // It stays in the audit record and the grant. When provenance ever
+          // becomes non-uniform, the row that DIFFERS is worth surfacing —
+          // worded as a consequence ("Read directly from Chase" vs "Read from
+          // data you imported"), never as the raw enum.
+          const sourceKindBlock =
+            row.sourceKind && !uniformSourceKind
+              ? `<span class="hosted-ui-option-source-kind" data-authorship="protocol">${ui.escapeHtml(
+                  row.sourceKind === "connector" ? "Read directly from this source" : "Read from data you imported"
+                )}</span>`
+              : "";
           return `
           <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false">
             <summary class="hosted-ui-option-source-legend hosted-ui-option-summary">
@@ -2227,28 +2425,57 @@ export async function renderHostedMcpSourceSelection(
                 </span>
               </label>
             </summary>
-            <div class="hosted-ui-option-stream-controls">
-              <p class="hosted-ui-option-streams-help">Each stream you check is granted on its own. Use the buttons below to share or clear this whole source at once.</p>
-              <div class="hosted-ui-actions hosted-ui-stream-actions" aria-label="Stream controls for ${ui.escapeHtml(row.connectorTypeLabel)}">
-                <button type="button" class="hosted-ui-button" data-hosted-mcp-select-streams>Select every stream</button>
-                <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-streams>Clear this source</button>
-              </div>
-            </div>
             ${renderRowStreams(row)}
           </details>
         `;
         })
         .join("\n")
-    : '<p class="pdpp-body">No sources are available on this server yet.</p>';
+    : // The empty picker used to be a hard dead end: no submit, no refusal,
+      // no link out, on a page whose only message was that nothing was
+      // available. An owner who reaches it must still be able to tell the
+      // client no, and must be told what to do next.
+      `<p class="pdpp-body">You haven&#39;t connected any data sources yet. Connect one, then start this request again.</p>
+        <div class="hosted-ui-actions hosted-ui-decision-actions">
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
+        </div>`;
 
+  // Allow and Cancel sit together as a pair. Every consent screen in the
+  // prior-art corpus has a refusal; this one had 59 buttons and every one of
+  // them was affirmative, so the only exit was to close the tab — which
+  // leaves the client with no response at all rather than the
+  // `error=access_denied` RFC 6749 §4.1.2.1 requires.
+  //
+  // `Cancel`, not `Deny`: declining is not an error and should not be dressed
+  // as one. Both appear in the corpus; `Cancel` is the more common shipped
+  // label and carries no implication the owner did something adversarial.
+  // It posts to the same form (carrying state, redirect_uri, and CSRF) with
+  // `decision=cancel`, using formaction so no nested form is needed.
   const submit = rows.length
-    ? '<button type="submit" class="hosted-ui-button" data-variant="primary">Approve selected data</button>'
+    ? `<div class="hosted-ui-actions hosted-ui-decision-actions">
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
+          <button type="submit" class="hosted-ui-button" data-variant="primary" name="decision" value="allow">Allow access</button>
+        </div>`
     : "";
 
   const riskCopy = rows.length
-    ? `<p class="pdpp-body"><strong>Share only what this app needs.</strong> A source is its streams: check the streams you want to share, and that source is included. Check one stream to share just that stream, or use the per-source buttons to share all of it. A source with no streams checked is not shared, and you can revoke any source you approve here later.</p>`
+    ? // The revoke promise is stated at package granularity because that is
+      // the only granularity the product delivers: `POST
+      // /grants/:grantId/revoke` exists and is proxied, but no UI calls it —
+      // the only revoke control that ships is the all-or-nothing package
+      // cascade at `/grants/packages/:packageId`. The page previously
+      // promised "you can revoke any source you approve here later", which is
+      // the promise that makes "yes" feel safe and which the owner cannot
+      // actually act on. Saying less, truthfully, beats a reversibility
+      // promise the product cannot keep.
+      //
+      // The ~70 words of checkbox instructions that used to lead this
+      // paragraph are gone. A tri-state parent over a child list is a pattern
+      // people know from every file manager; the behavior was already
+      // implemented correctly (the parent goes `indeterminate` on partial
+      // selection) and the copy was apologizing for a control that works.
+      `<p class="pdpp-body">You can revoke this access later from your grants page.</p>`
     : "";
-  const retentionBlock = rows.length ? renderHostedMcpRetentionBlock(ui) : "";
+  const retentionBlock = rows.length ? renderHostedMcpRetentionBlock(clientName, ui) : "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
   // Independent of `rows.length`: a validation error (e.g. the
@@ -2259,17 +2486,17 @@ export async function renderHostedMcpSourceSelection(
   // one message that explains why the page just changed.
   const validationBanner =
     rows.length || validationError
-      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Select at least one source and one stream inside each selected source before approving."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
+      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Choose at least one data type to continue."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
       : "";
 
   const bulkControls = rows.length
     ? `
         <div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Source bulk controls">
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Select all</button>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Clear all</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Select every source</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Clear selection</button>
           <span class="hosted-ui-toolbar-divider" aria-hidden="true"></span>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Expand all</button>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Collapse all</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Show all data types</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Hide all data types</button>
         </div>
       `
     : "";
@@ -2277,19 +2504,19 @@ export async function renderHostedMcpSourceSelection(
   const accessModeControl = rows.length
     ? `
         <fieldset class="hosted-ui-access-mode">
-          <legend class="hosted-ui-access-mode-legend">How long access lasts</legend>
+          <legend class="hosted-ui-access-mode-legend">Access duration</legend>
           <label class="hosted-ui-access-mode-option">
             <input type="radio" name="access_mode" value="continuous" checked />
             <span class="hosted-ui-access-mode-body">
-              <span class="hosted-ui-access-mode-label">Keep access until I revoke it</span>
-              <span class="hosted-ui-access-mode-meta">Best for apps that need to stay up to date.</span>
+              <span class="hosted-ui-access-mode-label">Ongoing access</span>
+              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can read the data you select, including new matching records, until you revoke access.</span>
             </span>
           </label>
           <label class="hosted-ui-access-mode-option">
             <input type="radio" name="access_mode" value="single_use" />
             <span class="hosted-ui-access-mode-body">
-              <span class="hosted-ui-access-mode-label">Allow one read only</span>
-              <span class="hosted-ui-access-mode-meta">Best for a one-time check or export.</span>
+              <span class="hosted-ui-access-mode-label">One-time access</span>
+              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can start one retrieval. It can't start another without your approval.</span>
             </span>
           </label>
         </fieldset>
@@ -2306,14 +2533,14 @@ export async function renderHostedMcpSourceSelection(
   display: none;
 }
 .hosted-ui-option-summary::after {
-  content: "Choose streams";
+  content: "Choose data";
   display: block;
   padding: 0 0.25rem 0.5rem 2rem;
   color: var(--muted-foreground);
   font-size: 0.75rem;
 }
 .hosted-ui-option-source[open] > .hosted-ui-option-summary::after {
-  content: "Hide streams";
+  content: "Hide data";
 }
 .hosted-ui-toolbar-divider {
   width: 1px;
@@ -2329,21 +2556,11 @@ export async function renderHostedMcpSourceSelection(
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
-.hosted-ui-picker-toolbar,
-.hosted-ui-stream-actions {
+.hosted-ui-picker-toolbar {
   margin: 0.75rem 0;
 }
-.hosted-ui-picker-toolbar .hosted-ui-button,
-.hosted-ui-stream-actions .hosted-ui-button {
+.hosted-ui-picker-toolbar .hosted-ui-button {
   padding: 0.425rem 0.75rem;
-  font-size: 0.8125rem;
-}
-.hosted-ui-option-stream-controls {
-  padding: 0 0.25rem 0 1.75rem;
-}
-.hosted-ui-option-streams-help {
-  margin: 0.25rem 0 0.5rem;
-  color: var(--muted-foreground);
   font-size: 0.8125rem;
 }
 .hosted-ui-picker-error {
@@ -2412,21 +2629,6 @@ export async function renderHostedMcpSourceSelection(
         setError("");
       });
     }
-    source.querySelector("[data-hosted-mcp-select-streams]")?.addEventListener("click", () => {
-      for (const streamBox of streamsFor(source)) {
-        streamBox.checked = true;
-      }
-      syncSource(source);
-      setError("");
-    });
-    source.querySelector("[data-hosted-mcp-clear-streams]")?.addEventListener("click", () => {
-      for (const streamBox of streamsFor(source)) {
-        streamBox.checked = false;
-      }
-      syncSource(source);
-      source.open = false;
-      setError("");
-    });
   }
   form.querySelector("[data-hosted-mcp-select-sources]")?.addEventListener("click", () => {
     for (const source of sources) {
@@ -2459,12 +2661,18 @@ export async function renderHostedMcpSourceSelection(
     }
   });
   form.addEventListener("submit", (event) => {
+    // Cancel must never be blocked by selection validation — refusing is
+    // always valid, and an owner with nothing selected is exactly the owner
+    // most likely to be refusing.
+    if (event.submitter && event.submitter.value === "cancel") {
+      return;
+    }
     for (const source of sources) {
       syncSource(source);
     }
     if (!sourceBoxes().some((sourceBox) => sourceBox.checked)) {
       event.preventDefault();
-      setError(error?.dataset.defaultMessage || "Select at least one source before approving.");
+      setError(error?.dataset.defaultMessage || "Choose at least one data source to continue.");
       return;
     }
     const incomplete = sources.find((source) => {
@@ -2475,7 +2683,7 @@ export async function renderHostedMcpSourceSelection(
     if (incomplete) {
       event.preventDefault();
       incomplete.open = true;
-      setError("Choose at least one stream inside each selected source, or clear that source.");
+      setError("Choose data from each selected source, or clear the source.");
     }
   });
   for (const source of sources) {
@@ -2485,37 +2693,37 @@ export async function renderHostedMcpSourceSelection(
 </script>`
     : "";
 
-  // The origin (`titleName`) is the enforced identity and stays in the title
-  // as the verified anchor; when a self-described name is also present,
-  // render it too so the human-readable app name isn't buried. `renderPageIntro`
-  // escapes `title` as plain text (no HTML), so the trust-status marker itself
-  // lives in the adjacent `clientIdentityBlock`'s existing "Unverified app"
-  // badge, not inline in the H1 — the H1 states which name is which, the
-  // badge right below it states the self-described one isn't verified
-  // (spec-core.md:706-730 allows showing a resolved name next to its trust
-  // status; it must not be presented as verified on its own).
+  // The headline carries the two facts that decide the page: who is asking,
+  // and that they want to READ. The URL is not one of them — it moved to the
+  // identity block's quiet domain line, where it does its anti-phishing job
+  // without occupying headline weight. The trust status sits directly beneath
+  // the name in `clientIdentityBlock`, so a resolved name is never shown as
+  // though the server had verified it (spec-core.md:706-730).
   const pickerTitle = clientDisplay
-    ? clientDisplay.selfDescribedName
-      ? `${clientDisplay.selfDescribedName} (${clientDisplay.titleName}) wants access`
-      : `${clientDisplay.titleName} wants access to your data`
+    ? `${clientDisplay.displayName} wants to read your data`
     : "Choose what this app can read";
 
-  const sourceKindSummaryInline = uniformSourceKind
-    ? `<p class="hosted-ui-source-kind-summary">All sources below are <code>${ui.escapeHtml(uniformSourceKind)}</code>-backed.</p>`
-    : "";
+  // The uniform-kind summary ("All sources below are connector-backed") is
+  // gone with the per-row badge: it stated a protocol classification the
+  // owner has no decision to make about. `source.kind` remains in the grant
+  // and the audit record.
+  const sourceKindSummaryInline = "";
 
   // Resolved field/time-range scope (Grant fields: `streams[].fields`,
   // `streams[].time_constraint`; approval-artifact requirement,
-  // spec-core.md:873-880). This picker has no field-projection or
-  // time-range UI (`buildHostedMcpAuthorizationDetailForConnector` always
-  // submits bare `{ name }` stream entries — request-params:726's `fields`/
-  // `time_range` are never set), so every stream every row grants resolves
-  // to all of that stream's fields with no temporal limit, uniformly. Stated
-  // once above the list rather than per-row, since there is no per-stream
-  // variance to distinguish (no stream on this picker can ever request a
-  // narrower scope than "everything").
+  // spec-core.md:873-880). This picker has no field-projection or time-range
+  // UI, so every stream it grants resolves to all of that stream's fields
+  // with no temporal limit.
+  //
+  // The prior wording — "All fields of each stream you check; no date-range
+  // limit." — read as though the absence were a property of the protocol. It
+  // is not: `fields` is a protocol-enforced allowlist (spec-core.md:769) and
+  // `time_range` is evaluated against each stream's `consent_time_field`
+  // (:758-759), which 97 of 162 fleet streams declare. It is an unbuilt
+  // feature phrased as a constraint. State the scope plainly and let it look
+  // as broad as it is.
   const fieldsAndTimeRangeSummary =
-    '<p class="hosted-ui-fields-timerange-summary">All fields of each stream you check; no date-range limit.</p>';
+    '<p class="hosted-ui-fields-timerange-summary">Everything in each data type you check, with no date limit.</p>';
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
@@ -2532,7 +2740,7 @@ export async function renderHostedMcpSourceSelection(
     body: [
       ui.renderPageIntro({
         eyebrow: "Data access request",
-        lede: "Pick the streams this app may read. Anything you leave unchecked stays private.",
+        lede: "Choose what it can read. Anything you leave unchecked stays private.",
         title: pickerTitle,
       }),
       clientIdentityBlock,

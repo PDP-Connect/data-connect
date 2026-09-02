@@ -598,7 +598,7 @@ function rejectMissingHostedMcpSelection(
     req,
     res,
     ctx,
-    "Select at least one source and one stream inside each selected source before approving.",
+    "Choose at least one data type to continue.",
     client
   );
 }
@@ -707,13 +707,13 @@ async function buildPackageAndRedirect(
       res,
       ctx,
       labels
-        ? `Choose at least one stream for ${labels}, or clear that source.`
-        : "Choose at least one stream inside each selected source, or clear that source.",
+        ? `Choose data from ${labels}, or clear the source.`
+        : "Choose data from each selected source, or clear the source.",
       client
     );
   }
   if (acc.authorizationDetails.length === 0) {
-    return renderHostedMcpPickerValidationPage(req, res, ctx, "Select at least one source before approving.", client);
+    return renderHostedMcpPickerValidationPage(req, res, ctx, "Choose at least one data source to continue.", client);
   }
 
   // Final-approval artifact completeness + digest binding (grant:873-877,
@@ -807,6 +807,52 @@ async function resolveMcpPackageIntake(
   return { client, packageAccessMode, selections, streamSelectionsBySource };
 }
 
+// ─── Refusal (RFC 6749 §4.1.2.1) ─────────────────────────────────────────────
+//
+// When the owner declines, the AS MUST redirect back to the client's
+// `redirect_uri` with `error=access_denied` and the original `state`. Before
+// this route existed, the reference implementation could not return an OAuth
+// error to a client at all — both redirect builders set only `code` and
+// `state`, so an owner who refused had no action to take but close the tab,
+// leaving the client waiting for a response that never came.
+//
+// `/consent/deny` does exist, but it operates on a pending-consent row that
+// the picker flow never writes (the picker mints straight from its POST), so
+// it cannot serve this surface. The refusal is validated exactly as hard as
+// an approval: same owner session, same CSRF token, same client and
+// redirect_uri registration checks. An unregistered redirect_uri must never
+// receive a redirect, error or otherwise — that is an open-redirect vector,
+// and the check is what makes it safe to echo the client's own URI back.
+async function handleHostedMcpCancel(
+  req: RouteRequest,
+  res: RouteResponse,
+  ctx: Pick<MountAsAuthorizeContext, "ensureRequestId" | "getRegisteredClient" | "oauthError">
+): Promise<unknown> {
+  const body = req.body || {};
+  const clientId = requireAuthorizeString(body, "client_id");
+  const redirectUri = requireAuthorizeString(body, "redirect_uri");
+  const state = typeof body.state === "string" ? body.state : null;
+
+  const client = await ctx.getRegisteredClient(clientId, {
+    requestId: ctx.ensureRequestId(res),
+    traceId: null,
+  });
+  if (!client) {
+    return ctx.oauthError(res, 400, "invalid_client", "Unknown client_id");
+  }
+  // Throws `invalid_request` (caught by the route's handler) rather than
+  // redirecting, so a forged redirect_uri never becomes a redirect target.
+  requireRegisteredRedirectUri(client, redirectUri);
+
+  const redirectUrl = new URL(redirectUri);
+  redirectUrl.searchParams.set("error", "access_denied");
+  redirectUrl.searchParams.set("error_description", "The owner denied the request");
+  if (state) {
+    redirectUrl.searchParams.set("state", state);
+  }
+  return res.redirect(302, redirectUrl.toString());
+}
+
 // ─── Route mount ─────────────────────────────────────────────────────────────
 
 export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): void {
@@ -892,6 +938,30 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
       );
     }
   });
+
+  // POST /oauth/authorize/mcp-package/cancel
+  //
+  // The owner's refusal. Redirects to the client's registered redirect_uri
+  // with `error=access_denied` and the original `state` (RFC 6749 §4.1.2.1).
+  // Nothing is minted and no grant state is touched — the picker never wrote
+  // any.
+  app.post(
+    "/oauth/authorize/mcp-package/cancel",
+    ctx.requireOwnerSession,
+    ctx.requireCsrf,
+    async (req: RouteRequest, res: RouteResponse) => {
+      try {
+        return await handleHostedMcpCancel(req, res, ctx);
+      } catch (err) {
+        return ctx.oauthError(
+          res,
+          400,
+          (err as { code?: string }).code || "invalid_request",
+          (err as Error).message || "Authorization refusal rejected"
+        );
+      }
+    }
+  );
 
   // POST /oauth/authorize/mcp-package
   //

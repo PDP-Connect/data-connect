@@ -1575,7 +1575,7 @@ test("hosted MCP source selection uses hosted-ui option styles", async () => {
     const resp = await fetch(authorizeUrl);
     assert.equal(resp.status, 200);
     const html = await resp.text();
-    assert.match(html, /Hosted MCP test client wants access to your data/);
+    assert.match(html, /Hosted MCP test client wants to read your data/);
     assert.match(html, /class="hosted-ui-option-group"/);
     assert.match(html, /class="hosted-ui-option"/);
     assert.match(html, /<details class="hosted-ui-option-source"[^>]*>/);
@@ -1602,7 +1602,7 @@ test("hosted MCP source selection uses hosted-ui option styles", async () => {
     assert.match(html, /spotify/, "picker meta copy should show canonical key `spotify`");
     assert.match(
       html,
-      /Share only what this app needs/,
+      /You can revoke this access later from your grants page/,
       "picker copy should present the flow as an owner-facing setup"
     );
 
@@ -2832,15 +2832,15 @@ test("hosted MCP picker surfaces each row's resolved source kind as a protocol f
     // the only case this fixture exercises), the picker states it once above
     // the list rather than repeating the full sentence on every row; each row
     // still carries a compact protocol-fact badge.
-    assert.match(
+    // `source.kind` is real protocol, but its audience is the CLIENT. To the
+    // owner, "connector" answers a question nobody asked, and because every
+    // row resolves to the same kind it distinguished nothing while consuming
+    // a badge slot on every row. It stays in the grant and audit record.
+    assert.doesNotMatch(html, /All sources below are/, "no uniform-kind summary line on the owner surface");
+    assert.doesNotMatch(
       html,
-      /aria-label="Streams and access mode your server will enforce">[\s\S]*?class="hosted-ui-source-kind-summary">All sources below are <code>connector<\/code>-backed/,
-      "picker must state the uniform resolved source.kind once above the list, inside the protocol-enforced block"
-    );
-    assert.match(
-      html,
-      /class="hosted-ui-option-source-kind-badge" data-authorship="protocol" title="Source kind: connector"><code>connector<\/code>/,
-      `picker must still carry a compact per-row protocol-fact badge (server-resolved, spotify.connector_id=${spotify.connector_id})`
+      /hosted-ui-option-source-kind-badge/,
+      `no per-row connector badge (server-resolved, spotify.connector_id=${spotify.connector_id})`
     );
     assert.equal(
       html.includes('class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>connector</code>'),
@@ -2887,8 +2887,11 @@ test("hosted MCP picker renders collapsed source summaries with per-stream contr
     assert.match(html, /class="hosted-ui-option-streams"/, "picker must render the per-source stream block");
     assert.match(html, /class="hosted-ui-stream-option"/, "picker must render at least one stream checkbox");
     assert.match(html, /data-hosted-mcp-stream-checkbox/, "picker must mark stream checkboxes for source coupling");
-    assert.match(html, /data-hosted-mcp-select-streams/, "picker must offer per-source select-all streams");
-    assert.match(html, /data-hosted-mcp-clear-streams/, "picker must offer per-source clear streams");
+    // The per-source buttons are gone: the tri-state parent checkbox already
+    // selects and clears its own source (27 sources x 2 buttons was the page
+    // compensating for a list that should have been shorter).
+    assert.doesNotMatch(html, /data-hosted-mcp-select-streams/, "no per-source select-all button");
+    assert.doesNotMatch(html, /data-hosted-mcp-clear-streams/, "no per-source clear button");
 
     const sourceInputs = [...html.matchAll(/<input[^>]*data-hosted-mcp-source-checkbox[^>]*>/g)];
     assert.ok(sourceInputs.length > 0, "picker must render source checkboxes");
@@ -2928,38 +2931,45 @@ test("hosted MCP picker renders collapsed source summaries with per-stream contr
       assert.equal(/\sdisabled(?:\s|\/|>)/.test(input[0]), false, `github::${stream.name} must be enabled`);
     }
 
-    // Owner-facing copy should make the stream-derived source model
-    // clear without registry URLs or demo-only phrasing.
-    assert.match(html, /A source is its streams/i, "picker copy should explain the source-is-its-streams model");
-    assert.match(
+    // The checkbox model is carried by the control, not by prose about the
+    // control. ~70 words explaining what a checkbox does signalled a broken
+    // control; this one was never broken.
+    assert.doesNotMatch(html, /A source is its streams/i, "no prose explaining the checkbox model");
+    assert.doesNotMatch(
       html,
       /A source with no streams checked is not shared/i,
-      "picker copy should explain derived source state"
+      "no prose explaining derived source state"
     );
-    assert.match(
+    // This sentence rendered inside all 27 sources — the page teaching the
+    // owner its own checkbox semantics, 27 times.
+    assert.doesNotMatch(
       html,
       /Each stream you check is granted on its own/i,
-      "per-source copy should make stream selection authoritative"
+      "no per-source repetition of the checkbox model"
     );
-    assert.match(
+    assert.doesNotMatch(
       html,
       /Check one stream to share just that stream/i,
-      "picker copy should make single-stream grants discoverable"
+      "single-stream grants are discoverable from the checkboxes themselves, not a sentence about them"
     );
     assert.match(html, /sourceBox\.checked = selected/, "picker JS should derive source checked state from streams");
     assert.match(html, /sourceBox\.indeterminate = partiallySelected/, "picker JS should expose subset stream grants");
-    assert.match(html, /Select every stream/i, "picker should make whole-source approval explicit");
+    // Whole-source approval is the parent checkbox — already proven above by
+    // the `sourceBox.checked = selected` / `indeterminate` derivation, and
+    // exercised end-to-end in hosted-mcp-picker-runtime.test.ts. It no longer
+    // needs a dedicated button per source.
+    assert.doesNotMatch(html, /Select every stream/i, "no per-source select-every button");
     assert.match(html, /data-hosted-mcp-select-sources/, "picker should make global bulk approval explicit");
-    assert.match(html, /Select all/i, "picker should offer a global select-all affordance");
-    assert.match(html, /Clear all/i, "picker should offer a clear global reset affordance");
+    assert.match(html, /Select every source/i, "picker should offer a global select-all affordance");
+    assert.match(html, /Clear selection/i, "picker should offer a clear global reset affordance");
     assert.match(html, /data-hosted-mcp-expand-all/, "picker should offer an explicit expand-all disclosure control");
     assert.match(
       html,
       /data-hosted-mcp-collapse-all/,
       "picker should offer an explicit collapse-all disclosure control"
     );
-    assert.match(html, />Expand all</i, "expand-all control should be owner-labelled");
-    assert.match(html, />Collapse all</i, "collapse-all control should be owner-labelled");
+    assert.match(html, />Show all data types</i, "expand-all control should be owner-labelled");
+    assert.match(html, />Hide all data types</i, "collapse-all control should be owner-labelled");
   } finally {
     await closeServer(server);
   }
@@ -3200,8 +3210,8 @@ test("POST /oauth/authorize/mcp-package renders picker error when a selected sou
     assert.equal(resp.status, 400);
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
-    assert.match(html, /Hosted MCP test client wants access to your data/);
-    assert.match(html, /Choose at least one stream for/i);
+    assert.match(html, /Hosted MCP test client wants to read your data/);
+    assert.match(html, /Choose data from/i);
     assert.match(html, /data-hosted-mcp-picker-error/);
     assert.match(html, /class="hosted-ui-error hosted-ui-picker-error"/);
   } finally {
@@ -3239,7 +3249,7 @@ test("POST /oauth/authorize/mcp-package renders picker error when every selected
     // NOT leak a raw registry URL or a cin_ id. Scope the leak checks to the
     // error banner: the re-rendered picker page legitimately echoes the
     // client redirect_uri as a hidden OAuth input.
-    assert.match(html, /Choose at least one stream/);
+    assert.match(html, /Choose data from each selected source, or clear the source\./);
     const errorText = renderedHostedMcpPickerErrorText(html).toLowerCase();
     assert.equal(errorText.includes("https://"), false, "error message MUST NOT leak registry URLs");
     assert.equal(errorText.includes("cin_"), false, "error message MUST NOT leak raw connection ids");
@@ -3423,9 +3433,9 @@ test("POST /oauth/authorize/mcp-package renders picker error when streams are su
     assert.match(resp.headers.get("content-type") || "", /text\/html/);
     const html = await resp.text();
 
-    assert.match(html, /Hosted MCP test client wants access to your data/);
+    assert.match(html, /Hosted MCP test client wants to read your data/);
     assert.match(html, /data-hosted-mcp-picker-error/);
-    assert.match(html, /Select at least one source and one stream inside each selected source before approving/);
+    assert.match(html, /Choose at least one data type to continue/);
     assert.equal(
       html.includes('{"error"'),
       false,
@@ -3576,10 +3586,19 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
     // any retention policy existed.
     assert.ok(!html.includes("client-policy retention"), "picker must not assert the legacy client-policy phrase");
     assert.ok(!html.includes("client_policy"), "picker must not surface the off-spec retention.classification value");
+    // The page told the owner "data it reads is deleted within 90 days". Read
+    // plainly, the subject is what the APP does — a promise the client never
+    // made and this server cannot cause (spec-core.md:948, :951). No feature
+    // makes that sentence true, so the fix is to state the absence.
     assert.match(
       html,
-      /No retention commitment was declared by this app[\s\S]*deleted within 90\s*days/i,
-      "picker should state the real server-generated retention default, not a no-limit disclaimer, and must not attribute it to the app as a declared commitment"
+      /did not say how long it keeps the data it receives\./,
+      "picker must state the absence of a retention commitment, naming the app"
+    );
+    assert.doesNotMatch(
+      html,
+      /deleted within 90\s*days/i,
+      "the server must never tell the owner the client deletes their data on a schedule it never accepted"
     );
     assert.match(
       html,
@@ -3816,17 +3835,18 @@ test("hosted MCP child-grant grant.issued spine event records access_mode, strea
     const issuedEventData = issuedEvent.data as Record<string, unknown>;
     assert.equal(issuedEventData.access_mode, "single_use");
     assert.deepEqual(issuedEventData.stream_names, ["saved_tracks"]);
-    // The picker now encodes a fixed, server-generated Core
-    // `{ max_duration, on_expiry }` retention bound
-    // (HOSTED_MCP_PICKER_RETENTION, request-params:726) on every hosted-MCP
-    // package grant. The event surfaces the exact resolved bound so a
-    // dashboard reading the timeline sees what was actually granted, not an
-    // absent/null placeholder.
-    assert.ok(Object.hasOwn(issuedEventData, "retention"), "grant.issued must surface a retention key");
-    assert.deepEqual(
-      issuedEventData.retention,
-      { max_duration: "P90D", on_expiry: "delete" },
-      "hosted MCP picker must encode the server-generated retention bound on every grant"
+    // Retention is a commitment BY THE RECIPIENT (spec-core.md:951), and a
+    // hosted-MCP request carries no `authorization_details` at all — the
+    // client has declared none. The picker used to write a hardcoded
+    // `{ max_duration: "P90D", on_expiry: "delete" }` into every grant,
+    // recording as ChatGPT's commitment a promise ChatGPT never made and this
+    // server cannot enforce (:948 — PDPP does not retroactively reach into
+    // client-side data stores). The grant must now record no recipient
+    // commitment, because there is none.
+    assert.equal(
+      issuedEventData.retention ?? null,
+      null,
+      "no retention may be written into a grant as the client's commitment when the client declared none"
     );
   } finally {
     await closeServer(server);
@@ -4865,25 +4885,31 @@ test("hosted MCP picker renders the CIMD client's resolved display name and mark
     await registerAuthorizedSpotify(asUrl);
     const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
 
-    // CIMD identity precedent (existing, unchanged): the URL-origin is the
-    // PROTOCOL fact (it's what the client authenticated as); the CIMD
-    // client_name is a CLIENT-authored claim, rendered separately. See
-    // `buildConsentClientDisplay`'s CIMD branch.
+    // spec-core.md:673 — the resolved display name MUST be shown when
+    // available; client_id is only the fallback. The header used to lead with
+    // the origin and label the actual name "Self-described app name", so a
+    // request from ChatGPT rendered as a URL while we held the answer.
     assert.match(
       html,
-      /class="hosted-ui-client-identity-name"[^>]*>\s*https:\/\/chatgpt\.example/,
-      "picker header must render the resolved protocol identity (origin)"
+      /class="hosted-ui-client-identity-name"[^>]*>ChatGPT</,
+      "picker header must lead with the resolved display name"
     );
     assert.match(
       html,
-      /Self-described app name<\/dt><dd>ChatGPT/,
-      "self-described name must be attributed as a client claim"
+      /class="hosted-ui-client-identity-domain"[^>]*>chatgpt\.example</,
+      "the origin stays, as the quiet second line"
     );
+    // Trust status as a neutral fact rather than an unconditional badge: no
+    // client can ever escape it today (there is no trust registry), so a
+    // badge shouting at an app that has done nothing wrong carries no
+    // information the owner can act on.
     assert.match(
       html,
-      /class="hosted-ui-unverified-badge"[^>]*>\s*Unverified app/,
-      "picker must render an Unverified app badge for a CIMD client with no trust-registry signal"
+      /This app isn't registered with your server\. Its name and logo are self-reported\./,
+      "picker must state the unverified trust status as a neutral fact adjacent to the name"
     );
+    assert.doesNotMatch(html, /Unverified app/, "the unconditional badge is replaced by the fact line");
+    assert.doesNotMatch(html, /Metadata document/, "the metadata-document URL never reaches the owner surface");
     assert.doesNotMatch(
       html,
       /<img[^>]*chatgpt\.example/i,
@@ -4909,8 +4935,8 @@ test("hosted MCP picker renders a text monogram, never an <img>, for client iden
     assert.ok(monogramMatch, "picker must render a monogram element for client identity");
     assert.equal(
       monogramMatch?.[1]?.trim(),
-      "C",
-      "monogram must be a short text placeholder derived from the display name"
+      "CH",
+      "monogram is a two-letter mark from the RESOLVED display name (ChatGPT -> CH), matching the design system's .pdpp-monogram; a lone 'C' derived from the URL string sat in a two-letter slot"
     );
     assert.doesNotMatch(
       html,
@@ -4981,8 +5007,8 @@ test("hosted MCP picker names the requester in its title instead of a generic ap
 
     assert.match(
       html,
-      /<h1[^>]*>Hosted MCP test client wants access to your data<\/h1>/,
-      "picker title must name the resolved requester"
+      /<h1[^>]*>Hosted MCP test client wants to read your data<\/h1>/,
+      "picker title must name the resolved requester and the verb"
     );
     assert.doesNotMatch(
       html,
@@ -5003,10 +5029,18 @@ test("hosted MCP picker renders the registry purpose code and description, not t
     const client = await registerAuthCodeClient(asUrl);
     const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
 
+    // The registry code is a protocol identifier, not owner-facing copy: it
+    // stays in the grant and the audit record. What the owner reads is one
+    // sentence naming both the purpose and who assigned it.
+    assert.doesNotMatch(
+      html,
+      /https:\/\/pdpp\.dev\/purpose\/agent_context/,
+      "no purpose-code URI on the owner surface"
+    );
     assert.match(
       html,
-      /<code>https:\/\/pdpp\.dev\/purpose\/agent_context<\/code>/,
-      "picker must render the Appendix A registry purpose code agent_context"
+      /Set by this server because [^<]*didn&#39;t give one/,
+      "purpose names its own origin in one sentence"
     );
     assert.doesNotMatch(
       html,
@@ -5015,8 +5049,8 @@ test("hosted MCP picker renders the registry purpose code and description, not t
     );
     assert.match(
       html,
-      /Providing context to a personal AI agent|personal AI agent/i,
-      "picker must render a purpose description"
+      /use the data you select as context for your AI assistant/i,
+      "picker must render a purpose description in plain words"
     );
   } finally {
     await closeServer(server);
@@ -5033,7 +5067,7 @@ test("hosted MCP picker wraps stream selection and access mode in the protocol a
     const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
 
     const protocolBlockMatch = html.match(
-      /<div class="hosted-ui-authorship" data-authorship="protocol"[^>]*>[\s\S]*?<\/div>\s*<\/div>/
+      /<div class="hosted-ui-authorship" data-authorship="protocol" aria-label="Streams and access mode your server will enforce"[^>]*>/
     );
     assert.ok(protocolBlockMatch, 'picker must render a data-authorship="protocol" block');
     // The protocol block wrapping the picker's own selection controls must
@@ -5420,7 +5454,7 @@ test("POST /oauth/authorize/mcp-package rejects a stale review_digest after a co
 
 // --- Instance branding (PDPP_INSTANCE_NAME) --------------------------------
 
-test("hosted MCP picker renders the configured instance name and monogram, never a hardcoded string, while keeping the PDPP protocol wordmark fixed", async () => {
+test("hosted MCP picker headers the configured instance name alone, with PDPP as a footer attribution", async () => {
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
@@ -5457,15 +5491,22 @@ test("hosted MCP picker renders the configured instance name and monogram, never
       /<span class="hosted-ui-provider" aria-label="Provider">Tim&#39;s Data Server<\/span>/,
       "operator label must render the configured instance name"
     );
-    assert.match(
-      html,
-      /<span class="hosted-ui-instance-monogram" aria-hidden="true">TD<\/span>/,
-      'instance monogram must be derived from the configured name ("Tim\'s Data Server" -> "TD")'
-    );
-    // The protocol wordmark is a separate invariant from the operator label —
-    // it must stay "PDPP" regardless of instance branding (mirrors the
-    // console's own "wordmark is PDPP, never Recordroom" test).
-    assert.match(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "protocol wordmark must stay PDPP");
+    // The instance monogram is gone. spec-core.md:676's monogram rule governs
+    // the CLIENT — it is a safety fallback for an app whose logo must not be
+    // fetched. Turning it on the operator inverts it: the server is the one
+    // party on this page whose identity is not in question. It was also
+    // unstyled (`hosted-ui-instance-monogram` never appeared in the
+    // stylesheet), so "TD" rendered as bare text beside the wordmark and read
+    // at screenshot scale as the unexplained token "PDPP TD".
+    assert.doesNotMatch(html, /hosted-ui-instance-monogram/, "no operator monogram");
+
+    // Consent screens are branded with the party the owner trusts and is
+    // accountable to. Here that is the instance; PDPP is the plumbing, and
+    // plumbing does not get the letterhead. The protocol keeps a quiet footer
+    // attribution — where Plaid puts its own wordmark on a bank-branded
+    // screen — so the header states one identity, not two.
+    assert.doesNotMatch(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "no protocol wordmark in the header");
+    assert.match(html, /hosted-ui-footer-attribution">Secured by PDPP</, "PDPP attribution lives in the footer");
   } finally {
     await closeServer(server);
   }
