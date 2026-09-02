@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react"
 import {
   ActivityIcon,
   ArrowUpRightIcon,
-  GithubIcon,
   InfoIcon,
   ScrollTextIcon,
   ChevronsLeftRightEllipsisIcon,
@@ -14,6 +13,7 @@ import {
   ServerIcon,
   Trash2Icon,
 } from "lucide-react"
+import { PlatformGithubIcon } from "@/components/icons/platform-github"
 import { SettingsRowDescriptionCopy } from "@/pages/settings/components/settings-row-description-copy"
 import { SettingsRowDescriptionStatus } from "@/pages/settings/components/settings-row-description-status"
 import { Text } from "@/components/typography/text"
@@ -210,7 +210,7 @@ export function SettingsAbout({
               }
             />
             <SettingsRow
-              icon={<GithubIcon aria-hidden="true" />}
+              icon={<PlatformGithubIcon aria-hidden="true" />}
               title="GitHub Repository"
               right={
                 <SettingsRowAction asChild>
