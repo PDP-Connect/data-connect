@@ -118,7 +118,16 @@ jobs:
         run: npm ci
 
       - name: Build workspace packages
-        run: npx tsc -b
+        # The root tsconfig.json's project references only cover the app
+        # (tsconfig.app.json/tsconfig.node.json) -- `npx tsc -b` never
+        # touches packages/connector-protocol, packages/collector-runtime,
+        # or the vendored reference-implementation/vendor/cli+mcp-server,
+        # all of which reference-implementation depends on as `dist/`-built
+        # workspace packages (not source-resolved). Build each directly.
+        run: |
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
 
       - name: Typecheck reference implementation
         run: npm --prefix reference-implementation run typecheck
@@ -146,7 +155,16 @@ jobs:
         run: npm ci
 
       - name: Build workspace packages
-        run: npx tsc -b
+        # The root tsconfig.json's project references only cover the app
+        # (tsconfig.app.json/tsconfig.node.json) -- `npx tsc -b` never
+        # touches packages/connector-protocol, packages/collector-runtime,
+        # or the vendored reference-implementation/vendor/cli+mcp-server,
+        # all of which reference-implementation depends on as `dist/`-built
+        # workspace packages (not source-resolved). Build each directly.
+        run: |
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
 
       - name: Test reference implementation
         env:
