@@ -133,8 +133,15 @@ export function renderPdppMark({ size = 28, title = "PDPP" } = {}) {
 // third-party font CDNs; it falls back to the closest installed system
 // faces until (if ever) fonts are self-hosted.
 export const HOSTED_UI_CSS = `:root {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Named faces only where they resolve without a fetch. The stack used to
+   * lead with "Inter" and "JetBrains Mono" while importing neither, so every
+   * hosted page rendered in system UI under a stylesheet that claimed
+   * otherwise. This surface deliberately loads no third-party font CDN — it
+   * is a security-sensitive first-party auth surface — so the honest stack is
+   * the system one, which on the platforms the console targets resolves to
+   * very nearly the same shapes. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   --background: oklch(0.985 0.004 90);
   --foreground: oklch(0.18 0.005 270);
@@ -553,24 +560,18 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   overflow-wrap: anywhere;
 }
 
-/* Compact per-row source-kind badge (FIX 3: presenter clutter) — used
- * instead of the full "Source kind: connector" text line when every row on
- * the picker shares one resolved kind and a single summary line above the
- * list already states it. */
-.hosted-ui-option-source-kind-badge {
-  display: inline-flex;
-  align-items: center;
+/* Per-row provenance, shown ONLY where rows genuinely differ. The uniform
+ * "connector" badge and its "All sources below are connector-backed" summary
+ * are gone: source.kind's audience is the client, and a value identical on
+ * every row carried zero bits while occupying a slot on all of them. What
+ * survives is the mixed-kind case, worded as a consequence for the owner
+ * rather than as the raw enum. */
+.hosted-ui-option-source-kind {
+  display: block;
   margin-top: 0.25rem;
-  padding: 0.0625rem 0.375rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+  font-size: 0.75rem;
   color: var(--muted-foreground);
-  font-size: 0.6875rem;
 }
-.hosted-ui-option-source-kind-badge code {
-  font-family: var(--font-mono);
-}
-.hosted-ui-source-kind-summary,
 .hosted-ui-fields-timerange-summary {
   margin: 0 0 0.5rem;
   font-size: 0.8125rem;
@@ -722,6 +723,18 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 .hosted-ui-button[data-variant="primary"]:hover {
   filter: brightness(0.94);
 }
+/* The refusal. Declining is not an error and is not dressed as one — but it
+ * must not read as a second primary either. Copper (--human) is reserved for
+ * the owner's consent act, so Allow is the only filled control in the pair. */
+.hosted-ui-button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+.hosted-ui-button[data-variant="ghost"]:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
 .hosted-ui-button[data-variant="danger"] {
   color: var(--destructive);
   border-color: var(--border);
@@ -834,6 +847,110 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
   font-size: 0.75rem;
   margin-top: 0.5rem;
+}
+
+/* ─── Disclosure control ────────────────────────────────────────────────
+ * The accordion's disclosure affordance used to be an ::after generated text
+ * ("Choose data" / "Hide data") with no hit target of its own, sharing one
+ * row with a checkbox that does something entirely different: the checkbox
+ * grants the source, the disclosure only reveals its streams. On a phone one
+ * tap had two plausible outcomes, and the generated text could not be
+ * targeted, labelled, or sized.
+ *
+ * It is a real element now, with its own hit area, sitting beside the
+ * checkbox rather than on top of it. */
+.hosted-ui-disclosure {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.hosted-ui-disclosure:hover { color: var(--foreground); }
+.hosted-ui-disclosure:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.hosted-ui-disclosure-chevron {
+  display: block;
+  transition: transform 150ms;
+}
+.hosted-ui-option-source[open] .hosted-ui-disclosure-chevron {
+  transform: rotate(90deg);
+}
+.hosted-ui-disclosure-label { white-space: nowrap; }
+
+/* ─── Small screens ─────────────────────────────────────────────────────
+ * There were no width breakpoints at all before this — the only two @media
+ * blocks in the file were prefers-color-scheme. A consent screen is a
+ * thing people reach from a phone, mid-task, from an app that just redirected
+ * them. */
+@media (max-width: 600px) {
+  .hosted-ui-page {
+    padding: 1.5rem 1rem 6.5rem;
+    gap: 1.25rem;
+  }
+
+  /* Full-bleed sheets with 16px gutters: on a narrow viewport the card inset
+   * costs horizontal room the stream labels need more than the border does. */
+  .hosted-ui-surface {
+    padding: 1rem;
+  }
+
+  /* Touch floor. Native checkboxes render ~13-16px; the label row around
+   * them is what the finger actually lands on, so the floor goes there. */
+  .hosted-ui-button,
+  .hosted-ui-option,
+  .hosted-ui-stream-option,
+  .hosted-ui-access-mode-option {
+    min-height: 44px;
+  }
+  .hosted-ui-option,
+  .hosted-ui-stream-option,
+  .hosted-ui-access-mode-option {
+    align-items: center;
+  }
+  .hosted-ui-option input,
+  .hosted-ui-stream-option input,
+  .hosted-ui-access-mode-option input {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
+  /* The decision pair stays reachable. Our scope list is far longer than the
+   * five-row scope cards the prior-art corpus ships, so burying Allow and
+   * Cancel past the end of it is the one place a sticky bar earns itself. */
+  .hosted-ui-decision-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    margin: 1.5rem -1rem 0;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+    background: var(--background);
+  }
+  .hosted-ui-decision-actions .hosted-ui-button {
+    flex: 1 1 auto;
+  }
+
+  /* Bulk controls wrap instead of overflowing. */
+  .hosted-ui-actions {
+    gap: 0.5rem;
+  }
+
+  .hosted-ui-option-streams {
+    padding-left: 1rem;
+  }
 }
 `;
 
