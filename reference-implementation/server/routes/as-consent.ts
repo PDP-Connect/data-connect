@@ -36,7 +36,11 @@ import { applyCredentialResponseNoStoreHeaders } from "../credential-response-ca
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import type { ConsentUiRenderer, PendingGrant } from "./as-consent-ui-helpers.ts";
-import { renderPendingConsentNotFoundHtml, renderPendingGrantConsentHtml } from "./as-consent-ui-helpers.ts";
+import {
+  HOSTED_DENIAL_COPY,
+  renderPendingConsentNotFoundHtml,
+  renderPendingGrantConsentHtml,
+} from "./as-consent-ui-helpers.ts";
 
 // ─── Local structural types ───────────────────────────────────────────────────
 
@@ -905,9 +909,12 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
               }),
               ctx.consentUi.renderSurface({
                 children: ctx.consentUi.renderResultState({
-                  body: "The pending data access request was rejected and cleared.",
-                  title: "Request rejected",
-                  tone: "danger",
+                  body: HOSTED_DENIAL_COPY.body,
+                  title: HOSTED_DENIAL_COPY.title,
+                  // Refusing is a normal outcome, not a failure. `danger`
+                  // painted the owner's own correct decision in the error
+                  // colour.
+                  tone: "neutral",
                 }),
               }),
             ].join("\n"),
