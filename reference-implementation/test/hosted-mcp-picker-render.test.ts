@@ -758,3 +758,142 @@ test("picker states the resolved field/time-range scope once, on the approval ar
     "the coverage term renders on the artifact the owner approves"
   );
 });
+
+// ── The connector key is a protocol identifier, not owner copy ───────────────
+
+test("a source row's meta line states holdings, never the connector key", async () => {
+  // The row meta printed "2 data types · spotify" — the registry connector
+  // key, appended whenever it differed from the display label. It is a
+  // protocol identifier: it answers nothing the owner asked, and on a screen
+  // that has already had the metadata-document URL and the `connector` badge
+  // removed for exactly this reason, it is the same defect wearing a shorter
+  // string. It stays in the form value and the audit record.
+  // The key only used to render when it DIFFERED from the display label, so
+  // the default fixture (where "Spotify" matches `spotify`) never exposed it.
+  // Use a fixture whose display names and registry keys genuinely differ —
+  // which is the normal case on a real deployment ("Chase" / `chase-bank`).
+  const html = await renderPicker(makeWideCaps(3));
+  const metas = [...html.matchAll(/<span class="hosted-ui-option-meta"[^>]*>([^<]*)<\/span>/g)].map((m) =>
+    (m[1] ?? "").trim()
+  );
+  assert.ok(metas.length >= 2, "fixture must render source meta lines");
+  for (const meta of metas) {
+    assert.match(meta, /^\d+ data types?$/, `meta must state holdings alone, got: ${meta}`);
+  }
+  assert.equal(/·\s*src\d/.test(html), false, "the registry connector key must not reach the owner surface");
+});
+
+// ── Structural well-formedness ───────────────────────────────────────────────
+
+test("every source row emits a closed <details> tag with its summary inside it", async () => {
+  // A regression this suite could not otherwise see: adding an attribute to
+  // the <details> open tag dropped its closing `>`, so the summary, the
+  // checkbox and the disclosure were all swallowed into the tag and the
+  // chevron rendered invisible. Every string assertion still passed, because
+  // substring matching cannot tell well-formed markup from a tag that never
+  // closed. Assert the structure, not the strings.
+  const html = await renderPicker();
+  // Scope to the source rows: the behavior script's own comments mention
+  // `<details>` in prose, and a document-wide scan would count those.
+  const openTags = [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*?>/g)].map((m) => m[0]);
+  assert.ok(openTags.length >= 2, "fixture must render at least two source rows");
+  assert.equal(
+    [...html.matchAll(/<\/details>/g)].length,
+    openTags.length,
+    "every source <details> must be closed exactly once"
+  );
+
+  // An unterminated open tag swallows the element that follows it, so the
+  // next `<` lands inside the tag. That is the exact signature of the bug.
+  for (const tag of openTags) {
+    assert.equal(
+      tag.slice(1).includes("<"),
+      false,
+      `a <details> open tag must terminate before the next element: ${tag.slice(0, 120)}`
+    );
+  }
+  // Each open tag must be immediately followed by its summary, not by
+  // whatever the malformed tag happened to absorb.
+  assert.equal(
+    [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*?>\s*<summary\b/g)].length,
+    openTags.length,
+    "each source <details> must be followed by its <summary>"
+  );
+});
+
+// ── List reduction: filter above the threshold, live counter always ──────────
+
+/** Builds a caps fixture with `count` distinct connectors, each with 2 streams. */
+function makeWideCaps(count: number): ConsentPickerCapabilities {
+  const ids = Array.from({ length: count }, (_, i) => `https://registry.pdpp.dev/connectors/src${i}`);
+  const manifests: Record<string, FixtureManifest> = {};
+  const bindings: Record<string, FixtureBinding[]> = {};
+  for (const [i, id] of ids.entries()) {
+    manifests[id] = {
+      display_name: `Source ${i}`,
+      source_declaration: { source: { id, kind: "connector" } },
+      streams: [
+        { description: "Records you saved", name: "records" },
+        { description: null, name: "activity" },
+      ],
+    };
+    bindings[id] = [{ _display: `Account ${i}`, connectorInstanceId: `cin_${i}` }];
+  }
+  return makeCaps({
+    getConnectorManifest: async (connectorId: string) => manifests[connectorId] ?? null,
+    listActiveBindingsForGrant: async ({ connectorId }: { connectorId: string }) => bindings[connectorId] ?? [],
+    listRegisteredConnectorIds: async () => ids,
+    listStreamsWithRecords: async ({ connectorId }: { connectorId: string }) =>
+      (manifests[connectorId]?.streams ?? []).map((s) => s.name),
+  });
+}
+
+test("a long source list gets a filter; a short one does not", async () => {
+  // A filter on three rows is chrome that costs a control and buys nothing;
+  // on a real deployment's 27 collapsed sources spanning a very long scroll,
+  // it is the difference between finding Chase and giving up. The threshold
+  // is where scanning stops being viable, not a round number for its own sake.
+  // Assert on the rendered CONTROL, not the string: the behavior script
+  // references the filter's hook unconditionally, so a substring check would
+  // pass vacuously on both.
+  const filterControl = /<input[^>]*data-hosted-mcp-filter[^>]*>/;
+
+  const short = await renderPicker(makeWideCaps(4));
+  assert.doesNotMatch(short, filterControl, "a list short enough to scan must not carry a filter control");
+
+  const long = await renderPicker(makeWideCaps(12));
+  assert.match(long, filterControl, "a long list must offer a filter");
+  assert.match(long, /type="search"/, "the filter is a search input, not a text box");
+});
+
+test("the filter names what it searches, and is not a form field", async () => {
+  const html = await renderPicker(makeWideCaps(12));
+  const tag = /<input[^>]*data-hosted-mcp-filter[^>]*>/.exec(html);
+  assert.ok(tag, "filter input must render");
+  // It must never post: this form's field set IS the grant. A stray `name`
+  // would put the owner's search string into the authorization request.
+  assert.equal(/\sname=/.test(tag[0]), false, "the filter must carry no name — it is not part of the decision");
+  assert.match(html, /Filter sources/, "the filter is labelled for screen readers and sighted users alike");
+});
+
+test("the picker renders a live selection counter, starting at nothing selected", async () => {
+  const html = await renderPicker();
+  assert.match(html, /data-hosted-mcp-counter/, "a selection counter must render");
+  // The counter is the owner's running answer to "what am I about to allow".
+  // It starts honest: before any interaction the answer is nothing.
+  assert.match(
+    html,
+    /data-hosted-mcp-counter[^>]*>\s*Nothing selected yet\.?\s*</,
+    "the counter starts at 'Nothing selected yet.'"
+  );
+});
+
+test("the counter is wired to selection changes, not rendered dead", async () => {
+  const html = await renderPicker();
+  // Guard against a counter that renders once and never updates — the whole
+  // point is that it tracks the selection as it changes.
+  assert.match(html, /data-hosted-mcp-counter[\s\S]*<script/, "the counter renders before the behavior script");
+  const script = /<script>([\s\S]*)<\/script>/.exec(html);
+  assert.ok(script, "picker behavior script must render");
+  assert.match(script[1] ?? "", /data-hosted-mcp-counter/, "the script must bind the counter");
+});
