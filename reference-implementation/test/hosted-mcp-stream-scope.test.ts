@@ -27,8 +27,12 @@ import {
   describeStreamScope,
   describeTimeField,
   normalizeScopeBound,
+  parseSubmittedStreamScopes,
   resolveStreamScopeCapability,
   resolveStreamScopeSelection,
+  scopeFieldsInputName,
+  scopeSinceInputName,
+  scopeUntilInputName,
   type StreamScopeSource,
 } from "../server/hosted-mcp-stream-scope.ts";
 
@@ -213,4 +217,92 @@ test("time fields humanize to the verb an owner reads", () => {
   // An unrecognized field must never print raw at the owner.
   assert.equal(describeTimeField("weird_internal_ts"), "dated");
   assert.equal(describeTimeField(null), "dated");
+});
+
+// ─── Form encoding and parsing ───────────────────────────────────────────────
+
+test("submitted scope is recovered per stream, by name", () => {
+  const body = {
+    [scopeFieldsInputName(0, "messages")]: ["content", "id"],
+    [scopeSinceInputName(0, "messages")]: "2026-03-01",
+    [scopeUntilInputName(0, "messages")]: "2026-03-31",
+  };
+
+  const scopes = parseSubmittedStreamScopes(body, 0);
+
+  assert.deepEqual(scopes.get("messages"), {
+    fields: ["content", "id"],
+    since: "2026-03-01",
+    until: "2026-03-31",
+  });
+});
+
+test("one source's controls never narrow another's", () => {
+  // Source 0 and source 1 both have a `messages` stream. Reading source 1's
+  // inputs while resolving source 0 would silently apply the wrong scope.
+  const body = {
+    [scopeFieldsInputName(0, "messages")]: ["content"],
+    [scopeFieldsInputName(1, "messages")]: ["author"],
+  };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, 1).get("messages")?.fields, ["author"]);
+});
+
+test("a stream name with separators or unicode round-trips intact", () => {
+  // The encoding exists so a stream name cannot collide with the `__`
+  // separator the input name uses.
+  for (const name of ["month_categories", "a__b", "naïve", "with space"]) {
+    const body = { [scopeFieldsInputName(2, name)]: ["x"] };
+    const scopes = parseSubmittedStreamScopes(body, 2);
+    assert.deepEqual(scopes.get(name)?.fields, ["x"], `expected ${name} to round-trip`);
+  }
+});
+
+test("a single checked field arrives as a list, not a bare string", () => {
+  // Form encoders send one value as a string and several as an array.
+  const body = { [scopeFieldsInputName(0, "messages")]: "content" };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content"]);
+});
+
+test("numeric-keyed objects from qs arrayLimit overflow are read as lists", () => {
+  // Per-field checkboxes across many streams exceed qs's arrayLimit, after
+  // which it yields {0: ..., 1: ...} instead of an array.
+  const body = { [scopeFieldsInputName(0, "messages")]: { 0: "content", 1: "id" } };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, 0).get("messages")?.fields, ["content", "id"]);
+});
+
+test("unrelated and malformed inputs are ignored rather than guessed at", () => {
+  const body = {
+    _csrf: "token",
+    access_mode: "continuous",
+    narrow_fields_0__: "orphan",
+    "narrow_fields_0__!!!not-base64!!!": "junk",
+    selection: "abc",
+  };
+
+  const scopes = parseSubmittedStreamScopes(body, 0);
+  // Nothing decodes to a usable stream name, so nothing is claimed.
+  assert.equal(scopes.size, 0);
+});
+
+test("an absent body yields no scopes instead of throwing", () => {
+  assert.equal(parseSubmittedStreamScopes(null, 0).size, 0);
+  assert.equal(parseSubmittedStreamScopes(undefined, 0).size, 0);
+  assert.equal(parseSubmittedStreamScopes({}, 0).size, 0);
+});
+
+test("a parsed submission resolves against the declaration end to end", () => {
+  const body = {
+    [scopeFieldsInputName(0, "messages")]: ["content"],
+    [scopeSinceInputName(0, "messages")]: "2026-03-01",
+  };
+  const submitted = parseSubmittedStreamScopes(body, 0).get("messages") ?? {};
+  const result = resolveStreamScopeSelection(messagesStream(), submitted);
+
+  assert.ok("selection" in result);
+  assert.deepEqual(result.selection.fields, ["content", "conversation_id", "id"]);
+  assert.deepEqual(result.selection.timeRange, { since: "2026-03-01T00:00:00.000Z" });
 });

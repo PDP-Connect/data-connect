@@ -207,6 +207,125 @@ export function resolveStreamScopeSelection(
   };
 }
 
+// ─── Form encoding ───────────────────────────────────────────────────────────
+//
+// Scope controls travel as their own named inputs rather than inside the
+// stream checkbox's value. The checkbox value identifies WHICH stream; these
+// carry HOW MUCH of it. Folding them together would mean the checkbox value
+// changes whenever the owner edits a date, which breaks the tri-state parent
+// logic that keys on it and makes the submitted identity of a stream depend
+// on unrelated edits.
+//
+// Neither encoding is a security boundary — every value here is
+// client-controlled either way, which is why `resolveStreamScopeSelection`
+// validates all of it against the declaration.
+//
+// The `narrow_*_<sourceKey>__<encodedStream>` shape matches the sibling
+// per-source narrowing controls in the non-picker consent flow, so the two
+// surfaces read the same way.
+
+/** base64url so a stream name cannot collide with the `__` separator. */
+export function encodeScopeStreamKey(name: string): string {
+  return Buffer.from(name, "utf8").toString("base64url");
+}
+
+function decodeScopeStreamKey(encoded: string): string | null {
+  // Node's base64url decoder is lenient: it drops characters outside the
+  // alphabet and decodes whatever is left, so `!!!junk!!!` yields mojibake
+  // rather than failing. Round-tripping is what makes the decode strict —
+  // only a key this function could itself have produced is accepted, so a
+  // malformed input is dropped instead of becoming a plausible stream name in
+  // an error message the owner reads.
+  try {
+    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+    if (!decoded || encodeScopeStreamKey(decoded) !== encoded) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+/** Input name for a stream's field checkboxes. */
+export function scopeFieldsInputName(sourceIndex: number, streamName: string): string {
+  return `narrow_fields_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+}
+
+/** Input name for a stream's start-date control. */
+export function scopeSinceInputName(sourceIndex: number, streamName: string): string {
+  return `narrow_since_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+}
+
+/** Input name for a stream's end-date control. */
+export function scopeUntilInputName(sourceIndex: number, streamName: string): string {
+  return `narrow_until_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+}
+
+/** One stream's raw submitted scope, before validation. */
+export interface SubmittedStreamScope {
+  fields?: string[] | null;
+  since?: string;
+  until?: string;
+}
+
+function normalizeSubmittedList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter(isNonEmptyString);
+  }
+  if (isNonEmptyString(value)) {
+    return [value];
+  }
+  // qs yields a numeric-keyed object rather than an array once repeated
+  // params exceed its arrayLimit, which per-field checkboxes reach easily.
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).filter(isNonEmptyString);
+  }
+  return [];
+}
+
+/**
+ * Recover per-stream scope from a submitted form body, keyed by stream name.
+ *
+ * Only inputs belonging to `sourceIndex` are read, so one source's controls
+ * can never narrow another's. Unparseable keys are skipped rather than
+ * guessed at; a stream with no submitted controls simply has no entry, which
+ * `resolveStreamScopeSelection` reads as "no narrowing requested".
+ */
+export function parseSubmittedStreamScopes(
+  body: Record<string, unknown> | null | undefined,
+  sourceIndex: number
+): Map<string, SubmittedStreamScope> {
+  const scopes = new Map<string, SubmittedStreamScope>();
+  if (!body || typeof body !== "object") {
+    return scopes;
+  }
+  const prefixes = [
+    { key: "fields" as const, prefix: `narrow_fields_${sourceIndex}__` },
+    { key: "since" as const, prefix: `narrow_since_${sourceIndex}__` },
+    { key: "until" as const, prefix: `narrow_until_${sourceIndex}__` },
+  ];
+  for (const [name, value] of Object.entries(body)) {
+    for (const { key, prefix } of prefixes) {
+      if (!name.startsWith(prefix)) {
+        continue;
+      }
+      const streamName = decodeScopeStreamKey(name.slice(prefix.length));
+      if (!streamName) {
+        continue;
+      }
+      const existing = scopes.get(streamName) ?? {};
+      if (key === "fields") {
+        existing.fields = normalizeSubmittedList(value);
+      } else if (isNonEmptyString(value)) {
+        existing[key] = value.trim();
+      }
+      scopes.set(streamName, existing);
+    }
+  }
+  return scopes;
+}
+
 /**
  * Describe a resolved scope in the owner's terms.
  *
