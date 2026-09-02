@@ -28,9 +28,16 @@ import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 import type {
   ConsentPickerBinding,
   ConsentPickerCapabilities,
+  ConsentPickerManifest,
   ConsentUiRenderer,
   PendingGrantRequest,
 } from "./as-consent-ui-helpers.ts";
+import {
+  type StreamScopeError,
+  type StreamScopeSelection,
+  parseSubmittedStreamScopes,
+  resolveStreamScopeSelection,
+} from "../hosted-mcp-stream-scope.ts";
 import {
   ActiveBindingLookupError,
   buildConsentClientDisplay,
@@ -278,7 +285,9 @@ async function accumulateSourceEntry(
   acc: SourceEntryAccumulator,
   caps: ConsentPickerCapabilities,
   oauthError: MountAsAuthorizeContext["oauthError"],
-  res: RouteResponse
+  res: RouteResponse,
+  /** The raw POST body, read only for this source's per-stream scope inputs. */
+  submittedBody: Record<string, unknown> | null | undefined
 ): Promise<"added" | "skipped" | "rejected"> {
   const { connectorId, connectionId } = selection;
   const manifest = await caps.getConnectorManifest(connectorId).catch(() => null);
@@ -292,11 +301,8 @@ async function accumulateSourceEntry(
     return "rejected";
   }
 
-  const narrowedStreamNames = resolveNarrowedStreams(
-    manifest,
-    caps.hostedMcpSourceKey({ connectionId, connectorId }),
-    streamSelectionsBySource
-  );
+  const sourceKey = caps.hostedMcpSourceKey({ connectionId, connectorId });
+  const narrowedStreamNames = resolveNarrowedStreams(manifest, sourceKey, streamSelectionsBySource);
 
   if (narrowedStreamNames === "deselected") {
     // Owner deliberately unchecked every declared stream — track for the
@@ -358,13 +364,26 @@ async function accumulateSourceEntry(
   // below via acc.connectionIds, so "what the owner saw" and "what is enforced"
   // agree when pinned.
   const pinnedConnectionId = shouldPinSelectedConnection(connectionId, activeBindingCount) ? connectionId : null;
+
+  // Per-stream field/date narrowing, validated against this source's own
+  // declaration before it can reach the grant engine. Rejecting here rather
+  // than downstream means an impossible narrowing surfaces as a correction on
+  // the page the owner is looking at, instead of an opaque 400 after they
+  // pressed Allow. See resolveSubmittedStreamScopes.
+  const scopeResult = resolveSubmittedStreamScopes(manifest, sourceKey, narrowedStreamNames, submittedBody);
+  if ("error" in scopeResult) {
+    oauthError(res, 400, "invalid_request", scopeResult.error.message);
+    return "rejected";
+  }
+
   acc.authorizationDetails.push(
     buildHostedMcpAuthorizationDetailForConnector(
       connectorId,
       narrowedStreamNames,
       packageAccessMode,
       pinnedConnectionId,
-      source
+      source,
+      scopeResult.scopes
     )
   );
   acc.storageBindings.push({ connector_id: connectorId });
@@ -386,6 +405,54 @@ async function accumulateSourceEntry(
     display_name: caps.projectBindingForWire(matchedBinding as ConsentPickerBinding)?.display_name ?? null,
   });
   return "added";
+}
+
+/**
+ * Validate this source's submitted per-stream narrowing against its own
+ * declaration.
+ *
+ * Only streams that survived selection are considered: a scope submitted for
+ * a stream the owner did not check is ignored rather than rejected, because an
+ * unchecked stream grants nothing and its leftover date input is noise, not an
+ * attempt at anything. A scope for a stream the manifest does not declare is
+ * likewise ignored — `resolveNarrowedStreams` has already bounded the grant to
+ * declared names, so there is nothing for it to attach to.
+ *
+ * Wildcard selections (`narrowedStreamNames === null`, meaning every stream)
+ * still resolve scopes by name, so narrowing survives the wildcard being
+ * expanded against the retained snapshot at issuance.
+ */
+function resolveSubmittedStreamScopes(
+  manifest: ConsentPickerManifest,
+  sourceKey: string,
+  narrowedStreamNames: string[] | null,
+  body: Record<string, unknown> | null | undefined
+): { error: StreamScopeError } | { scopes: Map<string, StreamScopeSelection> } {
+  const submitted = parseSubmittedStreamScopes(body, sourceKey);
+  const scopes = new Map<string, StreamScopeSelection>();
+  if (submitted.size === 0) {
+    return { scopes };
+  }
+  const selectedNames = narrowedStreamNames ? new Set(narrowedStreamNames) : null;
+  for (const stream of manifest.streams ?? []) {
+    if (selectedNames && !selectedNames.has(stream.name)) {
+      continue;
+    }
+    const streamSubmission = submitted.get(stream.name);
+    if (!streamSubmission) {
+      continue;
+    }
+    const resolved = resolveStreamScopeSelection(stream, streamSubmission);
+    if ("error" in resolved) {
+      return { error: resolved.error };
+    }
+    // Only record an actual narrowing; "everything, all dates" is the default
+    // and stays represented by absence.
+    if (resolved.selection.fields || resolved.selection.timeRange) {
+      scopes.set(stream.name, resolved.selection);
+    }
+  }
+  return { scopes };
 }
 
 // Resolves the narrowed stream name list for a source, accounting for:
@@ -483,7 +550,8 @@ async function buildSourceAccumulator(
   ownerSubjectId: string,
   caps: ConsentPickerCapabilities,
   oauthError: MountAsAuthorizeContext["oauthError"],
-  res: RouteResponse
+  res: RouteResponse,
+  submittedBody: Record<string, unknown> | null | undefined
 ): Promise<SourceEntryAccumulator | null> {
   const acc: SourceEntryAccumulator = {
     authorizationDetails: [],
@@ -504,7 +572,8 @@ async function buildSourceAccumulator(
       acc,
       caps,
       oauthError,
-      res
+      res,
+      submittedBody
     );
     if (result === "rejected") {
       return null;
@@ -1067,7 +1136,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           ownerSubjectId,
           ctx.consentPickerCaps,
           ctx.oauthError,
-          res
+          res,
+          body
         );
         if (!acc) {
           return;

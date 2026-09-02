@@ -220,11 +220,15 @@ export function resolveStreamScopeSelection(
 // client-controlled either way, which is why `resolveStreamScopeSelection`
 // validates all of it against the declaration.
 //
-// The `narrow_*_<sourceKey>__<encodedStream>` shape matches the sibling
-// per-source narrowing controls in the non-picker consent flow, so the two
-// surfaces read the same way.
+// Inputs are keyed by the source's stable `(connectorId, connectionId)`
+// identity, not by its position on the page. The POST iterates the submitted
+// selections, whose order comes from the form body rather than from the GET's
+// render order, so a positional index would not survive the round trip
+// reliably — and a mismatched index would silently apply one source's
+// narrowing to another. The naming otherwise follows the sibling per-source
+// narrowing controls in the non-picker consent flow.
 
-/** base64url so a stream name cannot collide with the `__` separator. */
+/** base64url so a name cannot collide with the `__` separator. */
 export function encodeScopeStreamKey(name: string): string {
   return Buffer.from(name, "utf8").toString("base64url");
 }
@@ -248,18 +252,18 @@ function decodeScopeStreamKey(encoded: string): string | null {
 }
 
 /** Input name for a stream's field checkboxes. */
-export function scopeFieldsInputName(sourceIndex: number, streamName: string): string {
-  return `narrow_fields_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+export function scopeFieldsInputName(sourceKey: string, streamName: string): string {
+  return `narrow_fields_${encodeScopeStreamKey(sourceKey)}__${encodeScopeStreamKey(streamName)}`;
 }
 
 /** Input name for a stream's start-date control. */
-export function scopeSinceInputName(sourceIndex: number, streamName: string): string {
-  return `narrow_since_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+export function scopeSinceInputName(sourceKey: string, streamName: string): string {
+  return `narrow_since_${encodeScopeStreamKey(sourceKey)}__${encodeScopeStreamKey(streamName)}`;
 }
 
 /** Input name for a stream's end-date control. */
-export function scopeUntilInputName(sourceIndex: number, streamName: string): string {
-  return `narrow_until_${sourceIndex}__${encodeScopeStreamKey(streamName)}`;
+export function scopeUntilInputName(sourceKey: string, streamName: string): string {
+  return `narrow_until_${encodeScopeStreamKey(sourceKey)}__${encodeScopeStreamKey(streamName)}`;
 }
 
 /** One stream's raw submitted scope, before validation. */
@@ -287,23 +291,26 @@ function normalizeSubmittedList(value: unknown): string[] {
 /**
  * Recover per-stream scope from a submitted form body, keyed by stream name.
  *
- * Only inputs belonging to `sourceIndex` are read, so one source's controls
- * can never narrow another's. Unparseable keys are skipped rather than
- * guessed at; a stream with no submitted controls simply has no entry, which
+ * Only inputs belonging to `sourceKey` are read, so one source's controls can
+ * never narrow another's — two connected accounts of the same connector have
+ * the same stream names, and cross-applying their windows would silently
+ * grant the wrong scope. Unparseable keys are skipped rather than guessed at;
+ * a stream with no submitted controls simply has no entry, which
  * `resolveStreamScopeSelection` reads as "no narrowing requested".
  */
 export function parseSubmittedStreamScopes(
   body: Record<string, unknown> | null | undefined,
-  sourceIndex: number
+  sourceKey: string
 ): Map<string, SubmittedStreamScope> {
   const scopes = new Map<string, SubmittedStreamScope>();
   if (!body || typeof body !== "object") {
     return scopes;
   }
+  const encodedSource = encodeScopeStreamKey(sourceKey);
   const prefixes = [
-    { key: "fields" as const, prefix: `narrow_fields_${sourceIndex}__` },
-    { key: "since" as const, prefix: `narrow_since_${sourceIndex}__` },
-    { key: "until" as const, prefix: `narrow_until_${sourceIndex}__` },
+    { key: "fields" as const, prefix: `narrow_fields_${encodedSource}__` },
+    { key: "since" as const, prefix: `narrow_since_${encodedSource}__` },
+    { key: "until" as const, prefix: `narrow_until_${encodedSource}__` },
   ];
   for (const [name, value] of Object.entries(body)) {
     for (const { key, prefix } of prefixes) {
