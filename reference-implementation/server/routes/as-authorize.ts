@@ -25,16 +25,12 @@
 
 import { randomBytes } from "node:crypto";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
-import type {
-  ConsentPickerBinding,
-  ConsentPickerCapabilities,
-  ConsentUiRenderer,
-  PendingGrantRequest,
-} from "./as-consent-ui-helpers.ts";
+import type { ConsentPickerBinding, ConsentPickerCapabilities, ConsentUiRenderer, PendingGrantRequest } from "./as-consent-ui-helpers.ts";
 import {
   ActiveBindingLookupError,
   buildHostedMcpAuthorizationDetailForConnector,
   buildHostedMcpAuthorizationDetailsForConnector,
+  computeHostedMcpPickerReviewDigest,
   HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE,
   HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES,
   parseAuthorizeAuthorizationDetails,
@@ -164,7 +160,8 @@ export interface MountAsAuthorizeContext {
     authorizationDetails: unknown[];
     clientId: string;
     connectionIds: Array<string | null>;
-    opts: Record<string, never>;
+    /** `reviewDigest` binds the final-approval digest (AS-conformance #15) onto every child grant's `grant.issued` event. */
+    opts: { reviewDigest?: string | null };
     sourceMetadata: Array<{ connector_display_name: string; display_name: string | null }>;
     storageBindings: Array<{ connector_id: string }>;
     subjectId: string;
@@ -649,11 +646,27 @@ async function buildPackageAndRedirect(
       client
     );
   }
+
+  // Final-approval artifact completeness + digest binding (grant:873-877,
+  // AS-conformance #15). Scoped down from a full two-step reviewed-confirm
+  // flow (see as-consent-ui-helpers.ts's `computeHostedMcpPickerReviewDigest`
+  // doc comment for why): rather than an interactive round-trip, this
+  // computes a digest over the exact resolved decision — the same
+  // `acc.authorizationDetails` `createHostedMcpGrantPackage` is about to mint,
+  // never client-supplied — and binds it into the audit trail via
+  // `reviewDigest`, which flows into every child grant's `grant.issued` spine
+  // event (see auth.ts). This makes "what was resolved" reconstructable and
+  // auditable without adding a second click to the existing single-step POST.
+  const reviewDigest = computeHostedMcpPickerReviewDigest({
+    authorizationDetails: acc.authorizationDetails,
+    clientId: pkce.clientId,
+  });
+
   const packageResult = await ctx.createHostedMcpGrantPackage({
     authorizationDetails: acc.authorizationDetails,
     clientId: pkce.clientId,
     connectionIds: acc.connectionIds,
-    opts: {},
+    opts: { reviewDigest },
     sourceMetadata: acc.sourceMetadata,
     storageBindings: acc.storageBindings,
     subjectId: ownerSubjectId,

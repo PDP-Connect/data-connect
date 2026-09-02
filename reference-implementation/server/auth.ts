@@ -8292,6 +8292,7 @@ async function persistChildGrantForPackage({
   storageBinding,
   resolvedStreams,
   traceContext,
+  reviewDigest = null,
 }: {
   request: PendingRequest;
   registeredClient: RegisteredClient;
@@ -8299,6 +8300,15 @@ async function persistChildGrantForPackage({
   storageBinding: StorageBinding;
   resolvedStreams: ResolvedGrantStream[];
   traceContext: TraceContext;
+  /**
+   * Digest binding the hosted-MCP picker's resolved decision (grant:873-877,
+   * AS-conformance #15) — computed server-side over the exact
+   * authorization_details entries about to be minted, before this call.
+   * Carried into the `grant.issued` spine event as an audit trail, not
+   * enforced here (there is no prior artifact to compare it against in this
+   * flow — see as-authorize.ts's `buildPackageAndRedirect`).
+   */
+  reviewDigest?: string | null;
 }): Promise<{ grant: GrantEnvelope; token: string; expiresAt: string | null }> {
   const { selection } = request;
 
@@ -8354,6 +8364,11 @@ async function persistChildGrantForPackage({
       access_mode: selection.access_mode,
       purpose_code: selection.purpose_code,
       retention: selection.retention ?? null,
+      // Review-revision/digest binding (AS-conformance #15): present only for
+      // the hosted-MCP package flow, which computes it server-side over the
+      // exact resolved authorization_details before this call. `null` for
+      // every other issuance path (unchanged).
+      review_digest: reviewDigest,
       source: describeGrantSource(grant),
       ...buildResolvedSnapshotEvidence(request, resolvedStreams),
       stream_names: resolvedStreams.map((stream) => stream.name),
@@ -8409,7 +8424,18 @@ export async function createHostedMcpGrantPackage({
   connectionIds?: (string | null)[];
   sourceMetadata?: Record<string, unknown>[];
   subjectId?: string;
-  opts?: { scenarioId?: string; nativeManifest?: DbRow | null; issuerBase?: string };
+  opts?: {
+    scenarioId?: string;
+    nativeManifest?: DbRow | null;
+    issuerBase?: string;
+    /**
+     * Digest binding the picker's resolved decision (grant:873-877,
+     * AS-conformance #15) — computed by the route layer over the exact
+     * `authorizationDetails` passed here, before this call. Carried onto
+     * every child grant's `grant.issued` spine event.
+     */
+    reviewDigest?: string | null;
+  };
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(clientId)) {
     throw buildOAuthAuthorizationCodeError("invalid_request", "client_id is required");
@@ -8476,6 +8502,7 @@ export async function createHostedMcpGrantPackage({
       registeredClient: childRegisteredClient,
       request,
       resolvedStreams,
+      reviewDigest: opts.reviewDigest ?? null,
       storageBinding,
       subjectId,
       traceContext,

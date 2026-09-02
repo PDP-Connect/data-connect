@@ -15,6 +15,8 @@
 //   test/security-consent-risk-disclosure.test.js
 //   test/security-consent-token-handoff.test.js
 
+import { base64UrlSha256 } from "../oauth-substrate/primitives.ts";
+
 // Hosted-UI rendering surface (injected to avoid importing .js directly).
 
 export interface ConsentUiRenderer {
@@ -379,6 +381,54 @@ export function buildHostedMcpAuthorizationDetailForConnector(
     streams,
     type: "https://pdpp.dev/data-access",
   };
+}
+
+// ─── Picker package review digest ─────────────────────────────────────────
+//
+// AS-conformance #15 (spec-core.md:1454-1457) requires the AS to resolve
+// omitted instance_ids before the final approval surface and bind that
+// resolution to an immutable review revision/digest. The non-picker consent
+// flow does this with a DB-persisted `approval_review_revision` (see
+// `buildApprovalReviewArtifact` in auth.ts); the hosted-MCP picker/package
+// flow has no equivalent state to persist into (it never writes a pending
+// row before minting the grant). This is a scoped-down, stateless
+// equivalent: the exact resolved decision (client identity + every
+// authorization_details entry the picker POST produced) is canonicalized and
+// hashed; the digest travels in a hidden field on a genuine second
+// confirmation POST and is re-verified server-side (recomputed from a fresh
+// re-resolution, not merely echoed) before any grant is minted. See
+// `renderHostedMcpPackageReviewHtml` and as-authorize.ts's
+// `buildPackageAndRedirect`.
+
+function canonicalizeForDigest(value: unknown): unknown {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizeForDigest(item));
+  }
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    sorted[key] = canonicalizeForDigest((value as Record<string, unknown>)[key]);
+  }
+  return sorted;
+}
+
+export interface HostedMcpPickerReviewDecision {
+  authorizationDetails: unknown[];
+  clientId: string;
+}
+
+/**
+ * Computes a stable digest over the exact resolved hosted-MCP package
+ * decision (client + every source-bounded authorization_details entry,
+ * including resolved instance_ids). Two calls with the same resolved
+ * decision — regardless of object key order — produce the same digest;
+ * any change to what would actually be granted changes it.
+ */
+export function computeHostedMcpPickerReviewDigest(decision: HostedMcpPickerReviewDecision): string {
+  const canonicalJson = JSON.stringify(canonicalizeForDigest(decision));
+  return `sha256:${base64UrlSha256(canonicalJson)}`;
 }
 
 // Picker data builder.
