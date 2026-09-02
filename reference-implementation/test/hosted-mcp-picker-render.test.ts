@@ -605,7 +605,24 @@ test("picker never states a retention the client did not declare", async () => {
     false,
     "the server must never tell the owner the client deletes their data on a schedule the client never accepted"
   );
-  assert.equal(/\b90 days\b/.test(html), false, "no fabricated retention window anywhere on the owner surface");
+  // The blanket ban on the string "90 days" was a proxy for "no fabricated
+  // retention window", and it stopped working once grant expiry became a real
+  // control whose bounded default is 90 days. These are different facts:
+  // retention is a promise the RECIPIENT makes about data it already holds and
+  // this server cannot enforce (spec-core.md:951), while grant expiry is when
+  // this server stops honoring the grant — something it does enforce. So the
+  // assertion now targets the fabrication rather than the number: any "90
+  // days" on this page must belong to the expiry control.
+  const retentionBlock = html.slice(html.indexOf("did not say how long"), html.indexOf("did not say how long") + 400);
+  assert.equal(/90\s*days/i.test(retentionBlock), false, "no fabricated retention window in the retention block");
+  for (const match of html.matchAll(/90 days/g)) {
+    const context = html.slice(Math.max(0, (match.index ?? 0) - 600), match.index);
+    assert.match(
+      context,
+      /data-hosted-mcp-grant-expiry/,
+      "every '90 days' on the page must be the grant-expiry control, never a retention claim"
+    );
+  }
   assert.equal(html.includes("P90D"), false, "no retention bound is asserted at all");
 
   // Retention also lives on the approval artifact, as one of the exact terms
@@ -749,12 +766,16 @@ test("mixed source kinds across rows fall back to a full per-row line, no false 
 
 // ── FIX 4: grant expiry is stated, tied to the access-mode control ───────────
 
-test("picker states grant expiry under 'Your server enforces', tied to the access-mode choice", async () => {
+test("picker offers grant expiry as its own control, tied to the access-mode choice", async () => {
   const html = await renderPicker();
+  // Expiry is now a choice with a bounded default rather than a footnote
+  // stating that indefinite access is the only outcome.
+  assert.match(html, /data-hosted-mcp-grant-expiry/, "picker must offer grant expiry as its own control");
+  assert.match(html, /When this access ends/, "the control names what it governs");
   assert.match(
     html,
-    /This authorization has no scheduled end date\./,
-    "picker must state grant expiry as its own fact"
+    /<input type="radio" name="grant_expiry" value="90d" checked \/>/,
+    "the default is bounded, so a forgotten grant closes by itself"
   );
   // Expiry is orthogonal to access mode (spec-core.md:889 — grant validity,
   // data temporal scope, and access pattern must not be conflated). The old
@@ -770,14 +791,14 @@ test("picker states grant expiry under 'Your server enforces', tied to the acces
   // each other. Assert ordering: access-mode fieldset close, then the expiry
   // note, before the block itself closes.
   const accessModeIndex = html.indexOf('class="hosted-ui-access-mode"');
-  const expiryIndex = html.indexOf("This authorization has no scheduled end date.");
+  const expiryIndex = html.indexOf("data-hosted-mcp-grant-expiry");
   assert.ok(accessModeIndex >= 0, "access-mode fieldset must be present");
-  assert.ok(expiryIndex > accessModeIndex, "expiry note must render after the access-mode fieldset, not before it");
+  assert.ok(expiryIndex > accessModeIndex, "expiry control must render after the access-mode fieldset, not before it");
   const protocolLabelIndex = html.indexOf('aria-label="Streams and access mode your server will enforce"');
   assert.ok(protocolLabelIndex >= 0, "the protocol-enforced streams/access-mode block must be present");
   assert.ok(
     protocolLabelIndex < accessModeIndex && accessModeIndex < expiryIndex,
-    "the expiry statement must be co-located inside the same protocol-enforced block as the access-mode control"
+    "the expiry control must be co-located inside the same protocol-enforced block as the access-mode control"
   );
 });
 
@@ -785,16 +806,27 @@ test("picker states grant expiry under 'Your server enforces', tied to the acces
 
 test("picker states the resolved field/time-range scope once, on the approval artifact", async () => {
   const html = await renderPicker();
-  // This flow has no field-projection or time-range UI, so every checked
-  // data type resolves to all of its fields with no temporal bound — an
-  // exact resolved term the artifact must carry (spec-core.md:873-877).
-  const occurrences = [...html.matchAll(/Everything in each data type you check, with no date limit\./g)];
-  assert.equal(occurrences.length, 1, "the coverage term is stated exactly once");
+  // The default is still everything; the copy now states that as a default
+  // and points at the control, rather than describing the breadth as a
+  // property of the protocol.
   assert.match(
     html,
-    /data-hosted-mcp-review[\s\S]*Everything in each data type you check, with no date limit\./,
+    /Each data type you check is shared in full unless you narrow it\./,
+    "picker must state the resolved field/time-range scope"
+  );
+  assert.match(
+    html,
+    /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">[\s\S]{0,400}Each data type you check is shared in full/,
+    "the fields/time-range statement must render inside the protocol-enforced block, above the source list"
+  );
+  // The approval artifact restates the same term (spec-core.md:873-877).
+  assert.match(
+    html,
+    /data-hosted-mcp-review[\s\S]*<dt>Coverage<\/dt><dd>Everything in each data type you check, unless you narrowed it above\.<\/dd>/,
     "the coverage term renders on the artifact the owner approves"
   );
+  // The old wording asserted an absence the server no longer has.
+  assert.equal(html.includes("with no date limit"), false, "the unbuilt-feature phrasing must not survive");
 });
 
 // ── One eyebrow per register change, not one per block ───────────────────────
