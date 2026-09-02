@@ -93,6 +93,20 @@ jobs:
           node-version: "22.23.1"
           cache: npm
 
+      - name: Install node-gyp with Visual Studio 2026 detection support
+        # windows-latest ships a Visual Studio install under a bare "\18\" path (VS 2026's
+        # naming scheme). The node-gyp bundled with Node 22.23.1's npm (10.9.8) predates the
+        # VS18 detection fix and fails with `unknown version "undefined"`. node-gyp>=12.1.0
+        # (see nodejs/node-gyp#3240) recognizes it; pin a modern node-gyp for this job only.
+        # TODO: drop this step once actions/setup-node's Node 22 LTS bundles npm>=11.6.3.
+        # Ref: https://github.com/PDP-Connect/data-connect/issues/47
+        if: matrix.os_family == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global node-gyp@latest
+          echo "npm_config_node_gyp=$(npm prefix --location=global)/node_modules/node-gyp/bin/node-gyp.js" >> "$GITHUB_ENV"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
