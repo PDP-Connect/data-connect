@@ -80,6 +80,13 @@ export const EXCLUDED_FILES = new Set([
 
   // -- generated file --
   "src/lib/platform/registry.generated.ts",
+
+  // -- generated test-discovery stubs (each re-exports a headered .source.ts
+  //    or .ts sibling; the header lives on that real source file) --
+  "reference-implementation/scripts/quality-ratchet/check-mass-ratchet.test.mjs",
+  "reference-implementation/scripts/quality-ratchet/measure-mass.test.mjs",
+  "reference-implementation/scripts/quality-ratchet/regenerate-mass-baseline.test.mjs",
+  "reference-implementation/scripts/requeue-quarantined-detail-gaps.test.mjs",
 ])
 
 export function isExcludedPath(relativePath) {

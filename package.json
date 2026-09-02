@@ -4,7 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/console",
+    "reference-implementation",
+    "reference-implementation/vendor/*"
   ],
   "engines": {
     "node": ">=22.14.0 <24"

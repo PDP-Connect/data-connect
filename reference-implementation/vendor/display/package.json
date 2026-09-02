@@ -1,0 +1,22 @@
+{
+  "name": "@pdpp/display",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Framework-independent rules that turn PDPP values and metadata into human-readable display models.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./health": "./src/health/axis-vocabulary.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node ../../scripts/run-node-tests.mjs --test --import tsx \"src/**/*.test.ts\"",
+    "verify": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  },
+  "license": "Apache-2.0"
+}
