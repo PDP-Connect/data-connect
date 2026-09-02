@@ -2448,6 +2448,13 @@ export async function renderHostedMcpSourceSelection(
                   row.sourceKind === "connector" ? "Read directly from this source" : "Read from data you imported"
                 )}</span>`
               : "";
+          // The disclosure is its own control, beside the checkbox rather
+          // than sharing its row. The checkbox grants the source; the
+          // disclosure only reveals its streams. Those are different acts,
+          // and when the affordance was `::after` generated text on the
+          // summary, one tap on a phone had two plausible outcomes and the
+          // control could be neither labelled nor sized.
+          const disclosureLabel = `Show what ${row.connectorTypeLabel} can share`;
           return `
           <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false">
             <summary class="hosted-ui-option-source-legend hosted-ui-option-summary">
@@ -2462,6 +2469,10 @@ export async function renderHostedMcpSourceSelection(
                   ${sourceKindBlock}
                 </span>
               </label>
+              <span class="hosted-ui-disclosure" role="button" tabindex="0" aria-expanded="false" aria-label="${ui.escapeHtml(disclosureLabel)}" data-hosted-mcp-disclosure>
+                <span class="hosted-ui-disclosure-label" aria-hidden="true">Choose data</span>
+                <svg class="hosted-ui-disclosure-chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M3 1 L7 5 L3 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
             </summary>
             ${renderRowStreams(row)}
           </details>
@@ -2595,19 +2606,16 @@ export async function renderHostedMcpSourceSelection(
     ? `<style>
 .hosted-ui-option-summary {
   list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 .hosted-ui-option-summary::-webkit-details-marker {
   display: none;
 }
-.hosted-ui-option-summary::after {
-  content: "Choose data";
-  display: block;
-  padding: 0 0.25rem 0.5rem 2rem;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-}
-.hosted-ui-option-source[open] > .hosted-ui-option-summary::after {
-  content: "Hide data";
+.hosted-ui-option-summary > .hosted-ui-option {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .hosted-ui-toolbar-divider {
   width: 1px;
@@ -2655,6 +2663,18 @@ export async function renderHostedMcpSourceSelection(
       error.hidden = true;
     }
   };
+  // Keep the disclosure's own state in sync with the <details>. The label and
+  // aria-expanded are on a real control now, so both must track "open"
+  // however it changed — chevron click, keyboard, or a selection auto-opening
+  // the row.
+  const syncDisclosure = (source) => {
+    const disclosure = source.querySelector("[data-hosted-mcp-disclosure]");
+    if (!disclosure) return;
+    const open = source.open;
+    disclosure.setAttribute("aria-expanded", open ? "true" : "false");
+    const label = disclosure.querySelector(".hosted-ui-disclosure-label");
+    if (label) label.textContent = open ? "Hide data" : "Choose data";
+  };
   const syncSource = (source) => {
     const sourceBox = source.querySelector("[data-hosted-mcp-source-checkbox]");
     if (!sourceBox) return;
@@ -2677,8 +2697,43 @@ export async function renderHostedMcpSourceSelection(
     if (selected) {
       source.open = true;
     }
+    syncDisclosure(source);
   };
   for (const source of sources) {
+    // The summary hosts two controls that do different things, so neither may
+    // trigger the other's effect. The browser toggles <details> on ANY click
+    // inside <summary>, which is what made one tap have two outcomes: ticking
+    // the checkbox also collapsed or expanded the row.
+    //
+    // Suppress that default on the summary and drive "open" only from the
+    // disclosure (and from selection, which auto-opens). The exception
+    // matters: preventDefault() on the summary cancels the checkbox's own
+    // activation too — both are default actions of the same click — so a
+    // blanket suppression leaves the selection control dead. Verified in
+    // Chromium, not assumed. Scope it to clicks that did not land on the
+    // checkbox.
+    const summary = source.querySelector(".hosted-ui-option-summary");
+    summary?.addEventListener("click", (event) => {
+      if (event.target.closest("input[type=checkbox]")) return;
+      event.preventDefault();
+    });
+    const disclosure = source.querySelector("[data-hosted-mcp-disclosure]");
+    const toggle = () => {
+      source.open = !source.open;
+      syncDisclosure(source);
+    };
+    disclosure?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggle();
+    });
+    disclosure?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggle();
+    });
+    source.addEventListener("toggle", () => syncDisclosure(source));
     const sourceBox = source.querySelector("[data-hosted-mcp-source-checkbox]");
     if (!sourceBox) continue;
     sourceBox.addEventListener("change", () => {
