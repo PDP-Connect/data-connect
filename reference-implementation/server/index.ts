@@ -346,7 +346,6 @@ import {
 } from "./routes/ref-browser-enrollment-shell.ts";
 import { mountRefConnectionAcknowledgeLoss } from "./routes/ref-connection-acknowledge-loss.ts";
 import { mountRefConnectionConfirmCoverageHorizon } from "./routes/ref-connection-confirm-coverage-horizon.ts";
-import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { mountRefConnectionPause } from "./routes/ref-connection-pause.ts";
 import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from "./routes/ref-connection-resume.ts";
 import {
@@ -506,6 +505,7 @@ import {
   listAttemptsForSubscription,
 } from "./stores/client-event-subscription-store.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
+import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
 import { getDefaultConnectorInstanceConfigStore } from "./stores/connector-instance-config-store.ts";
 import {
@@ -916,7 +916,11 @@ interface OwnerDeviceAuthStore {
 const AS_PORT = Number.parseInt(process.env.AS_PORT || "7662", 10);
 const RS_PORT = Number.parseInt(process.env.RS_PORT || "7663", 10);
 const DB_PATH = process.env.PDPP_DB_PATH || process.env.DB_PATH || ":memory:";
-const PDPP_PROVIDER_NAME = process.env.PDPP_PROVIDER_NAME || "PDPP Reference Provider";
+// PDPP_INSTANCE_NAME is the operator-facing name for this instance:
+// PDPP_PROVIDER_NAME is preserved as a fallback for deployments that only
+// set the older var, so nothing already running breaks.
+const PDPP_PROVIDER_NAME =
+  process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || "PDPP Reference Provider";
 const PDPP_PROVIDER_CONNECT_VERSION = process.env.PDPP_PROVIDER_CONNECT_VERSION || "draft-2026-04-16";
 const PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION = process.env.PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION !== "0";
 const PDPP_DCR_INITIAL_ACCESS_TOKENS = (process.env.PDPP_DCR_INITIAL_ACCESS_TOKENS || "")
@@ -2674,7 +2678,7 @@ async function resolveOwnerReadScope(req: ReqLike, opts: ServerOpts = {}) {
 }
 
 function resolveProviderName(opts: ServerOpts = {}) {
-  return opts.providerName || process.env.PDPP_PROVIDER_NAME || PDPP_PROVIDER_NAME;
+  return opts.providerName || process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || PDPP_PROVIDER_NAME;
 }
 
 function resolveNativeManifest(opts: ServerOpts = {}) {

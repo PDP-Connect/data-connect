@@ -848,13 +848,41 @@ ${body}
 }
 
 /**
- * Brand header: PDPP mark + wordmark + provider name.
+ * Short text monogram for the operator-facing instance name (e.g. "Tim's
+ * Data Server" -> "TD"). Pure text, never an image — this instance has no
+ * uploaded-logo concept, and an instance-name monogram is a distinct thing
+ * from the per-CLIENT monogram consent rendering uses for untrusted
+ * `logo_uri` (see `buildClientMonogram` in as-consent-ui-helpers.ts) — this
+ * one identifies the SERVER, not a requesting app.
+ */
+function buildInstanceMonogram(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return "?";
+  }
+  const letters = trimmed
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((word) => word.charAt(0))
+    .join("")
+    .toUpperCase();
+  return letters || trimmed.charAt(0).toUpperCase();
+}
+
+/**
+ * Brand header: PDPP protocol mark + wordmark (always "PDPP" — the protocol
+ * identity, never configurable) + the operator-facing instance name and its
+ * derived monogram (PDPP_INSTANCE_NAME, or PDPP_PROVIDER_NAME as a fallback
+ * for existing deployments — see `resolveProviderName` in server/index.ts).
  */
 export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
-  const safeProvider = escapeHtml(providerName);
+  const providerNameString = String(providerName ?? "");
+  const safeProvider = escapeHtml(providerNameString);
+  const safeMonogram = escapeHtml(buildInstanceMonogram(providerNameString));
   return `<header class="hosted-ui-header">
   ${renderPdppMark({ size: 28 })}
   <span class="hosted-ui-wordmark">PDPP</span>
+  <span class="hosted-ui-instance-monogram" aria-hidden="true">${safeMonogram}</span>
   <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
 </header>`;
 }
