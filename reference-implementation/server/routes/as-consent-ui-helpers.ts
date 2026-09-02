@@ -110,6 +110,8 @@ export interface HostedMcpPickerRow {
   formValue: string;
   meta: string;
   sourceKey: string;
+  /** Resolved public source identity kind (source-kinds:731-743), or null if the manifest has no valid source declaration. */
+  sourceKind: string | null;
   streams: Array<{ name: string; description: string | null }>;
 }
 
@@ -124,6 +126,19 @@ export const HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION =
   "Provide selected personal data as context to this MCP client acting as your personal AI agent.";
 export const HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE = "continuous";
 export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new Set(["single_use", "continuous"]);
+
+// Server-generated retention bound (request-params:726) for every hosted-MCP
+// package grant. This reference implementation has no per-connector or
+// per-client retention negotiation, so a single fixed policy applies
+// uniformly: 90 days is a conservative default matching neither indefinite
+// retention nor same-session-only, and `delete` (not `anonymize`) because the
+// hosted-MCP picker grants raw stream reads, not aggregate/derived data.
+// Server-determined — never client-asserted — so it renders in the protocol
+// authorship class, same as access_mode.
+export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } = {
+  max_duration: "P90D",
+  on_expiry: "delete",
+};
 
 // Input normalization helpers.
 
@@ -325,6 +340,7 @@ export function buildHostedMcpAuthorizationDetailsForConnector(
       access_mode: "continuous",
       purpose_code: HOSTED_MCP_PICKER_PURPOSE_CODE,
       purpose_description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
+      retention: HOSTED_MCP_PICKER_RETENTION,
       source,
       streams: [{ name: "*" }],
       type: "https://pdpp.dev/data-access",
@@ -359,6 +375,7 @@ export function buildHostedMcpAuthorizationDetailForConnector(
   purpose_code: string;
   purpose_description: string;
   access_mode: string;
+  retention: { max_duration: string; on_expiry: "anonymize" | "delete" };
   streams: Array<{ name: string; instance_ids?: string[] }>;
 } {
   const pinnedConnectionId = typeof connectionId === "string" && connectionId.trim() ? connectionId.trim() : null;
@@ -377,6 +394,7 @@ export function buildHostedMcpAuthorizationDetailForConnector(
     access_mode: resolvedAccessMode,
     purpose_code: HOSTED_MCP_PICKER_PURPOSE_CODE,
     purpose_description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
+    retention: HOSTED_MCP_PICKER_RETENTION,
     source,
     streams,
     type: "https://pdpp.dev/data-access",
@@ -431,6 +449,83 @@ export function computeHostedMcpPickerReviewDigest(decision: HostedMcpPickerRevi
   return `sha256:${base64UrlSha256(canonicalJson)}`;
 }
 
+// ─── Picker snapshot digest (stale-review-revision rejection) ─────────────
+//
+// AS-conformance #15 requires the final approval artifact's exact resolved
+// terms to be bound to an immutable review revision, and requires the AS to
+// reject a stale one. `computeHostedMcpPickerReviewDigest` above binds
+// AFTER minting, into the audit trail — it cannot itself reject anything
+// stale, because nothing is compared against it. This is the actual
+// TOCTOU guard: a digest computed over exactly what the picker GET rendered
+// as choosable (source/connection/stream eligibility, purpose, retention,
+// access modes, client identity) is stamped into a hidden `review_digest`
+// form field; the POST re-resolves the same inputs FRESH (a real second
+// read of connector manifests and active bindings, not a reuse of anything
+// from the GET) and only proceeds to mint if the freshly computed digest
+// matches the one the form carried. A mismatch — including a tampered
+// field, or a real drift such as a connection revoked between page-load and
+// submission — rejects with the same typed re-render path a validation
+// error uses; nothing is minted. No interactive round-trip is added: real
+// MCP OAuth clients still get their single POST -> redirect.
+//
+// Time range and per-stream client_claims are not part of this digest: the
+// hosted-MCP picker POST has no fields for either (see
+// CONSENT-UI-SPEC-GAP-0902.md §3 and §5) — there is nothing resolvable to
+// bind. Grant expiry is not a picker input either; it is a property of the
+// issued token, not of what the owner reviewed.
+export interface HostedMcpPickerSnapshotClientFacts {
+  isUnverified: boolean;
+  protocolFacts: Array<{ label: string; value?: unknown; html?: string }>;
+  titleName: string;
+}
+
+function computeHostedMcpPickerSnapshotDigest(
+  rows: HostedMcpPickerRow[],
+  client: HostedMcpPickerSnapshotClientFacts | null
+): string {
+  const sortedRows = [...rows]
+    .sort((a, b) => a.sourceKey.localeCompare(b.sourceKey))
+    .map((row) => ({
+      connectionId: row.connectionId,
+      connectorId: row.connectorId,
+      sourceKey: row.sourceKey,
+      sourceKind: row.sourceKind,
+      streamNames: [...row.streams.map((stream) => stream.name)].sort(),
+    }));
+  const snapshot = {
+    accessModes: [...HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES].sort(),
+    client: client
+      ? {
+          isUnverified: client.isUnverified,
+          protocolFacts: client.protocolFacts,
+          titleName: client.titleName,
+        }
+      : null,
+    purposeCode: HOSTED_MCP_PICKER_PURPOSE_CODE,
+    purposeDescription: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION,
+    retention: HOSTED_MCP_PICKER_RETENTION,
+    rows: sortedRows,
+  };
+  const canonicalJson = JSON.stringify(canonicalizeForDigest(snapshot));
+  return `sha256:${base64UrlSha256(canonicalJson)}`;
+}
+
+/**
+ * Re-resolves the picker's eligibility snapshot fresh (never reusing
+ * anything from a prior request) and computes its digest, for comparison
+ * against a `review_digest` a picker POST carried. Exported so the
+ * route-layer POST handler (as-authorize.ts) can call it without
+ * duplicating the row-resolution + digest logic.
+ */
+export async function resolveHostedMcpPickerSnapshotDigest(
+  caps: ConsentPickerCapabilities,
+  ownerSubjectId: string,
+  client: HostedMcpPickerSnapshotClientFacts | null
+): Promise<string> {
+  const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
+  return computeHostedMcpPickerSnapshotDigest(rows, client);
+}
+
 // Picker data builder.
 
 /**
@@ -450,6 +545,7 @@ async function buildConnectorPickerRows(
   }
   const connectorMetaToken = ownerFacingConnectorKey(connectorId, caps);
   const connectorLabel = ownerFacingConnectorLabel(manifest.display_name || manifest.name, connectorMetaToken);
+  const sourceKind = resolveHostedMcpSourceDescriptor(manifest)?.kind ?? null;
   const manifestStreams = Array.isArray(manifest.streams) ? manifest.streams : [];
   // The manifest list stays the full grantable catalog for the checkbox rows
   // (`HostedMcpPickerRow.streams`): a held connection may pre-authorize a
@@ -510,6 +606,7 @@ async function buildConnectorPickerRows(
         formValue: caps.encodeHostedMcpSelection({ connectionId: connectionId ?? null, connectorId }),
         meta: buildPickerRowMeta({ connectorKey: connectorMetaToken, connectorLabel, streamCount: heldStreamCount }),
         sourceKey: caps.hostedMcpSourceKey({ connectionId: connectionId ?? null, connectorId }),
+        sourceKind,
         streams: streamSummaries,
       };
     })
@@ -902,7 +999,7 @@ function renderAuthorshipBlock(
   )}</span>${childrenHtml}</div>`;
 }
 
-interface ConsentClientDisplay {
+export interface ConsentClientDisplay {
   // CLIENT: the client's own self-described display (its app name).
   clientFacts: Array<{ label: string; value?: unknown; html?: string }>;
   // Whether to render an "Unverified app" indicator. This reference
@@ -964,7 +1061,7 @@ function buildClientPolicyLinks(
   return links;
 }
 
-function buildConsentClientDisplay(
+export function buildConsentClientDisplay(
   client: NonNullable<PendingGrantRequest["client"]>,
   ui: ConsentUiRenderer
 ): ConsentClientDisplay {
@@ -1886,9 +1983,7 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
     : "";
   const header = `<div class="hosted-ui-client-identity"><span class="hosted-ui-client-monogram" aria-hidden="true">${ui.escapeHtml(
     clientDisplay.monogram
-  )}</span><span class="hosted-ui-client-identity-name">${ui.escapeHtml(
-    clientDisplay.titleName
-  )}</span>${badge}</div>`;
+  )}</span><span class="hosted-ui-client-identity-name">${ui.escapeHtml(clientDisplay.titleName)}</span>${badge}</div>`;
   const policyLinksHtml =
     clientDisplay.policyLinks.length > 0
       ? `<p class="hosted-ui-client-policy-links">${clientDisplay.policyLinks
@@ -1945,6 +2040,35 @@ function renderHostedMcpPurposeBlock(ui: ConsentUiRenderer): string {
   );
 }
 
+const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
+  anonymize: "anonymized",
+  delete: "deleted",
+};
+
+/**
+ * Renders the picker's retention bound (request-params:726). Server-
+ * determined and identical for every hosted-MCP package grant today
+ * (`HOSTED_MCP_PICKER_RETENTION`) — a protocol fact, not a client claim,
+ * unlike the purpose block above. Replaces the prior "this page does not set
+ * a time limit" disclaimer, which was true only because no retention policy
+ * existed yet.
+ */
+function renderHostedMcpRetentionBlock(ui: ConsentUiRenderer): string {
+  const onExpiry =
+    RETENTION_ON_EXPIRY_COPY[HOSTED_MCP_PICKER_RETENTION.on_expiry] ?? HOSTED_MCP_PICKER_RETENTION.on_expiry;
+  return renderAuthorshipBlock(
+    "protocol",
+    "Data retention",
+    ui.renderKeyValueList([
+      {
+        label: "Retention",
+        value: `Data this app reads is ${onExpiry} after ${HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days")}.`,
+      },
+    ]),
+    ui
+  );
+}
+
 /**
  * Renders the hosted MCP multi-source picker page for GET /oauth/authorize
  * when no `authorization_details` or `connector_id` is specified.
@@ -1966,10 +2090,13 @@ export async function renderHostedMcpSourceSelection(
   // any MCP client) ever reaches, and it previously showed no requester
   // identity at all.
   const clientDisplay = opts.client ? buildConsentClientDisplay(opts.client, ui) : null;
-  const clientIdentityBlock = clientDisplay
-    ? renderHostedMcpClientIdentityBlock(clientDisplay, ui)
-    : "";
+  const clientIdentityBlock = clientDisplay ? renderHostedMcpClientIdentityBlock(clientDisplay, ui) : "";
   const purposeBlock = renderHostedMcpPurposeBlock(ui);
+
+  // Stale-review-revision rejection (AS-conformance #15): bind exactly what
+  // this render offered as choosable into a digest the POST must reproduce
+  // fresh before minting — see `resolveHostedMcpPickerSnapshotDigest`.
+  const reviewSnapshotDigest = computeHostedMcpPickerSnapshotDigest(rows, clientDisplay);
 
   const hidden = [
     "client_id",
@@ -2028,6 +2155,9 @@ export async function renderHostedMcpSourceSelection(
           const previewBlock = streamPreview
             ? `<span class="hosted-ui-option-preview">${ui.escapeHtml(streamPreview)}</span>`
             : "";
+          const sourceKindBlock = row.sourceKind
+            ? `<span class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>${ui.escapeHtml(row.sourceKind)}</code></span>`
+            : "";
           return `
           <details class="hosted-ui-option-source" data-hosted-mcp-source data-source-key="${sourceKey}" data-source-selected="false">
             <summary class="hosted-ui-option-source-legend hosted-ui-option-summary">
@@ -2039,6 +2169,7 @@ export async function renderHostedMcpSourceSelection(
                   </span>
                   ${previewBlock}
                   <span class="hosted-ui-option-meta" id="${summaryId}">${ui.escapeHtml(row.meta)}</span>
+                  ${sourceKindBlock}
                 </span>
               </label>
             </summary>
@@ -2061,14 +2192,21 @@ export async function renderHostedMcpSourceSelection(
     : "";
 
   const riskCopy = rows.length
-    ? `<p class="pdpp-body"><strong>Share only what this app needs.</strong> A source is its streams: check the streams you want to share, and that source is included. Check one stream to share just that stream, or use the per-source buttons to share all of it. A source with no streams checked is not shared, and you can revoke any source you approve here later.</p>
-            <p class="pdpp-body hosted-ui-retention-note">This page does not set a time limit on data the app keeps after reading it from your server. Review the app's own terms before approving.</p>`
+    ? `<p class="pdpp-body"><strong>Share only what this app needs.</strong> A source is its streams: check the streams you want to share, and that source is included. Check one stream to share just that stream, or use the per-source buttons to share all of it. A source with no streams checked is not shared, and you can revoke any source you approve here later.</p>`
     : "";
+  const retentionBlock = rows.length ? renderHostedMcpRetentionBlock(ui) : "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
-  const validationBanner = rows.length
-    ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Select at least one source and one stream inside each selected source before approving."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
-    : "";
+  // Independent of `rows.length`: a validation error (e.g. the
+  // stale-review-revision rejection) can be the reason the picker now has
+  // FEWER rows than the owner saw last time — most acutely, zero rows, if
+  // every source they'd selected was revoked between page-load and
+  // submission. Suppressing the banner in exactly that case would hide the
+  // one message that explains why the page just changed.
+  const validationBanner =
+    rows.length || validationError
+      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Select at least one source and one stream inside each selected source before approving."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
+      : "";
 
   const bulkControls = rows.length
     ? `
@@ -2292,7 +2430,9 @@ export async function renderHostedMcpSourceSelection(
 </script>`
     : "";
 
-  const pickerTitle = clientDisplay ? `${clientDisplay.titleName} wants access to your data` : "Choose what this app can read";
+  const pickerTitle = clientDisplay
+    ? `${clientDisplay.titleName} wants access to your data`
+    : "Choose what this app can read";
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
@@ -2319,9 +2459,11 @@ export async function renderHostedMcpSourceSelection(
             ${riskCopy}
             <form method="POST" action="/oauth/authorize/mcp-package" data-hosted-mcp-picker-form>
               <input type="hidden" name="_csrf" value="${ui.escapeHtml(csrfToken)}" />
+              <input type="hidden" name="review_digest" value="${ui.escapeHtml(reviewSnapshotDigest)}" />
               ${hidden}
               ${validationBanner}
               ${purposeBlock}
+              ${retentionBlock}
               ${bulkControls}
               ${protocolSelectionBlock}
               ${submit}
