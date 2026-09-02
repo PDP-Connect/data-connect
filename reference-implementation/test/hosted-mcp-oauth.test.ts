@@ -22,7 +22,8 @@ import {
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { encodeHostedMcpSelection, encodeHostedMcpStreamSelection } from "../server/hosted-mcp-selection.ts";
+import { encodeHostedMcpSelection, encodeHostedMcpStreamSelection, hostedMcpSourceKey } from "../server/hosted-mcp-selection.ts";
+import { computeHostedMcpDecisionDigest } from "../server/routes/as-consent-ui-helpers.ts";
 import { startServer } from "../server/index.ts";
 import { basicIntrospectionAuthorization } from "../server/introspection-http.ts";
 import { ingestRecord, queryRecordsAcrossBindings, resolveReadRequestBindings } from "../server/records.ts";
@@ -381,6 +382,80 @@ function renderedHostedMcpStreamValues(html: string): string[] {
   ].map((match) => mustExist(match[1], "capture group must exist"));
 }
 
+/**
+ * Reads the picker HTML exactly as the browser script does — every rendered
+ * stream checkbox, grouped by its source key — and computes the decision
+ * digest for a whole-source approval of all of them. This is the test-side
+ * stand-in for the script's `readDecision()`, and it deliberately parses the
+ * same `data-source-key` / `data-stream-name` attributes the script reads, so
+ * a change to either markup or script shows up here.
+ */
+function decisionDigestForRenderedPicker(
+  html: string,
+  { clientId, accessMode = "continuous" }: { clientId: string; accessMode?: string }
+): string {
+  const bySource = new Map<string, string[]>();
+  for (const match of html.matchAll(/<input[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g)) {
+    const tag = mustExist(match[0], "capture group must exist");
+    const sourceKey = tag.match(/data-source-key="([^"]*)"/)?.[1];
+    const streamName = tag.match(/data-stream-name="([^"]*)"/)?.[1];
+    if (sourceKey === undefined || streamName === undefined) {
+      continue;
+    }
+    // Attributes are HTML-escaped in the markup; the browser reads decoded
+    // dataset values, so decode before digesting.
+    const key = decodeHtmlAttribute(sourceKey);
+    bySource.set(key, [...(bySource.get(key) ?? []), decodeHtmlAttribute(streamName)]);
+  }
+  return computeHostedMcpDecisionDigest({
+    accessMode,
+    clientId,
+    sources: [...bySource.entries()].map(([sourceKey, streamNames]) => ({ sourceKey, streamNames })),
+  });
+}
+
+/**
+ * Stamps the approval binding onto a hand-built picker form. `sources` is the
+ * decision the SERVER is expected to resolve — for a submission carrying
+ * orphaned or duplicate entries, that is deliberately not the same as what
+ * the form contains, which is the point: the digest binds what would actually
+ * be granted, not what was posted.
+ */
+function appendDecisionDigest(
+  params: URLSearchParams,
+  {
+    clientId,
+    accessMode = "continuous",
+    sources,
+  }: {
+    clientId: string;
+    accessMode?: string;
+    sources: Array<{ connectorId: string; connectionId?: string | null; streamNames: string[] }>;
+  }
+): URLSearchParams {
+  params.append(
+    "decision_digest",
+    computeHostedMcpDecisionDigest({
+      accessMode,
+      clientId,
+      sources: sources.map(({ connectorId, connectionId = null, streamNames }) => ({
+        sourceKey: hostedMcpSourceKey({ connectionId, connectorId }),
+        streamNames: [...streamNames].sort(),
+      })),
+    })
+  );
+  return params;
+}
+
+function decodeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 function renderedHostedMcpPickerErrorText(html: string): string {
   const match = html.match(/<div[^>]*data-hosted-mcp-picker-error[^>]*>([\s\S]*?)<\/div>/);
   return match ? mustExist(match[1], "capture group must exist") : "";
@@ -644,6 +719,10 @@ async function completeMultiSourcePackageFlow({
   for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
     params.append("stream", streamValue);
   }
+  params.append(
+    "decision_digest",
+    decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
+  );
 
   const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
     body: params.toString(),
@@ -2601,6 +2680,10 @@ test("query_records with connection_id routes to one source only (G1 source-targ
     for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
       params.append("stream", streamValue);
     }
+    params.append(
+      "decision_digest",
+      decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
+    );
 
     const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
       body: params.toString(),
@@ -2765,6 +2848,22 @@ function buildHostedMcpPickerForm({
       params.append("stream", encodeHostedMcpStreamSelection({ connectionId, connectorId, streamName }));
     }
   }
+  // The approval binding (spec-core.md:881-885): the picker's script writes
+  // this over the exact decision the review panel displayed, and the server
+  // recomputes it from the decision it independently resolves. A submission
+  // without it fails closed, so every test that models a real approval must
+  // carry one, exactly as a browser would.
+  params.append(
+    "decision_digest",
+    computeHostedMcpDecisionDigest({
+      accessMode: accessMode ?? "continuous",
+      clientId: client.client_id,
+      sources: sourceSelections.map(({ connectorId, connectionId = null, streamNames }) => ({
+        sourceKey: hostedMcpSourceKey({ connectionId, connectorId }),
+        streamNames: [...streamNames].sort(),
+      })),
+    })
+  );
   return params;
 }
 
@@ -3494,6 +3593,13 @@ test("POST /oauth/authorize/mcp-package ignores stream entries whose source was 
         streamName: "repositories",
       })
     );
+    // The digest binds what the server RESOLVES, which is spotify alone —
+    // the orphaned github stream is dropped before it can become a grant, so
+    // it must not appear in the decision the owner is bound to either.
+    appendDecisionDigest(params, {
+      clientId: client.client_id,
+      sources: [{ connectionId: null, connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+    });
 
     const approveResp = await exchangePackageCode({ asUrl, client, params });
     assert.equal(approveResp.status, 302);
@@ -3600,10 +3706,19 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
       /deleted within 90\s*days/i,
       "the server must never tell the owner the client deletes their data on a schedule it never accepted"
     );
+    // Retention is one of the exact terms the approval artifact states
+    // (spec-core.md:873-877), not a standalone caveat above the list. What
+    // must never happen is it rendering as something this server enforces —
+    // it is a recipient commitment PDPP does not enforce at all (:951).
     assert.match(
       html,
-      /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="Data retention"/,
-      "retention is a structured policy declaration, not a protocol-enforced constraint — it must not render under 'Your server enforces'"
+      /data-hosted-mcp-review[\s\S]*did not say how long it keeps the data it receives/,
+      "the retention state renders on the artifact the owner approves"
+    );
+    assert.doesNotMatch(
+      html,
+      /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/,
+      "retention must never render under the 'Your server enforces' eyebrow"
     );
   } finally {
     await closeServer(server);
@@ -4256,6 +4371,10 @@ test("sourceMetadata.display_name uses human-readable connection name, not raw c
     for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
       params.append("stream", streamValue);
     }
+    params.append(
+      "decision_digest",
+      decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
+    );
 
     const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
       body: params.toString(),
@@ -4608,6 +4727,10 @@ async function approvePinPackage({
       encodeHostedMcpStreamSelection({ connectionId, connectorId: PIN_CONNECTOR_ID, streamName })
     );
   }
+  appendDecisionDigest(params, {
+    clientId: client.client_id,
+    sources: [{ connectionId, connectorId: PIN_CONNECTOR_ID, streamNames: names }],
+  });
 
   const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
     body: params.toString(),
@@ -5657,6 +5780,211 @@ test("the picker renders Cancel as a first-class action beside Allow", async () 
       html,
       /event\.submitter && event\.submitter\.value === "cancel"/,
       "the client-side submit guard must let a refusal through"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// --- The approval artifact and its binding (spec-core.md:873-885) ----------
+//
+// AS-conformance #15 requires the approval to bind to an immutable review
+// revision or digest over the authorization DECISION fields, and requires a
+// stale review to fail. Two digests existed and neither did that:
+//
+//   `review_digest` covers what the GET rendered as *choosable*, so checking
+//   three streams or thirty produced an identical value — it detects drift in
+//   the menu and is blind to the order. Its handler also opened with
+//   `if (!carriedDigest) return false;`, so omitting the field skipped the
+//   check rather than failing it.
+//
+//   `computeHostedMcpPickerReviewDigest` does cover the exact selection, but
+//   is computed server-side AFTER the POST; its own comment concedes it
+//   "cannot itself reject anything stale, because nothing is compared
+//   against it".
+//
+// So no page in this flow was the approval artifact. These tests pin the one
+// that is: `decision_digest`, submitted by the owner over the terms the
+// review panel displayed, recomputed server-side from the decision actually
+// resolved, and failing closed when absent.
+
+test("the picker renders a live summary of the decision as the approval artifact", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+
+    assert.match(html, /data-hosted-mcp-review/, "the page carries a review panel");
+    assert.match(html, /What you're allowing/, "the panel is titled as the decision, not as a summary of options");
+    assert.match(html, /Nothing selected yet\./, "the empty state is honest before any selection");
+    // spec-core.md:873-877 — the artifact must state the exact resolved
+    // terms, not just the scope: coverage, duration, expiry, and what the
+    // recipient said about keeping the data all belong on it.
+    assert.match(html, /data-hosted-mcp-review-scope/, "the artifact states the selected scope");
+    assert.match(html, /data-hosted-mcp-review-duration/, "the artifact states the access duration");
+    assert.match(html, /This authorization has no scheduled end date\./, "the artifact states grant expiry");
+    assert.match(html, /did not say how long it keeps the data it receives/, "the artifact states retention state");
+    assert.match(html, /name="decision_digest"/, "the decision travels in a bound hidden field");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package rejects a submission carrying NO decision_digest and mints nothing", async () => {
+  // The specific fail-open this closes: an approval that never claimed to
+  // have reviewed anything is exactly the approval that must not mint.
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(randomBytes(32).toString("base64url")),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "no-decision-digest",
+    });
+    params.delete("decision_digest");
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 400, "an unbound approval must not mint");
+    assert.equal(resp.headers.get("location"), null, "no redirect, so no authorization code reaches the client");
+    const html = await resp.text();
+    assert.match(
+      html,
+      /We couldn&#39;t confirm what you approved/,
+      "the owner is sent back to review, not silently approved"
+    );
+    assert.equal(await countGrantPackagesForOwner(), packageCountBefore, "nothing was minted");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package rejects a decision_digest that does not cover the submitted streams", async () => {
+  // The mutation the old snapshot digest could not see: same menu, different
+  // order. The owner reviews one stream; the submission carries two. The
+  // digest must not still match.
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(randomBytes(32).toString("base64url")),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "widened-after-review",
+    });
+    // The digest above binds `saved_tracks` alone. Now widen what is actually
+    // submitted, exactly as a tampered or stale form would.
+    params.append(
+      "stream",
+      encodeHostedMcpStreamSelection({
+        connectionId: null,
+        connectorId: spotify.connector_id,
+        streamName: "top_artists",
+      })
+    );
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 400, "a decision wider than the one reviewed must not mint");
+    assert.equal(resp.headers.get("location"), null, "no authorization code reaches the client");
+    assert.match(await resp.text(), /This request changed since you reviewed it/);
+    assert.equal(await countGrantPackagesForOwner(), packageCountBefore, "nothing was minted");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package rejects a decision_digest computed for a different access mode", async () => {
+  // Access mode is a decision field (spec-core.md:873-877), so flipping the
+  // radio after review must invalidate the binding. The old snapshot digest
+  // hashed the *set of available modes*, so this mutation was invisible to it.
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const params = buildHostedMcpPickerForm({
+      accessMode: "single_use",
+      challenge: pkceChallenge(randomBytes(32).toString("base64url")),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "access-mode-flipped",
+    });
+    // Reviewed as single_use; submitted as continuous.
+    params.set("access_mode", "continuous");
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 400, "a mode the owner did not review must not mint");
+    assert.equal(await countGrantPackagesForOwner(), packageCountBefore, "nothing was minted");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("POST /oauth/authorize/mcp-package mints when the decision_digest matches the resolved decision", async () => {
+  // The positive control: the guard must not be a blanket refusal.
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(randomBytes(32).toString("base64url")),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "bound-approval",
+    });
+
+    const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: params.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+
+    assert.equal(resp.status, 302, "a correctly bound approval mints and redirects");
+    const callback = new URL(mustExist(resp.headers.get("location"), "must carry a Location header"));
+    assert.ok(callback.searchParams.get("code"), "the client receives an authorization code");
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore + 1,
+      "exactly one package is minted"
     );
   } finally {
     await closeServer(server);

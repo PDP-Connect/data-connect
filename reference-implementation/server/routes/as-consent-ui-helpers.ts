@@ -472,6 +472,59 @@ export interface HostedMcpPickerReviewDecision {
   clientId: string;
 }
 
+// ─── The owner's submitted decision (the approval artifact) ───────────────
+//
+// spec-core.md:873-877 requires the final approval artifact to carry the
+// EXACT resolved terms — instance_ids, stream names, fields, resources,
+// temporal field/since/until, purpose, retention, client identity, and grant
+// expiry. :881-885 and AS-conformance #15 require the approval to bind to an
+// immutable review revision or digest, and require a stale review to fail.
+//
+// Neither existing digest satisfied that. The snapshot digest below covers
+// what the GET rendered as *choosable*, so checking three streams or thirty
+// produced an identical value — it detects drift in the menu and is blind to
+// the order. `computeHostedMcpPickerReviewDigest` does cover the exact
+// selection, but is computed server-side AFTER the POST and its own comment
+// concedes it "cannot itself reject anything stale, because nothing is
+// compared against it". So no page in the flow was the approval artifact: the
+// owner never saw, and never bound to, a statement of what they actually
+// granted.
+//
+// This closes it without adding a round-trip. The page renders a live summary
+// of the decision as the owner builds it, and the same script writes the
+// canonical decision into a hidden `decision_digest` field. The POST
+// recomputes that digest from the decision it actually resolved — never from
+// anything the form supplied beyond the selections themselves — and rejects a
+// mismatch. Real MCP clients still get one POST and one redirect.
+//
+// The submitted decision is a binding claim about what the owner reviewed; it
+// never widens the grant. Everything minted still derives from the server's
+// own re-resolution of the selections.
+
+/** The exact decision the owner reviewed, in the shape the page displayed. */
+export interface HostedMcpPickerSubmittedDecision {
+  accessMode: string;
+  clientId: string;
+  /** Sorted `sourceKey -> sorted stream names`, exactly as approved. */
+  sources: Array<{ sourceKey: string; streamNames: string[] }>;
+}
+
+/**
+ * Digest over the owner's exact decision. Stable across key order; any change
+ * to the selected sources, the selected streams within them, the access mode,
+ * or the client identity changes it.
+ */
+export function computeHostedMcpDecisionDigest(decision: HostedMcpPickerSubmittedDecision): string {
+  const normalized = {
+    accessMode: decision.accessMode,
+    clientId: decision.clientId,
+    sources: [...decision.sources]
+      .map((source) => ({ sourceKey: source.sourceKey, streamNames: [...source.streamNames].sort() }))
+      .sort((a, b) => a.sourceKey.localeCompare(b.sourceKey)),
+  };
+  return `sha256:${base64UrlSha256(JSON.stringify(canonicalizeForDigest(normalized)))}`;
+}
+
 /**
  * Computes a stable digest over the exact resolved hosted-MCP package
  * decision (client + every source-bounded authorization_details entry,
@@ -2256,36 +2309,21 @@ const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
  * If `HOSTED_MCP_PICKER_RETENTION` is ever set by an operator, it renders as
  * this server's own requirement, never as the client's acceptance.
  */
-function renderHostedMcpRetentionBlock(clientName: string, ui: ConsentUiRenderer): string {
+/**
+ * The single retention sentence, used by both the terms block and the review
+ * panel so the two can never drift into saying different things.
+ */
+function buildRetentionSentence(clientName: string): string {
+  const absence = `${clientName} did not say how long it keeps the data it receives.`;
   if (!HOSTED_MCP_PICKER_RETENTION) {
-    return renderAuthorshipBlock(
-      "manifest",
-      "Data retention",
-      ui.renderKeyValueList([
-        {
-          label: "Keeping your data",
-          value: `${clientName} did not say how long it keeps the data it receives.`,
-        },
-      ]),
-      ui
-    );
+    return absence;
   }
   const onExpiry =
     RETENTION_ON_EXPIRY_COPY[HOSTED_MCP_PICKER_RETENTION.on_expiry] ?? HOSTED_MCP_PICKER_RETENTION.on_expiry;
   const days = HOSTED_MCP_PICKER_RETENTION.max_duration.replace("P", "").replace("D", " days");
-  return renderAuthorshipBlock(
-    "manifest",
-    "Data retention",
-    ui.renderKeyValueList([
-      {
-        label: "Keeping your data",
-        // The subject is this server's requirement, never the client's
-        // behavior — the client has accepted nothing.
-        value: `${clientName} did not say how long it keeps the data it receives. This server requires that it ${onExpiry} the data within ${days}.`,
-      },
-    ]),
-    ui
-  );
+  // The subject of the second sentence is this server's requirement, never
+  // the client's behavior — the client has accepted nothing.
+  return `${absence} This server requires that it ${onExpiry} the data within ${days}.`;
 }
 
 /**
@@ -2359,7 +2397,7 @@ export async function renderHostedMcpSourceSelection(
           : "";
         return `
             <label class="hosted-ui-stream-option">
-              <input type="checkbox" name="stream" value="${ui.escapeHtml(streamFormValue)}" data-hosted-mcp-stream-checkbox data-source-key="${ui.escapeHtml(row.sourceKey)}" />
+              <input type="checkbox" name="stream" value="${ui.escapeHtml(streamFormValue)}" data-hosted-mcp-stream-checkbox data-source-key="${ui.escapeHtml(row.sourceKey)}" data-stream-name="${ui.escapeHtml(stream.name)}" />
               <span class="hosted-ui-stream-option-body">
                 <span class="hosted-ui-stream-name">${ui.escapeHtml(humanizeStreamLabel(stream.name))}</span>
                 ${description}
@@ -2439,6 +2477,32 @@ export async function renderHostedMcpSourceSelection(
           <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
         </div>`;
 
+  // ─── The approval artifact ────────────────────────────────────────────
+  //
+  // A live, exact statement of what the owner is about to allow, rendered
+  // from the current form state and updated as they select. This is the page
+  // that becomes the approval: the submitted `decision_digest` covers exactly
+  // these terms, and the POST recomputes it from what it actually resolved.
+  //
+  // Everything not owner-variable on this surface (purpose, retention state,
+  // client identity, expiry) is stated above and repeated here only as the
+  // decision's own terms — the summary is the one place they appear together
+  // as a single reviewable artifact.
+  const reviewPanel = rows.length
+    ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
+          <h2 class="pdpp-title">What you're allowing</h2>
+          <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
+          <dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
+            <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
+            <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
+            <dt>Coverage</dt><dd>Everything in each data type you check, with no date limit.</dd>
+            <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
+            <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
+            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildRetentionSentence(clientName))}</dd>
+          </dl>
+        </section>`
+    : "";
+
   // Allow and Cancel sit together as a pair. Every consent screen in the
   // prior-art corpus has a refusal; this one had 59 buttons and every one of
   // them was affirmative, so the only exit was to close the tab — which
@@ -2475,7 +2539,11 @@ export async function renderHostedMcpSourceSelection(
       // selection) and the copy was apologizing for a control that works.
       `<p class="pdpp-body">You can revoke this access later from your grants page.</p>`
     : "";
-  const retentionBlock = rows.length ? renderHostedMcpRetentionBlock(clientName, ui) : "";
+  // Retention has no standalone block on the picker: it is one of the exact
+  // terms the approval artifact states (spec-core.md:873-877), and repeating
+  // it above the list said the same sentence twice. `buildRetentionSentence`
+  // is its single source.
+  const retentionBlock = "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
   // Independent of `rows.length`: a validation error (e.g. the
@@ -2520,7 +2588,6 @@ export async function renderHostedMcpSourceSelection(
             </span>
           </label>
         </fieldset>
-        <p class="hosted-ui-expiry-note">${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</p>
       `
     : "";
 
@@ -2660,6 +2727,102 @@ export async function renderHostedMcpSourceSelection(
       source.open = false;
     }
   });
+  // ── The approval artifact: live summary + decision digest ──────────────
+  //
+  // Reads the current form state into the exact decision the owner is
+  // approving, renders it, and canonicalizes + hashes it into the hidden
+  // decision_digest field. The server recomputes the same digest from the
+  // decision it independently resolves and rejects any mismatch, so this can
+  // only ever narrow or fail — it never widens a grant.
+  const decisionField = form.querySelector("[data-hosted-mcp-decision-digest]");
+  const review = form.querySelector("[data-hosted-mcp-review]");
+  const reviewEmpty = form.querySelector("[data-hosted-mcp-review-empty]");
+  const reviewTerms = form.querySelector("[data-hosted-mcp-review-terms]");
+  const reviewScope = form.querySelector("[data-hosted-mcp-review-scope]");
+  const reviewDuration = form.querySelector("[data-hosted-mcp-review-duration]");
+  const clientId = form.querySelector('input[name="client_id"]')?.value || "";
+
+  const readDecision = () => {
+    const selected = [];
+    for (const source of sources) {
+      const streamNames = streamsFor(source)
+        .filter((streamBox) => streamBox.checked)
+        .map((streamBox) => streamBox.dataset.streamName || "");
+      if (streamNames.length > 0) {
+        selected.push({ sourceKey: source.dataset.sourceKey || "", streamNames: streamNames.sort() });
+      }
+    }
+    selected.sort((a, b) => (a.sourceKey < b.sourceKey ? -1 : a.sourceKey > b.sourceKey ? 1 : 0));
+    const modeInput = form.querySelector('input[name="access_mode"]:checked');
+    return { accessMode: modeInput ? modeInput.value : "continuous", clientId, sources: selected };
+  };
+
+  // Must produce byte-identical JSON to the server's canonicalization:
+  // keys sorted at every level, arrays in order, no whitespace.
+  const canonicalize = (value) => {
+    if (!value || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(canonicalize);
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) sorted[key] = canonicalize(value[key]);
+    return sorted;
+  };
+
+  const toBase64Url = (buffer) => {
+    let binary = "";
+    for (const byte of new Uint8Array(buffer)) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+  };
+
+  const refreshDecision = async () => {
+    const decision = readDecision();
+    const total = decision.sources.reduce((sum, source) => sum + source.streamNames.length, 0);
+    const hasSelection = total > 0;
+    if (review) {
+      if (reviewEmpty) reviewEmpty.hidden = hasSelection;
+      if (reviewTerms) reviewTerms.hidden = !hasSelection;
+    }
+    if (reviewScope) {
+      const sourceWord = decision.sources.length === 1 ? "source" : "sources";
+      const typeWord = total === 1 ? "data type" : "data types";
+      reviewScope.textContent = total + " " + typeWord + " from " + decision.sources.length + " " + sourceWord;
+    }
+    if (reviewDuration) {
+      reviewDuration.textContent =
+        decision.accessMode === "single_use"
+          ? "One-time access — one retrieval, then no more without your approval."
+          : "Ongoing access — including new matching records, until you revoke it.";
+    }
+    if (!decisionField) return;
+    if (!hasSelection) {
+      decisionField.value = "";
+      return;
+    }
+    // SubtleCrypto is unavailable outside a secure context (plain HTTP, which
+    // is how a local instance is normally reached) and in some embedded
+    // webviews. Leaving the field empty there is the correct degradation: the
+    // server rejects an unbound approval and re-renders, so the owner sees an
+    // honest "review this again" rather than a silently unbound grant. It
+    // must never throw, which would take the whole picker's interaction model
+    // down with it.
+    if (!(globalThis.crypto && crypto.subtle)) {
+      decisionField.value = "";
+      return;
+    }
+    try {
+      const json = JSON.stringify(canonicalize(decision));
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
+      decisionField.value = "sha256:" + toBase64Url(digest);
+    } catch {
+      decisionField.value = "";
+    }
+  };
+
+  form.addEventListener("change", () => {
+    // The decision moved, so the one-shot submit retry is owed again.
+    delete form.dataset.decisionRetried;
+    refreshDecision();
+  });
+
   form.addEventListener("submit", (event) => {
     // Cancel must never be blocked by selection validation — refusing is
     // always valid, and an owner with nothing selected is exactly the owner
@@ -2684,11 +2847,27 @@ export async function renderHostedMcpSourceSelection(
       event.preventDefault();
       incomplete.open = true;
       setError("Choose data from each selected source, or clear the source.");
+      return;
+    }
+    // The digest is computed asynchronously (SubtleCrypto), so hold the
+    // submit for ONE pass and resubmit once the field carries the decision
+    // the owner reviewed. Exactly one retry: where the digest cannot be
+    // produced at all (no secure context), a loop would trap the owner on a
+    // page whose button does nothing. Letting the submit through instead
+    // reaches the server's own fail-closed check, which re-renders with a
+    // message. This is a UX guard, never the security boundary.
+    if (decisionField && !decisionField.value && !form.dataset.decisionRetried) {
+      event.preventDefault();
+      form.dataset.decisionRetried = "1";
+      refreshDecision().then(() => {
+        form.requestSubmit(event.submitter || undefined);
+      });
     }
   });
   for (const source of sources) {
     syncSource(source);
   }
+  refreshDecision();
 })();
 </script>`
     : "";
@@ -2722,8 +2901,10 @@ export async function renderHostedMcpSourceSelection(
   // (:758-759), which 97 of 162 fleet streams declare. It is an unbuilt
   // feature phrased as a constraint. State the scope plainly and let it look
   // as broad as it is.
-  const fieldsAndTimeRangeSummary =
-    '<p class="hosted-ui-fields-timerange-summary">Everything in each data type you check, with no date limit.</p>';
+  // Stated once, on the approval artifact, where it is one of the exact
+  // resolved terms the owner binds to (spec-core.md:873-877) rather than a
+  // standing caveat above a list.
+  const fieldsAndTimeRangeSummary = "";
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
@@ -2751,12 +2932,14 @@ export async function renderHostedMcpSourceSelection(
             <form method="POST" action="/oauth/authorize/mcp-package" data-hosted-mcp-picker-form>
               <input type="hidden" name="_csrf" value="${ui.escapeHtml(csrfToken)}" />
               <input type="hidden" name="review_digest" value="${ui.escapeHtml(reviewSnapshotDigest)}" />
+              <input type="hidden" name="decision_digest" value="" data-hosted-mcp-decision-digest />
               ${hidden}
               ${validationBanner}
               ${purposeBlock}
               ${retentionBlock}
               ${bulkControls}
               ${protocolSelectionBlock}
+              ${reviewPanel}
               ${submit}
             </form>
             ${pickerBehaviorScript}
