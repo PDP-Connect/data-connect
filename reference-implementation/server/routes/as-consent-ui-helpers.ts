@@ -2340,7 +2340,20 @@ export async function renderHostedMcpSourceSelection(
   providerName: string,
   caps: ConsentPickerCapabilities,
   ui: ConsentUiRenderer,
-  opts: { validationError?: string | null; client?: PendingGrantRequest["client"] | null } = {}
+  opts: {
+    validationError?: string | null;
+    client?: PendingGrantRequest["client"] | null;
+    /**
+     * Absolute URL of the console's connections page, if the route can resolve
+     * one. The empty picker uses it to give an owner with nothing connected
+     * somewhere to go; when it is absent the page still offers Cancel, so this
+     * only ever adds an exit, never removes one.
+     *
+     * INTEGRATOR: `as-authorize.ts` owns resolving this (it has
+     * `resolvePublicUrl`); this renderer never constructs a URL itself.
+     */
+    connectionsUrl?: string | null;
+  } = {}
 ): Promise<string> {
   const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
 
@@ -2494,9 +2507,17 @@ export async function renderHostedMcpSourceSelection(
       // no link out, on a page whose only message was that nothing was
       // available. An owner who reaches it must still be able to tell the
       // client no, and must be told what to do next.
+      // A link only when the route resolved one — this renderer never
+      // constructs a URL it cannot stand behind, and Cancel is present either
+      // way, so the link can only ever add an exit.
       `<p class="pdpp-body">You haven&#39;t connected any data sources yet. Connect one, then start this request again.</p>
         <div class="hosted-ui-actions hosted-ui-decision-actions">
           <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
+          ${
+            typeof opts.connectionsUrl === "string" && opts.connectionsUrl
+              ? `<a class="hosted-ui-button" data-variant="primary" href="${ui.escapeHtml(opts.connectionsUrl)}">Connect a source</a>`
+              : ""
+          }
         </div>`;
 
   // ─── The approval artifact ────────────────────────────────────────────
@@ -3124,5 +3145,94 @@ export async function renderHostedMcpSourceSelection(
       .join("\n"),
     providerName,
     title: `${providerName} — Choose data sources`,
+  });
+}
+
+// ─── Browser-reachable failures ──────────────────────────────────────────────
+//
+// Roughly thirty distinct failures on the authorize path returned a raw JSON
+// body to the browser — `Unknown client_id`, `redirect_uri does not match a
+// registered redirect URI`, `code_challenge_method must be S256`, `Unknown
+// connector: <id>`, `access_mode must be 'single_use' or 'continuous'`. Only
+// three conditions rendered HTML. An owner who hit any of the rest saw a JSON
+// blob mid-consent, on the most critical UI in the server.
+//
+// Two rules govern what replaces them. The owner reads a consequence, never a
+// protocol string: `code_challenge_method must be S256` tells the person
+// deciding whether to share their bank transactions nothing they can act on,
+// and the developer who needs it already has it in the log and the JSON body
+// an API client still receives. And every terminal failure states the one
+// fact the owner most needs — that nothing was shared.
+
+/** Owner-facing copy for the failures a browser can actually reach. */
+const HOSTED_ERROR_PAGE_COPY: Record<string, { title: string; body: string }> = {
+  expired_link: {
+    body: "This approval link expired or was already used. Start the request again from the app that sent you here. Nothing was shared.",
+    title: "Nothing was shared",
+  },
+  server_error: {
+    body: "Something went wrong on your server. Nothing was shared. Try again in a moment; if it keeps happening, check your server's logs.",
+    title: "Your server couldn't finish this",
+  },
+  stale_review: {
+    body: "This request changed since you loaded the page. Review and approve again. Your available sources changed while it was open, so nothing was shared.",
+    title: "Start over from the app",
+  },
+  unknown_client: {
+    body: "Your server doesn't recognize this app. It won't send it anything, and nothing was shared.",
+    title: "Unrecognized app",
+  },
+};
+
+/** The fallback every unmapped failure lands on. Safe, honest, and terminal. */
+const HOSTED_ERROR_PAGE_FALLBACK = HOSTED_ERROR_PAGE_COPY.server_error as { title: string; body: string };
+
+/**
+ * Whether this request is a browser navigation that should receive an HTML
+ * page rather than the JSON error body.
+ *
+ * Deliberately narrow: only an explicit `text/html` flips the response. A
+ * bare catch-all Accept (curl's default) and a missing Accept header both
+ * keep the JSON contract every existing API client and conformance test
+ * depends on, so this can only ever add a page where there was an unreadable
+ * blob — it can never take JSON away from something that was getting it.
+ */
+export function prefersHtmlErrorPage(accept: unknown): boolean {
+  return typeof accept === "string" && accept.includes("text/html");
+}
+
+/**
+ * Renders a terminal failure as a page the owner can read.
+ *
+ * `description` is the protocol-level message. It is accepted so callers can
+ * pass what they already have, and deliberately never rendered: it names
+ * `redirect_uri`, `client_id`, `code_challenge_method` and connector ids, all
+ * of which are debug output on this surface. It stays in the JSON body, the
+ * log, and the audit record.
+ */
+export function renderHostedErrorPage({
+  code,
+  providerName,
+  ui,
+}: {
+  code: unknown;
+  /** Protocol-level detail. Accepted, never rendered — see above. */
+  description?: unknown;
+  providerName: string;
+  ui: ConsentUiRenderer;
+}): string {
+  const key = typeof code === "string" ? code : "";
+  const copy = HOSTED_ERROR_PAGE_COPY[key] ?? HOSTED_ERROR_PAGE_FALLBACK;
+  const body = [
+    ui.renderPageIntro({
+      eyebrow: "Data access request",
+      lede: copy.body,
+      title: copy.title,
+    }),
+  ].join("\n");
+  return ui.renderHostedDocument({
+    body,
+    providerName,
+    title: `${providerName} — Request stopped`,
   });
 }
