@@ -255,7 +255,7 @@ test("the tone→glyph table has exactly ONE definition, in @pdpp/display", () =
   // grown a replacement copy. A restated table is the drift this whole change
   // was made to prevent.
   const packageSource = readFileSync(
-    fileURLToPath(new URL("../../packages/display/src/source/source-status.ts", import.meta.url)),
+    fileURLToPath(new URL("../vendor/display/src/source/source-status.ts", import.meta.url)),
     "utf8"
   );
   const table = packageSource.slice(
