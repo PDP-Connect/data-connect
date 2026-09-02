@@ -100,23 +100,28 @@ export function escapeHtml(input: unknown): string {
 }
 
 // ─── PDPP mark (server-side SVG) ─────────────────────────────────────────────
-// Geometry mirrors apps/site/src/components/PdppLogo.tsx so the reference
-// pages carry the same mark as the website. Keep in sync.
+// Geometry and colors mirror packages/operator-ui/src/components/pdpp-logo.tsx
+// (the canonical light/dark-aware mark) and apps/console/public/brand/
+// pdpp-mark.svg / pdpp-mark-dark.svg so the reference pages carry the exact
+// same mark as the console. Keep all six constants in sync with that file.
+const HUMAN = "oklch(0.52 0.11 45)";
+const PROTOCOL = "oklch(0.58 0.18 253)";
+const COUNTER_LIGHT = "oklch(0.985 0.005 85)";
+const HUMAN_NIGHT = "oklch(0.72 0.12 45)";
+const PROTOCOL_NIGHT = "oklch(0.74 0.16 253)";
+const COUNTER_NIGHT = "oklch(0.16 0.01 60)";
 
-// Ink Carbon values (apps/console/src/styles/ink-carbon.css light mode) —
-// keep these three in sync with that file's --human / --primary / --background.
-const HUMAN = "oklch(0.55 0.11 45)";
-const PROTOCOL = "oklch(0.46 0.11 255)";
-const COUNTER = "oklch(0.985 0.004 90)";
-
-export function renderPdppMark({ size = 28, title = "PDPP" } = {}) {
+export function renderPdppMark({ size = 28, title = "PDPP", surface = "light" }: { size?: number; title?: string; surface?: "light" | "dark" } = {}) {
   const safeTitle = escapeHtml(title);
   const labelAttr = title ? `role="img" aria-label="${safeTitle}"` : 'role="presentation" aria-hidden="true"';
+  const warm = surface === "dark" ? HUMAN_NIGHT : HUMAN;
+  const cool = surface === "dark" ? PROTOCOL_NIGHT : PROTOCOL;
+  const counter = surface === "dark" ? COUNTER_NIGHT : COUNTER_LIGHT;
   return (
     `<svg class="hosted-ui-mark" viewBox="0 0 200 200" width="${size}" height="${size}" ${labelAttr}>` +
-    `<path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="${HUMAN}"/>` +
-    `<path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="${PROTOCOL}"/>` +
-    `<circle cx="105" cy="73" r="18" fill="${COUNTER}"/>` +
+    `<path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="${warm}"/>` +
+    `<path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="${cool}"/>` +
+    `<circle cx="105" cy="73" r="18" fill="${counter}"/>` +
     "</svg>"
   );
 }
@@ -401,6 +406,16 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   padding-top: 1rem;
   border-top: 1px solid var(--border);
   color: var(--muted-foreground);
+}
+.hosted-ui-footer-attribution-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: inherit;
+  text-decoration: none;
+}
+.hosted-ui-footer-attribution-link:hover .hosted-ui-footer-attribution {
+  text-decoration: underline;
 }
 .hosted-ui-footer-attribution {
   font-size: 0.75rem;
@@ -1006,6 +1021,11 @@ export function renderHostedDocument({
 }: HostedDocumentArgs): string {
   const safeTitle = escapeHtml(title);
   const safeThemeChoice = normalizeHostedThemeChoice(themeChoice);
+  // The mark is an inline SVG with hardcoded fills, not CSS-token-driven, so
+  // it can't react to `system` at paint time the way the token sheet does.
+  // Only an explicit `dark` choice gets the night palette; `system` and
+  // `light` both render the light mark (matches the pre-existing default).
+  const markSurface = safeThemeChoice === "dark" ? "dark" : "light";
   return `<!DOCTYPE html>
 <html lang="en" data-theme="${safeThemeChoice}">
 <head>
@@ -1019,7 +1039,7 @@ export function renderHostedDocument({
 <main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
 ${renderBrandHeader({ providerName })}
 ${body}
-${renderBrandFooter()}
+${renderBrandFooter({ surface: markSurface })}
 </main>
 </body>
 </html>`;
@@ -1059,10 +1079,12 @@ export function renderBrandHeader({ providerName }: { providerName: unknown }): 
  * the PDPP mark belongs: honest about what runs the flow, without competing
  * with the instance for the header.
  */
-export function renderBrandFooter(): string {
+export function renderBrandFooter({ surface = "light" }: { surface?: "light" | "dark" } = {}): string {
   return `<footer class="hosted-ui-footer">
-  ${renderPdppMark({ size: 14 })}
+  <a class="hosted-ui-footer-attribution-link" href="https://pdpp.dev">
+  ${renderPdppMark({ size: 14, surface })}
   <span class="hosted-ui-footer-attribution">Secured by PDPP</span>
+  </a>
 </footer>`;
 }
 
