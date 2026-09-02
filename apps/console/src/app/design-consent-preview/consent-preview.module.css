@@ -1,0 +1,338 @@
+/*
+ * Copyright The PDP-Connect Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Layout-only rules the real component vocabulary (components.css) has no
+ * equivalent for: a sticky two-column decision rail, the grid, and the
+ * mobile collapse to a fixed bottom bar. Every value below is a var(--token)
+ * reference into the SAME tokens the console pages use — zero hardcoded
+ * colors, zero new palette.
+ */
+
+.page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.banner {
+  background: var(--warning);
+  color: var(--warning-foreground, var(--foreground));
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  text-align: center;
+  line-height: 1.5;
+}
+.banner a {
+  color: inherit;
+  font-weight: 500;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 336px;
+  gap: 2rem;
+  align-items: start;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.rail {
+  position: sticky;
+  top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.railSummary {
+  font-size: 0.875rem;
+  color: var(--foreground);
+  line-height: 1.5;
+}
+.railSummary strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.railMobileSummary {
+  display: none;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.grantExpiry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.grantExpiryLabel {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.grantExpiryRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.noEndDate {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.railEnds {
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+
+.chip {
+  padding: 0.3125rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] {
+  border-color: var(--human);
+  background: var(--human-tint, color-mix(in oklch, var(--human) 10%, transparent));
+  color: var(--human);
+  font-weight: 500;
+}
+
+.railActions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.searchRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  position: relative;
+}
+.searchClear {
+  position: absolute;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.searchCount {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  margin-bottom: 0.5rem;
+}
+.searchEmpty {
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+  padding: 0.75rem 0;
+}
+
+.sourceRow {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.sourceRow[data-active="true"] {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.sourceHead {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+.sourceIcon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+}
+.sourceText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sourceCount {
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.streamList {
+  margin-top: 0.5rem;
+  padding-left: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.streamRow {
+  display: flex;
+  gap: 0.625rem;
+  align-items: flex-start;
+}
+
+.narrow {
+  margin-top: 0.375rem;
+}
+.narrowSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+}
+.narrowChange {
+  color: var(--primary);
+  border-bottom: 1px solid currentColor;
+}
+.narrowBody {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem 1rem;
+}
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+}
+.field[data-required="true"] {
+  color: var(--muted-foreground);
+}
+.streamRange {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  align-items: center;
+}
+.rangeApplyAll {
+  align-self: flex-start;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.mobileExpiry {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+  .rail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    padding: 0.625rem 1rem 0.75rem;
+    background: var(--card);
+    border-top: 1px solid var(--border);
+    z-index: 10;
+    gap: 0.5rem;
+  }
+  .railSummary,
+  .grantExpiry,
+  .railEnds {
+    display: none;
+  }
+  .railMobileSummary {
+    display: block;
+  }
+  .railActions {
+    flex-direction: row;
+  }
+  .body {
+    padding-bottom: 6.5rem;
+  }
+  .mobileExpiry {
+    display: block;
+  }
+}
+
+.forceMobile .grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}
+.forceMobile .rail {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: auto;
+  padding: 0.625rem 1rem 0.75rem;
+  background: var(--card);
+  border-top: 1px solid var(--border);
+  z-index: 10;
+  gap: 0.5rem;
+}
+.forceMobile .railSummary,
+.forceMobile .grantExpiry,
+.forceMobile .railEnds {
+  display: none;
+}
+.forceMobile .railMobileSummary {
+  display: block;
+}
+.forceMobile .railActions {
+  flex-direction: row;
+}
+.forceMobile .body {
+  padding-bottom: 6.5rem;
+}
+.forceMobile .mobileExpiry {
+  display: block;
+}
+.forceMobile.page {
+  max-width: 420px;
+}
