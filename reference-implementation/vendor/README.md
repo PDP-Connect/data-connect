@@ -33,11 +33,14 @@ Same interim mechanism as `@pdpp/reference-contract` above: a committed tarball 
 with a plain `npm pack`, referenced via a `file:` dependency, digest recorded in
 `SHA256SUMS`. This one pins `packages/polyfill-connectors` from `PDP-Connect/data-connectors`
 — the canonical connector package Move A made real — at commit
-`870b4cd495569f901671a7835be0696a787cf192` (`main`, 2026-09-02), which merged
+`d2832953d999241f40129f0a8a14f0bd800c2923` (`main`, 2026-09-02), which merged
 `data-connectors#56` adding the 33 export subpaths this moved server needs
 (`connector-runtime`, `browser-handoff`, `credential-probe`, the `apple_health` /
 `google_maps` / `google_maps_data_portability` / `netflix_export` / `whatsapp` connector
-packages, etc. — see that PR for the full list).
+packages, etc. — see that PR for the full list), superseding the earlier pin at
+`870b4cd495569f901671a7835be0696a787cf192` to also carry `data-connectors#57`'s fix for
+the package's own `postinstall` hook (previously raw TypeScript, which crashed a plain
+`npm ci` in any repo that vendors this tarball — see that PR).
 
 This tarball is NOT a byte-identical `npm pack` of the package directory (unlike
 `reference-contract` above): `@pdpp/polyfill-connectors`'s own `package.json` declares
