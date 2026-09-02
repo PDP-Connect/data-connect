@@ -62,6 +62,8 @@ interface MinimalElement {
   querySelector: (selector: string) => MinimalElement | null;
   querySelectorAll: (selector: string) => Iterable<MinimalElement>;
   readonly textContent: string | null;
+  /** Present on inputs; the hidden decision-digest field is read through it. */
+  value: string;
 }
 
 interface MinimalDocument {
