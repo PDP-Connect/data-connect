@@ -3707,9 +3707,11 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
       "the server must never tell the owner the client deletes their data on a schedule it never accepted"
     );
     // Retention is one of the exact terms the approval artifact states
-    // (spec-core.md:873-877), not a standalone caveat above the list. What
-    // must never happen is it rendering as something this server enforces —
-    // it is a recipient commitment PDPP does not enforce at all (:951).
+    // (spec-core.md:873-877). It also shares the server-authored block with
+    // purpose — both are things this server says. The obligation is the
+    // authorship CLASS, not the heading: retention must never render as
+    // something this server enforces — it is a recipient commitment PDPP does
+    // not enforce at all (:951).
     assert.match(
       html,
       /data-hosted-mcp-review[\s\S]*did not say how long it keeps the data it receives/,
@@ -3719,6 +3721,21 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
       html,
       /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/,
       "retention must never render under the 'Your server enforces' eyebrow"
+    );
+    assert.match(
+      html,
+      /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said"/,
+      "retention is a structured policy declaration, not a protocol-enforced constraint — it must not render under 'Your server enforces'"
+    );
+    // Guard the substance directly: the retention sentence must sit inside a
+    // manifest-authorship block, never inside the protocol-enforced one.
+    const enforcedBlock = /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">([\s\S]*?)<\/div>/.exec(
+      html
+    );
+    assert.equal(
+      (enforcedBlock?.[1] ?? "").includes("did not say how long it keeps"),
+      false,
+      "the retention sentence must not appear inside the protocol-enforced block"
     );
   } finally {
     await closeServer(server);
