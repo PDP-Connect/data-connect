@@ -16,6 +16,10 @@
 //   test/security-consent-token-handoff.test.js
 
 import {
+  HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID,
+  HOSTED_MCP_GRANT_EXPIRY_OPTIONS,
+} from "../hosted-mcp-grant-expiry.ts";
+import {
   type OperatorTrustConfig,
   EMPTY_OPERATOR_TRUST_CONFIG,
   resolveClientTrust,
@@ -23,7 +27,11 @@ import {
 import {
   type StreamScopeCapability,
   type StreamScopeSelection,
+  describeTimeField,
   resolveStreamScopeCapability,
+  scopeFieldsInputName,
+  scopeSinceInputName,
+  scopeUntilInputName,
 } from "../hosted-mcp-stream-scope.ts";
 import { base64UrlSha256 } from "../oauth-substrate/primitives.ts";
 
@@ -2295,6 +2303,118 @@ interface AuthorizeQueryParams {
 }
 
 /**
+ * Grant expiry as its own row, never as a restatement of the access mode.
+ *
+ * `spec-core.md:889` lists grant validity, data temporal scope, and access
+ * pattern as three orthogonal concepts that MUST NOT be conflated. The note
+ * this replaces — "No expiry — access lasts until you revoke it, whichever
+ * access mode you choose above" — restated the mode and contradicted the
+ * control directly above it, because under One-time access a grant is
+ * consumed at first token issuance rather than lasting until revocation.
+ *
+ * The default is bounded. Indefinite access is available and explicit, which
+ * is the polarity Google uses and the right one: an owner who wants to grant
+ * forever should say so, and an owner who does nothing should end up with a
+ * window that closes by itself.
+ */
+function renderGrantExpiryControl(ui: ConsentUiRenderer): string {
+  const options = HOSTED_MCP_GRANT_EXPIRY_OPTIONS.map((option) => {
+    const checked = option.id === HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID ? " checked" : "";
+    return `<label class="hosted-ui-expiry-option">
+        <input type="radio" name="grant_expiry" value="${ui.escapeHtml(option.id)}"${checked} />
+        <span class="hosted-ui-expiry-label">${ui.escapeHtml(option.label)}</span>
+      </label>`;
+  }).join("");
+  return `<fieldset class="hosted-ui-expiry" data-hosted-mcp-grant-expiry>
+      <legend class="hosted-ui-expiry-legend">When this access ends</legend>
+      <p class="hosted-ui-expiry-hint">You can revoke it sooner at any time.</p>
+      ${options}
+    </fieldset>`;
+}
+
+/**
+ * Per-stream scope controls: which fields, and over what dates.
+ *
+ * Progressive disclosure, closed by default. The common path is unchanged —
+ * check a stream, get everything in it — and the narrowing is one click away
+ * for the owner who wants it. Rendering a dozen field checkboxes per stream
+ * inline, across 150-odd streams, would produce a page nobody can read, and
+ * the summary line states the resolved scope so the closed state is never
+ * ambiguous about what it means.
+ *
+ * A control appears only where the declaration supports it: `selection.fields`
+ * for the field list, `consent_time_field` for the dates. Offering either
+ * where the manifest lacks it would produce a 400 at issuance, after the owner
+ * had already chosen. A stream that supports neither renders nothing at all —
+ * silence is the correct rendering of an inapplicable control.
+ *
+ * Schema-required fields render checked and disabled (`spec-core.md:764` makes
+ * them the consent floor). Showing them greyed rather than hiding them means
+ * the owner sees what they cannot exclude, instead of unchecking something and
+ * being silently overruled at issuance.
+ */
+function renderStreamScopeControls(
+  sourceKey: string,
+  streamName: string,
+  scope: StreamScopeCapability,
+  ui: ConsentUiRenderer
+): string {
+  const canNarrowFields = scope.supportsFieldNarrowing && scope.optionalFields.length > 0;
+  if (!(canNarrowFields || scope.timeField)) {
+    return "";
+  }
+  const totalFields = scope.requiredFields.length + scope.optionalFields.length;
+  const label = humanizeStreamLabel(streamName).toLowerCase();
+
+  const fieldControls = canNarrowFields
+    ? `<fieldset class="hosted-ui-scope-fields">
+        <legend class="hosted-ui-scope-legend">Fields</legend>
+        ${scope.requiredFields
+          .map(
+            (field) =>
+              `<label class="hosted-ui-scope-field hosted-ui-scope-field--required"><input type="checkbox" checked disabled /> ${ui.escapeHtml(
+                humanizeStreamLabel(field)
+              )} <span class="hosted-ui-scope-required-note">always included</span></label>`
+          )
+          .join("")}
+        ${scope.optionalFields
+          .map(
+            (field) =>
+              `<label class="hosted-ui-scope-field"><input type="checkbox" name="${ui.escapeHtml(
+                scopeFieldsInputName(sourceKey, streamName)
+              )}" value="${ui.escapeHtml(field)}" checked /> ${ui.escapeHtml(humanizeStreamLabel(field))}</label>`
+          )
+          .join("")}
+      </fieldset>`
+    : "";
+
+  // spec-core.md:545 — temporal consent is rendered in the stream's own terms
+  // ("messages created on or after ..."), never as `time_range`.
+  const dateControls = scope.timeField
+    ? `<fieldset class="hosted-ui-scope-dates">
+        <legend class="hosted-ui-scope-legend">Dates</legend>
+        <p class="hosted-ui-scope-hint">Leave blank for all ${ui.escapeHtml(label)}, whenever they were ${ui.escapeHtml(
+          describeTimeField(scope.timeField)
+        )}.</p>
+        <label class="hosted-ui-scope-date">${ui.escapeHtml(
+          describeTimeField(scope.timeField)
+        )} on or after <input type="date" name="${ui.escapeHtml(scopeSinceInputName(sourceKey, streamName))}" /></label>
+        <label class="hosted-ui-scope-date">and on or before <input type="date" name="${ui.escapeHtml(
+          scopeUntilInputName(sourceKey, streamName)
+        )}" /></label>
+      </fieldset>`
+    : "";
+
+  const summary = canNarrowFields ? `All ${totalFields} fields · all dates` : "All dates";
+
+  return `<details class="hosted-ui-scope" data-hosted-mcp-stream-scope data-stream="${ui.escapeHtml(streamName)}">
+      <summary class="hosted-ui-scope-summary">${ui.escapeHtml(summary)}</summary>
+      ${fieldControls}
+      ${dateControls}
+    </details>`;
+}
+
+/**
  * Renders the picker's client-identity block: monogram, the resolved display
  * name, its domain, and one trust status.
  *
@@ -2545,6 +2665,7 @@ export async function renderHostedMcpSourceSelection(
                 ${description}
               </span>
             </label>
+            ${renderStreamScopeControls(row.sourceKey, stream.name, stream.scope, ui)}
           `;
       })
       .join("\n");
@@ -2664,7 +2785,7 @@ export async function renderHostedMcpSourceSelection(
           <dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
             <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
             <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
-            <dt>Coverage</dt><dd>Everything in each data type you check, with no date limit.</dd>
+            <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
             <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
             <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
@@ -2780,6 +2901,7 @@ export async function renderHostedMcpSourceSelection(
             </span>
           </label>
         </fieldset>
+        ${renderGrantExpiryControl(ui)}
       `
     : "";
 
@@ -3205,21 +3327,22 @@ export async function renderHostedMcpSourceSelection(
 
   // Resolved field/time-range scope (Grant fields: `streams[].fields`,
   // `streams[].time_constraint`; approval-artifact requirement,
-  // spec-core.md:873-880). This picker has no field-projection or time-range
-  // UI, so every stream it grants resolves to all of that stream's fields
-  // with no temporal limit.
+  // spec-core.md:873-880).
   //
-  // The prior wording — "All fields of each stream you check; no date-range
-  // limit." — read as though the absence were a property of the protocol. It
-  // is not: `fields` is a protocol-enforced allowlist (spec-core.md:769) and
+  // Two earlier wordings were wrong in the same direction. "All fields of each
+  // stream you check; no date-range limit." read as though the absence were a
+  // property of the protocol, and "Everything in each data type you check,
+  // with no date limit." described an unbuilt feature as a constraint. Neither
+  // was true: `fields` is a protocol-enforced allowlist (spec-core.md:761) and
   // `time_range` is evaluated against each stream's `consent_time_field`
-  // (:758-759), which 97 of 162 fleet streams declare. It is an unbuilt
-  // feature phrased as a constraint. State the scope plainly and let it look
-  // as broad as it is.
-  // Stated once, on the approval artifact, where it is one of the exact
-  // resolved terms the owner binds to (spec-core.md:873-877) rather than a
-  // standing caveat above a list.
-  const fieldsAndTimeRangeSummary = "";
+  // (:758-759), which most fleet streams declare.
+  //
+  // Both controls now exist, per stream, behind a closed disclosure. The
+  // default is still everything — so this states the default and points at the
+  // control, rather than describing the breadth as inevitable. The approval
+  // artifact restates the same term (spec-core.md:873-877).
+  const fieldsAndTimeRangeSummary =
+    '<p class="hosted-ui-fields-timerange-summary">Each data type you check is shared in full unless you narrow it. Open a data type to choose fields or a date range.</p>';
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
