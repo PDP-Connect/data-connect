@@ -59,6 +59,7 @@ test("buildHostedMcpAuthorizationDetailsForConnector: wildcard continuous read d
       purpose_code: "https://pdpp.dev/purpose/agent_context",
       purpose_description:
         "Provide selected personal data as context to this MCP client acting as your personal AI agent.",
+      retention: { max_duration: "P90D", on_expiry: "delete" },
       source: { id: "amazon", kind: "connector" },
       streams: [{ name: "*" }],
       type: "https://pdpp.dev/data-access",
