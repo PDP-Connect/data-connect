@@ -518,7 +518,19 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
             .to_string()
     })?;
 
-    let client = reqwest::Client::new();
+    // The server's own /owner/login handler answers a successful login with a
+    // 302 redirect back to the login page (a browser-form-compatible shape),
+    // setting pdpp_owner_session on THAT response, not on whatever it
+    // redirects to. A client that follows the redirect (reqwest's default
+    // policy) only sees the final response's headers, so the session cookie
+    // set on the intermediate 302 is invisible to it -- confirmed live: the
+    // final GET /owner/login response carries a fresh pdpp_owner_csrf but no
+    // pdpp_owner_session. Disable redirect-following so this code inspects
+    // the 302 itself.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
     let login_url = format!("{}/owner/login", origin.trim_end_matches('/'));
     let response = client
         .post(&login_url)
@@ -529,8 +541,8 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .await
         .map_err(|e| format!("Failed to reach {}: {}", login_url, e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !(status.is_success() || status.is_redirection()) {
         return Err(format!(
             "Owner login rejected by reference server: HTTP {}",
             status
