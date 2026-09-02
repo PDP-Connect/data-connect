@@ -383,6 +383,7 @@ import {
   mountRefDatasetTop,
   mountRefRecordsVersionStats,
 } from "./routes/ref-dataset.ts";
+import { mountRefDesignConsentMock } from "./routes/ref-design-consent-mock.ts";
 import {
   sanitizeDeviceExporterDiagnostic,
   sanitizeLocalCollectorGapDetails,
@@ -5145,6 +5146,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     requireOwnerSession: ownerAuth.requireOwnerSession,
     revokeGrantPackage,
   };
+  // GET /_ref/design/consent — owner-only preview of the anticipated consent
+  // design, rendered from mock data so the owner can react to it before it is
+  // wired to the real authorization flow. Reads nothing, submits nothing, and
+  // shares no code with the live consent path (`as-consent-ui-helpers.ts`).
+  // See `server/routes/ref-design-consent-mock.ts`.
+  mountRefDesignConsentMock(app, {
+    providerName,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefDesignConsentMock>[1]);
+
   mountRefGrantPackagesList(app, refGrantsContext as unknown as Parameters<typeof mountRefGrantPackagesList>[1]);
   mountRefGrantPackagesCount(app, refGrantsContext as unknown as Parameters<typeof mountRefGrantPackagesCount>[1]);
   mountRefGrantPackagesGet(app, refGrantsContext as unknown as Parameters<typeof mountRefGrantPackagesGet>[1]);
