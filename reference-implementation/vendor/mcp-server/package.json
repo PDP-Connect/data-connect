@@ -21,9 +21,9 @@
     "README.md"
   ],
   "scripts": {
-    "build": "pnpm --filter @pdpp/cli run build && node --import tsx scripts/build.ts",
-    "prepare": "pnpm build",
-    "prepack": "pnpm build",
+    "build": "npm --prefix ../cli run build && node --import tsx scripts/build.ts",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
     "test": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node ../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
     "test:read-surface": "node --import tsx ../../scripts/test-scratch/run-command.ts -- node ../../scripts/run-node-tests.mjs --test --import tsx \"test/*.test.ts\" test/smoke-stdio.ts",
     "validate:package": "pnpm build && node --import tsx scripts/package-contract.ts",
@@ -33,8 +33,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@pdpp/cli": ">=0.18.11 <1.0.0",
-    "@pdpp/read-core": ">=0.18.11 <1.0.0",
+    "@pdpp/cli": "*",
+    "@pdpp/read-core": "*",
     "zod": "^4.5.2"
   },
   "devDependencies": {

@@ -12,7 +12,7 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = join(packageRoot, "dist");
 
 await rm(distRoot, { force: true, recursive: true });
-await execFileAsync("pnpm", ["exec", "tsc", "--project", "tsconfig.build.json"], {
+await execFileAsync("npx", ["tsc", "--project", "tsconfig.build.json"], {
   cwd: packageRoot,
 });
 await chmod(join(distRoot, "bin", "pdpp-mcp-server.js"), 0o755);

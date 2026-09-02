@@ -26,8 +26,8 @@
   ],
   "scripts": {
     "build": "rm -rf dist && node --import tsx scripts/generate-list-envelope.ts && tsc -p tsconfig.build.json && node --import tsx scripts/postbuild.ts",
-    "prepare": "pnpm build",
-    "prepack": "pnpm build",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
     "test": "pnpm build && node --import tsx ../../scripts/test-scratch/run-command.ts -- node --import tsx scripts/run-tests.ts",
     "validate:package": "pnpm build && node --import tsx scripts/validate-package.ts",
     "pack-install-run": "pnpm build && node --import tsx scripts/pack-install-run.ts",
