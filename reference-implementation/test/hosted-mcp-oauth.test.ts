@@ -5016,7 +5016,7 @@ async function fetchHostedMcpPickerHtml(
   return await resp.text();
 }
 
-test("hosted MCP picker renders the CIMD client's resolved display name and marks it unverified", async () => {
+test("hosted MCP picker renders the CIMD client's resolved display name and its verified domain", async () => {
   const clientId = chatgptShapedClientId();
   const server = await startServerWithCimdDocFetch(chatgptShapedCimdDoc(clientId));
   const asUrl = `http://localhost:${server.asPort}`;
@@ -5039,15 +5039,17 @@ test("hosted MCP picker renders the CIMD client's resolved display name and mark
       /class="hosted-ui-client-identity-domain"[^>]*>chatgpt\.example</,
       "the origin stays, as the quiet second line"
     );
-    // Trust status as a neutral fact rather than an unconditional badge: no
-    // client can ever escape it today (there is no trust registry), so a
-    // badge shouting at an app that has done nothing wrong carries no
-    // information the owner can act on.
+    // Trust status as a neutral fact rather than an unconditional badge. This
+    // client reached the picker through CIMD resolution, which means it served
+    // a valid metadata document at its own https client_id — so it has proven
+    // control of that domain, and the surface says exactly that much.
     assert.match(
       html,
-      /This app isn't registered with your server\. Its name and logo are self-reported\./,
-      "picker must state the unverified trust status as a neutral fact adjacent to the name"
+      /Verified domain: chatgpt\.example — this app controls that domain\./,
+      "a client that proved domain control must have that rendered distinctly (spec-core.md:675)"
     );
+    // The claim never widens from the domain to the application.
+    assert.equal(html.includes("Verified app"), false, "domain control is not an endorsement of the app");
     assert.doesNotMatch(html, /Unverified app/, "the unconditional badge is replaced by the fact line");
     assert.doesNotMatch(html, /Metadata document/, "the metadata-document URL never reaches the owner surface");
     assert.doesNotMatch(

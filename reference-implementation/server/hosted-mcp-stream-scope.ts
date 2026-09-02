@@ -374,16 +374,38 @@ export function exclusiveEndToLastDay(untilIso: string): string {
 }
 
 /**
- * Turn a `consent_time_field` into the verb an owner reads: `create_time` and
- * `created_at` both become "created". Falls back to a neutral phrase rather
- * than printing a raw field name at someone.
+ * Turn a `consent_time_field` into the verb an owner reads, so temporal
+ * consent renders as "messages sent on or after 1 March 2026" rather than
+ * "messages in time_range" (`spec-core.md:545`).
+ *
+ * The stem list is derived from the actual fleet rather than guessed: across
+ * the shipped manifests the common declarations are `created_at`,
+ * `order_date`, `timestamp`, `created_utc`, `create_time`, `start_date`,
+ * `observed_on`, `sent_at`, and a long tail of `*_at`/`*_date` variants. Both
+ * affix positions occur (`date_received` as well as `received_at`), so both
+ * are stripped.
+ *
+ * An unrecognized field falls back to "dated" rather than printing the raw
+ * name: `rtime_last_played` is not something to show someone deciding whether
+ * to share their data, and a slightly generic sentence beats a leaked
+ * identifier.
  */
 export function describeTimeField(field: string | null): string {
   if (!field) {
     return "dated";
   }
-  const normalized = field.toLowerCase().replace(/[_\s]*(at|time|date|ts)$/g, "");
-  switch (normalized) {
+  // Reduce to the last meaningful word. Fleet fields carry affixes on both
+  // sides (`date_received` and `received_at`) and arbitrary qualifiers in
+  // front (`message_received_at`, `rtime_last_played`), so strip the temporal
+  // affixes and then keep the final remaining segment.
+  const segments = field
+    .toLowerCase()
+    .replace(/^(date|time)[_\s]+/, "")
+    .replace(/[_\s]*(at|time|date|on|utc|ts)$/g, "")
+    .split(/[_\s]+/)
+    .filter((part) => part && !["first", "last", "rtime", "message", "source"].includes(part));
+  const stem = segments[segments.length - 1] ?? "";
+  switch (stem) {
     case "create":
     case "created":
       return "created";
@@ -394,16 +416,46 @@ export function describeTimeField(field: string | null): string {
     case "send":
     case "sent":
       return "sent";
+    case "receive":
+    case "received":
+    case "deliver":
+    case "delivered":
+      return "received";
     case "start":
     case "started":
       return "started";
     case "play":
     case "played":
       return "played";
+    case "watch":
+    case "watched":
+      return "watched";
+    case "add":
+    case "added":
+      return "added";
+    case "star":
+    case "starred":
+      return "starred";
+    case "take":
+    case "taken":
+      return "taken";
+    case "order":
+      return "ordered";
+    case "request":
+    case "requested":
+      return "requested";
+    case "export":
+    case "exported":
+      return "exported";
+    case "observe":
+    case "observed":
+      return "recorded";
     case "occur":
     case "occurred":
     case "event":
-      return "from";
+    case "timestamp":
+    case "activity":
+      return "recorded";
     default:
       return "dated";
   }
