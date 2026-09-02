@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Discriminating regression test: startup semantic backfill must detect and
 // repair a record that was durably written but never got its index
 // maintenance run (simulating a crash between commit and background index

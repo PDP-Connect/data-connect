@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import { statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";

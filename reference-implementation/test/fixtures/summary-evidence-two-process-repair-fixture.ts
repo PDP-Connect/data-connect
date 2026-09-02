@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Genuine second-OS-process participant for the connector-summary-evidence
  * SQLite interleaving oracle

@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 export type ConnectorPublicTier = "supported" | "preview" | "development";
 
 const ALLOWED_KEYS = new Set(["tier", "proof_gate", "rationale"]);

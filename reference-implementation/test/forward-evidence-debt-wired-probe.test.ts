@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Wired forward-evidence-debt probe (P1-A fix, Fable review PART 2 §2/§5).
  *

@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Probe: does startup LEXICAL backfill detect a record that was durably
 // written but never got its index maintenance run (crash-abandoned)?
 import assert from "node:assert/strict";

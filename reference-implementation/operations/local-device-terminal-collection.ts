@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
