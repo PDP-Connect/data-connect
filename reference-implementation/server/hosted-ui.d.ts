@@ -22,6 +22,7 @@ export function escapeHtml(input: unknown): string;
 
 export interface PdppMarkOptions {
   size?: number;
+  surface?: "light" | "dark";
   title?: string;
 }
 
