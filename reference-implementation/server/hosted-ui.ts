@@ -321,21 +321,32 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   letter-spacing: 0.02em;
   flex-shrink: 0;
 }
+.hosted-ui-client-identity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
 .hosted-ui-client-identity-name {
   font-weight: 600;
+  font-size: 1rem;
 }
-.hosted-ui-unverified-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+.hosted-ui-client-identity-domain {
+  font-size: 0.8125rem;
   color: var(--muted-foreground);
-  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+/* Trust status as a neutral fact line, not a badge. The unverified state is
+ * unconditional today (no trust registry exists), and a badge that cannot
+ * vary reads as a warning about an app that has done nothing wrong. */
+.hosted-ui-client-trust {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.hosted-ui-client-trust[data-trust="registered"] {
+  color: var(--human, var(--foreground));
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .hosted-ui-client-policy-links {
   display: flex;
@@ -366,20 +377,38 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   padding-bottom: 0.25rem;
 }
 
-.hosted-ui-wordmark {
+/* The instance is the header's only identity, so it carries the weight the
+ * PDPP wordmark used to take. */
+.hosted-ui-provider {
   font-weight: 600;
   font-size: 0.9375rem;
   letter-spacing: -0.01em;
   color: var(--foreground);
 }
 
-.hosted-ui-provider {
-  margin-left: auto;
-  font-size: 0.8125rem;
+.hosted-ui-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
   color: var(--muted-foreground);
+}
+.hosted-ui-footer-attribution {
+  font-size: 0.75rem;
+  letter-spacing: 0.01em;
 }
 
 .hosted-ui-mark { display: block; }
+
+/* Allow and Cancel as a pair, primary rightmost. */
+.hosted-ui-decision-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
 
 .hosted-ui-intro {
   display: flex;
@@ -862,49 +891,51 @@ export function renderHostedDocument({
 <main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
 ${renderBrandHeader({ providerName })}
 ${body}
+${renderBrandFooter()}
 </main>
 </body>
 </html>`;
 }
 
 /**
- * Short text monogram for the operator-facing instance name (e.g. "Tim's
- * Data Server" -> "TD"). Pure text, never an image — this instance has no
- * uploaded-logo concept, and an instance-name monogram is a distinct thing
- * from the per-CLIENT monogram consent rendering uses for untrusted
- * `logo_uri` (see `buildClientMonogram` in as-consent-ui-helpers.ts) — this
- * one identifies the SERVER, not a requesting app.
+ * Brand header: the instance identity, alone.
+ *
+ * This previously rendered a PDPP mark, the wordmark `PDPP`, a monogram
+ * derived from `PDPP_INSTANCE_NAME`, and then the instance name — four marks
+ * for one party, reading at screenshot scale as the unexplained token
+ * "PDPP TD". Two separate errors:
+ *
+ *  - The monogram was unstyled (`hosted-ui-instance-monogram` appeared in the
+ *    markup and never in the stylesheet), so it was bare text beside the
+ *    wordmark. More basically, spec-core.md:676's monogram rule governs the
+ *    CLIENT — it is a safety fallback for an app whose logo must not be
+ *    fetched. Applying it to the operator inverts it: the server is the one
+ *    party on this page whose identity is not in question.
+ *  - Branding consent with the protocol is a category error. Consent screens
+ *    are branded with the party the owner trusts and is accountable to. Here
+ *    that is the instance; PDPP is the plumbing, and plumbing does not get
+ *    the letterhead.
+ *
+ * PDPP survives as a quiet footer attribution (`renderBrandFooter`) — where
+ * Plaid puts its own wordmark on a bank-branded screen.
  */
-function buildInstanceMonogram(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    return "?";
-  }
-  const letters = trimmed
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((word) => word.charAt(0))
-    .join("")
-    .toUpperCase();
-  return letters || trimmed.charAt(0).toUpperCase();
+export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
+  const safeProvider = escapeHtml(String(providerName ?? ""));
+  return `<header class="hosted-ui-header">
+  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
+</header>`;
 }
 
 /**
- * Brand header: PDPP protocol mark + wordmark (always "PDPP" — the protocol
- * identity, never configurable) + the operator-facing instance name and its
- * derived monogram (PDPP_INSTANCE_NAME, or PDPP_PROVIDER_NAME as a fallback
- * for existing deployments — see `resolveProviderName` in server/index.ts).
+ * Quiet protocol attribution, at the foot of every hosted page. This is where
+ * the PDPP mark belongs: honest about what runs the flow, without competing
+ * with the instance for the header.
  */
-export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
-  const providerNameString = String(providerName ?? "");
-  const safeProvider = escapeHtml(providerNameString);
-  const safeMonogram = escapeHtml(buildInstanceMonogram(providerNameString));
-  return `<header class="hosted-ui-header">
-  ${renderPdppMark({ size: 28 })}
-  <span class="hosted-ui-wordmark">PDPP</span>
-  <span class="hosted-ui-instance-monogram" aria-hidden="true">${safeMonogram}</span>
-  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
-</header>`;
+export function renderBrandFooter(): string {
+  return `<footer class="hosted-ui-footer">
+  ${renderPdppMark({ size: 14 })}
+  <span class="hosted-ui-footer-attribution">Secured by PDPP</span>
+</footer>`;
 }
 
 /**
