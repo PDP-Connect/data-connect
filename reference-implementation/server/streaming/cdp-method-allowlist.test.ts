@@ -158,9 +158,9 @@ test("streaming code only sends allowlisted CDP methods", () => {
   // @opendatalabs/remote-surface is an OPTIONAL dependency (see
   // runtime/browser-surface/remote-surface-optional.ts) requiring Node >=24;
   // this test suite's own CI job runs on Node 22.23.1, where npm silently
-  // skips installing it. Inspect its CDP backend when present, but the
-  // allowlist guarantee for our own adapter/companion/registry code must
-  // hold regardless of whether the optional package installed.
+  // skips installing it. Inspect its CDP backend when present, but both the
+  // allowlist guarantee and the presence assertions below must still hold
+  // for our own adapter/companion/registry code when it is absent.
   const remoteSurfaceCdpBackend = join(
     __dirname,
     "../../node_modules/@opendatalabs/remote-surface/dist/backends/cdp/backend.js"
@@ -178,20 +178,26 @@ test("streaming code only sends allowlisted CDP methods", () => {
   // If any violations found, report them clearly
   assertNoViolations(violations);
 
-  // Assert that at least some basic Page/Input methods are present (so we
-  // know streaming code actually exists and the test is working). These
-  // three methods live in @opendatalabs/remote-surface's own CDP backend,
-  // not in this repo's own cdp-adapter/cdp-companion/run-target-registry, so
-  // the assertion only applies when that optional package installed.
+  // Assert that basic Page/Input methods are present, so a gutted or
+  // relocated streaming layer fails here instead of passing an allowlist
+  // check that has nothing left to check. `assertNoViolations` above is
+  // vacuously true when no methods are extracted at all, so these presence
+  // assertions are the only thing keeping the suite honest.
+  //
+  // Page.startScreencast and Input.dispatchMouseEvent are sent by this
+  // repo's own cdp-companion.ts, so they must hold unconditionally --
+  // including on the Node 22.23.1 CI job where the optional package is
+  // absent. Only Page.enable lives solely in @opendatalabs/remote-surface's
+  // CDP backend, so only that one is conditional.
+  assert.ok(
+    allMethods.has("Page.startScreencast"),
+    "Expected Page.startScreencast to be present in streaming code"
+  );
+  assert.ok(
+    allMethods.has("Input.dispatchMouseEvent"),
+    "Expected Input.dispatchMouseEvent to be present in streaming code"
+  );
   if (remoteSurfaceInstalled) {
     assert.ok(allMethods.has("Page.enable"), "Expected Page.enable to be present in streaming code");
-    assert.ok(
-      allMethods.has("Page.startScreencast"),
-      "Expected Page.startScreencast to be present in streaming code"
-    );
-    assert.ok(
-      allMethods.has("Input.dispatchMouseEvent"),
-      "Expected Input.dispatchMouseEvent to be present in streaming code"
-    );
   }
 });
