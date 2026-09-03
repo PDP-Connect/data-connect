@@ -279,18 +279,42 @@
   align-items: flex-start;
 }
 
-.trustDetails {
-  margin-top: 0.125rem;
+.trustHintDesktop,
+.trustHintTouch {
+  display: inline-flex;
 }
-.trustDetails summary {
+.trustHintTouch {
+  display: none;
+}
+.trustHintTrigger,
+.trustHintDismiss {
+  padding: 0;
+  color: inherit;
   cursor: pointer;
-  color: var(--muted-foreground);
+  background: transparent;
+  border: 0;
 }
-.trustDetails summary::marker {
-  color: var(--muted-foreground);
+.clientPublishedLinks a {
+  color: inherit;
 }
-.trustDetails p {
-  margin: 0.25rem 0 0;
+.trustHintTrigger:focus-visible,
+.trustHintDismiss:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.trustHintDismiss {
+  margin-top: 0.5rem;
+  color: var(--primary);
+  font: inherit;
+  font-size: 0.75rem;
+}
+@media (hover: none), (pointer: coarse) {
+  .trustHintDesktop {
+    display: none;
+  }
+  .trustHintTouch {
+    display: inline-flex;
+  }
 }
 
 .narrow {

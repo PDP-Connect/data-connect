@@ -23,7 +23,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { sourceAccountLabel } from "./consent-screen-model.ts";
+import { clientPublishedLinks, sourceAccountLabel } from "./consent-screen-model.ts";
 
 const COMPONENT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const APP_DIR = fileURLToPath(new URL("../../app/", import.meta.url));
@@ -43,6 +43,21 @@ test("a repeated source name is stripped from the account label", () => {
   assert.equal(sourceAccountLabel("Amazon", "Amazon - gezalsatx@gmail.com"), "gezalsatx@gmail.com");
   assert.equal(sourceAccountLabel("Apple Contacts", "Apple Contacts - tim@opendatalabs.com"), "tim@opendatalabs.com");
   assert.equal(sourceAccountLabel("ChatGPT", "chaka.dondo@gmail.com"), "chaka.dondo@gmail.com");
+});
+
+test("client metadata line has both, one, and no published links", () => {
+  assert.deepEqual(clientPublishedLinks([
+    { href: "https://client.example/privacy", label: "Privacy policy" },
+    { href: "https://client.example/terms", label: "Terms of service" },
+  ]), [
+    { href: "https://client.example/privacy", label: "Privacy policy" },
+    { href: "https://client.example/terms", label: "Terms" },
+  ]);
+  assert.deepEqual(clientPublishedLinks([{ href: "https://client.example/privacy", label: "Privacy policy" }]), [
+    { href: "https://client.example/privacy", label: "Privacy policy" },
+  ]);
+  assert.deepEqual(clientPublishedLinks([]), []);
+  assert.match(CLIENT_SOURCE, /No privacy policy or terms published\./);
 });
 
 // ─── Owner gating ───────────────────────────────────────────────────────────
@@ -170,23 +185,36 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
   assert.deepEqual(offenders, [], "every color must reference a design token");
 });
 
-test("the client trust disclosure uses the full identity-block measure", () => {
-  assert.doesNotMatch(
-    CSS_SOURCE,
-    /\.trustDetails p\s*\{[^}]*max-width:/,
-    "the disclosure body must match the trust sentence rather than use a narrower measure"
+test("client trust explanations live only in an accessible chip hint", () => {
+  assert.doesNotMatch(CLIENT_SOURCE, /What was checked/);
+  assert.doesNotMatch(CLIENT_SOURCE, /<details className=\{styles\.trustDetails\}/);
+  assert.match(CLIENT_SOURCE, /<IcTooltip>/, "desktop hover and focus use the shared tooltip primitive");
+  assert.match(CLIENT_SOURCE, /<IcPopover>/, "touch uses a dismissible, anchored shared popover");
+  assert.match(CLIENT_SOURCE, /role="dialog"/, "the tappable explanation is announced as an interactive popover");
+  assert.match(CLIENT_SOURCE, /Dismiss trust explanation/, "the touch popover has an explicit dismiss control");
+});
+
+test("client trust chip copy names only the completed check", () => {
+  assert.doesNotMatch(CLIENT_SOURCE, /Its identity document was fetched from/);
+  assert.doesNotMatch(CLIENT_SOURCE, /Its name and logo come from its own registration/);
+  assert.doesNotMatch(CLIENT_SOURCE, /The operator of this server has confirmed the app/);
+  assert.match(CLIENT_SOURCE, /Name and logo are self-reported\. Nothing was verified\./);
+  assert.match(
+    CLIENT_SOURCE,
+    /Verified automatically against the identity document published at \$\{client\.domain\}\. No manual review\./
   );
+  assert.match(CLIENT_SOURCE, /Confirmed by the operator of this server\./);
 });
 
 test("client metadata links render only when the challenge model supplies them", () => {
   assert.match(
     CLIENT_SOURCE,
-    /client\.policyLinks\.length > 0/,
+    /publishedLinks\.length > 0/,
     "an absent policy_uri/tos_uri pair must omit the secondary row"
   );
   assert.match(
     CLIENT_SOURCE,
-    /client\.policyLinks\.map\(\(link, index\) =>[\s\S]*?href=\{link\.href\}[\s\S]*?target="_blank"/,
+    /publishedLinks\.map\(\(link, index\) =>[\s\S]*?href=\{link\.href\}[\s\S]*?target="_blank"/,
     "each present resolved metadata link must remain a direct, new-tab link"
   );
   assert.match(
