@@ -178,6 +178,24 @@ test("the client trust disclosure uses the full identity-block measure", () => {
   );
 });
 
+test("client metadata links render only when the challenge model supplies them", () => {
+  assert.match(
+    CLIENT_SOURCE,
+    /client\.policyLinks\.length > 0/,
+    "an absent policy_uri/tos_uri pair must omit the secondary row"
+  );
+  assert.match(
+    CLIENT_SOURCE,
+    /client\.policyLinks\.map\(\(link, index\) =>[\s\S]*?href=\{link\.href\}[\s\S]*?target="_blank"/,
+    "each present resolved metadata link must remain a direct, new-tab link"
+  );
+  assert.match(
+    CLIENT_SOURCE,
+    /rel="noopener noreferrer nofollow"/,
+    "new-tab metadata links must not retain an opener"
+  );
+});
+
 // ─── The client/server model contract ──────────────────────────────────────
 
 /** Field names declared on an interface block, by interface name. */
