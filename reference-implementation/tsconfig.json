@@ -65,5 +65,16 @@
     "examples/**/*.ts",
     "examples/**/*.js"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    // `@types/jsdom`'s ambient types carry a program-wide `/// <reference
+    // lib="dom" />`; TypeScript's module resolution loads it as soon as any
+    // included file imports `jsdom`, which collapses `@types/node`'s DOM-
+    // conditional types (RequestInit, Timeout, etc.) for every OTHER file
+    // in this same program too -- see data-connect#45. This file is the
+    // only one under this tsconfig's include that imports `jsdom`; it gets
+    // its own isolated program (test/tsconfig.dom.json) instead, still run
+    // by `npm run typecheck`, just not merged into this program.
+    "test/run-interaction-stream-remote-surface-session.test.ts"
+  ]
 }
