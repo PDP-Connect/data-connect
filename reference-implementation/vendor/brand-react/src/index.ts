@@ -44,6 +44,8 @@ export {
 } from "./dialog.tsx";
 // ─── Endorse (status badge — only home of state color) ────────────
 export { Endorse } from "./endorse.tsx";
+// ─── Tooltip and popover (anchored, non-modal explanations) ───────────────
+export { IcPopover, IcPopoverClose, IcPopoverPopup, IcPopoverTrigger } from "./popover.tsx";
 export type { IcInputProps } from "./input.tsx";
 // ─── Input + Field ────────────────────────────────────────────────
 export { IcField, IcInput } from "./input.tsx";
@@ -96,6 +98,7 @@ export {
 export { Tag } from "./tag.tsx";
 export type { TextColor, TextProps, TextSize } from "./text.tsx";
 export { Text } from "./text.tsx";
+export { IcTooltip, IcTooltipContent, IcTooltipTrigger } from "./tooltip.tsx";
 // ─── Text (shared typographic primitive) ──────────────────────────
 export { textVariants } from "./text-variants.ts";
 // ─── Timestamp ────────────────────────────────────────────────────
