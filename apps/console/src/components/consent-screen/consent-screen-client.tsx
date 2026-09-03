@@ -79,6 +79,7 @@ const TRUST_LABEL: Record<ConsentTrustTier, string> = {
   unverified: "Unverified",
   verified: "Verified",
 };
+const TRUST_HINT_ID = "consent-trust-explanation";
 
 interface SelectionState {
   [sourceId: string]: {
@@ -207,18 +208,18 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
           <h1 className={`pdpp-display ${styles.headline}`}>{client.name} wants to read your data</h1>
           <span className={styles.trustHintDesktop}>
             <IcTooltip>
-              <IcTooltipTrigger aria-label={`${TRUST_LABEL[client.trust]}: ${trustExplanation}`} className={styles.trustHintTrigger}>
+              <IcTooltipTrigger aria-describedby={TRUST_HINT_ID} aria-label={`${TRUST_LABEL[client.trust]}: ${trustExplanation}`} className={styles.trustHintTrigger}>
                 <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
               </IcTooltipTrigger>
-              <IcTooltipContent>{trustExplanation}</IcTooltipContent>
+              <IcTooltipContent id={TRUST_HINT_ID}>{trustExplanation}</IcTooltipContent>
             </IcTooltip>
           </span>
           <span className={styles.trustHintTouch}>
             <IcPopover>
-              <IcPopoverTrigger aria-label={`About ${TRUST_LABEL[client.trust]}`} className={styles.trustHintTrigger}>
+              <IcPopoverTrigger aria-describedby={TRUST_HINT_ID} aria-label={`About ${TRUST_LABEL[client.trust]}`} className={styles.trustHintTrigger}>
                 <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
               </IcPopoverTrigger>
-              <IcPopoverPopup aria-label={`${TRUST_LABEL[client.trust]} explanation`} role="dialog">
+              <IcPopoverPopup id={TRUST_HINT_ID} aria-label={`${TRUST_LABEL[client.trust]} explanation`} role="tooltip">
                 <p className="pdpp-caption">{trustExplanation}</p>
                 <IcPopoverClose aria-label="Dismiss trust explanation" className={styles.trustHintDismiss}>
                   Dismiss
