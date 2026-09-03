@@ -227,6 +227,9 @@
   min-width: 0;
 }
 .sourceName {
+  /* The source is the row's primary label. Preserve it while the secondary
+     account label yields the available space first. */
+  flex: 0 0 auto;
   font-weight: 500;
   min-width: 0;
   overflow: hidden;
@@ -239,6 +242,7 @@
    and an account name is identifying-at-a-glance rather than
    read-in-full — the source name beside it is the load-bearing label. */
 .sourceAccount {
+  flex: 1 1 0;
   font-family: var(--font-mono);
   min-width: 0;
   overflow: hidden;
@@ -252,6 +256,14 @@
   font-variant-numeric: tabular-nums;
   /* Never breaks "1 of 3 data types" across lines mid-phrase. */
   white-space: nowrap;
+}
+
+/* At narrow phone widths an account label cannot add useful context without
+   competing with the primary source name. Keep the primary label readable. */
+@media (max-width: 480px) {
+  .sourceAccount {
+    display: none;
+  }
 }
 
 .streamList {

@@ -23,6 +23,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { sourceAccountLabel } from "./consent-screen-model.ts";
 
 const COMPONENT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const APP_DIR = fileURLToPath(new URL("../../app/", import.meta.url));
@@ -37,6 +38,12 @@ const AS_HELPERS_SOURCE = readFileSync(
   join(REPO_ROOT, "reference-implementation", "server", "routes", "as-consent-ui-helpers.ts"),
   "utf8"
 );
+
+test("a repeated source name is stripped from the account label", () => {
+  assert.equal(sourceAccountLabel("Amazon", "Amazon - gezalsatx@gmail.com"), "gezalsatx@gmail.com");
+  assert.equal(sourceAccountLabel("Apple Contacts", "Apple Contacts - tim@opendatalabs.com"), "tim@opendatalabs.com");
+  assert.equal(sourceAccountLabel("ChatGPT", "chaka.dondo@gmail.com"), "chaka.dondo@gmail.com");
+});
 
 // ─── Owner gating ───────────────────────────────────────────────────────────
 

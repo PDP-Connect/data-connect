@@ -58,6 +58,12 @@ export interface ConsentSourceModel {
   readonly streams: readonly ConsentStreamModel[];
 }
 
+/** Removes the duplicated source-name prefix from an owner-facing account label. */
+export function sourceAccountLabel(sourceName: string, account: string): string {
+  const repeatedPrefix = `${sourceName} - `;
+  return account.startsWith(repeatedPrefix) ? account.slice(repeatedPrefix.length) : account;
+}
+
 export interface ConsentScreenModel {
   readonly accessMode: { readonly supported: readonly string[]; readonly value: string };
   readonly challenge: string;
