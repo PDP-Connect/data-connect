@@ -47,6 +47,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const testDir = __dirname;
+const reportPath = join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md");
 
 /**
  * A file is Postgres-profile-relevant when it either clones/bootstraps its
@@ -115,4 +116,14 @@ test("every listed file still exists and is still Postgres-profile-relevant (lis
       `${relativePath} is listed in the Postgres template eligibility registry but no longer calls withTemporaryPostgresDatabase or initPostgresStorage -- remove it from the registry`
     );
   });
+});
+
+test("the PostgreSQL profile report derives its scope counts from the eligibility registry", async () => {
+  const report = await readFile(reportPath, "utf8");
+  const eligible = POSTGRES_TEMPLATE_ELIGIBLE_FILES.length;
+  const coldRequired = POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length;
+  const total = eligible + coldRequired;
+
+  assert.match(report, new RegExp(`${eligible} eligible plus ${coldRequired} cold-required files`));
+  assert.match(report, new RegExp(`\\*\\*${total}\\*\\* total`));
 });

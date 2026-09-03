@@ -9,15 +9,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
-import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
-import type { StructuredSummary } from "./test-accounting/receipt.ts";
-import {
-  accountingResultLine,
-  assertNamedSkipMappingsFullyConsumed,
-  repositoryPaths,
-  riConfiguredNamedSkipMappingIdentities,
-  structuredNodeSummary,
-} from "./test-accounting/receipt.ts";
 import { provisionTestDatabase } from "../server/postgres-test-database-guard.ts";
 import {
   dedicatedPostgresTestUrl,
@@ -29,11 +20,21 @@ import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
 import {
+  clonePostgresTestDatabaseFromTemplate,
   dropPostgresTestTemplate,
   ensurePostgresTestTemplate,
   readPostgresTestTemplateIdentity,
 } from "./postgres-test-template.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
+import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
+import type { StructuredSummary } from "./test-accounting/receipt.ts";
+import {
+  accountingResultLine,
+  assertNamedSkipMappingsFullyConsumed,
+  repositoryPaths,
+  riConfiguredNamedSkipMappingIdentities,
+  structuredNodeSummary,
+} from "./test-accounting/receipt.ts";
 import type { ProcessEnvLike } from "./test-env.ts";
 import { buildScrubbedTestEnv } from "./test-env.ts";
 import { requireExplicitTestProfile, storageProfileEnvironment } from "./test-profile-env.ts";
@@ -290,12 +291,19 @@ async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDb
     await client.connect();
     // Identifier is safe: deriveDbName produces only [a-z0-9_] chars.
     await client.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    // Identifier is safe: postgresTestTemplateName is either null or the
-    // output of deriveDedicatedPostgresTemplateName, which is
-    // "pdpp_test_template_" + an 8-hex-char runnerId (no user input).
-    await client.query(
-      useTemplate ? `CREATE DATABASE "${dbName}" TEMPLATE "${postgresTestTemplateName}"` : `CREATE DATABASE "${dbName}"`
-    );
+    if (useTemplate) {
+      const templateName = postgresTestTemplateName;
+      const templateIdentity = postgresTestTemplateIdentity;
+      if (!(templateName && templateIdentity)) {
+        throw new Error("Postgres template clone requested without a runner-bound template identity");
+      }
+      // The clone helper verifies the template's complete identity immediately
+      // before CREATE DATABASE ... TEMPLATE. Do not replace this with a raw
+      // query: a same-named stale or altered template must fail closed.
+      await clonePostgresTestDatabaseFromTemplate(baseUrl, dbName, templateName, templateIdentity);
+    } else {
+      await client.query(`CREATE DATABASE "${dbName}"`);
+    }
     await client.end();
   } catch (err) {
     try {

@@ -47,6 +47,7 @@ import test from "node:test";
 import pg from "pg";
 import {
   assertPostgresTestTemplateUsable,
+  clonePostgresTestDatabaseFromTemplate,
   ensurePostgresTestTemplate,
   readPostgresTestTemplateIdentity,
 } from "../scripts/postgres-test-template.ts";
@@ -61,6 +62,7 @@ const RE_DIGEST_MISMATCH = /failed identity verification.*schema source digest m
 const RE_RUNNER_ID_MISMATCH = /failed identity verification.*runner id mismatch/s;
 const RE_IDENTITY_DIGEST_MISMATCH = /failed identity verification.*identity digest mismatch/s;
 const RE_IDENTITY_TOKEN_MISMATCH = /failed identity verification.*identity token mismatch/s;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
 function adminUrlFor(base: string): string {
   const url = new URL(base);
@@ -85,6 +87,22 @@ async function dropTemplate(base: string, templateName: string): Promise<void> {
     await admin
       .query("DELETE FROM pdpp_test_template_metadata WHERE template_name = $1", [templateName])
       .catch(() => undefined);
+  });
+}
+
+async function databaseExists(base: string, databaseName: string): Promise<boolean> {
+  return await withAdmin(base, async (admin) => {
+    const result = await admin.query<{ exists: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS exists",
+      [databaseName]
+    );
+    return result.rows[0]?.exists === true;
+  });
+}
+
+async function dropDatabase(base: string, databaseName: string): Promise<void> {
+  await withAdmin(base, async (admin) => {
+    await admin.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
   });
 }
 
@@ -207,7 +225,7 @@ test("REFUSES an intact template when the caller's identity token names a differ
   const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     const identity = await readPostgresTestTemplateIdentity(baseUrl, templateName);
-    assert.match(identity, /^[0-9a-f]{64}$/, "identity token is a sha256 hex digest");
+    assert.match(identity, SHA256_HEX_PATTERN, "identity token is a sha256 hex digest");
     await assert.rejects(
       () => assertPostgresTestTemplateUsable(baseUrl, templateName, { expectedIdentity: "0".repeat(64) }),
       RE_IDENTITY_TOKEN_MISMATCH,
@@ -218,6 +236,60 @@ test("REFUSES an intact template when the caller's identity token names a differ
       "the same template must pass when the caller holds the token of this build"
     );
   } finally {
+    await dropTemplate(baseUrl, templateName);
+  }
+});
+
+test("runner per-file clone refuses a template whose stored runner id was mutated before clone time", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  const baseUrl = POSTGRES_URL as string;
+  const runnerId = `idclone${process.pid}`;
+  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const cloneName = `pdpp_test_clone_runner_id_${process.pid}`;
+  try {
+    const identity = await readPostgresTestTemplateIdentity(baseUrl, templateName);
+    await withAdmin(baseUrl, async (admin) => {
+      await admin.query(`UPDATE pdpp_test_template_metadata SET runner_id = 'deadbeef' WHERE template_name = $1`, [
+        templateName,
+      ]);
+    });
+    await assert.rejects(
+      () => clonePostgresTestDatabaseFromTemplate(baseUrl, cloneName, templateName, identity),
+      RE_RUNNER_ID_MISMATCH,
+      "the runner's per-file clone must reject a template whose metadata no longer binds its runner id"
+    );
+    assert.equal(
+      await databaseExists(baseUrl, cloneName),
+      false,
+      "identity refusal must happen before the runner creates a clone"
+    );
+  } finally {
+    await dropDatabase(baseUrl, cloneName);
+    await dropTemplate(baseUrl, templateName);
+  }
+});
+
+test("runner per-file clone refuses a template when the runner holds the wrong identity token", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  const baseUrl = POSTGRES_URL as string;
+  const runnerId = `idtoken${process.pid}`;
+  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const cloneName = `pdpp_test_clone_identity_${process.pid}`;
+  try {
+    await assert.rejects(
+      () => clonePostgresTestDatabaseFromTemplate(baseUrl, cloneName, templateName, "0".repeat(64)),
+      RE_IDENTITY_TOKEN_MISMATCH,
+      "the runner's per-file clone must refuse a different run's identity token"
+    );
+    assert.equal(
+      await databaseExists(baseUrl, cloneName),
+      false,
+      "identity-token refusal must happen before the runner creates a clone"
+    );
+  } finally {
+    await dropDatabase(baseUrl, cloneName);
     await dropTemplate(baseUrl, templateName);
   }
 });

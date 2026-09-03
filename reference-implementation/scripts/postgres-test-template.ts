@@ -464,6 +464,24 @@ export async function assertPostgresTestTemplateUsable(
 }
 
 /**
+ * Clone a per-file runner database only after proving the template is the
+ * exact build this runner created. Keeping the check and clone together
+ * prevents a runner call site from accidentally issuing a raw TEMPLATE clone
+ * that bypasses the identity boundary.
+ */
+export async function clonePostgresTestDatabaseFromTemplate(
+  baseConnectionString: string,
+  databaseName: string,
+  templateName: string,
+  expectedIdentity: string
+): Promise<void> {
+  await withAdminClient(baseConnectionString, async (admin) => {
+    await assertPostgresTestTemplateUsable(baseConnectionString, templateName, { expectedIdentity });
+    await admin.query(`CREATE DATABASE ${quotedIdentifier(databaseName)} TEMPLATE ${quotedIdentifier(templateName)}`);
+  });
+}
+
+/**
  * The identity token of a template this process just built (or verified).
  * `scripts/run-tests.ts` passes it to every child as
  * PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY so the child's clone-time check can
