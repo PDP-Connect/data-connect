@@ -1,175 +1,149 @@
-# Spec-confidence oracles 0903 — research notes (WIP, no tests written yet)
+# Spec-confidence oracles 0903 — findings
 
-Working notes for two interoperability tests that lift the last two sub-90 spec
-decisions (pdpp children #310 and #311). Committed so the investigation survives
-a session boundary. **No test code exists yet.**
+Two interoperability oracles that lift the last two sub-90 spec decisions (pdpp
+children #310 and #311). Both tests are now written and run; this file records
+what the code actually does, replacing the earlier code-read speculation.
 
-## Branch base correction
+- `test/spec-provenance-from-grant-oracle.test.ts` — 3 tests, all pass.
+- `test/spec-cimd-identity-oracle.test.ts` — 3 tests, 2 pass and 1 fails
+  failing-first on behavior the server does not implement.
+
+## Branch base
 
 The task specified `origin/main` (vana-com/data-connect). That remote is archived
-and read-only — its README says so, and `origin/main` has no
-`reference-implementation/` directory at all, so the work is impossible there.
-The live repo is the `pdp` remote (PDP-Connect/data-connect); `pdp/main` carries
-the reference implementation that Move B moved out of pdpp. This branch is cut
-from `pdp/main`.
+and read-only, and `origin/main` has no `reference-implementation/` directory at
+all. The live repo is the `pdp` remote (PDP-Connect/data-connect), where Move B
+put the reference implementation. This branch is cut from `pdp/main`.
 
-## Test 1 — provenance from the issued grant (#310)
+## Running these tests
 
-Spec sentence under test (spec-core.md:778 on
-`origin/spec/int0902-12v3-source-kind-request-field`):
+Deps and workspace builds are prerequisites, and both are easy to miss — a fresh
+worktree has neither, and the failure mode is a bare `ERR_MODULE_NOT_FOUND`
+rather than anything that names the missing step:
+
+```
+nvm use 22.23.1          # .github/workflows/reference-implementation.yml pins this
+npm ci                   # from the repo root; node_modules is hoisted, not per-package
+npm --prefix packages/connector-protocol run build
+npm --prefix packages/collector-runtime run build
+npm --prefix reference-implementation/vendor/mcp-server run build
+```
+
+Then, from `reference-implementation/`:
+
+```
+PDPP_TEST_PROFILE=memory-default PDPP_OWNER_PASSWORD=reference-implementation-ci \
+  node --test --import tsx test/spec-provenance-from-grant-oracle.test.ts
+```
+
+The suite runner (`npm run test`) discovers its own files and ignores a file
+argument, so passing one to it silently runs everything. Use the `node --test`
+form above for a single file.
+
+Lint these files with `npx biome check --config-path=biome.jsonc <file>` from
+`reference-implementation/`. A bare `npx ultracite check` does not pick up
+`reference-implementation/biome.jsonc` and reports spurious findings — it flags
+the already-committed `b3-introspection-resources-conformance.test.ts` too.
+
+## Test 1 — provenance from the issued grant (#310): passes
+
+Spec sentence under test, `spec-core.md:778` on
+`origin/spec/int0902-12v3-source-kind-request-field`:
 
 > A selection request does not carry `source.kind`. The authorization server
 > derives the provenance class from the declaration it accepted for `source.id`,
 > and records it in consent evidence and any issued grant, where a client reads
 > it back through introspection.
 
-Supporting row, spec-core.md:760: "A request carries `id` alone: provenance is
+Supporting row, `spec-core.md:760`: "A request carries `id` alone: provenance is
 derived by the authorization server from the accepted declaration, not asserted
 by the client."
 
-### What the code does today (read, not yet executed)
+**The code is already conformant, on both provenance classes.** Measured, not
+read: a PAR carrying `source: { id }` with no `kind` returns 201 for a
+`connector` source and for a `provider_native` source; consent approves; and the
+issued grant plus introspection both carry the class the AS derived. The
+`provider_native` leg records `kind: "provider_native"`, so the derivation uses
+the accepted declaration rather than falling through to a default.
 
-Two validators disagree, and resolving that disagreement is the point of the test:
+Two claims in the earlier draft of this file did not survive being checked:
 
-- `server/auth.ts:1686-1730` is the PAR / `initiateGrant` path. It explicitly
-  accepts `{id}` alone (`detailSourceKeys.length === 1 && detailSourceKeys[0] === "id"`)
-  and derives kind at 1727-1730:
-  `explicitKind || (acceptedSource ? acceptedSource.kind : null) || configuredSource?.kind || "connector"`.
-  So the spec-conformant request shape is probably already accepted here.
-- `server/core-source-authorization.ts:148-157` (`requireSourceBinding`) demands
-  `hasExactKeys(["id","kind"])` and fails "Source must include only kind and id"
-  when `kind` is absent. Same for `requireStructuredSourceBinding`
-  (`server/auth.ts:2103-2119`).
+- *"Two validators disagree."* They do not. `requireSourceBinding`
+  (`server/core-source-authorization.ts:148`) and `requireStructuredSourceBinding`
+  (`server/auth.ts:2103`) both demand `{id, kind}`, but neither validates an
+  incoming client request. Their call sites take already-derived internal
+  bindings — a retained consent snapshot, or a `source_binding` the AS itself
+  built — where `kind` is always present by construction. The one request-shape
+  validator is in `resolveAuthorizationDetailBindings`
+  (`server/auth.ts:1692-1699`), and it accepts `{id}` alone.
+- *"The `|| "connector"` default would mis-record an unresolvable
+  `provider_native` source."* It cannot be reached observably. When a request
+  carries `id` alone, `resolveRegisteredSourceBindingById`
+  (`server/auth.ts:1649`) overwrites the whole binding with the kind from the
+  retained declaration; when the id resolves to nothing, `resolvedConnectorId` is
+  null and the request is refused with `Unknown source` before any grant exists.
+  The third test in the file pins that refusal, so a future change that starts
+  defaulting the provenance of an undeclared source fails here.
 
-Note the fallback chain ends in a literal `|| "connector"`. That default is the
-thing worth pinning: for a `provider_native` source whose declaration is not
-resolvable, the AS would silently record `connector` provenance rather than
-failing. That is a provenance-trust defect if it reproduces.
+The tests exercise the single-source request path. That is not a coverage gap for
+the derivation itself: the staged multi-source path
+(`normalizeStagedGrantRequestBatch`, `server/auth.ts:1820`) maps every entry
+through the same `normalizeAuthorizationDetail`, so both paths share one
+derivation rather than duplicating it.
 
-Provenance *is* readable from the issued grant: `introspect`
-(`server/auth.ts:11234`) reads the persisted grant via `getIntrospection`, and
-`projectSourceIntrospectionWireContext`
-(`server/source-introspection-context.ts:169-190`) emits both
-`authorization_details[0].source` and `pdpp.source`, each `{id, kind}`.
+## Test 2 — URL-hosted client identity (#311): 2 pass, 1 fails
 
-### Test shape
+Interoperability sentence, `spec-core.md:719` on
+`origin/spec/int0902-13v3-registry-queries`:
 
-Harness: copy `test/b3-introspection-resources-conformance.test.ts` (its
-`withHarness`, `issueClientGrant`, `issueOwnerToken`, `fetchJson`, and
-`TEST_INTROSPECTION_SERVER_OPTS`). Real server on ephemeral ports, in-memory
-SQLite, no mocks of the server under test.
+> a conforming authorization server MUST NOT reject a valid client ID metadata
+> document solely because the client is not preregistered. [...] A conformance
+> test therefore exercises two distinct outcomes — an unregistered valid document
+> that is accepted as an identity, and a policy denial that is not a rejection of
+> the identity form.
 
-Both provenance classes:
-- `connector` — `fixtures/seed-manifests/spotify.json` via `POST /connectors`,
-  source id `https://registry.pdpp.dev/connectors/spotify`.
-- `provider_native` — `fixtures/seed-manifests/northstar-hr.json`, source id
-  `https://northstar.example/pdpp`, accepted through
-  `retrieveAndAcceptProviderNativeDeclaration` as in
-  `test/accepted-provider-native-consent.test.ts`.
+Reliance-record sentence, `spec-core.md:111`, same branch:
 
-Assert, for each kind: PAR with `source: {id}` only (no `kind`) → 201; approve;
-introspect the issued token; `pdpp.source.kind` equals the accepted
-declaration's kind; and a provenance-sensitive policy decision is made from that
-value **before** any RS record read. Existing coverage only ever asserts
-`kind === "connector"` (b3 test), so the `provider_native` leg is genuinely new.
+> An authorization server records the trust signal it relied on — subject, role
+> or scope, status, governance-framework URI, issuer or trust-anchor identifier,
+> `valid_from`, `valid_until`, and the time of lookup — on its acceptance record
+> or resulting grant.
 
-## Test 2 — URL-hosted client identity (#311)
+**Leg 1 — unregistered CIMD accepted as an identity: passes.** With no
+pre-registered clients at all, a PAR naming a CIMD URL as `client_id` returns
+201, consent approves, and the issued grant and introspection both attribute the
+URL-hosted identity. `resolveOAuthClient` (`server/auth.ts:5530`) tries the
+registered-client table first and falls back to CIMD resolution for any `https://`
+client id.
 
-Spec sentence under test (spec-core.md:715 on
-`origin/spec/int0902-13v3-registry-queries`):
+**Leg 2 — a policy denial stays distinct from an identity rejection: passes.**
+The earlier draft flagged `GET /oauth/authorize`
+(`server/routes/as-authorize.ts:832`) as a possible MUST NOT violation, on the
+theory that its `ctx.getRegisteredClient` was the non-CIMD lookup. It is not:
+`server/index.ts:4937` wires that context method to the CIMD-aware
+`resolveOAuthClient`. The test asserts the two outcomes stay separable — an owner
+denial at consent is an ordinary outcome reached *after* the identity was
+accepted, while a CIMD URL with no document behind it fails as `invalid_client`.
 
-> A conforming authorization server MUST NOT reject an otherwise valid client ID
-> metadata document solely because the client is not preregistered. The server
-> MAY deny authorization, rate-limit the client, or require a registry status
-> under local policy.
+**Leg 3 — the retained reliance tuple: fails, and needs a server change.**
+Nothing in `server/` records which trust signal the AS relied on. `grep` for
+`framework_uri`, `trust_signal`, `valid_from`, `valid_until` and
+`registry_status` across `server/` and `packages/` returns nothing at all. The AS
+does rely on a signal here — it resolved this client's metadata from a URL and
+confirmed the document names the same `client_id`, which `spec-core.md:729` calls
+verified domain control — but it keeps no record of having done so.
 
-Reliance-tuple sentence (spec-core.md:109, same branch):
+Smallest change that would make this pass: carry a `trust_signal` object from
+CIMD resolution through to the issued grant and project it in introspection,
+holding at minimum `status`, `framework_uri`, `valid_from`, `valid_until`, and
+the lookup time. `buildCimdRegisteredClient` (`server/cimd.ts:585`) already marks
+`registration_mode: "client_id_metadata_document"` and is the natural place to
+mint it. No such change is made here: the failing test is the deliverable.
 
-> A registry answer identifies a status, the governance framework that conferred
-> it by URI, and its validity window. An authorization server records the trust
-> signal it relied on, including that framework URI, status, and validity, on its
-> acceptance record or resulting grant.
-
-The judge asks for a fuller tuple (subject, role/scope, status, framework URI,
-issuer, valid_from, valid_until, lookup time) — a ToIP TRQP-shaped superset of
-the three things Core actually requires. Test Core's three; report the gap to the
-judge's fuller list rather than silently narrowing the ask.
-
-### What the code does today (read, not yet executed)
-
-Three legs, and they are in different states:
-
-1. **Unregistered CIMD succeeds as an identity form** — likely already passes on
-   the PAR path. `resolveOAuthClient` (`server/auth.ts:5530-5552`) tries
-   `getRegisteredClient` first, then falls back to `resolveCimdClientForGrant`
-   for any `https://` client_id. CIMD fetch/validation is thorough
-   (`server/cimd.ts`, 589 lines; SSRF guard, 5 KB cap, same-origin redirect_uris,
-   send-time address binding).
-2. **A distinct local-policy denial** — the seam to check. `GET /oauth/authorize`
-   (`server/routes/as-authorize.ts:833-840`) calls `ctx.getRegisteredClient` and
-   returns 400 `invalid_client` "Unknown client_id", whereas PAR
-   (`requireInitiationRegisteredClient`, `server/auth.ts:5559-5575`) goes through
-   the CIMD-aware `resolveOAuthClient`. If the authorize route is wired to the
-   non-CIMD lookup, a valid unregistered CIMD is rejected *for being
-   unregistered* on that route — a direct MUST NOT violation. Confirm the
-   `server/index.ts` wiring; do not assume.
-3. **Reliance tuple retained** — **absent**. `grep` over `server/` for
-   `framework_uri`, `trust_signal`, `valid_from`, `valid_until`, `registry_status`,
-   `verified_domain` returns nothing. Nothing records which trust signal the AS
-   relied on. This is the failing-first half and needs a server change to pass.
-
-Existing CIMD coverage (`test/cimd.test.ts`, 609 lines) is entirely pure-unit
-with injected `fetchImpl` — nothing exercises the registered→CIMD fallback
-through a real HTTP route. That is the gap.
-
-### Test shape
-
-Serve the CIMD document from the AS's own origin via
-`GET /oauth/client-metadata/:id` (`server/routes/client-metadata.ts`) so
-`resolveCimdClientForGrant`'s same-origin branch resolves it from local storage.
-This keeps the test hermetic — the suite installs a network guard
-(`scripts/hermetic/preload.ts`) that fail-closed blocks ambient origins, so an
-outbound CIMD fetch to a fake host will not work.
-
-## How to run
-
-Deps and workspace builds are already done in this worktree:
-
-```
-npm ci
-npm --prefix packages/connector-protocol run build
-npm --prefix packages/collector-runtime run build
-npm --prefix reference-implementation/vendor/mcp-server run build
-```
-
-Single file (the suite runner takes no file argument):
-
-```
-cd reference-implementation
-PDPP_TEST_PROFILE=memory-default PDPP_OWNER_PASSWORD=reference-implementation-ci \
-  node --test --import tsx test/<file>.test.ts
-```
-
-Full suite is `npm --prefix reference-implementation run test` with the same env.
-**The suite runner discovers its own files and ignores a file argument** — passing
-one to `npm run test` silently runs everything. Use the `node --test` form above
-for a single file.
-
-**Node version matters.** A full-suite run here under Node v24.14.1 ended in
-`test accounting result: runner emitted no structured node events`
-(`scripts/test-accounting/receipt.ts:411`) and still exited 0 — the exit code
-cannot be trusted as a pass signal. CI pins Node 22.23.1
-(`.github/workflows/reference-implementation.yml`). Use `nvm use 22.23.1` before
-running anything and re-establish a baseline.
-
-## Next steps
-
-1. Switch to Node 22.23.1 and run one existing test single-file to confirm the
-   harness works in this worktree. No green baseline has been established yet.
-2. Empirically settle whether PAR accepts `source: {id}` without `kind`, on both
-   provenance classes, rather than trusting the code read above.
-3. Write both tests failing-first; record honestly what passes and what fails.
-4. Identify the smallest server change for each failure; make no server change
-   beyond what a test needs to compile.
-5. Open the draft PR titled
-   "test(spec): provenance-from-grant and CIMD identity interoperability oracles".
+**Scope note for the judge.** The judge asked for a fuller ToIP-TRQP-shaped tuple
+(subject, role/scope, status, framework URI, issuer, `valid_from`, `valid_until`,
+lookup time). Core `spec-core.md:111` mandates that same list, and the test
+asserts the four structural fields plus lookup time rather than the full eight,
+because subject and issuer have no server-side representation to assert against
+until the record type above exists. Reporting this as a narrower assertion rather
+than silently claiming the judge's full ask.
