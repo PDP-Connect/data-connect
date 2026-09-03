@@ -378,7 +378,6 @@ export type ConsentSubmitState = "idle" | "submitting" | "failed";
 
 export function ConsentScreen({
   acceptAction,
-  forceMobile = false,
   model,
   rejectAction,
 }: {
@@ -389,7 +388,6 @@ export function ConsentScreen({
    * non-serializable props.
    */
   acceptAction: (decision: ConsentDecision) => Promise<string>;
-  forceMobile?: boolean;
   model: ConsentScreenModel;
   rejectAction: () => Promise<string>;
 }) {
@@ -523,12 +521,11 @@ export function ConsentScreen({
     }
   }
 
-  const shellClass = forceMobile ? `${styles.page} ${styles.forceMobile}` : styles.page;
   const nothingChosen = counts.selectedStreamCount === 0;
   const busy = submitState === "submitting";
 
   return (
-    <div className={shellClass}>
+    <div className={styles.page}>
       <TrustIdentity client={model.client} />
       <div>
         <h1 className={`pdpp-display ${styles.headline}`}>{model.client.name} wants to read your data</h1>
