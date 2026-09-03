@@ -29,6 +29,10 @@ import {
   projectBrowserSurfaceLease,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
+import {
+  ConnectorImplementationNotFoundError,
+  resolveConnectorImplementation,
+} from "@pdpp/polyfill-connectors/resolve";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
@@ -112,14 +116,14 @@ const REFERENCE_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manif
 const SEED_CONNECTOR_PATH = join(REFERENCE_IMPL_DIR, "connectors", "seed", "index.ts");
 // Resolved from the installed `@pdpp/polyfill-connectors` package (never a
 // hardcoded relative repo path) so this reference never drifts from that
-// package's own on-disk layout.
+// package's own on-disk layout. Manifest enumeration still reads this
+// directory directly (the `manifests` export's on-disk layout is unaffected
+// by the connector-tree-scope fix); only per-connector entry-point
+// resolution moved to resolveConnectorImplementation — see that function's
+// own comment.
 const POLYFILL_PACKAGE_SRC_DIR = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
 const POLYFILL_ROOT = join(POLYFILL_PACKAGE_SRC_DIR, "..");
 const POLYFILL_MANIFESTS_DIR = join(POLYFILL_ROOT, "manifests");
-const POLYFILL_CONNECTORS_DIR = join(POLYFILL_ROOT, "connectors");
-
-// Hoisted so the regex compiles once per process, not once per manifest.
-const JSON_EXTENSION_RE = /\.json$/;
 
 // ─── Shared domain types ────────────────────────────────────────────────────
 
@@ -1330,32 +1334,33 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
 }
 
 // Resolve a shipped polyfill connector's runnable (spawnable) entry-point
-// path, given its manifest's file stem (the JSON filename minus extension,
-// e.g. "github" for "github.json"). Returns null when this connector has no
-// on-disk implementation shipped alongside its manifest.
+// path, given its manifest's connector_id. Returns null when
+// @pdpp/polyfill-connectors has no built implementation for this ID.
 //
-// SWAP POINT for the connector-tree-scope decision (data-connect PR #55 /
-// data-connectors lane dcx-full-connector-build-0903): today this walks
-// POLYFILL_CONNECTORS_DIR directly, which only works for the subset of the
-// 45 manifest-listed connectors that this repo's vendored tarball happens to
-// ship compiled. Once data-connectors ships a resolveConnectorImplementation
-// export (backed by a connector-index.json covering every manifest-listed
-// connector), replace this function's body with a call to that export
-// instead of the two-candidate existsSync probe below — everything else in
-// this file (fingerprint comparison, seed-vs-polyfill precedence in
-// resolveDefaultConnectorPath) stays unchanged, since this function's
-// contract (connectorName in, spawnable path or null out) does not change.
-function resolvePolyfillConnectorEntryPoint(connectorName: string): string | null {
-  return (
-    [
-      join(POLYFILL_CONNECTORS_DIR, connectorName, "index.ts"),
-      join(POLYFILL_CONNECTORS_DIR, connectorName, "index.js"),
-    ].find((candidatePath) => existsSync(candidatePath)) ?? null
-  );
+// Backed by @pdpp/polyfill-connectors/resolve's resolveConnectorImplementation
+// (data-connectors#75, connector-index.json covers all 45 manifest-listed
+// connectors — no more directory-walking POLYFILL_CONNECTORS_DIR, which only
+// worked for whatever subset this repo's vendored tarball happened to ship
+// compiled at the time). The resolver returns a file:// URL string, safe for
+// `import()` directly; converted to a filesystem path here because this
+// file's own downstream consumer (runtime/index.ts's connector spawn) takes
+// a path, not a URL. Unknown IDs throw ConnectorImplementationNotFoundError
+// rather than returning falsy — caught and treated the same as the old
+// "no on-disk implementation" case, since both mean the same thing to this
+// function's callers: no shipped polyfill connector for this ID.
+function resolvePolyfillConnectorEntryPoint(connectorId: string): string | null {
+  try {
+    return fileURLToPath(resolveConnectorImplementation(connectorId).entry);
+  } catch (err) {
+    if (err instanceof ConnectorImplementationNotFoundError) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 // Index one polyfill manifest file into the connector-path and fingerprint
-// maps. No-op for non-JSON files, connectors without an on-disk implementation,
+// maps. No-op for non-JSON files, connectors without a shipped implementation,
 // malformed manifests, or manifests missing a usable connector_id.
 function indexPolyfillManifestFile(
   file: string,
@@ -1363,11 +1368,6 @@ function indexPolyfillManifestFile(
   fingerprints: Map<string, ManifestFingerprint>
 ): void {
   if (!file.endsWith(".json")) {
-    return;
-  }
-  const connectorName = file.replace(JSON_EXTENSION_RE, "");
-  const connectorPath = resolvePolyfillConnectorEntryPoint(connectorName);
-  if (!connectorPath) {
     return;
   }
   try {
@@ -1380,6 +1380,10 @@ function indexPolyfillManifestFile(
       return;
     }
     const trimmedId = connectorId.trim();
+    const connectorPath = resolvePolyfillConnectorEntryPoint(trimmedId);
+    if (!connectorPath) {
+      return;
+    }
     setManifestLookupAliases(paths, trimmedId, manifest, connectorPath);
     const fp = fingerprintManifest(manifest);
     if (fp) {

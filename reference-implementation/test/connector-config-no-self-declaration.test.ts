@@ -43,18 +43,17 @@ const FORBIDDEN_IMPORT_PATTERNS = [
   /from\s+["'](\.\.\/)+reference-implementation\/server\/stores\/connector-instance-config-store(\.ts)?["']/,
 ];
 
-// SWAP POINT for the connector-tree-scope decision (data-connect PR #55 /
-// data-connectors lane dcx-full-connector-build-0903): this walks
-// CONNECTORS_DIR directly, which only covers the subset of the 45
-// manifest-listed connectors this repo's vendored tarball happens to ship
-// compiled today -- confirmed missing connectors (e.g. ynab) are silently
-// absent from this scan's coverage, not falsely passing it. Once
-// data-connectors ships a connector-index.json enumerating every
-// manifest-listed connector's source files, replace this function's body
-// with a read of that index instead of readdirSync-walking CONNECTORS_DIR --
-// the FORBIDDEN_IMPORT_PATTERNS check below and everything else in this file
-// stays unchanged, since this function's contract (list of connector source
-// file paths out) does not change.
+// Walks CONNECTORS_DIR directly. This used to only cover the subset of the
+// 45 manifest-listed connectors this repo's vendored tarball happened to
+// ship compiled (confirmed missing connectors, e.g. ynab, were silently
+// absent from this scan's coverage, not falsely passing it) -- resolved by
+// data-connectors#75, which now compiles and ships every manifest-listed
+// connector's full source tree, not just an entry-point subset. The walk
+// itself did not need to change: connector-index.json (also shipped by #75)
+// only enumerates one entry point per connector, not every source file, so
+// it cannot replace this directory walk without narrowing this test's
+// coverage from "every connector source file" to "just entry points" --
+// keeping the walk is the correct fix here, not a workaround.
 function listConnectorSourceFiles(): string[] {
   const out: string[] = [];
   function walk(dir: string) {

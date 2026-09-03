@@ -179,3 +179,23 @@ now ship for all 42 subpaths, with NodeNext- and bundler-moduleResolution proofs
 pack-time guard against regressing. Confirmed via
 `npm --prefix reference-implementation run typecheck`: clean at this pin. Re-derivation
 recipe is otherwise identical to the two notes above.
+
+**Update (2026-09-03, later still same day): pin moved a fourth time to `data-connectors`
+commit `c80e05bea98ba2eeda3bcf45598d9fb239a25902`** (`main`, merge of `data-connectors#75`,
+"feat: ship all connector implementations"). This is the fix for the connector-tree-scope
+gap that `runtime/controller.ts` and `test/connector-config-no-self-declaration.test.ts`
+both had (see their own `SWAP POINT` comments, added as prep in an earlier commit on this
+branch): the package now compiles and ships built JS + `.d.ts` for all 45 manifest-listed
+connectors (previously only 12 were compiled), plus a new `./resolve` export —
+`resolveConnectorImplementation(connectorId): { entry, manifest, brandIcon }` (file-URL
+strings, safe for `await import(entry)` directly), backed by a generated
+`connector-index.json` that also now ships in `files`. Unknown IDs throw a typed
+`ConnectorImplementationNotFoundError` (`.code === "ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND"`),
+not a silent null/undefined. Verified directly against this pin from a real installed
+consumer: `resolveConnectorImplementation("https://registry.pdpp.dev/connectors/ynab")`
+returns a real `file://` entry whose module imports and exposes real exports; an unknown
+ID throws the typed error. This repo's own `resolvePolyfillConnectorEntryPoint()` (in
+`runtime/controller.ts`) and `listConnectorSourceFiles()` (in
+`test/connector-config-no-self-declaration.test.ts`) were swapped to call this export
+instead of walking `POLYFILL_CONNECTORS_DIR` — see those functions' own updated comments
+for what changed. Re-derivation recipe is otherwise identical to the three notes above.
