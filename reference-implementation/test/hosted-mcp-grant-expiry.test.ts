@@ -113,3 +113,75 @@ test("expiry is described as a consequence, and never restates the access mode",
     assert.doesNotMatch(copy, /expires_at/);
   }
 });
+
+// ─── Owner-picked dates ─────────────────────────────────────────────────────
+//
+// The quick-fill options are a shortcut for common windows, not the only
+// windows allowed: the consent screen offers a real date picker (owner
+// feedback round 2 — "arbitrary ISO-8601 grant expiry"). These pin the
+// boundary between "a date this server will grant" and "a date it refuses",
+// because both failure directions are silent ones — a rejected valid date
+// reads to the owner as a broken control, and an accepted absurd date reads
+// as a correct grant.
+
+test("an owner-picked date resolves to the END of that day, not its first instant", () => {
+  const result = resolveGrantExpiry("2026-12-02", "continuous", NOW);
+
+  assert.ok("expiresAt" in result, "a date inside the bound must be granted");
+  // An owner who picks "December 2" means access lasts THROUGH December 2.
+  // Resolving to midnight would silently cut the last day off the grant.
+  assert.equal(result.expiresAt, "2026-12-02T23:59:59.999Z");
+});
+
+test("a date beyond the five-year ceiling is refused, and says what to do instead", () => {
+  const result = resolveGrantExpiry("2226-01-01", "continuous", NOW);
+
+  // The mis-typed-year case: 2226 for 2026 would otherwise become a
+  // two-century grant that looks, on the confirmation, exactly like a correct
+  // one.
+  assert.ok("error" in result, "an absurd date must not mint a two-century grant");
+  assert.match(result.error, /five years/, "the owner is told the bound");
+  assert.match(result.error, /no end date/i, "and the honest alternative to it");
+});
+
+test("a date in the past is refused rather than minting an already-dead grant", () => {
+  const result = resolveGrantExpiry("2020-01-01", "continuous", NOW);
+
+  assert.ok("error" in result);
+  assert.match(result.error, /future/);
+});
+
+test("a rejected date never reads as an unrecognized keyword", () => {
+  // Both are dates the server will not grant, so both must be answered as
+  // date problems. Falling through to the option-id vocabulary would tell an
+  // owner who picked a real date to "choose how long this access should last"
+  // — advice that does not describe what they did wrong.
+  for (const value of ["2226-01-01", "2020-01-01"]) {
+    const result = resolveGrantExpiry(value, "continuous", NOW);
+    assert.ok("error" in result);
+    assert.doesNotMatch(result.error, /how long this access should last/);
+  }
+});
+
+test("the fixed option ids still resolve, and a non-date keyword is still an error", () => {
+  // The date path must not have swallowed the vocabulary the form POST uses.
+  const ninety = resolveGrantExpiry("90d", "continuous", NOW);
+  assert.ok("expiresAt" in ninety);
+  assert.equal(ninety.expiresAt, new Date(NOW + 90 * 24 * 60 * 60 * 1000).toISOString());
+
+  const never = resolveGrantExpiry("never", "continuous", NOW);
+  assert.ok("expiresAt" in never);
+  assert.equal(never.expiresAt, null);
+
+  const nonsense = resolveGrantExpiry("whenever-i-say", "continuous", NOW);
+  assert.ok("error" in nonsense);
+  assert.match(nonsense.error, /how long this access should last/);
+});
+
+test("a date-shaped value that is not a real date is refused as a date problem", () => {
+  // `2026-13-45` matches the shape but names no day.
+  const result = resolveGrantExpiry("2026-13-45", "continuous", NOW);
+
+  assert.ok("error" in result);
+  assert.doesNotMatch(result.error, /how long this access should last/);
+});
