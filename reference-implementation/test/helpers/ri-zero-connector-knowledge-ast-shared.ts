@@ -117,13 +117,63 @@ export function lineOf(node: Node): number {
   return node.loc?.start.line ?? 0;
 }
 
-export function calleeName(callee: Node): string | null {
+/**
+ * Property names that are ambiguous across more than one real receiver type
+ * in this codebase's own production code: `resolve`/`join` are `node:path`'s
+ * path-arithmetic functions, but `resolve` ALSO names Node's OWN CommonJS
+ * module resolver (`createRequire(...)`'s returned `require` object exposes
+ * `require.resolve(...)`) -- a completely different operation (resolving a
+ * MODULE specifier to its on-disk entry point, not joining path segments)
+ * that happens to share the property name. Unlike `readFileSync`/`readFile`/
+ * `dirname`/`fileURLToPath` (verified, by a full-repo scan of the scanner's
+ * own production scan roots, to have no other real receiver in this
+ * codebase), a bare property-name match on `resolve`/`join` is genuinely
+ * unsound without knowing WHICH object it was called on -- see
+ * `calleeName`'s `trustedReceivers` parameter below, which this Set gates.
+ */
+const RECEIVER_AMBIGUOUS_PROPERTY_NAMES = new Set(["join", "resolve"]);
+
+/**
+ * Extract the callable name a `CallExpression`'s `callee` denotes: the bare
+ * identifier for a direct call (`foo(...)`), or the property name for a
+ * member-expression call (`obj.foo(...)`) -- WITHOUT verifying `obj` is any
+ * particular receiver, by default. This bare-name-only default is safe for
+ * every unambiguous name (`readFileSync`, `readFile`, `dirname`,
+ * `fileURLToPath`, and every local function name checked against
+ * `enclosingFunctionName` elsewhere) -- ordinary property access on an
+ * unrelated object could theoretically collide with any of these too, but no
+ * real production file in this codebase's scanned roots does so (verified by
+ * a full-repo scan), so treating the property name alone as decisive is a
+ * reasonable, low-risk default for those.
+ *
+ * `resolve`/`join` are NOT safe under that same default: `require.resolve(...)`
+ * (Node's own CommonJS module resolver, reached via `createRequire(...)`) is
+ * real, live production code in this repo (`scripts/hermetic/guard.ts`) that
+ * shares the bare property name `resolve` with `node:path`'s `path.resolve(...)`
+ * — treating the two as interchangeable resolves a MODULE specifier as though
+ * it were a path-join argument, fabricating a bogus relative path. When
+ * `trustedReceivers` is supplied (a caller-computed set of local binding
+ * names PROVEN, by that caller, to be bound to `node:path`'s own default/
+ * namespace import), a member-expression call to `join`/`resolve` is only
+ * trusted (its property name returned) when the receiver identifier is IN
+ * that set; any other receiver for one of these two ambiguous names resolves
+ * to `null` (unrecognized), not silently treated as `node:path`. Omitting
+ * `trustedReceivers` (the parameter's default, `undefined`) preserves the
+ * OLD, receiver-blind behavior for every other (non-ambiguous) name — every
+ * existing call site that never dealt with this ambiguity is unaffected.
+ */
+export function calleeName(callee: Node, trustedReceivers?: ReadonlySet<string>): string | null {
   if (callee.type === "Identifier") {
     return callee.name as string;
   }
   // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `callee.property` is `unknown` on the loosely-typed Node interface's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability (a real Babel AST node can have this field absent). `tsc --strict` raises no error on this file.
   if (callee.type === "MemberExpression" && (callee.property as Node)?.type === "Identifier") {
-    return (callee.property as Node).name as string;
+    const propertyName = (callee.property as Node).name as string;
+    if (!(trustedReceivers && RECEIVER_AMBIGUOUS_PROPERTY_NAMES.has(propertyName))) {
+      return propertyName;
+    }
+    const object = callee.object as Node | undefined;
+    return object?.type === "Identifier" && trustedReceivers.has(object.name as string) ? propertyName : null;
   }
   return null;
 }
@@ -217,12 +267,12 @@ export function parseFailureViolation(relPath: string, error: unknown): ParseFai
  * with no naming collision at all.
  */
 export function collectConstsAndFunctions(program: Node): {
-  localFunctions: Map<string, { params: string[]; exported: boolean }>;
+  localFunctions: Map<string, { body: Node; params: string[]; exported: boolean }>;
   moduleConsts: Map<string, Node>;
 } {
   const moduleConsts = new Map<string, Node>();
   const ambiguousNames = new Set<string>();
-  const localFunctions = new Map<string, { params: string[]; exported: boolean }>();
+  const localFunctions = new Map<string, { body: Node; params: string[]; exported: boolean }>();
 
   function paramNames(params: Node[]): string[] {
     return params.filter((p) => p.type === "Identifier").map((p) => p.name as string);
@@ -258,8 +308,10 @@ export function collectConstsAndFunctions(program: Node): {
       exported = true;
     }
     const targetId = target.id as Node | undefined;
-    if (target.type === "FunctionDeclaration" && targetId?.type === "Identifier") {
+    const targetBody = target.body as Node | undefined;
+    if (target.type === "FunctionDeclaration" && targetId?.type === "Identifier" && targetBody) {
       localFunctions.set(targetId.name as string, {
+        body: targetBody,
         exported,
         params: paramNames(nodeArrayField(target, "params")),
       });

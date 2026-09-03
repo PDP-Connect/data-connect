@@ -153,6 +153,29 @@ const GENERIC_URL_HOSTS = new Set([
 /** Env-var name shapes that are always generic (never provider-specific). */
 const GENERIC_ENV_PREFIXES = ["PDPP_", "NODE_", "CI_", "GITHUB_ACTIONS", "npm_", "NEKO_"];
 
+/**
+ * Reserved placeholder TLDs (RFC 6761 §6.2's `.test`/`.localhost`, and RFC
+ * 2606's `.example`/`.invalid`) that IETF has permanently reserved for
+ * exactly this use: a syntactically-valid dummy hostname with no real
+ * registration, guaranteed never to resolve to a real provider. Checked as a
+ * HOST SUFFIX (`foo.invalid`, `deeply.nested.example`, bare `invalid` itself,
+ * etc.), not an exact-match entry in `GENERIC_URL_HOSTS` — that Set is for
+ * specific real infra hostnames (this repo's own registry, RFC-standard
+ * bodies' real domains); a reserved TLD is a different, open-ended class
+ * (any label in front of it is still non-resolving by the same RFC
+ * guarantee), so it needs suffix matching to cover the whole class rather
+ * than one more hand-typed exact host. The classic use is exactly what
+ * `stream-health-audit/authority.ts` does: `new URL(relativeHref,
+ * "https://pdpp.invalid")` to parse a relative href with a syntactically
+ * required but semantically inert base — a standard placeholder-base
+ * pattern, not a hardcoded provider endpoint.
+ */
+const RESERVED_PLACEHOLDER_TLDS = new Set(["invalid", "example", "test", "localhost"]);
+
+function hasReservedPlaceholderTldSuffix(host: string): boolean {
+  return RESERVED_PLACEHOLDER_TLDS.has(host) || [...RESERVED_PLACEHOLDER_TLDS].some((tld) => host.endsWith(`.${tld}`));
+}
+
 // The repository's full executable JS/TS extension set (matches this repo's
 // own module-resolution surface: `tsconfig.json`'s `allowJs`, and real
 // production/tooling files under these roots today — e.g.
@@ -388,7 +411,7 @@ export function scanFile(
       // dynamically-assembled or placeholder-templated URL carries no
       // provider knowledge by itself.
       const isPlaceholderHost = host.includes("$") || host.includes("{");
-      if (host && !isPlaceholderHost && !GENERIC_URL_HOSTS.has(host)) {
+      if (host && !isPlaceholderHost && !GENERIC_URL_HOSTS.has(host) && !hasReservedPlaceholderTldSuffix(host)) {
         violations.push({
           file: relPath,
           line: lineNumberAt(source, index),

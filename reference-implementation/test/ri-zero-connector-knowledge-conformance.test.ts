@@ -144,6 +144,82 @@ test("falsifiability: the scanner does not flag manifest-generic code", () => {
   }
 });
 
+// --- Rule (3) fix: RFC 6761/2606 reserved placeholder-TLD host suffixes ----
+//
+// stream-health-audit/authority.ts:1812/1897 both write
+// `new URL(decodeHtml(href), "https://pdpp.invalid")` -- parsing a
+// (possibly-relative) href against a syntactically-required but
+// semantically inert base URL, using the RFC 6761/2606 reserved `.invalid`
+// placeholder TLD. GENERIC_URL_HOSTS' exact-match Set only ever fixes ONE
+// specific host; the owner's fix is a HOST-SUFFIX exemption for the whole
+// reserved-TLD class (`.invalid`/`.example`/`.test`/`.localhost`).
+
+test("falsifiability (rule 3 fix): the exact live pdpp.invalid placeholder-base URL shape is not flagged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const goodFile = join(dir, "synthetic-pdpp-invalid-base.ts");
+    writeFileSync(
+      goodFile,
+      [
+        "export function parseHref(href: string): string {",
+        '  const url = new URL(href, "https://pdpp.invalid");',
+        "  return url.pathname;",
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(goodFile, "synthetic-pdpp-invalid-base.ts", new Set(), repoRoot);
+    assert.deepEqual(
+      violations,
+      [],
+      `a new URL(..., "https://pdpp.invalid") placeholder-base parse must not be flagged, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 3 fix): the reserved-TLD exemption is a HOST SUFFIX, not just the bare TLD or one hardcoded host", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const goodFile = join(dir, "synthetic-reserved-tld-suffixes.ts");
+    writeFileSync(
+      goodFile,
+      [
+        'export const A = "https://foo.invalid/path";',
+        'export const B = "https://sub.example/path";',
+        'export const C = "https://api.test/path";',
+        'export const D = "https://svc.localhost/path";',
+        'export const E = "https://invalid/path";',
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(goodFile, "synthetic-reserved-tld-suffixes.ts", new Set(), repoRoot);
+    assert.deepEqual(
+      violations,
+      [],
+      `every reserved-placeholder-TLD host (as a suffix, any label in front) must be exempt, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 3 counterweight): a real hardcoded provider host is still flagged, reserved-TLD suffixes are not a blanket exemption", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const badFile = join(dir, "synthetic-real-provider-host.ts");
+    writeFileSync(badFile, ['export const STRIPE_API = "https://api.stripe.com/v1/charges";', ""].join("\n"));
+    const violations = scanFile(badFile, "synthetic-real-provider-host.ts", new Set(), repoRoot);
+    assert.ok(
+      violations.some((v) => v.rule === "hardcoded-provider-endpoint-url"),
+      `a real hardcoded provider host (api.stripe.com) must still be flagged, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 // --- Rule (5): AST-based data-resource-load scanning -----------------------
 //
 // These tests write a synthetic source file into a REAL location inside the
@@ -657,6 +733,274 @@ test("falsifiability: a genuinely unresolvable JSON.parse(readFileSync(...)) cal
   );
 });
 
+// --- Rule (5) fix: a path argument reached through a PROVEN validated-path
+// helper (safePath/safeLeasePath-shaped) is not "unresolvable" -----------
+//
+// test-accounting/packet.ts:267/580/637 and test-accounting/inventory.ts:719
+// all read through same-file helpers (safePath/safeLeasePath/
+// authorityContained) that resolve a REAL root via realpathSync(root),
+// resolve() a candidate against it, and REJECT (fail()) any candidate not
+// prefixed by the real root. The scanner cannot know the ACTUAL file (root
+// is a runtime parameter), but it CAN prove the helper structurally
+// constrains the result -- a narrow, function-shape-based exemption, not a
+// blanket "any unresolvable call is fine" weakening.
+
+test("falsifiability (rule 5 fix): the exact live safePath(root, literal) shape is not flagged", () => {
+  withSyntheticProductionFile(
+    "synthetic-safe-path-helper-literal.ts",
+    [
+      'import { readFileSync, realpathSync } from "node:fs";',
+      'import { resolve } from "node:path";',
+      "function fail(message: string): never {",
+      '  throw new Error(message);',
+      "}",
+      "function safePath(root: string, path: string): string {",
+      "  const rootReal = realpathSync(root);",
+      "  const candidate = resolve(rootReal, path);",
+      "  let target: string;",
+      "  try {",
+      "    target = realpathSync(candidate);",
+      "  } catch {",
+      '    fail(`missing path: ${path}`);',
+      "  }",
+      "  if (target !== rootReal && !target.startsWith(`${rootReal}/`)) {",
+      '    fail(`path escapes repository: ${path}`);',
+      "  }",
+      "  return target;",
+      "}",
+      "export function readManifest(root: string): unknown {",
+      '  return JSON.parse(readFileSync(safePath(root, "test-accounting.manifest.json"), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.deepEqual(
+        violations,
+        [],
+        `readFileSync(safePath(root, "..."), ...) reached through a proven validated-path helper must not be flagged, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+test("falsifiability (rule 5 fix): the const-indirection shape (const path = safePath(...); readFileSync(path, ...)) is also recognized", () => {
+  withSyntheticProductionFile(
+    "synthetic-safe-path-helper-indirection.ts",
+    [
+      'import { readFileSync, realpathSync } from "node:fs";',
+      'import { resolve } from "node:path";',
+      "function fail(message: string): never {",
+      '  throw new Error(message);',
+      "}",
+      "function authorityContained(directory: string, path: string, label: string): string {",
+      "  const directoryReal = realpathSync(directory);",
+      "  const candidate = resolve(directoryReal, path);",
+      "  if (candidate !== directoryReal && !candidate.startsWith(`${directoryReal}/`)) {",
+      "    fail(`${label} is outside its authority directory`);",
+      "  }",
+      "  let target: string;",
+      "  try {",
+      "    target = realpathSync(candidate);",
+      "  } catch {",
+      '    fail(`${label} is missing: ${path}`);',
+      "  }",
+      "  if (target !== directoryReal && !target.startsWith(`${directoryReal}/`)) {",
+      "    fail(`${label} is outside its authority directory`);",
+      "  }",
+      "  return target;",
+      "}",
+      "export function readAuthorityRecord(directory: string, runId: string) {",
+      '  const path = authorityContained(directory, `${runId}.authority.json`, "authority");',
+      '  return { path, value: JSON.parse(readFileSync(path, "utf8")) };',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.deepEqual(
+        violations,
+        [],
+        `a validated helper's result bound to a const before the read (the live authorityContained shape) must not be flagged, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+test("falsifiability (rule 5 counterweight): a call to an UNVALIDATED same-file function is still flagged (no blanket call-argument exemption)", () => {
+  withSyntheticProductionFile(
+    "synthetic-unvalidated-helper-call.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      "function buildPath(root: string, name: string): string {",
+      "  return root + '/' + name;",
+      "}",
+      "export function readManifest(root: string): unknown {",
+      '  return JSON.parse(readFileSync(buildPath(root, "manifest.json"), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        `a same-file helper that does NOT structurally validate/constrain its path (no realpathSync+prefix-reject) must still be flagged, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+test("falsifiability (rule 5 counterweight): a helper missing the reject-on-escape check (computes a root but never rejects) is still flagged", () => {
+  withSyntheticProductionFile(
+    "synthetic-helper-no-rejection.ts",
+    [
+      'import { readFileSync, realpathSync } from "node:fs";',
+      'import { resolve } from "node:path";',
+      "function looksSafeButIsnt(root: string, path: string): string {",
+      "  const rootReal = realpathSync(root);",
+      "  const candidate = resolve(rootReal, path);",
+      "  return candidate;",
+      "}",
+      "export function readManifest(root: string): unknown {",
+      '  return JSON.parse(readFileSync(looksSafeButIsnt(root, "manifest.json"), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        `a helper that resolves a real root but never rejects an escaping candidate is NOT a validated-path helper and must still be flagged, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+// --- Rule (5) widened fix: import.meta.resolve("@pdpp/polyfill-connectors/manifests")
+// as a recognized manifest-root anchor --------------------------------------
+//
+// runtime/controller.ts:1374 and scripts/generate-connector-registry.ts:104
+// both resolve the installed @pdpp/polyfill-connectors package's manifests
+// directory via `dirname(fileURLToPath(import.meta.resolve(
+// "@pdpp/polyfill-connectors/manifests")))` -- that package is a pinned
+// tarball dependency (node_modules/@pdpp/polyfill-connectors), not a
+// workspace package with a stable repo-relative source location, which is
+// exactly why production code resolves it this way instead of a hardcoded
+// relative path.
+
+test("falsifiability (rule 5 widened fix): the exact live import.meta.resolve(\"@pdpp/polyfill-connectors/manifests\") anchor shape is not flagged", () => {
+  withSyntheticProductionFile(
+    "synthetic-polyfill-connectors-manifests-resolve.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      'import { dirname, join } from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      'const packageSrcDir = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));',
+      'const manifestsDir = join(packageSrcDir, "..", "manifests");',
+      "export function readOne(file: string): unknown {",
+      '  return JSON.parse(readFileSync(join(manifestsDir, file), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.deepEqual(
+        violations,
+        [],
+        `the real import.meta.resolve("@pdpp/polyfill-connectors/manifests") manifest-root anchor must resolve and be sanctioned, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+test("falsifiability (rule 5 widened fix counterweight): import.meta.resolve(...) of an UNRELATED specifier is not treated as a manifest-root anchor", () => {
+  withSyntheticProductionFile(
+    "synthetic-unrelated-import-meta-resolve.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      'import { dirname, join } from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      'const someOtherPackageDir = dirname(fileURLToPath(import.meta.resolve("some-other-package/whatever")));',
+      'const dataDir = join(someOtherPackageDir, "..", "data");',
+      "export function readOne(file: string): unknown {",
+      '  return JSON.parse(readFileSync(join(dataDir, file), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unresolvable-data-resource-load"),
+        `import.meta.resolve(...) of any OTHER specifier must not be silently trusted as the polyfill-connectors manifest root, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+// --- calleeName() receiver-disambiguation fix: req.resolve(...) is not
+// path.resolve(...) -----------------------------------------------------
+//
+// scripts/hermetic/guard.ts:426 dynamically imports `undici` via
+// `pathToFileURL(req.resolve("undici")).href`, where `req` comes from
+// `createRequire(...)` -- Node's own CommonJS module resolver, which shares
+// the bare property name "resolve" with node:path's path.resolve(...).
+// calleeName() previously matched on the property name alone, so
+// req.resolve(...) was misread as a path.resolve(...) call and its literal
+// argument ("undici") got anchored to the current file's directory,
+// fabricating a bogus relative-path violation instead of the correct
+// (allowlisted) "genuinely unresolvable code load" classification.
+
+test("falsifiability (calleeName fix): a real node:path path.resolve(...) member-expression call still resolves as a path join", () => {
+  withSyntheticProductionFile(
+    "synthetic-real-path-resolve-member-call.ts",
+    [
+      'import { readFileSync } from "node:fs";',
+      'import path from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      "const __dirname = path.dirname(fileURLToPath(import.meta.url));",
+      "export function readSibling(): unknown {",
+      '  return JSON.parse(readFileSync(path.resolve(__dirname, "gmail-policy.json"), "utf8"));',
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.some((v) => v.rule === "unsanctioned-policy-resource-path"),
+        `a real path.resolve(...) member-expression call (import path from "node:path") must still resolve as a path join and be classified normally, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
+test("falsifiability (calleeName fix counterweight): require.resolve(...) via createRequire(...) is never misread as path.resolve(...)", () => {
+  withSyntheticProductionFile(
+    "synthetic-require-resolve-not-path-resolve.ts",
+    [
+      'async function loadUndici() {',
+      '  const { createRequire } = await import("node:module");',
+      '  const { pathToFileURL } = await import("node:url");',
+      '  const req = createRequire(pathToFileURL(process.cwd() + "/package.json").href);',
+      '  const resolved = req.resolve("undici");',
+      "  return await import(pathToFileURL(resolved).href);",
+      "}",
+      "export { loadUndici };",
+      "",
+    ].join("\n"),
+    (relPath) => {
+      const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot);
+      assert.ok(
+        violations.every((v) => v.rule !== "unsanctioned-policy-resource-path"),
+        `req.resolve("undici") must never be misread as path.resolve(...) and fabricate a bogus relative-path violation, got: ${JSON.stringify(violations)}`
+      );
+      assert.ok(
+        violations.length === 0 || violations.every((v) => v.rule === "unresolvable-data-resource-load"),
+        `req.resolve(...) should resolve as genuinely unresolvable (correct) rather than any other misclassification, got: ${JSON.stringify(violations)}`
+      );
+    }
+  );
+});
+
 test("falsifiability (Windows-safe dynamic import counterweight): pathToFileURL(...).href wrapping a genuinely unresolvable, runtime-derived path still fails closed", () => {
   // Proves the pathToFileURL transparent-resolution fix does not widen what
   // counts as "resolvable": wrapping a runtime-derived (env-sourced) path in
@@ -715,7 +1059,15 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     [
       'import { readFileSync } from "node:fs";',
       "function loadManifest(entryName: string) {",
-      `  const path = new URL(\`../../packages/polyfill-connectors/manifests/${DOLLAR}{entryName}\`, import.meta.url);`,
+      // `../fixtures/seed-manifests/` (not `../../packages/polyfill-connectors/manifests/`
+      // -- that path no longer exists on disk since `@pdpp/polyfill-connectors`
+      // became a pinned tarball dependency installed into `node_modules/`
+      // rather than a workspace package with a stable source-tree manifests/
+      // directory; see MANIFEST_ROOTS' own doc comment in
+      // ri-zero-connector-knowledge-data-load-scan.ts) is the OTHER real,
+      // git-tracked sanctioned manifest root, reachable from
+      // reference-implementation/server/ by the same relative-path shape.
+      `  const path = new URL(\`../fixtures/seed-manifests/${DOLLAR}{entryName}\`, import.meta.url);`,
       '  return JSON.parse(readFileSync(path, "utf8"));',
       "}",
       'loadManifest("gmail.json");',
@@ -752,12 +1104,12 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     );
 
   assert.deepEqual(
-    readAtLine(98, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
+    readAtLine(99, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
     [],
     "the reviewed polyfill manifest call site must match its exact current line pin and call shape"
   );
   assert.ok(
-    readAtLine(99, 'await readFile(path, "utf8")', "return JSON.parse(raw);").some(
+    readAtLine(100, 'await readFile(path, "utf8")', "return JSON.parse(raw);").some(
       (violation) => violation.rule === "unresolvable-data-resource-load"
     ),
     "moving the identical call one line must invalidate the exemption and fail closed"
@@ -769,7 +1121,7 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     ["missing JSON consumption", 'await readFile(path, "utf8")', "return raw;"],
   ] as const) {
     assert.ok(
-      readAtLine(98, readCall, jsonFlow).length > 0,
+      readAtLine(99, readCall, jsonFlow).length > 0,
       `${mutation} mutation at the approved line must fail closed`
     );
   }
@@ -1594,6 +1946,157 @@ test("terminal invariant: an array-literal element equal to a connector key is c
     assert.ok(
       violations.some((v) => v.rule === "hardcoded-connector-identity-literal"),
       `an array literal containing a connector key must be caught even if never checked against anything, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+// --- Rule (1) fix: field-name-list array elements are slot NAMES, not
+// asserted connector-identity VALUES ----------------------------------------
+//
+// test-accounting/inventory.ts:280 writes `"signal"` as one element of
+// `RECEIPT_BINDING_FIELDS`, a receipt/schema field-name array later used as
+// `RECEIPT_BINDING_FIELDS.map((field) => [field, record[field] ?? null])` --
+// each element names a FIELD to read off an unrelated `record`, not an
+// asserted connector identity. The owner's fix requires the literal be used
+// AS a connector id (passed to a registry/dispatch call, or compared against
+// a connector_id/connector_key-shaped thing) -- narrowed at the RULE level
+// (arrayExpressionsUsedAsFieldNameLists, the array-literal counterpart to
+// the existing object-key objectExpressionsUsedAsDispatchTables carve-out),
+// not by allowlisting the string "signal" or this one file.
+
+test("falsifiability (rule 1 fix): the exact live RECEIPT_BINDING_FIELDS shape is not flagged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const goodFile = join(dir, "synthetic-receipt-binding-fields.ts");
+    writeFileSync(
+      goodFile,
+      [
+        "const RECEIPT_BINDING_FIELDS = [",
+        '  "run_id",',
+        '  "exit_code",',
+        '  "signal",',
+        '  "counts",',
+        "] as const;",
+        "export function receiptBinding(receipt: Record<string, unknown>): unknown {",
+        "  const record = receipt;",
+        "  return Object.fromEntries(RECEIPT_BINDING_FIELDS.map((field) => [field, record[field] ?? null]));",
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(goodFile, "synthetic-receipt-binding-fields.ts", new Set(["signal"]), repoRoot);
+    assert.deepEqual(
+      violations,
+      [],
+      `a schema field-name array element that collides with a connector key, used only as a record[field] access, must not be flagged, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 1 fix): the field-name-list carve-out generalizes to any OTHER colliding schema field name, not just \"signal\"", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const goodFile = join(dir, "synthetic-other-colliding-field-name.ts");
+    writeFileSync(
+      goodFile,
+      [
+        "const EXPORT_FIELDS = [",
+        '  "id",',
+        '  "notion",', // a plausible future connector key colliding with a generic field name
+        '  "status",',
+        "] as const;",
+        "export function projectRow(source: Record<string, unknown>): unknown {",
+        "  return Object.fromEntries(EXPORT_FIELDS.map((column) => [column, source[column] ?? null]));",
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(goodFile, "synthetic-other-colliding-field-name.ts", new Set(["notion"]), repoRoot);
+    assert.deepEqual(
+      violations,
+      [],
+      `the fix must generalize at the rule level (any field-name-list array), not special-case "signal", got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 1 counterweight): a real connector-identity literal actually passed to a connector-registry/dispatch call is still flagged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const badFile = join(dir, "synthetic-signal-connector-dispatch.ts");
+    writeFileSync(
+      badFile,
+      [
+        "declare const connectorRegistry: { get(id: string): unknown };",
+        "export function loadSignalConnector(): unknown {",
+        '  return connectorRegistry.get("signal");',
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(badFile, "synthetic-signal-connector-dispatch.ts", new Set(["signal"]), repoRoot);
+    assert.ok(
+      violations.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      `"signal" passed as an argument to a registry-shaped dispatch call must still be flagged, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 1 counterweight): a real connector_id comparison against \"signal\" is still flagged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const badFile = join(dir, "synthetic-signal-connector-id-comparison.ts");
+    writeFileSync(
+      badFile,
+      [
+        "export function isSignalConnector(connector_id: string): boolean {",
+        '  return connector_id === "signal";',
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(badFile, "synthetic-signal-connector-id-comparison.ts", new Set(["signal"]), repoRoot);
+    assert.ok(
+      violations.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      `connector_id === "signal" must still be flagged, got: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("falsifiability (rule 1 counterweight): the field-name-list carve-out does not exempt an array ALSO used in a real membership/dispatch shape elsewhere in the file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const badFile = join(dir, "synthetic-laundered-dispatch-array.ts");
+    writeFileSync(
+      badFile,
+      [
+        "const NAMES = [",
+        '  "run_id",',
+        '  "signal",',
+        "] as const;",
+        "export function bind(record: Record<string, unknown>): unknown {",
+        "  return Object.fromEntries(NAMES.map((field) => [field, record[field] ?? null]));",
+        "}",
+        "export function isKnown(id: string): boolean {",
+        "  return (NAMES as readonly string[]).includes(id);",
+        "}",
+        "",
+      ].join("\n")
+    );
+    const violations = scanFile(badFile, "synthetic-laundered-dispatch-array.ts", new Set(["signal"]), repoRoot);
+    assert.ok(
+      violations.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      `an array ALSO used in a real .includes() membership check elsewhere must still be flagged, not exempted via its unrelated field-access usage, got: ${JSON.stringify(violations)}`
     );
   } finally {
     rmSync(dir, { force: true, recursive: true });
