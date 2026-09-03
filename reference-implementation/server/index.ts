@@ -311,6 +311,7 @@ import { mountAsDeviceAuthorization, mountAsIntrospect, mountAsToken } from "./r
 import { mountAsPar } from "./routes/as-par.ts";
 import { mountAsPolyfillConnectorDetail, mountAsPolyfillConnectorRegister } from "./routes/as-polyfill-connectors.ts";
 import { mountClientMetadata } from "./routes/client-metadata.ts";
+import { mountClientLogo } from "./routes/client-logo.ts";
 import { mountHostedUiCss } from "./routes/hosted-ui-asset.ts";
 import { mountOwnerConnectionCollectionScope } from "./routes/owner-connection-collection-scope.ts";
 import { mountOwnerConnectionConfig } from "./routes/owner-connection-config.ts";
@@ -741,6 +742,7 @@ interface ServerOpts {
   cancelScheduledRun?: ((runId: string) => unknown) | null;
   cimdEnabled?: boolean;
   cimdFetchDependencies?: CimdFetchDependencies;
+  clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
   configuredProviderAuthConnectorKeys?: readonly string[];
@@ -4846,6 +4848,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     getCimdDocument: getCimdDocument as unknown as Parameters<typeof mountClientMetadata>[1]["getCimdDocument"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountClientMetadata>[1]["resolvePublicUrl"],
   });
+  mountClientLogo(app as unknown as Parameters<typeof mountClientLogo>[0]);
 
   // DCR register/delete routes — extracted to routes/as-dcr.ts per
   // openspec/changes/split-reference-server-by-route-family.
@@ -4926,6 +4929,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // delegation, same auth-code staging and redirect.
   mountAsAuthorize(app, {
     asPublicUrl: opts.asPublicUrl || null,
+    ...(opts.clientLogoFetchDependencies ? { clientLogoFetchOptions: opts.clientLogoFetchDependencies } : {}),
     consentPickerCaps: consentPickerCaps as unknown as Parameters<typeof mountAsAuthorize>[1]["consentPickerCaps"],
     consentStore: consentStore as unknown as Parameters<typeof mountAsAuthorize>[1]["consentStore"],
     consentUi: consentUi as unknown as Parameters<typeof mountAsAuthorize>[1]["consentUi"],
@@ -8382,6 +8386,7 @@ export async function startServer(opts: ServerOpts = {}) {
     agentConnectTtlMs: opts.agentConnectTtlMs,
     asIssuer: configuredAsIssuer,
     asPublicUrl: configuredAsPublicUrl,
+    clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
     controller,
     dbPath: opts.dbPath || DB_PATH,

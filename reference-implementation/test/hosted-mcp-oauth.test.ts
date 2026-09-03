@@ -856,6 +856,7 @@ interface PickerConsentModel extends Record<string, unknown> {
   client: {
     domain: string;
     id: string;
+    logo: string | null;
     monogram: string;
     name: string;
     policyLinks: Array<{ href: string; label: string }>;
@@ -4933,6 +4934,17 @@ test("hosted MCP picker pins the wildcard stream entry when the whole source is 
 function startServerWithCimdDocFetch(doc: Record<string, unknown>) {
   return startServer({
     asPort: 0,
+    clientLogoFetchDependencies: {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: (async () => ({
+        body: (async function* () {
+          yield new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+        })(),
+        headers: { "content-type": "image/png" },
+        statusCode: 200,
+      })) as never,
+      isGlobalUnicastAddressImpl: () => true,
+    },
     cimdFetchDependencies: {
       dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
       fetchImpl: async () =>
@@ -5026,7 +5038,7 @@ test("hosted MCP picker renders the CIMD client's resolved display name and its 
   }
 });
 
-test("hosted MCP picker renders a text monogram, never an <img>, for client identity", async () => {
+test("hosted MCP picker exposes only an AS-cached logo URL for a domain-verified client", async () => {
   const clientId = chatgptShapedClientId();
   const server = await startServerWithCimdDocFetch(
     chatgptShapedCimdDoc(clientId, { logo_uri: "https://chatgpt.example/logo.png" })
@@ -5044,23 +5056,17 @@ test("hosted MCP picker renders a text monogram, never an <img>, for client iden
       "monogram is a two-letter mark from the RESOLVED display name (ChatGPT -> CH), matching the design system's .pdpp-monogram; a lone 'C' derived from the URL string sat in a two-letter slot"
     );
 
-    // The forbidden remote logo fetch (client-display:676) can no longer be a
-    // question of markup: assert the ABSENCE of any logo field on the model.
-    // The console cannot render an <img> from a URL it was never given, and
-    // the CIMD doc under test declares `logo_uri` precisely so this proves the
-    // server drops it rather than merely failing to use it.
-    for (const field of ["logo", "logoUri", "logo_uri", "iconUrl", "imageUrl"]) {
-      assert.equal(
-        Object.hasOwn(model.client, field),
-        false,
-        `the client identity MUST NOT carry a logo URL field (${field})`
-      );
-    }
+    assert.equal(typeof model.client.logo, "string", `the verified client must receive an AS-cached logo URL: ${JSON.stringify(model.client)}`);
+    assert.match(model.client.logo as string, /^\/oauth\/consent-client-logos\//);
     assert.equal(
       JSON.stringify(model.client).includes("logo.png"),
       false,
       "the client-supplied logo_uri must never reach the owner surface, even in another field"
     );
+    const logoResponse = await fetch(`${asUrl}${model.client.logo as string}`);
+    assert.equal(logoResponse.status, 200);
+    assert.equal(logoResponse.headers.get("content-type"), "image/png");
+    assert.deepEqual([...new Uint8Array(await logoResponse.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47]);
   } finally {
     await closeServer(server);
   }
@@ -6070,6 +6076,7 @@ function hostedMcpAuthorizeUrl(asUrl: string, client: RegisteredClient, state: s
 }
 
 interface ConsentChallengeModelStream {
+  fields: Array<{ description?: string; name: string; required: boolean }>;
   fieldsTotal: number;
   id: string;
   label: string;
@@ -6092,7 +6099,7 @@ interface ConsentChallengeModelSource {
 interface ConsentChallengeModel {
   accessMode: { supported: string[]; value: string };
   challenge: string;
-  client: { domain: string; monogram: string; name: string; policyLinks: unknown[]; trust: string };
+  client: { domain: string; logo: string | null; monogram: string; name: string; policyLinks: unknown[]; trust: string };
   grantExpiry: { defaultId: string; options: Array<{ days: number; id: string; label: string }> };
   purpose: { code: string; description: string };
   retention: string;
@@ -6126,6 +6133,7 @@ function consentChallengeAcceptBody({
   chosen,
   accessMode = "continuous",
   reviewDigest,
+  streamFields,
   streamRanges,
 }: {
   model: ConsentChallengeModel;
@@ -6133,6 +6141,8 @@ function consentChallengeAcceptBody({
   chosen: Array<{ source: ConsentChallengeModelSource; streams: ConsentChallengeModelStream[] }>;
   accessMode?: string;
   reviewDigest?: string;
+  /** Per-stream field allowlists, keyed by the model's stable stream id. */
+  streamFields?: Record<string, string[]>;
   /**
    * Per-stream data time range, keyed by the model's own `stream.id`. This is
    * the DATA range (`StreamGrant.time_constraint`), not grant validity — the
@@ -6155,6 +6165,7 @@ function consentChallengeAcceptBody({
     review_digest: reviewDigest ?? model.reviewDigest,
     source_id: chosen.map(({ source }) => source.id),
     stream: chosen.flatMap(({ streams }) => streams.map((stream) => stream.id)),
+    ...(streamFields ? { stream_fields: streamFields } : {}),
     ...(streamRanges ? { stream_range: streamRanges } : {}),
   };
 }
@@ -6185,6 +6196,19 @@ async function issuedStreamTimeConstraint(
   const stream = streams.find((entry) => entry.name === streamName);
   assert.ok(stream, `the issued grant must carry stream ${streamName}: ${JSON.stringify(streams)}`);
   return (stream.time_constraint as { field?: string; since?: string; until?: string } | null) ?? null;
+}
+
+/** The persisted field allowlist for one child-grant stream, or null for all fields. */
+async function issuedStreamFields(grantPackageId: string, streamName: string): Promise<string[] | null> {
+  const access = await getGrantPackageAccess(grantPackageId);
+  assert.ok(access, `package ${grantPackageId} must be readable`);
+  const members = (access.members ?? []) as Record<string, unknown>[];
+  assert.equal(members.length, 1, `expected exactly one child grant: ${JSON.stringify(members)}`);
+  const grant = mustExist(members[0], "package must carry one member").grant as Record<string, unknown>;
+  const streams = (grant.streams ?? []) as Record<string, unknown>[];
+  const stream = streams.find((entry) => entry.name === streamName);
+  assert.ok(stream, `the issued grant must carry stream ${streamName}: ${JSON.stringify(streams)}`);
+  return (stream.fields as string[] | null) ?? null;
 }
 
 function postConsentChallenge(
@@ -6583,6 +6607,66 @@ test("accepting with no date range leaves the issued grant unbounded in time", a
       await issuedStreamTimeConstraint(stringField(tokenBody, "grant_package_id"), stream.name),
       null,
       "no range chosen means no temporal bound recorded"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// The consent screen must not offer a cosmetic field picker. A narrowed list
+// travels through the existing scope resolver and is persisted on the child
+// grant, which is the same record the read path enforces.
+test("accepting a consent challenge carries the owner's selected fields onto the issued grant", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "stream-fields-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    const stream = mustExist(
+      source.streams.find((entry) => entry.fields.length >= 3 && entry.fields.some((field) => !field.required)),
+      "the fixture must publish a field-narrowable stream with optional fields"
+    );
+    const chosenFields = stream.fields.filter((field) => !field.required).slice(0, 1).map((field) => field.name);
+
+    const { status, body } = await postConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      consentChallengeAcceptBody({
+        chosen: [{ source, streams: [stream] }],
+        client,
+        model,
+        streamFields: { [stream.id]: chosenFields },
+      })
+    );
+    assert.equal(status, 200, JSON.stringify(body));
+
+    const code = mustExist(
+      new URL(stringField(body, "redirect_url")).searchParams.get("code"),
+      "the approval must return an authorization code"
+    );
+    const { body: tokenBody } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: consentChallengeVerifier,
+        grant_type: "authorization_code",
+        redirect_uri: HOSTED_MCP_REDIRECT_URI,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+
+    const persisted = await issuedStreamFields(stringField(tokenBody, "grant_package_id"), stream.name);
+    const required = stream.fields.filter((field) => field.required).map((field) => field.name);
+    assert.deepEqual(
+      persisted,
+      [...new Set([...chosenFields, ...required])].sort(),
+      "the issued grant must record the owner's narrowed field set plus the manifest-required consent floor"
     );
   } finally {
     await closeServer(server);

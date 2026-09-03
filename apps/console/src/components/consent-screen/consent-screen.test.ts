@@ -204,7 +204,7 @@ test("every field the consent screen reads off a stream exists on the AS model",
   // Catches the narrower rot the field-set test above cannot: a stream field
   // the screen reads that the server never sends.
   const streamFields = declaredFields(MODEL_SOURCE, "ConsentStreamModel");
-  for (const field of ["fieldsTotal", "id", "label", "name", "selected", "selectionValue", "sentence", "timePhrase"]) {
+  for (const field of ["fields", "fieldsTotal", "id", "label", "name", "selected", "selectionValue", "sentence", "timePhrase"]) {
     assert.ok(streamFields.includes(field), `ConsentStreamModel must declare ${field}`);
     assert.ok(
       new RegExp(`readonly ${field}[?]?:`).test(AS_HELPERS_SOURCE),
@@ -323,4 +323,30 @@ test("the data range is NOT folded into the approval artifact digest", () => {
   );
   assert.ok(digestCall.length > 0, "vacuity guard: the digest call must be found");
   assert.doesNotMatch(digestCall, /streamRanges|stream_range/, "the digest must not cover the data range");
+});
+
+test("the owner's selected fields are submitted through the declaration-checked narrowing path", () => {
+  assert.match(CLIENT_SOURCE, /initialFieldSelection/, "every manifest field starts selected");
+  assert.match(CLIENT_SOURCE, /Choose fields to share/, "Change must reveal a real field list");
+  assert.match(CLIENT_SOURCE, /streamFields\[stream\.id\]/, "the decision must keep fields keyed by stable stream id");
+  assert.match(ACTIONS_SOURCE, /stream_fields: decision\.streamFields/, "the accept request must carry field selections");
+  assert.match(
+    AS_HELPERS_SOURCE,
+    /readonly fields: ReadonlyArray<\{ readonly description\?: string; readonly name: string; readonly required: boolean \}>/,
+    "the AS model must publish the declaration-backed field list"
+  );
+});
+
+test("field narrowing is NOT folded into the approval artifact digest", () => {
+  const digestCall = ACTIONS_SOURCE.slice(
+    ACTIONS_SOURCE.indexOf("computeHostedMcpDecisionDigest({"),
+    ACTIONS_SOURCE.indexOf("return postChallenge")
+  );
+  assert.ok(digestCall.length > 0, "vacuity guard: the digest call must be found");
+  assert.doesNotMatch(digestCall, /streamFields|stream_fields/, "the digest must not cover manifest-normalized field choices");
+});
+
+test("source disclosures use the native details open state, not an invalid DOM defaultOpen prop", () => {
+  assert.doesNotMatch(CLIENT_SOURCE, /defaultOpen/, "details has no defaultOpen attribute; React warns and forwards it to the DOM");
+  assert.match(CLIENT_SOURCE, /onToggle=\{\(event\)/, "the owner must still be able to open and close each source");
 });

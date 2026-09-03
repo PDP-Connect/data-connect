@@ -38,6 +38,7 @@ import {
   type StreamScopeSelection,
   parseSubmittedStreamScopes,
   resolveStreamScopeSelection,
+  scopeFieldsInputName,
   scopeSinceInputName,
   scopeUntilInputName,
 } from "../hosted-mcp-stream-scope.ts";
@@ -59,6 +60,7 @@ import {
   resolveHostedMcpSourceDescriptor,
   validateAuthorizePkce,
 } from "./as-consent-ui-helpers.ts";
+import type { FetchClientLogoOptions } from "../client-logo-cache.ts";
 
 // ─── Minimal structural types ────────────────────────────────────────────────
 
@@ -287,6 +289,8 @@ export interface MountAsAuthorizeContext {
   asPublicUrl: string | null;
   /** The hosted MCP source picker capabilities (rendering + registry lookups). */
   consentPickerCaps: ConsentPickerCapabilities;
+  /** Safe server-side logo fetch dependencies; test-only overrides keep logo tests offline. */
+  clientLogoFetchOptions?: FetchClientLogoOptions;
   /** Consent store for pending-grant lifecycle. */
   consentStore: ConsentStore;
   /** The consent/authorize UI rendering helpers. */
@@ -1206,6 +1210,23 @@ function submittedStreamRanges(value: unknown): Map<string, { since?: string; un
   return ranges;
 }
 
+function submittedStreamFields(value: unknown): Map<string, string[]> {
+  const fields = new Map<string, string[]>();
+  if (!(value && typeof value === "object") || Array.isArray(value)) {
+    return fields;
+  }
+  for (const [streamId, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(raw)) {
+      continue;
+    }
+    fields.set(
+      streamId,
+      raw.filter((field): field is string => typeof field === "string" && field.trim().length > 0).map((field) => field.trim())
+    );
+  }
+  return fields;
+}
+
 /**
  * Translates the console's decision into the body the form POST handler
  * already validates.
@@ -1242,10 +1263,12 @@ async function buildChallengeApprovalBody(
     ctx.consentPickerCaps,
     ctx.consentUi,
     toPendingGrantRequestClient(challenge.client),
-    challenge.authorizeParams.redirect_uri
+    challenge.authorizeParams.redirect_uri,
+    ctx.clientLogoFetchOptions
   );
   const chosenSourceIds = new Set(submittedStrings(submitted.source_id));
   const chosenStreamIds = new Set(submittedStrings(submitted.stream));
+  const fields = submittedStreamFields(submitted.stream_fields);
   const ranges = submittedStreamRanges(submitted.stream_range);
 
   const selection: string[] = [];
@@ -1256,7 +1279,7 @@ async function buildChallengeApprovalBody(
   // through the SAME declaration-checked path as the form's — stamped with the
   // manifest's own `consent_time_field`, rejected if the stream declares no
   // time axis — instead of a parallel route that could diverge.
-  const scopeInputs: Record<string, string> = {};
+  const scopeInputs: Record<string, string | string[]> = {};
   for (const source of model.sources) {
     if (!chosenSourceIds.has(source.id)) {
       continue;
@@ -1267,6 +1290,10 @@ async function buildChallengeApprovalBody(
         continue;
       }
       stream.push(modelStream.selectionValue);
+      const selectedFields = fields.get(modelStream.id);
+      if (selectedFields) {
+        scopeInputs[scopeFieldsInputName(source.id, modelStream.name)] = selectedFields;
+      }
       // Keyed by the model's own `stream.id`, so a range for a stream the
       // owner did not choose is ignored rather than applied — the same
       // posture resolveSubmittedStreamScopes takes for the form.
@@ -1517,7 +1544,8 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         ctx.consentPickerCaps,
         ctx.consentUi,
         toPendingGrantRequestClient(challenge.client),
-        challenge.authorizeParams.redirect_uri
+        challenge.authorizeParams.redirect_uri,
+        ctx.clientLogoFetchOptions
       );
       return res.json(model);
     }

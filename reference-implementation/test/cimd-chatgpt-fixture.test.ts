@@ -44,7 +44,6 @@ import {
 import {
   isLogoFetchAllowed,
   resolveClientTrust,
-  resolveOperatorTrustConfig,
 } from "../server/client-trust-registry.ts";
 import { requireRegisteredRedirectUri } from "../server/routes/as-consent-ui-helpers.ts";
 
@@ -252,7 +251,7 @@ test("the second resolution is served from cache rather than refetched", async (
   assert.equal(fetches, 1, "a consent render must not refetch the client's document every time");
 });
 
-test("ChatGPT's logo needs an operator decision, because it is not on chatgpt.com", async () => {
+test("ChatGPT's domain-verified metadata logo is eligible for the approved cache", async () => {
   const result = await freshFetch(CHATGPT_CLIENT_ID, {
     dnsLookupImpl: publicDns,
     fetchImpl: async () => serve(RAW_FIXTURE),
@@ -262,9 +261,5 @@ test("ChatGPT's logo needs an operator decision, because it is not on chatgpt.co
   const logoUri = client.metadata.logo_uri as string;
 
   assert.equal(new URL(logoUri).hostname, "persistent.oaistatic.com");
-  // Verified for chatgpt.com; that proves nothing about oaistatic.com.
-  assert.equal(isLogoFetchAllowed(logoUri, CHATGPT_CLIENT_ID, trust), false);
-
-  const config = resolveOperatorTrustConfig({ logoHosts: ["persistent.oaistatic.com"] });
-  assert.equal(isLogoFetchAllowed(logoUri, CHATGPT_CLIENT_ID, trust, config), true);
+  assert.equal(isLogoFetchAllowed(logoUri, CHATGPT_CLIENT_ID, trust), true);
 });
