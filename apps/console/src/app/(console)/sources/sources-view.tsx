@@ -82,6 +82,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import { type RunNowResult, runConnectorNowAction } from "./actions.ts";
 import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
+import type { ConnectorBrandIconIndex } from "../lib/connector-brand-index.ts";
 import {
   buildDuplicateSourceReview,
   collapseDuplicateFallbackSources,
@@ -103,6 +104,7 @@ interface SourcesViewProps {
    * footer, never an alarm; the per-source detail page carries the drilldown.
    */
   churnAdvisory?: SourcesChurnAdvisory | null;
+  connectorIndex: ConnectorBrandIconIndex;
   instances: SourceInstanceView[];
   /** Whether the real Sync/Revoke/Reactivate mutations are wired (live) or read-only. */
   interactive: boolean;
@@ -123,6 +125,7 @@ const ADD_SOURCE_HREF = "/sources/add";
 
 export function SourcesView({
   churnAdvisory,
+  connectorIndex,
   instances,
   interactive,
   reactivateAction,
@@ -180,6 +183,7 @@ export function SourcesView({
         <aside aria-label="Sources" className="rr-s-list">
           {visibleActiveInstances.map((instance) => (
             <InstanceListItem
+              connectorIndex={connectorIndex}
               instance={instance}
               key={instance.id}
               onSelect={() => setSelectedId(instance.id)}
@@ -189,6 +193,7 @@ export function SourcesView({
 
           {duplicateGroups.map((group) => (
             <DuplicateSourceGroupList
+              connectorIndex={connectorIndex}
               group={group}
               key={group.connectorId}
               onSelect={setSelectedId}
@@ -204,6 +209,7 @@ export function SourcesView({
               <summary className="rr-s-revoked-group__summary">Revoked ({revokedInstances.length})</summary>
               {revokedInstances.map((instance) => (
                 <InstanceListItem
+                  connectorIndex={connectorIndex}
                   instance={instance}
                   key={instance.id}
                   onSelect={() => setSelectedId(instance.id)}
@@ -227,6 +233,7 @@ export function SourcesView({
               </p>
               {archivedInstances.map((instance) => (
                 <InstanceListItem
+                  connectorIndex={connectorIndex}
                   instance={instance}
                   key={instance.id}
                   onSelect={() => setSelectedId(instance.id)}
@@ -251,6 +258,7 @@ export function SourcesView({
               </p>
               {setupFailedGroups.map((group) => (
                 <InstanceListItem
+                  connectorIndex={connectorIndex}
                   instance={group.representative}
                   key={group.connectorId}
                   onSelect={() => setSelectedId(group.representative.id)}
@@ -286,10 +294,12 @@ export function SourcesView({
 }
 
 function DuplicateSourceGroupList({
+  connectorIndex,
   group,
   onSelect,
   selectedId,
 }: {
+  connectorIndex: ConnectorBrandIconIndex;
   group: DuplicateSourceGroup;
   onSelect: (id: string) => void;
   selectedId: string | null;
@@ -305,6 +315,7 @@ function DuplicateSourceGroupList({
       </p>
       {group.items.map((instance) => (
         <InstanceListItem
+          connectorIndex={connectorIndex}
           instance={instance}
           key={instance.id}
           onSelect={() => onSelect(instance.id)}
@@ -378,10 +389,12 @@ function ChurnAdvisory({ advisory }: { advisory: SourcesChurnAdvisory }) {
 }
 
 function InstanceListItem({
+  connectorIndex,
   instance,
   onSelect,
   selected,
 }: {
+  connectorIndex: ConnectorBrandIconIndex;
   instance: SourceInstanceView;
   onSelect: () => void;
   selected: boolean;
@@ -393,7 +406,7 @@ function InstanceListItem({
   const inner = (
     <>
       <span className="rr-s-item__identity">
-        <ConnectorIcon className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
+        <ConnectorIcon connectorId={instance.connectorId} connectorIndex={connectorIndex} className="rr-s-item__icon" name={instance.displayName} />
         <span className="rr-s-item__name">{instance.displayName}</span>
       </span>
       {/* Keep list rows comparable: connector kind lives in the selected detail

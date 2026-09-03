@@ -346,6 +346,7 @@ import {
   promoteBrowserEnrollmentShellBinding,
 } from "./routes/ref-browser-enrollment-shell.ts";
 import { mountRefConnectionAcknowledgeLoss } from "./routes/ref-connection-acknowledge-loss.ts";
+import { mountConnectorBrandIndex } from "./routes/connector-brand-index.ts";
 import { mountRefConnectionConfirmCoverageHorizon } from "./routes/ref-connection-confirm-coverage-horizon.ts";
 import { mountRefConnectionPause } from "./routes/ref-connection-pause.ts";
 import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from "./routes/ref-connection-resume.ts";
@@ -5985,6 +5986,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   };
 
   mountRefConnectorsList(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectorsList>[1]);
+  mountConnectorBrandIndex(app);
   mountRefFleetHealth(app, refConnectorsContext as unknown as Parameters<typeof mountRefFleetHealth>[1]);
   mountRefConnectorDetail(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectorDetail>[1]);
 

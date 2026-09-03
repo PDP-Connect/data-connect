@@ -358,7 +358,6 @@ function projectTemplate(
     connector_key: connectorKey,
     connector_modality: modality,
     display_name: displayNameForTemplate(connectorKey, manifest),
-    icon: manifest.icon ?? null,
     // Development-tier-only fact: whether this connector is a KNOWN scaffold
     // (unconditional SKIP_RESULT, no real collection) versus real-but-unproven.
     // The console needs this to decide whether a Development-tier card may

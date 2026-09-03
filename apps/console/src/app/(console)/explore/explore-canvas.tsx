@@ -39,7 +39,8 @@
  */
 "use client";
 
-import { IcInput } from "@pdpp/brand-react";
+import { ConnectorIcon, IcInput } from "@pdpp/brand-react";
+import type { ConnectorBrandIconIndex } from "../lib/connector-brand-index.ts";
 import { humanizeFieldLabel, rowPrimary, rowSecondary } from "@pdpp/display";
 import { kindGlyph, RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
 import { feedDescription, feedSectionTitle } from "@pdpp/operator-ui/components/views/explorer-utils";
@@ -334,6 +335,7 @@ function dedupeWarnings(warnings: readonly ExplorerWarning[]): ExplorerWarning[]
 }
 
 interface ExploreCanvasProps {
+  connectorIndex: ConnectorBrandIconIndex;
   data: RecordsExplorerData;
   /**
    * The Explore route base path (e.g. "/explore"). A plain string —
@@ -1738,11 +1740,13 @@ const STREAM_GROUP_TOP_N = 8;
 // a builder, not a wall) UNLESS it holds an active filter or a search is matching
 // inside it — then it opens so the relevant streams are visible without a click.
 function SourceFacetGroup({
+  connectorIndex,
   group,
   forceOpen,
   onToggle,
   onToggleExclude,
 }: {
+  connectorIndex: ConnectorBrandIconIndex;
   group: SourceStreamGroup;
   forceOpen: boolean;
   onToggle: (stream: string) => void;
@@ -1755,6 +1759,7 @@ function SourceFacetGroup({
   return (
     <details className="rr-x-source-group" open={forceOpen || hasActive}>
       <summary className="rr-x-source-group__summary">
+        <ConnectorIcon connectorId={group.connectorId} connectorIndex={connectorIndex} name={group.displayName} />
         <span className="rr-x-source-group__name" title={group.displayName}>
           {group.displayName}
         </span>
@@ -1793,10 +1798,12 @@ function SourceFacetGroup({
 // two sources appears under EACH with that source's own number, never a global
 // tally (RL2/RL3). A "search within filters" box tames many sources/streams.
 function StreamFacets({
+  connectorIndex,
   groups,
   onToggle,
   onToggleExclude,
 }: {
+  connectorIndex: ConnectorBrandIconIndex;
   groups: readonly SourceStreamGroup[];
   onToggle: (stream: string) => void;
   onToggleExclude: (stream: string) => void;
@@ -1837,6 +1844,7 @@ function StreamFacets({
       <div className="rr-x-facets__scroll">
         {filtered.map((g) => (
           <SourceFacetGroup
+            connectorIndex={connectorIndex}
             forceOpen={singleSource || searching}
             group={g}
             key={g.connectionId}
@@ -3015,6 +3023,7 @@ function SavedViewTabs({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ExploreCanvas orchestrates the full workbench state; this cell only swaps the shared record identity renderer.
 export function ExploreCanvas({
+  connectorIndex,
   data,
   explorePath,
   order = "newest",
@@ -3795,7 +3804,7 @@ export function ExploreCanvas({
               </div>
             </>
           )}
-          <StreamFacets groups={streamGroups} onToggle={toggleStream} onToggleExclude={toggleExcludeStream} />
+          <StreamFacets connectorIndex={connectorIndex} groups={streamGroups} onToggle={toggleStream} onToggleExclude={toggleExcludeStream} />
         </div>
         {/* P1: sticky close affordance so users aren't trapped in the mobile rail */}
         <div className="rr-x-rail__close">

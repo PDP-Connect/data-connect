@@ -21,6 +21,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { getAsInternalUrl, withOwnerSessionCookie } from "@/app/(console)/lib/owner-token.ts";
 import { verifyDashboardSession } from "@/app/(console)/lib/verify-session.ts";
+import { loadConnectorBrandIndex } from "@/app/(console)/lib/connector-brand-index.ts";
 import { ConsentScreen } from "@/components/consent-screen/consent-screen-client.tsx";
 import type { ConsentDecision, ConsentScreenModel } from "@/components/consent-screen/consent-screen-model.ts";
 import { acceptConsentChallenge, rejectConsentChallenge } from "./actions.ts";
@@ -69,7 +70,7 @@ export default async function ConsentPage({
   if (!challenge) {
     notFound();
   }
-  const model = await loadChallenge(challenge);
+  const [model, connectorIndex] = await Promise.all([loadChallenge(challenge), loadConnectorBrandIndex()]);
   if (!model) {
     notFound();
   }
@@ -86,5 +87,5 @@ export default async function ConsentPage({
     return rejectConsentChallenge(challenge);
   }
 
-  return <ConsentScreen acceptAction={acceptAction} model={model} rejectAction={rejectAction} />;
+  return <ConsentScreen acceptAction={acceptAction} connectorIndex={connectorIndex} model={model} rejectAction={rejectAction} />;
 }
