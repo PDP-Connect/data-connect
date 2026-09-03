@@ -155,8 +155,6 @@ export interface SourceInstanceView {
    * Never cheerier than its worst axis; see `lib/fused-source-status.ts`.
    */
   fusedStatus: FusedSourceStatus;
-  /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: SourceManifestLike["icon"];
   /** Stable React key + route id. */
   id: string;
   /** True when this connection's data arrives by device push (sync is inert). */
@@ -257,12 +255,6 @@ export interface SourcesRuntimeAdvisory {
 
 type SourceManifestLike = ConnectorManifestLike & {
   connector_id: string;
-  /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: {
-    color?: string | null;
-    kind?: string | null;
-    svg?: string | null;
-  } | null;
   streams?: readonly StreamManifestEntry[];
 };
 
@@ -717,7 +709,6 @@ export function toSourceInstanceView(
     connectorInstanceId,
     detailHref: sourceDetailHrefFor(routeId, summary),
     displayName,
-    icon: manifest?.icon ?? null,
     id: routeId,
     sourceScope,
     isLocalDevicePush,

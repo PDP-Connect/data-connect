@@ -50,6 +50,7 @@ import {
 import { useMemo, useState } from "react";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
 import { ThemeToggle } from "@/components/theme/theme-toggle.tsx";
+import type { ConnectorBrandIconIndex } from "@/app/(console)/lib/connector-brand-index.ts";
 import styles from "./consent-screen.module.css";
 import type {
   ConsentDecision,
@@ -370,6 +371,7 @@ function StreamRow({
 }
 
 function SourceRow({
+  connectorIndex,
   source,
   selection,
   fieldSelection,
@@ -386,6 +388,7 @@ function SourceRow({
   applyRangeToAllSelected,
 }: {
   active: boolean;
+  connectorIndex: ConnectorBrandIconIndex;
   applyRangeToAllSelected: (since: string, until: string) => void;
   hidden: boolean;
   onToggleSource: (checked: boolean) => void;
@@ -431,7 +434,7 @@ function SourceRow({
     >
       <summary className={styles.sourceHead}>
         <span className={styles.sourceIcon}>
-          <ConnectorIcon icon={source.icon ?? null} name={source.name} />
+          <ConnectorIcon connectorId={source.connectorId} connectorIndex={connectorIndex} name={source.name} />
         </span>
         <span className={styles.sourceText}>
           {/* Layout in CSS, not inline: the account handle can only truncate
@@ -481,6 +484,7 @@ export type ConsentSubmitState = "idle" | "submitting" | "failed";
 
 export function ConsentScreen({
   acceptAction,
+  connectorIndex,
   model,
   rejectAction,
 }: {
@@ -491,6 +495,7 @@ export function ConsentScreen({
    * non-serializable props.
    */
   acceptAction: (decision: ConsentDecision) => Promise<string>;
+  connectorIndex: ConnectorBrandIconIndex;
   model: ConsentScreenModel;
   rejectAction: () => Promise<string>;
 }) {
@@ -764,6 +769,7 @@ export function ConsentScreen({
                     <SourceRow
                       active={visibleIndex >= 0 && visibleIndex === activeIndex}
                       applyRangeToAllSelected={applyRangeToAllSelected}
+                      connectorIndex={connectorIndex}
                       fieldSelection={fieldSelection}
                       hidden={isHidden}
                       key={source.id}

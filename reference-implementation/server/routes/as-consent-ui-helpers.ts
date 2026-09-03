@@ -751,7 +751,7 @@ export interface HostedMcpConsentChallengeModel {
   readonly sources: ReadonlyArray<{
     readonly account: string;
     /** Manifest-declared brand glyph, passed straight to ConnectorIcon; null renders its Monogram. */
-    readonly icon: { readonly color: string | null; readonly kind: string | null; readonly svg: string | null } | null;
+    readonly connectorId: string;
     readonly id: string;
     readonly name: string;
     readonly selectionValue: string;
@@ -822,22 +822,6 @@ export async function buildHostedMcpConsentChallengeModel(
   // fallback — and `displayName` already encodes exactly that precedence.
   const clientName = clientDisplay?.displayName ?? "This app";
   const logo = await resolveConsentClientLogo(client, clientLogoFetchOptions);
-  // Icons come from each row's own manifest, the same value /sources passes to
-  // ConnectorIcon. Resolved here rather than in the console because the
-  // console has no manifest reader, and because `validateManifestIcon` has
-  // already allowlist-checked this SVG on the read that produced it.
-  const icons = new Map<string, HostedMcpConsentChallengeModel["sources"][number]["icon"]>();
-  for (const row of rows) {
-    if (icons.has(row.connectorId)) {
-      continue;
-    }
-    const manifest = await caps.getConnectorManifest(row.connectorId);
-    const icon = (manifest as { icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null })?.icon;
-    icons.set(
-      row.connectorId,
-      icon?.svg ? { color: icon.color ?? null, kind: icon.kind ?? null, svg: icon.svg } : null
-    );
-  }
   return {
     accessMode: {
       supported: [...HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES],
@@ -885,7 +869,7 @@ export async function buildHostedMcpConsentChallengeModel(
       // separately, so using it as a fallback would display two conflicting
       // "data types" facts on the same collapsed row.
       account: row.connectionName ?? "",
-      icon: icons.get(row.connectorId) ?? null,
+      connectorId: row.connectorId,
       id: row.sourceKey,
       name: row.connectorTypeLabel,
       selectionValue: row.formValue,
