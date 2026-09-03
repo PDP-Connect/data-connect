@@ -43,6 +43,13 @@ test("a repeated source name is stripped from the account label", () => {
   assert.equal(sourceAccountLabel("Amazon", "Amazon - gezalsatx@gmail.com"), "gezalsatx@gmail.com");
   assert.equal(sourceAccountLabel("Apple Contacts", "Apple Contacts - tim@opendatalabs.com"), "tim@opendatalabs.com");
   assert.equal(sourceAccountLabel("ChatGPT", "chaka.dondo@gmail.com"), "chaka.dondo@gmail.com");
+  assert.equal(sourceAccountLabel("H-E-B", "HEB - x"), "x");
+});
+
+test("trust hints link triggers to a tooltip id", () => {
+  assert.match(CLIENT_SOURCE, /aria-describedby=\{TRUST_HINT_ID\}/);
+  assert.match(CLIENT_SOURCE, /<IcTooltipContent id=\{TRUST_HINT_ID\}/);
+  assert.match(CLIENT_SOURCE, /<IcPopoverPopup id=\{TRUST_HINT_ID\}[^>]+role="tooltip"/);
 });
 
 test("client metadata line has both, one, and no published links", () => {
@@ -190,7 +197,7 @@ test("client trust explanations live only in an accessible chip hint", () => {
   assert.doesNotMatch(CLIENT_SOURCE, /<details className=\{styles\.trustDetails\}/);
   assert.match(CLIENT_SOURCE, /<IcTooltip>/, "desktop hover and focus use the shared tooltip primitive");
   assert.match(CLIENT_SOURCE, /<IcPopover>/, "touch uses a dismissible, anchored shared popover");
-  assert.match(CLIENT_SOURCE, /role="dialog"/, "the tappable explanation is announced as an interactive popover");
+  assert.match(CLIENT_SOURCE, /role="tooltip"/, "the explanation is announced as a tooltip");
   assert.match(CLIENT_SOURCE, /Dismiss trust explanation/, "the touch popover has an explicit dismiss control");
 });
 
