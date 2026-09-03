@@ -24,7 +24,14 @@ const MALFORMED_STREAM_REGEX = /manifest\.streams\[1\] must be an object/;
 const IMPORT_REGEX = /from\s+["']([^"']+)["']/g;
 const NO_CORE_COLLECTION_REGEX = /collection|legacy|connector-manifest-validation/i;
 const RUNTIME_IMPORT_REGEX = /import\s+(?!type\s)[\s\S]*?from\s+["']([^"']+)["']/g;
-const SOURCE_CONTRACT_PATH_REGEX = /\/src\/public\/source\.ts$/;
+// @pdpp/reference-contract is vendored here as a compiled-JS tarball, not a
+// byte-identical `npm pack` of pdpp's raw-TypeScript source directory (see
+// reference-implementation/vendor/README.md) -- Node refuses to type-strip
+// vendored .ts files under node_modules, which broke every real invocation
+// of this repo's own pdpp CLI before that fix. The resolved module now lives
+// at dist/public/source.js (compiled from src/public/source.ts), not
+// src/public/source.ts directly.
+const SOURCE_CONTRACT_PATH_REGEX = /\/dist\/public\/source\.js$/;
 const PROJECTED_DECLARATION_VERSION_REGEX = /^reference\.legacy-connector-projection\.v1:sha256:[0-9a-f]{64}$/;
 
 const query = {
