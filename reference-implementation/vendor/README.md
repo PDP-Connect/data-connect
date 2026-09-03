@@ -160,3 +160,22 @@ otherwise identical to the `262c7bd8` note above (`npm install && npm pack`, rew
 2 nested `file:` deps to `*` AFTER packing, delete `vendor/`, re-tar) — the `files`
 allowlist and additive exports live entirely in `data-connectors`, nothing about this
 repo's own re-vendor mechanics changed.
+
+**Update (2026-09-03, later same day): pin moved a third time to `data-connectors` commit
+`878b4cae785d1d444ff17fff5c44726528209745`** (`main`, merge of `data-connectors#74`, "fix
+declarations for polyfill-connectors" — fixes `data-connectors#71`). The `dc4008c3` pin
+above fixed the two named export needs but exposed a THIRD, separate defect: this
+package's `tsconfig.build.json` set `declaration: false`, so its real build never emitted
+any `.d.ts` for any of its 42 export subpaths — every TypeScript consumer (this repo
+included) got implicit `any` for everything imported from it, tripping strict-mode
+diagnostics. This was masked in every earlier local check here because this repo's own
+INTERIM hand-rolled vendoring step (before `#68` existed) had set `declaration: true` in
+its own scratch build config, shipping 120 `.d.ts` files that happened to paper over the
+gap — first genuinely caught running `npm --prefix reference-implementation run typecheck`
+(the exact command CI's "typecheck reference implementation" job runs, NOT the root
+`npm run typecheck`, whose project references never actually cover this directory) against
+a real `dc4008c3` re-vendor. `data-connectors#74` fixed it at source: `.d.ts` + `.d.ts.map`
+now ship for all 42 subpaths, with NodeNext- and bundler-moduleResolution proofs and a
+pack-time guard against regressing. Confirmed via
+`npm --prefix reference-implementation run typecheck`: clean at this pin. Re-derivation
+recipe is otherwise identical to the two notes above.
