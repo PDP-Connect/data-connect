@@ -438,8 +438,13 @@ function setup(
   // sweep interval). Without a ref'd handle, Node's test runner can flag
   // that still-pending (but by-design) promise as abandoned before the
   // race actually resolves. Documented upstream pattern for this exact
-  // interaction: nodejs/node#52025 / #51381.
-  const keepAlive = setInterval(() => {}, 1000);
+  // interaction: nodejs/node#52025 / #51381. A 10ms tick, not a longer one:
+  // this suite's own custom --test-reporter (an async generator consuming
+  // the runner's event stream) adds enough latency that a slow-ticking
+  // ref'd timer (tried at 1000ms first) doesn't keep the runner's liveness
+  // check satisfied in time -- confirmed directly against
+  // `node --test --test-reporter=<this repo's reporter>`.
+  const keepAlive = setInterval(() => {}, 10);
   t.after(() => clearInterval(keepAlive));
 
   const calls: RunCalls = {

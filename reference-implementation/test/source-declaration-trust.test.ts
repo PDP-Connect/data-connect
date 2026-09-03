@@ -279,8 +279,13 @@ test("a late fetch response after timeout is canceled and closes its pinned disp
   // against the deliberately-still-pending lateResponse promise, so Node's
   // test runner does not treat it as abandoned before the timeout resolves
   // the race. Documented upstream pattern for this exact interaction:
-  // nodejs/node#52025 / #51381.
-  const keepAlive = setInterval(() => {}, 1000);
+  // nodejs/node#52025 / #51381. A 10ms tick, not a longer one: this suite's
+  // own custom --test-reporter (an async generator consuming the runner's
+  // event stream) adds enough latency that a slow-ticking ref'd timer
+  // (tried at 1000ms first) doesn't keep the runner's liveness check
+  // satisfied in time -- confirmed directly against
+  // `node --test --test-reporter=<this repo's reporter>`.
+  const keepAlive = setInterval(() => {}, 10);
   t.after(() => clearInterval(keepAlive));
   let bodyCancelled = false;
   let dispatcherCloses = 0;
@@ -577,8 +582,13 @@ test("declaration retrieval bounds DNS work by the configured deadline", async (
   // against the deliberately-unresolved DNS promise below, so Node's test
   // runner does not treat it as abandoned before the timeout resolves the
   // race. Documented upstream pattern for this exact interaction:
-  // nodejs/node#52025 / #51381.
-  const keepAlive = setInterval(() => {}, 1000);
+  // nodejs/node#52025 / #51381. A 10ms tick, not a longer one: this
+  // suite's own custom --test-reporter (an async generator consuming the
+  // runner's event stream) adds enough latency that a slow-ticking ref'd
+  // timer (tried at 1000ms first) doesn't keep the runner's liveness
+  // check satisfied in time -- confirmed directly against
+  // `node --test --test-reporter=<this repo's reporter>`.
+  const keepAlive = setInterval(() => {}, 10);
   t.after(() => clearInterval(keepAlive));
   const result = await retrieveSourceDeclaration(
     { acceptedPointer: POINTER, expectedSourceId: RESOURCE },

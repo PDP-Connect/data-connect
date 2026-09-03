@@ -136,7 +136,15 @@ test("cancelRun aborts only the targeted run; sibling run is untouched", async (
   // test runner does not treat run_b's deliberately-still-pending promise
   // as abandoned before the test reaches its own cleanup. Documented
   // upstream pattern for this exact interaction: nodejs/node#52025 / #51381.
-  const keepAlive = setInterval(() => {}, 1000);
+  // A 10ms tick, not a longer one: under this suite's own custom
+  // --test-reporter (an async generator consuming the runner's event
+  // stream), a 1000ms interval reproduced the same false positive --
+  // reporter event consumption adds enough latency that a slow-ticking
+  // ref'd timer doesn't keep the runner's own liveness check satisfied in
+  // time. Confirmed directly: `node --test --test-reporter=<this repo's
+  // reporter> <file>` reproduced the failure at 1000ms and passed cleanly
+  // at 10ms.
+  const keepAlive = setInterval(() => {}, 10);
   t.after(() => clearInterval(keepAlive));
 
   const runA = cancellableRun();
