@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Real connector icon SVGs for the consent design preview, read from the
- * same source the reference-server round of this mock committed at
- * 4dbe7fa9f (`reference-implementation/server/assets/source-icons/`) —
- * copies of PDP-Connect/data-connectors connector icon SVGs.
+ * Real connector icon SVGs for the consent design preview, read from this
+ * route's own `icons/` directory — copies of PDP-Connect/data-connectors
+ * connector icon SVGs. Originally committed under
+ * `reference-implementation/server/assets/source-icons/` during the
+ * reference-server round of this mock (4dbe7fa9f); moved here when that
+ * route was retired (7ae7caed5) so this page owns the assets it depends on
+ * instead of reaching into a directory that no longer exists.
  *
  * Loaded server-side at module init and passed through `ConnectorIcon`'s
  * `{ kind: "inline_svg", svg }` prop — the exact shape a real connector
@@ -20,18 +23,7 @@ import { fileURLToPath } from "node:url";
 import { SOURCE_ICON_FILES } from "./mock-data.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ICONS_DIR = join(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "..",
-  "reference-implementation",
-  "server",
-  "assets",
-  "source-icons"
-);
+const ICONS_DIR = join(__dirname, "icons");
 
 function loadSvg(file: string): string | null {
   try {
