@@ -528,6 +528,7 @@ import {
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
 import { createConsentStore } from "./stores/consent-store.ts";
+import { createConsentChallengeStore } from "./stores/consent-challenge-store.ts";
 import {
   createDeviceExporterStore,
   DeviceBatchConflictError,
@@ -4937,6 +4938,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     asPublicUrl: opts.asPublicUrl || null,
     ...(opts.clientLogoFetchDependencies ? { clientLogoFetchOptions: opts.clientLogoFetchDependencies } : {}),
     consentPickerCaps: consentPickerCaps as unknown as Parameters<typeof mountAsAuthorize>[1]["consentPickerCaps"],
+    consentChallengeStore: createConsentChallengeStore(),
     consentStore: consentStore as unknown as Parameters<typeof mountAsAuthorize>[1]["consentStore"],
     consentUi: consentUi as unknown as Parameters<typeof mountAsAuthorize>[1]["consentUi"],
     createHostedMcpGrantPackage: createHostedMcpGrantPackage as unknown as Parameters<
