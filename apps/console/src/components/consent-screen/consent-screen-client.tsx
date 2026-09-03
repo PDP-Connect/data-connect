@@ -184,7 +184,7 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
   return { selectedSourceCount, selectedStreamCount, totalStreamCount };
 }
 
-function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
+function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
   const publishedLinks = clientPublishedLinks(client.policyLinks);
   const trustExplanation =
     client.trust === "domain"
@@ -193,18 +193,18 @@ function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
         ? "Name and logo are self-reported. Nothing was verified."
         : "Confirmed by the operator of this server.";
   return (
-    <div style={{ alignItems: "flex-start", display: "flex", gap: "1rem" }}>
+    <header className={styles.consentHeader}>
       {/* `client.logo` is an AS-cached, same-origin URL — never the client's
           declared remote URI. The monogram remains the safe fallback for an
           unverified client or a logo fetch the AS could not approve. */}
       {client.logo ? (
         <img alt="" className={styles.clientLogo} src={client.logo} />
       ) : (
-        <span className="pdpp-monogram" data-initials={client.monogram} />
+        <span className={`pdpp-monogram ${styles.clientMonogram}`} data-initials={client.monogram} />
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-        <div style={{ alignItems: "center", display: "flex", gap: "0.5rem" }}>
-          <span className="pdpp-title">{client.name}</span>
+      <div className={styles.consentHeaderContent}>
+        <div className={styles.consentHeaderTitle}>
+          <h1 className={`pdpp-display ${styles.headline}`}>{client.name} wants to read your data</h1>
           <span className={styles.trustHintDesktop}>
             <IcTooltip>
               <IcTooltipTrigger aria-label={`${TRUST_LABEL[client.trust]}: ${trustExplanation}`} className={styles.trustHintTrigger}>
@@ -227,24 +227,24 @@ function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
             </IcPopover>
           </span>
         </div>
-        {/* Only rendered when the client actually proved a domain. Repeating
-            the app's own name on a line that reads as a domain would dress a
-            self-asserted name as a checked one. */}
-        {client.domain && <span className="pdpp-caption">{client.domain}</span>}
         <p className={`pdpp-caption ${styles.clientPublishedLinks}`}>
+          {client.domain && <span>{client.domain} · </span>}
           {publishedLinks.length > 0
             ? publishedLinks.map((link, index) => (
-              <span key={link.href}>
-                {index > 0 && " · "}
-                <a href={link.href} rel="noopener noreferrer nofollow" target="_blank">
-                  {link.label}
-                </a>
-              </span>
+                <span key={link.href}>
+                  {index > 0 && " · "}
+                  <a href={link.href} rel="noopener noreferrer nofollow" target="_blank">
+                    {link.label}
+                  </a>
+                </span>
               ))
             : "No privacy policy or terms published."}
         </p>
+        <p className="pdpp-body" style={{ color: "var(--muted-foreground)" }}>
+          Choose what it can read. Anything you leave unchecked stays private.
+        </p>
       </div>
-    </div>
+    </header>
   );
 }
 
@@ -653,13 +653,7 @@ export function ConsentScreen({
 
   return (
     <div className={styles.page}>
-      <TrustIdentity client={model.client} />
-      <div>
-        <h1 className={`pdpp-display ${styles.headline}`}>{model.client.name} wants to read your data</h1>
-        <p className="pdpp-body" style={{ color: "var(--muted-foreground)" }}>
-          Choose what it can read. Anything you leave unchecked stays private.
-        </p>
-      </div>
+      <ConsentHeader client={model.client} />
       <div className={styles.grid}>
         <div className={styles.body}>
           <div className="pdpp-sheet" style={{ padding: "1.25rem" }}>
