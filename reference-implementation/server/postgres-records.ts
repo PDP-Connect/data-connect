@@ -952,7 +952,8 @@ export function postgresPrepareDeviceFinalRecords(
                 primary_key_text = $5,
                 semantic_time = $6
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
-            AND deleted = FALSE`,
+            AND deleted = FALSE
+            AND (cursor_value, primary_key_text, semantic_time) IS DISTINCT FROM ($4, $5, $6)`,
           [connectorInstanceId, input.stream, recordKey, cursor, primary, semanticTime]
         );
         result.push({
@@ -1625,7 +1626,8 @@ async function repairPostgresIdenticalIngest({
               primary_key_text = $5,
               semantic_time = $6
         WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
-          AND deleted = FALSE`,
+          AND deleted = FALSE
+          AND (cursor_value, primary_key_text, semantic_time) IS DISTINCT FROM ($4, $5, $6)`,
       [connectorInstanceId, stream, recordKey, storedCursorValue, storedPrimaryKeyText, storedSemanticTime]
     );
   }
@@ -2982,7 +2984,10 @@ async function deletePostgresRecordTailForPair(
   connectorInstanceId: string,
   stream: string
 ): Promise<void> {
-  const semanticScopePrefix = `[${JSON.stringify(stream)},`;
+  const semanticScopePrefix = `[${JSON.stringify(stream)},`
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_");
   await client.query("DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
     stream,
@@ -3003,7 +3008,7 @@ async function deletePostgresRecordTailForPair(
     connectorInstanceId,
     stream,
   ]);
-  await client.query("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2", [
+  await client.query("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'", [
     connectorInstanceId,
     `${semanticScopePrefix}%`,
   ]);
