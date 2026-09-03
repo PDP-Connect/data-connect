@@ -61,6 +61,7 @@ import {
   validateAuthorizePkce,
 } from "./as-consent-ui-helpers.ts";
 import type { FetchClientLogoOptions } from "../client-logo-cache.ts";
+import { createConsentChallengeStore, type ConsentChallengeRecord, type ConsentChallengeStore } from "../stores/consent-challenge-store.ts";
 
 // ─── Minimal structural types ────────────────────────────────────────────────
 
@@ -98,65 +99,15 @@ interface RouteResponse {
 // alter `client_id`, `redirect_uri`, or the PKCE challenge between the
 // authorize request and the approval, because it never carries them.
 //
-// PROCESS-LOCAL AND DELIBERATELY SO, FOR NOW. A challenge lives seconds to
-// minutes and is consumed once; losing the map on restart costs the owner a
-// re-click of an authorize link that is itself still valid. That is the same
-// durability the staged PKCE shell already has. It does mean a multi-process
-// or multi-replica deployment MUST pin the authorize and approve requests to
-// one process, or move this to the same store that backs pending consent —
-// see CONSENT-REAL-FLOW-REPORT.md.
 const CONSENT_CHALLENGE_TTL_MS = 30 * 60 * 1000;
-const CONSENT_CHALLENGE_MAX = 256;
-
-interface ConsentChallengeRecord {
-  readonly authorizeParams: Record<string, string | null>;
-  readonly client: OAuthClient;
-  readonly createdAt: number;
-  readonly id: string;
-  readonly ownerSubjectId: string;
-}
-
-const consentChallenges = new Map<string, ConsentChallengeRecord>();
-
-// Bounded on write, so an unauthenticated flood of authorize requests cannot
-// grow this map without limit. Expiry first (a challenge older than the TTL is
-// gone whether or not there is pressure), then oldest-first eviction — Map
-// preserves insertion order, and inserts here are monotonic in `createdAt`.
-function sweepConsentChallenges(now: number): void {
-  for (const [id, record] of consentChallenges) {
-    if (now - record.createdAt >= CONSENT_CHALLENGE_TTL_MS) {
-      consentChallenges.delete(id);
-    }
-  }
-  while (consentChallenges.size >= CONSENT_CHALLENGE_MAX) {
-    const oldest = consentChallenges.keys().next();
-    if (oldest.done) {
-      return;
-    }
-    consentChallenges.delete(oldest.value);
-  }
-}
-
-/**
- * Reads a live challenge, treating an expired one as absent so a stale id can
- * never be approved. Callers map `null` to the same 404 an unknown id gets:
- * "expired" and "never existed" are one answer to anyone holding an id.
- */
-function readConsentChallenge(id: string): ConsentChallengeRecord | null {
-  const record = consentChallenges.get(id);
-  if (!record) {
-    return null;
-  }
-  if (Date.now() - record.createdAt >= CONSENT_CHALLENGE_TTL_MS) {
-    consentChallenges.delete(id);
-    return null;
-  }
-  return record;
-}
 
 function challengeIdFromParams(req: RouteRequest): string {
   const raw = req.params?.challenge;
   return typeof raw === "string" ? raw : "";
+}
+
+function ownerSubjectIdFromRequest(req: RouteRequest): string {
+  return req.ownerAuth?.subjectId || "owner_local";
 }
 
 // The authorize params the approval path re-reads. `scope` and `resource` ride
@@ -289,6 +240,8 @@ export interface MountAsAuthorizeContext {
   asPublicUrl: string | null;
   /** The hosted MCP source picker capabilities (rendering + registry lookups). */
   consentPickerCaps: ConsentPickerCapabilities;
+  /** Durable, owner-bound console consent challenge lifecycle. */
+  consentChallengeStore?: ConsentChallengeStore;
   /** Safe server-side logo fetch dependencies; test-only overrides keep logo tests offline. */
   clientLogoFetchOptions?: FetchClientLogoOptions;
   /** Consent store for pending-grant lifecycle. */
@@ -1262,7 +1215,7 @@ async function buildChallengeApprovalBody(
     challenge.ownerSubjectId,
     ctx.consentPickerCaps,
     ctx.consentUi,
-    toPendingGrantRequestClient(challenge.client),
+    toPendingGrantRequestClient(challenge.client as OAuthClient),
     challenge.authorizeParams.redirect_uri,
     ctx.clientLogoFetchOptions
   );
@@ -1368,6 +1321,7 @@ async function handleHostedMcpCancel(
 // ─── Route mount ─────────────────────────────────────────────────────────────
 
 export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): void {
+  const consentChallengeStore = ctx.consentChallengeStore ?? createConsentChallengeStore();
   // GET /oauth/authorize
   //
   // Entry point for the OAuth authorization flow. Three paths:
@@ -1425,14 +1379,24 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
         const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
         const now = Date.now();
-        sweepConsentChallenges(now);
         const id = `cc_${randomBytes(18).toString("base64url")}`;
-        consentChallenges.set(id, {
-          authorizeParams: serializeAuthorizeParams(req.query),
+        const authorizeParams = serializeAuthorizeParams(req.query);
+        await consentChallengeStore.create({
+          authorizeParams,
           client,
           createdAt: now,
+          expiresAt: now + CONSENT_CHALLENGE_TTL_MS,
           id,
           ownerSubjectId,
+          // Source eligibility stays fresh at GET so the review digest can
+          // reject drift. These are the request-bound render inputs,
+          // including the resolved client identity and trust the owner saw.
+          renderModelInputs: {
+            authorizeParams,
+            client,
+            clientDisplay: buildConsentClientDisplay(toPendingGrantRequestClient(client), ctx.consentUi),
+            ownerSubjectId,
+          },
         });
         return res.redirect(302, consentConsoleUrl(id));
       }
@@ -1534,7 +1498,10 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     "/oauth/authorize/consent-challenges/:challenge",
     ctx.requireOwnerSession,
     async (req: RouteRequest, res: RouteResponse) => {
-      const challenge = readConsentChallenge(challengeIdFromParams(req));
+      const challenge = await consentChallengeStore.readPending(
+        challengeIdFromParams(req),
+        ownerSubjectIdFromRequest(req)
+      );
       if (!challenge) {
         return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
       }
@@ -1543,7 +1510,7 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         challenge.ownerSubjectId,
         ctx.consentPickerCaps,
         ctx.consentUi,
-        toPendingGrantRequestClient(challenge.client),
+        toPendingGrantRequestClient(challenge.client as OAuthClient),
         challenge.authorizeParams.redirect_uri,
         ctx.clientLogoFetchOptions
       );
@@ -1558,17 +1525,19 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     async (req: RouteRequest, res: RouteResponse) => {
       const id = challengeIdFromParams(req);
       try {
-        const challenge = readConsentChallenge(id);
+        const submitted = req.body || {};
+        const challenge = await consentChallengeStore.consume(
+          id,
+          ownerSubjectIdFromRequest(req),
+          "accepted",
+          typeof submitted.decision_digest === "string" ? submitted.decision_digest : null
+        );
         if (!challenge) {
           return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
         }
-        // Consume BEFORE minting. An approval is single-use: two concurrent
-        // accepts on one challenge must not both reach the mint path and
-        // issue two grants for one authorize request. If the approval is
-        // rejected downstream the challenge is gone and the owner restarts
-        // from the client — the safe direction to fail.
-        consentChallenges.delete(id);
-        const body = await buildChallengeApprovalBody(challenge, req.body || {}, ctx);
+        // Consume BEFORE minting. The conditional database update makes this
+        // single-use across processes as well as concurrent requests.
+        const body = await buildChallengeApprovalBody(challenge, submitted, ctx);
         const { response, redirectUrl } = captureRedirectResponse(res);
         await handleHostedMcpPackageApproval({ ...req, body, wantsJson: true }, response, ctx);
         const url = redirectUrl();
@@ -1599,11 +1568,15 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     async (req: RouteRequest, res: RouteResponse) => {
       const id = challengeIdFromParams(req);
       try {
-        const challenge = readConsentChallenge(id);
+        const challenge = await consentChallengeStore.consume(
+          id,
+          ownerSubjectIdFromRequest(req),
+          "rejected",
+          null
+        );
         if (!challenge) {
           return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
         }
-        consentChallenges.delete(id);
         // The refusal params are the server's own record of the authorize
         // request, never the owner's browser: `handleHostedMcpCancel` still
         // re-resolves the client and re-checks the redirect_uri against its
