@@ -327,7 +327,7 @@ function StreamRow({
                     : `This grant covers every field in ${stream.label.toLowerCase()}.`}
                 </p>
               )}
-              {stream.timePhrase && (
+              {stream.timePhrase ? (
                 <div className={styles.streamRange}>
                   <span className="pdpp-caption">{dataRangeSummary(stream, range) || "All dates"}</span>
                   <label className="pdpp-caption">
@@ -358,6 +358,8 @@ function StreamRow({
                     Apply to all selected streams
                   </button>
                 </div>
+              ) : (
+                <p className={`pdpp-caption ${styles.streamRange}`}>No date range for this data type.</p>
               )}
             </div>
           </details>

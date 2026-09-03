@@ -362,6 +362,11 @@ test("the owner's per-stream date range is submitted, not just collected", () =>
   );
 });
 
+test("streams without a declared time field explain the missing date range", () => {
+  assert.match(CLIENT_SOURCE, /No date range for this data type\./);
+  assert.match(CLIENT_SOURCE, /stream\.timePhrase \?/);
+});
+
 test("a range on a stream the owner unchecked is not submitted", () => {
   // A leftover date on a deselected stream is noise, not a narrowing.
   assert.match(
