@@ -29,6 +29,8 @@ export interface ConsentSourceIcon {
 }
 
 export interface ConsentStreamModel {
+  /** Manifest-declared selectable fields; required fields remain selected. */
+  readonly fields: ReadonlyArray<{ readonly description?: string; readonly name: string; readonly required: boolean }>;
   /** Total schema fields this stream would expose. `0` means the manifest declared none. */
   readonly fieldsTotal: number;
   /** `${sourceId}:${name}` — the id the accept request sends back. */
@@ -68,6 +70,8 @@ export interface ConsentScreenModel {
      * secret — but it is never rendered, only bound into the approval.
      */
     readonly id: string;
+    /** Same-origin URL for AS-cached approved logo bytes; null uses the monogram fallback. */
+    readonly logo: string | null;
     readonly monogram: string;
     readonly name: string;
     readonly policyLinks: ReadonlyArray<{ readonly href: string; readonly label: string }>;
@@ -105,6 +109,8 @@ export interface ConsentDecision {
   readonly grantExpiry: string;
   readonly reviewDigest: string;
   readonly sources: readonly ConsentSelectedSource[];
+  /** Selected fields by `ConsentStreamModel.id`, validated against the manifest by the AS. */
+  readonly streamFields: Readonly<Record<string, readonly string[]>>;
   /**
    * Per-stream DATA time range, keyed by `ConsentStreamModel.id`. Present only
    * for streams the owner actually bounded.
