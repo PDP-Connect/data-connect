@@ -639,7 +639,13 @@ test("picker never states a retention the client did not declare", async () => {
     /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said"/,
     "retention is a structured policy declaration (spec-core.md:706-730), not a protocol-enforced constraint"
   );
-  assert.match(html, /Keeping your data/, "the retention row still renders under that block");
+  // Retention itself is stated once, on the approval artifact (see above), so
+  // the terms block does not repeat it.
+  const termsBlock = /data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said">([\s\S]*?)<\/div>/.exec(
+    html
+  );
+  assert.ok(termsBlock, "the server-authored terms block renders");
+  assert.equal((termsBlock[1] ?? "").includes("did not say how long"), false, "the terms block does not restate retention");
   assert.equal(
     /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/.test(html),
     false,
