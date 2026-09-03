@@ -151,13 +151,21 @@ PDPP_TEST_PROFILE=memory-default PDPP_OWNER_PASSWORD=reference-implementation-ci
 ```
 
 Full suite is `npm --prefix reference-implementation run test` with the same env.
-Note a full-suite run did not finish within 10 minutes here; prefer single-file
-runs while iterating.
+**The suite runner discovers its own files and ignores a file argument** — passing
+one to `npm run test` silently runs everything. Use the `node --test` form above
+for a single file.
+
+**Node version matters.** A full-suite run here under Node v24.14.1 ended in
+`test accounting result: runner emitted no structured node events`
+(`scripts/test-accounting/receipt.ts:411`) and still exited 0 — the exit code
+cannot be trusted as a pass signal. CI pins Node 22.23.1
+(`.github/workflows/reference-implementation.yml`). Use `nvm use 22.23.1` before
+running anything and re-establish a baseline.
 
 ## Next steps
 
-1. Run one existing test single-file to confirm the harness works in this
-   worktree (a full-suite run was started and did not complete in time).
+1. Switch to Node 22.23.1 and run one existing test single-file to confirm the
+   harness works in this worktree. No green baseline has been established yet.
 2. Empirically settle whether PAR accepts `source: {id}` without `kind`, on both
    provenance classes, rather than trusting the code read above.
 3. Write both tests failing-first; record honestly what passes and what fails.
