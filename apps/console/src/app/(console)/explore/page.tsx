@@ -41,6 +41,7 @@ import { assembleExplorerData } from "@pdpp/operator-ui/explore/explore-data-ass
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { liveDashboardDataSource } from "../lib/data-source.ts";
+import { loadConnectorBrandIndex } from "../lib/connector-brand-index.ts";
 import { getRsInternalUrl, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { verifyDashboardSession } from "../lib/verify-session.ts";
 import { ExploreCanvas } from "./explore-canvas.tsx";
@@ -106,6 +107,7 @@ export default async function RecordsExplorerPage({
     return (
       <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
         <ExploreCanvas
+          connectorIndex={await loadConnectorBrandIndex()}
           data={demo.buildExploreDemoData()}
           explorePath={dashboardRoutes.section.explore}
           order="newest"
@@ -126,7 +128,10 @@ export default async function RecordsExplorerPage({
   const requestedOrder = params.order === "oldest" ? "oldest" : "newest";
 
   try {
-    const data = await assembleExplorerData(params, liveDashboardDataSource, getRsInternalUrl());
+    const [data, connectorIndex] = await Promise.all([
+      assembleExplorerData(params, liveDashboardDataSource, getRsInternalUrl()),
+      loadConnectorBrandIndex(),
+    ]);
     const order = data.supportsTimelineDirection && requestedOrder === "oldest" ? "oldest" : "newest";
     // Relationships for the inspected record come from declared metadata via the
     // SAME `records/lib/relationships.ts` helpers the records detail page uses —
@@ -148,6 +153,7 @@ export default async function RecordsExplorerPage({
     return (
       <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
         <ExploreCanvas
+          connectorIndex={connectorIndex}
           data={data}
           explorePath={dashboardRoutes.section.explore}
           order={order}

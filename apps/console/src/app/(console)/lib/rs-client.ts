@@ -166,12 +166,6 @@ export interface ConnectorManifest {
   connector_id: string;
   connector_key?: string;
   display_name?: string;
-  /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: {
-    color?: string | null;
-    kind?: string | null;
-    svg?: string | null;
-  } | null;
   name?: string;
   provider_id?: string;
   /**

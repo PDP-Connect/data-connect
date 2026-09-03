@@ -62,6 +62,8 @@ interface MinimalElement {
   querySelector: (selector: string) => MinimalElement | null;
   querySelectorAll: (selector: string) => Iterable<MinimalElement>;
   readonly textContent: string | null;
+  /** Present on inputs; the hidden decision-digest field is read through it. */
+  value: string;
 }
 
 interface MinimalDocument {
@@ -215,9 +217,25 @@ async function openPickerDom() {
       return prevented;
     };
     const errorEl = () => form.querySelector("[data-hosted-mcp-picker-error]");
+    // The approval binding is hashed with SubtleCrypto, so it lands a
+    // microtask after the `change` that triggered it. A real click always
+    // arrives long after; these tests drive the DOM synchronously, so they
+    // wait for the field the way the page's own submit handler does.
+    const decisionDigestField = () => form.querySelector("[data-hosted-mcp-decision-digest]");
+    const awaitDecisionDigest = async () => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (decisionDigestField()?.value) {
+          return decisionDigestField()?.value;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return decisionDigestField()?.value;
+    };
 
     return {
+      awaitDecisionDigest,
       click,
+      decisionDigestField,
       async close() {
         await closeServer(server);
       },
@@ -361,8 +379,22 @@ test("picker runtime: a valid single-stream selection submits (not prevented)", 
     );
     stream.checked = true;
     p.fire(stream, "change");
+    await p.awaitDecisionDigest();
+
+    // jsdom exposes no SubtleCrypto, which is the same situation as a browser
+    // on a non-secure origin — a real case, since a local instance is reached
+    // over plain HTTP. The picker must degrade rather than trap the owner:
+    // the digest stays empty, nothing throws, and the submit is allowed
+    // through on the retry so the SERVER's fail-closed check is what rejects
+    // it (with a page telling the owner to review again), instead of a button
+    // that silently does nothing forever.
+    const digest = p.decisionDigestField()?.value ?? "";
+    if (digest) {
+      assert.match(digest, /^sha256:/, "a computed binding must be a sha256 digest");
+    }
+    p.submit();
     const prevented = p.submit();
-    assert.equal(prevented, false, "a valid one-stream selection must be allowed to submit");
+    assert.equal(prevented, false, "a valid one-stream selection must never be trapped by the binding guard");
   } finally {
     await p.close();
   }
@@ -410,23 +442,43 @@ test("picker runtime: bulk controls behave distinctly (select / clear / expand /
   }
 });
 
-test("picker runtime: clearing a source via its per-source button collapses only that source", async () => {
+test("picker runtime: the parent checkbox selects and clears its own source, with no per-source buttons", async () => {
+  // The 54 per-source `Select every stream` / `Clear this source` buttons are
+  // gone. They existed because 27 sources made bulk affordances feel
+  // necessary, but the tri-state parent checkbox already does exactly this
+  // job — and a control that needs two buttons to explain it is a control
+  // that is not working. This proves the parent alone covers both directions.
   const p = await openPickerDom();
   try {
     const source = mustExist(p.sources()[0], "at least one source must render");
-    // Select the whole source (opens it), then use the per-source clear button.
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-clear-streams]"),
+      null,
+      "no per-source clear button remains"
+    );
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-select-streams]"),
+      null,
+      "no per-source select-every button remains"
+    );
+
     const sourceBox = mustExist(p.sourceBoxIn(source), "the source checkbox must render");
     sourceBox.checked = true;
     p.fire(sourceBox, "change");
+    assert.ok(
+      p.streamsIn(source).every((s) => s.checked),
+      "checking the parent selects every stream in that source"
+    );
     assert.equal(source.open, true, "selecting a source opens it");
+    assert.equal(source.dataset.sourceSelected, "true", "the source reads as selected");
 
-    source.querySelector("[data-hosted-mcp-clear-streams]")?.click();
+    sourceBox.checked = false;
+    p.fire(sourceBox, "change");
     assert.ok(
       p.streamsIn(source).every((s) => !s.checked),
-      "per-source clear unchecks its streams"
+      "unchecking the parent clears every stream in that source"
     );
-    assert.equal(source.open, false, "per-source clear collapses that source");
-    assert.equal(source.dataset.sourceSelected, "false", "per-source clear deselects the source");
+    assert.equal(source.dataset.sourceSelected, "false", "the source reads as deselected");
   } finally {
     await p.close();
   }

@@ -33,14 +33,10 @@ Same interim mechanism as `@pdpp/reference-contract` above: a committed tarball 
 with a plain `npm pack`, referenced via a `file:` dependency, digest recorded in
 `SHA256SUMS`. This one pins `packages/polyfill-connectors` from `PDP-Connect/data-connectors`
 — the canonical connector package Move A made real — at commit
-`d2832953d999241f40129f0a8a14f0bd800c2923` (`main`, 2026-09-02), which merged
-`data-connectors#56` adding the 33 export subpaths this moved server needs
-(`connector-runtime`, `browser-handoff`, `credential-probe`, the `apple_health` /
-`google_maps` / `google_maps_data_portability` / `netflix_export` / `whatsapp` connector
-packages, etc. — see that PR for the full list), superseding the earlier pin at
-`870b4cd495569f901671a7835be0696a787cf192` to also carry `data-connectors#57`'s fix for
-the package's own `postinstall` hook (previously raw TypeScript, which crashed a plain
-`npm ci` in any repo that vendors this tarball — see that PR).
+`a39f33e6bbd3ba6c73af9e5512fc945beb3cc1d2` (`main`, 2026-09-03), which merged
+`data-connectors#72` so every connector manifest can declare `brand.icon` (and optional
+`brand.dark_icon`) and the generated connector index exposes `brandIcons[connector_id]`.
+It supersedes the earlier pin at `d2832953d999241f40129f0a8a14f0bd800c2923`.
 
 This tarball is NOT a byte-identical `npm pack` of the package directory (unlike
 `reference-contract` above): `@pdpp/polyfill-connectors`'s own `package.json` declares
@@ -54,9 +50,10 @@ its own separate vendored tarball above), so before packing, this tarball's
 `package.json` had those three deps rewritten from `file:./vendor/*.tgz` to `*` (matching
 how `reference-implementation/package.json` itself already depends on
 `@pdpp/collector-runtime`/`@pdpp/connector-protocol`), and its now-unused nested
-`vendor/` directory was deleted. No other file was modified. Re-derivable: `npm pack` the
-package from `data-connectors` at the SHA below, edit those three dependency lines the
-same way, delete `vendor/`, `npm pack` again.
+`vendor/` directory was deleted. No other file was modified. Re-derivable: extract or
+checkout `PDP-Connect/data-connectors` at the SHA above, run the package's normal
+prepack/build so JavaScript entrypoints are emitted, edit those dependency and override
+lines the same way, delete `vendor/`, and `npm pack --ignore-scripts`.
 
 `reference-implementation/package.json` depends on it via
 `"file:./vendor/pdpp-polyfill-connectors-0.0.1.tgz"`. Every import inside

@@ -100,21 +100,28 @@ export function escapeHtml(input: unknown): string {
 }
 
 // ─── PDPP mark (server-side SVG) ─────────────────────────────────────────────
-// Geometry mirrors apps/site/src/components/PdppLogo.tsx so the reference
-// pages carry the same mark as the website. Keep in sync.
-
+// Geometry and colors mirror packages/operator-ui/src/components/pdpp-logo.tsx
+// (the canonical light/dark-aware mark) and apps/console/public/brand/
+// pdpp-mark.svg / pdpp-mark-dark.svg so the reference pages carry the exact
+// same mark as the console. Keep all six constants in sync with that file.
 const HUMAN = "oklch(0.52 0.11 45)";
 const PROTOCOL = "oklch(0.58 0.18 253)";
-const COUNTER = "oklch(0.985 0.005 85)";
+const COUNTER_LIGHT = "oklch(0.985 0.005 85)";
+const HUMAN_NIGHT = "oklch(0.72 0.12 45)";
+const PROTOCOL_NIGHT = "oklch(0.74 0.16 253)";
+const COUNTER_NIGHT = "oklch(0.16 0.01 60)";
 
-export function renderPdppMark({ size = 28, title = "PDPP" } = {}) {
+export function renderPdppMark({ size = 28, title = "PDPP", surface = "light" }: { size?: number; title?: string; surface?: "light" | "dark" } = {}) {
   const safeTitle = escapeHtml(title);
   const labelAttr = title ? `role="img" aria-label="${safeTitle}"` : 'role="presentation" aria-hidden="true"';
+  const warm = surface === "dark" ? HUMAN_NIGHT : HUMAN;
+  const cool = surface === "dark" ? PROTOCOL_NIGHT : PROTOCOL;
+  const counter = surface === "dark" ? COUNTER_NIGHT : COUNTER_LIGHT;
   return (
     `<svg class="hosted-ui-mark" viewBox="0 0 200 200" width="${size}" height="${size}" ${labelAttr}>` +
-    `<path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="${HUMAN}"/>` +
-    `<path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="${PROTOCOL}"/>` +
-    `<circle cx="105" cy="73" r="18" fill="${COUNTER}"/>` +
+    `<path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="${warm}"/>` +
+    `<path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="${cool}"/>` +
+    `<circle cx="105" cy="73" r="18" fill="${counter}"/>` +
     "</svg>"
   );
 }
@@ -124,65 +131,82 @@ export function renderPdppMark({ size = 28, title = "PDPP" } = {}) {
 // hosted-ui layer. No fontsource imports — these pages fall back to system UI
 // until font weights load from the website. Reference-only by design.
 
+// Values below mirror apps/console/src/styles/ink-carbon.css (:root and
+// [data-theme="dark"]) so a hosted page and the console render the same
+// palette, radii, and font stack. Font stack has no web-font fetch — the
+// hosted UI is a security-sensitive first-party surface and does not load
+// third-party font CDNs; it falls back to the closest installed system
+// faces until (if ever) fonts are self-hosted.
 export const HOSTED_UI_CSS = `:root {
-  --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Named faces only where they resolve without a fetch. The stack used to
+   * lead with "Inter" and "JetBrains Mono" while importing neither, so every
+   * hosted page rendered in system UI under a stylesheet that claimed
+   * otherwise. This surface deliberately loads no third-party font CDN — it
+   * is a security-sensitive first-party auth surface — so the honest stack is
+   * the system one, which on the platforms the console targets resolves to
+   * very nearly the same shapes. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
-  --background: oklch(0.99 0.002 95);
-  --foreground: oklch(0.13 0 0);
+  --background: oklch(0.985 0.004 90);
+  --foreground: oklch(0.18 0.005 270);
   --card: oklch(1 0 0);
-  --primary: oklch(0.580 0.172 253.7);
-  --primary-foreground: oklch(0.99 0 0);
-  --muted: oklch(0.96 0 0);
-  --muted-foreground: oklch(0.50 0 0);
-  --destructive: oklch(0.55 0.20 27);
-  --destructive-foreground: oklch(0.99 0 0);
-  --border: oklch(0.94 0 0);
-  --input: oklch(0.91 0 0);
-  --success: oklch(0.52 0.15 150);
-  --warning: oklch(0.62 0.15 70);
-  --human: oklch(0.52 0.09 45);
-  --human-wash: oklch(0.52 0.09 45 / 0.07);
-  --radius: 0.5rem;
+  --primary: oklch(0.46 0.11 255);
+  --primary-foreground: oklch(0.99 0.002 90);
+  --muted: oklch(0.955 0.004 270);
+  --muted-foreground: oklch(0.47 0.008 270);
+  --destructive: oklch(0.52 0.16 27);
+  --destructive-foreground: oklch(0.99 0.002 90);
+  --border: oklch(0.905 0.005 270);
+  --input: oklch(0.79 0.006 270);
+  --success: oklch(0.5 0.11 158);
+  --warning: oklch(0.58 0.13 70);
+  --human: oklch(0.55 0.11 45);
+  --human-foreground: oklch(0.99 0.005 90);
+  --human-wash: oklch(0.55 0.11 45 / 0.08);
+  --radius: 0px;
+  --radius-control: 2px;
   color-scheme: light;
 }
 
 html[data-theme="dark"] {
-  --background: oklch(0.16 0.005 260);
-  --foreground: oklch(0.985 0.004 85);
-  --card: oklch(0.205 0.006 260);
-  --primary: oklch(0.68 0.15 253.7);
-  --primary-foreground: oklch(0.11 0.008 260);
-  --muted: oklch(0.25 0.007 260);
-  --muted-foreground: oklch(0.72 0.01 260);
-  --destructive: oklch(0.70 0.18 27);
-  --destructive-foreground: oklch(0.11 0.008 260);
-  --border: oklch(1 0 0 / 0.12);
-  --input: oklch(1 0 0 / 0.18);
-  --success: oklch(0.70 0.14 150);
-  --warning: oklch(0.78 0.13 78);
-  --human: oklch(0.68 0.10 45);
-  --human-wash: oklch(0.68 0.10 45 / 0.14);
+  --background: oklch(0.17 0.006 262);
+  --foreground: oklch(0.95 0.005 262);
+  --card: oklch(0.21 0.007 262);
+  --primary: oklch(0.74 0.13 255);
+  --primary-foreground: oklch(0.15 0.01 262);
+  --muted: oklch(0.24 0.007 262);
+  --muted-foreground: oklch(0.72 0.01 262);
+  --destructive: oklch(0.7 0.16 27);
+  --destructive-foreground: oklch(0.15 0.01 262);
+  --border: oklch(0.29 0.008 262);
+  --input: oklch(0.34 0.008 262);
+  --success: oklch(0.76 0.13 158);
+  --warning: oklch(0.8 0.14 75);
+  --human: oklch(0.76 0.12 45);
+  --human-foreground: oklch(0.16 0.01 45);
+  --human-wash: oklch(0.76 0.12 45 / 0.11);
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: dark) {
   html[data-theme="system"] {
-    --background: oklch(0.16 0.005 260);
-    --foreground: oklch(0.985 0.004 85);
-    --card: oklch(0.205 0.006 260);
-    --primary: oklch(0.68 0.15 253.7);
-    --primary-foreground: oklch(0.11 0.008 260);
-    --muted: oklch(0.25 0.007 260);
-    --muted-foreground: oklch(0.72 0.01 260);
-    --destructive: oklch(0.70 0.18 27);
-    --destructive-foreground: oklch(0.11 0.008 260);
-    --border: oklch(1 0 0 / 0.12);
-    --input: oklch(1 0 0 / 0.18);
-    --success: oklch(0.70 0.14 150);
-    --warning: oklch(0.78 0.13 78);
-    --human: oklch(0.68 0.10 45);
-    --human-wash: oklch(0.68 0.10 45 / 0.14);
+    --background: oklch(0.17 0.006 262);
+    --foreground: oklch(0.95 0.005 262);
+    --card: oklch(0.21 0.007 262);
+    --primary: oklch(0.74 0.13 255);
+    --primary-foreground: oklch(0.15 0.01 262);
+    --muted: oklch(0.24 0.007 262);
+    --muted-foreground: oklch(0.72 0.01 262);
+    --destructive: oklch(0.7 0.16 27);
+    --destructive-foreground: oklch(0.15 0.01 262);
+    --border: oklch(0.29 0.008 262);
+    --input: oklch(0.34 0.008 262);
+    --success: oklch(0.76 0.13 158);
+    --warning: oklch(0.8 0.14 75);
+    --human: oklch(0.76 0.12 45);
+    --human-foreground: oklch(0.16 0.01 45);
+    --human-wash: oklch(0.76 0.12 45 / 0.11);
     color-scheme: dark;
   }
 }
@@ -200,25 +224,9 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, oklch(0.52 0.09 45 / 0.06), transparent 28rem),
-    linear-gradient(180deg, oklch(1 0 0) 0%, var(--background) 14rem);
+  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
-}
-
-html[data-theme="dark"] body {
-  background:
-    radial-gradient(circle at top left, oklch(0.68 0.10 45 / 0.12), transparent 28rem),
-    linear-gradient(180deg, oklch(0.22 0.006 260) 0%, var(--background) 14rem);
-}
-
-@media (prefers-color-scheme: dark) {
-  html[data-theme="system"] body {
-    background:
-      radial-gradient(circle at top left, oklch(0.68 0.10 45 / 0.12), transparent 28rem),
-      linear-gradient(180deg, oklch(0.22 0.006 260) 0%, var(--background) 14rem);
-  }
 }
 
 a { color: inherit; }
@@ -255,27 +263,21 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
 }
 
-/* ─── Semantic surfaces (match /pdpp-brand/styles/components.css) ──────────── */
+/* ─── Semantic surfaces (mirrors Ink Carbon's [data-surface] in
+   apps/console/src/app/globals.css — square paper, left-rule accent,
+   no shadow, no rounding) ──────────────────────────────────────── */
 [data-surface="human"] {
-  border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
   border-left: 2px solid var(--human);
-  background-image: linear-gradient(to bottom, var(--human-wash), transparent 35%);
   background-color: var(--card);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 3px rgb(0 0 0 / 0.02);
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
 }
 
 [data-surface="protocol"] {
-  border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
   border-left: 2px solid var(--primary);
-  background-image: linear-gradient(to right, oklch(0.580 0.172 253.7 / 0.04), transparent 70%);
   background-color: var(--card);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 3px rgb(0 0 0 / 0.02);
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
 }
 
 /* ─── Authorship classes (three-class trust model) ──────────────────────
@@ -323,7 +325,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   justify-content: center;
   width: 2.5rem;
   height: 2.5rem;
-  border-radius: 0.625rem;
+  border-radius: var(--radius);
   background: var(--muted, oklch(0.94 0.005 85));
   color: var(--muted-foreground);
   font-weight: 600;
@@ -331,21 +333,32 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   letter-spacing: 0.02em;
   flex-shrink: 0;
 }
+.hosted-ui-client-identity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
 .hosted-ui-client-identity-name {
   font-weight: 600;
+  font-size: 1rem;
 }
-.hosted-ui-unverified-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+.hosted-ui-client-identity-domain {
+  font-size: 0.8125rem;
   color: var(--muted-foreground);
-  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+/* Trust status as a neutral fact line, not a badge. The unverified state is
+ * unconditional today (no trust registry exists), and a badge that cannot
+ * vary reads as a warning about an app that has done nothing wrong. */
+.hosted-ui-client-trust {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+.hosted-ui-client-trust[data-trust="registered"] {
+  color: var(--human, var(--foreground));
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .hosted-ui-client-policy-links {
   display: flex;
@@ -376,20 +389,48 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   padding-bottom: 0.25rem;
 }
 
-.hosted-ui-wordmark {
+/* The instance is the header's only identity, so it carries the weight the
+ * PDPP wordmark used to take. */
+.hosted-ui-provider {
   font-weight: 600;
   font-size: 0.9375rem;
   letter-spacing: -0.01em;
   color: var(--foreground);
 }
 
-.hosted-ui-provider {
-  margin-left: auto;
-  font-size: 0.8125rem;
+.hosted-ui-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
   color: var(--muted-foreground);
+}
+.hosted-ui-footer-attribution-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: inherit;
+  text-decoration: none;
+}
+.hosted-ui-footer-attribution-link:hover .hosted-ui-footer-attribution {
+  text-decoration: underline;
+}
+.hosted-ui-footer-attribution {
+  font-size: 0.75rem;
+  letter-spacing: 0.01em;
 }
 
 .hosted-ui-mark { display: block; }
+
+/* Allow and Cancel as a pair, primary rightmost. */
+.hosted-ui-decision-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
 
 .hosted-ui-intro {
   display: flex;
@@ -444,7 +485,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 .hosted-ui-streams li {
   border: 1px solid var(--border);
   background: var(--card);
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   padding: 0.5rem 0.75rem;
   font-size: 0.8125rem;
 }
@@ -473,7 +514,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   align-items: start;
   padding: 0.75rem 0.875rem;
   border: 1px solid var(--border);
-  border-radius: 0.625rem;
+  border-radius: var(--radius);
   background: var(--card);
   cursor: pointer;
 }
@@ -534,24 +575,18 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   overflow-wrap: anywhere;
 }
 
-/* Compact per-row source-kind badge (FIX 3: presenter clutter) — used
- * instead of the full "Source kind: connector" text line when every row on
- * the picker shares one resolved kind and a single summary line above the
- * list already states it. */
-.hosted-ui-option-source-kind-badge {
-  display: inline-flex;
-  align-items: center;
+/* Per-row provenance, shown ONLY where rows genuinely differ. The uniform
+ * "connector" badge and its "All sources below are connector-backed" summary
+ * are gone: source.kind's audience is the client, and a value identical on
+ * every row carried zero bits while occupying a slot on all of them. What
+ * survives is the mixed-kind case, worded as a consequence for the owner
+ * rather than as the raw enum. */
+.hosted-ui-option-source-kind {
+  display: block;
   margin-top: 0.25rem;
-  padding: 0.0625rem 0.375rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+  font-size: 0.75rem;
   color: var(--muted-foreground);
-  font-size: 0.6875rem;
 }
-.hosted-ui-option-source-kind-badge code {
-  font-family: var(--font-mono);
-}
-.hosted-ui-source-kind-summary,
 .hosted-ui-fields-timerange-summary {
   margin: 0 0 0.5rem;
   font-size: 0.8125rem;
@@ -560,7 +595,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 
 .hosted-ui-option-source {
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   padding: 0.25rem 0.75rem 0.75rem;
   margin: 0;
   background: var(--card);
@@ -625,7 +660,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   margin: 0 0 1rem;
   padding: 0.625rem 0.875rem 0.75rem;
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   background: var(--card);
 }
 .hosted-ui-access-mode-legend {
@@ -678,7 +713,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 
 .hosted-ui-button {
   appearance: none;
-  border-radius: 0.5rem;
+  border-radius: var(--radius-control);
   padding: 0.625rem 1.125rem;
   font-size: 0.9375rem;
   font-weight: 500;
@@ -696,19 +731,31 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   outline-offset: 2px;
 }
 .hosted-ui-button[data-variant="primary"] {
-  background: var(--primary);
-  color: var(--primary-foreground);
+  background: var(--human);
+  color: var(--human-foreground);
   border-color: transparent;
 }
 .hosted-ui-button[data-variant="primary"]:hover {
-  background: oklch(0.52 0.172 253.7);
+  filter: brightness(0.94);
+}
+/* The refusal. Declining is not an error and is not dressed as one — but it
+ * must not read as a second primary either. Copper (--human) is reserved for
+ * the owner's consent act, so Allow is the only filled control in the pair. */
+.hosted-ui-button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+.hosted-ui-button[data-variant="ghost"]:hover {
+  background: var(--muted);
+  color: var(--foreground);
 }
 .hosted-ui-button[data-variant="danger"] {
   color: var(--destructive);
   border-color: var(--border);
 }
 .hosted-ui-button[data-variant="danger"]:hover {
-  background: oklch(0.55 0.20 27 / 0.08);
+  background: color-mix(in oklch, var(--destructive) 8%, transparent);
 }
 
 .hosted-ui-form { display: contents; }
@@ -727,7 +774,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   font: inherit;
   padding: 0.625rem 0.75rem;
   border: 1px solid var(--input);
-  border-radius: 0.5rem;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--foreground);
 }
@@ -747,20 +794,20 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 }
 
 .hosted-ui-error {
-  border: 1px solid oklch(0.55 0.20 27 / 0.25);
-  background: oklch(0.55 0.20 27 / 0.06);
+  border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+  background: color-mix(in oklch, var(--destructive) 6%, transparent);
   color: var(--destructive);
   padding: 0.625rem 0.875rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   font-size: 0.875rem;
 }
 
 .hosted-ui-warning {
-  border: 1px solid oklch(0.78 0.16 78 / 0.45);
-  background: oklch(0.78 0.16 78 / 0.08);
+  border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent);
+  background: color-mix(in oklch, var(--warning) 8%, transparent);
   color: var(--foreground);
   padding: 0.75rem 0.875rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   font-size: 0.875rem;
   display: flex;
   flex-direction: column;
@@ -771,7 +818,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   font-size: 0.8125rem;
   letter-spacing: 0.025em;
   text-transform: uppercase;
-  color: oklch(0.45 0.12 60);
+  color: var(--warning);
 }
 .hosted-ui-warning-body {
   color: var(--foreground);
@@ -785,7 +832,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 .hosted-ui-result-mark {
   width: 2rem;
   height: 2rem;
-  border-radius: 9999px;
+  border-radius: var(--radius);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -794,7 +841,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   flex-shrink: 0;
 }
 .hosted-ui-result-mark[data-tone="success"] {
-  background: oklch(0.52 0.15 150 / 0.14);
+  background: color-mix(in oklch, var(--success) 14%, transparent);
   color: var(--success);
 }
 .hosted-ui-result-mark[data-tone="neutral"] {
@@ -802,7 +849,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
 }
 .hosted-ui-result-mark[data-tone="danger"] {
-  background: oklch(0.55 0.20 27 / 0.12);
+  background: color-mix(in oklch, var(--destructive) 12%, transparent);
   color: var(--destructive);
 }
 .hosted-ui-result-body {
@@ -815,6 +862,121 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   color: var(--muted-foreground);
   font-size: 0.75rem;
   margin-top: 0.5rem;
+}
+
+/* ─── Disclosure control ────────────────────────────────────────────────
+ * The accordion's disclosure affordance used to be an ::after generated text
+ * ("Choose data" / "Hide data") with no hit target of its own, sharing one
+ * row with a checkbox that does something entirely different: the checkbox
+ * grants the source, the disclosure only reveals its streams. On a phone one
+ * tap had two plausible outcomes, and the generated text could not be
+ * targeted, labelled, or sized.
+ *
+ * It is a real element now, with its own hit area, sitting beside the
+ * checkbox rather than on top of it. */
+.hosted-ui-disclosure {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.hosted-ui-disclosure:hover { color: var(--foreground); }
+.hosted-ui-disclosure:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.hosted-ui-disclosure-chevron {
+  display: block;
+  transition: transform 150ms;
+}
+.hosted-ui-option-source[open] .hosted-ui-disclosure-chevron {
+  transform: rotate(90deg);
+}
+.hosted-ui-disclosure-label { white-space: nowrap; }
+
+/* ─── Small screens ─────────────────────────────────────────────────────
+ * There were no width breakpoints at all before this — the only two @media
+ * blocks in the file were prefers-color-scheme. A consent screen is a
+ * thing people reach from a phone, mid-task, from an app that just redirected
+ * them. */
+@media (max-width: 600px) {
+  .hosted-ui-page {
+    padding: 1.5rem 1rem 6.5rem;
+    gap: 1.25rem;
+  }
+
+  /* Full-bleed sheets with 16px gutters: on a narrow viewport the card inset
+   * costs horizontal room the stream labels need more than the border does. */
+  .hosted-ui-surface {
+    padding: 1rem;
+  }
+
+  /* Touch floor. Native checkboxes render ~13-16px; the label row around
+   * them is what the finger actually lands on, so the floor goes there. */
+  .hosted-ui-button,
+  .hosted-ui-option,
+  .hosted-ui-stream-option,
+  .hosted-ui-access-mode-option {
+    min-height: 44px;
+  }
+  .hosted-ui-option,
+  .hosted-ui-stream-option,
+  .hosted-ui-access-mode-option {
+    align-items: center;
+  }
+  .hosted-ui-option input,
+  .hosted-ui-stream-option input,
+  .hosted-ui-access-mode-option input {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
+  /* The decision pair stays reachable. Our scope list is far longer than the
+   * five-row scope cards the prior-art corpus ships, so burying Allow and
+   * Cancel past the end of it is the one place a sticky bar earns itself. */
+  .hosted-ui-decision-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    margin: 1.5rem -1rem 0;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+    background: var(--background);
+  }
+  .hosted-ui-decision-actions .hosted-ui-button {
+    flex: 1 1 auto;
+  }
+
+  /* Bulk controls wrap instead of overflowing. */
+  .hosted-ui-actions {
+    gap: 0.5rem;
+  }
+
+  .hosted-ui-option-streams {
+    padding-left: 1rem;
+  }
+
+  /* Two columns of a max-content label plus prose is a desktop shape. At
+   * 390px it squeezes the value into a ~20ch gutter and wraps every sentence
+   * to five lines. Stack the label above its value instead. */
+  .hosted-ui-kv {
+    grid-template-columns: 1fr;
+    gap: 0.125rem;
+  }
+  .hosted-ui-kv dd + dt {
+    margin-top: 0.625rem;
+  }
 }
 `;
 
@@ -859,6 +1021,11 @@ export function renderHostedDocument({
 }: HostedDocumentArgs): string {
   const safeTitle = escapeHtml(title);
   const safeThemeChoice = normalizeHostedThemeChoice(themeChoice);
+  // The mark is an inline SVG with hardcoded fills, not CSS-token-driven, so
+  // it can't react to `system` at paint time the way the token sheet does.
+  // Only an explicit `dark` choice gets the night palette; `system` and
+  // `light` both render the light mark (matches the pre-existing default).
+  const markSurface = safeThemeChoice === "dark" ? "dark" : "light";
   return `<!DOCTYPE html>
 <html lang="en" data-theme="${safeThemeChoice}">
 <head>
@@ -872,49 +1039,53 @@ export function renderHostedDocument({
 <main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
 ${renderBrandHeader({ providerName })}
 ${body}
+${renderBrandFooter({ surface: markSurface })}
 </main>
 </body>
 </html>`;
 }
 
 /**
- * Short text monogram for the operator-facing instance name (e.g. "Tim's
- * Data Server" -> "TD"). Pure text, never an image — this instance has no
- * uploaded-logo concept, and an instance-name monogram is a distinct thing
- * from the per-CLIENT monogram consent rendering uses for untrusted
- * `logo_uri` (see `buildClientMonogram` in as-consent-ui-helpers.ts) — this
- * one identifies the SERVER, not a requesting app.
+ * Brand header: the instance identity, alone.
+ *
+ * This previously rendered a PDPP mark, the wordmark `PDPP`, a monogram
+ * derived from `PDPP_INSTANCE_NAME`, and then the instance name — four marks
+ * for one party, reading at screenshot scale as the unexplained token
+ * "PDPP TD". Two separate errors:
+ *
+ *  - The monogram was unstyled (`hosted-ui-instance-monogram` appeared in the
+ *    markup and never in the stylesheet), so it was bare text beside the
+ *    wordmark. More basically, spec-core.md:676's monogram rule governs the
+ *    CLIENT — it is a safety fallback for an app whose logo must not be
+ *    fetched. Applying it to the operator inverts it: the server is the one
+ *    party on this page whose identity is not in question.
+ *  - Branding consent with the protocol is a category error. Consent screens
+ *    are branded with the party the owner trusts and is accountable to. Here
+ *    that is the instance; PDPP is the plumbing, and plumbing does not get
+ *    the letterhead.
+ *
+ * PDPP survives as a quiet footer attribution (`renderBrandFooter`) — where
+ * Plaid puts its own wordmark on a bank-branded screen.
  */
-function buildInstanceMonogram(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    return "?";
-  }
-  const letters = trimmed
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((word) => word.charAt(0))
-    .join("")
-    .toUpperCase();
-  return letters || trimmed.charAt(0).toUpperCase();
+export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
+  const safeProvider = escapeHtml(String(providerName ?? ""));
+  return `<header class="hosted-ui-header">
+  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
+</header>`;
 }
 
 /**
- * Brand header: PDPP protocol mark + wordmark (always "PDPP" — the protocol
- * identity, never configurable) + the operator-facing instance name and its
- * derived monogram (PDPP_INSTANCE_NAME, or PDPP_PROVIDER_NAME as a fallback
- * for existing deployments — see `resolveProviderName` in server/index.ts).
+ * Quiet protocol attribution, at the foot of every hosted page. This is where
+ * the PDPP mark belongs: honest about what runs the flow, without competing
+ * with the instance for the header.
  */
-export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
-  const providerNameString = String(providerName ?? "");
-  const safeProvider = escapeHtml(providerNameString);
-  const safeMonogram = escapeHtml(buildInstanceMonogram(providerNameString));
-  return `<header class="hosted-ui-header">
-  ${renderPdppMark({ size: 28 })}
-  <span class="hosted-ui-wordmark">PDPP</span>
-  <span class="hosted-ui-instance-monogram" aria-hidden="true">${safeMonogram}</span>
-  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
-</header>`;
+export function renderBrandFooter({ surface = "light" }: { surface?: "light" | "dark" } = {}): string {
+  return `<footer class="hosted-ui-footer">
+  <a class="hosted-ui-footer-attribution-link" href="https://pdpp.dev">
+  ${renderPdppMark({ size: 14, surface })}
+  <span class="hosted-ui-footer-attribution">Secured by PDPP</span>
+  </a>
+</footer>`;
 }
 
 /**

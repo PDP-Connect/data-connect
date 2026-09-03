@@ -453,14 +453,15 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) are e
 test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe never render actionless or unavailable", async () => {
   // Discrimination guard for the static-secret injection-registry fix: these
   // four connectors declare a real static_secret setup and are present in
-  // STATIC_SECRET_CONNECTOR_REGISTRY (packages/polyfill-connectors/src/
+  // STATIC_SECRET_CONNECTOR_REGISTRY (@pdpp/polyfill-connectors/src/
   // static-secret-injection.ts). If either the manifest or the registry drift,
   // Add Source must not silently strand them with no route or a "not
   // available" verdict.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);
+  // biome-ignore lint/correctness/noUndeclaredDependencies: this is the exact vendored runtime package declared by pdpp-reference-implementation, which owns the injection registry.
   const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(
-    "../../../../../../packages/polyfill-connectors/src/static-secret-injection.ts"
+    "@pdpp/polyfill-connectors/static-secret-injection"
   );
   for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
