@@ -3297,9 +3297,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeRunWatchdogTimers.delete(input.runId);
     }
     // A normal completion that beats the watchdog deadline means the timer
-    // above is cleared and will never fire, so its settlement will never
-    // resolve on its own — drop the entry so it doesn't leak. Any `awaitRun`
-    // race is already won by the (now-settled) `activeRunPromises` entry.
+    // above is cleared and will never fire on its own. Any `awaitRun` race is
+    // already won by the (now-settled) `activeRunPromises` entry regardless
+    // of whether this settlement ever resolves, so resolving it here changes
+    // no caller-observable behavior — but leaving it permanently unresolved
+    // after dropping the map entry below leaks a dangling promise with no
+    // remaining reference to it, which Node's test runner (correctly) flags
+    // as a resource the process never finished ("Promise resolution is still
+    // pending but the event loop has already resolved") in any test that
+    // exercises a normal (non-watchdog-timeout) run completion. Resolve
+    // before dropping the entry.
+    runWatchdogSettlements.get(input.runId)?.resolve();
     runWatchdogSettlements.delete(input.runId);
     // Mark settled BEFORE deleting from activeRuns so the 409 guard's
     // reconciliation window is as short as possible.

@@ -40,18 +40,32 @@ test("drainPromisesWithDeadline: all settle before deadline → drained=N, timed
 
 test("drainPromisesWithDeadline: deadline expires with stragglers → counts split", async () => {
   // Use generous margins so the test isn't load-sensitive: fast resolves
-  // at 30ms, deadline at 100ms, stragglers at 5_000ms. Under heavy parallel
+  // at 30ms, deadline at 100ms, stragglers at 250ms. Under heavy parallel
   // load the timer queue can slip, but the relative ordering
-  // fast(30) < deadline(100) < slow(5000) is robust to >2x slowdown.
+  // fast(30) < deadline(100) < slow(250) is robust to >2x slowdown.
+  //
+  // The stragglers previously ran for 5_000ms with `.unref()`, on the theory
+  // that unref'ing was enough to keep them from blocking anything. `.unref()`
+  // only excuses a timer from blocking PROCESS exit -- it does not settle the
+  // promise attached to it, and Node's test runner separately flags any
+  // promise a test created that is still unsettled once the test's own run
+  // has otherwise concluded (`cancelledByParent` / "Promise resolution is
+  // still pending"), independent of whether the process itself could still
+  // exit. A 5-second straggler reliably outlived that window. Explicitly
+  // awaiting the stragglers below (after the assertions that need them still
+  // pending) keeps the same behavior under test while letting every promise
+  // this test creates actually settle before the test function returns.
   const pending = new Map();
-  track(pending, "fast", new Promise((r) => setTimeout(r, 30)));
-  track(pending, "slow1", new Promise((r) => setTimeout(r, 5000).unref?.()));
-  track(pending, "slow2", new Promise((r) => setTimeout(r, 5000).unref?.()));
+  const fast = track(pending, "fast", new Promise((r) => setTimeout(r, 30)));
+  const slow1 = track(pending, "slow1", new Promise((r) => setTimeout(r, 250)));
+  const slow2 = track(pending, "slow2", new Promise((r) => setTimeout(r, 250)));
 
   const result = await drainPromisesWithDeadline(pending, 100);
   assert.equal(result.drained, 1, `expected 1 drained, got ${result.drained}; elapsed=${result.elapsedMs}`);
   assert.equal(result.timedOut, 2, `expected 2 timed out, got ${result.timedOut}; elapsed=${result.elapsedMs}`);
   assert.ok(result.elapsedMs >= 90, `elapsed=${result.elapsedMs} expected near deadline`);
+
+  await Promise.all([fast, slow1, slow2]);
 });
 
 test("drainPromisesWithDeadline: rejected promises count as drained (allSettled never throws)", async () => {
