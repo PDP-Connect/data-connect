@@ -154,11 +154,8 @@ test("the consent screen carries the console's own theme control", () => {
   assert.match(CLIENT_SOURCE, /<ThemeToggle \/>/, "must render the toggle");
 });
 
-test("connector icons come from the manifest, never a page-local asset directory", () => {
-  // ConnectorIcon renders the manifest's own `icon` declaration and falls back
-  // to its Monogram. A connector-id -> file map anywhere would mean a
-  // connector the console has never heard of renders worse than one it has.
-  assert.match(CLIENT_SOURCE, /<ConnectorIcon icon=\{source\.icon \?\? null\}/, "icon must come from the source model");
+test("connector icons come from the loaded index, never a page-local asset directory", () => {
+  assert.match(CLIENT_SOURCE, /<ConnectorIcon connectorId=\{source\.connectorId\} connectorIndex=\{connectorIndex\}/, "icon must come from the source connector id and loaded index");
   assert.doesNotMatch(CLIENT_SOURCE, /readFileSync|\.svg["']/, "must not read icon assets from disk");
   assert.equal(existsSync(join(COMPONENT_DIR, "icons")), false, "no page-local icon directory may exist");
 });

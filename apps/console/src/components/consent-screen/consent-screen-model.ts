@@ -21,13 +21,6 @@
 
 export type ConsentTrustTier = "unverified" | "domain" | "verified";
 
-/** Manifest-declared brand glyph, shaped for `ConnectorIcon`'s `icon` prop. */
-export interface ConsentSourceIcon {
-  readonly color?: string | null;
-  readonly kind?: string | null;
-  readonly svg?: string | null;
-}
-
 export interface ConsentStreamModel {
   /** Manifest-declared selectable fields; required fields remain selected. */
   readonly fields: ReadonlyArray<{ readonly description?: string; readonly name: string; readonly required: boolean }>;
@@ -51,7 +44,8 @@ export interface ConsentStreamModel {
 
 export interface ConsentSourceModel {
   readonly account: string;
-  readonly icon?: ConsentSourceIcon | null;
+  /** Stable manifest connector_id used to resolve the loaded connector index. */
+  readonly connectorId: string;
   readonly id: string;
   readonly name: string;
   readonly selectionValue: string;
