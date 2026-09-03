@@ -1,21 +1,45 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-
-const CONNECTOR_SOURCE_COMMIT = "a39f33e6bbd3ba6c73af9e5512fc945beb3cc1d2";
-const CONNECTOR_SOURCE_ROOT = `https://raw.githubusercontent.com/PDP-Connect/data-connectors/${CONNECTOR_SOURCE_COMMIT}/packages/polyfill-connectors/manifests/`;
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests"
 
 export interface ConnectorBrandIcon {
-  readonly backgroundColor?: string;
-  readonly darkUrl?: string;
-  readonly url: string;
+  readonly backgroundColor?: string
+  readonly darkUrl?: string
+  readonly url: string
 }
 
 export interface ConnectorBrandIndex {
-  readonly brandIcons: Readonly<Record<string, ConnectorBrandIcon>>;
-  readonly indexVersion: "2.0";
-  readonly sourceRepo: "https://github.com/PDP-Connect/data-connectors";
+  readonly brandIcons: Readonly<Record<string, ConnectorBrandIcon>>
+  readonly indexVersion: "2.0"
+}
+
+interface ConnectorBrandManifest {
+  readonly brand?: {
+    readonly background_color?: unknown
+    readonly dark_icon?: unknown
+    readonly icon?: unknown
+  }
+  readonly connector_id?: unknown
+  readonly connector_key?: unknown
+}
+
+const CONNECTOR_KEY_RE = /^[a-z0-9_-]+$/
+
+export function connectorBrandIconPath(
+  connectorKey: string,
+  dark = false
+): string {
+  return `/connector-brand-icons/${connectorKey}${dark ? ".dark" : ""}.svg`
+}
+
+function connectorBrandManifest(
+  rawManifest: unknown
+): ConnectorBrandManifest | null {
+  if (!rawManifest || typeof rawManifest !== "object") {
+    return null
+  }
+  return rawManifest as ConnectorBrandManifest
 }
 
 /**
@@ -24,25 +48,37 @@ export interface ConnectorBrandIndex {
  * remains declared once in data-connectors rather than copied into the console.
  */
 export function loadConnectorBrandIndex(): ConnectorBrandIndex {
-  const brandIcons: Record<string, ConnectorBrandIcon> = {};
+  const brandIcons: Record<string, ConnectorBrandIcon> = {}
   for (const { manifest: rawManifest } of readPolyfillManifests()) {
-    const manifest = rawManifest as Record<string, unknown>;
-    const connectorId = typeof manifest.connector_id === "string" ? manifest.connector_id : null;
-    const brand = manifest.brand as
-      | { background_color?: unknown; dark_icon?: unknown; icon?: unknown }
-      | undefined;
-    if (!connectorId || !brand || typeof brand.icon !== "string") {
-      continue;
+    const manifest = connectorBrandManifest(rawManifest)
+    const connectorId =
+      typeof manifest?.connector_id === "string" ? manifest.connector_id : null
+    const connectorKey =
+      typeof manifest?.connector_key === "string"
+        ? manifest.connector_key
+        : null
+    const brand = manifest?.brand
+    if (
+      !connectorId ||
+      !connectorKey ||
+      !CONNECTOR_KEY_RE.test(connectorKey) ||
+      !brand ||
+      typeof brand.icon !== "string"
+    ) {
+      continue
     }
     brandIcons[connectorId] = {
-      ...(typeof brand.background_color === "string" ? { backgroundColor: brand.background_color } : {}),
-      ...(typeof brand.dark_icon === "string" ? { darkUrl: new URL(brand.dark_icon, CONNECTOR_SOURCE_ROOT).toString() } : {}),
-      url: new URL(brand.icon, CONNECTOR_SOURCE_ROOT).toString(),
-    };
+      ...(typeof brand.background_color === "string"
+        ? { backgroundColor: brand.background_color }
+        : {}),
+      ...(typeof brand.dark_icon === "string"
+        ? { darkUrl: connectorBrandIconPath(connectorKey, true) }
+        : {}),
+      url: connectorBrandIconPath(connectorKey),
+    }
   }
   return {
     brandIcons,
     indexVersion: "2.0",
-    sourceRepo: "https://github.com/PDP-Connect/data-connectors",
-  };
+  }
 }

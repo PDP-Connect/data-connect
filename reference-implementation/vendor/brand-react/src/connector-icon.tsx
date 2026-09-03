@@ -61,8 +61,14 @@ function iconForConnector(
   // Reference-server connection summaries before the connector registry
   // migration use a short key (and sometimes underscores). The index remains
   // the only icon source; this merely recovers its manifest `connector_id`.
-  const connectorKey = connectorId.replace(/^https:\/\/registry\.pdpp\.dev\/connectors\//, "").replaceAll("_", "-");
-  return brandIcons?.[`https://registry.pdpp.dev/connectors/${connectorKey}`];
+  const connectorKey = connectorId.replace(/^https:\/\/registry\.pdpp\.dev\/connectors\//, "");
+  for (const key of new Set([connectorKey, connectorKey.replaceAll("_", "-"), connectorKey.replaceAll("-", "_")])) {
+    const icon = brandIcons?.[`https://registry.pdpp.dev/connectors/${key}`];
+    if (icon) {
+      return icon;
+    }
+  }
+  return undefined;
 }
 
 export function ConnectorIcon({ connectorId, connectorIndex, name, className }: ConnectorIconProps) {
