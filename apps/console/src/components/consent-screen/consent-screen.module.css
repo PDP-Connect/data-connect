@@ -127,13 +127,23 @@
   gap: 0.5rem;
 }
 
+/* Attribution and the theme control share the rail's last line: both are
+   about this page rather than about the decision, so they sit together below
+   the actions rather than competing with them for the owner's attention. */
+.railFooterRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 .railFooter {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
   color: inherit;
   text-decoration: none;
-  margin-top: 0.25rem;
 }
 
 .searchRow {
