@@ -940,6 +940,21 @@ CREATE TABLE IF NOT EXISTS pending_consents (
 CREATE INDEX IF NOT EXISTS idx_pending_consents_status_expires
   ON pending_consents(status, expires_at);
 
+CREATE TABLE IF NOT EXISTS consent_challenges (
+  id TEXT PRIMARY KEY,
+  owner_subject_id TEXT NOT NULL,
+  authorization_request_json TEXT NOT NULL,
+  client_json TEXT NOT NULL,
+  render_model_inputs_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+  decision_digest TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_consent_challenges_owner_status_expires
+  ON consent_challenges(owner_subject_id, status, expires_at);
+
 CREATE TABLE IF NOT EXISTS agent_connect_attempts (
   id                TEXT PRIMARY KEY,
   request_uri       TEXT NOT NULL,

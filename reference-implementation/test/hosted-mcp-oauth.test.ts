@@ -6286,6 +6286,86 @@ test("the consent challenge model carries the client, purpose, retention, and ev
   }
 });
 
+test("a consent challenge survives an AS restart over the same database", async () => {
+  const dbDir = mkdtempSync(join(tmpdir(), "pdpp-consent-challenge-restart-"));
+  const dbPath = join(dbDir, "reference.sqlite");
+  let first: CloseableTestServer | null = null;
+  let restarted: CloseableTestServer | null = null;
+  try {
+    first = await startServer({
+      asPort: 0,
+      dbPath,
+      ownerAuthPassword: "",
+      quiet: true,
+      rsPort: 0,
+      ...TEST_INTROSPECTION_SERVER_OPTS,
+    });
+    const firstUrl = `http://localhost:${first.asPort}`;
+    await registerAuthorizedSpotify(firstUrl);
+    const client = await registerAuthCodeClient(firstUrl);
+    const challenge = await startConsentChallenge(firstUrl, client, "restart-state");
+
+    await closeServer(first);
+    first = null;
+    closeDb();
+
+    restarted = await startServer({
+      asPort: 0,
+      dbPath,
+      ownerAuthPassword: "",
+      quiet: true,
+      rsPort: 0,
+      ...TEST_INTROSPECTION_SERVER_OPTS,
+    });
+    const { status, body } = await fetchJson(
+      `http://localhost:${restarted.asPort}/oauth/authorize/consent-challenges/${challenge}`
+    );
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.challenge, challenge);
+  } finally {
+    if (first) await closeServer(first);
+    if (restarted) await closeServer(restarted);
+    closeDb();
+    rmSync(dbDir, { force: true, recursive: true });
+  }
+});
+
+test("an expired consent challenge is terminalized server-side", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "expired-state");
+    getDb()
+      .prepare("UPDATE consent_challenges SET expires_at = ? WHERE id = ?")
+      .run(new Date(Date.now() - 1).toISOString(), challenge);
+
+    const { status, body } = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`);
+    assert.equal(status, 404, JSON.stringify(body));
+    const row = getDb().prepare("SELECT status FROM consent_challenges WHERE id = ?").get<{ status: string }>(challenge);
+    assert.equal(row?.status, "expired");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("a tampered consent challenge id is refused", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "tampered-id-state");
+    const tampered = `${challenge.slice(0, -1)}${challenge.endsWith("A") ? "B" : "A"}`;
+    const { status, body } = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${tampered}`);
+    assert.equal(status, 404, JSON.stringify(body));
+    assert.equal(body.error, "not_found");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 // Locks the mint path: a console decision carrying a correct decision digest
 // mints exactly one package and hands the client redirect back as JSON.
 test("accepting a consent challenge mints the package and returns the client redirect", async () => {
