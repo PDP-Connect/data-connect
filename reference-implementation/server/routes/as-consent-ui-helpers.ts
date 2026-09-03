@@ -2525,7 +2525,6 @@ function renderHostedMcpTermsBlock(clientName: string, ui: ConsentUiRenderer): s
         // owner-facing copy; it stays in the grant and the audit record.
         value: `Set by this server because ${clientName} didn't give one: use the data you select as context for your AI assistant.`,
       },
-      { label: "Keeping your data", value: buildHostedMcpRetentionSentence(clientName) },
     ]),
     ui
   );
