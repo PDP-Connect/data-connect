@@ -194,3 +194,110 @@ $ git diff --check
 The interrupted-run event log is retained at
 `/home/tnunamak/.tmp/pg-profile-51/full-profile.log`; clean-main comparison
 logs are retained under `/home/tnunamak/.tmp/pg-profile-51/`.
+
+## 2026-09-03 independent corrected-oracle rerun
+
+Before this rerun, `/` had 13 GB free (`/dev/nvme0n1p5 1.4T 1.3T 13G 100% /`),
+which met the required 10 GB threshold. No Docker builder prune was run.
+
+The existing `pdpp-test-postgres-0810` `pgvector/pgvector:pg16` listener was
+stopped but not removed while an ephemeral `postgres:16-alpine` listener used
+the required `127.0.0.1:55447` port. It reported server `16.15`; its own
+`pg_dump` reported `16.15`. Fresh sentinel-provisioned databases were
+`pdpp_test_pg51b_a1b2c3d4_1` and
+`pdpp_test_restore51b_a1b2c3d4_2`; both had zero active connections before the
+run. The launch used exactly:
+
+```text
+PATH=/home/tnunamak/.local/share/mise/installs/node/22.23.1/bin:$PATH
+NODE_OPTIONS=--import=tsx
+PDPP_TEST_PROFILE=postgres
+PDPP_TEST_CONCURRENCY=2
+PDPP_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:55447/pdpp_test_pg51b_a1b2c3d4_1
+PDPP_TEST_POSTGRES_RESTORE_URL=postgresql://postgres@127.0.0.1:55447/pdpp_test_restore51b_a1b2c3d4_2
+PDPP_TEST_POSTGRES_CLIENT_IMAGE=postgres:16-alpine
+```
+
+It reached a terminal receipt; this is not partial progress:
+
+```text
+PDPP_TEST_ACCOUNTING_RESULT
+assertions:      10,550
+passed:          10,392
+failed:             140
+skipped:             18
+planned_files:    1,034
+completed_files:      0
+receipt files:    1,034
+observed headings:1,034
+WALL_SECONDS=1432.89
+```
+
+The process exited 1 because tests failed, after **23m 52.89s**. As above,
+the runner deliberately sets `completed_files` to zero whenever any child
+fails; its receipt file list and heading count prove that all 1,034 planned
+files ran. The 18 skips are the suite's pre-existing named capability skips;
+none was added, renamed, or weakened for this work.
+
+### Fresh clean-main failure classification
+
+The raw log has 141 `test:fail` events, while the runner's assertion accounting
+has 140 failures. That one-event difference is a nested/umbrella reporter
+event, not an unreported test: it reproduces exactly in the clean-main replay.
+For the classification below, event counts describe every raw failure event;
+the terminal accounting numbers above remain the authoritative suite totals.
+
+The full set of 34 files that emitted those events was replayed on clean
+`pdp/main` `a72cb53a8` under the same Node 22, PostgreSQL 16 container,
+sentinel databases, client image, and concurrency. Its terminal receipt was
+`assertions=520`, `passed=380`, `failed=140`, `skipped=0`,
+`planned_files=34`, `completed_files=0`, `WALL_SECONDS=87.90`; it emitted the
+same 141 raw failure events. Thus **introduced failures: 0**.
+
+| Signature / root cause | Events | Files | Clean-main result | Classification |
+| --- | ---: | --- | --- | --- |
+| Pending promise after Node's event loop resolved | 60 | Six controller/run files (`controller-browser-surface-leases`, `controller-cancel-run`, `controller-drain`, `controller-phantom-active-run`, `run-generation-fencing`, `source-declaration-trust`) | Same 60 events; a direct six-file replay also produced 60 cancellations. | Pre-existing |
+| Absent site, Docker, deployment, Neko, reference-stack, documentation, connector, or installed dependency artifact | 49 | 17 boundary/deployment/fixture files | Same absent paths and events. | Pre-existing repository/dependency fixture gap |
+| Stock PostgreSQL lacks `pgvector` (`vector`, `vector_dims`, HNSW consequences) | 13 | `postgres-semantic-pgvector`, `postgres-hnsw-postlisten` | Same events; `pg_available_extensions` and installed extensions both returned `false` for `vector`. | Pre-existing exact-oracle limitation |
+| Bare-child Node 22 loader / orphan `tsx` dependency (`--experimental-strip-types`, missing child `tsx`) | 6 | Registry, env-scrub, static-secret, and terminal-restart files | Same events. | Pre-existing test child-launch issue |
+| Console build cannot complete in this checkout | 2 | `composed-origin`, `dashboard-proxy-redirect` | Same events. | Pre-existing local build setup gap |
+| Wrapper/nested-fixture assertions and reference-stack cascades | 11 | Collection/env-scrub, consent/runtime compatibility, HNSW/reference-stack, zero-connector, and Undici files | Same events. | Pre-existing fixture/cascade failures |
+
+The table totals 141 raw events. Because the authority-bound clean-main replay
+matches every failing file and event count, there is no dominant new failure
+source to repair in template cloning. No source change was made during this
+rerun. After comparison, the ephemeral stock PostgreSQL container was stopped
+and the original `pdpp-test-postgres-0810` `pgvector/pgvector:pg16` listener
+was restored on `127.0.0.1:55447`; `pg_isready` returned `accepting
+connections`.
+
+Relevant command tails:
+
+```text
+$ docker exec pg-profile-51-pg16-0903 pg_dump --version
+pg_dump (PostgreSQL) 16.15
+
+$ docker exec pg-profile-51-pg16-0903 psql ... -Atqc "SELECT EXISTS ... vector ..."
+f|f
+
+PDPP_TEST_ACCOUNTING_RESULT ... assertions=520 passed=380 failed=140 skipped=0 planned_files=34 completed_files=0
+WALL_SECONDS=87.90
+
+$ docker exec pdpp-test-postgres-0810 pg_isready -U postgres -d pdpp_test
+/var/run/postgresql:5432 - accepting connections
+```
+
+## Publication blocker
+
+The report update is committed locally as `c5974b843f47bf9a6c10749cde8bb3665969e4f2`,
+with a valid GPG signature, the required DCO sign-off, and `Assisted-by: AI`
+as its final trailer. The requested push was attempted once and was rejected:
+
+```text
+ERROR: This repository was archived so it is read-only.
+fatal: Could not read from remote repository.
+```
+
+No force-push or merge was attempted. The PR body was updated with the terminal
+receipt and this publication blocker, but this report commit cannot appear on
+the remote PR until the repository is made writable again.
