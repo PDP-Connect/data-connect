@@ -783,6 +783,11 @@ test("/_ref/deployment returns a structured report with zero participation by de
     assert.ok(body.semantic.participation);
     assert.ok(Array.isArray(body.environment));
     assert.ok(Array.isArray(body.warnings));
+    assert.equal(
+      body.postgres_derived_index_maintenance,
+      null,
+      "health reports no Postgres maintenance receipt before the job runs"
+    );
     assert.ok(Array.isArray(body.disk_headroom), "route wiring must include disk_headroom as array");
     assert.ok(body.disk_headroom.length > 0, "disk_headroom must have at least one entry");
     const [firstDiskEntry] = body.disk_headroom;

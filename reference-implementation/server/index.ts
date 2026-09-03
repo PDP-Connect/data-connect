@@ -234,6 +234,11 @@ import {
   schedulePostgresSemanticHnswMaintenance,
 } from "./postgres-storage.ts";
 import { createGenericProviderAuthDispatch } from "./provider-auth/generic-dispatch.ts";
+import {
+  getLastPostgresDerivedIndexMaintenanceReceipt,
+  parsePostgresDerivedIndexMaintenanceWindow,
+  runPostgresDerivedIndexMaintenance,
+} from "./postgres-derived-index-maintenance.ts";
 import { buildRecordVersionStatsEnvelope } from "./record-version-stats.ts";
 import {
   aggregateRecordsAcrossBindings,
@@ -981,6 +986,7 @@ const STARTUP_SUMMARY_EVIDENCE_MAX_RESUME_ROUNDS = 20;
 // running meaningfully more often than the durable state it sweeps
 // actually changes.
 // Canonical definition lives with the sweep it paces; imported above.
+const POSTGRES_DERIVED_INDEX_MAINTENANCE_SWEEP_INTERVAL_MS = 15 * 60_000;
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_MAX_DURATION_MS = 2000;
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE = 25;
 // Run-history backfill (terminal-read-architecture-fable-0730.md §9):
@@ -5219,6 +5225,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           getDiskHeadroom: () => probeDiskHeadroom(opts.dbPath || DB_PATH),
           getLexicalBackendPosture: () => getPostgresLexicalBackendState(),
           getLexicalBackfillProgress: () => getLexicalIndexBackfillProgress(),
+          getPostgresDerivedIndexMaintenanceReceipt: () => getLastPostgresDerivedIndexMaintenanceReceipt(),
           getPhysicalFootprint: () => collectPhysicalFootprint(),
           // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
           getRuntimeCapabilityPosture: async () => {
@@ -8289,6 +8296,40 @@ export async function startServer(opts: ServerOpts = {}) {
   function stopConnectorMaintenanceSweep() {
     connectorMaintenanceSweepTimer.stop();
   }
+  // Database-reclaiming maintenance defaults to a UTC off-peak window. The
+  // operator can override or disable it; the runner owns the non-transactional
+  // VACUUM/REINDEX session and records each result for diagnostics.
+  const postgresDerivedIndexMaintenanceWindow = isPostgresStorageBackend()
+    ? parsePostgresDerivedIndexMaintenanceWindow()
+    : null;
+  let postgresDerivedIndexMaintenanceInFlight = false;
+  const postgresDerivedIndexMaintenanceTimer = postgresDerivedIndexMaintenanceWindow
+    ? createBrowserSurfaceLeaseSweepTimer({
+        intervalMs: POSTGRES_DERIVED_INDEX_MAINTENANCE_SWEEP_INTERVAL_MS,
+        onSweepError: (err: unknown) => {
+          logger.warn?.(
+            { err: err instanceof Error ? err.message : String(err) },
+            "postgres derived-index maintenance tick failed"
+          );
+        },
+        sweep: async () => {
+          if (postgresDerivedIndexMaintenanceInFlight) {
+            logger.info?.("postgres derived-index maintenance skipped because a prior run is still active");
+            return;
+          }
+          postgresDerivedIndexMaintenanceInFlight = true;
+          try {
+            const receipt = await runPostgresDerivedIndexMaintenance({ window: postgresDerivedIndexMaintenanceWindow });
+            logger.info?.({ receipt }, "postgres derived-index maintenance completed");
+          } finally {
+            postgresDerivedIndexMaintenanceInFlight = false;
+          }
+        },
+      })
+    : null;
+  function stopPostgresDerivedIndexMaintenance() {
+    postgresDerivedIndexMaintenanceTimer?.stop();
+  }
   let schedulerManager: {
     cancelRun: (runId: string) => { status: string; run_id: string };
     refresh: () => Promise<void>;
@@ -8838,6 +8879,8 @@ export async function startServer(opts: ServerOpts = {}) {
   // every deployment.
   connectorMaintenanceSweepTimer.stopWhenAllClosed([asServer, rsServer]);
   connectorMaintenanceSweepTimer.start();
+  postgresDerivedIndexMaintenanceTimer?.stopWhenAllClosed([asServer, rsServer]);
+  postgresDerivedIndexMaintenanceTimer?.start();
   const deliveryWorkerLeases =
     opts.startClientEventDeliveryWorker === false
       ? []
@@ -8892,6 +8935,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // maintenance sweep timer (shell retirement, attention expiry, bounded
     // evidence-sweep round — see connector-maintenance-sweep.ts).
     stopConnectorMaintenanceSweep,
+    stopPostgresDerivedIndexMaintenance,
   };
 }
 
@@ -9923,6 +9967,7 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
     stopBrowserSurfaceLeaseSweep: StartServerResult["stopBrowserSurfaceLeaseSweep"] | null;
     stopClientEventDeliveryWorker: StartServerResult["stopClientEventDeliveryWorker"] | null;
     stopConnectorMaintenanceSweep: StartServerResult["stopConnectorMaintenanceSweep"] | null;
+    stopPostgresDerivedIndexMaintenance: StartServerResult["stopPostgresDerivedIndexMaintenance"] | null;
   } = {
     abortStartupBackfill: null,
     asServer: null,
@@ -9935,6 +9980,7 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
     stopBrowserSurfaceLeaseSweep: null,
     stopClientEventDeliveryWorker: null,
     stopConnectorMaintenanceSweep: null,
+    stopPostgresDerivedIndexMaintenance: null,
   };
   const exitOnSignal = (signal: string) => async () => {
     if (shuttingDown) {
@@ -10014,6 +10060,7 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
     } catch {}
     server.stopBrowserSurfaceLeaseSweep?.();
     server.stopConnectorMaintenanceSweep?.();
+    server.stopPostgresDerivedIndexMaintenance?.();
     await server.stopClientEventDeliveryWorker?.();
     // In-flight connector runs are deliberately NOT drained here.
     //
@@ -10077,6 +10124,7 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
       server.stopBrowserSurfaceLeaseSweep = result.stopBrowserSurfaceLeaseSweep;
       server.stopClientEventDeliveryWorker = result.stopClientEventDeliveryWorker;
       server.stopConnectorMaintenanceSweep = result.stopConnectorMaintenanceSweep;
+      server.stopPostgresDerivedIndexMaintenance = result.stopPostgresDerivedIndexMaintenance;
     })
     .catch((err) => {
       closePostgresStorage().finally(() => closeDb());

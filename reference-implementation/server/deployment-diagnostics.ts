@@ -22,6 +22,7 @@
  */
 
 import { statfs } from "node:fs/promises";
+import type { PostgresDerivedIndexMaintenanceReceipt } from "./postgres-derived-index-maintenance.ts";
 import type { SemanticEmbeddingWarmStatus } from "./search-semantic.ts";
 
 // Shape of a connector manifest as far as diagnostics care. We do not depend
@@ -219,6 +220,7 @@ export interface DeploymentDiagnosticsInput {
   // explicit SQLite/failure `{ physical_bytes: null, top_relations: null }`
   // both surface as unmeasured.
   readonly physicalFootprint?: PhysicalFootprint | null;
+  readonly postgresDerivedIndexMaintenanceReceipt?: PostgresDerivedIndexMaintenanceReceipt | null;
   readonly runtimeCapabilities?: RuntimeCapabilityPosture | null;
 }
 
@@ -357,6 +359,8 @@ export interface DeploymentDiagnosticsReport {
     readonly provenance: "native" | "polyfill-registered";
     readonly semantic_stream_count: number;
   }>;
+  // Null means this process has not completed a Postgres maintenance run.
+  readonly postgres_derived_index_maintenance: PostgresDerivedIndexMaintenanceReceipt | null;
   readonly runtime_capabilities: {
     readonly bindings: {
       readonly browser: boolean;
@@ -415,6 +419,7 @@ export interface DeploymentDiagnosticsReport {
 const STATIC_ENV_ALLOWLIST: ReadonlyArray<{ readonly name: string; readonly secret?: boolean }> = [
   { name: "PDPP_STORAGE_BACKEND" },
   { name: "PDPP_DATABASE_URL", secret: true },
+  { name: "PDPP_POSTGRES_DERIVED_INDEX_MAINTENANCE_WINDOW" },
   { name: "AS_PORT" },
   { name: "RS_PORT" },
   { name: "AS_PUBLIC_URL" },
@@ -1058,6 +1063,10 @@ export interface DeploymentDiagnosticsRuntimeDeps {
   // it and degrades cleanly to unmeasured on absence or rejection — the page
   // never fails because the footprint could not be read.
   readonly getPhysicalFootprint?: () => PhysicalFootprint | Promise<PhysicalFootprint> | null;
+  readonly getPostgresDerivedIndexMaintenanceReceipt?: () =>
+    | PostgresDerivedIndexMaintenanceReceipt
+    | Promise<PostgresDerivedIndexMaintenanceReceipt>
+    | null;
   readonly getRuntimeCapabilityPosture?: () => RuntimeCapabilityPosture | Promise<RuntimeCapabilityPosture> | null;
   readonly listRegisteredConnectorIds: () => Promise<readonly string[]>;
 }
@@ -1113,6 +1122,9 @@ export async function collectDeploymentDiagnostics(
   // missing dep) degrades to unmeasured rather than failing the whole page;
   // the builder collapses null/undefined to `physical_bytes: null`.
   const physicalFootprint = await resolveOptionalDep(deps.getPhysicalFootprint);
+  const postgresDerivedIndexMaintenanceReceipt = await resolveOptionalDep(
+    deps.getPostgresDerivedIndexMaintenanceReceipt
+  );
   const diskHeadroom = await resolveOptionalDep(deps.getDiskHeadroom);
   const pgDiskHeadroom = await resolveOptionalDep(deps.getPgDiskHeadroom);
 
@@ -1129,6 +1141,7 @@ export async function collectDeploymentDiagnostics(
     manifests,
     pgDiskHeadroom,
     physicalFootprint,
+    postgresDerivedIndexMaintenanceReceipt,
     runtimeCapabilities,
   });
 }
@@ -1159,6 +1172,7 @@ export function buildDeploymentDiagnostics(input: DeploymentDiagnosticsInput): D
       },
     },
     manifests: summarizeManifests(input.manifests),
+    postgres_derived_index_maintenance: input.postgresDerivedIndexMaintenanceReceipt ?? null,
     runtime_capabilities: buildRuntimeCapabilityReport(input.runtimeCapabilities ?? null),
     semantic: {
       backend: {

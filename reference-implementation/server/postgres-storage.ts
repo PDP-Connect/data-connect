@@ -150,6 +150,21 @@ const POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
  * pass rather than occupying a bulk-lane connection while it waits.
  */
 const POSTGRES_BULK_LOCK_TIMEOUT_MS = 3000;
+const POSTGRES_BLOAT_CONTROL_TABLES = ["records", "record_changes", "blobs", "spine_events"] as const;
+const POSTGRES_BLOAT_CONTROL_RELATION_OPTIONS = `
+  autovacuum_enabled = true,
+  autovacuum_vacuum_threshold = 1,
+  autovacuum_vacuum_scale_factor = 0.01,
+  autovacuum_vacuum_insert_threshold = 50,
+  autovacuum_vacuum_insert_scale_factor = 0.02,
+  autovacuum_analyze_threshold = 50,
+  autovacuum_analyze_scale_factor = 0.02,
+  toast.autovacuum_enabled = true,
+  toast.autovacuum_vacuum_threshold = 1,
+  toast.autovacuum_vacuum_scale_factor = 0.01,
+  toast.autovacuum_vacuum_insert_threshold = 50,
+  toast.autovacuum_vacuum_insert_scale_factor = 0.02
+`;
 
 // Semantic embedding storage mode, detected at bootstrap. 'vector' when the
 // pgvector extension is available and `semantic_search_blob.embedding` carries
@@ -345,6 +360,30 @@ async function sequentially<T>(items: readonly T[], visit: (item: T) => Promise<
   }
   await visit(item);
   await sequentially(items.slice(1), visit);
+}
+
+/**
+ * High-churn payload tables need per-relation settings so their maintenance
+ * cadence stays bounded even when a deployment has permissive cluster-wide
+ * autovacuum defaults. Include each table's TOAST relation: JSONB and BYTEA
+ * payload churn otherwise leaves the largest dead tuples behind.
+ */
+async function enforcePostgresBloatControlAutovacuumPolicy(client: PoolClient): Promise<void> {
+  await sequentially(POSTGRES_BLOAT_CONTROL_TABLES, async (table) => {
+    await client.query(`ALTER TABLE ${table} SET (${POSTGRES_BLOAT_CONTROL_RELATION_OPTIONS})`);
+  });
+}
+
+async function ensurePostgresDerivedIndexMaintenanceReceiptTable(client: PoolClient): Promise<void> {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS postgres_derived_index_maintenance_receipts (
+      window_key TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ,
+      error_text TEXT
+    )
+  `);
 }
 
 function semanticVectorMigrationBatchSize() {
@@ -3555,6 +3594,8 @@ async function bootstrapPostgresSchemaOnce({
     await ensurePostgresRecordsInstanceStreamIdIndex(client, log);
     await ensurePostgresRecordsInstanceDeletedIdIndex(client, log);
     await ensurePostgresConnectorSummarySourceRevisionPrimitive(client);
+    await enforcePostgresBloatControlAutovacuumPolicy(client);
+    await ensurePostgresDerivedIndexMaintenanceReceiptTable(client);
   } finally {
     try {
       if (bootstrapLockHeld) {
