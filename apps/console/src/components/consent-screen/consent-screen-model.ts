@@ -105,4 +105,14 @@ export interface ConsentDecision {
   readonly grantExpiry: string;
   readonly reviewDigest: string;
   readonly sources: readonly ConsentSelectedSource[];
+  /**
+   * Per-stream DATA time range, keyed by `ConsentStreamModel.id`. Present only
+   * for streams the owner actually bounded.
+   *
+   * Distinct from `grantExpiry` above: this narrows WHICH RECORDS the client
+   * may read, while grant expiry bounds HOW LONG the authorization lives.
+   * spec-core.md:889 lists them as concepts that MUST NOT be conflated, which
+   * is why they are separate fields rather than one "date" notion.
+   */
+  readonly streamRanges: Readonly<Record<string, { since?: string; until?: string }>>;
 }

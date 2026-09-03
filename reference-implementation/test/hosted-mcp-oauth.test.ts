@@ -6043,12 +6043,25 @@ test("POST /oauth/authorize/mcp-package mints when the decision_digest matches t
 
 /** A ChatGPT-shaped authorize request for the hosted-MCP picker branch: no
  * `authorization_details` and no `connector_id`, so the owner picks. */
+/**
+ * The registered redirect for these clients, and one FIXED PKCE verifier for
+ * the whole challenge-flow group.
+ *
+ * Fixed rather than per-call because a test that completes the flow has to
+ * present the matching verifier at the token endpoint, and a helper that
+ * generated one internally left no way to. PKCE's security property is that
+ * the verifier never leaves the client; a constant in a test file is a client
+ * that keeps its secret perfectly well.
+ */
+const HOSTED_MCP_REDIRECT_URI = "https://client.example/callback";
+const consentChallengeVerifier = "vk9Xr2Lt7QpZ3mNb8sYd1FhJ4cWa6TgE0uKiOvRxSzB";
+
 function hostedMcpAuthorizeUrl(asUrl: string, client: RegisteredClient, state: string): URL {
   const url = new URL(`${asUrl}/oauth/authorize`);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", client.client_id);
-  url.searchParams.set("redirect_uri", "https://client.example/callback");
-  url.searchParams.set("code_challenge", pkceChallenge(randomBytes(32).toString("base64url")));
+  url.searchParams.set("redirect_uri", HOSTED_MCP_REDIRECT_URI);
+  url.searchParams.set("code_challenge", pkceChallenge(consentChallengeVerifier));
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("resource", `${asUrl}/mcp`);
   url.searchParams.set("state", state);
@@ -6113,12 +6126,20 @@ function consentChallengeAcceptBody({
   chosen,
   accessMode = "continuous",
   reviewDigest,
+  streamRanges,
 }: {
   model: ConsentChallengeModel;
   client: RegisteredClient;
   chosen: Array<{ source: ConsentChallengeModelSource; streams: ConsentChallengeModelStream[] }>;
   accessMode?: string;
   reviewDigest?: string;
+  /**
+   * Per-stream data time range, keyed by the model's own `stream.id`. This is
+   * the DATA range (`StreamGrant.time_constraint`), not grant validity — the
+   * two are orthogonal (spec-core.md:889) and `grant_expiry` above carries the
+   * other one.
+   */
+  streamRanges?: Record<string, { since?: string; until?: string }>;
 }): Record<string, unknown> {
   return {
     access_mode: accessMode,
@@ -6134,7 +6155,36 @@ function consentChallengeAcceptBody({
     review_digest: reviewDigest ?? model.reviewDigest,
     source_id: chosen.map(({ source }) => source.id),
     stream: chosen.flatMap(({ streams }) => streams.map((stream) => stream.id)),
+    ...(streamRanges ? { stream_range: streamRanges } : {}),
   };
+}
+
+/**
+ * The `time_constraint` the issued child grant recorded for one stream.
+ *
+ * Reads the PERSISTED GRANT via `getGrantPackageAccess` — the same record the
+ * `/mcp` read path consults — rather than an owner-facing summary endpoint.
+ * `time_constraint` is a property of the child grant's resolved stream
+ * selection, stamped with the manifest's own `consent_time_field`, and this
+ * asserts on what enforcement will actually honor.
+ *
+ * Returns null when the stream carries no bound, so "the owner chose no range"
+ * and "the range was dropped on the way" stay distinguishable by the caller
+ * instead of being collapsed here.
+ */
+async function issuedStreamTimeConstraint(
+  grantPackageId: string,
+  streamName: string
+): Promise<{ field?: string; since?: string; until?: string } | null> {
+  const access = await getGrantPackageAccess(grantPackageId);
+  assert.ok(access, `package ${grantPackageId} must be readable`);
+  const members = (access.members ?? []) as Record<string, unknown>[];
+  assert.equal(members.length, 1, `expected exactly one child grant: ${JSON.stringify(members)}`);
+  const grant = mustExist(members[0], "package must carry one member").grant as Record<string, unknown>;
+  const streams = (grant.streams ?? []) as Record<string, unknown>[];
+  const stream = streams.find((entry) => entry.name === streamName);
+  assert.ok(stream, `the issued grant must carry stream ${streamName}: ${JSON.stringify(streams)}`);
+  return (stream.time_constraint as { field?: string; since?: string; until?: string } | null) ?? null;
 }
 
 function postConsentChallenge(
@@ -6395,6 +6445,144 @@ test("a stale review_digest on a consent challenge is rejected and mints nothing
       await countGrantPackagesForOwner(),
       packageCountBefore,
       "a stale approval mints nothing"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// The defect this locks: the consent screen's per-stream date controls held
+// state and the accept route dropped it, so an owner who narrowed "saved
+// tracks" to 2025 got a grant covering every year. The two date axes are
+// orthogonal (spec-core.md:889) — `grant_expiry` bounds how long the
+// AUTHORIZATION lives, `time_constraint` bounds which RECORDS it reaches — and
+// only the first was reaching the grant.
+test("accepting a consent challenge carries the owner's per-stream date range onto the issued grant", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "stream-range-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    // Only a stream the manifest gives a time field can carry a range; the
+    // model says which by publishing `timePhrase`, and the screen shows the
+    // date control on exactly those.
+    const stream = mustExist(
+      source.streams.find((entry) => entry.timePhrase),
+      "the fixture must publish a stream with a data time axis"
+    );
+
+    const { status, body } = await postConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      consentChallengeAcceptBody({
+        chosen: [{ source, streams: [stream] }],
+        client,
+        model,
+        streamRanges: { [stream.id]: { since: "2025-01-01", until: "2025-12-31" } },
+      })
+    );
+    assert.equal(status, 200, JSON.stringify(body));
+
+    // Complete the flow so the child grant exists to inspect.
+    const redirectUrl = stringField(body, "redirect_url");
+    const code = mustExist(
+      new URL(redirectUrl).searchParams.get("code"),
+      "the approval must return an authorization code"
+    );
+    const { body: tokenBody } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: consentChallengeVerifier,
+        grant_type: "authorization_code",
+        redirect_uri: HOSTED_MCP_REDIRECT_URI,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    const grantPackageId = stringField(tokenBody, "grant_package_id");
+
+    const constraint = await issuedStreamTimeConstraint(grantPackageId, stream.name);
+    assert.ok(constraint, "the issued grant MUST record the range the owner chose, not drop it");
+
+    // The field is the MANIFEST's own consent_time_field, never a name the
+    // request supplied — the request only says which window, the declaration
+    // says which column it applies to.
+    const declared = mustExist(
+      spotify.streams.find((entry) => entry.name === stream.name),
+      "the manifest must declare the approved stream"
+    ) as Record<string, unknown>;
+    assert.equal(
+      constraint.field,
+      declared.consent_time_field,
+      "time_constraint.field MUST come from the manifest declaration"
+    );
+    // `since` is inclusive and `until` is EXCLUSIVE (spec-core.md:758-759), so
+    // an owner who picks "through 2025-12-31" gets an end instant of
+    // 2026-01-01T00:00:00Z — the whole last day is covered, and asserting the
+    // exclusive form is what stops a future change from quietly truncating it
+    // to midnight on the 31st.
+    assert.equal(constraint.since, "2025-01-01T00:00:00.000Z");
+    assert.equal(
+      constraint.until,
+      "2026-01-01T00:00:00.000Z",
+      "until is exclusive, so the owner's last chosen day must be fully inside the window"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// The default must not regress into an accidental bound: an owner who touched
+// no date control grants every record, and that is represented by ABSENCE.
+test("accepting with no date range leaves the issued grant unbounded in time", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "no-range-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    const stream = mustExist(
+      source.streams.find((entry) => entry.timePhrase),
+      "the fixture must publish a stream with a data time axis"
+    );
+
+    const { status, body } = await postConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      consentChallengeAcceptBody({ chosen: [{ source, streams: [stream] }], client, model })
+    );
+    assert.equal(status, 200, JSON.stringify(body));
+
+    const code = mustExist(
+      new URL(stringField(body, "redirect_url")).searchParams.get("code"),
+      "the approval must return an authorization code"
+    );
+    const { body: tokenBody } = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code,
+        code_verifier: consentChallengeVerifier,
+        grant_type: "authorization_code",
+        redirect_uri: HOSTED_MCP_REDIRECT_URI,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(
+      await issuedStreamTimeConstraint(stringField(tokenBody, "grant_package_id"), stream.name),
+      null,
+      "no range chosen means no temporal bound recorded"
     );
   } finally {
     await closeServer(server);

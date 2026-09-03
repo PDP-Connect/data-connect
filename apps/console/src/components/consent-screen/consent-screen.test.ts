@@ -266,3 +266,61 @@ test("the design-consent-preview route no longer exists — the real page is the
     "the mock preview must be deleted; /consent is the only consent surface"
   );
 });
+
+// ─── The data time range reaches the wire ──────────────────────────────────
+//
+// The defect these lock: the date controls held state and the submission
+// dropped it, so an owner who narrowed a stream to 2025 got a grant covering
+// every year. The controls were live and the wire was not.
+
+test("the owner's per-stream date range is submitted, not just collected", () => {
+  assert.match(CLIENT_SOURCE, /streamRanges,/, "buildDecision must return the ranges it tracked");
+  assert.match(
+    ACTIONS_SOURCE,
+    /stream_range: decision\.streamRanges/,
+    "the accept request must carry the ranges to the AS"
+  );
+});
+
+test("a range on a stream the owner unchecked is not submitted", () => {
+  // A leftover date on a deselected stream is noise, not a narrowing.
+  assert.match(
+    CLIENT_SOURCE,
+    /const chosenStreamIds = new Set\(sources\.flatMap\(\(source\) => source\.streamIds\)\)/,
+    "ranges must be filtered to streams that survived selection"
+  );
+  assert.match(CLIENT_SOURCE, /if \(!chosenStreamIds\.has\(streamId\)\)/);
+});
+
+test("an empty range is omitted rather than sent as a bound", () => {
+  // Sending `{}` would ask the server to record "no bound" as if the owner had
+  // chosen one.
+  assert.match(CLIENT_SOURCE, /if \(entry\.since \|\| entry\.until\)/);
+});
+
+test("the data range and the grant expiry stay separate fields", () => {
+  // spec-core.md:889 — grant validity, data temporal scope, and access pattern
+  // are three concepts that MUST NOT be conflated. One "date" field would
+  // conflate the first two.
+  assert.match(ACTIONS_SOURCE, /grant_expiry: decision\.grantExpiry/);
+  assert.match(ACTIONS_SOURCE, /stream_range: decision\.streamRanges/);
+  assert.match(
+    MODEL_SOURCE,
+    /readonly streamRanges: Readonly<Record<string, \{ since\?: string; until\?: string \}>>/,
+    "the decision model must declare the range separately from grantExpiry"
+  );
+});
+
+test("the data range is NOT folded into the approval artifact digest", () => {
+  // The digest binds the client, the access mode, and which streams were
+  // approved — terms the AS re-resolves independently. The range goes through
+  // the manifest-checked narrowing path instead, which can reject a range the
+  // stream cannot honor; a digest over it would bind a value the AS may
+  // legitimately normalize (`until` is exclusive).
+  const digestCall = ACTIONS_SOURCE.slice(
+    ACTIONS_SOURCE.indexOf("computeHostedMcpDecisionDigest({"),
+    ACTIONS_SOURCE.indexOf("return postChallenge")
+  );
+  assert.ok(digestCall.length > 0, "vacuity guard: the digest call must be found");
+  assert.doesNotMatch(digestCall, /streamRanges|stream_range/, "the digest must not cover the data range");
+});

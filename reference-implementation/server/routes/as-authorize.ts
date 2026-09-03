@@ -38,6 +38,8 @@ import {
   type StreamScopeSelection,
   parseSubmittedStreamScopes,
   resolveStreamScopeSelection,
+  scopeSinceInputName,
+  scopeUntilInputName,
 } from "../hosted-mcp-stream-scope.ts";
 import {
   ActiveBindingLookupError,
@@ -1171,6 +1173,40 @@ function submittedStrings(value: unknown): string[] {
 }
 
 /**
+ * Reads the console's `stream_range` object — `{ "<sourceKey>:<stream>": {
+ * since?, until? } }` — into a map keyed by the model's own stream id.
+ *
+ * Shape-checking only. Whether a date is VALID, whether the stream even has a
+ * time axis to narrow, and whether `since` precedes `until` are all decided
+ * downstream by `resolveStreamScopeSelection` against the manifest's own
+ * declaration; duplicating any of that here would create a second opinion
+ * about the same question.
+ */
+function submittedStreamRanges(value: unknown): Map<string, { since?: string; until?: string }> {
+  const ranges = new Map<string, { since?: string; until?: string }>();
+  if (!(value && typeof value === "object") || Array.isArray(value)) {
+    return ranges;
+  }
+  for (const [streamId, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!(raw && typeof raw === "object")) {
+      continue;
+    }
+    const { since, until } = raw as { since?: unknown; until?: unknown };
+    const entry: { since?: string; until?: string } = {};
+    if (typeof since === "string" && since.trim()) {
+      entry.since = since.trim();
+    }
+    if (typeof until === "string" && until.trim()) {
+      entry.until = until.trim();
+    }
+    if (entry.since || entry.until) {
+      ranges.set(streamId, entry);
+    }
+  }
+  return ranges;
+}
+
+/**
  * Translates the console's decision into the body the form POST handler
  * already validates.
  *
@@ -1210,23 +1246,43 @@ async function buildChallengeApprovalBody(
   );
   const chosenSourceIds = new Set(submittedStrings(submitted.source_id));
   const chosenStreamIds = new Set(submittedStrings(submitted.stream));
+  const ranges = submittedStreamRanges(submitted.stream_range);
 
   const selection: string[] = [];
   const stream: string[] = [];
+  // Per-stream data ranges, emitted as the flat `narrow_since_/narrow_until_`
+  // keys `parseSubmittedStreamScopes` already reads. Translating into the form
+  // vocabulary rather than adding a second one means the console's dates go
+  // through the SAME declaration-checked path as the form's — stamped with the
+  // manifest's own `consent_time_field`, rejected if the stream declares no
+  // time axis — instead of a parallel route that could diverge.
+  const scopeInputs: Record<string, string> = {};
   for (const source of model.sources) {
     if (!chosenSourceIds.has(source.id)) {
       continue;
     }
     selection.push(source.selectionValue);
     for (const modelStream of source.streams) {
-      if (chosenStreamIds.has(modelStream.id)) {
-        stream.push(modelStream.selectionValue);
+      if (!chosenStreamIds.has(modelStream.id)) {
+        continue;
+      }
+      stream.push(modelStream.selectionValue);
+      // Keyed by the model's own `stream.id`, so a range for a stream the
+      // owner did not choose is ignored rather than applied — the same
+      // posture resolveSubmittedStreamScopes takes for the form.
+      const range = ranges.get(modelStream.id);
+      if (range?.since) {
+        scopeInputs[scopeSinceInputName(source.id, modelStream.name)] = range.since;
+      }
+      if (range?.until) {
+        scopeInputs[scopeUntilInputName(source.id, modelStream.name)] = range.until;
       }
     }
   }
 
   return {
     ...challenge.authorizeParams,
+    ...scopeInputs,
     access_mode: submitted.access_mode,
     decision_digest: submitted.decision_digest,
     grant_expiry: submitted.grant_expiry,
