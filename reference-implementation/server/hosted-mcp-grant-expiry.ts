@@ -53,7 +53,50 @@ export const HOSTED_MCP_GRANT_EXPIRY_OPTIONS: readonly GrantExpiryOption[] = Obj
 
 export const HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID = "90d";
 
+/**
+ * The longest dated expiry an owner may pick, in days.
+ *
+ * The quick-fill options top out at a year; a bare date picker with no ceiling
+ * would let a mis-typed year (2226 for 2026) become a two-century grant that
+ * looks, on the confirmation, exactly like a correct one. Five years is well
+ * past any plausible deliberate choice while still closing that gap — and an
+ * owner who genuinely wants unbounded access has "No end date", which says so
+ * out loud instead of hiding behind a far-future date.
+ */
+const MAX_DATED_EXPIRY_DAYS = 5 * 365;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Resolve a bare `YYYY-MM-DD` the owner typed into a date picker.
+ *
+ * Returns null when the value is not a date at all, so the caller can fall
+ * through to the option-id vocabulary; returns `{ error }` when it IS a date
+ * but not one this server will grant, so a rejected date never reads as an
+ * unrecognized keyword.
+ *
+ * Resolved to the END of the chosen day (UTC), because an owner who picks
+ * "December 2" means access lasts through December 2, not until its first
+ * instant.
+ */
+function resolveDatedExpiry(raw: string, nowMs: number): { error: string } | { expiresAt: string } | null {
+  if (!ISO_DATE_RE.test(raw)) {
+    return null;
+  }
+  const parsed = Date.parse(`${raw}T23:59:59.999Z`);
+  if (Number.isNaN(parsed)) {
+    return { error: "That is not a date this server can use. Pick another." };
+  }
+  if (parsed <= nowMs) {
+    return { error: "Choose an end date in the future." };
+  }
+  if (parsed - nowMs > MAX_DATED_EXPIRY_DAYS * DAY_MS) {
+    return { error: "Choose an end date within five years, or choose no end date." };
+  }
+  return { expiresAt: new Date(parsed).toISOString() };
+}
 
 /** Look up an offered option by its form value. */
 export function findGrantExpiryOption(id: unknown): GrantExpiryOption | null {
@@ -66,6 +109,10 @@ export function findGrantExpiryOption(id: unknown): GrantExpiryOption | null {
 
 /**
  * Resolve a submitted expiry choice into the instant the grant carries.
+ *
+ * Accepts either a quick-fill option id (`90d`, `1y`, `never`) or a bare
+ * `YYYY-MM-DD` the owner picked, bounded to five years. Absent falls back to
+ * the default.
  *
  * Returns `{ expiresAt: null }` for "no end date", which callers must render
  * as an ABSENT `expires_at` rather than an explicit null — `ResolvedGrant`
@@ -88,6 +135,14 @@ export function resolveGrantExpiry(
     return { expiresAt: null };
   }
   const raw = typeof submitted === "string" ? submitted.trim() : "";
+  // A bare date the owner picked, before the fixed vocabulary. The quick-fill
+  // options are a shortcut for common windows, not the only windows allowed:
+  // the consent screen offers a real date picker, and an owner who names a
+  // Tuesday in March should get that Tuesday rather than a validation error.
+  const dated = resolveDatedExpiry(raw, nowMs);
+  if (dated) {
+    return dated;
+  }
   const option = findGrantExpiryOption(raw || HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID);
   if (!option) {
     return { error: "Choose how long this access should last." };
