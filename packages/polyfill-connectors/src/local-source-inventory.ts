@@ -46,6 +46,7 @@ export const LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR = {
   ],
   codex: [
     { store: "sessions", stream: "sessions" },
+    { store: "sessions_archive", stream: "sessions" },
     { store: "state_db", stream: "sessions" },
     { store: "derived_messages", stream: "messages" },
     { store: "derived_function_calls", stream: "function_calls" },

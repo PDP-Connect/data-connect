@@ -115,6 +115,30 @@ export function isRolloutFile(name: string): boolean {
 	return name.startsWith("rollout-") && name.endsWith(".jsonl");
 }
 
+// A real on-disk rollout filename looks like
+// `rollout-2026-07-31T14-01-26-019fb98d-807f-7f62-9cbf-5950178318cc.jsonl`.
+// The trailing UUID is byte-identical to the `session_id`/`id` field inside
+// the file's first `session_meta` JSON line (confirmed empirically). This
+// regex pulls it straight off the filename — no file I/O — so the rollout
+// scan can identify a file by session UUID before ever opening it.
+const ROLLOUT_FILENAME_UUID_RE =
+	/-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+
+/**
+ * Extract the trailing session UUID from a rollout filename, or `null` when
+ * the name doesn't carry the expected suffix (e.g. a legacy/malformed file
+ * name). This is a pure, I/O-free identity hint used to key the per-file
+ * parse cursor by session UUID instead of by path, so a rollout file that is
+ * later relocated (e.g. archived to a second root; see
+ * ARCHIVAL-CONTRACT.md) is still recognized as the SAME file and is not
+ * fully reparsed — the file's content-derived identity never changes even
+ * when its location does.
+ */
+export function extractRolloutUuidFromFilename(name: string): string | null {
+	const match = name.match(ROLLOUT_FILENAME_UUID_RE);
+	return match?.[1]?.toLowerCase() ?? null;
+}
+
 // ─── Session record builders ────────────────────────────────────────────
 
 export function buildThreadSessionRecord(

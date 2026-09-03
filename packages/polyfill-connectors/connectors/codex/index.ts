@@ -34,12 +34,24 @@
  * opened READ-ONLY so we never risk corrupting live Codex state.
  *
  * Env overrides:
- *   CODEX_HOME             default ~/.codex (parent of all paths below)
- *   CODEX_SESSIONS_DIR     default $CODEX_HOME/sessions
- *   CODEX_STATE_DB         default $CODEX_HOME/state_5.sqlite
- *   CODEX_RULES_DIR        default $CODEX_HOME/rules
- *   CODEX_PROMPTS_DIR      default $CODEX_HOME/prompts
- *   CODEX_SKILLS_DIR       default $CODEX_HOME/skills
+ *   CODEX_HOME               default ~/.codex (parent of all paths below)
+ *   CODEX_SESSIONS_DIR       default $CODEX_HOME/sessions
+ *   CODEX_SESSIONS_ARCHIVE_DIR default $CODEX_HOME/sessions-archive
+ *   CODEX_STATE_DB           default $CODEX_HOME/state_5.sqlite
+ *   CODEX_RULES_DIR          default $CODEX_HOME/rules
+ *   CODEX_PROMPTS_DIR        default $CODEX_HOME/prompts
+ *   CODEX_SKILLS_DIR         default $CODEX_HOME/skills
+ *
+ * Two rollout roots: `CODEX_SESSIONS_DIR` is where Codex itself writes and
+ * appends rollout files. A separate, external archival policy (outside this
+ * repo — see connectors/codex/ARCHIVAL-CONTRACT.md) one-way-moves rollout
+ * files older than some threshold into `CODEX_SESSIONS_ARCHIVE_DIR`, using
+ * the same yyyy/mm/dd layout. Codex itself never writes to the archive root.
+ * This connector scans BOTH roots and merges them; rollout files are
+ * identified by the session UUID embedded in their filename (see
+ * `extractRolloutUuidFromFilename` in parsers.ts), never by path, so a file
+ * relocated from one root to the other is recognized as the same file and is
+ * neither reparsed from scratch nor double-emitted.
  */
 
 import { createHash } from "node:crypto";
@@ -89,6 +101,7 @@ import {
 	buildThreadSessionRecord,
 	extendTimestampRange,
 	extractMessageText,
+	extractRolloutUuidFromFilename,
 	isRolloutFile,
 	isSkippableRulesLine,
 	parseFrontmatter,
@@ -166,6 +179,14 @@ export const CODEX_KNOWN_LOCAL_STORES: KnownLocalStore[] = [
 		stream: "sessions",
 		classification: "collect",
 		reason: "declared rollout source",
+	},
+	{
+		store: "sessions_archive",
+		relativePath: "sessions-archive",
+		stream: "sessions",
+		classification: "collect",
+		reason:
+			"declared rollout source: the external archival policy's one-way relocation target for rollout files older than its threshold (see ARCHIVAL-CONTRACT.md); absence is normal on a host with nothing archived yet",
 	},
 	{
 		store: "state_db",
@@ -469,6 +490,22 @@ export async function* walkRollouts(
 		}
 		yield* walkYearMonths(join(baseDir, y), y, scope);
 	}
+}
+
+/**
+ * The rich per-file parse cursor's map key. Prefers the session UUID parsed
+ * out of the filename (stable across a relocation between the sessions/ and
+ * sessions-archive/ roots — see ARCHIVAL-CONTRACT.md) and falls back to the
+ * full path only for a filename that doesn't carry the expected UUID suffix
+ * (never observed on a real Codex install, but a malformed/legacy name
+ * degrades to the pre-fix path-keyed behavior rather than dropping the
+ * cursor silently).
+ */
+export function cursorKeyForEntry(entry: {
+	file: string;
+	path: string;
+}): string {
+	return extractRolloutUuidFromFilename(entry.file) ?? entry.path;
 }
 
 // ─── state_5.sqlite reader ─────────────────────────────────────────────
@@ -1275,17 +1312,29 @@ export function decideRolloutAction(input: {
 	return { kind: "skip" };
 }
 
+/** One rollout root to scan. `label` identifies it in progress/log messages
+ *  only — it plays no role in cursor identity or record emission. */
+interface RolloutRoot {
+	baseDir: string;
+	label: "sessions" | "sessions_archive";
+}
+
 interface ScanRolloutsArgs {
 	activeQuietMs: number;
-	baseDir: string;
 	emitRecord: (stream: string, data: RecordData) => void;
 	fileCursors: Record<string, RolloutFileCursor>;
 	fileMtimes: Record<string, number>;
 	newFileCursors: Record<string, RolloutFileCursor>;
 	newMtimes: Record<string, number>;
 	requested: Map<string, StreamScope>;
+	roots: readonly RolloutRoot[];
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	scanStartedAtMs: number;
+	/** Cursor keys (UUID, or path for a malformed filename) already processed
+	 *  THIS scan — guards the mid-move race where the same rollout file is
+	 *  briefly visible under both roots in one pass. Owned by the caller so it
+	 *  spans every root's walk, not just one. */
+	seenCursorKeysThisScan: Set<string>;
 	scope?: EnumerationScope | null;
 }
 
@@ -1299,17 +1348,21 @@ interface ScanRolloutsResult {
 }
 
 /** Carry a file's prior cursor forward verbatim into the next STATE, and keep
- *  the legacy mtime map populated so a downgrade still has a usable cursor. */
+ *  the legacy mtime map populated so a downgrade still has a usable cursor.
+ *  The rich cursor is carried under its UUID key (stable across a relocation
+ *  between roots); the legacy mtime map stays path-keyed, matching its
+ *  pre-existing path+mtime fast-path semantics. */
 function carryFileCursorForward(
 	args: ScanRolloutsArgs,
-	path: string,
+	entry: { file: string; path: string },
 	mtime: number,
 ): void {
-	const prior = args.fileCursors[path];
+	const cursorKey = cursorKeyForEntry(entry);
+	const prior = args.fileCursors[cursorKey];
 	if (prior) {
-		args.newFileCursors[path] = prior;
+		args.newFileCursors[cursorKey] = prior;
 	}
-	args.newMtimes[path] = mtime;
+	args.newMtimes[entry.path] = mtime;
 }
 
 /** Report `Codex phase=index sessions_dir_readable=false` and return the empty scan result. */
@@ -1430,7 +1483,7 @@ async function processRolloutEntry(
 	},
 	args: ScanRolloutsArgs,
 	rolloutOrdinal: number,
-): Promise<"missing" | "parsed" | "skipped"> {
+): Promise<"missing" | "parsed" | "skipped" | "duplicate"> {
 	let st: Stats;
 	try {
 		st = statSync(entry.path);
@@ -1438,10 +1491,39 @@ async function processRolloutEntry(
 		return "missing";
 	}
 	const mtime = st.mtimeMs;
-	const cursor = args.fileCursors[entry.path];
+	const cursorKey = cursorKeyForEntry(entry);
+
+	// Mid-move race guard: the archival policy one-way-moves a file from
+	// sessions/ to sessions-archive/ (see ARCHIVAL-CONTRACT.md). A scan that
+	// lands mid-`mv` (rare, but the walk over two roots is not atomic) can see
+	// the SAME session UUID under both roots in one pass — e.g. a `cp`-then-
+	// `rm` style move briefly leaves both copies on disk, or a directory
+	// listing race yields stale entries. Once this scan has already processed
+	// a UUID (from whichever root it was walked first), a second sighting in
+	// the same pass is the identical file re-appearing under its other root:
+	// skip it outright rather than re-parsing or re-emitting. This is
+	// never a "the file disappeared, therefore deleted" inference — it is the
+	// same content encountered twice in one walk, using the same identity the
+	// per-run cursor already trusts.
+	//
+	// This is distinct from a plain "skipped" (the legacy mtime fast path, or
+	// an unchanged-file skip below): those carry a cursor whose examined counts
+	// have NOT yet been added to this scan's totals, so the caller adds them.
+	// A "duplicate" sighting's cursor was already counted at first sighting —
+	// counting it again would double `messagesExamined`/`functionCallsExamined`
+	// for a file that was only actually examined once.
+	if (args.seenCursorKeysThisScan.has(cursorKey)) {
+		return "duplicate";
+	}
+	args.seenCursorKeysThisScan.add(cursorKey);
+
+	const cursor = args.fileCursors[cursorKey];
 
 	// Legacy fast path: no rich cursor yet, but the legacy mtime matches — the
 	// previously-emitted records stay valid. Carry the (absent) cursor forward.
+	// This map stays PATH-keyed (its pre-existing semantics): a relocated file
+	// has a new path, so it never spuriously hits this fast path — it falls
+	// through to resolveRolloutAction, which is keyed by the stable UUID.
 	if (!cursor && args.fileMtimes[entry.path] === mtime) {
 		args.newMtimes[entry.path] = mtime;
 		return "skipped";
@@ -1449,7 +1531,7 @@ async function processRolloutEntry(
 
 	const action = await resolveRolloutAction(entry.path, st, cursor);
 	if (action.kind === "skip") {
-		carryFileCursorForward(args, entry.path, mtime);
+		carryFileCursorForward(args, entry, mtime);
 		return "skipped";
 	}
 
@@ -1475,7 +1557,7 @@ async function processRolloutEntry(
 		// still avoid stamping it so the deferral is a pure no-op on this run's
 		// record emission.
 		if (cursor) {
-			args.newFileCursors[entry.path] = cursor;
+			args.newFileCursors[cursorKey] = cursor;
 		}
 		return "skipped";
 	}
@@ -1497,7 +1579,7 @@ async function processRolloutEntry(
 		seed: isAppend ? action.seed : undefined,
 	});
 
-	args.newFileCursors[entry.path] = await buildFileCursorAfterParse(
+	args.newFileCursors[cursorKey] = await buildFileCursorAfterParse(
 		entry.path,
 		result,
 	);
@@ -1505,21 +1587,57 @@ async function processRolloutEntry(
 	return "parsed";
 }
 
+/** Whether a root directory exists, distinguishing ENOENT from a real I/O
+ *  error the same way `listIfExists` does. */
+async function rootExists(
+	baseDir: string,
+): Promise<{ exists: boolean; unreadable: boolean }> {
+	try {
+		return {
+			exists: (await listIfExists(baseDir)) !== null,
+			unreadable: false,
+		};
+	} catch {
+		return { exists: false, unreadable: true };
+	}
+}
+
+/**
+ * Scan every rollout root (today: `sessions/` and `sessions-archive/`, see
+ * ARCHIVAL-CONTRACT.md) and merge their results into one logical scan.
+ *
+ * Root existence is evaluated independently: a host that has never had
+ * anything archived yet (sessions-archive/ absent) is normal, not an error —
+ * only when EVERY root is absent does this report the legacy
+ * `sessions_dir_readable=false` outcome. A single unreadable (not merely
+ * absent) root still marks the overall scan `unreadable`, since that root's
+ * content genuinely could not be examined.
+ *
+ * Cross-root de-duplication is `processRolloutEntry`'s job (via
+ * `seenCursorKeysThisScan`, keyed by the UUID `cursorKeyForEntry` derives from
+ * each entry's filename) — this function just walks every existing root in
+ * turn and folds the counts together.
+ */
 async function scanRollouts(
 	args: ScanRolloutsArgs,
 ): Promise<ScanRolloutsResult> {
-	let baseExists = false;
-	let scanOutcomeOnBaseError: "unreadable" | null = null;
-
-	try {
-		baseExists = (await listIfExists(args.baseDir)) !== null;
-	} catch {
-		// listIfExists distinguishes ENOENT (returns null) from other errors (throws)
-		scanOutcomeOnBaseError = "unreadable";
+	// Sequential, not Promise.all: `args.roots` is a short, fixed list (today:
+	// two — the primary and archive roots), and each check is a single cheap
+	// listIfExists(). No ordering or parallelism benefit is worth the added
+	// concurrency surface.
+	const rootChecks: Array<{
+		exists: boolean;
+		root: RolloutRoot;
+		unreadable: boolean;
+	}> = [];
+	for (const root of args.roots) {
+		rootChecks.push({ root, ...(await rootExists(root.baseDir)) });
 	}
+	const existingRoots = rootChecks.filter((r) => r.exists).map((r) => r.root);
+	const anyUnreadable = rootChecks.some((r) => r.unreadable);
 
-	if (!baseExists) {
-		return await reportMissingSessionsBase(scanOutcomeOnBaseError);
+	if (existingRoots.length === 0) {
+		return await reportMissingSessionsBase(anyUnreadable ? "unreadable" : null);
 	}
 
 	// Local wrapper to track emissions without mutating args
@@ -1538,47 +1656,54 @@ async function scanRollouts(
 
 	let totalRollouts = 0;
 	let parsedRollouts = 0;
-	let scanOutcome: "complete" | "unreadable" | "parse_error" = "complete";
+	let scanOutcome: "complete" | "unreadable" | "parse_error" = anyUnreadable
+		? "unreadable"
+		: "complete";
 	let messagesExamined = 0;
 	let functionCallsExamined = 0;
 
-	try {
-		for await (const entry of walkRollouts(args.baseDir, args.scope)) {
-			if (!isPathWithinSourceRoots(entry.path, args.scope)) {
-				continue;
-			}
-			totalRollouts += 1;
-			try {
-				const result = await processRolloutEntry(
-					entry,
-					{ ...args, emitRecord: countingEmit },
-					totalRollouts,
-				);
-				if (result === "parsed") {
-					parsedRollouts += 1;
+	outer: for (const root of existingRoots) {
+		try {
+			for await (const entry of walkRollouts(root.baseDir, args.scope)) {
+				if (!isPathWithinSourceRoots(entry.path, args.scope)) {
+					continue;
 				}
-				// A "parsed" file was just examined; a "skipped" file may still carry
-				// examined counts forward from a prior run's cursor — either way, the
-				// cursor at this path (fresh or carried-forward) is the source of truth.
-				if (result === "parsed" || result === "skipped") {
-					const counts = examinedCountsFromCursor(
-						args.newFileCursors[entry.path],
+				totalRollouts += 1;
+				try {
+					const result = await processRolloutEntry(
+						entry,
+						{ ...args, emitRecord: countingEmit },
+						totalRollouts,
 					);
-					messagesExamined += counts.messages;
-					functionCallsExamined += counts.functionCalls;
+					if (result === "parsed") {
+						parsedRollouts += 1;
+					}
+					// A "parsed" file was just examined; a "skipped" file may still carry
+					// examined counts forward from a prior run's cursor — either way, the
+					// cursor at this key (fresh or carried-forward) is the source of truth.
+					// A "duplicate" (mid-move-race second sighting of the same UUID this
+					// scan) contributes nothing: its cursor was already counted at first
+					// sighting, so adding it again would double-count the file.
+					if (result === "parsed" || result === "skipped") {
+						const counts = examinedCountsFromCursor(
+							args.newFileCursors[cursorKeyForEntry(entry)],
+						);
+						messagesExamined += counts.messages;
+						functionCallsExamined += counts.functionCalls;
+					}
+				} catch (error) {
+					if (error instanceof LocalJsonlMalformedLineError) {
+						await reportMalformedRolloutGap(args.requested);
+					}
+					// Any error during parsing (without code or other) makes scan incomplete
+					scanOutcome = "parse_error";
+					break outer;
 				}
-			} catch (error) {
-				if (error instanceof LocalJsonlMalformedLineError) {
-					await reportMalformedRolloutGap(args.requested);
-				}
-				// Any error during parsing (without code or other) makes scan incomplete
-				scanOutcome = "parse_error";
-				break;
 			}
+		} catch {
+			// Enumeration error (e.g., directory traversal failure) makes scan incomplete
+			scanOutcome = "unreadable";
 		}
-	} catch {
-		// Enumeration error (e.g., directory traversal failure) makes scan incomplete
-		scanOutcome = "unreadable";
 	}
 
 	emit({
@@ -1671,6 +1796,7 @@ async function readStartMessage(): Promise<StartMessage> {
 }
 
 interface CodexDirs {
+	archiveBaseDir: string;
 	baseDir: string;
 	codexHome: string;
 	promptsDir: string;
@@ -1684,6 +1810,13 @@ function resolveCodexDirs(): CodexDirs {
 	return {
 		codexHome,
 		baseDir: process.env.CODEX_SESSIONS_DIR || join(codexHome, "sessions"),
+		// The external archival policy's destination root (see
+		// ARCHIVAL-CONTRACT.md). Absence is normal — many hosts have nothing
+		// old enough to have been archived yet — and is reported honestly via
+		// the `sessions_archive` coverage store rather than failing readiness.
+		archiveBaseDir:
+			process.env.CODEX_SESSIONS_ARCHIVE_DIR ||
+			join(codexHome, "sessions-archive"),
 		stateDbPath:
 			process.env.CODEX_STATE_DB || join(codexHome, "state_5.sqlite"),
 		rulesDir: process.env.CODEX_RULES_DIR || join(codexHome, "rules"),
@@ -2417,7 +2550,10 @@ async function main(): Promise<void> {
 	if (needRollouts) {
 		rolloutScan = await scanRollouts({
 			activeQuietMs: resolveActiveRolloutQuietMs(),
-			baseDir: dirs.baseDir,
+			roots: [
+				{ baseDir: dirs.baseDir, label: "sessions" },
+				{ baseDir: dirs.archiveBaseDir, label: "sessions_archive" },
+			],
 			fileCursors,
 			fileMtimes,
 			newFileCursors,
@@ -2426,6 +2562,7 @@ async function main(): Promise<void> {
 			emitRecord,
 			rolloutAggregates,
 			scanStartedAtMs,
+			seenCursorKeysThisScan: new Set<string>(),
 			scope: enumerationScope,
 		});
 		parsedRolloutFiles = rolloutScan.parsedFiles;

@@ -187,7 +187,7 @@ function rolloutStateCursor(
 
 test("first run full-parses a rollout file and writes a rich per-file cursor", async () => {
 	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-append-first-"));
-	const path = await writeRollout(
+	await writeRollout(
 		codexHome,
 		OLD_DATE_DIR,
 		`rollout-2026-04-15T12-26-06-${SESSION_ID}.jsonl`,
@@ -206,7 +206,10 @@ test("first run full-parses a rollout file and writes a rich per-file cursor", a
 		"both messages parsed on first run",
 	);
 
-	const cursor = rolloutStateCursor(run.messages).file_cursors?.[path];
+	// Cursor is keyed by the session UUID (parsed from the filename), not the
+	// path — stable across a relocation between roots (see
+	// ARCHIVAL-CONTRACT.md and the "rescan after relocation" tests below).
+	const cursor = rolloutStateCursor(run.messages).file_cursors?.[SESSION_ID];
 	assert.ok(cursor, "a rich per-file cursor is written for the parsed file");
 	assert.equal(cursor.session_id, SESSION_ID);
 	assert.equal(
@@ -329,7 +332,9 @@ test("appending to a long-lived rollout file emits ONLY the appended records wit
 	);
 
 	// The advanced cursor reflects the new boundary + cumulative count.
-	const nextCursor = rolloutStateCursor(run2.messages).file_cursors?.[path];
+	const nextCursor = rolloutStateCursor(run2.messages).file_cursors?.[
+		SESSION_ID
+	];
 	assert.ok(nextCursor, "cursor advances after the tail");
 	assert.equal(
 		nextCursor.message_count,
@@ -484,7 +489,7 @@ test("replaced-prefix rollout file (same size, changed head) full-reparses via t
 	const run1 = await runCodex({ codexHome, streams: ["messages"] });
 	assert.equal(run1.exitCode, 0);
 	const priorCursor = rolloutStateCursor(run1.messages);
-	const priorSize = priorCursor.file_cursors?.[path]?.size_bytes;
+	const priorSize = priorCursor.file_cursors?.[SESSION_ID]?.size_bytes;
 	assert.ok(priorSize, "first run wrote a cursor");
 
 	// Rewrite with the SAME byte length but a changed prefix (different first
@@ -549,7 +554,7 @@ test("legacy file_mtimes-only cursor reparses once, then writes a rich cursor th
 	// The upgrade run wrote a rich cursor; a subsequent append must now tail.
 	const upgradedCursor = rolloutStateCursor(run1.messages);
 	assert.ok(
-		upgradedCursor.file_cursors?.[path],
+		upgradedCursor.file_cursors?.[SESSION_ID],
 		"rich cursor written on the upgrade run",
 	);
 
@@ -644,7 +649,7 @@ test("cursor records size_bytes == committed offset, NOT the larger raw stat siz
 	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-append-inv-"));
 	const completePrefix = jsonl([sessionMetaLine(), messageLine("committed")]);
 	const partialTail = messageLine("uncommitted partial"); // no trailing newline
-	const path = await writeRollout(
+	await writeRollout(
 		codexHome,
 		OLD_DATE_DIR,
 		`rollout-2026-04-15T12-26-06-${SESSION_ID}.jsonl`,
@@ -655,7 +660,7 @@ test("cursor records size_bytes == committed offset, NOT the larger raw stat siz
 
 	const run = await runCodex({ codexHome, streams: ["messages"] });
 	assert.equal(run.exitCode, 0);
-	const cursor = rolloutStateCursor(run.messages).file_cursors?.[path];
+	const cursor = rolloutStateCursor(run.messages).file_cursors?.[SESSION_ID];
 	assert.ok(cursor, "cursor written");
 	assert.ok(
 		rawSize > committed,
@@ -708,7 +713,7 @@ test("a trailing partial line (no final newline) is NOT committed and is parsed 
 		["committed line"],
 		"only the newline-terminated line is committed; the partial is held back",
 	);
-	const cursor1 = rolloutStateCursor(run1.messages).file_cursors?.[path];
+	const cursor1 = rolloutStateCursor(run1.messages).file_cursors?.[SESSION_ID];
 	assert.ok(cursor1, "cursor written");
 	assert.equal(
 		cursor1.offset_bytes,
