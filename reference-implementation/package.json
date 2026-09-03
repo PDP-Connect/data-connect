@@ -10,6 +10,7 @@
     "./reference-topology": "./server/reference-topology.ts",
     "./connection-setup-plan": "./server/connection-setup-plan.ts",
     "./owner-session": "./server/owner-session.ts",
+    "./hosted-mcp-decision-digest": "./server/hosted-mcp-decision-digest.ts",
     "./deployment-diagnostics": "./server/deployment-diagnostics.ts",
     "./manual-upload-limits": "./server/manual-upload-limits.ts",
     "./operations/as-authorization-server-metadata": "./operations/as-authorization-server-metadata/index.ts",

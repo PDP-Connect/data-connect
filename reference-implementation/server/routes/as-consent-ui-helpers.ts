@@ -565,29 +565,12 @@ export interface HostedMcpPickerReviewDecision {
 // never widens the grant. Everything minted still derives from the server's
 // own re-resolution of the selections.
 
-/** The exact decision the owner reviewed, in the shape the page displayed. */
-export interface HostedMcpPickerSubmittedDecision {
-  accessMode: string;
-  clientId: string;
-  /** Sorted `sourceKey -> sorted stream names`, exactly as approved. */
-  sources: Array<{ sourceKey: string; streamNames: string[] }>;
-}
-
-/**
- * Digest over the owner's exact decision. Stable across key order; any change
- * to the selected sources, the selected streams within them, the access mode,
- * or the client identity changes it.
- */
-export function computeHostedMcpDecisionDigest(decision: HostedMcpPickerSubmittedDecision): string {
-  const normalized = {
-    accessMode: decision.accessMode,
-    clientId: decision.clientId,
-    sources: [...decision.sources]
-      .map((source) => ({ sourceKey: source.sourceKey, streamNames: [...source.streamNames].sort() }))
-      .sort((a, b) => a.sourceKey.localeCompare(b.sourceKey)),
-  };
-  return `sha256:${base64UrlSha256(JSON.stringify(canonicalizeForDigest(normalized)))}`;
-}
+// The decision digest itself now lives in `../hosted-mcp-decision-digest.ts`,
+// a dependency-light module the console's consent page can import without
+// pulling this renderer into a browser-facing bundle. Re-exported here so
+// every existing caller and test keeps its import path.
+export type { HostedMcpPickerSubmittedDecision } from "../hosted-mcp-decision-digest.ts";
+export { computeHostedMcpDecisionDigest } from "../hosted-mcp-decision-digest.ts";
 
 /**
  * Computes a stable digest over the exact resolved hosted-MCP package
@@ -697,6 +680,192 @@ export async function resolveHostedMcpPickerSnapshotDigest(
 ): Promise<string> {
   const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
   return computeHostedMcpPickerSnapshotDigest(rows, client);
+}
+
+/**
+ * The consent challenge render model — every fact the owner-facing consent
+ * screen displays, resolved server-side from the pending authorization
+ * request, with no rendering decisions baked in.
+ *
+ * This is the JSON counterpart of `renderHostedMcpSourceSelection`'s HTML: it
+ * carries the SAME facts, resolved by the SAME helpers, so the two surfaces
+ * cannot disagree about what the owner is being asked. What it deliberately
+ * does NOT carry is presentation — no copy the console can write for itself,
+ * no markup, no CSS classes. The console owns how this reads; this owns what
+ * is true.
+ *
+ * `reviewDigest` binds the eligibility snapshot the owner reviewed. The
+ * console echoes it back on accept, where `rejectIfHostedMcpReviewDigestStale`
+ * re-resolves it fresh and fails closed on drift — the same TOCTOU guard the
+ * form POST has always had, reached through the same code path.
+ */
+export interface HostedMcpConsentChallengeModel {
+  /** Server default (`continuous`), and the vocabulary the accept route validates against. */
+  readonly accessMode: { readonly supported: readonly string[]; readonly value: string };
+  readonly challenge: string;
+  readonly client: {
+    /**
+     * The origin the client PROVED it controls, or null when it proved none.
+     * Never falls back to the app's own name: repeating "ChatGPT" on a line
+     * that reads as a domain would dress a self-asserted name as a verified
+     * one. A client with no proven domain simply has no second identity line.
+     */
+    readonly domain: string | null;
+    /**
+     * The raw `client_id`. Published because the approving surface must
+     * compute `decision_digest` over the client identity it displayed, and a
+     * digest the server computed for itself would bind nothing (AS-conformance
+     * #15). Not a secret — it is a public parameter of the authorize URL.
+     */
+    readonly id: string;
+    readonly monogram: string;
+    readonly name: string;
+    /** Policy/terms links the client's own identity document declared, if any. */
+    readonly policyLinks: ReadonlyArray<{ readonly href: string; readonly label: string }>;
+    /**
+     * The host this flow will actually send the owner back to — the REGISTERED
+     * redirect_uri's origin, resolved by the server, never the requested one.
+     * A different fact from `domain`: this is where the browser goes, which is
+     * true regardless of whether the client proved anything about its identity.
+     */
+    readonly returnTo: string | null;
+    readonly trust: "unverified" | "domain" | "verified";
+  };
+  /** Owner-chooseable grant validity (`Grant.expires_at`), NOT per-stream data range. */
+  readonly grantExpiry: {
+    readonly defaultId: string;
+    readonly options: ReadonlyArray<{ readonly days: number | null; readonly id: string; readonly label: string }>;
+  };
+  readonly purpose: { readonly code: string; readonly description: string };
+  readonly retention: string;
+  readonly reviewDigest: string;
+  readonly sources: ReadonlyArray<{
+    readonly account: string;
+    /** Manifest-declared brand glyph, passed straight to ConnectorIcon; null renders its Monogram. */
+    readonly icon: { readonly color: string | null; readonly kind: string | null; readonly svg: string | null } | null;
+    readonly id: string;
+    readonly name: string;
+    readonly selectionValue: string;
+    readonly streams: ReadonlyArray<{
+      readonly fieldsTotal: number;
+      readonly id: string;
+      readonly label: string;
+      readonly name: string;
+      readonly selectionValue: string;
+      /**
+       * Whether this stream starts checked. Always false: the picker
+       * pre-selects nothing, so consent is an affirmative act rather than a
+       * default the owner has to notice and undo. Carried explicitly (not
+       * assumed by the console) so a future default-selection policy is a
+       * server decision, not a client one.
+       */
+      readonly selected: boolean;
+      readonly sentence: string;
+      /** Present only when the stream declares `consent_time_field`; absent suppresses the date control. */
+      readonly timePhrase?: string;
+    }>;
+  }>;
+}
+
+export async function buildHostedMcpConsentChallengeModel(
+  challenge: string,
+  ownerSubjectId: string,
+  caps: ConsentPickerCapabilities,
+  ui: ConsentUiRenderer,
+  client: PendingGrantRequest["client"] | null,
+  /**
+   * The redirect target for this authorize request, used only to tell the
+   * owner where they will end up. The caller passes the value the AS itself
+   * recorded, so this cannot be steered by a request parameter.
+   */
+  redirectUri: string | null = null
+): Promise<HostedMcpConsentChallengeModel> {
+  const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
+  const clientDisplay = client ? buildConsentClientDisplay(client, ui) : null;
+  // `displayName`, not `titleName`: spec-core.md:673 requires the resolved
+  // display name when the metadata carries one, with `client_id` only as the
+  // fallback — and `displayName` already encodes exactly that precedence.
+  const clientName = clientDisplay?.displayName ?? "This app";
+  // Icons come from each row's own manifest, the same value /sources passes to
+  // ConnectorIcon. Resolved here rather than in the console because the
+  // console has no manifest reader, and because `validateManifestIcon` has
+  // already allowlist-checked this SVG on the read that produced it.
+  const icons = new Map<string, HostedMcpConsentChallengeModel["sources"][number]["icon"]>();
+  for (const row of rows) {
+    if (icons.has(row.connectorId)) {
+      continue;
+    }
+    const manifest = await caps.getConnectorManifest(row.connectorId);
+    const icon = (manifest as { icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null })?.icon;
+    icons.set(
+      row.connectorId,
+      icon?.svg ? { color: icon.color ?? null, kind: icon.kind ?? null, svg: icon.svg } : null
+    );
+  }
+  return {
+    accessMode: {
+      supported: [...HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES],
+      value: HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE,
+    },
+    challenge,
+    client: {
+      // Null, not the app's own name: see the field's doc comment. A client
+      // that proved no domain gets no domain line at all.
+      domain: clientDisplay?.domainLabel ?? null,
+      id: client?.client_id ?? "",
+      monogram: clientDisplay?.monogram ?? "AP",
+      name: clientName,
+      policyLinks: clientDisplay?.policyLinks ?? [],
+      returnTo: hostLabelFromClientId(redirectUri) ?? null,
+      // Three tiers, each naming what the server actually checked
+      // (`resolveClientTrust`'s `basis`). Untrusted is the DEFAULT, so a
+      // client that proved nothing can never fall through into a badge that
+      // claims otherwise — the one failure mode this screen must not have.
+      //   unverified — nothing checked.
+      //   domain     — `domain_verified`: a client identity document was
+      //                fetched from the client's own https origin and matched,
+      //                proving domain control automatically, with no human
+      //                review.
+      //   verified   — `operator_registered`: an operator of this server
+      //                explicitly registered the client. Trusted with no
+      //                verified domain is exactly that basis.
+      trust: clientDisplay?.isUnverified !== false ? "unverified" : clientDisplay.verifiedDomain ? "domain" : "verified",
+    },
+    grantExpiry: {
+      defaultId: HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID,
+      options: HOSTED_MCP_GRANT_EXPIRY_OPTIONS.map((option) => ({
+        days: option.days,
+        id: option.id,
+        label: option.label,
+      })),
+    },
+    purpose: { code: HOSTED_MCP_PICKER_PURPOSE_CODE, description: HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION },
+    retention: buildHostedMcpRetentionSentence(clientName),
+    reviewDigest: computeHostedMcpPickerSnapshotDigest(rows, clientDisplay),
+    sources: rows.map((row) => ({
+      account: row.connectionName ?? row.meta,
+      icon: icons.get(row.connectorId) ?? null,
+      id: row.sourceKey,
+      name: row.connectorTypeLabel,
+      selectionValue: row.formValue,
+      streams: row.streams.map((stream) => ({
+        fieldsTotal: stream.scope.requiredFields.length + stream.scope.optionalFields.length,
+        id: `${row.sourceKey}:${stream.name}`,
+        label: humanizeStreamLabel(stream.name),
+        name: stream.name,
+        selectionValue: caps.encodeHostedMcpStreamSelection({
+          connectionId: row.connectionId,
+          connectorId: row.connectorId,
+          streamName: stream.name,
+        }),
+        selected: false,
+        sentence: consentSafeStreamDescription(stream.description) || humanizeStreamLabel(stream.name),
+        // Same phrasing the HTML picker's date controls use, from the same
+        // helper, so the two surfaces describe the same field identically.
+        ...(stream.scope.timeField ? { timePhrase: describeTimeField(stream.scope.timeField) } : {}),
+      })),
+    })),
+  };
 }
 
 // Picker data builder.
