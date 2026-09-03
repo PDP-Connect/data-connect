@@ -70,3 +70,20 @@ test("receipt verification rejects a modified transcript or selected file list",
 test("failure identities exclude skipped failures", () => {
   assert.deepEqual(failureIdentities(output), ["fails"]);
 });
+
+test("the selection manifest is stable across concurrency measurements", () => {
+  const common = {
+    endedAt: "2026-09-03T16:00:01.000Z",
+    exitCode: 1,
+    gitHeadSha: "head",
+    output,
+    selectedFiles: ["reference-implementation/test/example.test.ts"],
+    sourceTreeSha256: "source",
+    startedAt: "2026-09-03T16:00:00.000Z",
+    transcript,
+  };
+  const capTwo = buildGateConcurrencyReceipt({ ...common, cap: 2 });
+  const capEight = buildGateConcurrencyReceipt({ ...common, cap: 8 });
+
+  assert.equal(capTwo.selection_manifest_sha256, capEight.selection_manifest_sha256);
+});

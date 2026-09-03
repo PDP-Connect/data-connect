@@ -99,7 +99,7 @@ export function buildGateConcurrencyReceipt({
     selected_files: selectedFiles,
     selected_files_sha256: contentDigest(JSON.stringify(selectedFiles)),
     selection_manifest_sha256: contentDigest(
-      JSON.stringify({ cap, node_version: process.version, profile: "memory-default", selected_files: selectedFiles })
+      JSON.stringify({ profile: "memory-default", selected_files: selectedFiles })
     ),
     source_tree_sha256: sourceTreeSha256,
     started_at: startedAt,
@@ -123,8 +123,6 @@ export function assertGateConcurrencyReceipt(receipt: GateConcurrencyReceipt, tr
     receipt.selection_manifest_sha256 !==
     contentDigest(
       JSON.stringify({
-        cap: receipt.cap,
-        node_version: receipt.node_version,
         profile: receipt.profile,
         selected_files: receipt.selected_files,
       })
