@@ -44,7 +44,7 @@ test("wrapper delegates public CLI namespaces (including ref) to @pdpp/cli", () 
 // ---- integration: spawn the wrapper for help-only smoke ---------------------
 
 test("pdpp --help mentions delegation to @pdpp/cli and ref namespace", async () => {
-  const { stdout, stderr } = await execFile(process.execPath, [CLI_PATH, "--help"]);
+  const { stdout, stderr } = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, "--help"]);
   assert.equal(stderr, "");
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
   assert.match(stdout, /Public commands delegated/);
@@ -57,7 +57,7 @@ test("pdpp --help mentions delegation to @pdpp/cli and ref namespace", async () 
 });
 
 test("pdpp ref --help is served by the @pdpp/cli delegate and advertises login", async () => {
-  const { stdout } = await execFile(process.execPath, [CLI_PATH, "ref", "--help"]);
+  const { stdout } = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, "ref", "--help"]);
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
   assert.match(stdout, /ref login/);
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
@@ -69,7 +69,7 @@ test("pdpp ref --help is served by the @pdpp/cli delegate and advertises login",
 });
 
 test("workspace package entrypoint runs through the real CLI guard", async () => {
-  const { stdout, stderr } = await execFile(process.execPath, [CLI_PACKAGE_LINK_PATH, "ref", "--help"]);
+  const { stdout, stderr } = await execFile(process.execPath, ["--import", "tsx", CLI_PACKAGE_LINK_PATH, "ref", "--help"]);
   assert.equal(stderr, "");
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
   assert.match(stdout, /ref login/);
@@ -80,7 +80,7 @@ test("workspace package entrypoint runs through the real CLI guard", async () =>
 test('pdpp run timeline (legacy alias) emits a deprecation hint pointing at "pdpp ref run timeline"', async () => {
   // Missing --as-url ensures the command exits non-zero quickly without
   // requiring a live reference server.
-  const result = await execFile(process.execPath, [CLI_PATH, "run", "timeline", "run-abc"]).catch((e) => e);
+  const result = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, "run", "timeline", "run-abc"]).catch((e) => e);
 
   const stderr = result.stderr || "";
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
@@ -90,7 +90,7 @@ test('pdpp run timeline (legacy alias) emits a deprecation hint pointing at "pdp
 });
 
 test("pdpp grant timeline (legacy alias) emits a deprecation hint", async () => {
-  const result = await execFile(process.execPath, [CLI_PATH, "grant", "timeline", "grant-x"]).catch((e) => e);
+  const result = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, "grant", "timeline", "grant-x"]).catch((e) => e);
 
   const stderr = result.stderr || "";
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
@@ -100,7 +100,7 @@ test("pdpp grant timeline (legacy alias) emits a deprecation hint", async () => 
 });
 
 test("pdpp trace show (legacy alias) emits a deprecation hint", async () => {
-  const result = await execFile(process.execPath, [CLI_PATH, "trace", "show", "trace-y"]).catch((e) => e);
+  const result = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, "trace", "show", "trace-y"]).catch((e) => e);
 
   const stderr = result.stderr || "";
   // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.

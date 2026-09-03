@@ -1051,7 +1051,7 @@ interface ExecFileError extends Error {
 }
 
 async function runCli(args: readonly string[], env: Record<string, string> = {}) {
-  const { stdout, stderr } = await execFile(process.execPath, [CLI_PATH, ...args], {
+  const { stdout, stderr } = await execFile(process.execPath, ["--import", "tsx", CLI_PATH, ...args], {
     cwd: REFERENCE_IMPL_DIR,
     env: {
       ...process.env,
@@ -1083,7 +1083,7 @@ async function runCli(args: readonly string[], env: Record<string, string> = {})
 
 async function runCliExpectFailure(args: readonly string[], env: Record<string, string> = {}) {
   try {
-    await execFile(process.execPath, [CLI_PATH, ...args], {
+    await execFile(process.execPath, ["--import", "tsx", CLI_PATH, ...args], {
       cwd: REFERENCE_IMPL_DIR,
       env: {
         ...process.env,
@@ -1336,6 +1336,8 @@ test("PDPP CLI smoke", async (t) => {
       const proc = spawn(
         process.execPath,
         [
+          "--import",
+          "tsx",
           CLI_PATH,
           "auth",
           "login",
@@ -1423,6 +1425,8 @@ test("PDPP CLI smoke", async (t) => {
       const proc = spawn(
         process.execPath,
         [
+          "--import",
+          "tsx",
           CLI_PATH,
           "auth",
           "login",
@@ -3723,6 +3727,8 @@ test("PDPP CLI smoke", async (t) => {
       const proc = spawn(
         process.execPath,
         [
+          "--import",
+          "tsx",
           CLI_PATH,
           "auth",
           "login",
@@ -8925,7 +8931,7 @@ test("legacy operator aliases emit a deprecation hint pointing at `pdpp ref ...`
     // round-trip.
     const { stderr } = await execFile(
       process.execPath,
-      [CLI_PATH, "trace", "show", "trc_nope", "--as-url", asUrl, "--format", "json"],
+      ["--import", "tsx", CLI_PATH, "trace", "show", "trc_nope", "--as-url", asUrl, "--format", "json"],
       {
         cwd: REFERENCE_IMPL_DIR,
         env: {

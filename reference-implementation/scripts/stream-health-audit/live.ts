@@ -85,6 +85,15 @@ interface OwnerAuthForStreamHealth {
 const OWNER_DOM_RESOLUTION_TIMEOUT_MS = 15_000;
 const OWNER_DOM_PAGE_BUDGET = 512;
 
+// This program deliberately runs without "DOM" lib (its ambient fetch/Headers
+// types must stay the undici-types-backed ones, not the browser spec's), so
+// `document` isn't ambiently available -- but OwnerSourcesBrowserPage's
+// `waitForFunction` predicate below is serialized and actually executed
+// inside the browser page it drives (a real Playwright page in production;
+// see launchOwnerSourcesBrowser), where a real `document` exists. Declared
+// locally, narrowly, to the one method this file calls on it.
+declare const document: { querySelector: (selector: string) => unknown };
+
 interface BrowserNavigationResponse {
   headers?: () => Record<string, string>;
 }
@@ -630,6 +639,16 @@ export async function runLiveStreamHealthAuthority({
       headers: { accept: "application/json", ...auth.header },
       onRevision: (revision) => summaryRevisions.push(revision),
     });
+    // auth.header.cookie is genuinely always set here: the `!auth.supported`
+    // guard above already returned for every mode ("bearer", "none") that
+    // doesn't populate a cookie header, leaving only "cookie" and a
+    // successful "password-session", both of which set `header: { cookie }`
+    // in resolveOwnerAuthForStreamHealth. TypeScript can't see that
+    // cross-branch guarantee through header's plain `Record<string, string>`
+    // shape, so it's asserted explicitly rather than widening the type.
+    if (!auth.header.cookie) {
+      throw new Error(`resolveOwnerAuthForStreamHealth returned mode ${auth.mode} without a cookie header`);
+    }
     const domResult = await fetchOwnerSourcesDom({
       base,
       browserFactory,

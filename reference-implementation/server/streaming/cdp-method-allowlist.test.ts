@@ -18,7 +18,7 @@
  */
 
 import { strict as assert } from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -155,11 +155,22 @@ function assertNoViolations(violations: { file: string; method: string }[]): voi
 }
 
 test("streaming code only sends allowlisted CDP methods", () => {
+  // @opendatalabs/remote-surface is an OPTIONAL dependency (see
+  // runtime/browser-surface/remote-surface-optional.ts) requiring Node >=24;
+  // this test suite's own CI job runs on Node 22.23.1, where npm silently
+  // skips installing it. Inspect its CDP backend when present, but the
+  // allowlist guarantee for our own adapter/companion/registry code must
+  // hold regardless of whether the optional package installed.
+  const remoteSurfaceCdpBackend = join(
+    __dirname,
+    "../../node_modules/@opendatalabs/remote-surface/dist/backends/cdp/backend.js"
+  );
+  const remoteSurfaceInstalled = existsSync(remoteSurfaceCdpBackend);
   const files = [
     "cdp-adapter.ts",
     "cdp-companion.ts",
     "run-target-registry.ts",
-    join(__dirname, "../../node_modules/@opendatalabs/remote-surface/dist/backends/cdp/backend.js"),
+    ...(remoteSurfaceInstalled ? [remoteSurfaceCdpBackend] : []),
   ];
 
   const { allMethods, violations } = inspectStreamingFiles(files);
@@ -167,12 +178,20 @@ test("streaming code only sends allowlisted CDP methods", () => {
   // If any violations found, report them clearly
   assertNoViolations(violations);
 
-  // Assert that at least some basic Page/Input methods are present
-  // (so we know streaming code actually exists and the test is working)
-  assert.ok(allMethods.has("Page.enable"), "Expected Page.enable to be present in streaming code");
-  assert.ok(allMethods.has("Page.startScreencast"), "Expected Page.startScreencast to be present in streaming code");
-  assert.ok(
-    allMethods.has("Input.dispatchMouseEvent"),
-    "Expected Input.dispatchMouseEvent to be present in streaming code"
-  );
+  // Assert that at least some basic Page/Input methods are present (so we
+  // know streaming code actually exists and the test is working). These
+  // three methods live in @opendatalabs/remote-surface's own CDP backend,
+  // not in this repo's own cdp-adapter/cdp-companion/run-target-registry, so
+  // the assertion only applies when that optional package installed.
+  if (remoteSurfaceInstalled) {
+    assert.ok(allMethods.has("Page.enable"), "Expected Page.enable to be present in streaming code");
+    assert.ok(
+      allMethods.has("Page.startScreencast"),
+      "Expected Page.startScreencast to be present in streaming code"
+    );
+    assert.ok(
+      allMethods.has("Input.dispatchMouseEvent"),
+      "Expected Input.dispatchMouseEvent to be present in streaming code"
+    );
+  }
 });

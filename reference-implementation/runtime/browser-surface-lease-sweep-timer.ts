@@ -44,7 +44,8 @@ export function createBrowserSurfaceLeaseSweepTimer(
   options: BrowserSurfaceLeaseSweepTimerOptions
 ): BrowserSurfaceLeaseSweepTimer {
   const { sweep, intervalMs, onSweepError } = options;
-  const setIntervalFn = options.setIntervalFn ?? setInterval;
+  const setIntervalFn: (callback: () => void, ms: number) => NodeJS.Timeout =
+    options.setIntervalFn ?? setInterval;
   const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
   let timer: NodeJS.Timeout | null = null;
 

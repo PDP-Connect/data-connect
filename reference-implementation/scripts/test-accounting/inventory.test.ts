@@ -1006,7 +1006,7 @@ test("the dedicated scratch lifecycle leaf removes every inherited capability va
   const missingBoundary = structuredClone(localManifest);
   const [missingSuite] = missingBoundary.suites;
   assert.ok(missingSuite);
-  missingSuite.environment_unset = undefined;
+  delete missingSuite.environment_unset;
   await writeFile(join(root, "test-accounting.manifest.json"), `${JSON.stringify(missingBoundary)}\n`);
   await assert.rejects(
     readManifest(join(root, "test-accounting.manifest.json"), { root }),

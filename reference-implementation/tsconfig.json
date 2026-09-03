@@ -65,5 +65,16 @@
     "examples/**/*.ts",
     "examples/**/*.js"
   ],
-  "exclude": ["node_modules"]
+  // run-interaction-stream-remote-surface-session.test.ts drives
+  // @opendatalabs/remote-surface/client's real HTMLElement/HTMLCanvasElement
+  // API against a jsdom fake, so it genuinely needs "DOM" lib -- unlike
+  // every other file here, which deliberately runs without it (this
+  // program's ambient Headers/RequestInit/ReadableStream must stay the
+  // undici-types-backed ones). Node's own test runner executes this file
+  // via type-stripping regardless (this program only ever runs `tsc
+  // --noEmit`, never emits), so excluding it from tsc's program doesn't
+  // affect what actually runs -- it only stops its DOM-only types from
+  // being force-checked (and, previously, from leaking DOM lib into every
+  // other file's ambient globals) under this tsconfig.
+  "exclude": ["node_modules", "test/run-interaction-stream-remote-surface-session.test.ts"]
 }
