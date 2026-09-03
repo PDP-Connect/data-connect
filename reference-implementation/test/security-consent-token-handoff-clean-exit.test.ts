@@ -20,9 +20,16 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGET_FILE = join(__dirname, "security-consent-token-handoff.test.ts");
 const EXIT_BUDGET_MS = 45_000;
-const TEST_RUNNER_SUMMARY_RE = /\nℹ tests \d+\n/;
-const TEST_RUNNER_PASS_RE = /\nℹ pass \d+\n/;
-const TEST_RUNNER_FAIL_RE = /\nℹ fail [1-9]/;
+// Node's test runner defaults to the "spec" reporter ("ℹ tests N") only when
+// stdout is a TTY. In CI (and inside this repo's own scripts/run-tests.ts
+// wrapper, which forces a custom accounting reporter for the file THIS test
+// runs as, but not for the grandchild it spawns below), stdout isn't a TTY,
+// so the grandchild falls back to the "tap" reporter's plain-text summary
+// ("# tests N") instead. Match both so this guard doesn't silently break
+// whichever one a given environment picks.
+const TEST_RUNNER_SUMMARY_RE = /\n(?:ℹ|#) tests \d+\n/;
+const TEST_RUNNER_PASS_RE = /\n(?:ℹ|#) pass \d+\n/;
+const TEST_RUNNER_FAIL_RE = /\n(?:ℹ|#) fail [1-9]/;
 
 test("security-consent-token-handoff.test.ts exits cleanly within budget as a spawned child", async () => {
 	// NODE_TEST_CONTEXT is set by the `node --test` run this file itself
