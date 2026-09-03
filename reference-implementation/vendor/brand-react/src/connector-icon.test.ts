@@ -17,10 +17,12 @@ const ICON_CLASS = /class="pdpp-connector-icon"/;
 const SPOTIFY_LIGHT_ICON = "https://cdn.example.test/spotify.svg";
 const GITHUB_LIGHT_ICON = "https://cdn.example.test/github.svg";
 const GITHUB_DARK_ICON = "https://cdn.example.test/github-dark.svg";
+const APPLE_CONTACTS_ICON = "https://cdn.example.test/apple-contacts.svg";
 
 const connectorIndex = {
   brandIcons: {
     github: { darkUrl: GITHUB_DARK_ICON, url: GITHUB_LIGHT_ICON },
+    "https://registry.pdpp.dev/connectors/apple_contacts": { url: APPLE_CONTACTS_ICON },
     spotify: { backgroundColor: "#1ED760", url: SPOTIFY_LIGHT_ICON },
   },
 };
@@ -61,6 +63,13 @@ test("ConnectorIcon falls back to the monogram when connector index has no brand
     createElement(ConnectorIcon, { connectorId: "slack", connectorIndex, name: "Slack" })
   );
   assert.match(html, MONOGRAM_CLASS);
+});
+
+test("ConnectorIcon resolves an underscore connector key against its manifest identity", () => {
+  const html = renderToStaticMarkup(
+    createElement(ConnectorIcon, { connectorId: "apple_contacts", connectorIndex, name: "Apple Contacts" })
+  );
+  assert.match(html, new RegExp(`src="${APPLE_CONTACTS_ICON}"`));
 });
 
 test("ConnectorIcon falls back to the monogram when brand icon has no light URL", () => {
