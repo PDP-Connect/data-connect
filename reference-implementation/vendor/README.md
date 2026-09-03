@@ -10,22 +10,56 @@ already pins `@pdpp/collector-runtime` and `@pdpp/connector-protocol` from data-
 built with a plain `npm pack`, referenced via a `file:` dependency, with its digest
 recorded below.
 
-`pdpp-reference-contract-0.1.0.tgz` was built via `npm pack` from
+`pdpp-reference-contract-0.1.0.tgz` was originally built via `npm pack` from
 `packages/reference-contract` at `PDP-Connect/pdpp` commit
-`0d3deca19186a2185a6a15ab76c71352d10e627e` (`main`, 2026-09-02). The package ships raw
-TypeScript source with no build step (`main`/`exports` point directly at `./src/*.ts`),
-so the tarball is a straight `npm pack` of the package directory — no prepack/build
-mutation applied. SHA-256 is recorded in `SHA256SUMS` in this directory.
+`0d3deca19186a2185a6a15ab76c71352d10e627e` (`main`, 2026-09-02). SHA-256 is recorded in
+`SHA256SUMS` in this directory.
 
 `reference-implementation/package.json` depends on it via
 `"file:./vendor/pdpp-reference-contract-0.1.0.tgz"`.
 
-**Swapping to a real registry release is a one-line change** once the owner publishes
-`@pdpp/reference-contract`: replace the `file:` path in
-`reference-implementation/package.json` with the published semver range (e.g. `^0.1.0`),
-delete this tarball and its `SHA256SUMS` line, run `npm install`. No other code changes
-are needed — the package's public surface (all 9 `exports` subpaths) is unchanged
-between this tarball and the source it was packed from.
+**Update (2026-09-02, data-connect seam-fix): compiled JS, not raw `.ts`, is now
+vendored.** The package ships raw TypeScript source with no build step in `pdpp` itself
+(`main`/`exports` there point directly at `./src/*.ts`) — that is fine inside `pdpp`'s
+own repo, where Node's native type-stripping applies normally to first-party source, but
+once vendored as a tarball unpacked into THIS repo's `node_modules`, every one of those
+files sits under `node_modules`, and Node deliberately refuses to strip types there
+(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`) as a fixed platform policy. This broke
+the `pdpp` CLI (`reference-implementation/cli/index.ts`) the moment any command reached a
+`server/*.ts` file that imports `@pdpp/reference-contract` — a real defect for any real
+invocation of this repo's CLI, not just a test-harness quirk (confirmed live: `node
+cli/index.ts --help` crashed with this exact error before this fix).
+
+Since `pdpp` itself is out of scope to change from here (this fix originates in
+`PDP-Connect/data-connect`, and the true fix — publishing `@pdpp/reference-contract` with
+a compiled-JS build — is the owner's call to make in `pdpp`), this repo's OWN vendoring
+step now compiles the tarball's contents before packing, rather than shipping a
+byte-identical `npm pack` of the source directory. Re-derivable:
+
+```
+npm pack packages/reference-contract   # from a pdpp checkout at the pinned commit
+tar -xzf pdpp-reference-contract-0.1.0.tgz -C /tmp/rc && cd /tmp/rc/package
+# add a temporary build tsconfig: noEmit:false, outDir:"./dist", rootDir:"./src",
+# rewriteRelativeImportExtensions:true, declaration:true, include: src/**/*.ts + src/**/*.js
+npx tsc -p tsconfig.build.json && rm tsconfig.build.json
+# edit package.json: exports/main/types point at ./dist/... instead of ./src/...
+# (9 exports subpaths + main + types; src/ stays in the tarball too, unedited, for
+# anyone reading/debugging — only the exports map changed)
+npm pack .
+```
+
+`src/` (raw TypeScript, for reference/debugging) and `test/` ship in the tarball
+alongside the new `dist/` (compiled JS + `.d.ts`); only `exports`/`main`/`types` in
+`package.json` changed to point at `dist/`. Every one of the 9 `exports` subpaths was
+verified to import and resolve cleanly from the compiled output before repacking.
+
+**Swapping to a real registry release is still a one-line change** once the owner
+publishes `@pdpp/reference-contract` (ideally WITH a real build step, so this repo can
+depend on a published semver range instead of carrying its own compile-and-repack step):
+replace the `file:` path in `reference-implementation/package.json` with the published
+semver range (e.g. `^0.1.0`), delete this tarball and its `SHA256SUMS` line, run `npm
+install`. No other code changes are needed — the package's public surface (all 9
+`exports` subpaths) is unchanged from the source it was packed from, only compiled.
 
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 
