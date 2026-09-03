@@ -103,13 +103,17 @@ test("run-target registry and connector handoff remain reference-owned host orch
   // repo-root packages/polyfill-connectors/ vendoring-trick copy, which RI no
   // longer imports): both source files' content is what these assertions
   // check, and the package copy is the one actually reachable/loaded at
-  // runtime.
+  // runtime. Both browser-handoff and streaming-target-registration are
+  // already-blessed exports, shipped compiled — reading the .js sibling
+  // (not the .ts, which data-connectors#68 stopped shipping) since the
+  // import/reference patterns these assertions check survive compilation
+  // unchanged (verified: same matches/doesNotMatch results either way).
   const handoff = readFileSync(
-    new URL("../../node_modules/@pdpp/polyfill-connectors/src/browser-handoff.ts", import.meta.url),
+    new URL("../../node_modules/@pdpp/polyfill-connectors/src/browser-handoff.js", import.meta.url),
     "utf8"
   );
   const registration = readFileSync(
-    new URL("../../node_modules/@pdpp/polyfill-connectors/src/streaming-target-registration.ts", import.meta.url),
+    new URL("../../node_modules/@pdpp/polyfill-connectors/src/streaming-target-registration.js", import.meta.url),
     "utf8"
   );
 
