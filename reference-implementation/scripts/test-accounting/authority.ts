@@ -583,16 +583,6 @@ export async function runAuthority({
       await transcript.close();
       throw error;
     }
-    const endedAt = instant(Date.now());
-    await transcript.write(
-      `${JSON.stringify({ event: "end", run_id: runId, nonce, ended_at: endedAt, exit_code: observed.exit_code, signal: observed.signal })}\n`
-    );
-    await transcript.sync();
-    await transcript.close();
-    assertCleanSourceTree(root);
-    if (sourceTreeDigest(root, head) !== sourceTree) {
-      fail(`${issued.suite}/${issued.profile} changed the full source tree during execution`);
-    }
     let counts: Counts;
     try {
       counts = observedCounts(run, observed, issued);
@@ -609,6 +599,16 @@ export async function runAuthority({
         protocol_error: err.message,
       };
       observed.exit_code ||= 1;
+    }
+    const endedAt = instant(Date.now());
+    await transcript.write(
+      `${JSON.stringify({ event: "end", run_id: runId, nonce, ended_at: endedAt, exit_code: observed.exit_code, signal: observed.signal })}\n`
+    );
+    await transcript.sync();
+    await transcript.close();
+    assertCleanSourceTree(root);
+    if (sourceTreeDigest(root, head) !== sourceTree) {
+      fail(`${issued.suite}/${issued.profile} changed the full source tree during execution`);
     }
     const transcriptRelative = relative(directory, transcriptPath);
     const completion = {
