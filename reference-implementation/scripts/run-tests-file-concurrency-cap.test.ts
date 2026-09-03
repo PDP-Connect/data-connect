@@ -9,6 +9,10 @@ const runTestsSource = readFileSync(
 	new URL("./run-tests.ts", import.meta.url),
 	"utf8",
 );
+const concurrencyGuidance = readFileSync(
+	new URL("../docs/gate-concurrency.md", import.meta.url),
+	"utf8",
+);
 
 test("PostgreSQL profile keeps the default file concurrency cap at two", () => {
 	assert.match(
@@ -23,5 +27,13 @@ test("explicit PDPP_TEST_CONCURRENCY still overrides the profile default", () =>
 		runTestsSource,
 		/Number\.isInteger\(requestedConcurrency\) && requestedConcurrency > 0 \? requestedConcurrency : defaultConcurrency;/,
 		"an explicit positive PDPP_TEST_CONCURRENCY must remain authoritative for either profile",
+	);
+});
+
+test("checked-in guidance states the same profile-specific defaults as the runner", () => {
+	assert.match(
+		concurrencyGuidance,
+		/Memory-default uses eight file workers by default; PostgreSQL uses two\./,
+		"the operational guidance must state the runner's profile-specific defaults",
 	);
 });

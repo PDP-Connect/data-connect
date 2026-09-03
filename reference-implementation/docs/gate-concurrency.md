@@ -2,14 +2,25 @@
 
 ## Policy
 
-`scripts/run-tests.ts` caps file concurrency at **2** by default, clamped to the
+`scripts/run-tests.ts` chooses its default file-concurrency cap from the storage
+profile — **8** for memory-default, **2** for PostgreSQL — clamped to the
 available CPU parallelism and the number of selected test files:
 
 ```ts
-const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
+const DEFAULT_FILE_CONCURRENCY_CAP = selectedProfile === "postgres" ? 2 : 8;
+const defaultConcurrency = Math.max(
+  1,
+  Math.min(DEFAULT_FILE_CONCURRENCY_CAP, availableParallelism?.() ?? 1, testFiles.length || 1)
+);
 ```
 
-`PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces that
+The caps differ because the profiles differ. Memory-default gives every test
+file its own in-memory storage, so independent files can run together and the
+cap only has to bound host contention. PostgreSQL stays at 2 for the
+restore-database reason described in the next section, and the cap-8
+measurements archived below cover memory-default only.
+
+`PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces either
 default. A positive override is **not** clamped to the CPU count or the selected
 file count.
 
