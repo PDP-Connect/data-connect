@@ -190,7 +190,7 @@ test("text-like inputs (search, date) render through the real IcInput component,
 // ─── Real, on-disk icon assets ──────────────────────────────────────────────
 
 test("every mapped source icon file actually exists on disk", () => {
-  const iconsDir = join(REPO_ROOT, "reference-implementation", "server", "assets", "source-icons");
+  const iconsDir = join(APP_DIR, "icons");
   for (const file of Object.values(SOURCE_ICON_FILES)) {
     assert.equal(existsSync(join(iconsDir, file)), true, `missing icon asset: ${file}`);
   }
@@ -223,9 +223,9 @@ test("dataRangeSummary never mentions grant validity vocabulary", () => {
   assert.doesNotMatch(summary, /Access ends|No end date/);
 });
 
-// ─── Old route left untouched (owner instruction: do not delete yet) ──────
+// ─── Old route retired ──────────────────────────────────────────────────────
 
-test("the old reference-server mock route is untouched in this commit", () => {
+test("the old reference-server mock route no longer exists", () => {
   const refRoute = join(
     REPO_ROOT,
     "reference-implementation",
@@ -233,5 +233,5 @@ test("the old reference-server mock route is untouched in this commit", () => {
     "routes",
     "ref-design-consent-mock.ts"
   );
-  assert.equal(existsSync(refRoute), true, "old route must still exist until a separate retirement commit");
+  assert.equal(existsSync(refRoute), false, "old route should be retired now this page is live and proven");
 });
