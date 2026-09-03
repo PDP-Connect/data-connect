@@ -42,6 +42,7 @@ import {
 import {
   ActiveBindingLookupError,
   buildConsentClientDisplay,
+  buildHostedMcpConsentChallengeModel,
   buildHostedMcpAuthorizationDetailForConnector,
   buildHostedMcpAuthorizationDetailsForConnector,
   computeHostedMcpDecisionDigest,
@@ -62,13 +63,130 @@ import {
 interface RouteRequest {
   readonly body: Record<string, unknown> | null | undefined;
   ownerAuth?: { subjectId?: string };
+  readonly params?: Record<string, unknown>;
   readonly query: Record<string, unknown>;
+  /**
+   * True when this request came through the console's challenge API and so
+   * expects a typed JSON envelope rather than a re-rendered HTML page. Set by
+   * the challenge routes on the body they synthesize, never read from the
+   * wire — a client cannot ask the form path to answer in JSON.
+   */
+  readonly wantsJson?: boolean;
 }
 
 interface RouteResponse {
+  json: (body: unknown) => unknown;
   redirect: (status: number, url: string) => unknown;
   send: (body: string) => unknown;
   status: (status: number) => RouteResponse;
+}
+
+// ─── Consent challenge store (Ory-Hydra-shaped login-and-consent handoff) ────
+//
+// The authorize request pauses here. Everything the owner is about to be
+// asked — which client, which authorize params, which eligibility snapshot —
+// is held server-side under an opaque id, and only that id travels to the
+// console. The console renders the decision and posts it back; the AS keeps
+// the protocol.
+//
+// Holding the params server-side (rather than re-passing them through the
+// browser) is the security property that matters: the owner's browser cannot
+// alter `client_id`, `redirect_uri`, or the PKCE challenge between the
+// authorize request and the approval, because it never carries them.
+//
+// PROCESS-LOCAL AND DELIBERATELY SO, FOR NOW. A challenge lives seconds to
+// minutes and is consumed once; losing the map on restart costs the owner a
+// re-click of an authorize link that is itself still valid. That is the same
+// durability the staged PKCE shell already has. It does mean a multi-process
+// or multi-replica deployment MUST pin the authorize and approve requests to
+// one process, or move this to the same store that backs pending consent —
+// see CONSENT-REAL-FLOW-REPORT.md.
+const CONSENT_CHALLENGE_TTL_MS = 30 * 60 * 1000;
+const CONSENT_CHALLENGE_MAX = 256;
+
+interface ConsentChallengeRecord {
+  readonly authorizeParams: Record<string, string | null>;
+  readonly client: OAuthClient;
+  readonly createdAt: number;
+  readonly id: string;
+  readonly ownerSubjectId: string;
+}
+
+const consentChallenges = new Map<string, ConsentChallengeRecord>();
+
+// Bounded on write, so an unauthenticated flood of authorize requests cannot
+// grow this map without limit. Expiry first (a challenge older than the TTL is
+// gone whether or not there is pressure), then oldest-first eviction — Map
+// preserves insertion order, and inserts here are monotonic in `createdAt`.
+function sweepConsentChallenges(now: number): void {
+  for (const [id, record] of consentChallenges) {
+    if (now - record.createdAt >= CONSENT_CHALLENGE_TTL_MS) {
+      consentChallenges.delete(id);
+    }
+  }
+  while (consentChallenges.size >= CONSENT_CHALLENGE_MAX) {
+    const oldest = consentChallenges.keys().next();
+    if (oldest.done) {
+      return;
+    }
+    consentChallenges.delete(oldest.value);
+  }
+}
+
+/**
+ * Reads a live challenge, treating an expired one as absent so a stale id can
+ * never be approved. Callers map `null` to the same 404 an unknown id gets:
+ * "expired" and "never existed" are one answer to anyone holding an id.
+ */
+function readConsentChallenge(id: string): ConsentChallengeRecord | null {
+  const record = consentChallenges.get(id);
+  if (!record) {
+    return null;
+  }
+  if (Date.now() - record.createdAt >= CONSENT_CHALLENGE_TTL_MS) {
+    consentChallenges.delete(id);
+    return null;
+  }
+  return record;
+}
+
+function challengeIdFromParams(req: RouteRequest): string {
+  const raw = req.params?.challenge;
+  return typeof raw === "string" ? raw : "";
+}
+
+// The authorize params the approval path re-reads. `scope` and `resource` ride
+// along untouched so a later change to what the approval consumes does not
+// silently drop a param the client sent.
+const CARRIED_AUTHORIZE_PARAMS = [
+  "client_id",
+  "code_challenge",
+  "code_challenge_method",
+  "redirect_uri",
+  "resource",
+  "response_type",
+  "scope",
+  "state",
+] as const;
+
+function serializeAuthorizeParams(query: Record<string, unknown>): Record<string, string | null> {
+  const params: Record<string, string | null> = {};
+  for (const name of CARRIED_AUTHORIZE_PARAMS) {
+    params[name] = typeof query[name] === "string" ? query[name] : null;
+  }
+  return params;
+}
+
+/**
+ * Where the owner decides. The console renders the consent screen; this server
+ * keeps the protocol. Configured with the console's public origin, defaulting
+ * to the composed-mode dev origin the reference topology already assumes.
+ */
+function consentConsoleUrl(challenge: string): string {
+  const base = process.env.PDPP_REFERENCE_ORIGIN || process.env.CONSOLE_PUBLIC_URL || "http://localhost:3000";
+  const url = new URL("/consent", base);
+  url.searchParams.set("challenge", challenge);
+  return url.toString();
 }
 
 interface ClientResolutionCorrelation {
@@ -655,6 +773,21 @@ function hasSubmittedSelectionInput(raw: unknown): boolean {
   return false;
 }
 
+/**
+ * Rejects a picker submission with an owner-readable reason, in whichever
+ * medium the caller speaks.
+ *
+ * There are two approving surfaces now — the server-rendered form and the
+ * console's challenge API — and they need the SAME rejection decisions
+ * (`decision`, below) delivered two different ways. Re-rendering the picker
+ * HTML into a JSON response would hand the console a page it cannot use; so
+ * the medium is a property of the request, not of the validation.
+ *
+ * `req.wantsJson` is set only by the challenge routes, so the form path's
+ * behavior is byte-identical to before: a 400 carrying the re-rendered picker
+ * with the message inline, CSRF token refreshed, and the owner's inputs
+ * preserved.
+ */
 async function renderHostedMcpPickerValidationPage(
   req: RouteRequest,
   res: RouteResponse,
@@ -662,6 +795,12 @@ async function renderHostedMcpPickerValidationPage(
   message: string,
   client: OAuthClient | null = null
 ): Promise<unknown> {
+  if (req.wantsJson) {
+    // Same status and same owner-facing sentence, as a typed envelope. The
+    // console renders this beside the controls the owner just used, so it
+    // needs the reason, not a replacement page.
+    return res.status(400).json({ error: "invalid_request", error_description: message });
+  }
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
   const csrfToken = ctx.ensureCsrfToken(req, res);
@@ -936,6 +1075,167 @@ async function resolveMcpPackageIntake(
   return { client, packageAccessMode, selections, streamSelectionsBySource };
 }
 
+async function handleHostedMcpPackageApproval(
+  req: RouteRequest,
+  res: RouteResponse,
+  ctx: MountAsAuthorizeContext
+): Promise<unknown> {
+  const body = req.body || {};
+  const clientId = requireAuthorizeString(body, "client_id");
+  const redirectUri = requireAuthorizeString(body, "redirect_uri");
+  const responseType = requireAuthorizeString(body, "response_type");
+  const codeChallenge = requireAuthorizeString(body, "code_challenge");
+  const codeChallengeMethod = requireAuthorizeString(body, "code_challenge_method");
+  const state = typeof body.state === "string" ? body.state : null;
+  validateAuthorizePkce({ codeChallenge, codeChallengeMethod, responseType });
+
+  const intake = await resolveMcpPackageIntake(req, res, body, { clientId, redirectUri }, ctx);
+  if (!intake) {
+    return;
+  }
+  const { client, selections, streamSelectionsBySource, packageAccessMode } = intake;
+
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+  const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
+
+  if (await rejectIfHostedMcpReviewDigestStale(req, res, body, ownerSubjectId, client, ctx)) {
+    return;
+  }
+
+  const acc = await buildSourceAccumulator(
+    selections,
+    streamSelectionsBySource,
+    packageAccessMode,
+    ownerSubjectId,
+    ctx.consentPickerCaps,
+    ctx.oauthError,
+    res,
+    body
+  );
+  if (!acc) {
+    return;
+  }
+
+  const expiryResult = resolveGrantExpiry(body.grant_expiry, packageAccessMode);
+  if ("error" in expiryResult) {
+    return ctx.oauthError(res, 400, "invalid_request", expiryResult.error);
+  }
+
+  return await buildPackageAndRedirect(
+    req,
+    res,
+    acc,
+    { clientId, codeChallenge, codeChallengeMethod, redirectUri, state },
+    ownerSubjectId,
+    ctx,
+    client,
+    { body, packageAccessMode },
+    expiryResult.expiresAt
+  );
+}
+
+/**
+ * Runs a redirect-issuing handler and captures its redirect instead of
+ * emitting it, so the same handler can serve both a form POST (302) and the
+ * challenge API (`{ redirect_url }` for the console to follow).
+ *
+ * This is what keeps the challenge routes from forking the protocol: accept
+ * and reject run the EXACT approval and refusal code the form POST runs —
+ * every validation, the grant creation, the audit events — and differ only in
+ * how the final redirect reaches the browser. A second implementation of the
+ * mint path is the bug this avoids.
+ *
+ * Errors are not captured: `ctx.oauthError` writes through to the real `res`,
+ * so a rejected approval still produces its own typed envelope and this
+ * returns no URL.
+ */
+function captureRedirectResponse(res: RouteResponse): { response: RouteResponse; redirectUrl: () => string | null } {
+  let redirectUrl: string | null = null;
+  return {
+    redirectUrl: () => redirectUrl,
+    response: {
+      ...res,
+      redirect: (_status: number, url: string) => {
+        redirectUrl = url;
+        return undefined;
+      },
+    },
+  };
+}
+
+function submittedStrings(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  return typeof value === "string" ? [value] : [];
+}
+
+/**
+ * Translates the console's decision into the body the form POST handler
+ * already validates.
+ *
+ * This is a TRANSLATION, not a validation: it maps `source_id` / `stream`
+ * (owner-facing ids the challenge model published) onto the opaque
+ * `selection` / `stream` encodings the approval path expects, and passes
+ * `access_mode`, `grant_expiry`, `review_digest`, and `decision_digest`
+ * straight through. Everything that decides whether this approval is
+ * ALLOWED — digest freshness, access-mode vocabulary, expiry bounds, stream
+ * eligibility — is checked downstream against a fresh resolve, exactly as it
+ * is for the form POST.
+ *
+ * Two consequences are deliberate:
+ *
+ *  - A `source_id` or `stream` the model did not publish maps to nothing and
+ *    is dropped, so a tampered id cannot widen the grant. It can only narrow
+ *    it, which the owner is always entitled to do.
+ *
+ *  - `decision_digest` is the CONSOLE's, never recomputed here. The whole
+ *    point of AS-conformance #15 is that the approving surface commits to
+ *    what it displayed and the AS independently recomputes it from what it
+ *    resolved; a server-minted digest would always match its own
+ *    recomputation and bind nothing.
+ */
+async function buildChallengeApprovalBody(
+  challenge: ConsentChallengeRecord,
+  submitted: Record<string, unknown>,
+  ctx: MountAsAuthorizeContext
+): Promise<Record<string, unknown>> {
+  const model = await buildHostedMcpConsentChallengeModel(
+    challenge.id,
+    challenge.ownerSubjectId,
+    ctx.consentPickerCaps,
+    ctx.consentUi,
+    toPendingGrantRequestClient(challenge.client),
+    challenge.authorizeParams.redirect_uri
+  );
+  const chosenSourceIds = new Set(submittedStrings(submitted.source_id));
+  const chosenStreamIds = new Set(submittedStrings(submitted.stream));
+
+  const selection: string[] = [];
+  const stream: string[] = [];
+  for (const source of model.sources) {
+    if (!chosenSourceIds.has(source.id)) {
+      continue;
+    }
+    selection.push(source.selectionValue);
+    for (const modelStream of source.streams) {
+      if (chosenStreamIds.has(modelStream.id)) {
+        stream.push(modelStream.selectionValue);
+      }
+    }
+  }
+
+  return {
+    ...challenge.authorizeParams,
+    access_mode: submitted.access_mode,
+    decision_digest: submitted.decision_digest,
+    grant_expiry: submitted.grant_expiry,
+    review_digest: submitted.review_digest,
+    selection,
+    stream,
+  };
+}
+
 // ─── Refusal (RFC 6749 §4.1.2.1) ─────────────────────────────────────────────
 //
 // When the owner declines, the AS MUST redirect back to the client's
@@ -1030,20 +1330,28 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         : null;
 
       if (!(authorizationDetails || selectedConnectorId)) {
-        const csrfToken = ctx.ensureCsrfToken(req, res);
+        // The hosted-MCP picker branch: the client named no sources, so the
+        // owner chooses. Park the request under an opaque challenge id and
+        // hand the decision to the console, which renders the consent screen
+        // and posts the result back to the challenge API below.
+        //
+        // No render model is built here. The model is resolved fresh on the
+        // GET the console makes, so what the owner sees reflects their
+        // connections at the moment they look — not at the moment the client
+        // happened to redirect.
         // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
         const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
-        return res.send(
-          await renderHostedMcpSourceSelection(
-            ownerSubjectId,
-            req.query,
-            csrfToken,
-            ctx.providerName,
-            ctx.consentPickerCaps,
-            ctx.consentUi,
-            { client: toPendingGrantRequestClient(client) }
-          )
-        );
+        const now = Date.now();
+        sweepConsentChallenges(now);
+        const id = `cc_${randomBytes(18).toString("base64url")}`;
+        consentChallenges.set(id, {
+          authorizeParams: serializeAuthorizeParams(req.query),
+          client,
+          createdAt: now,
+          id,
+          ownerSubjectId,
+        });
+        return res.redirect(302, consentConsoleUrl(id));
       }
 
       return await initiateGrantAndRedirect(
@@ -1113,72 +1421,7 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     ctx.requireCsrf,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
-        const body = req.body || {};
-        const clientId = requireAuthorizeString(body, "client_id");
-        const redirectUri = requireAuthorizeString(body, "redirect_uri");
-        const responseType = requireAuthorizeString(body, "response_type");
-        const codeChallenge = requireAuthorizeString(body, "code_challenge");
-        const codeChallengeMethod = requireAuthorizeString(body, "code_challenge_method");
-        const state = typeof body.state === "string" ? body.state : null;
-        validateAuthorizePkce({ codeChallenge, codeChallengeMethod, responseType });
-
-        const intake = await resolveMcpPackageIntake(req, res, body, { clientId, redirectUri }, ctx);
-        if (!intake) {
-          return;
-        }
-        const { client, selections, streamSelectionsBySource, packageAccessMode } = intake;
-
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-        const ownerSubjectId = req?.ownerAuth?.subjectId || "owner_local";
-
-        if (await rejectIfHostedMcpReviewDigestStale(req, res, body, ownerSubjectId, client, ctx)) {
-          return;
-        }
-
-        const acc = await buildSourceAccumulator(
-          selections,
-          streamSelectionsBySource,
-          packageAccessMode,
-          ownerSubjectId,
-          ctx.consentPickerCaps,
-          ctx.oauthError,
-          res,
-          body
-        );
-        if (!acc) {
-          return;
-        }
-
-        // Owner-chosen grant expiry (Grant fields: `expires_at`). Resolved
-        // after the sources, so an invalid choice here cannot mask a more
-        // specific selection error the owner would rather see first.
-        const expiryResult = resolveGrantExpiry(body.grant_expiry, packageAccessMode);
-        if ("error" in expiryResult) {
-          return ctx.oauthError(res, 400, "invalid_request", expiryResult.error);
-        }
-
-        // Stage, issue, and redirect — or error if all streams were deselected.
-        //
-        // MUST be awaited (not bare-returned) inside this try block: a
-        // `return somePromise` from a try block resolves the async function
-        // via that promise WITHOUT routing its rejection through this
-        // function's own catch (JS semantics — the catch only sees
-        // synchronous throws and awaited rejections within the try's own
-        // execution). A bare return here let CoreSourceAuthorizationError
-        // (e.g. a stream with zero eligible connector instances) escape
-        // straight past this handler to Fastify's default error handler,
-        // producing a raw 500 instead of the typed 4xx envelope below.
-        return await buildPackageAndRedirect(
-          req,
-          res,
-          acc,
-          { clientId, codeChallenge, codeChallengeMethod, redirectUri, state },
-          ownerSubjectId,
-          ctx,
-          client,
-          { body, packageAccessMode },
-          expiryResult.expiresAt
-        );
+        return await handleHostedMcpPackageApproval(req, res, ctx);
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };
         return ctx.oauthError(
@@ -1187,6 +1430,113 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
           (err as { code?: string }).code || "invalid_request",
           (err as Error).message || "Hosted MCP package authorization rejected",
           Array.isArray(streams) && streams.length > 0 ? { streams } : undefined
+        );
+      }
+    }
+  );
+
+  // ─── Consent challenge API ─────────────────────────────────────────────────
+  //
+  // The console's half of the handoff. Every route here is owner-session
+  // authenticated, and both mutating routes additionally require CSRF — the
+  // same posture as the form POSTs they stand in for. Owner auth alone is not
+  // enough for a state-changing request reachable from a browser: without the
+  // CSRF check, a page on another origin could drive an approval using the
+  // owner's ambient cookie.
+  //
+  // An unknown, expired, or already-consumed challenge is one answer — 404 —
+  // to anyone holding an id.
+
+  app.get(
+    "/oauth/authorize/consent-challenges/:challenge",
+    ctx.requireOwnerSession,
+    async (req: RouteRequest, res: RouteResponse) => {
+      const challenge = readConsentChallenge(challengeIdFromParams(req));
+      if (!challenge) {
+        return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
+      }
+      const model = await buildHostedMcpConsentChallengeModel(
+        challenge.id,
+        challenge.ownerSubjectId,
+        ctx.consentPickerCaps,
+        ctx.consentUi,
+        toPendingGrantRequestClient(challenge.client),
+        challenge.authorizeParams.redirect_uri
+      );
+      return res.json(model);
+    }
+  );
+
+  app.post(
+    "/oauth/authorize/consent-challenges/:challenge/accept",
+    ctx.requireOwnerSession,
+    ctx.requireCsrf,
+    async (req: RouteRequest, res: RouteResponse) => {
+      const id = challengeIdFromParams(req);
+      try {
+        const challenge = readConsentChallenge(id);
+        if (!challenge) {
+          return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
+        }
+        // Consume BEFORE minting. An approval is single-use: two concurrent
+        // accepts on one challenge must not both reach the mint path and
+        // issue two grants for one authorize request. If the approval is
+        // rejected downstream the challenge is gone and the owner restarts
+        // from the client — the safe direction to fail.
+        consentChallenges.delete(id);
+        const body = await buildChallengeApprovalBody(challenge, req.body || {}, ctx);
+        const { response, redirectUrl } = captureRedirectResponse(res);
+        await handleHostedMcpPackageApproval({ ...req, body, wantsJson: true }, response, ctx);
+        const url = redirectUrl();
+        if (!url) {
+          // The approval path already wrote its own typed error envelope
+          // (stale digest, empty selection, bad expiry, ...) through to the
+          // real response. Returning here leaves that as the reply.
+          return;
+        }
+        return res.json({ redirect_url: url });
+      } catch (err) {
+        const { streams } = err as { streams?: readonly string[] };
+        return ctx.oauthError(
+          res,
+          400,
+          (err as { code?: string }).code || "invalid_request",
+          (err as Error).message || "Consent challenge approval rejected",
+          Array.isArray(streams) && streams.length > 0 ? { streams } : undefined
+        );
+      }
+    }
+  );
+
+  app.post(
+    "/oauth/authorize/consent-challenges/:challenge/reject",
+    ctx.requireOwnerSession,
+    ctx.requireCsrf,
+    async (req: RouteRequest, res: RouteResponse) => {
+      const id = challengeIdFromParams(req);
+      try {
+        const challenge = readConsentChallenge(id);
+        if (!challenge) {
+          return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
+        }
+        consentChallenges.delete(id);
+        // The refusal params are the server's own record of the authorize
+        // request, never the owner's browser: `handleHostedMcpCancel` still
+        // re-resolves the client and re-checks the redirect_uri against its
+        // registration, so this cannot be steered into an open redirect.
+        const { response, redirectUrl } = captureRedirectResponse(res);
+        await handleHostedMcpCancel({ ...req, body: { ...challenge.authorizeParams }, wantsJson: true }, response, ctx);
+        const url = redirectUrl();
+        if (!url) {
+          return;
+        }
+        return res.json({ redirect_url: url });
+      } catch (err) {
+        return ctx.oauthError(
+          res,
+          400,
+          (err as { code?: string }).code || "invalid_request",
+          (err as Error).message || "Consent challenge refusal rejected"
         );
       }
     }
