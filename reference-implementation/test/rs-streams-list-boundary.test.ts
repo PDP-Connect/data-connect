@@ -2,21 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Import-boundary guards for the `rs.streams.list` operation.
+ * Import-boundary guard for the `rs.streams.list` operation.
  *
  * Enforces the dependency direction declared in
  * openspec/changes/mount-rs-streams-list-operation/design.md:
  *
  *   - The operation module SHALL NOT import Fastify, Next, SQLite,
  *     Postgres, a raw SQL handle, a generic repository, or `process.env`.
- *   - The sandbox `/sandbox/v1/streams` route SHALL NOT import
- *     `buildLiveStreamsList` (it must mount the canonical operation).
  *
  * The operation-module boundary check delegates to the shared helper so the
  * forbidden-import list is the single source of truth across operations
- * (see openspec/changes/add-reference-operation-boundary-gate). Sandbox-route
- * and `_demo/builders.ts` demotion assertions remain operation-specific and
- * stay here.
+ * (see openspec/changes/add-reference-operation-boundary-gate).
+ *
+ * This file previously also asserted that pdpp's own `apps/site` sandbox
+ * route and `_demo/builders.ts` no longer imported/exported
+ * `buildLiveStreamsList` -- both pdpp-repo-root frontend paths that do not
+ * exist in this repo (Move B did not bring `apps/site` along). Removed;
+ * that demotion coverage belongs in pdpp's own suite, not here.
  */
 
 import assert from "node:assert/strict";
@@ -27,8 +29,6 @@ import { fileURLToPath } from "node:url";
 
 import { assertOperationBoundary } from "./helpers/operation-boundary.ts";
 
-const TOP_LEVEL_REGEX_1 = /\bimport\b[^;]*\bbuildLiveStreamsList\b[^;]*\bfrom\b[^;]*;/;
-const TOP_LEVEL_REGEX_2 = /export\s+function\s+buildLiveStreamsList\b/;
 const TOP_LEVEL_REGEX_3 =
   /async function listExplicitPolyfillOwnerStreams[\s\S]*buildOwnerReadGrantForManifest\(ownerResolved\.manifest\)[\s\S]*ctx\.listStreamsAcrossBindings\(/;
 const TOP_LEVEL_REGEX_4 = /listSummaries:\s*async\s*\(\)\s*=>\s*ctx\.listAllStreams\(ownerResolved\.storageBinding\)/;
@@ -43,28 +43,6 @@ function read(rel: string) {
 test("rs.streams.list operation has no host or storage concretes", () => {
   const rel = "reference-implementation/operations/rs-streams-list/index.ts";
   assertOperationBoundary(read(rel), rel);
-});
-
-test("sandbox /sandbox/v1/streams route does not import buildLiveStreamsList", () => {
-  const src = read("apps/site/src/app/sandbox/v1/streams/route.ts");
-  // Match any static-import statement that pulls buildLiveStreamsList in.
-  // Comments referencing the deleted symbol are still allowed; only
-  // import-binding usage is forbidden.
-  const importPattern = TOP_LEVEL_REGEX_1;
-  assert.equal(
-    importPattern.test(src),
-    false,
-    "public sandbox stream-list route must mount the canonical operation, not buildLiveStreamsList"
-  );
-});
-
-test("sandbox builders.ts no longer exports buildLiveStreamsList", () => {
-  const src = read("apps/site/src/app/sandbox/_demo/builders.ts");
-  assert.equal(
-    TOP_LEVEL_REGEX_2.test(src),
-    false,
-    "buildLiveStreamsList must be removed so the public route cannot import a parallel AS/RS builder"
-  );
 });
 
 test("polyfill owner stream list is manifest-scoped, not raw storage-scoped", () => {

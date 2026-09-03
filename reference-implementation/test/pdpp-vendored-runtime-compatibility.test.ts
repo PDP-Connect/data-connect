@@ -2,23 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Release-boundary tests for the two data-connect packages consumed by PDPP.
+ * Consumer-contract test for this repo's own workspace packages.
  *
- * The source repositories have independent release workflows.  These tests
- * keep the installed consumer contract honest: protocol 0.0.2 remains
- * parseable without being advertised by the withdrawn device runtime, while a
- * connector that declares STREAM_EVIDENCE is rejected before it can spawn.
+ * `verifyPdppVendoredPackagePins` (the release-boundary half of this file's
+ * original scope) asserted an invariant about `PDP-Connect/pdpp`'s own
+ * vendored copies of these packages via a relative import
+ * (`../../scripts/check-pdpp-vendored-package-pins.ts`) that only resolved
+ * when `reference-implementation/` still lived inside pdpp's monorepo. Now
+ * that it has moved to this standalone repo (Move B), that path points
+ * outside this repo entirely -- the script does not exist here and
+ * structurally cannot, since it is checking an invariant about pdpp's side of
+ * the repo boundary, not this one. Removed; pdpp's own suite is responsible
+ * for that check if pdpp still wants it.
+ *
+ * The test below is unaffected -- it exercises `@pdpp/collector-runtime` and
+ * `@pdpp/connector-protocol`, both native workspace packages in this repo.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-import { verifyPdppVendoredPackagePins } from "../../scripts/check-pdpp-vendored-package-pins.ts";
-
-test("PDPP consumes both reviewed data-connect package-release 1.0.0 artifacts at exact hashes", () => {
-  verifyPdppVendoredPackagePins(fileURLToPath(new URL("../../", import.meta.url)));
-});
 
 test("withdrawn device runtime rejects STREAM_EVIDENCE while protocol 0.0.2 still validates it", async () => {
   const runtime = await import("@pdpp/collector-runtime");

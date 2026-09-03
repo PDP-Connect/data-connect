@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
@@ -18,7 +17,6 @@ import {
   startNekoSurfaceAllocatorServer,
 } from "../server/neko-surface-allocator-server.ts";
 
-const REGEXP_1 = /command: \["node", "server\/neko-surface-allocator-server\.ts"\]/;
 const REGEXP_2 = /^\/networks\/([^/]+)\/disconnect$/;
 const REGEXP_3 = /^\/containers\/([^/]+)\/start$/;
 const REGEXP_4 = /^\/containers\/([^/]+)\/stop$/;
@@ -31,19 +29,6 @@ const REGEXP_10 = /^chatgpt-[a-f0-9]{16}$/;
 const REGEXP_11 = /^\/var\/lib\/pdpp\/neko-profiles\/chatgpt-[a-f0-9]{16}$/;
 const REGEXP_12 = /https|the owner|example\.com|registry/;
 const REGEXP_13 = /https|the owner|example\.com|registry/;
-const REGEXP_14 = /command: \["node", "reference-implementation\/server\/neko-surface-allocator-server\.ts"\]/;
-const REGEXP_15 =
-  /PDPP_NEKO_STREAM_BASE_URL_TEMPLATE: \$\{PDPP_NEKO_STREAM_BASE_URL_TEMPLATE:-http:\/\/\{container_name\}:8080\/neko\}/;
-const REGEXP_16 = /PDPP_NEKO_PROFILE_OWNER_UID: \$\{PDPP_NEKO_PROFILE_OWNER_UID:-1000\}/;
-const REGEXP_17 = /PDPP_NEKO_PROFILE_OWNER_GID: \$\{PDPP_NEKO_PROFILE_OWNER_GID:-1000\}/;
-const REGEXP_18 =
-  /\$\{PDPP_NEKO_PROFILE_STORAGE_ROOT:-\/var\/lib\/pdpp\/neko-profiles\}:\$\{PDPP_NEKO_PROFILE_STORAGE_ROOT:-\/var\/lib\/pdpp\/neko-profiles\}/;
-const REGEXP_19 = /8080\/neko\/\{surface_id\}/;
-const REGEXP_20 = /pdpp_neko_dynamic:\s*\n\s*external: true/;
-const REGEXP_21 = /PDPP_NEKO_DOCKER_NETWORK: \$\{PDPP_NEKO_DOCKER_NETWORK:-pdpp_neko_dynamic\}/;
-const REGEXP_22 = /PDPP_NEKO_DOCKER_NETWORK:.*COMPOSE_PROJECT_NAME/;
-const REGEXP_23 =
-  /PDPP_NEKO_LEGACY_DOCKER_NETWORK: \$\{PDPP_NEKO_LEGACY_DOCKER_NETWORK:-\$\{COMPOSE_PROJECT_NAME:-pdpp\}_default\}/;
 const REGEXP_24 = /chown failed/;
 const REGEXP_25 = /^\/networks\/([^/]+)$/;
 
@@ -857,42 +842,15 @@ test("startNekoSurfaceAllocatorServer ensures the dynamic surface network exists
   }
 });
 
-test("compose dynamic allocator command and stream template match reference image layout", async () => {
-  const compose = await readFile(new URL("../../docker-compose.neko.yml", import.meta.url), "utf8");
-
-  assert.match(compose, REGEXP_14);
-  assert.match(compose, REGEXP_15);
-  assert.match(compose, REGEXP_16);
-  assert.match(compose, REGEXP_17);
-  assert.match(compose, REGEXP_18);
-  assert.doesNotMatch(compose, REGEXP_1);
-  assert.doesNotMatch(compose, REGEXP_19);
-});
-
-test("compose declares the dynamic surface network as externally managed, not Compose-owned", async () => {
-  const compose = await readFile(new URL("../../docker-compose.neko.yml", import.meta.url), "utf8");
-
-  assert.match(compose, REGEXP_20);
-  assert.match(compose, REGEXP_21);
-  // Regression guard for the fixed durability defect: the network must not
-  // be interpolated from COMPOSE_PROJECT_NAME, which would tie its identity
-  // back to one Compose project and reintroduce the teardown race this
-  // change fixes (docker compose down unconditionally removes every network
-  // it created for its own project).
-  assert.doesNotMatch(compose, REGEXP_22);
-});
-
-test("compose declares an explicit legacy network for in-place migration of pre-existing surfaces", async () => {
-  const compose = await readFile(new URL("../../docker-compose.neko.yml", import.meta.url), "utf8");
-
-  assert.match(compose, REGEXP_23);
-});
-
-test("managed n.eko Chrome policy restores prior browser session", async () => {
-  const policies = JSON.parse(await readFile(new URL("../../docker/neko/policies.json", import.meta.url), "utf8"));
-
-  assert.equal(policies.RestoreOnStartup, 1, "session-cookie auth must survive managed browser container restarts");
-});
+// This file previously also asserted several invariants directly against
+// pdpp-repo-root deployment config: `docker-compose.neko.yml` (allocator
+// command/stream template, network ownership, legacy-network migration) and
+// `docker/neko/policies.json` (Chrome restore-on-startup policy). None of
+// those files exist in this repo's own `deploy/` tree -- PR #43 explicitly
+// scoped the Dockerfile port only, not neko/compose orchestration, which
+// remains an undecided deployment-architecture question, not something to
+// invent here. Removed those tests; they belong in pdpp's own suite, which
+// still owns those files, not here.
 
 test("parses explicit n.eko profile owner uid and gid overrides", () => {
   const options = readNekoSurfaceAllocatorOptionsFromEnv({

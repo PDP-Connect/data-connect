@@ -15,9 +15,6 @@ const REGEXP_5 = /@opendatalabs\/remote-surface/;
 const REGEXP_6 = /streaming-target/;
 const REGEXP_7 = /resolveStreamingRegistrationFromEnv/;
 const REGEXP_8 = /PDPP_STREAMING_REGISTRATION_TOKEN/;
-const REGEXP_9 = /neko:/;
-const REGEXP_10 = /docker|container/i;
-const REGEXP_11 = /from ['"]@opendatalabs\/remote-surface\/leases['"]/;
 const REGEXP_12 = /from ['"]\.\/protocol-wire\.ts['"]/;
 const REGEXP_13 = /@opendatalabs\/remote-surface/;
 const REGEXP_14 = /\/_ref\/runs\/:runId\/run-interaction-stream/;
@@ -30,28 +27,6 @@ type LeasesModule = typeof import("@opendatalabs/remote-surface/leases");
 
 function read(path: string) {
   return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
-}
-
-// @opendatalabs/remote-surface is an OPTIONAL dependency (see
-// runtime/browser-surface/remote-surface-optional.ts). Assertions that inspect
-// the consumer wiring only make sense when it is installed; skip them cleanly
-// when it is absent, matching the shim's degrade-not-crash semantics. Boundary
-// assertions that verify PDPP-owned ownership need no dependency and always run.
-//
-// The package is ESM-only (exports declares only "import"/"types" conditions,
-// no "require"), so require.resolve() always throws here regardless of
-// whether the package is installed — that false-negative silently skipped
-// the one real package-consumer assertion below in every environment,
-// including CI. Use dynamic import() instead, which resolves the same
-// exports map require.resolve() cannot.
-async function remoteSurfaceInstalled() {
-  try {
-    // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-    await import("@opendatalabs/remote-surface/leases");
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function retainedIdleSurface(overrides: Partial<BrowserSurface> = {}): BrowserSurface {
@@ -146,25 +121,17 @@ test("run-target registry and connector handoff remain reference-owned host orch
   assert.match(registration, REGEXP_8);
 });
 
-test("dynamic n.eko allocation seams use package leases while Docker lifecycle stays reference-owned", async (t) => {
-  const leaseStore = read("reference-implementation/server/stores/browser-surface-lease-store.ts");
-  const compose = read("docker-compose.neko.yml");
-  const allocator = read("reference-implementation/server/neko-surface-allocator-server.ts");
-
-  // PDPP owns the Docker/n.eko container lifecycle — asserted from PDPP-side
-  // files, not the package's own docs (the package lives in its own repo now
-  // and asserts its "does not own Docker Engine access" invariant there).
-  assert.match(compose, REGEXP_9, "PDPP owns the neko compose service");
-  assert.match(allocator, REGEXP_10, "PDPP allocator owns Docker container lifecycle");
-
-  // The lease store consumes the package's /leases seam — only meaningful when
-  // the optional dependency is installed.
-  if (!(await remoteSurfaceInstalled())) {
-    t.skip("@opendatalabs/remote-surface not installed; skipping package-consumer assertion");
-    return;
-  }
-  assert.match(leaseStore, REGEXP_11);
-});
+// This file previously also asserted (in a test named "dynamic n.eko
+// allocation seams use package leases while Docker lifecycle stays
+// reference-owned") that `docker-compose.neko.yml` at the repo root
+// declares the neko service and that PDPP's allocator owns the Docker
+// lifecycle -- a pdpp-repo-root deployment-config invariant. That compose
+// file (and `docker/neko/*`) has not been ported into this repo's own
+// `deploy/` tree (PR #43 explicitly scoped the Dockerfile port only, not
+// neko/compose orchestration -- that's an undecided deployment-architecture
+// question, not something to invent here). Removed the compose-file
+// assertion; the lease-store/`@opendatalabs/remote-surface` consumer
+// assertion in this file's other tests is unaffected and stays.
 
 test("installed remote-surface excludes retained surfaces from idle-TTL reap", async (t) => {
   const leases = await loadLeaseManager(t);
