@@ -224,6 +224,18 @@ test("client metadata links render only when the challenge model supplies them",
   );
 });
 
+test("field panels expose bulk selection while preserving required fields", () => {
+  assert.match(CLIENT_SOURCE, /Select all/);
+  assert.match(CLIENT_SOURCE, /Select none/);
+  assert.match(CLIENT_SOURCE, /selectAll \|\| field\.required/);
+  assert.match(CLIENT_SOURCE, /disabled=\{field\.required\}/);
+});
+
+test("described fields show description first and raw names as mono hints", () => {
+  assert.match(CLIENT_SOURCE, /field\.description \|\| field\.name/);
+  assert.match(CLIENT_SOURCE, /className=\{styles\.fieldRaw\}>\{field\.name\}<\/span>/);
+});
+
 // ─── The client/server model contract ──────────────────────────────────────
 
 /** Field names declared on an interface block, by interface name. */

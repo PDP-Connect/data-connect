@@ -254,6 +254,8 @@ function StreamRow({
   selected,
   selectedFields,
   onToggleField,
+  onSelectAll,
+  onSelectNone,
   onToggle,
   ranges,
   setRange,
@@ -262,6 +264,8 @@ function StreamRow({
   applyRangeToAllSelected: (since: string, until: string) => void;
   onToggle: () => void;
   onToggleField: (fieldName: string, checked: boolean) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
   ranges: Record<string, { since: string; until: string }>;
   selected: boolean;
   selectedFields: Record<string, boolean>;
@@ -290,7 +294,14 @@ function StreamRow({
             <div className={styles.narrowBody}>
               {stream.fields.length > 0 ? (
                 <fieldset className={styles.fieldList}>
-                  <legend className="pdpp-caption">Choose fields to share</legend>
+                  <legend className={`pdpp-caption ${styles.fieldPanelLegend}`}>
+                    <span>Choose fields to share</span>
+                    <span className={styles.fieldBulkActions}>
+                      <button className={styles.fieldBulkAction} onClick={onSelectAll} type="button">Select all</button>
+                      <span aria-hidden="true">·</span>
+                      <button className={styles.fieldBulkAction} onClick={onSelectNone} type="button">Select none</button>
+                    </span>
+                  </legend>
                   {stream.fields.map((field) => (
                     <label className={styles.fieldOption} key={field.name}>
                       <input
@@ -300,7 +311,8 @@ function StreamRow({
                         type="checkbox"
                       />
                       <span>
-                        <span className="pdpp-caption">{field.name}</span>
+                        <span className="pdpp-caption">{field.description || field.name}</span>
+                        {field.description && <span className={styles.fieldRaw}>{field.name}</span>}
                         {field.required && <span className={styles.fieldRequired}>Required</span>}
                         {field.description && <span className="pdpp-caption">{field.description}</span>}
                       </span>
@@ -365,6 +377,8 @@ function SourceRow({
   onToggleStream,
   onToggleField,
   onToggleSource,
+  onSelectAll,
+  onSelectNone,
   setRange,
   applyRangeToAllSelected,
 }: {
@@ -374,6 +388,8 @@ function SourceRow({
   onToggleSource: (checked: boolean) => void;
   onToggleStream: (streamName: string) => void;
   onToggleField: (streamId: string, fieldName: string, checked: boolean) => void;
+  onSelectAll: (streamId: string) => void;
+  onSelectNone: (streamId: string) => void;
   fieldSelection: FieldSelectionState;
   ranges: Record<string, { since: string; until: string }>;
   searching: boolean;
@@ -443,6 +459,8 @@ function SourceRow({
             key={stream.name}
             onToggle={() => onToggleStream(stream.name)}
             onToggleField={(fieldName, checked) => onToggleField(stream.id, fieldName, checked)}
+            onSelectAll={() => onSelectAll(stream.id)}
+            onSelectNone={() => onSelectNone(stream.id)}
             ranges={ranges}
             selected={Boolean(selection[source.id]?.[stream.name])}
             selectedFields={fieldSelection[stream.id] ?? {}}
@@ -523,6 +541,15 @@ export function ConsentScreen({
     setFieldSelection((prev) => ({
       ...prev,
       [streamId]: { ...prev[streamId], [fieldName]: checked },
+    }));
+  }
+
+  function selectFields(streamId: string, selectAll: boolean) {
+    const stream = model.sources.flatMap((source) => source.streams).find((candidate) => candidate.id === streamId);
+    if (!stream) return;
+    setFieldSelection((prev) => ({
+      ...prev,
+      [streamId]: Object.fromEntries(stream.fields.map((field) => [field.name, selectAll || field.required])),
     }));
   }
 
@@ -739,6 +766,8 @@ export function ConsentScreen({
                       key={source.id}
                       onToggleSource={(checked) => toggleSource(source.id, checked)}
                       onToggleField={toggleField}
+                      onSelectAll={(streamId) => selectFields(streamId, true)}
+                      onSelectNone={(streamId) => selectFields(streamId, false)}
                       onToggleStream={(streamName) => toggleStream(source.id, streamName)}
                       ranges={ranges}
                       searching={Boolean(query)}
