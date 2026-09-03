@@ -6,8 +6,8 @@
 /**
  * Consent design preview — owner-only, mock data, submits nothing.
  *
- * Built from the REAL `@pdpp/brand-react` components (Sheet, HumanSurface,
- * IcButton, ConnectorIcon, Scope, ...) so there is zero drift by
+ * Built from the REAL `@pdpp/brand-react` components (Sheet, IcButton,
+ * ConnectorIcon, Scope, ...) so there is zero drift by
  * construction: this renders the actual component modules the console's
  * `/sources` and `/explore` pages render, not a transcription of their
  * output. `consent-preview.module.css` supplies ONLY the structural rules
@@ -23,13 +23,33 @@
  * (grant validity vs per-stream data range + apply-to-all).
  */
 
-import { ConnectorIcon, HumanSurface, IcButton, IcInput } from "@pdpp/brand-react";
+import { ConnectorIcon, Endorse, IcButton, IcInput } from "@pdpp/brand-react";
 import { useMemo, useState } from "react";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
 import styles from "./consent-preview.module.css";
 import { CLIENT, dataRangeSummary, fieldSummary, type MockSource, type MockStream, SOURCES } from "./mock-data.ts";
 
 export type TrustTier = "unverified" | "domain" | "verified";
+
+// Endorse's status vocabulary is written for GRANT state (active/expiring/
+// revoked/...), not identity trust — reusing it here borrows its VISUAL chip
+// pattern via the real `label` override, not its semantic meaning. The
+// ordinal mapping (unknown -> continuous -> active) reads as ascending
+// confidence without claiming a grant-lifecycle status that doesn't apply.
+// A locally-scoped literal union, not an import of Endorse's own type, per
+// the pattern every other console page already uses (e.g.
+// (console)/event-subscriptions's subscriptionEndorseStatus()).
+type TrustEndorseStatus = "active" | "continuous" | "unknown";
+const TRUST_ENDORSE_STATUS: Record<TrustTier, TrustEndorseStatus> = {
+  domain: "continuous",
+  unverified: "unknown",
+  verified: "active",
+};
+const TRUST_LABEL: Record<TrustTier, string> = {
+  domain: "Domain verified",
+  unverified: "Unverified",
+  verified: "Verified",
+};
 export type PreviewState = "consent" | "signin" | "deny" | "error" | "receipt";
 
 interface ClientLogos {
@@ -59,6 +79,19 @@ function todayPlusDays(days: number): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+const HUMAN_DATE_FMT = new Intl.DateTimeFormat("en-US", { day: "numeric", month: "short", timeZone: "UTC", year: "numeric" });
+
+// One human format ("Dec 1, 2026") everywhere a date renders as text, so it
+// never disagrees with the picker's own browser-native display next to it
+// (round 4, item 4). The <input type="date"> element's `value` stays ISO —
+// that's the HTML date-input contract, not a rendering choice.
+function humanDate(iso: string): string {
+  if (!iso) return "";
+  const [year, month, day] = iso.split("-").map(Number);
+  if (!year || !month || !day) return iso;
+  return HUMAN_DATE_FMT.format(new Date(Date.UTC(year, month - 1, day)));
 }
 
 function computeCounts(selection: SelectionState) {
@@ -94,31 +127,27 @@ function TrustIdentity({ trust, logos }: { trust: TrustTier; logos: ClientLogos 
         <span className="pdpp-monogram" data-initials={CLIENT.monogram} />
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-        <span className="pdpp-title">{CLIENT.name}</span>
+        <div style={{ alignItems: "center", display: "flex", gap: "0.5rem" }}>
+          <span className="pdpp-title">{CLIENT.name}</span>
+          <Endorse label={TRUST_LABEL[trust]} status={TRUST_ENDORSE_STATUS[trust]} />
+        </div>
         <span className="pdpp-caption">{CLIENT.domain}</span>
         {trust === "unverified" && (
-          <p className="pdpp-caption">
-            {CLIENT.name}'s name and logo come from its own registration; nothing about them has been checked.
-          </p>
+          <p className="pdpp-caption">Its name and logo come from its own registration; nothing about them has been checked.</p>
         )}
         {trust === "domain" && (
-          <p className="pdpp-caption">
-            This app's identity document was fetched from {CLIENT.domain}, so whoever controls that domain is the
-            app.
-          </p>
+          <p className="pdpp-caption">Its identity document was fetched from {CLIENT.domain}, so whoever controls that domain is the app.</p>
         )}
-        {trust === "verified" && (
-          <p className="pdpp-caption">The operator of this server has confirmed this app.</p>
-        )}
+        {trust === "verified" && <p className="pdpp-caption">The operator of this server has confirmed the app.</p>}
         <details className={styles.trustDetails}>
           <summary className="pdpp-caption">What was checked</summary>
           <p className="pdpp-caption">
             {trust === "unverified" &&
-              `No check ran. Any app can claim to be named "${CLIENT.name}" and use this logo — treat both as unverified claims until a check below has run.`}
+              `No check ran. Any app can claim this name and use this logo — treat both as unverified claims until a check below has run.`}
             {trust === "domain" &&
-              `This server fetched a client identity document from ${CLIENT.domain} over HTTPS and confirmed it matches this request. That proves domain control, automatically, with no action from ${CLIENT.name} and no human review.`}
+              `This server fetched a client identity document from ${CLIENT.domain} over HTTPS and confirmed it matches this request. That proves domain control, automatically, with no action from the app and no human review.`}
             {trust === "verified" &&
-              `In addition to the automatic domain check, an operator of this server has explicitly reviewed and registered this app — the strongest tier this server offers.`}
+              `In addition to the automatic domain check, an operator of this server has explicitly reviewed and registered the app — the strongest tier this server offers.`}
           </p>
         </details>
       </div>
@@ -228,6 +257,7 @@ function SourceRow({
   ranges,
   hidden,
   active,
+  searching,
   onToggleStream,
   onToggleSource,
   setRange,
@@ -240,6 +270,7 @@ function SourceRow({
   onToggleSource: (checked: boolean) => void;
   onToggleStream: (streamName: string) => void;
   ranges: Record<string, { since: string; until: string }>;
+  searching: boolean;
   selection: SelectionState;
   setRange: (sourceId: string, streamName: string, key: "since" | "until", value: string) => void;
   source: MockSource;
@@ -248,15 +279,34 @@ function SourceRow({
   const total = source.streams.length;
   const allSelected = selected.length === total && total > 0;
   const icon = logos.sources[source.id];
+  // Collapsed by default; open only for sources the mock request pre-selects
+  // (Chase, Gmail, GitHub). This is a fixed initial state, not tied to live
+  // selection — checking a source doesn't jump it open, unchecking doesn't
+  // collapse it. Reuses the same <details> disclosure idiom as the per-stream
+  // field narrowing below, just one level up (round 4, item 9). While a
+  // search is active, force every visible match open — a collapsed row would
+  // hide the very stream text that matched the query.
+  const initiallyOpen = source.streams.some((s) => s.selected);
 
   return (
-    <div className={styles.sourceRow} data-active={active} data-hidden={hidden} hidden={hidden}>
-      <div className={styles.sourceHead}>
+    <details
+      className={styles.sourceRow}
+      data-active={active}
+      data-hidden={hidden}
+      hidden={hidden}
+      key={searching ? "search" : "browse"}
+      open={searching ? true : undefined}
+      {...(searching ? {} : { defaultOpen: initiallyOpen })}
+    >
+      <summary className={styles.sourceHead}>
         <span className={styles.sourceIcon}>
           <ConnectorIcon icon={icon ? { kind: "inline_svg", svg: icon } : null} name={source.name} />
         </span>
-        <div className={styles.sourceText}>
-          <label style={{ alignItems: "center", cursor: "pointer", display: "flex", gap: "0.5rem" }}>
+        <span className={styles.sourceText}>
+          <label
+            onClick={(e) => e.stopPropagation()}
+            style={{ alignItems: "center", cursor: "pointer", display: "flex", gap: "0.5rem" }}
+          >
             <input
               aria-label={`Share data from ${source.name}`}
               checked={allSelected}
@@ -269,13 +319,13 @@ function SourceRow({
             <span className="pdpp-body" style={{ fontWeight: 500 }}>
               {source.name}
             </span>
-            <span className="pdpp-caption">{source.account}</span>
+            <span className={`pdpp-caption ${styles.sourceAccount}`}>{source.account}</span>
           </label>
-        </div>
+        </span>
         <span className={styles.sourceCount}>
           {selected.length > 0 ? `${selected.length} of ${total}` : total} data types
         </span>
-      </div>
+      </summary>
       <div className={styles.streamList}>
         {source.streams.map((stream) => (
           <StreamRow
@@ -290,7 +340,7 @@ function SourceRow({
           />
         ))}
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -384,7 +434,7 @@ export function ConsentPreviewClient({
   }
 
   function endsText() {
-    return noEndDate ? "No end date" : `Access ends ${expiry}`;
+    return noEndDate ? "No end date" : `Access ends ${humanDate(expiry)}`;
   }
 
   const clientLogos = logos;
@@ -424,23 +474,27 @@ export function ConsentPreviewClient({
       </div>
       <TrustIdentity logos={clientLogos} trust={trust} />
       <div>
-        <h1 className="pdpp-display" style={{ fontSize: "1.75rem" }}>
-          {CLIENT.name} wants to read your data
-        </h1>
+        <h1 className={`pdpp-display ${styles.headline}`}>{CLIENT.name} wants to read your data</h1>
         <p className="pdpp-body" style={{ color: "var(--muted-foreground)" }}>
           Choose what it can read. Anything you leave unchecked stays private.
         </p>
       </div>
       <div className={styles.grid}>
         <div className={styles.body}>
-          <HumanSurface style={{ padding: "1.25rem" }}>
+          <div className="pdpp-sheet" style={{ padding: "1.25rem" }}>
             <h2 className="pdpp-title">Terms</h2>
-            <p className="pdpp-body">
-              Purpose: set by this server because {CLIENT.name} didn't give one — use the data you select as context
-              for your AI assistant.
+            <p className="pdpp-body">It can use your data to answer questions and assist you.</p>
+            {/* Italic muted caption marks this server's OWN fallback note, distinct
+                from the app-facing statement above it — same convention as
+                .rr-recbody__empty elsewhere in this design system for
+                system-generated (not app-authored) text. */}
+            <p className="pdpp-caption" style={{ fontStyle: "italic" }}>
+              It didn't state a purpose, so this server set that default.
             </p>
-            <p className="pdpp-body">Retention: {CLIENT.name} did not say how long it keeps the data it receives.</p>
-          </HumanSurface>
+            <p className="pdpp-body" style={{ marginTop: "0.5rem" }}>
+              It hasn't said how long it keeps your data.
+            </p>
+          </div>
 
           <div className={styles.mobileExpiry}>
             <GrantExpiryControls
@@ -455,11 +509,8 @@ export function ConsentPreviewClient({
 
           <div>
             <div style={{ alignItems: "baseline", display: "flex", justifyContent: "space-between" }}>
-              <h2 className="pdpp-title">What {CLIENT.name} can read</h2>
-              <span className="pdpp-caption">
-                {counts.selectedSourceCount} sources · {counts.selectedStreamCount} of {counts.totalStreamCount}{" "}
-                streams
-              </span>
+              <h2 className="pdpp-title">What it can read</h2>
+              <span className="pdpp-caption">{SOURCES.length} sources</span>
             </div>
             <div className={styles.searchRow}>
               <IcInput
@@ -509,6 +560,7 @@ export function ConsentPreviewClient({
                   onToggleSource={(checked) => toggleSource(source.id, checked)}
                   onToggleStream={(streamName) => toggleStream(source.id, streamName)}
                   ranges={ranges}
+                  searching={Boolean(query)}
                   selection={selection}
                   setRange={setRange}
                   source={source}
@@ -534,7 +586,7 @@ export function ConsentPreviewClient({
             setExpiry={setExpiry}
             setNoEndDate={setNoEndDate}
           />
-          <p className={styles.railEnds}>{endsText()}</p>
+          <p className={styles.railReturnTo}>You'll return to {CLIENT.domain}</p>
           <div className={styles.railActions}>
             <IcButton type="button" variant="human">
               Allow access
@@ -542,20 +594,21 @@ export function ConsentPreviewClient({
             <IcButton type="button" variant="ghost">
               Cancel
             </IcButton>
-            <p className="pdpp-caption">You'll return to {CLIENT.domain}</p>
           </div>
+          <a className={styles.railFooter} href="https://pdpp.dev">
+            <PdppLogo size={14} />
+            <span className="pdpp-caption">Secured by PDPP</span>
+          </a>
         </aside>
       </div>
-      <footer style={{ alignItems: "center", display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-        <a href="https://pdpp.dev" style={{ alignItems: "center", display: "inline-flex", gap: "0.5rem" }}>
-          <PdppLogo size={14} />
-          <span className="pdpp-caption">Secured by PDPP</span>
-        </a>
-      </footer>
     </div>
   );
 }
 
+// One composed control, not a picker plus a redundant echo (round 4, item 4):
+// the summary line only appears when it says something the picker itself
+// can't — "No end date" disables and greys the date input, so that state
+// needs a plain-text confirmation the picker alone doesn't give.
 function GrantExpiryControls({
   expiry,
   setExpiry,
@@ -573,7 +626,7 @@ function GrantExpiryControls({
 }) {
   return (
     <div className={styles.grantExpiry}>
-      <span className={styles.grantExpiryLabel}>Access duration — how long {CLIENT.name} can read</span>
+      <span className="pdpp-eyebrow">Access duration</span>
       <div className={styles.grantExpiryRow}>
         <IcInput
           aria-label="Access ends"
@@ -622,6 +675,7 @@ function GrantExpiryControls({
         />
         No end date
       </label>
+      {noEndDate && <p className={styles.railEnds}>Access never expires.</p>}
     </div>
   );
 }

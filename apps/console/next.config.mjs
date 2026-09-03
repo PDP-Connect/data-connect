@@ -35,6 +35,12 @@ const nextConfig = {
     },
     useTypeScriptCli: true,
   },
+  // Off everywhere: the dev-only "N" build-status badge (bottom-left, fixed
+  // position) never ships in a production build regardless of this flag —
+  // `next build`/`next start` don't include next-devtools — but it visually
+  // overlaps small-viewport UI (e.g. a mobile sticky action bar) in `next
+  // dev`, which is where this app's screenshots and manual review happen.
+  devIndicators: false,
   output: "standalone",
   // sharp ships prebuilt binaries for both glibc and musl per platform, and Next's
   // file tracer can't tell at build time which one the deploy target needs, so it

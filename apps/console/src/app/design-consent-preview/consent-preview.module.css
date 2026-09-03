@@ -31,6 +31,10 @@
   font-weight: 500;
 }
 
+.headline {
+  font-size: 1.75rem;
+}
+
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 336px;
@@ -76,11 +80,6 @@
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
 }
-.grantExpiryLabel {
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--muted-foreground);
-}
 .grantExpiryRow {
   display: flex;
   align-items: center;
@@ -116,10 +115,25 @@
   font-weight: 500;
 }
 
+.railReturnTo {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
 .railActions {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.railFooter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: inherit;
+  text-decoration: none;
+  margin-top: 0.25rem;
 }
 
 .searchRow {
@@ -164,10 +178,31 @@
   outline-offset: -2px;
 }
 
+/* Collapsed by default (round 4, item 9) — a plain-language summary row
+   until the owner opens it. The native marker triangle is replaced with a
+   chevron so it doesn't collide with the leading connector icon. */
 .sourceHead {
   display: flex;
   align-items: center;
   gap: 0.625rem;
+  cursor: pointer;
+  list-style: none;
+}
+.sourceHead::-webkit-details-marker {
+  display: none;
+}
+.sourceHead::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 1.5px solid var(--muted-foreground);
+  border-bottom: 1.5px solid var(--muted-foreground);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+.sourceRow[open] .sourceHead::after {
+  transform: rotate(45deg);
 }
 .sourceIcon {
   flex: 0 0 auto;
@@ -179,6 +214,9 @@
   flex-direction: column;
   min-width: 0;
   flex: 1 1 auto;
+}
+.sourceAccount {
+  font-family: var(--font-mono);
 }
 .sourceCount {
   font-size: 0.8125rem;
@@ -298,7 +336,9 @@
   }
   .railSummary,
   .grantExpiry,
-  .railEnds {
+  .railEnds,
+  .railReturnTo,
+  .railFooter {
     display: none;
   }
   .railMobileSummary {
@@ -312,6 +352,9 @@
   }
   .mobileExpiry {
     display: block;
+  }
+  .headline {
+    font-size: 1.5rem;
   }
 }
 
@@ -333,7 +376,9 @@
 }
 .forceMobile .railSummary,
 .forceMobile .grantExpiry,
-.forceMobile .railEnds {
+.forceMobile .railEnds,
+.forceMobile .railReturnTo,
+.forceMobile .railFooter {
   display: none;
 }
 .forceMobile .railMobileSummary {
@@ -350,4 +395,7 @@
 }
 .forceMobile.page {
   max-width: 420px;
+}
+.forceMobile .headline {
+  font-size: 1.5rem;
 }
