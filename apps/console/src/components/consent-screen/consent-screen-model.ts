@@ -64,6 +64,12 @@ export function sourceAccountLabel(sourceName: string, account: string): string 
   return account.startsWith(repeatedPrefix) ? account.slice(repeatedPrefix.length) : account;
 }
 
+export function clientPublishedLinks(
+  links: ReadonlyArray<{ readonly href: string; readonly label: string }>
+): ReadonlyArray<{ readonly href: string; readonly label: string }> {
+  return links.map((link) => ({ ...link, label: link.label === "Terms of service" ? "Terms" : link.label }));
+}
+
 export interface ConsentScreenModel {
   readonly accessMode: { readonly supported: readonly string[]; readonly value: string };
   readonly challenge: string;
