@@ -34,9 +34,14 @@ test("design-consent-preview is NOT the deliberately-ungated /design-system rout
 
 test("consent preview uses the real @pdpp/brand-react component modules", () => {
   assert.match(CLIENT_SOURCE, /from ["']@pdpp\/brand-react["']/);
-  for (const component of ["ConnectorIcon", "HumanSurface", "IcButton"]) {
+  // HumanSurface was dropped from the Terms box in round 4 (item 2): no other
+  // console page uses that copper tint for "this is a system-set default,"
+  // so the owner asked for a neutral surface instead — .pdpp-sheet, the plain
+  // paper class, applied directly rather than through a component wrapper.
+  for (const component of ["ConnectorIcon", "IcButton"]) {
     assert.match(new RegExp(`\\b${component}\\b`).test(CLIENT_SOURCE) ? "ok" : "missing", /ok/, `must import ${component}`);
   }
+  assert.match(CLIENT_SOURCE, /className="pdpp-sheet"/, "Terms box must use the real neutral sheet surface");
 });
 
 test("no hosted-ui-* class strings appear anywhere in the new consent preview source", () => {
@@ -81,7 +86,14 @@ test("mobile media query hides every grant-validity summary line, not just .gran
   const mobileBlockMatch = CSS_SOURCE.match(/@media \(max-width: 899px\) \{([\s\S]*?)\n\}/);
   assert.ok(mobileBlockMatch, "expected a max-width: 899px media query block");
   const mobileBlock = mobileBlockMatch?.[1] ?? "";
-  assert.match(mobileBlock, /\.railEnds\s*\{[^}]*display:\s*none/, "mobile block must hide .railEnds directly");
+  // .railEnds may be hidden via its own rule OR grouped into a shared
+  // comma-separated selector list with the other rail-summary lines — either
+  // is a real display:none, so match the selector-group form loosely rather
+  // than requiring .railEnds to own a standalone block.
+  assert.match(mobileBlock, /\.railEnds\s*[,{]/, "mobile block must reference .railEnds in a hiding rule");
+  const railEndsRule = mobileBlock.match(/([.\w,\s]*\.railEnds[.\w,\s]*)\{([^}]*)\}/);
+  assert.ok(railEndsRule, "expected a rule whose selector list includes .railEnds");
+  assert.match(railEndsRule?.[2] ?? "", /display:\s*none/, "the rule containing .railEnds must set display: none");
 
   const forceMobileRule = CSS_SOURCE.match(/\.forceMobile \.railSummary,[\s\S]*?\{[^}]*display:\s*none;[^}]*\}/);
   assert.ok(forceMobileRule);
@@ -168,7 +180,7 @@ test("trust copy is precise, not alarming — no 'isn't registered' / bare 'self
 test("each trust tier states what was verified, in one precise sentence", () => {
   assert.match(CLIENT_SOURCE, /own registration; nothing about them has been checked/, "unverified must say nothing was checked");
   assert.match(CLIENT_SOURCE, /identity document was fetched from \{CLIENT\.domain\}/, "domain-verified must name the automatic document fetch");
-  assert.match(CLIENT_SOURCE, /operator of this server has confirmed this app/, "verified must attribute the check to an operator, not an automatic process");
+  assert.match(CLIENT_SOURCE, /operator of this server has confirmed the app/, "verified must attribute the check to an operator, not an automatic process");
 });
 
 test("a 'What was checked' disclosure exists inline, not as a modal", () => {
@@ -185,6 +197,55 @@ test("the default trust tier is domain-verified, not unverified", () => {
     "a real ChatGPT would pass automatic domain verification, so that must be the default the owner sees first"
   );
   assert.match(PAGE_SOURCE, /value === ["']unverified["']/, "unverified must still be explicitly reachable via ?trust=unverified");
+});
+
+// ─── Round 4: progressive disclosure, real console idiom ───────────────────
+
+test("source rows are collapsible <details>, open only for pre-selected sources", () => {
+  assert.match(CLIENT_SOURCE, /<details[\s\S]{0,40}className=\{styles\.sourceRow\}/, "each source must be its own <details> disclosure");
+  assert.match(CLIENT_SOURCE, /initiallyOpen = source\.streams\.some\(\(s\) => s\.selected\)/, "only sources with a pre-selected stream start open");
+  assert.doesNotMatch(CLIENT_SOURCE, /defaultOpen=\{true\}/, "must not force every source open");
+});
+
+test("an active search forces matching source rows open so results aren't hidden", () => {
+  assert.match(CLIENT_SOURCE, /searching[\s\S]{0,80}open=\{searching \? true : undefined\}/, "search must override the collapsed default");
+  assert.match(CLIENT_SOURCE, /searching=\{Boolean\(query\)\}/, "the search query must drive the searching prop at the call site");
+});
+
+test("no duplicate 'sources · streams selected' count next to the section heading", () => {
+  const railOccurrences = (CLIENT_SOURCE.match(/streams selected/g) ?? []).length;
+  assert.equal(railOccurrences, 1, "exactly one place should render the live selection count");
+  assert.doesNotMatch(CLIENT_SOURCE, /What it can read[\s\S]{0,120}selectedStreamCount/, "the section heading must not repeat the rail's live count");
+});
+
+test("source account handles render in mono, matching /sources's real idiom", () => {
+  assert.match(CLIENT_SOURCE, /className=\{`pdpp-caption \$\{styles\.sourceAccount\}`\}/);
+  assert.match(CSS_SOURCE, /\.sourceAccount\s*\{[^}]*font-family:\s*var\(--font-mono\)/);
+});
+
+test("access-duration label uses the real pdpp-eyebrow micro-caps class, not a bespoke one", () => {
+  assert.match(CLIENT_SOURCE, /className="pdpp-eyebrow">Access duration</);
+  assert.doesNotMatch(CLIENT_SOURCE, /grantExpiryLabel/, "the bespoke label class should be gone once pdpp-eyebrow replaces it");
+});
+
+test("trust tier renders as a real Endorse chip next to the client name, not just a sentence", () => {
+  assert.match(CLIENT_SOURCE, /import \{[^}]*\bEndorse\b[^}]*\} from ["']@pdpp\/brand-react["']/);
+  assert.match(CLIENT_SOURCE, /<Endorse label=\{TRUST_LABEL\[trust\]\} status=\{TRUST_ENDORSE_STATUS\[trust\]\}/);
+  for (const tier of ["unverified", "domain", "verified"]) {
+    assert.match(CLIENT_SOURCE, new RegExp(`${tier}:\\s*["'][\\w ]+["']`), `TRUST_LABEL must map ${tier} to a human label`);
+  }
+});
+
+test("Allow uses the human/copper variant deliberately — consent acts, not the console's default primary", () => {
+  // Confirmed intentional per the design system's two-temperature rule
+  // (protocol/cool-blue for machine-authored surfaces, human/copper
+  // reserved for owner consent acts) — not a missed component swap. See
+  // packages/pdpp-brand-react/src/surface.tsx's own docstring for the same
+  // rule applied to HumanSurface/ProtocolSurface.
+  const allowIndex = CLIENT_SOURCE.indexOf("Allow access");
+  assert.ok(allowIndex >= 0, "expected an Allow access button");
+  const allowButtonBlock = CLIENT_SOURCE.slice(Math.max(0, allowIndex - 120), allowIndex);
+  assert.match(allowButtonBlock, /variant="human"/, "Allow must use variant=\"human\", matching the copper consent-act convention");
 });
 
 test("no end date control exists alongside the arbitrary-date grant-expiry input", () => {
