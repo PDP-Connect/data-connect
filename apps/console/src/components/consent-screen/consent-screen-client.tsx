@@ -34,7 +34,19 @@
  * per-stream data range).
  */
 
-import { ConnectorIcon, Endorse, IcButton, IcInput } from "@pdpp/brand-react";
+import {
+  ConnectorIcon,
+  Endorse,
+  IcButton,
+  IcInput,
+  IcPopover,
+  IcPopoverClose,
+  IcPopoverPopup,
+  IcPopoverTrigger,
+  IcTooltip,
+  IcTooltipContent,
+  IcTooltipTrigger,
+} from "@pdpp/brand-react";
 import { useMemo, useState } from "react";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
 import { ThemeToggle } from "@/components/theme/theme-toggle.tsx";
@@ -46,7 +58,7 @@ import type {
   ConsentStreamModel,
   ConsentTrustTier,
 } from "./consent-screen-model.ts";
-import { sourceAccountLabel } from "./consent-screen-model.ts";
+import { clientPublishedLinks, sourceAccountLabel } from "./consent-screen-model.ts";
 
 // Endorse's status vocabulary is written for GRANT state (active/expiring/
 // revoked/...), not identity trust — reusing it here borrows its VISUAL chip
@@ -173,6 +185,13 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
 }
 
 function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
+  const publishedLinks = clientPublishedLinks(client.policyLinks);
+  const trustExplanation =
+    client.trust === "domain"
+      ? `Verified automatically against the identity document published at ${client.domain}. No manual review.`
+      : client.trust === "unverified"
+        ? "Name and logo are self-reported. Nothing was verified."
+        : "Confirmed by the operator of this server.";
   return (
     <div style={{ alignItems: "flex-start", display: "flex", gap: "1rem" }}>
       {/* `client.logo` is an AS-cached, same-origin URL — never the client's
@@ -186,42 +205,44 @@ function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
       <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
         <div style={{ alignItems: "center", display: "flex", gap: "0.5rem" }}>
           <span className="pdpp-title">{client.name}</span>
-          <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
+          <span className={styles.trustHintDesktop}>
+            <IcTooltip>
+              <IcTooltipTrigger aria-label={`${TRUST_LABEL[client.trust]}: ${trustExplanation}`} className={styles.trustHintTrigger}>
+                <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
+              </IcTooltipTrigger>
+              <IcTooltipContent>{trustExplanation}</IcTooltipContent>
+            </IcTooltip>
+          </span>
+          <span className={styles.trustHintTouch}>
+            <IcPopover>
+              <IcPopoverTrigger aria-label={`About ${TRUST_LABEL[client.trust]}`} className={styles.trustHintTrigger}>
+                <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
+              </IcPopoverTrigger>
+              <IcPopoverPopup aria-label={`${TRUST_LABEL[client.trust]} explanation`} role="dialog">
+                <p className="pdpp-caption">{trustExplanation}</p>
+                <IcPopoverClose aria-label="Dismiss trust explanation" className={styles.trustHintDismiss}>
+                  Dismiss
+                </IcPopoverClose>
+              </IcPopoverPopup>
+            </IcPopover>
+          </span>
         </div>
         {/* Only rendered when the client actually proved a domain. Repeating
             the app's own name on a line that reads as a domain would dress a
             self-asserted name as a checked one. */}
         {client.domain && <span className="pdpp-caption">{client.domain}</span>}
-        {client.trust === "unverified" && (
-          <p className="pdpp-caption">Its name and logo come from its own registration; nothing about them has been checked.</p>
-        )}
-        {client.trust === "domain" && client.domain && (
-          <p className="pdpp-caption">Its identity document was fetched from {client.domain}, so whoever controls that domain is the app.</p>
-        )}
-        {client.trust === "verified" && <p className="pdpp-caption">The operator of this server has confirmed the app.</p>}
-        <details className={styles.trustDetails}>
-          <summary className="pdpp-caption">What was checked</summary>
-          <p className="pdpp-caption">
-            {client.trust === "unverified" &&
-              `No check ran. Any app can claim this name and use this logo — treat both as unverified claims until a check below has run.`}
-            {client.trust === "domain" &&
-              `This server fetched a client identity document from ${client.domain} over HTTPS and confirmed it matches this request. That proves domain control, automatically, with no action from the app and no human review.`}
-            {client.trust === "verified" &&
-              `In addition to the automatic domain check, an operator of this server has explicitly reviewed and registered the app — the strongest tier this server offers.`}
-          </p>
-        </details>
-        {client.policyLinks.length > 0 && (
-          <p className="pdpp-caption">
-            {client.policyLinks.map((link, index) => (
+        <p className={`pdpp-caption ${styles.clientPublishedLinks}`}>
+          {publishedLinks.length > 0
+            ? publishedLinks.map((link, index) => (
               <span key={link.href}>
                 {index > 0 && " · "}
                 <a href={link.href} rel="noopener noreferrer nofollow" target="_blank">
                   {link.label}
                 </a>
               </span>
-            ))}
-          </p>
-        )}
+              ))
+            : "No privacy policy or terms published."}
+        </p>
       </div>
     </div>
   );
