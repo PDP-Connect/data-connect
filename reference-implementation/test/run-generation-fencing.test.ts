@@ -138,7 +138,16 @@ function freshDb(t: TestContext): void {
   closeDb();
   initDb(makeTemporaryDbPath("pdpp-gen-fence-"));
   __resetControllerInteractionStateForTests();
+  // Keep the event loop alive for this test's duration. This file exercises
+  // run-generation fencing around reclaimed/zombie runs, which deliberately
+  // leaves a stale run's promise pending while a new generation is admitted
+  // -- without a ref'd handle, Node's test runner can flag that
+  // still-pending promise as abandoned before the reclaim actually
+  // resolves. Documented upstream pattern for this exact interaction:
+  // nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
   t.after(() => {
+    clearInterval(keepAlive);
     __resetControllerInteractionStateForTests();
     closeDb();
   });

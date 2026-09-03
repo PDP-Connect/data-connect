@@ -274,7 +274,14 @@ test("live declaration adapter closes a pinned dispatcher when fetch fails", asy
   assert.equal(closes, 1);
 });
 
-test("a late fetch response after timeout is canceled and closes its pinned dispatcher", async () => {
+test("a late fetch response after timeout is canceled and closes its pinned dispatcher", async (t) => {
+  // Keep the event loop alive while this test's internal timeout races
+  // against the deliberately-still-pending lateResponse promise, so Node's
+  // test runner does not treat it as abandoned before the timeout resolves
+  // the race. Documented upstream pattern for this exact interaction:
+  // nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   let bodyCancelled = false;
   let dispatcherCloses = 0;
   let markFetchStarted!: () => void;
@@ -565,7 +572,14 @@ test("declaration retrieval rejects malformed UTF-8 and cancels non-success bodi
   assert.equal(errorBodyCancelled, true);
 });
 
-test("declaration retrieval bounds DNS work by the configured deadline", async () => {
+test("declaration retrieval bounds DNS work by the configured deadline", async (t) => {
+  // Keep the event loop alive while this test's internal timeout races
+  // against the deliberately-unresolved DNS promise below, so Node's test
+  // runner does not treat it as abandoned before the timeout resolves the
+  // race. Documented upstream pattern for this exact interaction:
+  // nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const result = await retrieveSourceDeclaration(
     { acceptedPointer: POINTER, expectedSourceId: RESOURCE },
     { ...policy, timeoutMs: 1 },

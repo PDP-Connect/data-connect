@@ -131,6 +131,13 @@ function freshDb(t: TestContext) {
 
 test("cancelRun aborts only the targeted run; sibling run is untouched", async (t) => {
   freshDb(t);
+  // Keep the event loop alive for the duration of this test's own unref'd
+  // internal timers (drainPromisesWithDeadline's deadline race) so Node's
+  // test runner does not treat run_b's deliberately-still-pending promise
+  // as abandoned before the test reaches its own cleanup. Documented
+  // upstream pattern for this exact interaction: nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
 
   const runA = cancellableRun();
   const runB = cancellableRun();

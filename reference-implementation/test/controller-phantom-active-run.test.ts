@@ -227,7 +227,15 @@ function freshDb(t: TestContext) {
   closeDb();
   initDb(makeTemporaryDbPath("pdpp-phantom-run-"));
   __resetControllerInteractionStateForTests();
+  // Keep the event loop alive for this test's duration. This whole file
+  // exercises the watchdog's own unref'd timer racing against a
+  // deliberately-hung (never-settling) connector impl -- without a ref'd
+  // handle, Node's test runner can flag that still-pending promise as
+  // abandoned before the watchdog actually fires. Documented upstream
+  // pattern for this exact interaction: nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
   t.after(() => {
+    clearInterval(keepAlive);
     __resetControllerInteractionStateForTests();
     closeDb();
   });

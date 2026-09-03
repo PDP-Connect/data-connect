@@ -431,6 +431,16 @@ function setup(
   }: SetupOptions = {}
 ) {
   setupIsolatedControllerDb(t);
+  // Keep the event loop alive for this test's duration. Several tests below
+  // deliberately leave a lease/interaction promise pending while asserting
+  // unrelated state (a pending assist, a queued lease, a sweep in flight),
+  // racing it against an unref'd internal timer (e.g. the watchdog or a
+  // sweep interval). Without a ref'd handle, Node's test runner can flag
+  // that still-pending (but by-design) promise as abandoned before the
+  // race actually resolves. Documented upstream pattern for this exact
+  // interaction: nodejs/node#52025 / #51381.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
 
   const calls: RunCalls = {
     clearNonce: 0,
