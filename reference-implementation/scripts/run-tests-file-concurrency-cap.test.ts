@@ -5,35 +5,33 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const runTestsSource = readFileSync(
-	new URL("./run-tests.ts", import.meta.url),
-	"utf8",
-);
-const concurrencyGuidance = readFileSync(
-	new URL("../docs/gate-concurrency.md", import.meta.url),
-	"utf8",
-);
+const runTestsSource = readFileSync(new URL("./run-tests.ts", import.meta.url), "utf8");
+const concurrencyGuidance = readFileSync(new URL("../docs/gate-concurrency.md", import.meta.url), "utf8");
+const PROFILE_CAP_PATTERN = /const DEFAULT_FILE_CONCURRENCY_CAP = selectedProfile === "postgres" \? 2 : 8;/;
+const EXPLICIT_OVERRIDE_PATTERN =
+  /Number\.isInteger\(requestedConcurrency\) && requestedConcurrency > 0 \? requestedConcurrency : defaultConcurrency;/;
+const GUIDANCE_PATTERN = /Memory-default uses eight file workers by default; PostgreSQL uses two\./;
 
 test("PostgreSQL profile keeps the default file concurrency cap at two", () => {
-	assert.match(
-		runTestsSource,
-		/const DEFAULT_FILE_CONCURRENCY_CAP = selectedProfile === "postgres" \? 2 : 8;/,
-		"the runner must cap PostgreSQL at two by default while allowing memory-default to use eight",
-	);
+  assert.match(
+    runTestsSource,
+    PROFILE_CAP_PATTERN,
+    "the runner must cap PostgreSQL at two by default while allowing memory-default to use eight"
+  );
 });
 
 test("explicit PDPP_TEST_CONCURRENCY still overrides the profile default", () => {
-	assert.match(
-		runTestsSource,
-		/Number\.isInteger\(requestedConcurrency\) && requestedConcurrency > 0 \? requestedConcurrency : defaultConcurrency;/,
-		"an explicit positive PDPP_TEST_CONCURRENCY must remain authoritative for either profile",
-	);
+  assert.match(
+    runTestsSource,
+    EXPLICIT_OVERRIDE_PATTERN,
+    "an explicit positive PDPP_TEST_CONCURRENCY must remain authoritative for either profile"
+  );
 });
 
 test("checked-in guidance states the same profile-specific defaults as the runner", () => {
-	assert.match(
-		concurrencyGuidance,
-		/Memory-default uses eight file workers by default; PostgreSQL uses two\./,
-		"the operational guidance must state the runner's profile-specific defaults",
-	);
+  assert.match(
+    concurrencyGuidance,
+    GUIDANCE_PATTERN,
+    "the operational guidance must state the runner's profile-specific defaults"
+  );
 });
