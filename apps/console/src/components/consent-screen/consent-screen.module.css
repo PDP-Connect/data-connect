@@ -22,10 +22,33 @@
   font-size: 1.75rem;
 }
 
+.consentHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+.consentHeaderContent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.consentHeaderTitle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .clientLogo {
-  width: 2rem;
-  height: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
   object-fit: contain;
+}
+.clientMonogram {
+  width: 2.5rem;
+  height: 2.5rem;
 }
 
 .grid {
@@ -439,5 +462,10 @@
   }
   .headline {
     font-size: 1.5rem;
+  }
+  .consentHeaderTitle {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.25rem;
   }
 }
