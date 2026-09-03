@@ -1,0 +1,20 @@
+{
+  // Typecheck program for the one test file that legitimately needs the DOM
+  // lib. `tsconfig.json` excludes it because TypeScript applies `lib` per
+  // program, not per file: pulling "DOM" in there would replace every other
+  // file's ambient Headers/RequestInit/ReadableStream with the DOM versions
+  // instead of the undici-types-backed ones the runtime actually provides.
+  //
+  // Without this second program the excluded file would run under Node's
+  // test runner while getting no `tsc` coverage at all, so a type error in
+  // it could not fail any check. Run both programs to cover the whole tree:
+  //   tsc --noEmit -p tsconfig.json
+  //   tsc --noEmit -p tsconfig.dom.json
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["test/run-interaction-stream-remote-surface-session.test.ts"],
+  "exclude": ["node_modules"]
+}
