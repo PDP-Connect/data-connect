@@ -37,8 +37,14 @@ export const metadata: Metadata = {
   robots: { follow: false, index: false, nocache: true },
 };
 
+// Default is "domain", not "unverified": a real ChatGPT publishes its client
+// metadata document at chatgpt.com, so the automatic domain-verification
+// check this mock's CLIENT scenario represents would actually succeed. The
+// unverified tier is real and stays reachable at ?trust=unverified, but it
+// must not be what the owner sees first for an example built around a client
+// that would, in practice, verify.
 function parseTrust(value: string | string[] | undefined): TrustTier {
-  return value === "domain" || value === "verified" ? value : "unverified";
+  return value === "unverified" || value === "verified" ? value : "domain";
 }
 
 function parseState(value: string | string[] | undefined): PreviewState {

@@ -97,15 +97,30 @@ function TrustIdentity({ trust, logos }: { trust: TrustTier; logos: ClientLogos 
         <span className="pdpp-title">{CLIENT.name}</span>
         <span className="pdpp-caption">{CLIENT.domain}</span>
         {trust === "unverified" && (
-          <p className="pdpp-caption">This app isn't registered with your server. Its name and logo are self-reported.</p>
+          <p className="pdpp-caption">
+            {CLIENT.name}'s name and logo come from its own registration; nothing about them has been checked.
+          </p>
         )}
         {trust === "domain" && (
           <p className="pdpp-caption">
-            {CLIENT.domain}'s own metadata confirms this app's identity. This check ran automatically — {CLIENT.name}{" "}
-            did not need to do anything.
+            This app's identity document was fetched from {CLIENT.domain}, so whoever controls that domain is the
+            app.
           </p>
         )}
-        {trust === "verified" && <p className="pdpp-caption">An operator registered this app with your server.</p>}
+        {trust === "verified" && (
+          <p className="pdpp-caption">The operator of this server has confirmed this app.</p>
+        )}
+        <details className={styles.trustDetails}>
+          <summary className="pdpp-caption">What was checked</summary>
+          <p className="pdpp-caption">
+            {trust === "unverified" &&
+              `No check ran. Any app can claim to be named "${CLIENT.name}" and use this logo — treat both as unverified claims until a check below has run.`}
+            {trust === "domain" &&
+              `This server fetched a client identity document from ${CLIENT.domain} over HTTPS and confirmed it matches this request. That proves domain control, automatically, with no action from ${CLIENT.name} and no human review.`}
+            {trust === "verified" &&
+              `In addition to the automatic domain check, an operator of this server has explicitly reviewed and registered this app — the strongest tier this server offers.`}
+          </p>
+        </details>
       </div>
     </div>
   );
