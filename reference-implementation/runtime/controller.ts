@@ -1329,6 +1329,31 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
   return entries;
 }
 
+// Resolve a shipped polyfill connector's runnable (spawnable) entry-point
+// path, given its manifest's file stem (the JSON filename minus extension,
+// e.g. "github" for "github.json"). Returns null when this connector has no
+// on-disk implementation shipped alongside its manifest.
+//
+// SWAP POINT for the connector-tree-scope decision (data-connect PR #55 /
+// data-connectors lane dcx-full-connector-build-0903): today this walks
+// POLYFILL_CONNECTORS_DIR directly, which only works for the subset of the
+// 45 manifest-listed connectors that this repo's vendored tarball happens to
+// ship compiled. Once data-connectors ships a resolveConnectorImplementation
+// export (backed by a connector-index.json covering every manifest-listed
+// connector), replace this function's body with a call to that export
+// instead of the two-candidate existsSync probe below — everything else in
+// this file (fingerprint comparison, seed-vs-polyfill precedence in
+// resolveDefaultConnectorPath) stays unchanged, since this function's
+// contract (connectorName in, spawnable path or null out) does not change.
+function resolvePolyfillConnectorEntryPoint(connectorName: string): string | null {
+  return (
+    [
+      join(POLYFILL_CONNECTORS_DIR, connectorName, "index.ts"),
+      join(POLYFILL_CONNECTORS_DIR, connectorName, "index.js"),
+    ].find((candidatePath) => existsSync(candidatePath)) ?? null
+  );
+}
+
 // Index one polyfill manifest file into the connector-path and fingerprint
 // maps. No-op for non-JSON files, connectors without an on-disk implementation,
 // malformed manifests, or manifests missing a usable connector_id.
@@ -1341,10 +1366,7 @@ function indexPolyfillManifestFile(
     return;
   }
   const connectorName = file.replace(JSON_EXTENSION_RE, "");
-  const connectorPath = [
-    join(POLYFILL_CONNECTORS_DIR, connectorName, "index.ts"),
-    join(POLYFILL_CONNECTORS_DIR, connectorName, "index.js"),
-  ].find((candidatePath) => existsSync(candidatePath));
+  const connectorPath = resolvePolyfillConnectorEntryPoint(connectorName);
   if (!connectorPath) {
     return;
   }

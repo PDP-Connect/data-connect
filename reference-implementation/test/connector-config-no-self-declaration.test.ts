@@ -43,6 +43,18 @@ const FORBIDDEN_IMPORT_PATTERNS = [
   /from\s+["'](\.\.\/)+reference-implementation\/server\/stores\/connector-instance-config-store(\.ts)?["']/,
 ];
 
+// SWAP POINT for the connector-tree-scope decision (data-connect PR #55 /
+// data-connectors lane dcx-full-connector-build-0903): this walks
+// CONNECTORS_DIR directly, which only covers the subset of the 45
+// manifest-listed connectors this repo's vendored tarball happens to ship
+// compiled today -- confirmed missing connectors (e.g. ynab) are silently
+// absent from this scan's coverage, not falsely passing it. Once
+// data-connectors ships a connector-index.json enumerating every
+// manifest-listed connector's source files, replace this function's body
+// with a read of that index instead of readdirSync-walking CONNECTORS_DIR --
+// the FORBIDDEN_IMPORT_PATTERNS check below and everything else in this file
+// stays unchanged, since this function's contract (list of connector source
+// file paths out) does not change.
 function listConnectorSourceFiles(): string[] {
   const out: string[] = [];
   function walk(dir: string) {
