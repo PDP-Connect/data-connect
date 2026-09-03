@@ -73,6 +73,12 @@ interface SelectionState {
   };
 }
 
+interface FieldSelectionState {
+  [streamId: string]: {
+    [fieldName: string]: boolean;
+  };
+}
+
 /**
  * The server decides what starts checked (`stream.selected`), so a future
  * change to that policy is a server change, not a client one. Today it sends
@@ -87,6 +93,20 @@ function initialSelection(sources: readonly ConsentSourceModel[]): SelectionStat
       streamState[stream.name] = stream.selected;
     }
     state[source.id] = streamState;
+  }
+  return state;
+}
+
+// A field picker starts with every manifest field selected. Required fields
+// stay checked in the UI and the AS independently adds them back if a forged
+// submission omits one; the UI is an honest view of that consent floor, not
+// the authority that enforces it.
+function initialFieldSelection(sources: readonly ConsentSourceModel[]): FieldSelectionState {
+  const state: FieldSelectionState = {};
+  for (const source of sources) {
+    for (const stream of source.streams) {
+      state[stream.id] = Object.fromEntries(stream.fields.map((field) => [field.name, true]));
+    }
   }
   return state;
 }
@@ -114,7 +134,7 @@ function fieldSummary(stream: ConsentStreamModel, selectedFields: number | null)
   if (stream.fieldsTotal === 0) {
     return "All fields";
   }
-  return selectedFields === null
+  return selectedFields === null || selectedFields === stream.fieldsTotal
     ? `All ${stream.fieldsTotal} fields`
     : `${selectedFields} of ${stream.fieldsTotal} fields`;
 }
@@ -154,10 +174,14 @@ function computeCounts(sources: readonly ConsentSourceModel[], selection: Select
 function TrustIdentity({ client }: { client: ConsentScreenModel["client"] }) {
   return (
     <div style={{ alignItems: "flex-start", display: "flex", gap: "1rem" }}>
-      {/* Never an <img> from a client-supplied URL: spec-core.md:676 prohibits
-          fetching a remote logo for a client whose identity is unverified, and
-          the monogram is the safe rendering for every tier. */}
-      <span className="pdpp-monogram" data-initials={client.monogram} />
+      {/* `client.logo` is an AS-cached, same-origin URL — never the client's
+          declared remote URI. The monogram remains the safe fallback for an
+          unverified client or a logo fetch the AS could not approve. */}
+      {client.logo ? (
+        <img alt="" className={styles.clientLogo} src={client.logo} />
+      ) : (
+        <span className="pdpp-monogram" data-initials={client.monogram} />
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
         <div style={{ alignItems: "center", display: "flex", gap: "0.5rem" }}>
           <span className="pdpp-title">{client.name}</span>
@@ -206,6 +230,8 @@ function StreamRow({
   source,
   stream,
   selected,
+  selectedFields,
+  onToggleField,
   onToggle,
   ranges,
   setRange,
@@ -213,8 +239,10 @@ function StreamRow({
 }: {
   applyRangeToAllSelected: (since: string, until: string) => void;
   onToggle: () => void;
+  onToggleField: (fieldName: string, checked: boolean) => void;
   ranges: Record<string, { since: string; until: string }>;
   selected: boolean;
+  selectedFields: Record<string, boolean>;
   setRange: (sourceId: string, streamName: string, key: "since" | "until", value: string) => void;
   source: ConsentSourceModel;
   stream: ConsentStreamModel;
@@ -231,19 +259,39 @@ function StreamRow({
         {selected && (
           <details className={styles.narrow}>
             <summary className={styles.narrowSummary}>
-              {fieldSummary(stream, null)} <span className={styles.narrowChange}>Change</span>
+              {fieldSummary(
+                stream,
+                stream.fields.length > 0 ? stream.fields.filter((field) => selectedFields[field.name]).length : null
+              )}{" "}
+              {stream.fields.length > 0 && <span className={styles.narrowChange}>Change</span>}
             </summary>
             <div className={styles.narrowBody}>
-              {/* Field-level narrowing is declared by the manifest but not yet
-                  carried on this flow's accept request — see
-                  CONSENT-REAL-FLOW-REPORT.md. Stating the count the grant will
-                  actually cover is honest; offering per-field checkboxes that
-                  the submission drops would not be. */}
-              <p className="pdpp-caption">
-                {stream.fieldsTotal > 0
-                  ? `This grant covers all ${stream.fieldsTotal} fields in ${stream.label.toLowerCase()}.`
-                  : `This grant covers every field in ${stream.label.toLowerCase()}.`}
-              </p>
+              {stream.fields.length > 0 ? (
+                <fieldset className={styles.fieldList}>
+                  <legend className="pdpp-caption">Choose fields to share</legend>
+                  {stream.fields.map((field) => (
+                    <label className={styles.fieldOption} key={field.name}>
+                      <input
+                        checked={Boolean(selectedFields[field.name])}
+                        disabled={field.required}
+                        onChange={(event) => onToggleField(field.name, event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>
+                        <span className="pdpp-caption">{field.name}</span>
+                        {field.required && <span className={styles.fieldRequired}>Required</span>}
+                        {field.description && <span className="pdpp-caption">{field.description}</span>}
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : (
+                <p className="pdpp-caption">
+                  {stream.fieldsTotal > 0
+                    ? `This grant covers all ${stream.fieldsTotal} fields in ${stream.label.toLowerCase()}.`
+                    : `This grant covers every field in ${stream.label.toLowerCase()}.`}
+                </p>
+              )}
               {stream.timePhrase && (
                 <div className={styles.streamRange}>
                   <span className="pdpp-caption">{dataRangeSummary(stream, range) || "All dates"}</span>
@@ -287,11 +335,13 @@ function StreamRow({
 function SourceRow({
   source,
   selection,
+  fieldSelection,
   ranges,
   hidden,
   active,
   searching,
   onToggleStream,
+  onToggleField,
   onToggleSource,
   setRange,
   applyRangeToAllSelected,
@@ -301,6 +351,8 @@ function SourceRow({
   hidden: boolean;
   onToggleSource: (checked: boolean) => void;
   onToggleStream: (streamName: string) => void;
+  onToggleField: (streamId: string, fieldName: string, checked: boolean) => void;
+  fieldSelection: FieldSelectionState;
   ranges: Record<string, { since: string; until: string }>;
   searching: boolean;
   selection: SelectionState;
@@ -317,6 +369,7 @@ function SourceRow({
   // While a search is active, force every visible match open — a collapsed
   // row would hide the very stream text that matched the query.
   const initiallyOpen = source.streams.some((s) => s.selected);
+  const [isOpen, setIsOpen] = useState(initiallyOpen);
 
   return (
     <details
@@ -325,8 +378,14 @@ function SourceRow({
       data-hidden={hidden}
       hidden={hidden}
       key={searching ? "search" : "browse"}
-      open={searching ? true : undefined}
-      {...(searching ? {} : { defaultOpen: initiallyOpen })}
+      onToggle={(event) => {
+        if (searching) {
+          event.currentTarget.open = true;
+          return;
+        }
+        setIsOpen(event.currentTarget.open);
+      }}
+      open={searching || isOpen}
     >
       <summary className={styles.sourceHead}>
         <span className={styles.sourceIcon}>
@@ -347,7 +406,7 @@ function SourceRow({
               type="checkbox"
             />
             <span className={`pdpp-body ${styles.sourceName}`}>{source.name}</span>
-            <span className={`pdpp-caption ${styles.sourceAccount}`}>{source.account}</span>
+            {source.account && <span className={`pdpp-caption ${styles.sourceAccount}`}>{source.account}</span>}
           </label>
         </span>
         <span className={styles.sourceCount}>
@@ -360,8 +419,10 @@ function SourceRow({
             applyRangeToAllSelected={applyRangeToAllSelected}
             key={stream.name}
             onToggle={() => onToggleStream(stream.name)}
+            onToggleField={(fieldName, checked) => onToggleField(stream.id, fieldName, checked)}
             ranges={ranges}
             selected={Boolean(selection[source.id]?.[stream.name])}
+            selectedFields={fieldSelection[stream.id] ?? {}}
             setRange={setRange}
             source={source}
             stream={stream}
@@ -390,6 +451,7 @@ export function ConsentScreen({
   rejectAction: () => Promise<string>;
 }) {
   const [selection, setSelection] = useState<SelectionState>(() => initialSelection(model.sources));
+  const [fieldSelection, setFieldSelection] = useState<FieldSelectionState>(() => initialFieldSelection(model.sources));
   const [ranges, setRanges] = useState<Record<string, { since: string; until: string }>>({});
   const [search, setSearch] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -431,6 +493,13 @@ export function ConsentScreen({
     setSelection((prev) => ({
       ...prev,
       [sourceId]: Object.fromEntries(source.streams.map((s) => [s.name, checked])),
+    }));
+  }
+
+  function toggleField(streamId: string, fieldName: string, checked: boolean) {
+    setFieldSelection((prev) => ({
+      ...prev,
+      [streamId]: { ...prev[streamId], [fieldName]: checked },
     }));
   }
 
@@ -501,6 +570,7 @@ export function ConsentScreen({
     // unchecked is noise, not a narrowing, and an empty entry would ask the
     // server to record "no bound" as if it were one.
     const chosenStreamIds = new Set(sources.flatMap((source) => source.streamIds));
+    const streamFields: Record<string, readonly string[]> = {};
     const streamRanges: Record<string, { since?: string; until?: string }> = {};
     for (const [streamId, range] of Object.entries(ranges)) {
       if (!chosenStreamIds.has(streamId)) {
@@ -518,11 +588,23 @@ export function ConsentScreen({
       }
     }
 
+    for (const source of model.sources) {
+      for (const stream of source.streams) {
+        if (!chosenStreamIds.has(stream.id) || stream.fields.length === 0) {
+          continue;
+        }
+        streamFields[stream.id] = stream.fields
+          .filter((field) => fieldSelection[stream.id]?.[field.name])
+          .map((field) => field.name);
+      }
+    }
+
     return {
       accessMode: model.accessMode.value,
       grantExpiry: noEndDate ? "never" : expiry,
       reviewDigest: model.reviewDigest,
       sources,
+      streamFields,
       streamRanges,
     };
   }
@@ -635,9 +717,11 @@ export function ConsentScreen({
                     <SourceRow
                       active={visibleIndex >= 0 && visibleIndex === activeIndex}
                       applyRangeToAllSelected={applyRangeToAllSelected}
+                      fieldSelection={fieldSelection}
                       hidden={isHidden}
                       key={source.id}
                       onToggleSource={(checked) => toggleSource(source.id, checked)}
+                      onToggleField={toggleField}
                       onToggleStream={(streamName) => toggleStream(source.id, streamName)}
                       ranges={ranges}
                       searching={Boolean(query)}

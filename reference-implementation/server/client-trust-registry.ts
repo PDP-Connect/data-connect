@@ -264,14 +264,15 @@ export function resolveClientTrust(
  * Three conditions, all required (`spec-core.md:676`):
  *   1. the client is verified — an unverified client never gets an image;
  *   2. the URL is https — no cleartext fetch, no non-web schemes;
- *   3. the host is the client_id's own domain, or one the operator
- *      allow-listed (globally or for this client).
+ *   3. a domain-verified client may use the HTTPS URI in the identity
+ *      document it proved control of; an operator-registered client must use
+ *      its own domain or an operator allow-list.
  *
- * Condition 3 is what keeps a verified domain from laundering an arbitrary
- * third-party URL through the server. A client that controls `chatgpt.com`
- * has proven nothing about `cdn.example`, so serving assets from a CDN is an
- * operator decision. ChatGPT's logo lives on `oaistatic.com`, which is why
- * that host is allow-listable rather than automatic.
+ * A domain-verified identity document is the client's authenticated metadata,
+ * so its HTTPS `logo_uri` is an identity claim the AS may fetch through its
+ * guarded cache. The browser never sees the URI. An operator registration
+ * does not prove a domain, so its third-party asset hosts remain an operator
+ * decision.
  *
  * Returning true authorizes a server-side fetch whose bytes are cached and
  * re-served locally. The client's URL is never emitted to the owner's browser.
@@ -299,6 +300,9 @@ export function isLogoFetchAllowed(
     return false;
   }
   const logoHost = url.hostname.replace(/^www\./, "").toLowerCase();
+  if (trust.basis === "domain_verified") {
+    return true;
+  }
   const clientHost = trustHostLabel(clientId);
   if (clientHost && logoHost === clientHost) {
     return true;

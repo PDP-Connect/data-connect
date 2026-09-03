@@ -15,6 +15,7 @@
 //   test/security-consent-risk-disclosure.test.js
 //   test/security-consent-token-handoff.test.js
 
+import { createHash } from "node:crypto";
 import {
   HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID,
   HOSTED_MCP_GRANT_EXPIRY_OPTIONS,
@@ -22,8 +23,10 @@ import {
 import {
   type OperatorTrustConfig,
   EMPTY_OPERATOR_TRUST_CONFIG,
+  isLogoFetchAllowed,
   resolveClientTrust,
 } from "../client-trust-registry.ts";
+import { type FetchClientLogoOptions, fetchAndCacheClientLogo } from "../client-logo-cache.ts";
 import {
   type StreamScopeCapability,
   type StreamScopeSelection,
@@ -105,7 +108,10 @@ export interface ConsentPickerManifest {
     name: string;
     consent_time_field?: string | null;
     description?: string | null;
-    schema?: { properties?: Record<string, unknown> | null; required?: readonly string[] | null } | null;
+    schema?: {
+      properties?: Record<string, { description?: string | null } | unknown> | null;
+      required?: readonly string[] | null;
+    } | null;
     selection?: { fields?: boolean | null } | null;
   }> | null;
 }
@@ -144,6 +150,7 @@ export interface HostedMcpPickerRow {
   streams: Array<{
     name: string;
     description: string | null;
+    schema?: { properties?: Record<string, { description?: string | null } | unknown> | null; required?: readonly string[] | null } | null;
     /** What this stream's declaration permits the picker to offer. */
     scope: StreamScopeCapability;
   }>;
@@ -718,6 +725,8 @@ export interface HostedMcpConsentChallengeModel {
      * #15). Not a secret — it is a public parameter of the authorize URL.
      */
     readonly id: string;
+    /** Same-origin URL for a verified logo cached by the AS, or null for the monogram fallback. */
+    readonly logo: string | null;
     readonly monogram: string;
     readonly name: string;
     /** Policy/terms links the client's own identity document declared, if any. */
@@ -747,6 +756,8 @@ export interface HostedMcpConsentChallengeModel {
     readonly name: string;
     readonly selectionValue: string;
     readonly streams: ReadonlyArray<{
+      /** Fields the owner can narrow, with required fields marked as the consent floor. */
+      readonly fields: ReadonlyArray<{ readonly description?: string; readonly name: string; readonly required: boolean }>;
       readonly fieldsTotal: number;
       readonly id: string;
       readonly label: string;
@@ -767,6 +778,29 @@ export interface HostedMcpConsentChallengeModel {
   }>;
 }
 
+/** Opaque stable key; the original client id and upstream URI never reach the browser. */
+export function consentClientLogoCacheKey(clientId: string): string {
+  return `consent-client-logo-${createHash("sha256").update(clientId).digest("base64url")}`;
+}
+
+async function resolveConsentClientLogo(
+  client: PendingGrantRequest["client"] | null,
+  clientLogoFetchOptions?: FetchClientLogoOptions
+): Promise<string | null> {
+  const clientId = typeof client?.client_id === "string" ? client.client_id : null;
+  const logoUri = typeof client?.client_display?.logo_uri === "string" ? client.client_display.logo_uri : null;
+  if (!(clientId && logoUri)) {
+    return null;
+  }
+  const trust = resolveClientTrust({ client_id: clientId, registration_mode: client?.registration_mode ?? null });
+  if (!isLogoFetchAllowed(logoUri, clientId, trust)) {
+    return null;
+  }
+  const cacheKey = consentClientLogoCacheKey(clientId);
+  const logo = await fetchAndCacheClientLogo(cacheKey, logoUri, clientLogoFetchOptions);
+  return logo ? `/oauth/consent-client-logos/${encodeURIComponent(cacheKey)}` : null;
+}
+
 export async function buildHostedMcpConsentChallengeModel(
   challenge: string,
   ownerSubjectId: string,
@@ -778,7 +812,8 @@ export async function buildHostedMcpConsentChallengeModel(
    * owner where they will end up. The caller passes the value the AS itself
    * recorded, so this cannot be steered by a request parameter.
    */
-  redirectUri: string | null = null
+  redirectUri: string | null = null,
+  clientLogoFetchOptions?: FetchClientLogoOptions
 ): Promise<HostedMcpConsentChallengeModel> {
   const rows = await listHostedMcpPickerRows(caps, ownerSubjectId);
   const clientDisplay = client ? buildConsentClientDisplay(client, ui) : null;
@@ -786,6 +821,7 @@ export async function buildHostedMcpConsentChallengeModel(
   // display name when the metadata carries one, with `client_id` only as the
   // fallback — and `displayName` already encodes exactly that precedence.
   const clientName = clientDisplay?.displayName ?? "This app";
+  const logo = await resolveConsentClientLogo(client, clientLogoFetchOptions);
   // Icons come from each row's own manifest, the same value /sources passes to
   // ConnectorIcon. Resolved here rather than in the console because the
   // console has no manifest reader, and because `validateManifestIcon` has
@@ -813,6 +849,7 @@ export async function buildHostedMcpConsentChallengeModel(
       // that proved no domain gets no domain line at all.
       domain: clientDisplay?.domainLabel ?? null,
       id: client?.client_id ?? "",
+      logo,
       monogram: clientDisplay?.monogram ?? "AP",
       name: clientName,
       policyLinks: clientDisplay?.policyLinks ?? [],
@@ -843,13 +880,37 @@ export async function buildHostedMcpConsentChallengeModel(
     retention: buildHostedMcpRetentionSentence(clientName),
     reviewDigest: computeHostedMcpPickerSnapshotDigest(rows, clientDisplay),
     sources: rows.map((row) => ({
-      account: row.connectionName ?? row.meta,
+      // `meta` is the count of streams that currently have records, not an
+      // account label. The console already shows the grantable stream count
+      // separately, so using it as a fallback would display two conflicting
+      // "data types" facts on the same collapsed row.
+      account: row.connectionName ?? "",
       icon: icons.get(row.connectorId) ?? null,
       id: row.sourceKey,
       name: row.connectorTypeLabel,
       selectionValue: row.formValue,
       streams: row.streams.map((stream) => ({
-        fieldsTotal: stream.scope.requiredFields.length + stream.scope.optionalFields.length,
+        // Do not surface schema-required fields alone as a fake narrowing
+        // control. The issuer rejects `fields` for declarations that did not
+        // opt into selection.fields, even if their schema has required keys.
+        fields: (stream.scope.supportsFieldNarrowing
+          ? [...stream.scope.requiredFields, ...stream.scope.optionalFields]
+          : []
+        )
+          .sort()
+          .map((name) => {
+            const property = stream.schema?.properties?.[name];
+            const description =
+              property && typeof property === "object" && typeof property.description === "string"
+                ? property.description.trim()
+                : "";
+            return {
+              ...(description ? { description } : {}),
+              name,
+              required: stream.scope.requiredFields.includes(name),
+            };
+          }),
+        fieldsTotal: Object.keys(stream.schema?.properties ?? {}).length,
         id: `${row.sourceKey}:${stream.name}`,
         label: humanizeStreamLabel(stream.name),
         name: stream.name,
@@ -897,6 +958,7 @@ async function buildConnectorPickerRows(
   const streamSummaries = manifestStreams.map((stream) => ({
     description: typeof stream.description === "string" ? stream.description : null,
     name: stream.name,
+    schema: stream.schema,
     // Resolved here rather than at render time so the capability check happens
     // once per row, and so no surface can offer a control the declaration does
     // not support (which would 400 at issuance, after the owner chose).
