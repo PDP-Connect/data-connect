@@ -1,65 +1,52 @@
-# Gate concurrency: measured safe ceiling
+# Gate concurrency: profile-specific policy
 
-## The finding
+`scripts/run-tests.ts` chooses its file-worker cap from the storage profile.
+Memory-default uses eight file workers by default; PostgreSQL uses two.
+`PDPP_TEST_CONCURRENCY`, when set to a positive integer, overrides either
+default. The runner then clamps the default to the available CPU parallelism and
+the number of selected test files.
 
-`scripts/run-tests.ts` caps file concurrency at **2**:
+## Why the profiles differ
 
-```ts
-const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
-```
+Memory-default gives every test file its own in-memory storage. The cap of
+eight limits host contention while allowing independent files to run together.
+It is not a universal safe ceiling: the measurements below apply only to the
+documented host and memory-default profile.
 
-On a 24-core host that is the difference between a ~20-minute gate and an
-~8-minute one. `PDPP_TEST_CONCURRENCY` already overrides it — no code change is
-required to go faster.
+PostgreSQL keeps the cap of two because its backup/restore oracle shares the
+restore database named by `PDPP_TEST_POSTGRES_RESTORE_URL`. Raising that cap
+can make otherwise-independent file workers contend for the same restore
+resource. Do not treat the memory-default result as authority to raise the
+PostgreSQL cap; measure a dedicated PostgreSQL host and profile first.
 
-## Measured, on 24 cores
+## Reviewable memory-default measurements
 
-| Concurrency | Elapsed | Exit | Failures |
-|---|---:|---:|---:|
-| 2 (default) | ~1200s | 0 | 0 |
-| 6 | **465s** | **0** | **0** |
-| 12 | 399s | 1 | 4 |
+The authority receipts and transcripts for the two measurements are checked in
+with this document:
 
-995 files, 9,935 passing assertions at concurrency 6 — identical verdict to the
-default, in 39% of the wall clock.
+- `receipts/260903-gate-concurrency-memory-cap-2.receipt.json` and
+  `receipts/260903-gate-concurrency-memory-cap-2.transcript`
+- `receipts/260903-gate-concurrency-memory-cap-8.receipt.json` and
+  `receipts/260903-gate-concurrency-memory-cap-8.transcript`
 
-## Why 12 fails, and why the cap is not arbitrary
+Each receipt binds its run to the Git head, manifest digest, selected files,
+structured counts, final exit code, and start/end timestamps. Its companion
+transcript has the digest recorded by the receipt and retains the emitted test
+identities. The commands used Node 22.23.1, selected `ri-default` with the
+`memory-default` profile, and set `PDPP_TEST_CONCURRENCY` to the cap named in
+the file. The two receipts record whether the same selected files and outcome
+counts were observed; they are evidence for this host only, not a green-suite
+claim.
 
-The four failures at 12 are all timing/lock-sensitive:
+## Operational use
 
-- `SQLite connector-wide bulk deletion serializes the actual same-instance writer, while a sibling instance overlaps`
-- `SQLite direct ingest queued before bulk deletion deterministically leaves the bulk-delete final state`
-- `SQLite lexical manifest backfill waits on its actual instance but does not block a sibling writer`
-- `a WhatsApp .txt upload well past the old 1 GiB cap streams to disk and validates successfully`
-
-All four pass in isolation (26 tests, 0 failures), so these are CONTENTION
-ARTIFACTS, not code defects. Three assert real serialization ordering against
-SQLite writers; the fourth streams a >1 GiB file. Under enough parallel load
-they lose their timing assumptions.
-
-That is worth stating plainly: a faster gate that reports failures which are
-not real is worse than a slow one, because it teaches the reader to discount
-red. **6 is the measured ceiling at which the verdict stays trustworthy on this
-host.** It is a host-specific number, not a universal one — re-measure on
-different hardware rather than porting the constant.
-
-## Recommendation
-
-Do NOT change `defaultConcurrency`. The cap of 2 is a safe default for unknown
-hardware, and CI may well be a 2-core runner where raising it would only cause
-contention.
-
-Set it per-invocation where the host is known:
+Use the profile default unless a measurement for the same profile and host
+justifies an explicit override:
 
 ```sh
-PDPP_TEST_CONCURRENCY=6 pnpm --dir reference-implementation test
+# The memory-default default is eight; this makes the setting explicit.
+PDPP_TEST_PROFILE=memory-default PDPP_TEST_CONCURRENCY=8 pnpm --dir reference-implementation test
+
+# PostgreSQL stays at two unless its own restore-aware measurement says otherwise.
+PDPP_TEST_PROFILE=postgres PDPP_TEST_CONCURRENCY=2 pnpm --dir reference-implementation test
 ```
-
-## Sharding beyond this
-
-Per-package parallelism (RI / connectors / console as concurrent invocations)
-is orthogonal to this and stacks with it: those suites share no SQLite files or
-temp directories, so they do not contend the way intra-RI files do. RI is by
-far the longest pole, so raising ITS concurrency is where the wall-clock win
-actually is — a separate console/connectors invocation saves little if RI still
-takes 8 minutes alone.
