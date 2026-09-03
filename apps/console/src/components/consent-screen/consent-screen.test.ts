@@ -170,6 +170,14 @@ test("layout CSS defines no hardcoded color literals — every color is a var(--
   assert.deepEqual(offenders, [], "every color must reference a design token");
 });
 
+test("the client trust disclosure uses the full identity-block measure", () => {
+  assert.doesNotMatch(
+    CSS_SOURCE,
+    /\.trustDetails p\s*\{[^}]*max-width:/,
+    "the disclosure body must match the trust sentence rather than use a narrower measure"
+  );
+});
+
 // ─── The client/server model contract ──────────────────────────────────────
 
 /** Field names declared on an interface block, by interface name. */
