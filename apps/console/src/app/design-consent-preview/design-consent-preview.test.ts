@@ -152,6 +152,41 @@ test("three trust tiers are distinguishable in the identity component", () => {
   }
 });
 
+test("trust copy is precise, not alarming — no 'isn't registered' / bare 'self-reported' wording", () => {
+  assert.doesNotMatch(
+    CLIENT_SOURCE,
+    /isn't registered with your server/,
+    "false for a dynamically registered client, and reads as a warning"
+  );
+  assert.doesNotMatch(
+    CLIENT_SOURCE,
+    /Its name and logo are self-reported\.?\s*<\/p>/,
+    "self-reported alone doesn't say what was or wasn't checked"
+  );
+});
+
+test("each trust tier states what was verified, in one precise sentence", () => {
+  assert.match(CLIENT_SOURCE, /own registration; nothing about them has been checked/, "unverified must say nothing was checked");
+  assert.match(CLIENT_SOURCE, /identity document was fetched from \{CLIENT\.domain\}/, "domain-verified must name the automatic document fetch");
+  assert.match(CLIENT_SOURCE, /operator of this server has confirmed this app/, "verified must attribute the check to an operator, not an automatic process");
+});
+
+test("a 'What was checked' disclosure exists inline, not as a modal", () => {
+  assert.match(CLIENT_SOURCE, /What was checked/);
+  const detailsBlock = CLIENT_SOURCE.slice(CLIENT_SOURCE.indexOf("What was checked") - 200);
+  assert.match(detailsBlock.slice(0, 400), /<details\b/, "must be a details/summary disclosure");
+  assert.doesNotMatch(CLIENT_SOURCE, /pdpp-dialog/, "the trust disclosure must not use the modal/dialog component");
+});
+
+test("the default trust tier is domain-verified, not unverified", () => {
+  assert.match(
+    PAGE_SOURCE,
+    /function parseTrust[\s\S]{0,200}?:\s*["']domain["'];?\s*\n\}/,
+    "a real ChatGPT would pass automatic domain verification, so that must be the default the owner sees first"
+  );
+  assert.match(PAGE_SOURCE, /value === ["']unverified["']/, "unverified must still be explicitly reachable via ?trust=unverified");
+});
+
 test("no end date control exists alongside the arbitrary-date grant-expiry input", () => {
   assert.match(CLIENT_SOURCE, /noEndDate/);
   assert.match(CLIENT_SOURCE, /type="date"/);
