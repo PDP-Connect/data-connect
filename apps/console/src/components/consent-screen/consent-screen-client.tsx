@@ -497,11 +497,35 @@ export function ConsentScreen({
         };
       })
       .filter((source) => source.streamNames.length > 0);
+
+    // Only ranges belonging to a stream the owner actually kept, and only
+    // where a bound was set. A leftover date on a stream that was later
+    // unchecked is noise, not a narrowing, and an empty entry would ask the
+    // server to record "no bound" as if it were one.
+    const chosenStreamIds = new Set(sources.flatMap((source) => source.streamIds));
+    const streamRanges: Record<string, { since?: string; until?: string }> = {};
+    for (const [streamId, range] of Object.entries(ranges)) {
+      if (!chosenStreamIds.has(streamId)) {
+        continue;
+      }
+      const entry: { since?: string; until?: string } = {};
+      if (range.since) {
+        entry.since = range.since;
+      }
+      if (range.until) {
+        entry.until = range.until;
+      }
+      if (entry.since || entry.until) {
+        streamRanges[streamId] = entry;
+      }
+    }
+
     return {
       accessMode: model.accessMode.value,
       grantExpiry: noEndDate ? "never" : expiry,
       reviewDigest: model.reviewDigest,
       sources,
+      streamRanges,
     };
   }
 

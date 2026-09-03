@@ -90,6 +90,13 @@ export async function acceptConsentChallenge(
     review_digest: decision.reviewDigest,
     source_id: decision.sources.map((source) => source.sourceId),
     stream: decision.sources.flatMap((source) => source.streamIds),
+    // Per-stream DATA range. Deliberately NOT part of `decision_digest`: the
+    // digest binds the client, the access mode, and which streams were
+    // approved — the terms the AS re-resolves independently. The range is
+    // carried through to the same declaration-checked narrowing the form POST
+    // uses, which validates it against the manifest's own time field and
+    // rejects a range the stream cannot honor.
+    stream_range: decision.streamRanges,
   });
 }
 
