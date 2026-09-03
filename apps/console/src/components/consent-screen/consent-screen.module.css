@@ -212,13 +212,37 @@
   min-width: 0;
   flex: 1 1 auto;
 }
+.sourceLabel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  /* Lets the account handle below truncate instead of overflowing the row. */
+  min-width: 0;
+}
+.sourceName {
+  font-weight: 500;
+  flex: 0 0 auto;
+}
+
+/* Truncates rather than pushing the data-type count out of its own column.
+   A long handle (tim@gmail.com at 390px) otherwise collides with the count,
+   and an account name is identifying-at-a-glance rather than
+   read-in-full — the source name beside it is the load-bearing label. */
 .sourceAccount {
   font-family: var(--font-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sourceCount {
+  flex: 0 0 auto;
   font-size: 0.8125rem;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
+  /* Never breaks "1 of 3 data types" across lines mid-phrase. */
+  white-space: nowrap;
 }
 
 .streamList {
