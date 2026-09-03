@@ -38,7 +38,12 @@ import test from "node:test";
 
 import { closeDb, initDb } from "../server/db.ts";
 import { postgresIngestRecord } from "../server/postgres-records.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  initPostgresStorage,
+  isPostgresSemanticVectorEmbedding,
+  postgresQuery,
+} from "../server/postgres-storage.ts";
 import { deleteAllRecords, deleteAllRecordsForConnector } from "../server/records.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -252,9 +257,17 @@ if (POSTGRES_URL) {
         op: "upsert",
         stream: streamSibling,
       });
+      // `semantic_search_blob.embedding` is `vector` when pgvector is
+      // available and `jsonb` otherwise, so the cast has to follow the same
+      // branch the production writer uses (`insertSemanticRows` in
+      // postgres-search.ts). A JSON array literal is valid input for both
+      // types; hardcoding `::jsonb` fails on a pgvector database — which is
+      // the production configuration — with
+      // `column "embedding" is of type vector but expression is of type jsonb`.
+      const embeddingCast = isPostgresSemanticVectorEmbedding() ? "vector" : "jsonb";
       await postgresQuery(
         `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding)
-         VALUES ($1, $2, $3, $4, $5::jsonb), ($1, $2, $6, $7, $5::jsonb)`,
+         VALUES ($1, $2, $3, $4, $5::${embeddingCast}), ($1, $2, $6, $7, $5::${embeddingCast})`,
         [
           connectorId,
           connectorInstanceId,
