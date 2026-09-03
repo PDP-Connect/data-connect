@@ -220,7 +220,7 @@ function ConsentHeader({ client }: { client: ConsentScreenModel["client"] }) {
               <IcPopoverTrigger aria-describedby={TRUST_HINT_ID} aria-label={`About ${TRUST_LABEL[client.trust]}`} className={styles.trustHintTrigger}>
                 <Endorse label={TRUST_LABEL[client.trust]} status={TRUST_ENDORSE_STATUS[client.trust]} />
               </IcPopoverTrigger>
-              <IcPopoverPopup id={TRUST_HINT_ID} aria-label={`${TRUST_LABEL[client.trust]} explanation`} role="tooltip">
+              <IcPopoverPopup id={TRUST_HINT_ID} aria-label={`${TRUST_LABEL[client.trust]} explanation`}>
                 <p className="pdpp-caption">{trustExplanation}</p>
                 <IcPopoverClose aria-label="Dismiss trust explanation" className={styles.trustHintDismiss}>
                   Dismiss
