@@ -333,10 +333,10 @@ function SourceRow({
           <ConnectorIcon icon={source.icon ?? null} name={source.name} />
         </span>
         <span className={styles.sourceText}>
-          <label
-            onClick={(e) => e.stopPropagation()}
-            style={{ alignItems: "center", cursor: "pointer", display: "flex", gap: "0.5rem" }}
-          >
+          {/* Layout in CSS, not inline: the account handle can only truncate
+              if every flex ancestor is allowed to shrink below its content,
+              which needs min-width:0 on this label too. */}
+          <label className={styles.sourceLabel} onClick={(e) => e.stopPropagation()}>
             <input
               aria-label={`Share data from ${source.name}`}
               checked={allSelected}
@@ -346,9 +346,7 @@ function SourceRow({
               }}
               type="checkbox"
             />
-            <span className="pdpp-body" style={{ fontWeight: 500 }}>
-              {source.name}
-            </span>
+            <span className={`pdpp-body ${styles.sourceName}`}>{source.name}</span>
             <span className={`pdpp-caption ${styles.sourceAccount}`}>{source.account}</span>
           </label>
         </span>
@@ -660,7 +658,7 @@ export function ConsentScreen({
             {counts.totalStreamCount} streams selected
           </div>
           <p className={styles.railMobileSummary}>
-            {endsText()} · {counts.selectedStreamCount} streams
+            {endsText()} · {counts.selectedStreamCount} {counts.selectedStreamCount === 1 ? "stream" : "streams"}
           </p>
           <GrantExpiryControls
             activeChipDays={activeChipDays}
