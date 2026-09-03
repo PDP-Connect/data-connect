@@ -73,6 +73,13 @@ RUN npm run build --workspace=packages/connector-protocol --workspace=packages/c
   && npm run build --workspace=reference-implementation/vendor/read-core \
   && npm run build --workspace=reference-implementation/vendor/mcp-server
 
+# Build the hosted console against the completed workspace tree. The console's
+# standalone output traces its workspace dependencies, so it must be built
+# after the reference and shared-package outputs above exist.
+FROM source AS console-builder
+
+RUN npm run build --workspace=apps/console
+
 FROM base AS reference
 
 ARG PDPP_REFERENCE_REVISION=unknown
@@ -108,6 +115,11 @@ CMD ["sh", "-c", "export AS_PORT=\"${PORT:-${AS_PORT:-7662}}\"; export PDPP_RS_U
 FROM base AS browsers
 
 ARG TARGETARCH
+
+# Browser-capable runtime stages inherit this explicit capability marker. The
+# reference runtime checks it together with DISPLAY before allowing headed
+# connector launches; Xvfb alone is not sufficient.
+ENV PDPP_RUNTIME_BROWSER=1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends xvfb \
@@ -150,3 +162,21 @@ EXPOSE 7662 7663
 CMD ["node", "--import", "tsx", "reference-implementation/server/index.ts"]
 
 FROM reference-browser AS core
+
+# One public service owns port 3000. The reference AS/RS stay on loopback and
+# are reached through the console's existing route handlers and proxy.
+ENV HOSTNAME=0.0.0.0 \
+    PORT=3000 \
+    PDPP_AS_URL=http://127.0.0.1:7662 \
+    PDPP_RS_URL=http://127.0.0.1:7663
+
+COPY --from=console-builder /app/apps/console/.next/standalone /console
+COPY --from=console-builder /app/apps/console/.next/static /console/apps/console/.next/static
+COPY --from=console-builder /app/apps/console/public /console/apps/console/public
+
+EXPOSE 3000
+
+# `tsx` is required for the reference server because its vendored connector
+# package contains TypeScript source. The supervisor is PID 1 so it can own
+# Xvfb, the AS/RS process, and the public Next.js console together.
+CMD ["node", "--import", "tsx", "/app/deploy/railway/core-supervisor.ts"]
