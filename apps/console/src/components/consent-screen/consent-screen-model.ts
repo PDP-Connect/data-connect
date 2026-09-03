@@ -60,8 +60,9 @@ export interface ConsentSourceModel {
 
 /** Removes the duplicated source-name prefix from an owner-facing account label. */
 export function sourceAccountLabel(sourceName: string, account: string): string {
-  const repeatedPrefix = `${sourceName} - `;
-  return account.startsWith(repeatedPrefix) ? account.slice(repeatedPrefix.length) : account;
+  const normalize = (value: string) => value.replace(/[\p{P}\s]+/gu, "").toLocaleLowerCase();
+  const match = account.match(/^(.+?)\s*-\s*(.*)$/u);
+  return match && normalize(match[1] ?? "") === normalize(sourceName) ? match[2] ?? "" : account;
 }
 
 export function clientPublishedLinks(

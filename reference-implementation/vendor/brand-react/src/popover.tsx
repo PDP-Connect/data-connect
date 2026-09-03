@@ -3,7 +3,7 @@
 
 /** Non-modal anchored popover primitives, skinned with Ink Carbon tokens. */
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
-import { type ComponentProps, forwardRef } from "react";
+import { type ComponentProps, forwardRef, useId } from "react";
 import "./components.css";
 
 const IcPopover = PopoverPrimitive.Root;
@@ -11,17 +11,21 @@ const IcPopoverClose = PopoverPrimitive.Close;
 const IcPopoverTrigger = PopoverPrimitive.Trigger;
 
 const IcPopoverPopup = forwardRef<HTMLDivElement, ComponentProps<typeof PopoverPrimitive.Popup>>(
-  ({ className, ...props }, ref) => (
+  ({ className, id, ...props }, ref) => {
+    const generatedId = useId();
+    return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Positioner side="bottom" sideOffset={6}>
         <PopoverPrimitive.Popup
           className={["pdpp-popover", className].filter(Boolean).join(" ")}
           ref={ref}
+          id={id ?? generatedId}
           {...props}
         />
       </PopoverPrimitive.Positioner>
     </PopoverPrimitive.Portal>
-  )
+    );
+  }
 );
 IcPopoverPopup.displayName = "IcPopoverPopup";
 
