@@ -515,7 +515,23 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
 }
 
 const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
-const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
+// Each worker owns one child process (its own event loop, own listen sockets)
+// pulling one file at a time from a shared queue, so raising this cap adds
+// wall-clock-real parallelism rather than starving a single process of CPU.
+// Capped at 8 rather than following availableParallelism() to the host's
+// full core count: the measured headroom (pdpp PR #287 and the PR that
+// ported it here) shows throughput flattening well before 24 cores, and a
+// hardcoded cap bounds worst-case resource use on a small CI runner
+// regardless of host size.
+// The postgres profile stays at 2: its backup/restore oracle uses one shared
+// restore database (PDPP_TEST_POSTGRES_RESTORE_URL) that is not per-file
+// allocated, and the cap-8 measurement covered memory-default only.
+// PDPP_TEST_CONCURRENCY still overrides either default explicitly.
+const DEFAULT_FILE_CONCURRENCY_CAP = selectedProfile === "postgres" ? 2 : 8;
+const defaultConcurrency = Math.max(
+  1,
+  Math.min(DEFAULT_FILE_CONCURRENCY_CAP, availableParallelism?.() ?? 1, testFiles.length || 1)
+);
 const fileConcurrency =
   Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : defaultConcurrency;
 
