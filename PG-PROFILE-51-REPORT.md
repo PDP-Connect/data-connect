@@ -287,20 +287,23 @@ $ docker exec pdpp-test-postgres-0810 pg_isready -U postgres -d pdpp_test
 /var/run/postgresql:5432 - accepting connections
 ```
 
-## Publication blocker
+## Publication status
 
-The report update is committed locally as `c5974b843f47bf9a6c10749cde8bb3665969e4f2`,
-with a valid GPG signature, the required DCO sign-off, and `Assisted-by: AI`
-as its final trailer. The requested push was attempted once and was rejected:
+The first report update was committed locally as
+`c5974b843f47bf9a6c10749cde8bb3665969e4f2`, with a valid GPG signature, the
+required DCO sign-off, and `Assisted-by: AI` as its final trailer. Its first
+push attempted the worktree's archived `vana-com/data-connect` `origin` and
+was rejected:
 
 ```text
 ERROR: This repository was archived so it is read-only.
 fatal: Could not read from remote repository.
 ```
 
-No force-push or merge was attempted. The PR body was updated with the terminal
-receipt and this publication blocker, but this report commit cannot appear on
-the remote PR until the repository is made writable again.
+That was a remote-selection error, not a canonical-repository block. The
+canonical `git@github.com:PDP-Connect/data-connect.git` remote was added and
+the two local commits were pushed to `port/gate-speed-278-0902`; PR #51 now
+reports head `c2c7a76a78a6fdd70c1578e25888dff888e15dd3`. No merge occurred.
 
 ## Reviewer repair: cold-default mutation control
 
@@ -357,6 +360,6 @@ clean-main replay, so neither receipt is discarded. Broad `ENOENT` matches are
 the already-classified missing project artifacts and a missing linked `biome`
 binary; they are not a missing Node executable.
 
-The reviewer repair and this continuation note are in a subsequent signed local
-commit as well. The archived remote prevents either local report update from
-reaching PR #51 until the repository is writable.
+The reviewer repair and this continuation note are in the pushed canonical PR
+history. The archived fork remains unsuitable for future pushes; use the
+canonical remote for PR #51.
