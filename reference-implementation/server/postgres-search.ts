@@ -261,6 +261,14 @@ export async function postgresLexicalIndexInsertMany({
   // row a concurrent delete/newer-write has since superseded is silently
   // skipped rather than resurrected/overwritten. See
   // harden-connector-instance-write-fence-transaction-native.
+  //
+  // Write-elided: the `IS DISTINCT FROM` guard on the conflict update means a
+  // tuple whose indexed columns already match is left physically untouched.
+  // Without it, a backfill that re-reads unchanged text rewrites every row and
+  // leaves a dead tuple behind for each — the same bloat the semantic upsert in
+  // `insertSemanticRows` avoids. `rowCount` is not inspected by any caller
+  // (the function reports `entries.length`), so eliding equal writes does not
+  // change observable behavior.
   await postgresQuery(
     `INSERT INTO lexical_search_index (connector_id, connector_instance_id, stream, record_key, field, value)
      SELECT $1, $2, $3, rows.record_key, rows.field, rows.value
@@ -273,7 +281,9 @@ export async function postgresLexicalIndexInsertMany({
       AND r.deleted = FALSE
      ON CONFLICT (connector_instance_id, stream, record_key, field) DO UPDATE
        SET connector_id = EXCLUDED.connector_id,
-           value = EXCLUDED.value`,
+           value = EXCLUDED.value
+       WHERE (lexical_search_index.connector_id, lexical_search_index.value)
+             IS DISTINCT FROM (EXCLUDED.connector_id, EXCLUDED.value)`,
     [
       connectorId,
       connectorInstanceId,

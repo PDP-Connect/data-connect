@@ -3,7 +3,13 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { postgresLexicalIndexPublishWithClient, postgresSemanticIndexPublishWithClient } from "../server/postgres-search.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { postgresIngestRecord } from "../server/postgres-records.ts";
+import {
+  postgresLexicalIndexInsertMany,
+  postgresLexicalIndexPublishWithClient,
+  postgresSemanticIndexPublishWithClient,
+} from "../server/postgres-search.ts";
 import {
   closePostgresStorage,
   initPostgresStorage,
@@ -194,6 +200,111 @@ if (POSTGRES_URL) {
             Number(row.bytes) <= Number(baseline.bytes) + 8192,
             `${row.relname} stays within one Postgres page of its initial relation size`
           );
+        }
+      }
+    );
+  });
+
+  // Companion to the publish-path fixture above. `postgresLexicalIndexInsertMany`
+  // is the BACKFILL writer (`rebuildLexicalIndexForStream` via
+  // `rebuildLexicalInsertEntries` in search.ts) — a different statement from
+  // `postgresLexicalIndexPublishWithClient`, which the fixture above covers.
+  // A backfill re-reads text that has not changed, so without an
+  // `IS DISTINCT FROM` guard on its conflict update every re-run rewrites
+  // every row and leaves one dead tuple per row behind.
+  test("N identical lexical backfill inserts leave dead-tuple pressure and relation size bounded", async () => {
+    const databaseName = `pdpp_lexical_backfill_bloat_${Date.now().toString(36)}`;
+    await withTemporaryPostgresDatabase(
+      { closeConnections: closePostgresStorage, connectionString: POSTGRES_URL, databaseName },
+      async (url) => {
+        initDb(":memory:");
+        await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+        try {
+          // The insert JOINs `records` on (connector_instance_id, stream,
+          // record_key, version) and requires a live row, so the fixture has to
+          // seed a real record and backfill at its actual current version.
+          await postgresIngestRecord(
+            { connector_id: CONNECTOR_ID, connector_instance_id: INSTANCE_ID },
+            {
+              data: { body: "a stable body", id: RECORD_KEY, subject: "a stable subject" },
+              emitted_at: "2026-09-03T00:00:00.000Z",
+              key: RECORD_KEY,
+              op: "upsert",
+              stream: STREAM,
+            }
+          );
+          const versionRow = await postgresQuery<{ version: string }>(
+            `SELECT version::text AS version FROM records
+              WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3`,
+            [INSTANCE_ID, STREAM, RECORD_KEY]
+          );
+          const version = Number(versionRow.rows[0]?.version);
+          assert.ok(Number.isInteger(version) && version > 0, "fixture seeded a live record with a version");
+
+          const backfillEntries = [
+            { field: "body", recordKey: RECORD_KEY, text: "a stable body", version },
+            { field: "subject", recordKey: RECORD_KEY, text: "a stable subject", version },
+          ];
+          const backfill = () =>
+            postgresLexicalIndexInsertMany({
+              connectorId: CONNECTOR_ID,
+              connectorInstanceId: INSTANCE_ID,
+              entries: backfillEntries,
+              stream: STREAM,
+            });
+
+          await backfill();
+          const seeded = await postgresQuery<{ ctid: string; field: string }>(
+            `SELECT ctid::text AS ctid, field FROM lexical_search_index
+              WHERE connector_instance_id = $1 AND record_key = $2 ORDER BY field`,
+            [INSTANCE_ID, RECORD_KEY]
+          );
+          assert.equal(seeded.rows.length, 2, "fixture backfilled both indexed fields");
+          const before = await postgresQuery<{ bytes: string; relname: string }>(
+            `SELECT relname, pg_relation_size(relid)::text AS bytes
+               FROM pg_stat_user_tables
+              WHERE relname = $1`,
+            ["lexical_search_index"]
+          );
+
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            // biome-ignore lint/performance/noAwaitInLoops: each call is one production backfill insert.
+            await backfill();
+          }
+          await postgresQuery("ANALYZE lexical_search_index", []);
+
+          // Physical identity is the strongest assertion available: an elided
+          // update does not move the tuple, so `ctid` is unchanged. A rewrite
+          // would relocate every row.
+          const after = await postgresQuery<{ ctid: string; field: string }>(
+            `SELECT ctid::text AS ctid, field FROM lexical_search_index
+              WHERE connector_instance_id = $1 AND record_key = $2 ORDER BY field`,
+            [INSTANCE_ID, RECORD_KEY]
+          );
+          assert.deepEqual(
+            after.rows,
+            seeded.rows,
+            "identical lexical backfill entries must leave their physical rows untouched"
+          );
+
+          const stats = await postgresQuery<{ bytes: string; n_dead_tup: string; n_live_tup: string }>(
+            `SELECT n_live_tup::text, n_dead_tup::text, pg_relation_size(relid)::text AS bytes
+               FROM pg_stat_user_tables
+              WHERE relname = $1`,
+            ["lexical_search_index"]
+          );
+          const row = stats.rows[0];
+          assert.ok(row, "fixture measured lexical_search_index");
+          assert.ok(
+            Number(row.n_dead_tup) <= 1,
+            `lexical_search_index leaves no meaningful dead tuples after 20 identical backfills (saw ${row.n_dead_tup})`
+          );
+          assert.ok(
+            Number(row.bytes) <= Number(before.rows[0]?.bytes) + 8192,
+            "lexical_search_index stays within one Postgres page of its post-backfill size"
+          );
+        } finally {
+          closeDb();
         }
       }
     );
