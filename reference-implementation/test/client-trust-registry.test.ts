@@ -19,8 +19,9 @@
  * claim never widens beyond the domain that was actually proven.
  *
  * They also pin the logo rules, which are the part most likely to erode:
- * an unverified client never gets an image, and a verified one only gets one
- * from its own domain or a host the operator allow-listed.
+ * an unverified client never gets an image, and a domain-verified client can
+ * use the HTTPS logo URI in its authenticated identity document. An
+ * operator-registered client still needs its own domain or an allow-list.
  */
 
 import assert from "node:assert/strict";
@@ -132,49 +133,56 @@ test("a verified client may use a logo served from its own domain", () => {
   assert.equal(isLogoFetchAllowed("https://chatgpt.com/logo.png", CHATGPT_CLIENT_ID, trust), true);
 });
 
-test("a verified client may not launder a third-party logo host by default", () => {
+test("a domain-verified client may use the HTTPS logo URI in its metadata document", () => {
   const trust = resolveClientTrust(cimdClient());
 
-  // Controlling chatgpt.com proves nothing about oaistatic.com.
   assert.equal(
     isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, trust, EMPTY_OPERATOR_TRUST_CONFIG),
-    false,
-    "a host the client never proved control of requires an operator decision"
+    true,
+    "the AS fetches it through its SSRF-guarded, same-origin cache"
   );
 });
 
-test("an operator can allow-list a logo host, which is how ChatGPT's logo renders", () => {
-  const trust = resolveClientTrust(cimdClient());
-  // ChatGPT's logo is served from persistent.oaistatic.com — the exact host.
-  const config = resolveOperatorTrustConfig({ logoHosts: ["persistent.oaistatic.com"] });
+test("an operator-registered client needs an allow-listed third-party logo host", () => {
+  const config = resolveOperatorTrustConfig({
+    logoHosts: ["persistent.oaistatic.com"],
+    trustedClients: [{ client_id: "pdpp_cli" }],
+  });
+  const trust = resolveClientTrust(preRegisteredClient(), config);
 
-  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, trust, config), true);
-  // The allow-list is per-host, not a blanket pass for the verified client.
-  assert.equal(isLogoFetchAllowed("https://elsewhere.example/logo.png", CHATGPT_CLIENT_ID, trust, config), false);
+  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, "pdpp_cli", trust, config), true);
+  assert.equal(isLogoFetchAllowed("https://elsewhere.example/logo.png", "pdpp_cli", trust, config), false);
 });
 
 test("an allow-listed host does not silently cover its subdomains", () => {
-  const trust = resolveClientTrust(cimdClient());
-  const exact = resolveOperatorTrustConfig({ logoHosts: ["oaistatic.com"] });
+  const exact = resolveOperatorTrustConfig({
+    logoHosts: ["oaistatic.com"],
+    trustedClients: [{ client_id: "pdpp_cli" }],
+  });
+  const trust = resolveClientTrust(preRegisteredClient(), exact);
 
   // Whoever controls a domain can mint any subdomain under it, so an exact
   // host must not widen the operator's decision to the whole tree.
-  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, trust, exact), false);
+  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, "pdpp_cli", trust, exact), false);
 
   // An operator who wants the tree says so, and it reads as a wildcard.
-  const wildcard = resolveOperatorTrustConfig({ logoHosts: [".oaistatic.com"] });
-  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, trust, wildcard), true);
-  assert.equal(isLogoFetchAllowed("https://oaistatic.com/logo.png", CHATGPT_CLIENT_ID, trust, wildcard), true);
+  const wildcard = resolveOperatorTrustConfig({
+    logoHosts: [".oaistatic.com"],
+    trustedClients: [{ client_id: "pdpp_cli" }],
+  });
+  const wildcardTrust = resolveClientTrust(preRegisteredClient(), wildcard);
+  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, "pdpp_cli", wildcardTrust, wildcard), true);
+  assert.equal(isLogoFetchAllowed("https://oaistatic.com/logo.png", "pdpp_cli", wildcardTrust, wildcard), true);
   // A lookalike suffix must not match: `notoaistatic.com` is a different domain.
-  assert.equal(isLogoFetchAllowed("https://notoaistatic.com/logo.png", CHATGPT_CLIENT_ID, trust, wildcard), false);
+  assert.equal(isLogoFetchAllowed("https://notoaistatic.com/logo.png", "pdpp_cli", wildcardTrust, wildcard), false);
 });
 
 test("a logo host can be allow-listed for one client without opening it to others", () => {
   const config = resolveOperatorTrustConfig({
     trustedClients: [{ client_id: CHATGPT_CLIENT_ID, logo_hosts: ["persistent.oaistatic.com"] }],
   });
-  const chatGpt = resolveClientTrust(cimdClient(), config);
-  const other = resolveClientTrust(cimdClient("https://other.example/client.json"), config);
+  const chatGpt = resolveClientTrust(preRegisteredClient(CHATGPT_CLIENT_ID), config);
+  const other = resolveClientTrust(preRegisteredClient("https://other.example/client.json"), config);
 
   assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, chatGpt, config), true);
   assert.equal(
@@ -194,9 +202,12 @@ test("non-https logo URLs are refused even for a verified client on its own doma
 });
 
 test("operator logo hosts accept either a bare host or a URL", () => {
-  const trust = resolveClientTrust(cimdClient());
-  const config = resolveOperatorTrustConfig({ logoHosts: ["https://persistent.oaistatic.com/", "www.cdn.example"] });
+  const config = resolveOperatorTrustConfig({
+    logoHosts: ["https://persistent.oaistatic.com/", "www.cdn.example"],
+    trustedClients: [{ client_id: "pdpp_cli" }],
+  });
+  const trust = resolveClientTrust(preRegisteredClient(), config);
 
-  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, CHATGPT_CLIENT_ID, trust, config), true);
-  assert.equal(isLogoFetchAllowed("https://cdn.example/logo.png", CHATGPT_CLIENT_ID, trust, config), true);
+  assert.equal(isLogoFetchAllowed(CHATGPT_LOGO, "pdpp_cli", trust, config), true);
+  assert.equal(isLogoFetchAllowed("https://cdn.example/logo.png", "pdpp_cli", trust, config), true);
 });
