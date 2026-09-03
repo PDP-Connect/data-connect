@@ -195,7 +195,7 @@ test("codex inventory streams emit safe metadata and exclude auth payloads", asy
 		Array.isArray(stores),
 		"successful collection must emit the committed coverage snapshot",
 	);
-	assert.equal(stores.length, 13);
+	assert.equal(stores.length, 14);
 	assert(!JSON.stringify(coverageState).includes("secret-token"));
 	assert(!JSON.stringify(coverageState).includes("reason"));
 });

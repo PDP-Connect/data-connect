@@ -12,6 +12,7 @@ import {
 	epochToIso,
 	extendTimestampRange,
 	extractMessageText,
+	extractRolloutUuidFromFilename,
 	isRolloutFile,
 	isSkippableRulesLine,
 	parseFrontmatter,
@@ -148,6 +149,55 @@ test("isRolloutFile: rejects non-matches", () => {
 	assert.equal(isRolloutFile("rollout.jsonl"), false);
 	assert.equal(isRolloutFile("rollout-x.txt"), false);
 	assert.equal(isRolloutFile("README.md"), false);
+});
+
+// ─── extractRolloutUuidFromFilename ─────────────────────────────────────
+
+test("extractRolloutUuidFromFilename: pulls the trailing UUID off a real-shaped filename", () => {
+	assert.equal(
+		extractRolloutUuidFromFilename(
+			"rollout-2026-07-31T14-01-26-019fb98d-807f-7f62-9cbf-5950178318cc.jsonl",
+		),
+		"019fb98d-807f-7f62-9cbf-5950178318cc",
+	);
+});
+
+test("extractRolloutUuidFromFilename: lower-cases an upper-case UUID", () => {
+	assert.equal(
+		extractRolloutUuidFromFilename(
+			"rollout-2026-07-31T14-01-26-019FB98D-807F-7F62-9CBF-5950178318CC.jsonl",
+		),
+		"019fb98d-807f-7f62-9cbf-5950178318cc",
+	);
+});
+
+test("extractRolloutUuidFromFilename: no UUID suffix → null", () => {
+	assert.equal(
+		extractRolloutUuidFromFilename("rollout-2026-07-31.jsonl"),
+		null,
+	);
+	assert.equal(
+		extractRolloutUuidFromFilename("not-a-rollout-file.jsonl"),
+		null,
+	);
+	assert.equal(extractRolloutUuidFromFilename(""), null);
+});
+
+test("extractRolloutUuidFromFilename: same identity regardless of which root the file lives under", () => {
+	// The whole point: the connector never sees the parent directory here, but
+	// pin the invariant explicitly — extraction is a pure function of the
+	// filename alone, so a relocation between sessions/ and sessions-archive/
+	// (which only changes the parent directory, never the filename — see
+	// ARCHIVAL-CONTRACT.md invariant 4) can never change the extracted UUID.
+	const fileName =
+		"rollout-2026-04-15T12-26-06-019d922d-c38b-7e11-ae99-9187af386148.jsonl";
+	const uuid = extractRolloutUuidFromFilename(fileName);
+	assert.equal(uuid, "019d922d-c38b-7e11-ae99-9187af386148");
+	assert.equal(
+		extractRolloutUuidFromFilename(fileName),
+		uuid,
+		"extraction is deterministic and directory-independent",
+	);
 });
 
 test("isSkippableRulesLine: blank and comment lines are skipped", () => {
