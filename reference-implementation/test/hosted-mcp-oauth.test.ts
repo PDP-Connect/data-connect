@@ -376,44 +376,6 @@ async function createCimdClientDocument(asUrl: string, input: unknown): Promise<
   return body;
 }
 
-function renderedHostedMcpStreamValues(html: string): string[] {
-  return [
-    ...html.matchAll(/<input[^>]*name="stream"[^>]*value="([^"]+)"[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g),
-  ].map((match) => mustExist(match[1], "capture group must exist"));
-}
-
-/**
- * Reads the picker HTML exactly as the browser script does — every rendered
- * stream checkbox, grouped by its source key — and computes the decision
- * digest for a whole-source approval of all of them. This is the test-side
- * stand-in for the script's `readDecision()`, and it deliberately parses the
- * same `data-source-key` / `data-stream-name` attributes the script reads, so
- * a change to either markup or script shows up here.
- */
-function decisionDigestForRenderedPicker(
-  html: string,
-  { clientId, accessMode = "continuous" }: { clientId: string; accessMode?: string }
-): string {
-  const bySource = new Map<string, string[]>();
-  for (const match of html.matchAll(/<input[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g)) {
-    const tag = mustExist(match[0], "capture group must exist");
-    const sourceKey = tag.match(/data-source-key="([^"]*)"/)?.[1];
-    const streamName = tag.match(/data-stream-name="([^"]*)"/)?.[1];
-    if (sourceKey === undefined || streamName === undefined) {
-      continue;
-    }
-    // Attributes are HTML-escaped in the markup; the browser reads decoded
-    // dataset values, so decode before digesting.
-    const key = decodeHtmlAttribute(sourceKey);
-    bySource.set(key, [...(bySource.get(key) ?? []), decodeHtmlAttribute(streamName)]);
-  }
-  return computeHostedMcpDecisionDigest({
-    accessMode,
-    clientId,
-    sources: [...bySource.entries()].map(([sourceKey, streamNames]) => ({ sourceKey, streamNames })),
-  });
-}
-
 /**
  * Stamps the approval binding onto a hand-built picker form. `sources` is the
  * decision the SERVER is expected to resolve — for a submission carrying
@@ -447,27 +409,15 @@ function appendDecisionDigest(
   return params;
 }
 
-function decodeHtmlAttribute(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
+// Removed with the picker HTML they parsed: `renderedHostedMcpStreamValues`,
+// `decisionDigestForRenderedPicker`, `decodeHtmlAttribute`, and
+// `visibleTextFromHtml`. Every caller now reads the console's JSON render
+// model (see `fetchPickerConsentModel` below), where stream values, the
+// decision digest inputs, and owner-visible copy are fields rather than
+// markup to scrape.
 function renderedHostedMcpPickerErrorText(html: string): string {
   const match = html.match(/<div[^>]*data-hosted-mcp-picker-error[^>]*>([\s\S]*?)<\/div>/);
   return match ? mustExist(match[1], "capture group must exist") : "";
-}
-
-function visibleTextFromHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 async function issueOwnerToken(asUrl: string): Promise<string> {
@@ -633,16 +583,24 @@ async function startMcpDeviceAuthorization({
   });
 }
 
-// Drive the multi-source hosted-MCP picker end-to-end:
+// Drive the multi-source hosted-MCP consent flow end-to-end:
 //   1. Register multiple connectors with the AS.
-//   2. Open the picker (GET /oauth/authorize without authorization_details).
-//   3. Post the multi-select picker form with one opaque selection value per
-//      approved row. The picker emits base64url(JSON) payloads so URL-shaped
-//      connector ids cannot collide with any wrapping delimiter; the test
-//      reuses the production encoder for the same reason.
-//   4. Follow the redirect to the client's callback, capture the package code.
+//   2. Open the picker branch (GET /oauth/authorize without
+//      authorization_details) and follow its 302 to the console consent
+//      challenge.
+//   3. Fetch the challenge's JSON render model and approve every stream of
+//      every eligible source, posting the decision to the accept route with a
+//      `decision_digest` computed over exactly what was approved.
+//   4. Read the client callback out of the accept response and capture the
+//      package code.
 //   5. Exchange the code for a `grant_package_id`-bearing access token at
 //      /oauth/token, including a refresh token.
+//
+// Steps 2-3 used to read the picker HTML and post the picker form. The consent
+// UI now lives in the console, so the same whole-source approval is expressed
+// against the challenge model instead. What the helper GUARANTEES is unchanged:
+// every registered source must be published as its own row keyed by an opaque
+// selection value, and approving them all must mint exactly one package.
 //
 // Returns the access token, refresh token, package id, and PKCE artefacts so
 // the caller can drive /mcp under the package bearer and exercise refresh
@@ -666,76 +624,58 @@ async function completeMultiSourcePackageFlow({
 }): Promise<MultiSourcePackageFlowResult> {
   const verifier = randomBytes(32).toString("base64url");
   const state = "pkg-state-456";
-  const challenge = pkceChallenge(verifier);
+  const codeChallenge = pkceChallenge(verifier);
 
-  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-  authorizeUrl.searchParams.set("client_id", client.client_id);
-  authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-  authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("state", state);
-  authorizeUrl.searchParams.set("code_challenge", challenge);
-  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  // No `authorization_details` and no `connector_id` → the AS parks the
+  // request under a consent challenge and hands the decision to the console.
+  const challenge = await startPickerConsentChallenge({
+    asUrl,
+    clientId: client.client_id,
+    codeChallenge,
+    state,
+  });
+  const model = await fetchPickerConsentModel(asUrl, challenge);
 
-  // No `authorization_details` and no `connector_id` → AS renders the
-  // multi-source picker page so we can submit a multi-select form.
-  const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-  assert.equal(pickerResp.status, 200);
-  const pickerHtml = await pickerResp.text();
-  // The picker MUST NOT advertise raw `connector:<url>` form values: that
+  // The model MUST NOT publish raw `connector:<url>` selection values: that
   // shape collapsed when split at the first `:`. Each row must carry the
   // structured selection encoding instead, and the URL-shaped connector id
-  // MUST appear only in human-facing meta copy, not as the submitted value.
-  assert.ok(!pickerHtml.includes('value="connector:'), "picker MUST NOT submit raw connector:<id> selection values");
-  assert.ok(
-    !pickerHtml.includes('value="connection:'),
-    "picker MUST NOT submit raw connection:<id>:<id> selection values"
-  );
+  // MUST appear only in human-facing labels, never as the submitted value.
+  for (const source of model.sources) {
+    assert.ok(
+      !source.selectionValue.startsWith("connector:"),
+      "the model MUST NOT publish raw connector:<id> selection values"
+    );
+    assert.ok(
+      !source.selectionValue.startsWith("connection:"),
+      "the model MUST NOT publish raw connection:<id>:<id> selection values"
+    );
+  }
+  const selectionValues = new Set(model.sources.map((source) => source.selectionValue));
   for (const id of connectorIds) {
     const encoded = encodeHostedMcpSelection({ connectionId: defaultHostedInstanceId(id), connectorId: id });
-    assert.ok(pickerHtml.includes(`value="${encoded}"`), `picker should advertise opaque selection for ${id}`);
+    assert.ok(selectionValues.has(encoded), `model should advertise the opaque selection for ${id}`);
   }
 
-  // POST the multi-source approval. Owner auth is disabled for tests
-  // (`ownerAuthPassword: ''`), so `requireOwnerSession` and `requireCsrf`
-  // are no-ops and the form goes through without a session cookie.
+  // POST the multi-source approval the way the console does. Owner auth is
+  // disabled for tests (`ownerAuthPassword: ''`), so `requireOwnerSession` and
+  // `requireCsrf` are no-ops and the decision goes through without a session
+  // cookie.
   //
   // The picker makes source selection derive from checked streams. This helper
   // mirrors an explicit whole-source approval by submitting every child stream
-  // for the selected sources; tests for narrowing construct their own forms
+  // for every eligible source; tests for narrowing build their own decision
   // instead of going through this helper.
-  const params = new URLSearchParams();
-  params.append("client_id", client.client_id);
-  params.append("redirect_uri", "https://client.example/callback");
-  params.append("response_type", "code");
-  params.append("state", state);
-  params.append("code_challenge", challenge);
-  params.append("code_challenge_method", "S256");
-  for (const id of connectorIds) {
-    params.append(
-      "selection",
-      encodeHostedMcpSelection({ connectionId: defaultHostedInstanceId(id), connectorId: id })
-    );
-  }
-  for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
-    params.append("stream", streamValue);
-  }
-  params.append(
-    "decision_digest",
-    decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
+  const chosen = everyPickerConsentSource(model);
+  const approve = await postPickerConsentChallenge(
+    asUrl,
+    challenge,
+    "accept",
+    pickerConsentAcceptBody({ chosen, clientId: client.client_id, model })
   );
-
-  const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
-    body: params.toString(),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    method: "POST",
-    redirect: "manual",
-  });
-  if (approveResp.status !== 302) {
-    assert.fail(`expected approval redirect, got ${approveResp.status}: ${await approveResp.text()}`);
+  if (approve.status !== 200) {
+    assert.fail(`expected approval, got ${approve.status}: ${JSON.stringify(approve.body)}`);
   }
-  const callback = new URL(
-    mustExist(approveResp.headers.get("location"), "approve redirect must carry a Location header")
-  );
+  const callback = new URL(stringField(approve.body, "redirect_url"));
   assert.equal(callback.origin, "https://client.example");
   assert.equal(callback.searchParams.get("state"), state);
   const code = mustExist(callback.searchParams.get("code"), "callback must carry an authorization code");
@@ -844,6 +784,171 @@ async function fetchProtectedResourceMetadata(url: string): Promise<Record<strin
   const { status, body } = await fetchJson(url);
   assert.equal(status, 200);
   return body;
+}
+
+// ─── Driving the picker branch after the console handoff ────────────────────
+//
+// `GET /oauth/authorize` with no `authorization_details` and no `connector_id`
+// used to render the picker as HTML. It now parks the request under an opaque
+// `cc_...` challenge and 302s the owner to the console, which fetches a JSON
+// render model and posts the decision back. Every test below that once read
+// the picker HTML reads that model instead: the same facts, resolved by the
+// same server helpers, with the rendering moved out of the AS.
+//
+// The narrow, typed helpers live here (before their first use) because they
+// serve tests across the whole file; the seven `consent challenge` tests at the
+// bottom keep their own copies of the same idiom.
+
+/** Opens the picker branch and returns the consent challenge id it parks. */
+async function startPickerConsentChallenge({
+  asUrl,
+  clientId,
+  redirectUri = "https://client.example/callback",
+  state,
+  codeChallenge,
+}: {
+  asUrl: string;
+  clientId: string;
+  redirectUri?: string;
+  state: string;
+  codeChallenge?: string;
+}): Promise<string> {
+  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+  authorizeUrl.searchParams.set("client_id", clientId);
+  authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("state", state);
+  authorizeUrl.searchParams.set(
+    "code_challenge",
+    codeChallenge ?? pkceChallenge(randomBytes(32).toString("base64url"))
+  );
+  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+  const resp = await fetch(authorizeUrl, { redirect: "manual" });
+  assert.equal(resp.status, 302, "the picker branch hands the decision to the console");
+  const location = new URL(mustExist(resp.headers.get("location"), "handoff must carry a Location header"));
+  return mustExist(location.searchParams.get("challenge"), "the handoff must name a consent challenge");
+}
+
+interface PickerConsentStream extends Record<string, unknown> {
+  fieldsTotal: number;
+  id: string;
+  label: string;
+  name: string;
+  selected: boolean;
+  selectionValue: string;
+  sentence: string;
+  timePhrase?: string;
+}
+
+interface PickerConsentSource extends Record<string, unknown> {
+  account: string | null;
+  icon: { color: string | null; kind: string | null; svg: string | null } | null;
+  id: string;
+  name: string;
+  selectionValue: string;
+  streams: PickerConsentStream[];
+}
+
+interface PickerConsentModel extends Record<string, unknown> {
+  accessMode: { supported: string[]; value: string };
+  challenge: string;
+  client: {
+    domain: string;
+    id: string;
+    monogram: string;
+    name: string;
+    policyLinks: Array<{ href: string; label: string }>;
+    trust: string;
+  };
+  grantExpiry: { defaultId: string; options: Array<{ days: number | null; id: string; label: string }> };
+  purpose: { code: string; description: string };
+  retention: string;
+  reviewDigest: string;
+  sources: PickerConsentSource[];
+}
+
+async function fetchPickerConsentModel(asUrl: string, challenge: string): Promise<PickerConsentModel> {
+  const { status, body } = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`);
+  assert.equal(status, 200, JSON.stringify(body));
+  return body as unknown as PickerConsentModel;
+}
+
+/**
+ * Opens the picker branch and returns the render model the console draws from.
+ * The direct replacement for the old `fetchHostedMcpPickerHtml`: assertions
+ * that used to read the picker HTML read this instead.
+ */
+async function fetchPickerConsentModelFor({
+  asUrl,
+  clientId,
+  redirectUri = "https://client.example/callback",
+  state = "picker-model-state",
+}: {
+  asUrl: string;
+  clientId: string;
+  redirectUri?: string;
+  state?: string;
+}): Promise<PickerConsentModel> {
+  const challenge = await startPickerConsentChallenge({ asUrl, clientId, redirectUri, state });
+  return await fetchPickerConsentModel(asUrl, challenge);
+}
+
+/**
+ * The console's accept body for a whole-source approval of `chosen`. The
+ * `decision_digest` is the CONSOLE's commitment to what it displayed — the
+ * accept route never recomputes it from the submission — so it is computed
+ * here over the chosen source keys and stream names, exactly as
+ * `buildHostedMcpPickerForm` does for the form path.
+ */
+function pickerConsentAcceptBody({
+  model,
+  clientId,
+  chosen,
+  accessMode = "continuous",
+  reviewDigest,
+}: {
+  model: PickerConsentModel;
+  clientId: string;
+  chosen: Array<{ source: PickerConsentSource; streams: PickerConsentStream[] }>;
+  accessMode?: string;
+  reviewDigest?: string;
+}): Record<string, unknown> {
+  return {
+    access_mode: accessMode,
+    decision_digest: computeHostedMcpDecisionDigest({
+      accessMode,
+      clientId,
+      sources: chosen.map(({ source, streams }) => ({
+        sourceKey: source.id,
+        streamNames: streams.map((stream) => stream.name).sort(),
+      })),
+    }),
+    grant_expiry: model.grantExpiry.defaultId,
+    review_digest: reviewDigest ?? model.reviewDigest,
+    source_id: chosen.map(({ source }) => source.id),
+    stream: chosen.flatMap(({ streams }) => streams.map((stream) => stream.id)),
+  };
+}
+
+function postPickerConsentChallenge(
+  asUrl: string,
+  challenge: string,
+  action: "accept" | "reject",
+  body: Record<string, unknown>
+): Promise<JsonResponse> {
+  return fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}/${action}`, {
+    body: JSON.stringify(body),
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
+
+/** Every stream of every source in the model — a whole-source approval of all. */
+function everyPickerConsentSource(
+  model: PickerConsentModel
+): Array<{ source: PickerConsentSource; streams: PickerConsentStream[] }> {
+  return model.sources.map((source) => ({ source, streams: source.streams }));
 }
 
 test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", async () => {
@@ -1635,65 +1740,24 @@ test('POST /oauth/authorize/mcp-package rejects legacy delimited selection witho
   }
 });
 
-test("hosted MCP source selection uses hosted-ui option styles", async () => {
-  const server = await startOpenTestServer();
-  const asUrl = `http://localhost:${server.asPort}`;
-
-  try {
-    await registerAuthorizedSpotify(asUrl);
-    const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "state-123");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
-    assert.match(html, /Hosted MCP test client wants to read your data/);
-    assert.match(html, /class="hosted-ui-option-group"/);
-    assert.match(html, /class="hosted-ui-option"/);
-    assert.match(html, /<details class="hosted-ui-option-source"[^>]*>/);
-    assert.match(html, /data-hosted-mcp-select-sources/);
-    assert.match(html, /data-hosted-mcp-clear-sources/);
-    assert.match(html, /class="hosted-ui-button" data-variant="primary"/);
-
-    const sourceDetails = [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*>/g)];
-    assert.ok(sourceDetails.length > 0, "picker must render collapsed source detail sections");
-    for (const match of sourceDetails) {
-      assert.equal(/\sopen(?:\s|>)/.test(match[0]), false, "source detail sections must be collapsed by default");
-    }
-
-    // Regression: owner-facing picker copy MUST NOT leak URL-shaped
-    // first-party connector ids. The canonical short `connector_key`
-    // (`spotify`) is the only connector identifier that may appear in
-    // human meta copy alongside the display name. See
-    // `openspec/changes/canonicalize-connector-keys/`.
-    assert.equal(
-      html.includes("https://registry.pdpp.dev"),
-      false,
-      "picker meta copy MUST NOT show registry URLs; expected canonical connector keys"
-    );
-    assert.match(html, /spotify/, "picker meta copy should show canonical key `spotify`");
-    assert.match(
-      html,
-      /You can revoke this access later from your grants page/,
-      "picker copy should present the flow as an owner-facing setup"
-    );
-
-    const cssResp = await fetch(`${asUrl}/__pdpp/hosted-ui.css`);
-    assert.equal(cssResp.status, 200);
-    const css = await cssResp.text();
-    assert.match(css, /\.hosted-ui-option-group/);
-    assert.match(css, /\.hosted-ui-option\b/);
-  } finally {
-    await closeServer(server);
-  }
-});
+// DELETED: "hosted MCP source selection uses hosted-ui option styles".
+//
+// The whole test was styling of a server-rendered page that the picker branch
+// no longer produces: `hosted-ui-option-group`, `hosted-ui-option`, the
+// collapsed `<details class="hosted-ui-option-source">` sections, the
+// select/clear-sources buttons, and the primary-button variant are all CSS
+// classes on markup the console now owns. Nothing it asserted is orphaned:
+//   - the `/__pdpp/hosted-ui.css` asset is still served and still tested, by
+//     `hosted-ui.test.ts` ("shared stylesheet is served under
+//     /__pdpp/hosted-ui.css");
+//   - the "no URL-shaped connector id in owner-visible copy" regression is
+//     held by "picker hides URL-shaped default connection labels from
+//     owner-visible copy" below, rewritten against the model;
+//   - the requester-named title is held by "hosted MCP picker names the
+//     requester ...", also rewritten against the model.
+// GAP: the picker's own CSS class names and the "You can revoke this access
+// later from your grants page" copy are no longer asserted anywhere on the
+// server side — both are now the console's rendering, outside this suite.
 
 test("grant-scoped MCP device authorization requires resource and authorization_details", async () => {
   const server = await startOpenTestServer();
@@ -2644,55 +2708,44 @@ test("query_records with connection_id routes to one source only (G1 source-targ
 
     const client = await registerAuthCodeClient(asUrl);
     const verifier = randomBytes(32).toString("base64url");
-    const challenge = pkceChallenge(verifier);
+    const codeChallenge = pkceChallenge(verifier);
     const state = "g1-routing-test";
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", state);
-    authorizeUrl.searchParams.set("code_challenge", challenge);
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-    assert.equal(pickerResp.status, 200);
-    const pickerHtml = await pickerResp.text();
-
-    // Build a connection-scoped multi-select form: one selection per
-    // named connection (connector + connection_id pair).
-    const params = new URLSearchParams();
-    params.append("client_id", client.client_id);
-    params.append("redirect_uri", "https://client.example/callback");
-    params.append("response_type", "code");
-    params.append("state", state);
-    params.append("code_challenge", challenge);
-    params.append("code_challenge_method", "S256");
-    params.append(
-      "selection",
-      encodeHostedMcpSelection({ connectionId: spotifyConnId, connectorId: spotify.connector_id })
-    );
-    params.append(
-      "selection",
-      encodeHostedMcpSelection({ connectionId: githubConnId, connectorId: github.connector_id })
-    );
-    // Mirror explicit whole-source approval: submit every stream value.
-    for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
-      params.append("stream", streamValue);
-    }
-    params.append(
-      "decision_digest",
-      decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
-    );
-
-    const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
-      body: params.toString(),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      method: "POST",
-      redirect: "manual",
+    // The picker branch parks the request under a consent challenge; the
+    // console's render model publishes one row per named connection. Approving
+    // every stream of both rows is the same connection-scoped whole-source
+    // approval the picker form used to submit — the routing contract under test
+    // depends on the resulting members carrying a connection_id, which is what
+    // the per-connection rows produce.
+    const challenge = await startPickerConsentChallenge({
+      asUrl,
+      clientId: client.client_id,
+      codeChallenge,
+      state,
     });
-    assert.equal(approveResp.status, 302);
-    const callback = new URL(mustExist(approveResp.headers.get("location"), "redirect must carry a Location header"));
+    const model = await fetchPickerConsentModel(asUrl, challenge);
+    const bySelection = new Map(model.sources.map((source) => [source.selectionValue, source]));
+    const spotifySourceRow = mustExist(
+      bySelection.get(encodeHostedMcpSelection({ connectionId: spotifyConnId, connectorId: spotify.connector_id })),
+      "the model must publish a row for the named spotify connection"
+    );
+    const githubSourceRow = mustExist(
+      bySelection.get(encodeHostedMcpSelection({ connectionId: githubConnId, connectorId: github.connector_id })),
+      "the model must publish a row for the named github connection"
+    );
+    const chosen = [
+      { source: spotifySourceRow, streams: spotifySourceRow.streams },
+      { source: githubSourceRow, streams: githubSourceRow.streams },
+    ];
+
+    const approve = await postPickerConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      pickerConsentAcceptBody({ chosen, clientId: client.client_id, model })
+    );
+    assert.equal(approve.status, 200, JSON.stringify(approve.body));
+    const callback = new URL(stringField(approve.body, "redirect_url"));
     const code = mustExist(callback.searchParams.get("code"), "redirect must carry an authorization code");
     assert.ok(code);
 
@@ -2884,26 +2937,21 @@ async function exchangePackageCode({
   return approveResp;
 }
 
-// Fetches the real picker GET and extracts its `review_digest` hidden
-// field — the exact snapshot digest `rejectIfHostedMcpReviewDigestStale`
-// (as-authorize.ts) will require a POST to reproduce fresh. Tests exercising
-// the stale-review-revision guard build their form with this helper (never
-// `buildHostedMcpPickerForm` directly) so the digest they carry is genuine,
-// not fabricated.
+// Opens the real picker branch and reads back the `reviewDigest` the owner's
+// surface is served — the exact snapshot digest
+// `rejectIfHostedMcpReviewDigestStale` (as-authorize.ts) will require a POST to
+// reproduce fresh. Tests exercising the stale-review-revision guard get their
+// digest here (never by fabricating one) so the value they carry is genuine.
+//
+// It used to be scraped from a `name="review_digest"` hidden field in the
+// picker HTML. The picker branch no longer renders HTML: the same digest is now
+// published as `reviewDigest` on the console's JSON render model, computed by
+// the same `computeHostedMcpPickerSnapshotDigest` call over the same rows.
 async function fetchHostedMcpReviewDigest(asUrl: string, client: RegisteredClient, state: string): Promise<string> {
-  const verifier = randomBytes(32).toString("base64url");
-  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-  authorizeUrl.searchParams.set("client_id", client.client_id);
-  authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-  authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("state", state);
-  authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-  authorizeUrl.searchParams.set("code_challenge_method", "S256");
-  const resp = await fetch(authorizeUrl);
-  assert.equal(resp.status, 200, "picker GET must render 200 to extract a real review_digest");
-  const html = await resp.text();
-  const match = html.match(/name="review_digest" value="([^"]+)"/);
-  return mustExist(match?.[1], "picker HTML must carry a review_digest hidden field");
+  const model = await fetchPickerConsentModelFor({ asUrl, clientId: client.client_id, state });
+  assert.equal(typeof model.reviewDigest, "string", "the render model must carry a review digest");
+  assert.ok(model.reviewDigest.length > 0, "the review digest must not be empty");
+  return model.reviewDigest;
 }
 
 test("hosted MCP picker surfaces each row's resolved source kind as a protocol fact (source-kinds:731-743)", async () => {
@@ -2913,39 +2961,42 @@ test("hosted MCP picker surfaces each row's resolved source kind as a protocol f
   try {
     const spotify = await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "source-kind-render");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "source-kind-render",
+    });
 
     // FIX 3: with every row resolving to the same kind (the common case, and
-    // the only case this fixture exercises), the picker states it once above
-    // the list rather than repeating the full sentence on every row; each row
-    // still carries a compact protocol-fact badge.
+    // the only case this fixture exercises), the picker stated it once above
+    // the list rather than repeating the full sentence on every row.
     // `source.kind` is real protocol, but its audience is the CLIENT. To the
     // owner, "connector" answers a question nobody asked, and because every
     // row resolves to the same kind it distinguished nothing while consuming
     // a badge slot on every row. It stays in the grant and audit record.
-    assert.doesNotMatch(html, /All sources below are/, "no uniform-kind summary line on the owner surface");
-    assert.doesNotMatch(
-      html,
-      /hosted-ui-option-source-kind-badge/,
-      `no per-row connector badge (server-resolved, spotify.connector_id=${spotify.connector_id})`
-    );
+    //
+    // What moved: the assertion used to read the picker HTML for the absence
+    // of the kind badge and the uniform-kind summary line. The render model is
+    // the owner-surface contract now, and it carries NO source-kind field at
+    // all — the strongest possible form of the same guarantee, since the
+    // console cannot render a fact the server never hands it.
+    // GAP: this no longer asserts anything about the wording of a kind badge
+    // or a uniform-kind summary line, because neither can exist: no field
+    // carries `source.kind` to the owner surface. If a future model adds one,
+    // this test will not catch its COPY — only its presence, below.
+    const source = mustExist(model.sources[0], "the model must publish a source row");
     assert.equal(
-      html.includes('class="hosted-ui-option-source-kind" data-authorship="protocol">Source kind: <code>connector</code>'),
+      Object.hasOwn(source, "sourceKind"),
       false,
-      "picker must not repeat the full 'Source kind: connector' sentence on every row once a uniform summary is shown"
+      `no source-kind field reaches the owner surface (server-resolved, spotify.connector_id=${spotify.connector_id})`
     );
+    assert.equal(Object.hasOwn(source, "kind"), false, "and not under a shorter name either");
+    // The row still carries the owner-facing identity facts it always did, so
+    // the absence above is a deliberate omission, not an empty model.
+    assert.equal(typeof source.id, "string");
+    assert.ok(source.name.length > 0, "the row still names the connector type");
+    assert.ok(source.streams.length > 0, "the row still publishes its streams");
   } finally {
     await closeServer(server);
   }
@@ -2959,116 +3010,60 @@ test("hosted MCP picker renders collapsed source summaries with per-stream contr
     const spotify = await registerAuthorizedSpotify(asUrl);
     const github = await registerAuthorizedGithub(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "streams-render-test");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "streams-render-test",
+    });
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
+    // The picker groups every stream under its own source, and each stream is
+    // individually choosable — that is what made a subset grant possible at
+    // all. The grouping used to be `<details class="hosted-ui-option-source">`
+    // wrapping `hosted-ui-stream-option` checkboxes; it is now the model's
+    // `sources[].streams[]` nesting, which is the same structure with the
+    // markup removed.
+    assert.ok(model.sources.length >= 2, `both registered sources are published: ${model.sources.length}`);
+    const bySelection = new Map(model.sources.map((source) => [source.selectionValue, source]));
 
-    // The picker MUST render the per-source collapsed grouping that holds
-    // both the source toggle and the per-stream checkboxes.
-    assert.match(html, /class="hosted-ui-option-source"/, "picker must wrap each row in a source group");
-    assert.match(html, /<details class="hosted-ui-option-source"[^>]*data-source-selected="false"/);
-    assert.match(html, /data-hosted-mcp-source-checkbox/, "picker must mark source checkboxes for picker behavior");
-    assert.match(
-      html,
-      /data-source-selection-mode="streams"/,
-      "source checkbox state must be derived from stream choices"
-    );
-    assert.match(html, /class="hosted-ui-option-streams"/, "picker must render the per-source stream block");
-    assert.match(html, /class="hosted-ui-stream-option"/, "picker must render at least one stream checkbox");
-    assert.match(html, /data-hosted-mcp-stream-checkbox/, "picker must mark stream checkboxes for source coupling");
-    // The per-source buttons are gone: the tri-state parent checkbox already
-    // selects and clears its own source (27 sources x 2 buttons was the page
-    // compensating for a list that should have been shorter).
-    assert.doesNotMatch(html, /data-hosted-mcp-select-streams/, "no per-source select-all button");
-    assert.doesNotMatch(html, /data-hosted-mcp-clear-streams/, "no per-source clear button");
-
-    const sourceInputs = [...html.matchAll(/<input[^>]*data-hosted-mcp-source-checkbox[^>]*>/g)];
-    assert.ok(sourceInputs.length > 0, "picker must render source checkboxes");
-    for (const match of sourceInputs) {
-      assert.match(match[0], /data-source-selection-mode="streams"/);
-      assert.equal(/\schecked(?:\s|\/|>)/.test(match[0]), false, "source checkbox must not start checked");
+    // Every manifest stream must be published as its own choosable entry with
+    // owner-readable copy. Nothing is disabled and nothing is pre-checked, so
+    // a source cannot be granted while every one of its streams is clear.
+    for (const manifest of [spotify, github]) {
+      const source = mustExist(
+        bySelection.get(
+          encodeHostedMcpSelection({
+            connectionId: defaultHostedInstanceId(manifest.connector_id),
+            connectorId: manifest.connector_id,
+          })
+        ),
+        `the model must publish a row for ${manifest.connector_id}`
+      );
+      const publishedNames = source.streams.map((stream) => stream.name).sort();
+      assert.deepEqual(
+        publishedNames,
+        manifest.streams.map((stream) => stream.name).sort(),
+        `${manifest.connector_id} publishes every manifest stream, no more and no fewer`
+      );
+      for (const stream of source.streams) {
+        assert.equal(stream.selected, false, `${manifest.connector_id}::${stream.name} must not start selected`);
+        assert.equal(stream.id, `${source.id}:${stream.name}`, "each stream is addressable under its own source");
+        assert.ok(stream.label.length > 0, `${stream.name} must carry an owner-readable label`);
+        assert.ok(stream.sentence.length > 0, `${stream.name} must carry an owner-readable sentence`);
+        assert.equal(typeof stream.fieldsTotal, "number", `${stream.name} must state how many fields it covers`);
+        assert.ok(stream.selectionValue.length > 0, `${stream.name} must carry its own opaque selection value`);
+      }
     }
 
-    const sourceDetails = [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*>/g)];
-    for (const match of sourceDetails) {
-      assert.equal(/\sopen(?:\s|>)/.test(match[0]), false, "source sections must start collapsed");
-    }
-
-    // Every manifest stream must be rendered unchecked but enabled. JS derives
-    // the parent source checkbox from checked streams so a source cannot stay
-    // selected for grant while every stream is clear.
-    for (const stream of spotify.streams) {
-      const streamFormValue = encodeHostedMcpStreamSelection({
-        connectionId: defaultHostedInstanceId(spotify.connector_id),
-        connectorId: spotify.connector_id,
-        streamName: stream.name,
-      });
-      const input = html.match(new RegExp(`<input[^>]*name="stream"[^>]*value="${streamFormValue}"[^>]*>`));
-      assert.ok(input, `picker must render a stream checkbox for spotify::${stream.name}`);
-      assert.equal(/\schecked(?:\s|\/|>)/.test(input[0]), false, `spotify::${stream.name} must not be checked`);
-      assert.equal(/\sdisabled(?:\s|\/|>)/.test(input[0]), false, `spotify::${stream.name} must be enabled`);
-    }
-    for (const stream of github.streams) {
-      const streamFormValue = encodeHostedMcpStreamSelection({
-        connectionId: defaultHostedInstanceId(github.connector_id),
-        connectorId: github.connector_id,
-        streamName: stream.name,
-      });
-      const input = html.match(new RegExp(`<input[^>]*name="stream"[^>]*value="${streamFormValue}"[^>]*>`));
-      assert.ok(input, `picker must render a stream checkbox for github::${stream.name}`);
-      assert.equal(/\schecked(?:\s|\/|>)/.test(input[0]), false, `github::${stream.name} must not be checked`);
-      assert.equal(/\sdisabled(?:\s|\/|>)/.test(input[0]), false, `github::${stream.name} must be enabled`);
-    }
-
-    // The checkbox model is carried by the control, not by prose about the
-    // control. ~70 words explaining what a checkbox does signalled a broken
-    // control; this one was never broken.
-    assert.doesNotMatch(html, /A source is its streams/i, "no prose explaining the checkbox model");
-    assert.doesNotMatch(
-      html,
-      /A source with no streams checked is not shared/i,
-      "no prose explaining derived source state"
-    );
-    // This sentence rendered inside all 27 sources — the page teaching the
-    // owner its own checkbox semantics, 27 times.
-    assert.doesNotMatch(
-      html,
-      /Each stream you check is granted on its own/i,
-      "no per-source repetition of the checkbox model"
-    );
-    assert.doesNotMatch(
-      html,
-      /Check one stream to share just that stream/i,
-      "single-stream grants are discoverable from the checkboxes themselves, not a sentence about them"
-    );
-    assert.match(html, /sourceBox\.checked = selected/, "picker JS should derive source checked state from streams");
-    assert.match(html, /sourceBox\.indeterminate = partiallySelected/, "picker JS should expose subset stream grants");
-    // Whole-source approval is the parent checkbox — already proven above by
-    // the `sourceBox.checked = selected` / `indeterminate` derivation, and
-    // exercised end-to-end in hosted-mcp-picker-runtime.test.ts. It no longer
-    // needs a dedicated button per source.
-    assert.doesNotMatch(html, /Select every stream/i, "no per-source select-every button");
-    assert.match(html, /data-hosted-mcp-select-sources/, "picker should make global bulk approval explicit");
-    assert.match(html, /Select every source/i, "picker should offer a global select-all affordance");
-    assert.match(html, /Clear selection/i, "picker should offer a clear global reset affordance");
-    assert.match(html, /data-hosted-mcp-expand-all/, "picker should offer an explicit expand-all disclosure control");
-    assert.match(
-      html,
-      /data-hosted-mcp-collapse-all/,
-      "picker should offer an explicit collapse-all disclosure control"
-    );
-    assert.match(html, />Show all data types</i, "expand-all control should be owner-labelled");
-    assert.match(html, />Hide all data types</i, "collapse-all control should be owner-labelled");
+    // GAP: the picker's own selection UI — the collapsed-by-default `<details>`
+    // sections, the tri-state parent checkbox and its
+    // `data-source-selection-mode="streams"` derivation, the global
+    // select-all/clear/expand-all/collapse-all controls and their owner
+    // labels, and the absence of per-source select/clear buttons and of prose
+    // teaching the checkbox model — is now the console's. None of it can be
+    // asserted here: the server hands over facts, and every one of those was a
+    // statement about markup or about the browser script that read it. The
+    // runtime behaviour of that UI is covered by the console's own suite.
   } finally {
     await closeServer(server);
   }
@@ -3078,11 +3073,16 @@ test("hosted MCP picker pre-selects nothing: zero checked sources and zero check
   // UAT regression (owner-reported): "Streams should not be selected by
   // default while parent connection is not selected." The existing render
   // test asserts no-checked per known input; this locks the coupled aggregate
-  // invariant directly — across the whole picker render there must be zero
-  // checked source boxes AND zero checked stream boxes AND every source group
-  // must report data-source-selected="false". A future change that pre-checks
-  // either side (e.g. defaulting one stream on, or marking a source selected
-  // before any stream is chosen) breaks this single assertion.
+  // invariant directly — across the whole picker surface there must be zero
+  // selected streams, and therefore no source can be derived as selected.
+  // A future change that pre-checks either side (e.g. defaulting one stream
+  // on) breaks this single assertion.
+  //
+  // What moved: the render is the console's, so "checked" is no longer an
+  // HTML attribute to count. The server states the default explicitly, as
+  // `selected` on every published stream, and the source's selected state is
+  // derived from its streams exactly as before — so zero selected streams
+  // still means zero selected sources.
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
 
@@ -3090,39 +3090,32 @@ test("hosted MCP picker pre-selects nothing: zero checked sources and zero check
     await registerAuthorizedSpotify(asUrl);
     await registerAuthorizedGithub(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "nothing-preselected");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "nothing-preselected",
+    });
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
+    // The model must actually contain pickable sources and streams, otherwise
+    // "zero selected" would pass vacuously.
+    const streams = model.sources.flatMap((source) => source.streams);
+    assert.ok(model.sources.length >= 2, `model must contain the registered sources: ${model.sources.length}`);
+    assert.ok(streams.length >= 2, `model must contain streams to choose from: ${streams.length}`);
 
-    const sourceBoxes = [...html.matchAll(/<input[^>]*data-hosted-mcp-source-checkbox[^>]*>/g)].map((m) => m[0]);
-    const streamBoxes = [...html.matchAll(/<input[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g)].map((m) => m[0]);
-
-    // The render must actually contain pickable sources and streams, otherwise
-    // "zero checked" would pass vacuously.
-    assert.ok(sourceBoxes.length >= 2, "render must contain the registered source checkboxes");
-    assert.ok(streamBoxes.length >= 2, "render must contain stream checkboxes to choose from");
-
-    const checkedSources = sourceBoxes.filter((b) => /\schecked(?:\s|\/|>)/.test(b)).length;
-    const checkedStreams = streamBoxes.filter((b) => /\schecked(?:\s|\/|>)/.test(b)).length;
-    assert.equal(checkedSources, 0, "no source may be checked on first render");
-    assert.equal(checkedStreams, 0, "no stream may be checked while its parent source is unselected");
-
-    // Every source group must also declare itself unselected, so the derived
-    // "source participates" state starts false everywhere.
-    const sourceGroups = [...html.matchAll(/<details class="hosted-ui-option-source"[^>]*>/g)].map((m) => m[0]);
-    assert.equal(sourceGroups.length, sourceBoxes.length, "one source group per source checkbox");
-    for (const group of sourceGroups) {
-      assert.match(group, /data-source-selected="false"/, "each source group must start unselected");
+    const selectedStreams = streams.filter((stream) => stream.selected);
+    assert.equal(selectedStreams.length, 0, "no stream may be selected on first render");
+    // GAP: there is no longer a separate source-level "selected" flag to
+    // assert. Source selection is derived from stream selection (see
+    // `buildChallengeApprovalBody`, which resolves a source only when its id
+    // is submitted alongside its chosen streams), so zero selected streams is
+    // the whole of the invariant the server can state.
+    for (const source of model.sources) {
+      assert.equal(
+        Object.hasOwn(source, "selected"),
+        false,
+        "a source carries no independent selected state to pre-set"
+      );
     }
   } finally {
     await closeServer(server);
@@ -3662,80 +3655,70 @@ test("hosted MCP picker renders an access-mode radio with continuous default and
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "access-mode-render");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "access-mode-render",
+    });
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
-
-    assert.match(html, /class="hosted-ui-access-mode"/, "picker must render the access-mode fieldset");
-    assert.ok(html.includes('name="access_mode" value="continuous" checked'), "picker must pre-select continuous");
+    // What moved: the radio group is the console's markup now, so the default
+    // and the vocabulary are asserted where the server states them — on the
+    // model, which is also exactly what the accept route validates against.
+    assert.equal(model.accessMode.value, "continuous", "continuous is the default access mode");
     assert.ok(
-      html.includes('name="access_mode" value="single_use"'),
-      "picker must offer single_use as the narrowing option"
+      model.accessMode.supported.includes("continuous"),
+      `continuous must be offered: ${model.accessMode.supported.join(", ")}`
     );
-    assert.ok(!html.includes('name="access_mode" value="single_use" checked'), "picker must NOT pre-select single_use");
+    assert.ok(
+      model.accessMode.supported.includes("single_use"),
+      `single_use must be offered as the narrowing option: ${model.accessMode.supported.join(", ")}`
+    );
 
-    // Retention copy honesty: the picker must not promise an
-    // owner-narrowable retention knob, must not advertise the
-    // off-spec `client_policy` classification, and must state the real
-    // server-generated retention bound (request-params:726) rather than
-    // the old "no time limit" disclaimer, which was accurate only before
-    // any retention policy existed.
-    assert.ok(!html.includes("client-policy retention"), "picker must not assert the legacy client-policy phrase");
-    assert.ok(!html.includes("client_policy"), "picker must not surface the off-spec retention.classification value");
+    // Retention copy honesty: the model must not promise an owner-narrowable
+    // retention knob, must not advertise the off-spec `client_policy`
+    // classification, and must state the real server-generated retention bound
+    // (request-params:726) rather than the old "no time limit" disclaimer,
+    // which was accurate only before any retention policy existed.
+    assert.equal(typeof model.retention, "string");
+    assert.ok(model.retention.length > 0, "retention must be a rendered sentence, not empty");
+    assert.equal(
+      model.retention.includes("client-policy retention"),
+      false,
+      "retention must not assert the legacy client-policy phrase"
+    );
+    assert.equal(
+      model.retention.includes("client_policy"),
+      false,
+      "retention must not surface the off-spec retention.classification value"
+    );
     // The page told the owner "data it reads is deleted within 90 days". Read
     // plainly, the subject is what the APP does — a promise the client never
     // made and this server cannot cause (spec-core.md:948, :951). No feature
     // makes that sentence true, so the fix is to state the absence.
     assert.match(
-      html,
+      model.retention,
       /did not say how long it keeps the data it receives\./,
-      "picker must state the absence of a retention commitment, naming the app"
+      "retention must state the absence of a commitment, naming the app"
     );
     assert.doesNotMatch(
-      html,
+      model.retention,
       /deleted within 90\s*days/i,
       "the server must never tell the owner the client deletes their data on a schedule it never accepted"
     );
-    // Retention is one of the exact terms the approval artifact states
-    // (spec-core.md:873-877). It also shares the server-authored block with
-    // purpose — both are things this server says. The obligation is the
-    // authorship CLASS, not the heading: retention must never render as
-    // something this server enforces — it is a recipient commitment PDPP does
-    // not enforce at all (:951).
-    assert.match(
-      html,
-      /data-hosted-mcp-review[\s\S]*did not say how long it keeps the data it receives/,
-      "the retention state renders on the artifact the owner approves"
-    );
-    assert.doesNotMatch(
-      html,
-      /aria-label="Data retention"[^>]*>[\s\S]{0,120}Your server enforces/,
-      "retention must never render under the 'Your server enforces' eyebrow"
-    );
-    assert.match(
-      html,
-      /class="hosted-ui-authorship" data-authorship="manifest"[^>]*aria-label="What this server sets and what the app said"/,
-      "retention is a structured policy declaration, not a protocol-enforced constraint — it must not render under 'Your server enforces'"
-    );
-    // Guard the substance directly: the retention sentence must sit inside a
-    // manifest-authorship block, never inside the protocol-enforced one.
-    const enforcedBlock = /data-authorship="protocol"[^>]*aria-label="Streams and access mode your server will enforce">([\s\S]*?)<\/div>/.exec(
-      html
-    );
-    assert.equal(
-      (enforcedBlock?.[1] ?? "").includes("did not say how long it keeps"),
-      false,
-      "the retention sentence must not appear inside the protocol-enforced block"
+    // GAP: the authorship CLASSES are gone from this assertion. The server
+    // used to prove structurally that retention rendered under
+    // `data-authorship="manifest"` and never inside the
+    // `data-authorship="protocol"` ("Streams and access mode your server will
+    // enforce") block. The model carries `retention` and `accessMode` as
+    // separate top-level fields, which keeps them from being conflated, but
+    // marking retention as a recipient commitment PDPP does not enforce
+    // (spec-core.md:951) is now the console's responsibility and is not
+    // asserted here.
+    assert.notEqual(
+      model.retention,
+      String(model.accessMode.value),
+      "retention and access mode remain distinct facts, not one merged claim"
     );
   } finally {
     await closeServer(server);
@@ -4288,32 +4271,30 @@ test("hosted MCP picker excludes internal/test/stub connectors", async () => {
     await seedDefaultHostedInstance(stubManifest as unknown as ConnectorManifest);
 
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "stub-filter-test");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "stub-filter-test",
+    });
 
     // The picker must not expose the stub connector's id or display name
     // in any selectable row. Spotify (real connector) must still appear.
+    // The row list is the model's `sources[]` now rather than the picker HTML,
+    // but "selectable row" means the same thing: an entry the owner can
+    // approve.
+    const rendered = JSON.stringify(model.sources);
     assert.equal(
-      html.includes("stream-test-stub"),
+      rendered.includes("stream-test-stub"),
       false,
-      "picker HTML MUST NOT contain the internal stub connector id"
+      "the model MUST NOT publish the internal stub connector id as a selectable source"
     );
     assert.equal(
-      html.includes("Stream Test Stub"),
+      rendered.includes("Stream Test Stub"),
       false,
-      "picker HTML MUST NOT contain the internal stub connector display name in a selectable row"
+      "the model MUST NOT publish the internal stub connector display name as a selectable source"
     );
-    assert.match(html, /spotify/i, "real connector (spotify) must still appear in the picker");
+    assert.match(rendered, /spotify/i, "real connector (spotify) must still be a selectable source");
   } finally {
     await closeServer(server);
   }
@@ -4351,56 +4332,49 @@ test("sourceMetadata.display_name uses human-readable connection name, not raw c
 
     const client = await registerAuthCodeClient(asUrl);
     const verifier = randomBytes(32).toString("base64url");
-    const challenge = pkceChallenge(verifier);
+    const codeChallenge = pkceChallenge(verifier);
     const state = "display-name-regression-test";
 
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", state);
-    authorizeUrl.searchParams.set("code_challenge", challenge);
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-    assert.equal(pickerResp.status, 200);
-    const pickerHtml = await pickerResp.text();
-
-    // The picker must show the connection under the named connection row.
-    assert.ok(
-      pickerHtml.includes(humanDisplayName),
-      `picker MUST surface the human display name "${humanDisplayName}" as a row label`
-    );
-
-    // Submit the picker with the connection-scoped selection value.
-    const params = new URLSearchParams();
-    params.append("client_id", client.client_id);
-    params.append("redirect_uri", "https://client.example/callback");
-    params.append("response_type", "code");
-    params.append("state", state);
-    params.append("code_challenge", challenge);
-    params.append("code_challenge_method", "S256");
-    params.append(
-      "selection",
-      encodeHostedMcpSelection({ connectionId: instanceId, connectorId: spotify.connector_id })
-    );
-    // Mirror explicit whole-source approval: submit every stream value.
-    for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
-      params.append("stream", streamValue);
-    }
-    params.append(
-      "decision_digest",
-      decisionDigestForRenderedPicker(pickerHtml, { clientId: client.client_id })
-    );
-
-    const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
-      body: params.toString(),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      method: "POST",
-      redirect: "manual",
+    // What moved: the owner surface is the console's now, so the mint is
+    // driven through the consent-challenge accept route instead of the picker
+    // form POST. The assertions on the MINTED artifact below are unchanged —
+    // they are the point of this test.
+    const challenge = await startPickerConsentChallenge({
+      asUrl,
+      clientId: client.client_id,
+      codeChallenge,
+      state,
     });
-    assert.equal(approveResp.status, 302);
-    const callback = new URL(mustExist(approveResp.headers.get("location"), "redirect must carry a Location header"));
+    const model = await fetchPickerConsentModel(asUrl, challenge);
+
+    // The owner surface must show the connection under its human name.
+    const source = mustExist(
+      model.sources.find(
+        (row) =>
+          row.selectionValue ===
+          encodeHostedMcpSelection({ connectionId: instanceId, connectorId: spotify.connector_id })
+      ),
+      "the model must publish a row for the named connection"
+    );
+    assert.equal(
+      source.account,
+      humanDisplayName,
+      `the model MUST surface the human display name "${humanDisplayName}" as the row's account label`
+    );
+
+    // Approve the connection-scoped row whole.
+    const approve = await postPickerConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      pickerConsentAcceptBody({
+        chosen: [{ source, streams: source.streams }],
+        clientId: client.client_id,
+        model,
+      })
+    );
+    assert.equal(approve.status, 200, JSON.stringify(approve.body));
+    const callback = new URL(stringField(approve.body, "redirect_url"));
     const code = mustExist(callback.searchParams.get("code"), "redirect must carry an authorization code");
     assert.ok(code);
 
@@ -4457,9 +4431,12 @@ test("sourceMetadata.display_name uses human-readable connection name, not raw c
 test("picker renders connector type and connection name as distinct semantic elements", async () => {
   // Acceptance target: the picker must make it clear that "Claude Code" is the
   // connector *type* and "laptop Claude Code" is the *connection name* —
-  // not two competing ontologies. The HTML must carry separate elements with
-  // class="hosted-ui-connector-type" and class="hosted-ui-connection-name"
-  // so they can be styled and machine-read as distinct concepts.
+  // not two competing ontologies. This used to be enforced as two separate
+  // HTML elements (class="hosted-ui-connector-type" and
+  // class="hosted-ui-connection-name"). The console renders now, so the
+  // separation is enforced one level earlier and more strongly: the model
+  // carries them as two distinct FIELDS, `name` (type) and `account`
+  // (connection), which no rendering can conflate back together.
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
 
@@ -4485,43 +4462,34 @@ test("picker renders connector type and connection name as distinct semantic ele
     });
 
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "type-vs-connection-test");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "type-vs-connection-test",
+    });
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
-
-    // The connector type (Spotify display name) must appear in a dedicated element.
-    assert.match(
-      html,
-      /class="hosted-ui-connector-type"[^>]*>[^<]*Spotify/,
-      "connector type label must be in a hosted-ui-connector-type element"
+    const source = mustExist(
+      model.sources.find(
+        (row) =>
+          row.selectionValue ===
+          encodeHostedMcpSelection({ connectionId: instanceId, connectorId: spotify.connector_id })
+      ),
+      "the model must publish a row for the named connection"
     );
 
-    // The connection name must appear in a dedicated element — distinct from
-    // the connector type element so type and instance are never ambiguous.
-    assert.match(
-      html,
-      /class="hosted-ui-connection-name"[^>]*>[^<]*My Work Spotify/,
-      "connection name must be in a hosted-ui-connection-name element separate from the connector type"
+    // The connector type (Spotify display name) is its own field.
+    assert.match(source.name, /Spotify/, "the connector type label must be the row's `name`");
+    // The connection name is its own field, distinct from the connector type,
+    // so type and instance are never ambiguous.
+    assert.equal(source.account, connectionDisplayName, "the connection name must be the row's `account`");
+    // The two MUST NOT be the same value — the whole point is that they are
+    // distinguished.
+    assert.notEqual(source.name, source.account, "connector type and connection name must be separate values");
+    assert.equal(
+      source.name.includes(connectionDisplayName),
+      false,
+      "the connector type MUST NOT contain the connection name — they must stay separate fields"
     );
-
-    // The connector type element and the connection name element MUST NOT be
-    // the same element — the whole point is that they are distinguished.
-    const connectorTypePattern = /class="hosted-ui-connector-type"[^>]*>([^<]*)<\/span>/g;
-    for (const match of html.matchAll(connectorTypePattern)) {
-      assert.ok(
-        !mustExist(match[1], "capture group must exist").includes(connectionDisplayName),
-        "connector type element MUST NOT contain the connection name — they must be separate elements"
-      );
-    }
   } finally {
     await closeServer(server);
   }
@@ -4553,30 +4521,34 @@ test("picker hides URL-shaped default connection labels from owner-visible copy"
     });
 
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "url-label-test");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const model = await fetchPickerConsentModelFor({
+      asUrl,
+      clientId: client.client_id,
+      state: "url-label-test",
+    });
 
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
-    const visibleText = visibleTextFromHtml(html);
-
-    assert.doesNotMatch(
-      html,
-      /class="hosted-ui-connection-name"[^>]*>https:\/\/registry\.pdpp\.org\/connectors\/spotify/,
-      "URL-shaped connector ids must not render as connection-name copy"
-    );
+    // What moved: "owner-visible picker text" was the visible text of the
+    // rendered page; it is now the owner-facing label fields the model hands
+    // the console. Opaque selection values are excluded on purpose — they are
+    // machine identifiers, exactly as the form values were.
+    const source = mustExist(model.sources[0], "the model must publish the seeded connection");
     assert.equal(
-      visibleText.includes("https://registry.pdpp.dev/connectors/spotify"),
+      /^https?:\/\//.test(String(source.account ?? "")),
       false,
-      "URL-shaped connector ids must not appear in owner-visible picker text"
+      `a URL-shaped connection label must never render as owner copy: ${source.account}`
     );
+    const ownerVisibleCopy = model.sources.flatMap((row) => [
+      row.name,
+      row.account ?? "",
+      ...row.streams.flatMap((stream) => [stream.label, stream.sentence]),
+    ]);
+    for (const copy of ownerVisibleCopy) {
+      assert.equal(
+        copy.includes("https://registry.pdpp.dev/connectors/spotify"),
+        false,
+        `URL-shaped connector ids must not appear in owner-visible copy: ${copy}`
+      );
+    }
   } finally {
     await closeServer(server);
   }
@@ -4998,22 +4970,16 @@ function chatgptShapedCimdDoc(clientId: string, overrides: Record<string, unknow
   };
 }
 
-async function fetchHostedMcpPickerHtml(
+// Was `fetchHostedMcpPickerHtml`. The picker branch no longer renders HTML, so
+// the client-identity facts these tests assert on are read from the console's
+// JSON render model instead — the same values, resolved by the same
+// `buildConsentClientDisplay` call that fed the markup.
+async function fetchHostedMcpPickerModel(
   asUrl: string,
   clientId: string,
   redirectUri = "https://client.example/callback"
-): Promise<string> {
-  const verifier = randomBytes(32).toString("base64url");
-  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-  authorizeUrl.searchParams.set("client_id", clientId);
-  authorizeUrl.searchParams.set("redirect_uri", redirectUri);
-  authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("state", "chatgpt-shape-state");
-  authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-  authorizeUrl.searchParams.set("code_challenge_method", "S256");
-  const resp = await fetch(authorizeUrl);
-  assert.equal(resp.status, 200);
-  return await resp.text();
+): Promise<PickerConsentModel> {
+  return await fetchPickerConsentModelFor({ asUrl, clientId, redirectUri, state: "chatgpt-shape-state" });
 }
 
 test("hosted MCP picker renders the CIMD client's resolved display name and its verified domain", async () => {
@@ -5023,40 +4989,38 @@ test("hosted MCP picker renders the CIMD client's resolved display name and its 
 
   try {
     await registerAuthorizedSpotify(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+    const model = await fetchHostedMcpPickerModel(asUrl, clientId, chatgptShapedRedirectUri(clientId));
 
     // spec-core.md:673 — the resolved display name MUST be shown when
     // available; client_id is only the fallback. The header used to lead with
     // the origin and label the actual name "Self-described app name", so a
     // request from ChatGPT rendered as a URL while we held the answer.
-    assert.match(
-      html,
-      /class="hosted-ui-client-identity-name"[^>]*>ChatGPT</,
-      "picker header must lead with the resolved display name"
-    );
-    assert.match(
-      html,
-      /class="hosted-ui-client-identity-domain"[^>]*>chatgpt\.example</,
-      "the origin stays, as the quiet second line"
-    );
+    // What moved: the header is the console's markup, so the same precedence
+    // is asserted on the fields the console is handed.
+    assert.equal(model.client.name, "ChatGPT", "the model must lead with the resolved display name");
+    assert.equal(model.client.domain, "chatgpt.example", "the origin stays, as its own quiet field");
     // Trust status as a neutral fact rather than an unconditional badge. This
     // client reached the picker through CIMD resolution, which means it served
     // a valid metadata document at its own https client_id — so it has proven
     // control of that domain, and the surface says exactly that much.
-    assert.match(
-      html,
-      /Verified domain: chatgpt\.example — this app controls that domain\./,
-      "a client that proved domain control must have that rendered distinctly (spec-core.md:675)"
+    assert.equal(
+      model.client.trust,
+      "domain",
+      "a client that proved domain control must be marked distinctly (spec-core.md:675)"
     );
-    // The claim never widens from the domain to the application.
-    assert.equal(html.includes("Verified app"), false, "domain control is not an endorsement of the app");
-    assert.doesNotMatch(html, /Unverified app/, "the unconditional badge is replaced by the fact line");
-    assert.doesNotMatch(html, /Metadata document/, "the metadata-document URL never reaches the owner surface");
-    assert.doesNotMatch(
-      html,
-      /<img[^>]*chatgpt\.example/i,
-      "picker must never fetch/render a remote client-supplied logo"
-    );
+    // The claim never widens from the domain to the application: `domain` is a
+    // narrower tier than `verified`, which only an operator registration earns.
+    assert.notEqual(model.client.trust, "verified", "domain control is not an endorsement of the app");
+    // The metadata-document URL never reaches the owner surface as copy.
+    assert.equal(model.client.name.includes("client.json"), false);
+    assert.equal(model.client.domain.includes("client.json"), false);
+    // GAP: the exact owner-facing trust SENTENCE ("Verified domain:
+    // chatgpt.example — this app controls that domain.") and the absence of
+    // the strings "Verified app" / "Unverified app" / "Metadata document" are
+    // no longer asserted here. The server now hands over the trust TIER and
+    // the console writes the sentence, so the wording moved out of this suite;
+    // the tier itself, which is what the wording must not overstate, is
+    // asserted above.
   } finally {
     await closeServer(server);
   }
@@ -5071,19 +5035,31 @@ test("hosted MCP picker renders a text monogram, never an <img>, for client iden
 
   try {
     await registerAuthorizedSpotify(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+    const model = await fetchHostedMcpPickerModel(asUrl, clientId, chatgptShapedRedirectUri(clientId));
 
-    const monogramMatch = html.match(/<span class="hosted-ui-client-monogram"[^>]*>([^<]*)<\/span>/);
-    assert.ok(monogramMatch, "picker must render a monogram element for client identity");
+    assert.equal(typeof model.client.monogram, "string", "the model must carry a monogram for client identity");
     assert.equal(
-      monogramMatch?.[1]?.trim(),
+      model.client.monogram.trim(),
       "CH",
       "monogram is a two-letter mark from the RESOLVED display name (ChatGPT -> CH), matching the design system's .pdpp-monogram; a lone 'C' derived from the URL string sat in a two-letter slot"
     );
-    assert.doesNotMatch(
-      html,
-      /<img[^>]*src="https:\/\/chatgpt\.example\/logo\.png"/,
-      "picker must not render the client-supplied logo_uri as an <img> even when present in the CIMD doc"
+
+    // The forbidden remote logo fetch (client-display:676) can no longer be a
+    // question of markup: assert the ABSENCE of any logo field on the model.
+    // The console cannot render an <img> from a URL it was never given, and
+    // the CIMD doc under test declares `logo_uri` precisely so this proves the
+    // server drops it rather than merely failing to use it.
+    for (const field of ["logo", "logoUri", "logo_uri", "iconUrl", "imageUrl"]) {
+      assert.equal(
+        Object.hasOwn(model.client, field),
+        false,
+        `the client identity MUST NOT carry a logo URL field (${field})`
+      );
+    }
+    assert.equal(
+      JSON.stringify(model.client).includes("logo.png"),
+      false,
+      "the client-supplied logo_uri must never reach the owner surface, even in another field"
     );
   } finally {
     await closeServer(server);
@@ -5102,17 +5078,20 @@ test("hosted MCP picker renders CIMD policy_uri/tos_uri as secondary links when 
 
   try {
     await registerAuthorizedSpotify(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+    const model = await fetchHostedMcpPickerModel(asUrl, clientId, chatgptShapedRedirectUri(clientId));
 
-    assert.match(
-      html,
-      /<a href="https:\/\/chatgpt\.example\/privacy"[^>]*>Privacy policy<\/a>/,
-      "picker must render policy_uri as a secondary link"
+    // What moved: the `<a href=...>` markup is the console's; the links
+    // themselves — href and label — are the fact the server resolves.
+    const byHref = new Map(model.client.policyLinks.map((link) => [link.href, link.label]));
+    assert.equal(
+      byHref.get("https://chatgpt.example/privacy"),
+      "Privacy policy",
+      "the model must publish policy_uri as a labelled link"
     );
-    assert.match(
-      html,
-      /<a href="https:\/\/chatgpt\.example\/terms"[^>]*>Terms of service<\/a>/,
-      "picker must render tos_uri as a secondary link"
+    assert.equal(
+      byHref.get("https://chatgpt.example/terms"),
+      "Terms of service",
+      "the model must publish tos_uri as a labelled link"
     );
   } finally {
     await closeServer(server);
@@ -5126,13 +5105,9 @@ test("hosted MCP picker omits policy/tos links when the CIMD doc carries neither
 
   try {
     await registerAuthorizedSpotify(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, clientId, chatgptShapedRedirectUri(clientId));
+    const model = await fetchHostedMcpPickerModel(asUrl, clientId, chatgptShapedRedirectUri(clientId));
 
-    assert.doesNotMatch(
-      html,
-      /class="hosted-ui-client-policy-links"/,
-      "no policy-links block should render with no data"
-    );
+    assert.deepEqual(model.client.policyLinks, [], "no links should be published with no data");
   } finally {
     await closeServer(server);
   }
@@ -5145,18 +5120,19 @@ test("hosted MCP picker names the requester in its title instead of a generic ap
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+    const model = await fetchHostedMcpPickerModel(asUrl, client.client_id);
 
-    assert.match(
-      html,
-      /<h1[^>]*>Hosted MCP test client wants to read your data<\/h1>/,
-      "picker title must name the resolved requester and the verb"
+    // What moved: the `<h1>` is the console's, so what is asserted is the
+    // input it can only write a named title from — the resolved requester
+    // name. A generic app-agnostic heading ("Choose what this app can read")
+    // is exactly what a model without a real name would force.
+    assert.equal(
+      model.client.name,
+      "Hosted MCP test client",
+      "the model must name the resolved requester, not a generic stand-in"
     );
-    assert.doesNotMatch(
-      html,
-      /<h1[^>]*>Choose what this app can read<\/h1>/,
-      "the old generic app-agnostic title must not remain as the page heading"
-    );
+    assert.equal(model.client.name, model.client.name.trim());
+    assert.notEqual(model.client.name, "This app", "the app-agnostic fallback must not be what a named client gets");
   } finally {
     await closeServer(server);
   }
@@ -5169,31 +5145,40 @@ test("hosted MCP picker renders the registry purpose code and description, not t
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+    const model = await fetchHostedMcpPickerModel(asUrl, client.client_id);
 
     // The registry code is a protocol identifier, not owner-facing copy: it
-    // stays in the grant and the audit record. What the owner reads is one
-    // sentence naming both the purpose and who assigned it.
-    assert.doesNotMatch(
-      html,
-      /https:\/\/pdpp\.dev\/purpose\/agent_context/,
-      "no purpose-code URI on the owner surface"
+    // stays in the grant and the audit record, and the model carries it on its
+    // own field so the console can keep it off the owner surface.
+    assert.equal(model.purpose.code, "https://pdpp.dev/purpose/agent_context");
+    assert.equal(
+      model.purpose.code.includes("personal_ai_assistant"),
+      false,
+      "the unregistered personal_ai_assistant purpose code must never be minted"
     );
-    assert.match(
-      html,
-      /Set by this server because [^<]*didn&#39;t give one/,
-      "purpose names its own origin in one sentence"
+    assert.equal(
+      model.purpose.description.includes("personal_ai_assistant"),
+      false,
+      "and it must not leak through the description either"
     );
-    assert.doesNotMatch(
-      html,
-      /personal_ai_assistant/,
-      "picker must not render the unregistered personal_ai_assistant purpose code"
+    assert.ok(
+      model.purpose.description.length > 0,
+      "the purpose must carry a description, not just a code"
     );
-    assert.match(
-      html,
-      /use the data you select as context for your AI assistant/i,
-      "picker must render a purpose description in plain words"
+    assert.equal(
+      model.purpose.description.includes("://"),
+      false,
+      `the description must be prose, not a second identifier: ${model.purpose.description}`
     );
+    // GAP: the picker's plain-words rewording of the purpose ("use the data
+    // you select as context for your AI assistant") and the sentence naming
+    // the purpose's ORIGIN ("Set by this server because <app> didn't give
+    // one") are no longer asserted. Both were picker copy composed from the
+    // canonical description plus the client name; the model hands the console
+    // the canonical `HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION` and the client
+    // name, and the owner-facing rewording is now the console's to write. What
+    // survives here is the protocol identity of the purpose — the part that
+    // the invented `personal_ai_assistant` code got wrong.
   } finally {
     await closeServer(server);
   }
@@ -5206,19 +5191,28 @@ test("hosted MCP picker wraps stream selection and access mode in the protocol a
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+    const model = await fetchHostedMcpPickerModel(asUrl, client.client_id);
 
-    const protocolBlockMatch = html.match(
-      /<div class="hosted-ui-authorship" data-authorship="protocol" aria-label="Streams and access mode your server will enforce"[^>]*>/
-    );
-    assert.ok(protocolBlockMatch, 'picker must render a data-authorship="protocol" block');
-    // The protocol block wrapping the picker's own selection controls must
-    // contain the option group and access-mode fieldset, not merely exist
-    // somewhere on the page (the reviewed-artifact pages already had
-    // data-authorship="protocol" blocks before this change; this locks that
-    // the picker's OWN controls are now wrapped too).
-    assert.match(html, /data-authorship="protocol"[^>]*>[\s\S]*?hosted-ui-option-group/);
-    assert.match(html, /data-authorship="protocol"[^>]*>[\s\S]*?hosted-ui-access-mode/);
+    // GAP: authorship marking is now the console's responsibility and is not
+    // asserted here. The picker used to wrap its own selection controls in a
+    // `<div class="hosted-ui-authorship" data-authorship="protocol"
+    // aria-label="Streams and access mode your server will enforce">` block,
+    // which is how the owner could tell which terms this server enforces from
+    // which are only what the app said. That block is markup the AS no longer
+    // emits for this branch, and nothing on the model records the authorship
+    // class of a field.
+    //
+    // What this test still locks is the input that marking needs: the two
+    // protocol-enforced facts — the stream selection and the access mode —
+    // must both be carried, and carried as protocol facts distinct from the
+    // manifest-authored and client-said ones (`purpose`, `retention`), so the
+    // console has something to mark and cannot mark the wrong thing.
+    const streams = model.sources.flatMap((source) => source.streams);
+    assert.ok(streams.length > 0, "the enforced stream selection must be published");
+    assert.ok(model.accessMode.supported.length > 0, "the enforced access mode must be published");
+    assert.equal(model.accessMode.value, "continuous");
+    assert.equal(typeof model.retention, "string", "the recipient commitment stays a separate field");
+    assert.equal(typeof model.purpose.description, "string", "as does the server-set purpose");
   } finally {
     await closeServer(server);
   }
@@ -5596,63 +5590,26 @@ test("POST /oauth/authorize/mcp-package rejects a stale review_digest after a co
 
 // --- Instance branding (PDPP_INSTANCE_NAME) --------------------------------
 
-test("hosted MCP picker headers the configured instance name alone, with PDPP as a footer attribution", async () => {
-  const server = await startServer({
-    asPort: 0,
-    dbPath: ":memory:",
-    ownerAuthPassword: "",
-    providerName: "Tim's Data Server",
-    quiet: true,
-    rsPort: 0,
-    ...TEST_INTROSPECTION_SERVER_OPTS,
-  });
-  const asUrl = `http://localhost:${server.asPort}`;
-
-  try {
-    const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-    authorizeUrl.searchParams.set("client_id", client.client_id);
-    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("state", "instance-branding");
-    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-    const resp = await fetch(authorizeUrl);
-    assert.equal(resp.status, 200);
-    const html = await resp.text();
-
-    assert.match(
-      html,
-      /<title>Tim&#39;s Data Server — Choose data sources<\/title>/,
-      "page title must carry the configured instance name"
-    );
-    assert.match(
-      html,
-      /<span class="hosted-ui-provider" aria-label="Provider">Tim&#39;s Data Server<\/span>/,
-      "operator label must render the configured instance name"
-    );
-    // The instance monogram is gone. spec-core.md:676's monogram rule governs
-    // the CLIENT — it is a safety fallback for an app whose logo must not be
-    // fetched. Turning it on the operator inverts it: the server is the one
-    // party on this page whose identity is not in question. It was also
-    // unstyled (`hosted-ui-instance-monogram` never appeared in the
-    // stylesheet), so "TD" rendered as bare text beside the wordmark and read
-    // at screenshot scale as the unexplained token "PDPP TD".
-    assert.doesNotMatch(html, /hosted-ui-instance-monogram/, "no operator monogram");
-
-    // Consent screens are branded with the party the owner trusts and is
-    // accountable to. Here that is the instance; PDPP is the plumbing, and
-    // plumbing does not get the letterhead. The protocol keeps a quiet footer
-    // attribution — where Plaid puts its own wordmark on a bank-branded
-    // screen — so the header states one identity, not two.
-    assert.doesNotMatch(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "no protocol wordmark in the header");
-    assert.match(html, /hosted-ui-footer-attribution">Secured by PDPP</, "PDPP attribution lives in the footer");
-  } finally {
-    await closeServer(server);
-  }
-});
+// DELETED: "hosted MCP picker headers the configured instance name alone, with
+// PDPP as a footer attribution".
+//
+// Everything it asserted was the shared server-rendered page chrome — the
+// `<title>`, the `hosted-ui-provider` header label, the absence of an operator
+// monogram and of a `hosted-ui-wordmark` PDPP header, and the "Secured by
+// PDPP" footer attribution. The picker branch renders no page, and the render
+// model carries no provider name at all (the console reads the instance name
+// from its own configuration), so there is no surface here to assert against.
+//
+// Nothing it covered is orphaned. The identical chrome contract is held
+// against the shared helpers by `hosted-ui.test.ts` ("no protocol wordmark in
+// the header" / "header carries the instance name" / "PDPP attribution moves
+// to the footer") and by `hosted-ui-theme-and-mark.test.ts`
+// ("renderBrandFooter: links Secured by PDPP to https://pdpp.dev"). This test
+// was the picker page's instance of that same contract.
+//
+// GAP: nothing asserts that the CONSENT screen specifically is branded with
+// the operator rather than the protocol. That claim now has to be made against
+// the console, which is where the screen lives.
 
 // --- Refusal (RFC 6749 §4.1.2.1) -------------------------------------------
 //
@@ -5782,23 +5739,37 @@ test("the picker renders Cancel as a first-class action beside Allow", async () 
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+    const state = "cancel-is-first-class";
+    const packageCountBefore = await countGrantPackagesForOwner();
 
-    assert.match(
-      html,
-      /formaction="\/oauth\/authorize\/mcp-package\/cancel"/,
-      "Cancel must post to the refusal route"
+    // GAP: the picker's own Cancel button — that it posts to the refusal
+    // route, is labelled "Cancel" and not "Deny", sits beside "Allow access",
+    // carries `formnovalidate`, and is let through by the submit guard's
+    // `event.submitter.value === "cancel"` check — is markup and script the AS
+    // no longer emits. Whether the console gives refusal equal billing cannot
+    // be asserted from here.
+    //
+    // What this test still locks is the guarantee that made the button
+    // possible: refusal must be reachable on the SAME artifact as approval,
+    // with no selection made and nothing minted. A challenge the owner has
+    // done nothing with must be refusable, and the client must be told.
+    const challenge = await startPickerConsentChallenge({ asUrl, clientId: client.client_id, state });
+
+    const { status, body } = await postPickerConsentChallenge(asUrl, challenge, "reject", {});
+
+    assert.equal(status, 200, JSON.stringify(body));
+    const redirectUrl = new URL(stringField(body, "redirect_url"));
+    assert.equal(
+      redirectUrl.searchParams.get("error"),
+      "access_denied",
+      "declining is answered as a refusal, not an error the owner caused"
     );
-    assert.match(html, />Cancel</, "the refusal is labelled Cancel, not Deny — declining is not an error");
-    assert.match(html, />Allow access</, "the affirmative action sits beside it");
-    // `formnovalidate` plus the submitter check in the picker script keep
-    // selection validation from blocking a refusal: an owner with nothing
-    // selected is exactly the owner most likely to be refusing.
-    assert.match(html, /formnovalidate/, "Cancel must not be gated by selection validation");
-    assert.match(
-      html,
-      /event\.submitter && event\.submitter\.value === "cancel"/,
-      "the client-side submit guard must let a refusal through"
+    assert.equal(redirectUrl.searchParams.get("state"), state, "the client's state round-trips on a refusal");
+    assert.equal(redirectUrl.searchParams.get("code"), null, "a refusal must never carry an authorization code");
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "refusing with nothing selected mints nothing"
     );
   } finally {
     await closeServer(server);
@@ -5834,19 +5805,72 @@ test("the picker renders a live summary of the decision as the approval artifact
   try {
     await registerAuthorizedSpotify(asUrl);
     const client = await registerAuthCodeClient(asUrl);
-    const html = await fetchHostedMcpPickerHtml(asUrl, client.client_id);
+    const state = "approval-artifact-binding";
+    const challenge = await startPickerConsentChallenge({ asUrl, clientId: client.client_id, state });
+    const model = await fetchPickerConsentModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    assert.ok(source.streams.length >= 2, `this test needs a source with at least two streams: ${source.streams.length}`);
+    const packageCountBefore = await countGrantPackagesForOwner();
 
-    assert.match(html, /data-hosted-mcp-review/, "the page carries a review panel");
-    assert.match(html, /What you're allowing/, "the panel is titled as the decision, not as a summary of options");
-    assert.match(html, /Nothing selected yet\./, "the empty state is honest before any selection");
-    // spec-core.md:873-877 — the artifact must state the exact resolved
-    // terms, not just the scope: coverage, duration, expiry, and what the
-    // recipient said about keeping the data all belong on it.
-    assert.match(html, /data-hosted-mcp-review-scope/, "the artifact states the selected scope");
-    assert.match(html, /data-hosted-mcp-review-duration/, "the artifact states the access duration");
-    assert.match(html, /This authorization has no scheduled end date\./, "the artifact states grant expiry");
-    assert.match(html, /did not say how long it keeps the data it receives/, "the artifact states retention state");
-    assert.match(html, /name="decision_digest"/, "the decision travels in a bound hidden field");
+    // What moved: the review panel ("What you're allowing", its empty state,
+    // the scope/duration/expiry/retention lines) is composed by the console
+    // now, so there is no server-rendered summary to read. The GUARANTEE the
+    // panel existed to serve is unchanged and is what this asserts: the
+    // decision the owner approved is BOUND, so an approval whose digest does
+    // not cover what is actually being granted mints nothing.
+    //
+    // The digest here is computed over ONE stream while the submission asks
+    // for TWO — exactly the drift a live summary is supposed to make visible,
+    // and the case where a summary that lied would otherwise mint silently.
+    const submittedStreams = source.streams.slice(0, 2);
+    const wrongDigest = computeHostedMcpDecisionDigest({
+      accessMode: "continuous",
+      clientId: client.client_id,
+      sources: [{ sourceKey: source.id, streamNames: [mustExist(submittedStreams[0], "stream").name] }],
+    });
+
+    const { status, body } = await postPickerConsentChallenge(asUrl, challenge, "accept", {
+      access_mode: "continuous",
+      decision_digest: wrongDigest,
+      grant_expiry: model.grantExpiry.defaultId,
+      review_digest: model.reviewDigest,
+      source_id: [source.id],
+      stream: submittedStreams.map((stream) => stream.id),
+    });
+
+    assert.equal(status, 400, JSON.stringify(body));
+    assert.equal(typeof body.error, "string", "the rejection is a typed error, not a silent mint");
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "an approval that does not bind the decision it grants must mint nothing"
+    );
+
+    // Positive control: the guard is a binding, not a blanket refusal. The
+    // same submission with a digest that DOES cover it mints.
+    const secondChallenge = await startPickerConsentChallenge({
+      asUrl,
+      clientId: client.client_id,
+      state: `${state}-bound`,
+    });
+    const secondModel = await fetchPickerConsentModel(asUrl, secondChallenge);
+    const secondSource = mustExist(secondModel.sources[0], "the model must publish a source to approve");
+    const bound = await postPickerConsentChallenge(
+      asUrl,
+      secondChallenge,
+      "accept",
+      pickerConsentAcceptBody({
+        chosen: [{ source: secondSource, streams: secondSource.streams.slice(0, 2) }],
+        clientId: client.client_id,
+        model: secondModel,
+      })
+    );
+    assert.equal(bound.status, 200, JSON.stringify(bound.body));
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore + 1,
+      "a correctly bound approval mints exactly one package"
+    );
   } finally {
     await closeServer(server);
   }
@@ -6004,6 +6028,373 @@ test("POST /oauth/authorize/mcp-package mints when the decision_digest matches t
       await countGrantPackagesForOwner(),
       packageCountBefore + 1,
       "exactly one package is minted"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// ─── Consent challenge API (console-rendered consent screen) ────────────────
+//
+// `GET /oauth/authorize` no longer renders the picker HTML for the hosted-MCP
+// branch. It parks the authorize params under an opaque `cc_...` challenge id
+// and redirects the owner to the console, which fetches a JSON render model
+// and posts the decision back. The tests below drive that handoff end to end.
+
+/** A ChatGPT-shaped authorize request for the hosted-MCP picker branch: no
+ * `authorization_details` and no `connector_id`, so the owner picks. */
+function hostedMcpAuthorizeUrl(asUrl: string, client: RegisteredClient, state: string): URL {
+  const url = new URL(`${asUrl}/oauth/authorize`);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", client.client_id);
+  url.searchParams.set("redirect_uri", "https://client.example/callback");
+  url.searchParams.set("code_challenge", pkceChallenge(randomBytes(32).toString("base64url")));
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("resource", `${asUrl}/mcp`);
+  url.searchParams.set("state", state);
+  url.searchParams.set("ui_locales", "en-US");
+  return url;
+}
+
+interface ConsentChallengeModelStream {
+  fieldsTotal: number;
+  id: string;
+  label: string;
+  name: string;
+  selected: boolean;
+  selectionValue: string;
+  sentence: string;
+  timePhrase?: string;
+}
+
+interface ConsentChallengeModelSource {
+  account: string | null;
+  icon: unknown;
+  id: string;
+  name: string;
+  selectionValue: string;
+  streams: ConsentChallengeModelStream[];
+}
+
+interface ConsentChallengeModel {
+  accessMode: { supported: string[]; value: string };
+  challenge: string;
+  client: { domain: string; monogram: string; name: string; policyLinks: unknown[]; trust: string };
+  grantExpiry: { defaultId: string; options: Array<{ days: number; id: string; label: string }> };
+  purpose: { code: string; description: string };
+  retention: string;
+  reviewDigest: string;
+  sources: ConsentChallengeModelSource[];
+}
+
+/** Follows the picker branch's 302 and returns the minted challenge id. */
+async function startConsentChallenge(asUrl: string, client: RegisteredClient, state: string): Promise<string> {
+  const resp = await fetch(hostedMcpAuthorizeUrl(asUrl, client, state), { redirect: "manual" });
+  assert.equal(resp.status, 302, "the picker branch hands off to the console");
+  const location = new URL(mustExist(resp.headers.get("location"), "must carry a Location header"));
+  return mustExist(location.searchParams.get("challenge"), "the redirect must name a challenge");
+}
+
+async function fetchConsentChallengeModel(asUrl: string, challenge: string): Promise<ConsentChallengeModel> {
+  const { status, body } = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`);
+  assert.equal(status, 200, JSON.stringify(body));
+  return body as unknown as ConsentChallengeModel;
+}
+
+/**
+ * Posts a decision the way the console does. `decision_digest` is the
+ * CONSOLE's commitment to what it displayed — the accept route never
+ * recomputes it — so it is computed here from the chosen sources exactly as
+ * `buildHostedMcpPickerForm` does for the form path.
+ */
+function consentChallengeAcceptBody({
+  model,
+  client,
+  chosen,
+  accessMode = "continuous",
+  reviewDigest,
+}: {
+  model: ConsentChallengeModel;
+  client: RegisteredClient;
+  chosen: Array<{ source: ConsentChallengeModelSource; streams: ConsentChallengeModelStream[] }>;
+  accessMode?: string;
+  reviewDigest?: string;
+}): Record<string, unknown> {
+  return {
+    access_mode: accessMode,
+    decision_digest: computeHostedMcpDecisionDigest({
+      accessMode,
+      clientId: client.client_id,
+      sources: chosen.map(({ source, streams }) => ({
+        sourceKey: source.id,
+        streamNames: streams.map((stream) => stream.name).sort(),
+      })),
+    }),
+    grant_expiry: model.grantExpiry.defaultId,
+    review_digest: reviewDigest ?? model.reviewDigest,
+    source_id: chosen.map(({ source }) => source.id),
+    stream: chosen.flatMap(({ streams }) => streams.map((stream) => stream.id)),
+  };
+}
+
+function postConsentChallenge(
+  asUrl: string,
+  challenge: string,
+  action: "accept" | "reject",
+  body: Record<string, unknown>
+): Promise<JsonResponse> {
+  return fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}/${action}`, {
+    body: JSON.stringify(body),
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
+
+// Locks the handoff itself: the picker branch must stop rendering HTML and
+// instead park the request under a `cc_` challenge the console can fetch.
+test("GET /oauth/authorize redirects the picker branch to the console consent challenge", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+
+    const resp = await fetch(hostedMcpAuthorizeUrl(asUrl, client, "handoff-state"), { redirect: "manual" });
+
+    assert.equal(resp.status, 302, "the picker branch redirects instead of rendering HTML");
+    const location = new URL(mustExist(resp.headers.get("location"), "must carry a Location header"));
+    assert.equal(location.host, "localhost:3000", "the owner is sent to the console");
+    assert.equal(location.pathname, "/consent", "the console renders the consent screen");
+    const challenge = mustExist(location.searchParams.get("challenge"), "the redirect must name a challenge");
+    assert.ok(challenge.startsWith("cc_"), `challenge id must be opaque and prefixed: ${challenge}`);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks the render model contract the console draws from: client identity,
+// purpose, retention, every eligible source, stable stream ids, and the
+// picker's "nothing pre-selected" default.
+test("the consent challenge model carries the client, purpose, retention, and every eligible source", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "model-state");
+
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+
+    assert.equal(model.challenge, challenge, "the model names the challenge it answers for");
+    assert.equal(model.client.name, "Hosted MCP test client", "the registered client_name is displayed");
+    assert.equal(model.purpose.code, "https://pdpp.dev/purpose/agent_context");
+    assert.equal(typeof model.retention, "string");
+    assert.ok(model.retention.length > 0, "retention must be a rendered sentence, not empty");
+    assert.ok(
+      model.retention.includes(model.client.name),
+      `retention must name the client: ${model.retention}`
+    );
+    assert.ok(model.sources.length >= 2, `both registered sources are eligible: ${model.sources.length}`);
+
+    const streams = model.sources.flatMap((source) => source.streams);
+    assert.ok(streams.length >= 2, `vacuity guard: the model must publish streams to check (${streams.length})`);
+    for (const source of model.sources) {
+      for (const stream of source.streams) {
+        assert.equal(stream.selected, false, `the picker pre-selects nothing: ${stream.id}`);
+        assert.equal(stream.id, `${source.id}:${stream.name}`, "stream ids are scoped to their source key");
+      }
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks the mint path: a console decision carrying a correct decision digest
+// mints exactly one package and hands the client redirect back as JSON.
+test("accepting a consent challenge mints the package and returns the client redirect", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "accept-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    const stream = mustExist(source.streams[0], "the source must publish a stream to approve");
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const { status, body } = await postConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      consentChallengeAcceptBody({ chosen: [{ source, streams: [stream] }], client, model })
+    );
+
+    assert.equal(status, 200, JSON.stringify(body));
+    const redirectUrl = stringField(body, "redirect_url");
+    assert.ok(redirectUrl.includes("code="), `the client receives an authorization code: ${redirectUrl}`);
+    assert.ok(redirectUrl.includes("accept-state"), `the original state is returned: ${redirectUrl}`);
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore + 1,
+      "exactly one package is minted"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks single-use consumption: the challenge is deleted before minting, so a
+// replayed accept cannot issue a second grant for one authorize request.
+test("a consent challenge is single-use: the second accept 404s and mints nothing", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "replay-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    const stream = mustExist(source.streams[0], "the source must publish a stream to approve");
+    const acceptBody = consentChallengeAcceptBody({ chosen: [{ source, streams: [stream] }], client, model });
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const first = await postConsentChallenge(asUrl, challenge, "accept", acceptBody);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const packageCountAfterFirst = await countGrantPackagesForOwner();
+    assert.equal(packageCountAfterFirst, packageCountBefore + 1, "the first accept mints once");
+
+    const replay = await postConsentChallenge(asUrl, challenge, "accept", acceptBody);
+
+    assert.equal(replay.status, 404, JSON.stringify(replay.body));
+    assert.equal(replay.body.error, "not_found", "a consumed challenge is indistinguishable from an unknown one");
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountAfterFirst,
+      "the replay mints nothing"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks the refusal path (RFC 6749 §4.1.2.1): declining must return
+// `error=access_denied` and the original state to the client, minting nothing.
+test("rejecting a consent challenge denies the client and mints nothing", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "reject-state");
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const { status, body } = await postConsentChallenge(asUrl, challenge, "reject", {});
+
+    assert.equal(status, 200, JSON.stringify(body));
+    const redirectUrl = stringField(body, "redirect_url");
+    assert.ok(redirectUrl.includes("error=access_denied"), `the client is told the owner declined: ${redirectUrl}`);
+    assert.ok(redirectUrl.includes("reject-state"), `the original state is returned: ${redirectUrl}`);
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "a refusal mints nothing"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks the translation guarantee: `source_id` is mapped against the model the
+// server resolves fresh, so an id the model never published maps to nothing.
+// It can only narrow the grant, never widen it — here it narrows to empty,
+// which the approval path must refuse.
+test("a tampered source_id on a consent challenge cannot widen the grant beyond the model", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "tamper-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const forgedSourceId = "chase:not-a-real-source";
+    assert.ok(
+      !model.sources.some((source) => source.id === forgedSourceId),
+      "the forged id must genuinely be absent from the model"
+    );
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const { status, body } = await postConsentChallenge(asUrl, challenge, "accept", {
+      access_mode: "continuous",
+      decision_digest: computeHostedMcpDecisionDigest({
+        accessMode: "continuous",
+        clientId: client.client_id,
+        sources: [{ sourceKey: forgedSourceId, streamNames: [] }],
+      }),
+      grant_expiry: model.grantExpiry.defaultId,
+      review_digest: model.reviewDigest,
+      source_id: [forgedSourceId],
+      stream: [`${forgedSourceId}:anything`],
+    });
+
+    assert.equal(status, 400, JSON.stringify(body));
+    assert.equal(typeof body.error, "string", "these routes answer in JSON, not HTML");
+    assert.equal(typeof body.error_description, "string");
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "an unresolvable selection mints nothing"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Locks the snapshot binding: the console commits to the `review_digest` it
+// was served, and the AS recomputes it from a fresh resolve. A stale one means
+// what the owner saw is no longer what would be granted.
+test("a stale review_digest on a consent challenge is rejected and mints nothing", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "stale-state");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "the model must publish a source to approve");
+    const stream = mustExist(source.streams[0], "the source must publish a stream to approve");
+    const packageCountBefore = await countGrantPackagesForOwner();
+
+    const { status, body } = await postConsentChallenge(
+      asUrl,
+      challenge,
+      "accept",
+      consentChallengeAcceptBody({
+        chosen: [{ source, streams: [stream] }],
+        client,
+        model,
+        reviewDigest: "sha256:stale",
+      })
+    );
+
+    assert.equal(status, 400, JSON.stringify(body));
+    assert.match(
+      stringField(body, "error_description"),
+      /changed since you loaded/i,
+      "the owner is told the request moved under them"
+    );
+    assert.equal(
+      await countGrantPackagesForOwner(),
+      packageCountBefore,
+      "a stale approval mints nothing"
     );
   } finally {
     await closeServer(server);
