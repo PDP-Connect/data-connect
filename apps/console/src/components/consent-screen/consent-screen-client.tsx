@@ -46,6 +46,7 @@ import type {
   ConsentStreamModel,
   ConsentTrustTier,
 } from "./consent-screen-model.ts";
+import { sourceAccountLabel } from "./consent-screen-model.ts";
 
 // Endorse's status vocabulary is written for GRANT state (active/expiring/
 // revoked/...), not identity trust — reusing it here borrows its VISUAL chip
@@ -362,6 +363,7 @@ function SourceRow({
   const selected = source.streams.filter((s) => selection[source.id]?.[s.name]);
   const total = source.streams.length;
   const allSelected = selected.length === total && total > 0;
+  const accountLabel = sourceAccountLabel(source.name, source.account);
   // Collapsed by default; open only for sources the request pre-selects. A
   // fixed initial state, not tied to live selection — checking a source
   // doesn't jump it open, unchecking doesn't collapse it. Reuses the same
@@ -406,7 +408,7 @@ function SourceRow({
               type="checkbox"
             />
             <span className={`pdpp-body ${styles.sourceName}`}>{source.name}</span>
-            {source.account && <span className={`pdpp-caption ${styles.sourceAccount}`}>{source.account}</span>}
+            {accountLabel && <span className={`pdpp-caption ${styles.sourceAccount}`}>{accountLabel}</span>}
           </label>
         </span>
         <span className={styles.sourceCount}>
