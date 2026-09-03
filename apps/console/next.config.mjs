@@ -92,7 +92,13 @@ const nextConfig = {
   // consume its TypeScript sources directly once shim pairs (.js + .d.ts)
   // collapse into single .ts exports. Without this, Next's bundler would
   // reject .ts entries from a node_modules-resolved workspace package.
-  transpilePackages: ["pdpp-reference-implementation", "@pdpp/brand", "@pdpp/brand-react", "@pdpp/operator-ui"],
+  transpilePackages: [
+    "pdpp-reference-implementation",
+    "@pdpp/brand",
+    "@pdpp/brand-react",
+    "@pdpp/operator-ui",
+    "@pdpp/polyfill-connectors",
+  ],
   webpack(config) {
     config.resolve.alias = {
       ...config.resolve.alias,
