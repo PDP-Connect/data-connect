@@ -301,3 +301,62 @@ fatal: Could not read from remote repository.
 No force-push or merge was attempted. The PR body was updated with the terminal
 receipt and this publication blocker, but this report commit cannot appear on
 the remote PR until the repository is made writable again.
+
+## Reviewer repair: cold-default mutation control
+
+PR #51 review found that
+`test/postgres-template-eligibility-migration-mutation-control.test.ts`
+previously forced `templateName: null`. That bypassed the runtime default in
+`withTemporaryPostgresDatabase`, so it could not prove that the file-identity
+selection seam stayed cold by default.
+
+The test is now listed in `POSTGRES_TEMPLATE_COLD_REQUIRED_FILES`, not the
+eligible list. It omits `templateName` and therefore lets the helper's real
+default read the current test process identity and choose cold versus the
+environment-pointed template. The fixture now starts from a real,
+identity-bearing template, corrupts only `run_history.completed_at` to legacy
+`NOT NULL`, and keeps its valid identity metadata. Before bootstrap, the
+test asserts that `run_history` does not exist. A cold database satisfies that;
+a clone proves itself by already containing the corrupted table.
+
+Fresh corrected-oracle proof (Node 22.23.1, `NODE_OPTIONS=--import=tsx`,
+fresh sentinel-marked `postgres:16-alpine` PostgreSQL 16.15 databases and its
+matching `pg_dump`):
+
+```text
+intact selector:
+# pass 2
+# fail 0
+# skipped 1
+mutation_control_exit=0
+
+inventory:
+# pass 2
+# fail 0
+inventory_exit=0
+
+selection mutation (`isPostgresTemplateEligibleFilePath` returns true):
+error: the real cold default must create an empty database; if selection is
+broadened to clone the env-pointed broken template, run_history already exists
+here and this mutation control fails before bootstrap can repair it
+true !== false
+mutation_test_exit=1
+```
+
+The selector was restored before the final focused proof. A new full-profile
+rerun was prepared with fresh dedicated sentinel databases, but did not start:
+the required preflight found only 8.6 GB free on `/`, below the mandated 10 GB
+minimum. No Docker builder prune was run, no partial profile result is claimed,
+and the original `pdpp-test-postgres-0810` listener was restored and verified
+as accepting connections.
+
+After Node 22.23.1 was reinstalled, the binary at the corrected-oracle path
+again reported `v22.23.1`. Exact retained-log searches found no `node: command
+not found` or `node not found` shell failure in either completed profile or the
+clean-main replay, so neither receipt is discarded. Broad `ENOENT` matches are
+the already-classified missing project artifacts and a missing linked `biome`
+binary; they are not a missing Node executable.
+
+The reviewer repair and this continuation note are in a subsequent signed local
+commit as well. The archived remote prevents either local report update from
+reaching PR #51 until the repository is writable.
