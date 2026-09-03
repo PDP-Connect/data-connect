@@ -10,7 +10,11 @@ const IcPopover = PopoverPrimitive.Root;
 const IcPopoverClose = PopoverPrimitive.Close;
 const IcPopoverTrigger = PopoverPrimitive.Trigger;
 
-const IcPopoverPopup = forwardRef<HTMLDivElement, ComponentProps<typeof PopoverPrimitive.Popup>>(
+type IcPopoverPopupProps = Omit<ComponentProps<typeof PopoverPrimitive.Popup>, "role">;
+
+// A popover is an interactive disclosure, unlike a passive tooltip. Keep the
+// shared primitive's dialog semantics intact so triggers and popups agree.
+const IcPopoverPopup = forwardRef<HTMLDivElement, IcPopoverPopupProps>(
   ({ className, id, ...props }, ref) => {
     const generatedId = useId();
     return (
@@ -21,6 +25,7 @@ const IcPopoverPopup = forwardRef<HTMLDivElement, ComponentProps<typeof PopoverP
           ref={ref}
           id={id ?? generatedId}
           {...props}
+          role="dialog"
         />
       </PopoverPrimitive.Positioner>
     </PopoverPrimitive.Portal>
