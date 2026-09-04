@@ -57,6 +57,8 @@ import {
   scanSharedLibraryKindDispatchFile,
   scanSharedLibraryKindDispatchRoot,
   sharedLibraryKindDispatchScanFiles,
+  sharedLibraryReportedPath,
+  sharedLibrarySrcDir,
 } from "./helpers/ri-zero-connector-knowledge-scan.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1054,9 +1056,15 @@ test("falsifiability (final-redteam #2 counterweight): RI's own reference-implem
 // `packages/polyfill-connectors/src/` (removed in `finally`) and prove
 // `scanSharedLibraryKindDispatchRoot` now catches it.
 
+// The synthetic file must land in the root the scanner actually walks -- the
+// installed `@pdpp/polyfill-connectors` package's `src/`, not the repo-relative
+// `packages/polyfill-connectors/src/` (a different, 19-file vendored subset;
+// see the scanner's own note). Writing to the repo path would prove only that
+// the scanner ignores a directory it no longer reads. `relPath` is still the
+// stable reported name, which is what violations are keyed by.
 function withSyntheticSharedLibraryFile<T>(fileName: string, contents: string, run: (relPath: string) => T): T {
-  const relPath = `packages/polyfill-connectors/src/${fileName}`;
-  const absPath = join(repoRoot, relPath);
+  const relPath = sharedLibraryReportedPath(fileName);
+  const absPath = join(sharedLibrarySrcDir(), fileName);
   if (existsSync(absPath)) {
     throw new Error(`refusing to overwrite a file that already exists on disk: ${absPath}`);
   }
@@ -1134,8 +1142,13 @@ test("falsifiability (terminal-redteam-0810 #3 counterweight): every real allowl
     "packages/polyfill-connectors/src/auto-login/heb.ts",
     "packages/polyfill-connectors/src/provider-auth-adapters.ts",
   ];
+  // Resolved against the scanned root (the installed package), which is where
+  // these files really live -- see withSyntheticSharedLibraryFile's note. This
+  // existence check is the anti-vacuity guard that caught the root drifting to
+  // a subset holding none of them: keep it pointed at what the scanner reads.
   for (const relPath of allowlistedRelPaths) {
-    assert.ok(existsSync(join(repoRoot, relPath)), `expected ${relPath} to exist as a real fixture`);
+    const absPath = join(sharedLibrarySrcDir(), relPath.slice("packages/polyfill-connectors/src/".length));
+    assert.ok(existsSync(absPath), `expected ${relPath} to exist as a real fixture (looked in ${absPath})`);
   }
   const files = sharedLibraryKindDispatchScanFiles({ repoRoot });
   for (const relPath of allowlistedRelPaths) {
@@ -1163,9 +1176,10 @@ test("falsifiability (terminal-redteam-0810 #3 counterweight): packages/polyfill
     "packages/polyfill-connectors/src/auto-login/usaa.ts",
   ];
   for (const relPath of legitimateFiles) {
+    const absPath = join(sharedLibrarySrcDir(), relPath.slice("packages/polyfill-connectors/src/".length));
     assert.ok(
-      existsSync(join(repoRoot, relPath)),
-      `expected ${relPath} to exist as a real fixture for this counterweight`
+      existsSync(absPath),
+      `expected ${relPath} to exist as a real fixture for this counterweight (looked in ${absPath})`
     );
   }
   assert.ok(
