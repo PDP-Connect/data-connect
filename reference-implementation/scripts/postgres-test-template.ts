@@ -94,8 +94,9 @@ async function databaseExists(admin: InstanceType<typeof Client>, databaseName: 
  *
  *   - `runnerId`            -- the run that built it (also encoded in the
  *                              template name; the two must agree)
- *   - `schemaVersion`       -- digest of the catalog (tables, columns,
- *                              indexes) the built template actually carries
+ *   - `schemaVersion`       -- digest of the template's COLUMNS and INDEXES
+ *                              only (see `computePostgresSchemaCatalogDigest`
+ *                              for exactly what is and is not covered)
  *   - `schemaSourceDigest`  -- digest of the `postgres-storage.ts` that
  *                              built it (must equal this process's own)
  *   - `builtAt`             -- creation instant, as the metadata table
@@ -163,10 +164,23 @@ function templateIdentityDigest(
 }
 
 /**
- * Digest of the schema a database actually carries: every column of every
- * table and every index definition in `public`, in catalog order. Computed
- * on the template while it still accepts connections (before
- * `ALLOW_CONNECTIONS false`) and recorded as its `schema_version`.
+ * Digest of a database's COLUMNS and INDEXES in `public`, in catalog order:
+ * every column's name, type, nullability and default, and every index
+ * definition. Computed on the template while it still accepts connections
+ * (before `ALLOW_CONNECTIONS false`) and recorded as its `schema_version`.
+ *
+ * SCOPE, stated exactly because the name invites a broader reading (external
+ * review P2). This is NOT a full schema identity. It does not cover
+ * constraints, triggers, row-level security policies, functions, sequences
+ * and their current values, types, extensions and their versions, ownership,
+ * privileges, collation, or the PostgreSQL server version. Two databases
+ * differing only in any of those digest identically here.
+ *
+ * That is tolerable for what this binding is for -- catching a template
+ * built from different migration source, which `schemaSourceDigest` binds
+ * directly and which would in practice also move columns or indexes -- but
+ * it must not be described as proving the template's whole schema matches.
+ * Widen this query before making that stronger claim.
  */
 export async function computePostgresSchemaCatalogDigest(connectionString: string): Promise<string> {
   const client = new Client({ connectionString });
