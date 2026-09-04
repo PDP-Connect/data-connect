@@ -313,6 +313,15 @@ async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDb
     } else {
       await client.query(`CREATE DATABASE "${dbName}"`);
     }
+    // State which provisioning path this file took. The choice is otherwise
+    // invisible from outside the runner, which is what let the eligibility
+    // half of `useTemplate` go untested (external review P1-1): a
+    // cold-required file wrongly routed through the template would still
+    // usually pass, because the template carries a correct schema. Naming
+    // the path makes the decision itself assertable.
+    process.stdout.write(
+      `PDPP_TEST_DB_PROVISION ${JSON.stringify({ file: filePath, path: useTemplate ? "template-clone" : "cold-bootstrap" })}\n`
+    );
     await client.end();
   } catch (err) {
     try {

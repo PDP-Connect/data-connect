@@ -39,6 +39,13 @@
  * `datistemplate=true, datallowconn=false` but fails identity verification
  * is exactly the "looks fine, quietly wrong" shape the reviewer's P2 finding
  * was about.
+ *
+ * SCOPE: every test here calls the template helpers DIRECTLY. They prove the
+ * clone helper is fail-closed; they do not exercise `run-tests.ts`'s decision
+ * about WHICH files get a clone at all. That selection seam is covered end to
+ * end by `test/run-tests-postgres-template-selection.test.ts`, which invokes
+ * the real runner as a subprocess -- see external review P1-1, which found
+ * that two tests here were named as though they covered it and did not.
  */
 
 import assert from "node:assert/strict";
@@ -240,7 +247,7 @@ test("REFUSES an intact template when the caller's identity token names a differ
   }
 });
 
-test("runner per-file clone refuses a template whose stored runner id was mutated before clone time", {
+test("clone helper refuses a template whose stored runner id was mutated before clone time", {
   skip: POSTGRES_SKIP,
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
@@ -270,7 +277,7 @@ test("runner per-file clone refuses a template whose stored runner id was mutate
   }
 });
 
-test("runner per-file clone refuses a template when the runner holds the wrong identity token", {
+test("clone helper refuses a template when the caller holds the wrong identity token", {
   skip: POSTGRES_SKIP,
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
