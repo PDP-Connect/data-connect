@@ -29,8 +29,9 @@
  * would be exactly the violation the guard exists to forbid.
  */
 
+import { createRequire } from "node:module";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { dirname, extname, join, relative } from "node:path";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { isExemptDataLoadPath, scanFileDataLoads } from "./ri-zero-connector-knowledge-data-load-scan.ts";
@@ -83,10 +84,25 @@ const REFERENCE_FIXTURE_MANIFEST_ROOT = "reference-implementation/fixtures/seed-
  * `validation.kind` literal branch, or a direct import of a connector's own
  * module — never rules (1)/(3)/(4)/(5), which are legitimately violated by
  * the rest of this root by design.
+ *
+ * This root is the `@pdpp/polyfill-connectors` PACKAGE's `src/`, resolved
+ * through the package the same way this file already reads its manifests
+ * (see the note above `REFERENCE_FIXTURE_MANIFEST_ROOT`) — not the
+ * repo-relative `packages/polyfill-connectors/src/` path this constant used
+ * to name. That repo path is a different thing that happens to share a name:
+ * `packages/polyfill-connectors` is `@pdpp/polyfill-connectors-vendored-source`,
+ * a 19-file closed subset vendored by physical file into
+ * `@pdpp/local-collector`'s build (see its own package.json), and it holds
+ * none of the files this invariant is written about. Pointing here at that
+ * subset scanned 19 unrelated files and returned no violations while every
+ * module the guard exists to watch — `orchestrator.ts`, `auto-login/*.ts`,
+ * `static-secret-injection.ts` — went unexamined. See
+ * {@link sharedLibraryKindDispatchScanFiles} for the guard that keeps that
+ * silence from being possible again.
  */
-const SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT = "packages/polyfill-connectors/src";
+const SHARED_LIBRARY_KIND_DISPATCH_PACKAGE = "@pdpp/polyfill-connectors";
 
-/** Files at {@link SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT} legitimately
+/** Files at the {@link SHARED_LIBRARY_KIND_DISPATCH_PACKAGE} `src/` root legitimately
  * exempt from rules (6)/(7) — see that constant's doc comment for what each
  * entry is and why. Exact-file, not a directory/prefix allowlist: adding a
  * new entry requires deliberately widening this Set, not an incidental path
@@ -112,6 +128,16 @@ const SHARED_LIBRARY_KIND_DISPATCH_ALLOWLIST = new Set([
   "packages/polyfill-connectors/src/auto-login/heb.ts",
   "packages/polyfill-connectors/src/provider-auth-adapters.ts",
 ]);
+
+/**
+ * The shared library is read from the installed package, but its files are
+ * still REPORTED under the `packages/polyfill-connectors/src/...` names above
+ * — that is the path a reader opens to inspect a violation, and it keeps the
+ * allowlist and every `Violation.file` in this root stable across whatever
+ * physical location the package resolves to (hoisted `node_modules`, a
+ * workspace link, an unpacked tarball).
+ */
+const SHARED_LIBRARY_REPORTED_PATH_PREFIX = "packages/polyfill-connectors/src";
 
 const REGISTRY_ID_PREFIX = "https://registry.pdpp.dev/connectors/";
 
@@ -239,13 +265,56 @@ export function productionFiles({ repoRoot }: ScanRoots): string[] {
   return out.sort((a, b) => a.localeCompare(b));
 }
 
-/** Every file at {@link SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT}, minus the
- * one exact-file allowlist entry — the file set rules (6)/(7) run against. */
-export function sharedLibraryKindDispatchScanFiles({ repoRoot }: ScanRoots): string[] {
-  const scanRootDir = join(repoRoot, SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT);
-  const out: string[] = [];
-  walkTsFiles(scanRootDir, scanRootDir, repoRoot, out);
-  return out
+/**
+ * Absolute path to the installed {@link SHARED_LIBRARY_KIND_DISPATCH_PACKAGE}'s
+ * `src/`. Resolved through the package's own `./collectors` export (which
+ * points at `src/collector-registry.ts`) rather than a hardcoded
+ * `node_modules/...` path, so this follows the package wherever it is
+ * installed from — the same posture as this file's `readPolyfillManifests()`
+ * import.
+ */
+export function sharedLibrarySrcDir(): string {
+  const require = createRequire(import.meta.url);
+  return dirname(require.resolve(`${SHARED_LIBRARY_KIND_DISPATCH_PACKAGE}/collectors`));
+}
+
+/** The stable reported name for a file at {@link sharedLibrarySrcDir}, e.g.
+ * `packages/polyfill-connectors/src/orchestrator.ts`. Exported so
+ * falsifiability tests can inject a synthetic file into the root the scanner
+ * really walks and predict the path it will be reported under. */
+export function sharedLibraryReportedPath(packageRelPath: string): string {
+  return `${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/${packageRelPath.split("\\").join("/")}`;
+}
+
+/** Every file at the shared library's `src/`, minus the exact-file allowlist
+ * entries — the file set rules (6)/(7) run against.
+ *
+ * Takes {@link ScanRoots} for call-site symmetry with the other scan-set
+ * functions, but reads none of it: this root is resolved through the package,
+ * not off `repoRoot`. */
+export function sharedLibraryKindDispatchScanFiles(_roots: ScanRoots): string[] {
+  const scanRootDir = sharedLibrarySrcDir();
+  const absolute: string[] = [];
+  // `walkTsFiles` reports paths relative to its `repoRoot` argument; the
+  // package lives outside the repo tree, so walk relative to the scan root and
+  // re-prefix below rather than emitting a pile of `../../` paths.
+  walkTsFiles(scanRootDir, scanRootDir, scanRootDir, absolute);
+
+  // A root that resolves to nothing is the failure mode that let this guard
+  // drift: `walkTsFiles` swallows a missing directory and returns [], which
+  // reads downstream as "scanned everything, found nothing wrong". An empty
+  // shared library is not a real state of this repo, so say so loudly instead
+  // of reporting a vacuous pass.
+  if (absolute.length === 0) {
+    throw new Error(
+      `${SHARED_LIBRARY_KIND_DISPATCH_PACKAGE} resolved to ${scanRootDir}, which contains no scannable files. ` +
+        "The shared-library kind-dispatch guard would silently pass against an empty file set. " +
+        "Install dependencies, or fix the package resolution, before trusting this scan."
+    );
+  }
+
+  return absolute
+    .map((packageRelPath) => sharedLibraryReportedPath(packageRelPath))
     .filter((relPath) => !SHARED_LIBRARY_KIND_DISPATCH_ALLOWLIST.has(relPath))
     .sort((a, b) => a.localeCompare(b));
 }
@@ -432,7 +501,7 @@ export function scanFile(
     }
   }
 
-  const isSharedLibraryFile = relPath.startsWith(`${SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT}/`);
+  const isSharedLibraryFile = relPath.startsWith(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`);
   violations.push(
     ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile).map((v) => ({
       file: v.file,
@@ -468,7 +537,7 @@ const SHARED_LIBRARY_KIND_DISPATCH_RULES = new Set([
 ]);
 
 /**
- * Scans one {@link SHARED_LIBRARY_KIND_DISPATCH_SCAN_ROOT} file for ONLY
+ * Scans one {@link SHARED_LIBRARY_KIND_DISPATCH_PACKAGE} `src/` file for ONLY
  * rules (6)/(7)/(4b) — see that constant's doc comment for why rules (1)/(3)/
  * (4)/(5) do not apply here. Exported (not inlined into
  * {@link scanSharedLibraryKindDispatchRoot}) so falsifiability tests can
@@ -489,11 +558,14 @@ export function scanSharedLibraryKindDispatchFile(
 export function scanSharedLibraryKindDispatchRoot(roots: ScanRoots): Violation[] {
   const validationKinds = manifestDerivedValidationKinds(roots);
   const files = sharedLibraryKindDispatchScanFiles(roots);
+  const scanRootDir = sharedLibrarySrcDir();
   const violations: Violation[] = [];
   for (const relPath of files) {
-    violations.push(
-      ...scanSharedLibraryKindDispatchFile(join(roots.repoRoot, relPath), relPath, validationKinds, roots.repoRoot)
-    );
+    // Read from where the package actually is; report under the stable
+    // `packages/polyfill-connectors/src/...` name (see
+    // {@link SHARED_LIBRARY_REPORTED_PATH_PREFIX}).
+    const absPath = join(scanRootDir, relPath.slice(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`.length));
+    violations.push(...scanSharedLibraryKindDispatchFile(absPath, relPath, validationKinds, roots.repoRoot));
   }
   return violations;
 }
