@@ -66,6 +66,29 @@ async function currentPostgresStorageSourceDigest(): Promise<string> {
 const TEMPLATE_METADATA_TABLE = "pdpp_test_template_metadata";
 
 /**
+ * Byte length of the per-run nonce that template names derive from.
+ *
+ * External review P1-2: this was 4 bytes (32 bits), which puts a same-name
+ * collision inside the range a shared CI cluster reaches -- roughly 77k runs
+ * for a 50% chance, by the birthday bound. Since a colliding name is exactly
+ * the condition under which one run could inherit another's template, the
+ * nonce is the whole separation guarantee and 16 bytes (128 bits) makes it
+ * negligible.
+ */
+export const POSTGRES_TEST_RUNNER_NONCE_BYTES = 16;
+
+/** What a completed template build publishes: its name and the identity it committed. */
+export interface BuiltPostgresTestTemplate {
+  identityDigest: string;
+  templateName: string;
+}
+
+async function databaseExists(admin: InstanceType<typeof Client>, databaseName: string): Promise<boolean> {
+  const { rows } = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [databaseName]);
+  return rows.length > 0;
+}
+
+/**
  * Everything a clone call site verifies before trusting a template. Each
  * field is one of the four identity elements the P2 review asked to bind:
  *
@@ -88,6 +111,13 @@ const TEMPLATE_METADATA_TABLE = "pdpp_test_template_metadata";
 export interface PostgresTestTemplateMetadata {
   builtAt: string;
   identityDigest: string;
+  /**
+   * OID of the template database itself. Bound into the identity digest so a
+   * drop-and-recreate that preserves the NAME is detected: PostgreSQL issues
+   * a new OID for the new database, and the recomputed digest stops matching
+   * (external review P2).
+   */
+  templateOid: string;
   runnerId: string;
   schemaSourceDigest: string;
   schemaVersion: string;
@@ -109,7 +139,8 @@ async function ensureTemplateMetadataTable(admin: InstanceType<typeof Client>): 
   await admin.query(
     `ALTER TABLE ${TEMPLATE_METADATA_TABLE}
        ADD COLUMN IF NOT EXISTS schema_version text,
-       ADD COLUMN IF NOT EXISTS identity_digest text`
+       ADD COLUMN IF NOT EXISTS identity_digest text,
+       ADD COLUMN IF NOT EXISTS template_oid text`
   );
 }
 
@@ -125,6 +156,7 @@ function templateIdentityDigest(
         metadata.schemaVersion,
         metadata.schemaSourceDigest,
         metadata.builtAt,
+        metadata.templateOid,
       ])
     )
     .digest("hex");
@@ -158,35 +190,70 @@ export async function computePostgresSchemaCatalogDigest(connectionString: strin
   }
 }
 
+/**
+ * Write the metadata row and return the identity it published.
+ *
+ * The identity is computed BEFORE the row is written, from values this
+ * builder chose, and is then inserted in the same statement as those values.
+ * That ordering is the point (external review P1-2): an identity derived by
+ * reading a row back cannot distinguish the row this run just wrote from one
+ * that was already there. `builtAt` is therefore supplied by the caller as a
+ * fixed ISO string rather than left to the server's `now()`, so the digest
+ * can be committed up front and still cover the stored timestamp exactly.
+ */
 async function writeTemplateMetadata(
   admin: InstanceType<typeof Client>,
   templateName: string,
-  metadata: { runnerId: string; schemaSourceDigest: string; schemaVersion: string }
-): Promise<void> {
+  metadata: {
+    builtAt: string;
+    runnerId: string;
+    schemaSourceDigest: string;
+    schemaVersion: string;
+    templateOid: string;
+  }
+): Promise<string> {
   await ensureTemplateMetadataTable(admin);
-  await admin.query(
-    `INSERT INTO ${TEMPLATE_METADATA_TABLE} (template_name, runner_id, schema_source_digest, schema_version, identity_digest)
-       VALUES ($1, $2, $3, $4, NULL)
-     ON CONFLICT (template_name) DO UPDATE
-       SET runner_id = EXCLUDED.runner_id,
-           schema_source_digest = EXCLUDED.schema_source_digest,
-           schema_version = EXCLUDED.schema_version,
-           identity_digest = NULL,
-           built_at = now()`,
-    [templateName, metadata.runnerId, metadata.schemaSourceDigest, metadata.schemaVersion]
+  // The digest must cover `built_at` exactly as the table will later RENDER
+  // it (`built_at::text`), which is not the ISO-8601 form we hand in. Ask the
+  // server to render our chosen instant first, so the value hashed here and
+  // the value read at clone time are byte-identical -- without ever letting
+  // the row itself decide what the identity is.
+  const { rows: renderedRows } = await admin.query<{ built_at: string }>(
+    "SELECT ($1::timestamptz)::text AS built_at",
+    [metadata.builtAt]
   );
-  // The identity digest covers `built_at` exactly as the table returns it,
-  // so it is computed from the stored row rather than from the values just
-  // inserted: that keeps the clone-time recomputation byte-identical to the
-  // build-time one regardless of how the server renders the timestamp.
+  const builtAt = renderedRows[0]?.built_at;
+  if (!builtAt) {
+    throw new Error(`could not render build timestamp ${JSON.stringify(metadata.builtAt)} for template metadata`);
+  }
+  const identityDigest = templateIdentityDigest(templateName, { ...metadata, builtAt });
+  await admin.query(
+    `INSERT INTO ${TEMPLATE_METADATA_TABLE} (template_name, runner_id, schema_source_digest, schema_version, identity_digest, built_at, template_oid)
+       VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7)`,
+    [
+      templateName,
+      metadata.runnerId,
+      metadata.schemaSourceDigest,
+      metadata.schemaVersion,
+      identityDigest,
+      metadata.builtAt,
+      metadata.templateOid,
+    ]
+  );
+  // Read back only to CONFIRM the published row reproduces the precommitted
+  // digest -- never to source it. If the server rendered `built_at`
+  // differently from the string we hashed, fail loudly here rather than let
+  // clone-time recomputation disagree later.
   const stored = await readTemplateMetadata(admin, templateName);
   if (!stored) {
     throw new Error(`template metadata row for "${templateName}" vanished between insert and read-back`);
   }
-  await admin.query(`UPDATE ${TEMPLATE_METADATA_TABLE} SET identity_digest = $2 WHERE template_name = $1`, [
-    templateName,
-    templateIdentityDigest(templateName, stored),
-  ]);
+  if (templateIdentityDigest(templateName, stored) !== identityDigest) {
+    throw new Error(
+      `template metadata row for "${templateName}" does not reproduce the identity committed before publication (stored built_at ${JSON.stringify(stored.builtAt)} vs written ${JSON.stringify(metadata.builtAt)})`
+    );
+  }
+  return identityDigest;
 }
 
 async function readTemplateMetadata(
@@ -201,9 +268,10 @@ async function readTemplateMetadata(
     schema_source_digest: string;
     schema_version: string | null;
     identity_digest: string | null;
+    template_oid: string | null;
     built_at: string;
   }>(
-    `SELECT runner_id, schema_source_digest, schema_version, identity_digest, built_at::text AS built_at
+    `SELECT runner_id, schema_source_digest, schema_version, identity_digest, template_oid, built_at::text AS built_at
        FROM ${TEMPLATE_METADATA_TABLE}
       WHERE template_name = $1`,
     [templateName]
@@ -217,6 +285,7 @@ async function readTemplateMetadata(
     runnerId: row.runner_id,
     schemaSourceDigest: row.schema_source_digest,
     schemaVersion: row.schema_version ?? "",
+    templateOid: row.template_oid ?? "",
   };
 }
 
@@ -228,6 +297,14 @@ async function readTemplateMetadata(
  * connection before any template database exists.
  */
 const TEMPLATE_BUILD_SERIALIZATION_LOCK = [482_571, 151];
+
+/**
+ * Advisory lock held across the whole verify -> capture-OID -> clone
+ * sequence, so two participants cannot interleave a template swap between
+ * one another's check and copy (external review P2). Distinct from the build
+ * lock: a clone must not block template construction, only other clones.
+ */
+export const TEMPLATE_CLONE_SERIALIZATION_LOCK = [482_571, 152];
 
 function adminUrl(connectionString: string): string {
   const url = new URL(connectionString);
@@ -366,21 +443,27 @@ async function templateIdentityMatches(
  * callers that want that fallback must catch and decide explicitly, and this
  * harness's own call sites do not.
  */
-export async function ensurePostgresTestTemplate(baseConnectionString: string, runnerId: string): Promise<string> {
+export async function ensurePostgresTestTemplate(
+  baseConnectionString: string,
+  runnerId: string
+): Promise<BuiltPostgresTestTemplate> {
   const templateName = deriveDedicatedPostgresTemplateName(runnerId);
+  let identityDigest: string | null = null;
 
   await withAdminClient(baseConnectionString, async (admin) => {
     await admin.query("SELECT pg_advisory_lock($1, $2)", TEMPLATE_BUILD_SERIALIZATION_LOCK);
     try {
-      if (await templateIsUsable(admin, templateName)) {
-        return;
+      // A database already occupying this run's name is an ERROR, never
+      // something to adopt (external review P1-2). `runnerId` is a fresh
+      // >=128-bit nonce, so nothing legitimate can already be here; whatever
+      // is, this run did not build it, and anything this run later
+      // "verifies" about it would be verifying a stranger's work.
+      if (await databaseExists(admin, templateName)) {
+        throw new Error(
+          `Postgres test template "${templateName}" already exists before this run built it. The template name derives from a freshly generated ${POSTGRES_TEST_RUNNER_NONCE_BYTES}-byte run nonce, so a collision is not expected; refusing to adopt a template this run did not create rather than inheriting an unknown schema. Drop it if it is a leftover.`
+        );
       }
 
-      // Not usable (absent, or a stale half-built leftover from a crashed
-      // prior attempt under the same runnerId -- extremely unlikely given
-      // runnerId is a fresh random hex per run, but handled explicitly
-      // rather than assumed away): drop and rebuild from scratch.
-      await admin.query(`DROP DATABASE IF EXISTS ${quotedIdentifier(templateName)} WITH (FORCE)`);
       await admin.query(`CREATE DATABASE ${quotedIdentifier(templateName)}`);
 
       const templateUrl = databaseUrl(baseConnectionString, templateName);
@@ -422,7 +505,13 @@ export async function ensurePostgresTestTemplate(baseConnectionString: string, r
       // successfully-built template stands behind it -- never the reverse
       // ordering, which could leave a metadata row pointing at a template
       // build that failed partway through marking.
-      await writeTemplateMetadata(admin, templateName, {
+      const builtOid = await templateOid(admin, templateName);
+      if (builtOid === null) {
+        throw new Error(`Postgres test template "${templateName}" vanished immediately after being built`);
+      }
+      identityDigest = await writeTemplateMetadata(admin, templateName, {
+        builtAt: new Date().toISOString(),
+        templateOid: builtOid,
         runnerId,
         schemaSourceDigest: await currentPostgresStorageSourceDigest(),
         schemaVersion,
@@ -432,7 +521,10 @@ export async function ensurePostgresTestTemplate(baseConnectionString: string, r
     }
   });
 
-  return templateName;
+  if (identityDigest === null) {
+    throw new Error(`Postgres test template "${templateName}" build completed without publishing an identity`);
+  }
+  return { identityDigest, templateName };
 }
 
 /**
@@ -448,19 +540,59 @@ export async function assertPostgresTestTemplateUsable(
   { expectedIdentity }: { expectedIdentity?: string | undefined } = {}
 ): Promise<PostgresTestTemplateMetadata> {
   return await withAdminClient(baseConnectionString, async (admin) => {
-    if (!(await templateIsUsable(admin, templateName))) {
-      throw new Error(
-        `Postgres test template "${templateName}" is missing or not usable (expected datistemplate=true, datallowconn=false). Refusing to fall back to a from-scratch bootstrap silently -- if the template was supposed to exist, this is the bug; if templating is not wanted, unset PDPP_TEST_POSTGRES_TEMPLATE instead.`
-      );
-    }
-    const identity = await templateIdentityMatches(admin, templateName, expectedIdentity);
-    if (!identity.ok) {
-      throw new Error(
-        `Postgres test template "${templateName}" failed identity verification: ${identity.reason}. Refusing to clone from a template that cannot be proven to be the one this run built from this process's own migration code -- a stale, foreign, or altered template could otherwise mask a real migration defect.`
-      );
-    }
-    return identity.metadata;
+    const verified = await verifyTemplateOnConnection(admin, templateName, expectedIdentity);
+    return verified.metadata;
   });
+}
+
+/**
+ * Verify a template using an ALREADY-OPEN admin connection, returning both
+ * its metadata and the OID of the database that was actually verified.
+ *
+ * Taking the connection as a parameter is the point (external review P2):
+ * the caller can hold one connection across verification and the subsequent
+ * `CREATE DATABASE ... TEMPLATE`, instead of checking on a connection that is
+ * closed before the clone runs. The OID comes back so the caller can prove,
+ * immediately before cloning, that the name still refers to the same
+ * database it verified.
+ */
+async function verifyTemplateOnConnection(
+  admin: InstanceType<typeof Client>,
+  templateName: string,
+  expectedIdentity: string | undefined
+): Promise<{ metadata: PostgresTestTemplateMetadata; oid: string }> {
+  if (!(await templateIsUsable(admin, templateName))) {
+    throw new Error(
+      `Postgres test template "${templateName}" is missing or not usable (expected datistemplate=true, datallowconn=false). Refusing to fall back to a from-scratch bootstrap silently -- if the template was supposed to exist, this is the bug; if templating is not wanted, unset PDPP_TEST_POSTGRES_TEMPLATE instead.`
+    );
+  }
+  const identity = await templateIdentityMatches(admin, templateName, expectedIdentity);
+  if (!identity.ok) {
+    throw new Error(
+      `Postgres test template "${templateName}" failed identity verification: ${identity.reason}. Refusing to clone from a template that cannot be proven to be the one this run built from this process's own migration code -- a stale, foreign, or altered template could otherwise mask a real migration defect.`
+    );
+  }
+  const oid = await templateOid(admin, templateName);
+  if (oid === null) {
+    throw new Error(`Postgres test template "${templateName}" disappeared during verification`);
+  }
+  // The identity binds the OID the template had when it was built. If the
+  // name now resolves to a different database, this run is looking at
+  // something it did not build -- a drop-and-recreate under the same name
+  // (external review P2). Nothing else in the row would reveal that.
+  if (identity.metadata.templateOid !== oid) {
+    throw new Error(
+      `Postgres test template "${templateName}" failed identity verification: the name now refers to a different database (metadata records oid ${JSON.stringify(identity.metadata.templateOid)}, the live template has oid ${oid}) -- it was dropped and recreated under the same name since this run built it.`
+    );
+  }
+  return { metadata: identity.metadata, oid };
+}
+
+async function templateOid(admin: InstanceType<typeof Client>, templateName: string): Promise<string | null> {
+  const { rows } = await admin.query<{ oid: string }>("SELECT oid::text AS oid FROM pg_database WHERE datname = $1", [
+    templateName,
+  ]);
+  return rows[0]?.oid ?? null;
 }
 
 /**
@@ -476,8 +608,29 @@ export async function clonePostgresTestDatabaseFromTemplate(
   expectedIdentity: string
 ): Promise<void> {
   await withAdminClient(baseConnectionString, async (admin) => {
-    await assertPostgresTestTemplateUsable(baseConnectionString, templateName, { expectedIdentity });
-    await admin.query(`CREATE DATABASE ${quotedIdentifier(databaseName)} TEMPLATE ${quotedIdentifier(templateName)}`);
+    // ONE connection, ONE lock, across verify -> capture OID -> clone
+    // (external review P2). Previously the verification ran on a second,
+    // independently opened connection that was already closed by the time
+    // CREATE DATABASE ran here, so nothing tied what was checked to what was
+    // copied.
+    await admin.query("SELECT pg_advisory_lock($1, $2)", TEMPLATE_CLONE_SERIALIZATION_LOCK);
+    try {
+      const verified = await verifyTemplateOnConnection(admin, templateName, expectedIdentity);
+      // Re-read the OID immediately before the clone. The lock keeps other
+      // participants in this protocol out, but a drop-and-recreate from
+      // anything that does not take the lock would otherwise be invisible:
+      // the name still resolves, so only the OID reveals that it now points
+      // at a different database than the one just verified.
+      const oidAtCloneTime = await templateOid(admin, templateName);
+      if (oidAtCloneTime !== verified.oid) {
+        throw new Error(
+          `Postgres test template "${templateName}" is no longer the database that was verified (oid ${verified.oid} at verification, ${oidAtCloneTime ?? "absent"} at clone time). Refusing to clone: the template was replaced between the check and the copy.`
+        );
+      }
+      await admin.query(`CREATE DATABASE ${quotedIdentifier(databaseName)} TEMPLATE ${quotedIdentifier(templateName)}`);
+    } finally {
+      await admin.query("SELECT pg_advisory_unlock($1, $2)", TEMPLATE_CLONE_SERIALIZATION_LOCK);
+    }
   });
 }
 

@@ -23,7 +23,7 @@ import {
   clonePostgresTestDatabaseFromTemplate,
   dropPostgresTestTemplate,
   ensurePostgresTestTemplate,
-  readPostgresTestTemplateIdentity,
+  POSTGRES_TEST_RUNNER_NONCE_BYTES,
 } from "./postgres-test-template.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
@@ -195,6 +195,15 @@ await assertPostgresProfilePreflight({
 
 let fileCounter = 0;
 const runnerId = randomBytes(4).toString("hex");
+// A separate, wider nonce names the run's TEMPLATE. It is not the same value
+// as `runnerId` above because the two have different jobs: `runnerId` is
+// embedded in per-file database names, whose authorization grammar
+// (test/helpers/dedicated-postgres-test-url.ts) pins it at exactly 8 hex
+// chars, while the template name is the only thing separating this run's
+// template from any other run's on a shared cluster. External review P1-2
+// required >=128 bits there, since a collision is precisely the condition
+// under which one run could inherit another's template.
+const templateRunnerId = randomBytes(POSTGRES_TEST_RUNNER_NONCE_BYTES).toString("hex");
 
 // Set once, before the worker pool starts, when a Postgres profile is
 // active (see the ensurePostgresTestTemplate() call below). Per-file/per-test
@@ -514,11 +523,13 @@ const results: NodeTestResult[] = [];
 // behind a normal-looking (slow) green run, which is the one thing the task
 // this exists for explicitly rules out.
 if (dedicatedBasePostgresTestUrl && testFiles.length > 0) {
-  postgresTestTemplateName = await ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, runnerId);
-  postgresTestTemplateIdentity = await readPostgresTestTemplateIdentity(
-    dedicatedBasePostgresTestUrl,
-    postgresTestTemplateName
-  );
+  // The builder returns the identity it committed before publishing the
+  // template. Do not re-read it off the template afterwards: an expectation
+  // sourced from the thing being verified proves nothing (external review
+  // P1-2).
+  const builtTemplate = await ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId);
+  postgresTestTemplateName = builtTemplate.templateName;
+  postgresTestTemplateIdentity = builtTemplate.identityDigest;
 }
 
 async function worker(): Promise<void> {

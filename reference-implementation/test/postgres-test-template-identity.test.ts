@@ -111,7 +111,7 @@ test("REFUSES a template with no metadata row (built by an older/foreign process
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idnone${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await withAdmin(baseUrl, async (admin) => {
       await admin.query("DELETE FROM pdpp_test_template_metadata WHERE template_name = $1", [templateName]);
@@ -131,7 +131,7 @@ test("REFUSES a template whose metadata digest does not match this process's own
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idmis${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await withAdmin(baseUrl, async (admin) => {
       await admin.query(
@@ -154,7 +154,7 @@ test("REFUSES a template whose metadata runner id alone was altered (digest stil
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idrun${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await withAdmin(baseUrl, async (admin) => {
       await admin.query(`UPDATE pdpp_test_template_metadata SET runner_id = 'deadbeef' WHERE template_name = $1`, [
@@ -176,7 +176,7 @@ test("REFUSES a template whose recorded build time alone was altered", {
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idblt${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await withAdmin(baseUrl, async (admin) => {
       await admin.query(
@@ -199,7 +199,7 @@ test("REFUSES a template whose recorded schema version alone was altered", {
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idver${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await withAdmin(baseUrl, async (admin) => {
       await admin.query(
@@ -222,7 +222,7 @@ test("REFUSES an intact template when the caller's identity token names a differ
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idtok${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     const identity = await readPostgresTestTemplateIdentity(baseUrl, templateName);
     assert.match(identity, SHA256_HEX_PATTERN, "identity token is a sha256 hex digest");
@@ -245,7 +245,7 @@ test("runner per-file clone refuses a template whose stored runner id was mutate
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idclone${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   const cloneName = `pdpp_test_clone_runner_id_${process.pid}`;
   try {
     const identity = await readPostgresTestTemplateIdentity(baseUrl, templateName);
@@ -275,7 +275,7 @@ test("runner per-file clone refuses a template when the runner holds the wrong i
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idtoken${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   const cloneName = `pdpp_test_clone_identity_${process.pid}`;
   try {
     await assert.rejects(
@@ -299,7 +299,7 @@ test("ALLOWS a freshly-built template whose metadata matches this process's own 
 }, async () => {
   const baseUrl = POSTGRES_URL as string;
   const runnerId = `idok${process.pid}`;
-  const templateName = await ensurePostgresTestTemplate(baseUrl, runnerId);
+  const { templateName } = await ensurePostgresTestTemplate(baseUrl, runnerId);
   try {
     await assert.doesNotReject(
       () => assertPostgresTestTemplateUsable(baseUrl, templateName),
