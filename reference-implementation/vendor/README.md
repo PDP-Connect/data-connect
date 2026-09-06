@@ -199,3 +199,15 @@ ID throws the typed error. This repo's own `resolvePolyfillConnectorEntryPoint()
 `test/connector-config-no-self-declaration.test.ts`) were swapped to call this export
 instead of walking `POLYFILL_CONNECTORS_DIR` — see those functions' own updated comments
 for what changed. Re-derivation recipe is otherwise identical to the three notes above.
+
+**Update (2026-09-06): pin moved to `data-connectors` commit
+`8372d0308678985adf86c1a664bc251f50dc7246`** (`main`, including
+`data-connectors#78` and `#77`). `#78` removes Signal's unsupported
+`proven.local_collector` declaration; `#77` demotes unproven connectors and adds the
+related-test selector. The tarball is rebuilt with the upstream `prepack` command, then
+its nested `vendor/` directory and bundled copies of collector-runtime and
+connector-protocol are removed. Its three in-repo dependencies
+(`@pdpp/collector-runtime`, `@pdpp/connector-protocol`, and
+`@pdpp/reference-contract`) are declared as `*`, so the host's pinned copies remain the
+single runtime source. The tarball checksum and root lock integrity bind this exact
+post-pack artifact.
