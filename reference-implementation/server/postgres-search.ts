@@ -261,6 +261,14 @@ export async function postgresLexicalIndexInsertMany({
   // row a concurrent delete/newer-write has since superseded is silently
   // skipped rather than resurrected/overwritten. See
   // harden-connector-instance-write-fence-transaction-native.
+  //
+  // Write-elided: the `IS DISTINCT FROM` guard on the conflict update means a
+  // tuple whose indexed columns already match is left physically untouched.
+  // Without it, a backfill that re-reads unchanged text rewrites every row and
+  // leaves a dead tuple behind for each — the same bloat the semantic upsert in
+  // `insertSemanticRows` avoids. `rowCount` is not inspected by any caller
+  // (the function reports `entries.length`), so eliding equal writes does not
+  // change observable behavior.
   await postgresQuery(
     `INSERT INTO lexical_search_index (connector_id, connector_instance_id, stream, record_key, field, value)
      SELECT $1, $2, $3, rows.record_key, rows.field, rows.value
@@ -273,7 +281,9 @@ export async function postgresLexicalIndexInsertMany({
       AND r.deleted = FALSE
      ON CONFLICT (connector_instance_id, stream, record_key, field) DO UPDATE
        SET connector_id = EXCLUDED.connector_id,
-           value = EXCLUDED.value`,
+           value = EXCLUDED.value
+       WHERE (lexical_search_index.connector_id, lexical_search_index.value)
+             IS DISTINCT FROM (EXCLUDED.connector_id, EXCLUDED.value)`,
     [
       connectorId,
       connectorInstanceId,
@@ -504,16 +514,21 @@ export async function postgresLexicalSearch({
   return result.rows;
 }
 
+function semanticScopeLikePattern(stream: string): string {
+  const scopePrefix = `[${JSON.stringify(stream)},`;
+  const escapedPrefix = scopePrefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+  return `${escapedPrefix}%`;
+}
+
 export async function postgresSemanticIndexDelete({
   connectorId,
   connectorInstanceId = defaultConnectorInstanceId(connectorId),
   stream,
   recordKey,
 }: RecordScope) {
-  const scopePrefix = `[${JSON.stringify(stream)},`;
   await postgresQuery(
-    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 AND record_key = $3",
-    [connectorInstanceId, `${scopePrefix}%`, recordKey]
+    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\' AND record_key = $3",
+    [connectorInstanceId, semanticScopeLikePattern(stream), recordKey]
   );
 }
 
@@ -522,10 +537,9 @@ export async function postgresSemanticIndexDeleteByConnectorStream({
   connectorInstanceId = defaultConnectorInstanceId(connectorId),
   stream,
 }: ConnectorStreamScope) {
-  const scopePrefix = `[${JSON.stringify(stream)},`;
-  await postgresQuery("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2", [
+  await postgresQuery("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'", [
     connectorInstanceId,
-    `${scopePrefix}%`,
+    semanticScopeLikePattern(stream),
   ]);
   await postgresQuery("DELETE FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
@@ -727,7 +741,8 @@ async function insertSemanticRows(
      FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
        AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding)
      ON CONFLICT (connector_instance_id, scope_key, record_key) DO UPDATE
-       SET embedding = EXCLUDED.embedding`,
+       SET embedding = EXCLUDED.embedding
+       WHERE semantic_search_blob.embedding IS DISTINCT FROM EXCLUDED.embedding`,
     [
       rows.map((entry) => entry.connectorId),
       rows.map((entry) => entry.connectorInstanceId),
@@ -850,10 +865,13 @@ export async function postgresSemanticIndexPublishWithClient(
   }: RecordScope & { entries: readonly SemanticIndexEntry[] }
 ): Promise<void> {
   const rows = semanticInsertManyRows(connectorId, connectorInstanceId, entries);
-  const scopePrefix = `[${JSON.stringify(stream)},`;
   await client.query(
-    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 AND record_key = $3",
-    [connectorInstanceId, `${scopePrefix}%`, recordKey]
+    `DELETE FROM semantic_search_blob
+     WHERE connector_instance_id = $1
+       AND scope_key LIKE $2 ESCAPE '\\'
+       AND record_key = $3
+       AND scope_key <> ALL($4::text[])`,
+    [connectorInstanceId, semanticScopeLikePattern(stream), recordKey, rows.map((row) => row.scopeKey)]
   );
   await insertSemanticRows(rows, (sql, params) => client.query(sql, params as unknown[]));
 }
@@ -863,10 +881,9 @@ export async function postgresSemanticIndexDeleteWithClient(
   client: PostgresTransactionClient,
   { connectorInstanceId, stream, recordKey }: { connectorInstanceId: string; stream: string; recordKey: string }
 ): Promise<void> {
-  const scopePrefix = `[${JSON.stringify(stream)},`;
   await client.query(
-    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 AND record_key = $3",
-    [connectorInstanceId, `${scopePrefix}%`, recordKey]
+    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\' AND record_key = $3",
+    [connectorInstanceId, semanticScopeLikePattern(stream), recordKey]
   );
 }
 
