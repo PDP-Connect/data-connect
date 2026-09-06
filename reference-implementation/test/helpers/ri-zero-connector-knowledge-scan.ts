@@ -30,7 +30,7 @@
  */
 
 import { createRequire } from "node:module";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
@@ -283,7 +283,18 @@ export function sharedLibrarySrcDir(): string {
  * falsifiability tests can inject a synthetic file into the root the scanner
  * really walks and predict the path it will be reported under. */
 export function sharedLibraryReportedPath(packageRelPath: string): string {
-  return `${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/${packageRelPath.split("\\").join("/")}`;
+  return `${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/${packageRelPath.split("\\").join("/").replace(/\.js$/, ".ts")}`;
+}
+
+/** Absolute path for a stable shared-library reported path. Prefer authored
+ * TypeScript when it ships; use the compiled JavaScript in vendored tarballs. */
+export function sharedLibrarySourcePath(reportedPath: string): string {
+  const packageRelPath = reportedPath.slice(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`.length);
+  const sourcePath = join(sharedLibrarySrcDir(), packageRelPath);
+  if (existsSync(sourcePath)) {
+    return sourcePath;
+  }
+  return join(sharedLibrarySrcDir(), packageRelPath.replace(/\.ts$/, ".js"));
 }
 
 /** Every file at the shared library's `src/`, minus the exact-file allowlist
@@ -558,13 +569,12 @@ export function scanSharedLibraryKindDispatchFile(
 export function scanSharedLibraryKindDispatchRoot(roots: ScanRoots): Violation[] {
   const validationKinds = manifestDerivedValidationKinds(roots);
   const files = sharedLibraryKindDispatchScanFiles(roots);
-  const scanRootDir = sharedLibrarySrcDir();
   const violations: Violation[] = [];
   for (const relPath of files) {
     // Read from where the package actually is; report under the stable
     // `packages/polyfill-connectors/src/...` name (see
     // {@link SHARED_LIBRARY_REPORTED_PATH_PREFIX}).
-    const absPath = join(scanRootDir, relPath.slice(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`.length));
+    const absPath = sharedLibrarySourcePath(relPath);
     violations.push(...scanSharedLibraryKindDispatchFile(absPath, relPath, validationKinds, roots.repoRoot));
   }
   return violations;

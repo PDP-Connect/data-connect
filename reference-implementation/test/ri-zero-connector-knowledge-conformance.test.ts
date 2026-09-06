@@ -58,6 +58,7 @@ import {
   scanSharedLibraryKindDispatchRoot,
   sharedLibraryKindDispatchScanFiles,
   sharedLibraryReportedPath,
+  sharedLibrarySourcePath,
   sharedLibrarySrcDir,
 } from "./helpers/ri-zero-connector-knowledge-scan.ts";
 
@@ -1499,7 +1500,7 @@ test("falsifiability (terminal-redteam-0810 #3 counterweight): every real allowl
   // existence check is the anti-vacuity guard that caught the root drifting to
   // a subset holding none of them: keep it pointed at what the scanner reads.
   for (const relPath of allowlistedRelPaths) {
-    const absPath = join(sharedLibrarySrcDir(), relPath.slice("packages/polyfill-connectors/src/".length));
+    const absPath = sharedLibrarySourcePath(relPath);
     assert.ok(existsSync(absPath), `expected ${relPath} to exist as a real fixture (looked in ${absPath})`);
   }
   const files = sharedLibraryKindDispatchScanFiles({ repoRoot });
@@ -1528,7 +1529,7 @@ test("falsifiability (terminal-redteam-0810 #3 counterweight): packages/polyfill
     "packages/polyfill-connectors/src/auto-login/usaa.ts",
   ];
   for (const relPath of legitimateFiles) {
-    const absPath = join(sharedLibrarySrcDir(), relPath.slice("packages/polyfill-connectors/src/".length));
+    const absPath = sharedLibrarySourcePath(relPath);
     assert.ok(
       existsSync(absPath),
       `expected ${relPath} to exist as a real fixture for this counterweight (looked in ${absPath})`
