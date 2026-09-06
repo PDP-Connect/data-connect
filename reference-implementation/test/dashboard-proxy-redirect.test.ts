@@ -144,7 +144,14 @@ async function ensureConsoleBuild() {
       } catch {}
 
       try {
-        await runCommand("pnpm", ["--dir", "apps/console", "build"], {
+        // This repo's package manager is npm (root package.json declares
+        // "workspaces", not a pnpm-workspace.yaml), which already wires
+        // apps/console's @pdpp/brand /-brand-react/-operator-ui/
+        // pdpp-reference-implementation deps to reference-implementation/
+        // vendor/* via workspace symlinks in the root node_modules/. `pnpm
+        // --dir` ignores that entirely and tries (and fails) to fetch those
+        // private, never-published packages from the public npm registry.
+        await runCommand("npm", ["--prefix", "apps/console", "run", "build"], {
           cwd: REPO_ROOT,
           env: {
             ...process.env,

@@ -43,6 +43,17 @@ const FORBIDDEN_IMPORT_PATTERNS = [
   /from\s+["'](\.\.\/)+reference-implementation\/server\/stores\/connector-instance-config-store(\.ts)?["']/,
 ];
 
+// Walks CONNECTORS_DIR directly. This used to only cover the subset of the
+// 45 manifest-listed connectors this repo's vendored tarball happened to
+// ship compiled (confirmed missing connectors, e.g. ynab, were silently
+// absent from this scan's coverage, not falsely passing it) -- resolved by
+// data-connectors#75, which now compiles and ships every manifest-listed
+// connector's full source tree, not just an entry-point subset. The walk
+// itself did not need to change: connector-index.json (also shipped by #75)
+// only enumerates one entry point per connector, not every source file, so
+// it cannot replace this directory walk without narrowing this test's
+// coverage from "every connector source file" to "just entry points" --
+// keeping the walk is the correct fix here, not a workaround.
 function listConnectorSourceFiles(): string[] {
   const out: string[] = [];
   function walk(dir: string) {

@@ -388,7 +388,7 @@ function unsafeAuthorityInput(value: unknown): StreamHealthAuthorityInput {
   return value as StreamHealthAuthorityInput;
 }
 
-function response(body: unknown, status = 200, revision = REVISION) {
+function response(body: unknown, status = 200, revision: string | null | undefined = REVISION) {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   return {
     headers: {
@@ -1425,7 +1425,7 @@ for (const accepted of ["deferred", "inventory_only"]) {
       connection_health: {
         state: "healthy",
         axes: { coverage: accepted, freshness: "fresh", attention: "none", outbox: "idle" },
-        conditions: healthyConnection().connection_health.conditions,
+        conditions: (healthyConnection().connection_health as Json).conditions,
       },
     });
     const result = evaluate(connection);
@@ -1447,7 +1447,7 @@ for (const accepted of ["unavailable", "unsupported"]) {
       connection_health: {
         state: "degraded",
         axes: { coverage: accepted, freshness: "fresh", attention: "none", outbox: "idle" },
-        conditions: healthyConnection().connection_health.conditions,
+        conditions: (healthyConnection().connection_health as Json).conditions,
       },
       rendered_verdict: { pill: { tone: "amber", label: "Some records stuck" } },
     });
@@ -1469,7 +1469,7 @@ test("a genuinely degrading coverage axis still disagrees with an entirely compl
     connection_health: {
       state: "degraded",
       axes: { coverage: "retryable_gap", freshness: "fresh", attention: "none", outbox: "idle" },
-      conditions: healthyConnection().connection_health.conditions,
+      conditions: (healthyConnection().connection_health as Json).conditions,
     },
     rendered_verdict: { pill: { tone: "amber", label: "Some records stuck" } },
   });

@@ -2,34 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Import-boundary guards for the `rs.streams.detail` operation.
+ * Import-boundary guard for the `rs.streams.detail` operation.
  *
  * Enforces the dependency direction declared in
  * openspec/changes/mount-rs-stream-detail-operation/design.md:
  *
  *   - The operation module SHALL NOT import Fastify, Next, SQLite,
  *     Postgres, a raw SQL handle, a generic repository, or `process.env`.
- *   - The sandbox `/sandbox/v1/streams/:stream` route SHALL NOT import
- *     `buildLiveStreamMetadataResponse` (it must mount the canonical
- *     operation).
  *
  * The operation-module boundary check delegates to the shared helper so the
  * forbidden-import list is the single source of truth across operations
- * (see openspec/changes/add-reference-operation-boundary-gate). Sandbox-route
- * and `_demo/builders.ts` demotion assertions remain operation-specific and
- * stay here.
+ * (see openspec/changes/add-reference-operation-boundary-gate).
+ *
+ * This file previously also asserted that pdpp's own `apps/site` sandbox
+ * route and `_demo/builders.ts` no longer imported/exported
+ * `buildLiveStreamMetadataResponse` -- both pdpp-repo-root frontend paths
+ * that do not exist in this repo (Move B did not bring `apps/site` along).
+ * Removed; that demotion coverage belongs in pdpp's own suite, not here.
  */
 
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { assertOperationBoundary } from "./helpers/operation-boundary.ts";
-
-const TOP_LEVEL_REGEX_1 = /\bimport\b[^;]*\bbuildLiveStreamMetadataResponse\b[^;]*\bfrom\b[^;]*;/;
-const TOP_LEVEL_REGEX_2 = /export\s+function\s+buildLiveStreamMetadataResponse\b/;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..");
@@ -41,23 +38,4 @@ function read(rel: string) {
 test("rs.streams.detail operation has no host or storage concretes", () => {
   const rel = "reference-implementation/operations/rs-streams-detail/index.ts";
   assertOperationBoundary(read(rel), rel);
-});
-
-test("sandbox /sandbox/v1/streams/:stream route does not import buildLiveStreamMetadataResponse", () => {
-  const src = read("apps/site/src/app/sandbox/v1/streams/[stream]/route.ts");
-  const importPattern = TOP_LEVEL_REGEX_1;
-  assert.equal(
-    importPattern.test(src),
-    false,
-    "public sandbox stream-detail route must mount the canonical operation, not buildLiveStreamMetadataResponse"
-  );
-});
-
-test("sandbox builders.ts no longer exports buildLiveStreamMetadataResponse", () => {
-  const src = read("apps/site/src/app/sandbox/_demo/builders.ts");
-  assert.equal(
-    TOP_LEVEL_REGEX_2.test(src),
-    false,
-    "buildLiveStreamMetadataResponse must be removed so the public route cannot import a parallel AS/RS builder"
-  );
 });

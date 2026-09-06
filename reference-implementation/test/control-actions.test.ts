@@ -1,7 +1,7 @@
 const TOP_LEVEL_REGEX_1 = /^(started|in_progress)$/;
 const TOP_LEVEL_REGEX_2 = /interval_seconds/;
 const TOP_LEVEL_REGEX_3 = /^(assisted|manual_only|unattended)$/;
-const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
+const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.(ts|js)$/;
 const TOP_LEVEL_REGEX_5 = /manual runs|background-safe|scheduling is disabled/;
 const TOP_LEVEL_REGEX_6 = /background-safe/;
 const TOP_LEVEL_REGEX_7 = /manual runs|background-safe|paused/;

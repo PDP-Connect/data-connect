@@ -11,16 +11,16 @@
  *     Postgres, a raw SQL handle, a generic repository, sandbox modules,
  *     the native `server/search.js` helper module, or `process` /
  *     `process.env`.
- *   - The sandbox `/sandbox/v1/search` route SHALL NOT statically import
- *     `buildLiveSearchResponse` (it must mount the canonical operation).
- *   - `_demo/builders.ts` SHALL no longer export
- *     `buildLiveSearchResponse`.
  *
  * The operation-module boundary check delegates to the shared helper so
  * the forbidden-import list is the single source of truth across
  * operations (see openspec/changes/add-reference-operation-boundary-gate).
- * Sandbox-route and `_demo/builders.ts` demotion assertions remain
- * operation-specific and stay here.
+ *
+ * This file previously also asserted that pdpp's own `apps/site` sandbox
+ * route and `_demo/builders.ts` no longer imported/exported
+ * `buildLiveSearchResponse` -- both pdpp-repo-root frontend paths that do
+ * not exist in this repo (Move B did not bring `apps/site` along). Removed;
+ * that demotion coverage belongs in pdpp's own suite, not here.
  */
 
 import assert from "node:assert/strict";
@@ -55,26 +55,3 @@ test("rs.search.lexical operation does not import server/search.js", () => {
   assert.equal(fromPattern.test(src), false, "operation must not import the native server/search.js helper module");
 });
 
-test("sandbox /sandbox/v1/search route does not import buildLiveSearchResponse", () => {
-  const src = read("apps/site/src/app/sandbox/v1/search/route.ts");
-  // Match any static-import statement that pulls buildLiveSearchResponse
-  // in. Comments referencing the deleted symbol are still allowed; only
-  // import-binding usage is forbidden.
-  // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
-  const importPattern = /\bimport\b[^;]*\bbuildLiveSearchResponse\b[^;]*\bfrom\b[^;]*;/;
-  assert.equal(
-    importPattern.test(src),
-    false,
-    "public sandbox search route must mount the canonical operation, not buildLiveSearchResponse"
-  );
-});
-
-test("sandbox builders.ts no longer exports buildLiveSearchResponse", () => {
-  const src = read("apps/site/src/app/sandbox/_demo/builders.ts");
-  assert.equal(
-    // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
-    /export\s+function\s+buildLiveSearchResponse\b/.test(src),
-    false,
-    "buildLiveSearchResponse must be removed so the public route cannot import a parallel AS/RS builder"
-  );
-});

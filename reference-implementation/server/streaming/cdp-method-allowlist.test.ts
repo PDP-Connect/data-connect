@@ -159,7 +159,12 @@ test("streaming code only sends allowlisted CDP methods", () => {
     "cdp-adapter.ts",
     "cdp-companion.ts",
     "run-target-registry.ts",
-    join(__dirname, "../../node_modules/@opendatalabs/remote-surface/dist/backends/cdp/backend.js"),
+    // __dirname is server/streaming/; three levels up reaches this repo's
+    // root node_modules/, where npm hoists this package (data-connect's
+    // workspace layout differs by one directory level from wherever this
+    // path was written against originally -- verified: node_modules/@opendatalabs
+    // does not exist two levels up, only three).
+    join(__dirname, "../../../node_modules/@opendatalabs/remote-surface/dist/backends/cdp/backend.js"),
   ];
 
   const { allMethods, violations } = inspectStreamingFiles(files);

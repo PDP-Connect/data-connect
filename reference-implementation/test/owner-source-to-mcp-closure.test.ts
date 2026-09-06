@@ -3,10 +3,10 @@
 
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildLocalDeviceRecordEnvelope, LocalDeviceClient } from "@pdpp/collector-runtime";
 import { buildLocalDeviceIngestBatchRequest } from "@pdpp/collector-runtime/local-device-envelope";
+import { readSampleRecord } from "@pdpp/polyfill-connectors/fixture-samples";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
@@ -21,15 +21,6 @@ const STATIC_SECRET = "synthetic fixture app password";
 const FIXTURE_TIME = "2026-08-06T12:00:00.000Z";
 const CSRF_FIELD_RE = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 const CLOSURE_MCP_MISSING_RE = /scoped MCP must read exactly the newly accepted fixture record/;
-// Read from the installed @pdpp/polyfill-connectors package (not the
-// repo-root packages/polyfill-connectors/ vendoring-trick copy, which RI no
-// longer imports): the package has no subpath export for its fixtures, so
-// this reaches the on-disk file directly, same as
-// remote-surface-reference-boundary.test.ts does for the package's src/.
-const GMAIL_FIXTURE_PATH =
-  "../../node_modules/@pdpp/polyfill-connectors/fixtures/gmail/scrubbed/pilot-real-shape/records/messages.jsonl";
-const CODEX_FIXTURE_PATH =
-  "../../node_modules/@pdpp/polyfill-connectors/fixtures/codex/scrubbed/pilot-real-shape/records/messages.jsonl";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 type JsonRecord = Record<string, unknown>;
@@ -275,14 +266,6 @@ async function issueOwnerToken(asUrl: string, session: OwnerSession): Promise<st
   return stringField(token.body, "access_token");
 }
 
-function fixtureRecord(relativePath: string): JsonRecord {
-  const line = readFileSync(new URL(relativePath, import.meta.url), "utf8")
-    .split("\n")
-    .find((candidate) => candidate.trim());
-  assert.ok(line, `fixture ${relativePath} must contain a record`);
-  return JSON.parse(line) as JsonRecord;
-}
-
 function ingestNdjson(
   rsUrl: string,
   ownerToken: string,
@@ -512,7 +495,7 @@ test("owner-source-to-mcp-closure", async () => {
       // and cannot contact Gmail.
       const gmailConnectionId = await createStaticDraft(asUrl, session);
       await captureStaticCredential(asUrl, session, gmailConnectionId);
-      const gmailFixture = fixtureRecord(GMAIL_FIXTURE_PATH);
+      const gmailFixture = readSampleRecord("gmail", "messages") as JsonRecord;
       const gmailIngest = await ingestNdjson(
         rsUrl,
         ownerToken,
@@ -556,7 +539,7 @@ test("owner-source-to-mcp-closure", async () => {
         deviceToken: localDevice.device_token,
         requestTimeoutMs: 5000,
       });
-      const codexFixture = fixtureRecord(CODEX_FIXTURE_PATH);
+      const codexFixture = readSampleRecord("codex", "messages") as JsonRecord;
       const localEnvelope = buildLocalDeviceRecordEnvelope({
         batchId: "closure-codex-batch-1",
         batchSeq: 1,

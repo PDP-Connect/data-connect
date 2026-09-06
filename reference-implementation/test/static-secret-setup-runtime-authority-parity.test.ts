@@ -124,14 +124,11 @@ test("password-without-secret probe: setup and runtime agree it is static-secret
 
     const { execFileSync } = await import("node:child_process");
     // Resolved from the installed @pdpp/polyfill-connectors package (never a
-    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
-    // scripts/generate-static-secret-registry.ts via plain
-    // `node --experimental-strip-types`, and that script now lives under
-    // node_modules — Node refuses to type-strip a `.ts` file there
-    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
-    // documented in scripts/generate-connector-registry.ts. Fixing it
-    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
-    // separate decision from the import path.
+    // hardcoded relative repo path). data-connectors#68 ships this script
+    // compiled (scripts/generate-static-secret-registry.js, in place next to
+    // the .ts source) specifically so it can be spawned as a real subprocess
+    // once vendored into a consumer's node_modules — spawn the compiled
+    // output directly, no TS loader needed.
     const packageDir = join(
       dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
       ".."
@@ -139,7 +136,7 @@ test("password-without-secret probe: setup and runtime agree it is static-secret
     const outPath = join(scratchDir, "static-secret-registry.pwtype-probe.generated.ts");
     execFileSync(
       "node",
-      ["--experimental-strip-types", join(packageDir, "scripts/generate-static-secret-registry.ts"), outPath],
+      [join(packageDir, "scripts/generate-static-secret-registry.js"), outPath],
       { cwd: packageDir, env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir }, stdio: "pipe" }
     );
     const generatedSource = readFileSync(outPath, "utf8");
@@ -187,14 +184,11 @@ test("missing-label probe: a secret field with no label fails manifest generatio
 
     const { execFileSync } = await import("node:child_process");
     // Resolved from the installed @pdpp/polyfill-connectors package (never a
-    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
-    // scripts/generate-static-secret-registry.ts via plain
-    // `node --experimental-strip-types`, and that script now lives under
-    // node_modules — Node refuses to type-strip a `.ts` file there
-    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
-    // documented in scripts/generate-connector-registry.ts. Fixing it
-    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
-    // separate decision from the import path.
+    // hardcoded relative repo path). data-connectors#68 ships this script
+    // compiled (scripts/generate-static-secret-registry.js, in place next to
+    // the .ts source) specifically so it can be spawned as a real subprocess
+    // once vendored into a consumer's node_modules — spawn the compiled
+    // output directly, no TS loader needed.
     const packageDir = join(
       dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
       ".."
@@ -204,7 +198,7 @@ test("missing-label probe: a secret field with no label fails manifest generatio
       () =>
         execFileSync(
           "node",
-          ["--experimental-strip-types", join(packageDir, "scripts/generate-static-secret-registry.ts"), outPath],
+          [join(packageDir, "scripts/generate-static-secret-registry.js"), outPath],
           { cwd: packageDir, env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir }, stdio: "pipe" }
         ),
       LABEL_DIAGNOSTIC,
@@ -245,14 +239,11 @@ test("empty-env probe: a secret field with zero env aliases fails manifest gener
 
     const { execFileSync } = await import("node:child_process");
     // Resolved from the installed @pdpp/polyfill-connectors package (never a
-    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
-    // scripts/generate-static-secret-registry.ts via plain
-    // `node --experimental-strip-types`, and that script now lives under
-    // node_modules — Node refuses to type-strip a `.ts` file there
-    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
-    // documented in scripts/generate-connector-registry.ts. Fixing it
-    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
-    // separate decision from the import path.
+    // hardcoded relative repo path). data-connectors#68 ships this script
+    // compiled (scripts/generate-static-secret-registry.js, in place next to
+    // the .ts source) specifically so it can be spawned as a real subprocess
+    // once vendored into a consumer's node_modules — spawn the compiled
+    // output directly, no TS loader needed.
     const packageDir = join(
       dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
       ".."
@@ -262,7 +253,7 @@ test("empty-env probe: a secret field with zero env aliases fails manifest gener
       () =>
         execFileSync(
           "node",
-          ["--experimental-strip-types", join(packageDir, "scripts/generate-static-secret-registry.ts"), outPath],
+          [join(packageDir, "scripts/generate-static-secret-registry.js"), outPath],
           { cwd: packageDir, env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir }, stdio: "pipe" }
         ),
       ENV_DIAGNOSTIC,
@@ -313,14 +304,11 @@ test("fail-before counterweight: a synthetic new static-secret manifest is recog
     // otherwise have to remember to update too.
     const { execFileSync } = await import("node:child_process");
     // Resolved from the installed @pdpp/polyfill-connectors package (never a
-    // hardcoded relative repo path). KNOWN GAP: this spawns the package's own
-    // scripts/generate-static-secret-registry.ts via plain
-    // `node --experimental-strip-types`, and that script now lives under
-    // node_modules — Node refuses to type-strip a `.ts` file there
-    // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), the same limitation
-    // documented in scripts/generate-connector-registry.ts. Fixing it
-    // requires this spawn to gain a TS loader (e.g. `--import tsx`), a
-    // separate decision from the import path.
+    // hardcoded relative repo path). data-connectors#68 ships this script
+    // compiled (scripts/generate-static-secret-registry.js, in place next to
+    // the .ts source) specifically so it can be spawned as a real subprocess
+    // once vendored into a consumer's node_modules — spawn the compiled
+    // output directly, no TS loader needed.
     const packageDir = join(
       dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
       ".."
@@ -328,7 +316,7 @@ test("fail-before counterweight: a synthetic new static-secret manifest is recog
     const outPath = join(scratchDir, "static-secret-registry.probe.generated.ts");
     execFileSync(
       "node",
-      ["--experimental-strip-types", join(packageDir, "scripts/generate-static-secret-registry.ts"), outPath],
+      [join(packageDir, "scripts/generate-static-secret-registry.js"), outPath],
       { cwd: packageDir, env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir }, stdio: "pipe" }
     );
     const generatedSource = readFileSync(outPath, "utf8");

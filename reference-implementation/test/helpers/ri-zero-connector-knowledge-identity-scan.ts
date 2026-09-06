@@ -242,7 +242,16 @@ function isSharedLibraryRelativeConnectorModulePath(resolvedRelPath: string): bo
   return SHARED_LIBRARY_RELATIVE_CONNECTOR_MODULE_PATH_RE.test(resolvedRelPath);
 }
 
-const MANIFEST_ROOTS = ["reference-implementation/fixtures/seed-manifests", "packages/polyfill-connectors/manifests"];
+// See the sibling data-load scanner's own `MANIFEST_ROOTS` doc comment
+// (`ri-zero-connector-knowledge-data-load-scan.ts`) for why the installed
+// `@pdpp/polyfill-connectors` npm package's manifests directory
+// (`node_modules/@pdpp/polyfill-connectors/manifests`), not the vendored-
+// SOURCE package's own tree (`packages/polyfill-connectors/manifests`,
+// which never ships a `manifests/` directory), is the real second root here.
+const MANIFEST_ROOTS = [
+  "reference-implementation/fixtures/seed-manifests",
+  "node_modules/@pdpp/polyfill-connectors/manifests",
+];
 
 function isUnderManifestRoot(resolvedRelPath: string): boolean {
   return MANIFEST_ROOTS.some((root) => resolvedRelPath === root || resolvedRelPath.startsWith(`${root}/`));
@@ -370,6 +379,214 @@ function unwrapObjectFreeze(expr: Node): Node {
   return first ?? expr;
 }
 
+/** Unwrap a TS type-assertion wrapper (`[...] as const`, `[...] as readonly
+ * string[]`, `<const>[...]`) to its inner expression, any depth -- this
+ * codebase's own idiom for a field-name-list constant is exactly `const
+ * NAMES = [...] as const`, so a resolver that only recognized a bare
+ * `ArrayExpression` init would miss every real one, the same reason
+ * `unwrapObjectFreeze` exists for the dispatch-table side. */
+function unwrapTsAssertion(expr: Node): Node {
+  if (expr.type === "TSAsExpression" || expr.type === "TSSatisfiesExpression" || expr.type === "TSTypeAssertion") {
+    return unwrapTsAssertion(expr.expression as Node);
+  }
+  return expr;
+}
+
+/**
+ * Every module- or function-scope `const`-bound `ArrayExpression` that is
+ * PROVEN, by an ACTUAL downstream usage elsewhere in the file, to be a
+ * FIELD-NAME LIST rather than a connector-identity list: the array is the
+ * receiver of exactly one `.map(cb)`/`.forEach(cb)` call whose callback has a
+ * single parameter, and every reference to that parameter anywhere in the
+ * callback body is used ONLY as a computed member-access KEY into some OTHER
+ * identifier (`record[field]`, never the array/table itself and never a
+ * value already proven to be a dispatch table) -- the exact shape of this
+ * codebase's own `RECEIPT_BINDING_FIELDS.map((field) => [field,
+ * record[field] ?? null])`, which builds a name/value tuple list for
+ * `Object.fromEntries` by reading named fields off an unrelated record, not
+ * by asserting a set of connector identities.
+ *
+ * This is the array-literal-element counterpart to
+ * `objectExpressionsUsedAsDispatchTables`'s "the check proves intent" gate,
+ * but for the OPPOSITE conclusion: proving `TABLE[x]` usage against an
+ * object literal is evidence its KEYS are asserted identities (dispatch);
+ * proving `record[field]` usage where `field` is drawn from THIS array is
+ * evidence the array's OWN elements are field NAMES, not asserted
+ * connector-identity VALUES -- structurally the mirror image, not the same
+ * check reused. Because "prove innocence" is a materially different (and
+ * more evadable) claim than "prove guilt", this is deliberately narrower
+ * than the dispatch-table gate in one more way: an array is only trusted as
+ * a field-name list if it is NEVER ALSO used anywhere else in the file in an
+ * identity-membership shape (`.includes()`/`.has()`/`in`) or passed as a
+ * bare call argument -- a would-be evasion that laundered a real
+ * connector-identity array through a second, unrelated `.map(field =>
+ * record[field])` call elsewhere would still be caught via its OTHER,
+ * dispatch-shaped usage. Disclosed residual: a connector-identity array used
+ * ONLY ONCE, ONLY in this exact `.map(x => obj[x])` shape and never compared
+ * or dispatched anywhere else in the same file, would be exempted -- the
+ * same class of single-file-analysis residual already disclosed at this
+ * module's own top doc comment (an unresolvable/unproven value is not
+ * flagged), not a new kind of gap.
+ */
+function arrayExpressionsUsedAsFieldNameLists(program: Node, analysis: FileAnalysis): Set<Node> {
+  // Every ArrayExpression, by identity, reachable from a const binding name
+  // (so a `.map()` call site naming the const by identifier can find the
+  // literal node it points to, mirroring `moduleConsts` resolution
+  // elsewhere in this file). Resolves through one hop of TS type-assertion
+  // unwrapping (see `unwrapTsAssertion` above) so `const NAMES = [...] as
+  // const` resolves the same as a bare array literal.
+  function resolveArrayLiteral(expr: Node | undefined): Node | null {
+    if (!expr) {
+      return null;
+    }
+    const unwrapped = unwrapTsAssertion(expr);
+    if (unwrapped.type === "ArrayExpression") {
+      return unwrapped;
+    }
+    if (unwrapped.type === "Identifier") {
+      const decl = analysis.moduleConsts.get(unwrapped.name as string);
+      const unwrappedDecl = decl ? unwrapTsAssertion(decl) : undefined;
+      return unwrappedDecl?.type === "ArrayExpression" ? unwrappedDecl : null;
+    }
+    return null;
+  }
+
+  // Every parameter-reference inside `body` must be used ONLY as (a) a
+  // computed member-access key into an identifier other than `paramName`
+  // itself (and other than the array's own binding name, so `arr.map(x =>
+  // arr[x])` -- a real self-referential dispatch shape, not field access --
+  // is never mistaken for field-name usage), or (b) a bare element of an
+  // ArrayExpression tuple (the `[field, ...]` shape that echoes the field's
+  // own name back out as the destination object's key, e.g. via
+  // `Object.fromEntries` -- the tuple-key position is a slot NAME being
+  // carried through, the same "declaration, not assertion" status as an
+  // object property key, not a separate identity check). AT LEAST ONE
+  // computed-member-access use (shape (a)) must be present -- a callback
+  // that only ever echoes the parameter bare (shape (b) alone, e.g. `arr.map(x
+  // => [x, x])`) never actually reads a field off another object and so
+  // proves nothing about field-name intent. Any OTHER use of the parameter
+  // (comparison, a call argument to anything but this exact tuple
+  // construction, a membership check, anything) disqualifies the whole array
+  // from this carve-out.
+  function everyParamUseIsFieldAccess(body: Node, paramName: string, arrayBindingName: string | null): boolean {
+    function isFieldAccessMemberExpression(node: Node): boolean {
+      if (node.type !== "MemberExpression" || node.computed !== true) {
+        return false;
+      }
+      const property = node.property as Node | undefined;
+      const object = node.object as Node | undefined;
+      return (
+        property?.type === "Identifier" &&
+        (property.name as string) === paramName &&
+        object?.type === "Identifier" &&
+        (object.name as string) !== paramName &&
+        (object.name as string) !== arrayBindingName
+      );
+    }
+    function isBareTupleElement(node: Node, parent: Node | null): boolean {
+      return (
+        node.type === "Identifier" &&
+        (node.name as string) === paramName &&
+        parent?.type === "ArrayExpression" &&
+        nodeArrayField(parent, "elements").includes(node)
+      );
+    }
+    let fieldAccessUseCount = 0;
+    let acceptedUseCount = 0;
+    walk(body, (node, parent) => {
+      if (isFieldAccessMemberExpression(node)) {
+        fieldAccessUseCount += 1;
+        acceptedUseCount += 1;
+        return;
+      }
+      if (isBareTupleElement(node, parent)) {
+        acceptedUseCount += 1;
+      }
+    });
+    let totalUseCount = 0;
+    walk(body, (node) => {
+      if (node.type === "Identifier" && (node.name as string) === paramName) {
+        totalUseCount += 1;
+      }
+    });
+    return fieldAccessUseCount > 0 && acceptedUseCount === totalUseCount;
+  }
+
+  // First pass: collect every array (by node identity) that has ANY
+  // identity-membership-shaped usage (.includes()/.has()/`in`) or is passed
+  // as a bare call argument anywhere in the file -- these are permanently
+  // disqualified from the field-name-list carve-out regardless of any other
+  // usage, closing the "launder a dispatch array through an unrelated
+  // .map() elsewhere" evasion described above.
+  const disqualified = new Set<Node>();
+  function markDisqualified(expr: Node | undefined): void {
+    const arr = resolveArrayLiteral(expr);
+    if (arr) {
+      disqualified.add(arr);
+    }
+  }
+  walk(program, (node) => {
+    if (node.type === "CallExpression") {
+      const callee = node.callee as Node;
+      const calleeProp = callee.type === "MemberExpression" ? (callee.property as Node) : null;
+      const methodName = calleeProp?.type === "Identifier" ? (calleeProp.name as string) : null;
+      if (callee.type === "MemberExpression" && (methodName === "includes" || methodName === "has")) {
+        markDisqualified(callee.object as Node | undefined);
+        return;
+      }
+      // A bare call argument (e.g. passed to some dispatch function) is
+      // ordinary value-position usage this scanner already flags
+      // unconditionally elsewhere; disqualify the array from a SEPARATE
+      // exemption rather than trying to reason about the callee.
+      for (const arg of nodeArrayField(node, "arguments")) {
+        if (arg.type === "Identifier") {
+          markDisqualified(arg);
+        }
+      }
+      return;
+    }
+    if (node.type === "BinaryExpression" && node.operator === "in") {
+      markDisqualified(node.right as Node | undefined);
+    }
+  });
+
+  const provenFieldNameLists = new Set<Node>();
+  walk(program, (node) => {
+    if (node.type !== "CallExpression") {
+      return;
+    }
+    const callee = node.callee as Node;
+    if (callee.type !== "MemberExpression") {
+      return;
+    }
+    const methodProp = callee.property as Node;
+    const methodName = methodProp?.type === "Identifier" ? (methodProp.name as string) : null;
+    if (methodName !== "map" && methodName !== "forEach") {
+      return;
+    }
+    const receiverExpr = callee.object as Node | undefined;
+    const arr = resolveArrayLiteral(receiverExpr);
+    if (!arr || disqualified.has(arr)) {
+      return;
+    }
+    const [callback] = nodeArrayField(node, "arguments");
+    if (!callback || (callback.type !== "ArrowFunctionExpression" && callback.type !== "FunctionExpression")) {
+      return;
+    }
+    const params = nodeArrayField(callback, "params");
+    if (params.length !== 1 || params[0]?.type !== "Identifier") {
+      return;
+    }
+    const paramName = params[0].name as string;
+    const arrayBindingName = receiverExpr?.type === "Identifier" ? (receiverExpr.name as string) : null;
+    const body = nodeField(callback, "body");
+    if (body && everyParamUseIsFieldAccess(body, paramName, arrayBindingName)) {
+      provenFieldNameLists.add(arr);
+    }
+  });
+  return provenFieldNameLists;
+}
+
 /**
  * Every module-level `const`-bound `ObjectExpression` (optionally wrapped in
  * `Object.freeze(...)`, this codebase's own idiom for a dispatch-table
@@ -463,20 +680,48 @@ function objectPropertyKeyPositions(
   return { decidedKeys, sites };
 }
 
+/** Every direct element node of an array proven by
+ * {@link arrayExpressionsUsedAsFieldNameLists} to be a field-name list --
+ * collected up front (by node identity) so the generic walk below can skip
+ * exactly these elements, the array-literal-element counterpart to
+ * {@link objectPropertyKeyPositions}'s `decidedKeys`. Scoped to DIRECT
+ * elements of a proven array only: a nested array/object inside one of these
+ * elements is never itself exempted by this pass. */
+function fieldNameListElementPositions(fieldNameLists: ReadonlySet<Node>): Set<Node> {
+  const decided = new Set<Node>();
+  for (const arr of fieldNameLists) {
+    for (const element of nodeArrayField(arr, "elements")) {
+      decided.add(element);
+    }
+  }
+  return decided;
+}
+
 /** Every literal-bearing AST position in the file: every node is a candidate
  * -- `resolveStringValue` decides what actually resolves, so pushing a node
- * whose shape it doesn't recognize just costs a wasted attempt. The one
- * exclusion is an object/pattern property KEY declaration, gated by
- * {@link objectPropertyKeyPositions} instead of the generic push (see that
- * function's doc comment for why membership/call/return values, including
- * `x in obj`, are deliberately NOT covered by this exclusion). Every real
- * value position -- object VALUES, class fields, call arguments, return
- * values, everything else -- is pushed unconditionally. */
+ * whose shape it doesn't recognize just costs a wasted attempt. Two
+ * exclusions: an object/pattern property KEY declaration, gated by
+ * {@link objectPropertyKeyPositions} (see that function's doc comment for why
+ * membership/call/return values, including `x in obj`, are deliberately NOT
+ * covered by this exclusion); and a direct element of an array PROVEN to be a
+ * field-name list, gated by {@link arrayExpressionsUsedAsFieldNameLists} /
+ * {@link fieldNameListElementPositions} (see that function's doc comment for
+ * the proof requirement and its disclosed residual). Every real value
+ * position -- object VALUES, class fields, call arguments, return values,
+ * every OTHER array's elements, everything else -- is pushed unconditionally.
+ */
 function collectLiteralPositions(program: Node, analysis: FileAnalysis): LiteralPosition[] {
   const dispatchTables = objectExpressionsUsedAsDispatchTables(program, analysis);
   const { decidedKeys, sites } = objectPropertyKeyPositions(program, dispatchTables);
+  const fieldNameLists = arrayExpressionsUsedAsFieldNameLists(program, analysis);
+  const decidedFieldNameElements = fieldNameListElementPositions(fieldNameLists);
   walk(program, (node, _parent, ancestors) => {
-    if (decidedKeys.has(node) || node.type === "ObjectProperty" || node.type === "ObjectMethod") {
+    if (
+      decidedKeys.has(node) ||
+      decidedFieldNameElements.has(node) ||
+      node.type === "ObjectProperty" ||
+      node.type === "ObjectMethod"
+    ) {
       return;
     }
     sites.push({ enclosingFunctionName: enclosingFunctionNameOf(ancestors), node });

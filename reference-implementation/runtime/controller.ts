@@ -29,6 +29,10 @@ import {
   projectBrowserSurfaceLease,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
+import {
+  ConnectorImplementationNotFoundError,
+  resolveConnectorImplementation,
+} from "@pdpp/polyfill-connectors/resolve";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
@@ -112,14 +116,14 @@ const REFERENCE_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manif
 const SEED_CONNECTOR_PATH = join(REFERENCE_IMPL_DIR, "connectors", "seed", "index.ts");
 // Resolved from the installed `@pdpp/polyfill-connectors` package (never a
 // hardcoded relative repo path) so this reference never drifts from that
-// package's own on-disk layout.
+// package's own on-disk layout. Manifest enumeration still reads this
+// directory directly (the `manifests` export's on-disk layout is unaffected
+// by the connector-tree-scope fix); only per-connector entry-point
+// resolution moved to resolveConnectorImplementation — see that function's
+// own comment.
 const POLYFILL_PACKAGE_SRC_DIR = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
 const POLYFILL_ROOT = join(POLYFILL_PACKAGE_SRC_DIR, "..");
 const POLYFILL_MANIFESTS_DIR = join(POLYFILL_ROOT, "manifests");
-const POLYFILL_CONNECTORS_DIR = join(POLYFILL_ROOT, "connectors");
-
-// Hoisted so the regex compiles once per process, not once per manifest.
-const JSON_EXTENSION_RE = /\.json$/;
 
 // ─── Shared domain types ────────────────────────────────────────────────────
 
@@ -1329,8 +1333,34 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
   return entries;
 }
 
+// Resolve a shipped polyfill connector's runnable (spawnable) entry-point
+// path, given its manifest's connector_id. Returns null when
+// @pdpp/polyfill-connectors has no built implementation for this ID.
+//
+// Backed by @pdpp/polyfill-connectors/resolve's resolveConnectorImplementation
+// (data-connectors#75, connector-index.json covers all 45 manifest-listed
+// connectors — no more directory-walking POLYFILL_CONNECTORS_DIR, which only
+// worked for whatever subset this repo's vendored tarball happened to ship
+// compiled at the time). The resolver returns a file:// URL string, safe for
+// `import()` directly; converted to a filesystem path here because this
+// file's own downstream consumer (runtime/index.ts's connector spawn) takes
+// a path, not a URL. Unknown IDs throw ConnectorImplementationNotFoundError
+// rather than returning falsy — caught and treated the same as the old
+// "no on-disk implementation" case, since both mean the same thing to this
+// function's callers: no shipped polyfill connector for this ID.
+function resolvePolyfillConnectorEntryPoint(connectorId: string): string | null {
+  try {
+    return fileURLToPath(resolveConnectorImplementation(connectorId).entry);
+  } catch (err) {
+    if (err instanceof ConnectorImplementationNotFoundError) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 // Index one polyfill manifest file into the connector-path and fingerprint
-// maps. No-op for non-JSON files, connectors without an on-disk implementation,
+// maps. No-op for non-JSON files, connectors without a shipped implementation,
 // malformed manifests, or manifests missing a usable connector_id.
 function indexPolyfillManifestFile(
   file: string,
@@ -1338,14 +1368,6 @@ function indexPolyfillManifestFile(
   fingerprints: Map<string, ManifestFingerprint>
 ): void {
   if (!file.endsWith(".json")) {
-    return;
-  }
-  const connectorName = file.replace(JSON_EXTENSION_RE, "");
-  const connectorPath = [
-    join(POLYFILL_CONNECTORS_DIR, connectorName, "index.ts"),
-    join(POLYFILL_CONNECTORS_DIR, connectorName, "index.js"),
-  ].find((candidatePath) => existsSync(candidatePath));
-  if (!connectorPath) {
     return;
   }
   try {
@@ -1358,6 +1380,10 @@ function indexPolyfillManifestFile(
       return;
     }
     const trimmedId = connectorId.trim();
+    const connectorPath = resolvePolyfillConnectorEntryPoint(trimmedId);
+    if (!connectorPath) {
+      return;
+    }
     setManifestLookupAliases(paths, trimmedId, manifest, connectorPath);
     const fp = fingerprintManifest(manifest);
     if (fp) {
@@ -3297,9 +3323,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeRunWatchdogTimers.delete(input.runId);
     }
     // A normal completion that beats the watchdog deadline means the timer
-    // above is cleared and will never fire, so its settlement will never
-    // resolve on its own — drop the entry so it doesn't leak. Any `awaitRun`
-    // race is already won by the (now-settled) `activeRunPromises` entry.
+    // above is cleared and will never fire on its own. Any `awaitRun` race is
+    // already won by the (now-settled) `activeRunPromises` entry regardless
+    // of whether this settlement ever resolves, so resolving it here changes
+    // no caller-observable behavior — but leaving it permanently unresolved
+    // after dropping the map entry below leaks a dangling promise with no
+    // remaining reference to it, which Node's test runner (correctly) flags
+    // as a resource the process never finished ("Promise resolution is still
+    // pending but the event loop has already resolved") in any test that
+    // exercises a normal (non-watchdog-timeout) run completion. Resolve
+    // before dropping the entry.
+    runWatchdogSettlements.get(input.runId)?.resolve();
     runWatchdogSettlements.delete(input.runId);
     // Mark settled BEFORE deleting from activeRuns so the 409 guard's
     // reconciliation window is as short as possible.

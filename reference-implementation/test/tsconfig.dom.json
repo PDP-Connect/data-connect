@@ -1,0 +1,47 @@
+{
+  // Isolated program for the one test file that legitimately needs jsdom's
+  // real DOM surface (document, Event, ResizeObserver, ...). Kept OUT of
+  // the main tsconfig.json program (see that file's `exclude`) because
+  // `@types/jsdom`'s ambient `/// <reference lib="dom" />` is a program-
+  // wide side effect of TypeScript module resolution, not scoped to the
+  // importing file -- merging it into the main program collapses
+  // `@types/node`'s DOM-conditional types (RequestInit, Timeout, etc.)
+  // everywhere else. See data-connect#45 for the full mechanism.
+  //
+  // Same language/strictness bar as the main tsconfig.json; only the
+  // `types` list and `include` differ.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+    "lib": ["ES2023", "DOM"],
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "useUnknownInCatchVariables": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node", "jsdom"],
+
+    "allowJs": true,
+    "checkJs": false,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["run-interaction-stream-remote-surface-session.test.ts"]
+}

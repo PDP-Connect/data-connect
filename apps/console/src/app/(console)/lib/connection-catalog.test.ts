@@ -459,9 +459,12 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
   // available" verdict.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);
-  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(
-    "../../../../../../packages/polyfill-connectors/src/static-secret-injection.ts"
-  );
+  // Import via the real package specifier, not a physical path into
+  // packages/polyfill-connectors/src/ -- that directory is a narrow,
+  // deliberately curated subset (see its own package.json) vendored for
+  // @pdpp/local-collector's build only, not a general-purpose mirror of the
+  // full @pdpp/polyfill-connectors package, and does not carry this file.
+  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import("@pdpp/polyfill-connectors/static-secret-injection");
   for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);

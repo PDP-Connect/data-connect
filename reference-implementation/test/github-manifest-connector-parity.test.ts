@@ -50,14 +50,6 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..");
-// Resolved from the installed `@pdpp/polyfill-connectors` package (never a
-// hardcoded relative repo path) so this scan covers the real, currently
-// shipping connector source, not a local vendoring copy.
-const POLYFILL_CONNECTORS_DIR = join(
-  dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests"))),
-  "..",
-  "connectors"
-);
 
 interface ManifestStream {
   name: string;
@@ -127,32 +119,10 @@ test("reference fixture manifest only advertises streams the seed connector emit
 
 test("polyfill manifest only advertises streams the GitHub connector has schemas for", async () => {
   const manifestStreams = shippedGithubManifestStreamNames();
-  const githubSchemasPath = join(POLYFILL_CONNECTORS_DIR, "github", "schemas.ts");
-
-  const { SCHEMAS } = await import(githubSchemasPath)
-    // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
-    .catch(async () => {
-      // Node strips TS via --experimental-strip-types under v22+, but never
-      // for a `.ts` file under node_modules (which this package now is); if
-      // the dynamic import fails for that or any other reason, fall back to
-      // source inspection.
-      const source = readFileSync(githubSchemasPath, "utf8");
-      const keys = new Set<string>();
-      // Match: `key: someSchema,` inside the SCHEMAS block - capture the key.
-      // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-      const schemasBlockMatch = source.match(/SCHEMAS[^=]*=\s*{([\s\S]*?)};/);
-      const schemasBlock = schemasBlockMatch?.[1];
-      if (schemasBlock) {
-        for (const m of schemasBlock.matchAll(/^\s*(\w+):/gm)) {
-          // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
-          const key = m[1];
-          if (key) {
-            keys.add(key);
-          }
-        }
-      }
-      return { SCHEMAS: Object.fromEntries([...keys].map((k) => [k, true])) };
-    });
+  // data-connectors#70 blessed ./connectors/github/schemas specifically for
+  // this check — no more falling back to raw-source regex scraping of a
+  // `.ts` file under node_modules.
+  const { SCHEMAS } = await import("@pdpp/polyfill-connectors/connectors/github/schemas");
 
   const schemaStreams = new Set(Object.keys(SCHEMAS));
   const orphans = manifestStreams.filter((name: string) => !schemaStreams.has(name));

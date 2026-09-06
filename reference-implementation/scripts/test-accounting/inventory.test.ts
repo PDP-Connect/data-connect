@@ -1006,7 +1006,12 @@ test("the dedicated scratch lifecycle leaf removes every inherited capability va
   const missingBoundary = structuredClone(localManifest);
   const [missingSuite] = missingBoundary.suites;
   assert.ok(missingSuite);
-  missingSuite.environment_unset = undefined;
+  // `environment_unset` is declared `?: string[]` (optional key, not
+  // `string[] | undefined`); under `exactOptionalPropertyTypes`, assigning
+  // the literal value `undefined` is a distinct, disallowed operation from
+  // the key being absent. `delete` is what this test actually means to
+  // simulate: the manifest field is missing entirely.
+  delete missingSuite.environment_unset;
   await writeFile(join(root, "test-accounting.manifest.json"), `${JSON.stringify(missingBoundary)}\n`);
   await assert.rejects(
     readManifest(join(root, "test-accounting.manifest.json"), { root }),

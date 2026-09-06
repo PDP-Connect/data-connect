@@ -350,16 +350,34 @@ async function fetchOwnerSourcesDom({
         // The browser waits for the resolved semantic surface. No wall-clock sleep is used.
         // biome-ignore lint/performance/noAwaitInLoops: each next DOM page is discovered from the prior page's rendered pager link.
         navigation = await page.goto(absolute, { waitUntil: "domcontentloaded" });
-        await page.waitForFunction(
-          () =>
-            !document.querySelector(
+        // This closure is stringified by Playwright and evaluated inside the
+        // real browser page (`page.waitForFunction`), where `document` is a
+        // real ambient global at runtime. It is typed here via a local,
+        // in-closure cast rather than TypeScript's ambient `document` global
+        // because this repo's tsconfig deliberately withholds `lib: "DOM"`
+        // from the main program (see tsconfig.json's `exclude` comment and
+        // data-connect#45: that lib is a program-wide setting, and this same
+        // file is imported by `authority.test.ts`/`receipt.ts`, which stay in
+        // that program). The cast must stay entirely inside this closure's
+        // own source text -- Playwright sends only `fn.toString()` to the
+        // browser, so referencing any outer helper here would throw
+        // `ReferenceError` at runtime; every identifier the closure uses
+        // must be self-contained or a real browser global.
+        await page.waitForFunction(() => {
+          const ownerSourcesDomDocument = (
+            globalThis as unknown as { document: { querySelector: (selector: string) => unknown } }
+          ).document;
+          return (
+            !ownerSourcesDomDocument.querySelector(
               '[aria-busy="true"], [data-testid*="loading" i], [data-testid*="suspense" i], .animate-pulse'
             ) &&
             Boolean(
-              document.querySelector('[data-pdpp-source-row], [data-pdpp-stream-row], [data-testid="sources-empty"]')
-            ),
-          { timeout: OWNER_DOM_RESOLUTION_TIMEOUT_MS }
-        );
+              ownerSourcesDomDocument.querySelector(
+                '[data-pdpp-source-row], [data-pdpp-stream-row], [data-testid="sources-empty"]'
+              )
+            )
+          );
+        }, { timeout: OWNER_DOM_RESOLUTION_TIMEOUT_MS });
       } catch {
         const html = await page.content();
         const observed = parseOwnerSourcesDom(html);
@@ -630,10 +648,24 @@ export async function runLiveStreamHealthAuthority({
       headers: { accept: "application/json", ...auth.header },
       onRevision: (revision) => summaryRevisions.push(revision),
     });
+    // `auth.supported` (checked above) only holds for `mode: "cookie"` or a
+    // successful `mode: "password-session"` login, and both of those paths
+    // populate `header.cookie` (see resolveOwnerAuthForStreamHealth above) --
+    // but `header: Record<string, string>` can't encode that invariant in
+    // its type, and `noUncheckedIndexedAccess` correctly refuses to assume
+    // an index-signature read is present. Fail loud rather than silently
+    // passing `undefined` through as a cookie string if that invariant is
+    // ever violated by a future auth-mode change.
+    const { cookie } = auth.header;
+    if (!cookie) {
+      throw new Error(
+        `resolveOwnerAuthForStreamHealth reported supported auth (mode: ${auth.mode}) with no cookie in header — invariant violated`
+      );
+    }
     const domResult = await fetchOwnerSourcesDom({
       base,
       browserFactory,
-      cookie: auth.header.cookie,
+      cookie,
     });
     const authority = evaluateStreamHealthAuthority({
       auth: { authenticated: true, mode: auth.mode, resolved: true },

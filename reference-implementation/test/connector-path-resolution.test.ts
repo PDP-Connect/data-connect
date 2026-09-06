@@ -43,7 +43,7 @@ const TOP_LEVEL_REGEX_1 = /@pdpp\/polyfill-connectors\/connectors\/github\/index
 const TOP_LEVEL_REGEX_2 = /reference-implementation\/connectors\/seed\/index\.ts$/;
 const TOP_LEVEL_REGEX_3 = /reference-implementation\/connectors\/seed\/index\.ts$/;
 const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/github\/index\.(ts|js)$/;
-const TOP_LEVEL_REGEX_5 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.ts$/;
+const TOP_LEVEL_REGEX_5 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.(ts|js)$/;
 const TOP_LEVEL_REGEX_6 = /reference-implementation\/connectors\/seed\/index\.ts$/;
 
 interface FixtureManifest extends ConnectorManifest {

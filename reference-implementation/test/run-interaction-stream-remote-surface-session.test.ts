@@ -5,7 +5,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: remote-surface 1.5.1 is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
 import { createRemoteSurfaceSession } from "@opendatalabs/remote-surface/client";
-// @ts-expect-error jsdom is a test-only dev dependency without declarations in the reference tsconfig.
+// This file typechecks under its own isolated program (test/tsconfig.dom.json,
+// types: ["node", "jsdom"]) rather than the main reference-implementation
+// tsconfig.json, so `@types/jsdom` resolves cleanly here without leaking its
+// ambient `lib="dom"` reference into the rest of the program — see that
+// file's comment and data-connect#45 for why the isolation exists.
 // biome-ignore lint/correctness/noUnresolvedImports: jsdom is installed for this DOM-only session test.
 import { JSDOM } from "jsdom";
 

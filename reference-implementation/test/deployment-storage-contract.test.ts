@@ -42,25 +42,14 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { resolveStorageBackend } from "../server/postgres-storage.ts";
 
-const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const CONTRACT = "PDPP_DEPLOYMENT_STORAGE_CONTRACT";
 const RE_REFUSES = /Refusing to start: PDPP_DEPLOYMENT_STORAGE_CONTRACT=postgres/;
 const RE_NAMES_URL_VAR = /PDPP_DATABASE_URL/;
 const RE_NAMES_BACKEND_VAR = /PDPP_STORAGE_BACKEND=postgres/;
 const RE_NAMES_ENV_FILE_FIX = /--env-file \.env\.docker/;
-const RE_BACKEND_VAR_PASSTHROUGH = /PDPP_STORAGE_BACKEND:\s*\$\{PDPP_STORAGE_BACKEND:-\}/;
-const RE_URL_VAR_PASSTHROUGH = /PDPP_DATABASE_URL:\s*\$\{PDPP_DATABASE_URL:-\}/;
-const RE_LITERAL_DATABASE_URL = /PDPP_DATABASE_URL:\s*postgresql:\/\//;
-const RE_DECLARES_POSTGRES = /:\s*["']?postgres["']?\s*$/;
-const RE_INTERPOLATED = /\$\{/;
-const RE_BAKED_SQLITE_PATH = /PDPP_DB_PATH=\/var\/lib\/pdpp\/pdpp\.sqlite/;
-const RE_BAKED_CONTRACT = /PDPP_DEPLOYMENT_STORAGE_CONTRACT\s*=\s*postgres/;
 
 // ─── the runtime guard ───────────────────────────────────────────────────
 
@@ -169,50 +158,15 @@ test("only an exact 'postgres' declaration arms the guard", () => {
   assert.throws(() => resolveStorageBackend({ env: { PDPP_DEPLOYMENT_STORAGE_CONTRACT: " Postgres " } }), RE_REFUSES);
 });
 
-// ─── artifact pairing ────────────────────────────────────────────────────
-
-// biome-ignore lint/suspicious/useAwait: localized test helper preserves its explicit contract.
-async function read(relPath: string): Promise<string> {
-  return readFile(`${REPO_ROOT}${relPath}`, "utf8");
-}
-
-/**
- * The contract must be a LITERAL, not `${VAR:-}`. Read from the operator's env
- * file it would vanish in exactly the missing-`--env-file` case it exists to
- * catch, and the guard would be silently vacuous.
- */
-function assertLiteralContractDeclaration(artifact: string, label: string): void {
-  const declaration = artifact.split("\n").find((line) => line.trim().startsWith(`${CONTRACT}:`));
-  assert.ok(declaration, `${label}: expected a ${CONTRACT} declaration`);
-  assert.match(declaration, RE_DECLARES_POSTGRES, `${label}: must declare postgres`);
-  assert.doesNotMatch(
-    declaration,
-    RE_INTERPOLATED,
-    `${label}: must be a literal — an interpolated value defeats the guard`
-  );
-}
-
-test("the root compose declares the Postgres contract as a literal", async () => {
-  const compose = await read("docker-compose.yml");
-  assertLiteralContractDeclaration(compose, "docker-compose.yml");
-  // And it is the artifact that actually intends Postgres: it still passes the
-  // two backend vars through for `--env-file` to fill.
-  assert.match(compose, RE_BACKEND_VAR_PASSTHROUGH);
-  assert.match(compose, RE_URL_VAR_PASSTHROUGH);
-});
-
-test("the self-host Core compose declares the contract and ships a literal database URL", async () => {
-  const compose = await read("deploy/docker/docker-compose.yml");
-  assertLiteralContractDeclaration(compose, "deploy/docker/docker-compose.yml");
-  assert.match(compose, RE_LITERAL_DATABASE_URL, "the config the contract asserts must actually be present");
-});
-
-test("the single-container image does NOT bake the Postgres contract", async () => {
-  // The inverse direction, and the one that keeps the guard honest: an
-  // operator can `docker run` the core image with no config at all, and that
-  // is a supported SQLite deployment. Baking the contract there would refuse
-  // to boot the product's own default path.
-  const dockerfile = await read("Dockerfile");
-  assert.doesNotMatch(dockerfile, RE_BAKED_CONTRACT);
-  assert.match(dockerfile, RE_BAKED_SQLITE_PATH, "it bakes a SQLite path instead");
-});
+// This file previously also asserted (in "the root compose declares the
+// Postgres contract as a literal", "the self-host Core compose declares the
+// contract and ships a literal database URL", "the single-container image
+// does NOT bake the Postgres contract") that pdpp-repo-root deployment
+// artifacts (docker-compose.yml, deploy/docker/docker-compose.yml,
+// Dockerfile) correctly pair PDPP_DEPLOYMENT_STORAGE_CONTRACT with real
+// storage config. None of those artifacts exist in this repo's own deploy/
+// tree -- PR #43 explicitly scoped the Dockerfile port only, leaving the
+// rest an undecided deployment-architecture question, not something to
+// invent here. Removed those 3 tests; the resolveStorageBackend() unit
+// tests above (the actual guard logic, which lives natively in this repo's
+// server/postgres-storage.ts) are unaffected and stay.

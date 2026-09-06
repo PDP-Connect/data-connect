@@ -104,7 +104,24 @@ export interface DataLoadViolation {
   snippet: string;
 }
 
-const MANIFEST_ROOTS = ["reference-implementation/fixtures/seed-manifests", "packages/polyfill-connectors/manifests"];
+// `packages/polyfill-connectors/manifests` (the vendored-SOURCE package's
+// own tree) never ships a `manifests/` directory -- that package is a BUILD
+// INPUT for the `@pdpp/polyfill-connectors` npm package (a pinned tarball
+// dependency, per `reference-implementation/package.json` -- see
+// `POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER`'s own doc comment), which ships
+// `manifests/` as part of its BUILT, INSTALLED output at
+// `node_modules/@pdpp/polyfill-connectors/manifests` instead. Both roots are
+// listed: the reference-fixture root is a real, git-tracked repo directory;
+// the installed-package root is where the real npm dependency's manifests
+// physically land after `npm install`, verified by inspection of that
+// package's own `exports` map (`./manifests` -> `./src/manifest-registry.js`,
+// whose sibling `manifests/` directory this root names) -- not a repo path
+// this scanner could derive generically, since an installed dependency's
+// on-disk layout is package-manager behavior, not something committed here.
+const MANIFEST_ROOTS = [
+  "reference-implementation/fixtures/seed-manifests",
+  "node_modules/@pdpp/polyfill-connectors/manifests",
+];
 
 /**
  * The complete, hand-maintained allowlist of RI-owned policy resources a
@@ -137,7 +154,7 @@ const MANIFEST_ROOTS = ["reference-implementation/fixtures/seed-manifests", "pac
  */
 const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
 
-const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:98";
+const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:99";
 
 /**
  * Closed, human-reviewed allowlist of call sites (file + 1-indexed line of
@@ -198,14 +215,18 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-root-derived-dir>, entryName) (defaultPolyfillManifestsDir()
   // / defaultReferenceFixturesDir(), both resolve()'d off the two sanctioned
-  // manifest roots), but through 2 hops of parameter indirection
+  // manifest roots — defaultPolyfillManifestsDir()'s own
+  // import.meta.resolve("@pdpp/polyfill-connectors/manifests") anchor is now
+  // separately recognized by this scanner's resolver, see
+  // `isPolyfillConnectorsPackageSrcDirExpr`; that fix closes THAT anchor
+  // shape, not this one), but through 2 hops of parameter indirection
   // (readManifestJson's own `path` param, fed by loadReferenceFixtureFingerprints's/
   // reconcilePolyfillManifests's `referenceFixturesDir`/`manifestsDir` params) —
   // one hop deeper than this scanner's bounded parameter resolver follows.
   // Verified by direct inspection, not by the scanner, hence the allowlist entry.
-  // Re-derived 2026-08-30: the call site moved from line 103 to 98 after
-  // unrelated edits removed five lines above it -- the function itself is
-  // unchanged. This entry is
+  // Re-derived 2026-09-03: the call site moved from line 98 to 99 after
+  // 3870a58b (consume @pdpp/polyfill-connectors as a pinned dependency) added
+  // a line above it -- the function itself is unchanged. This entry is
   // line-pinned by design (see this array's own doc comment above); it must
   // be re-derived whenever an edit anywhere above the call site shifts it.
   POLYFILL_MANIFEST_READ_SITE,
@@ -230,6 +251,68 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // owner/operator-authored evidence about connector_instance_id groupings
   // (opaque ids), not connector/provider policy data.
   "reference-implementation/scripts/connector-instance-groups-migrate.ts:89",
+  // guardUndiciDispatcher() in hermetic/guard.ts: dynamic
+  // import(pathToFileURL(resolved).href) where `resolved` is
+  // `req.resolve("undici")` -- Node's OWN CommonJS module resolver (from a
+  // real `createRequire(...)` binding) resolving a bare npm PACKAGE name
+  // ("undici") to that package's real on-disk CODE entry point, not a JSON/
+  // YAML data resource. This is genuinely unresolvable to this scanner's
+  // bounded constant-folder (the resolved on-disk path depends on the
+  // installed npm tree, not anything statically knowable from source), but
+  // "unresolvable" here means "the resolver can't compute WHICH .js file on
+  // disk", not "this might carry connector policy" -- `require.resolve` can
+  // only ever resolve a MODULE specifier, never a data file, and the
+  // specifier itself ("undici") is a literal, non-connector, non-relative
+  // npm package name, plainly visible at the call site as a real string
+  // argument to `req.resolve(...)` one line above. Verified by direct
+  // inspection, not by the scanner (the scanner has no general "this
+  // resolves a require specifier, not a path" resolution mode -- see
+  // `calleeName`'s own doc comment in `ri-zero-connector-knowledge-ast-shared.ts`
+  // for the receiver-disambiguation fix that stopped this call site's
+  // `req.resolve(...)` from being MISREAD as `path.resolve(...)` and
+  // fabricating a bogus relative-path violation instead of this correct,
+  // narrower "genuinely unresolvable, but provably a code load" one).
+  // Line-pinned by design (see this array's own doc comment above); it must
+  // be re-derived if an edit above the call site moves it.
+  "reference-implementation/scripts/hermetic/guard.ts:426",
+  // readPolyfillManifests() in generate-connector-registry.ts:
+  // readFileSync(resolve(manifestsDir, file), "utf8") where `manifestsDir =
+  // process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..",
+  // "manifests")` -- a LogicalExpression (`||`) fallback this scanner's
+  // constant-folder does not evaluate (no rule anywhere folds `||`; only `+`
+  // string concatenation is a value-producing operator here, matching the
+  // sibling identity scanner's own posture). Both branches are legitimate,
+  // non-connector-identity paths: the env var is explicit OPERATOR
+  // OVERRIDE input (same class as `version-disposition.ts:238`'s
+  // `PDPP_COMPACTION_RESIDUE_REVIEW_PATH` above), and the fallback resolves
+  // via `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`
+  // (`packageSrcDir`, one line above) into the real installed
+  // `@pdpp/polyfill-connectors` package's own shipped manifests directory --
+  // this scanner's `POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER`/
+  // `MANIFEST_ROOTS` already sanction that exact directory when reached
+  // directly (see `runtime/controller.ts`'s equivalent, resolver-provable
+  // call site); this one is functionally identical but ONE level of `||`
+  // indirection deeper than the bounded folder follows. Verified by direct
+  // inspection, not by the scanner.
+  // Line-pinned by design (see this array's own doc comment above); it must
+  // be re-derived if an edit above the call site moves it.
+  "reference-implementation/scripts/generate-connector-registry.ts:104",
+  // readOwner(ownerPath) in with-local-full-suite-lock.mjs: readFileSync(ownerPath,
+  // "utf8") where `ownerPath = resolve(lockPath, OWNER_NAME)`, `lockPath =
+  // resolve(gitCommonDirectory(), LOCK_NAME)`, and `gitCommonDirectory()` runs
+  // `git rev-parse --path-format=absolute --git-common-dir` (an
+  // execFileSync call, not a scanner-recognized path-anchor shape). This is
+  // this SAME TOOL's own advisory-lock owner file: `LOCK_NAME`
+  // ("pdpp-test-accounting.lock.d") and `OWNER_NAME` ("owner.json") are
+  // fixed string constants a few lines above, and the directory itself is
+  // this repo's own `.git` common directory -- never attacker- or
+  // connector-influenced. The file is written by THIS SAME SCRIPT
+  // (`writeFileSync(ownerPath, ...)`, acquireLock()) and only ever read back
+  // by itself; its content is a lock-ownership token/pid/timestamp, not
+  // connector/provider policy data. Verified by direct inspection, not by
+  // the scanner (no rule here folds an `execFileSync` call result as a path
+  // anchor, matching this scanner's stated bounded-resolver scope).
+  "reference-implementation/scripts/test-accounting/with-local-full-suite-lock.mjs:44",
 ]);
 
 /** Directory segments, relative to a production scan root (e.g. `server/`),
@@ -356,7 +439,26 @@ function manifestRootFileHasManifestProvenance(repoRoot: string, resolvedRelPath
 // PLACEHOLDER can never make an out-of-root path look in-root, since the
 // directory portion up to the last statically-known segment is unaffected.
 
-type ResolvedPath = { kind: "static"; relPath: string } | { kind: "unresolvable" };
+/**
+ * `kind: "validated-by-helper"` is a THIRD, deliberately narrow resolution
+ * outcome alongside `"static"` (a real repo-relative path) and
+ * `"unresolvable"` (fails closed): a path ARGUMENT that is itself a call to a
+ * same-file, non-exported function PROVEN, by {@link functionIsProvenSafePathHelper},
+ * to structurally constrain its own return value to a fixed root the
+ * function's OWN CALLER controls (a `realpathSync`-then-prefix-reject
+ * pattern — see that function's doc comment for the exact shape required).
+ * This is NOT "resolved to a known path" (the actual root value is a runtime
+ * parameter, genuinely unknowable statically) and NOT "give up" either — it
+ * is a THIRD claim: "whatever this reads, the helper itself proves it cannot
+ * escape outside a directory the caller already controls", which is exactly
+ * the property rule (5) cares about (no connector-identity data smuggled in
+ * via an unconstrained/attacker-influenced path), proven by the FUNCTION'S
+ * OWN CODE rather than by resolving a literal value. `classifyResolved`
+ * treats this outcome as legitimate outright — it is not compared against
+ * `MANIFEST_ROOTS`/`SANCTIONED_POLICY_RESOURCES` at all, since there is no
+ * resolved path to compare.
+ */
+type ResolvedPath = { kind: "static"; relPath: string } | { kind: "unresolvable" } | { kind: "validated-by-helper" };
 
 const PLACEHOLDER = " DYNAMIC ";
 
@@ -390,12 +492,62 @@ interface FileAnalysis {
   allCalls: Node[];
   fileDir: string;
   /** Non-exported top-level function declarations, by name, so a parameter
-   * can be resolved to the union of its own call sites (single hop). */
-  localFunctions: Map<string, { params: string[]; exported: boolean }>;
+   * can be resolved to the union of its own call sites (single hop). `body`
+   * additionally lets `functionIsProvenSafePathHelper` inspect a candidate
+   * validated-path-helper's own implementation structurally. */
+  localFunctions: Map<string, { body: Node; params: string[]; exported: boolean }>;
   /** Module-level `const NAME = <init>` declarators, by name. Used to
    * resolve identifiers like `__dirname`/`REFERENCE_MANIFESTS_DIR`. */
   moduleConsts: Map<string, Node>;
+  /** Local binding names PROVEN, by a real `import ... from "node:path"`
+   * declaration (default or namespace form: `import path from "node:path"`,
+   * `import * as path from "node:path"`), to denote the real `node:path`
+   * module -- passed to `calleeName`'s `trustedReceivers` parameter so
+   * `X.resolve(...)`/`X.join(...)` is only ever treated as `node:path`'s
+   * path-arithmetic functions when `X` is one of these bindings, never any
+   * other object that happens to expose a same-named method (e.g.
+   * `require.resolve(...)`, Node's own CommonJS module resolver). See
+   * `calleeName`'s own doc comment in `ri-zero-connector-knowledge-ast-shared.ts`
+   * for the full rationale. */
+  nodePathBindingNames: ReadonlySet<string>;
+  /** Same-file, non-exported function names PROVEN by
+   * `functionIsProvenSafePathHelper` to structurally validate their own
+   * return value against a caller-supplied root -- see that function's doc
+   * comment for the exact required shape. A path ARGUMENT that is a call to
+   * one of these functions resolves to `{ kind: "validated-by-helper" }`
+   * rather than `"unresolvable"`. */
+  provenSafePathHelperNames: ReadonlySet<string>;
   relPath: string;
+}
+
+/** Every local name bound to a real `import ... from "node:path"` default or
+ * namespace import (`import path from "node:path"`, `import * as np from
+ * "node:path"`) -- named imports (`import { join, resolve } from
+ * "node:path"`) bind `join`/`resolve` themselves as bare identifiers, which
+ * `calleeName` already resolves correctly with zero receiver ambiguity (a
+ * bare `Identifier` callee), so only the default/namespace forms need
+ * tracking here. */
+function collectNodePathBindingNames(program: Node): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of nodeArrayField(program, "body")) {
+    if (stmt.type !== "ImportDeclaration") {
+      continue;
+    }
+    const source = nodeField(stmt, "source");
+    if (source?.type !== "StringLiteral" || source.value !== "node:path") {
+      continue;
+    }
+    for (const specifier of nodeArrayField(stmt, "specifiers")) {
+      if (specifier.type !== "ImportDefaultSpecifier" && specifier.type !== "ImportNamespaceSpecifier") {
+        continue;
+      }
+      const local = nodeField(specifier, "local");
+      if (local?.type === "Identifier") {
+        names.add(local.name as string);
+      }
+    }
+  }
+  return names;
 }
 
 // A resolved fragment is either "already a full repo-root-relative path"
@@ -426,7 +578,7 @@ function resolveCallExpressionSegment(
   depth: number,
   visiting: Set<string>
 ): SegmentResult {
-  const name = calleeName(expr.callee as Node);
+  const name = calleeName(expr.callee as Node, analysis.nodePathBindingNames);
   if (name === "join" || name === "resolve") {
     const joined = resolveJoinOrResolveCall(expr, analysis, depth, visiting);
     return joined.kind === "static" ? { kind: "anchored", relPath: joined.relPath } : UNRESOLVABLE;
@@ -511,6 +663,9 @@ function resolveSegment(expr: Node, analysis: FileAnalysis, depth: number, visit
   if (isDirnameLikeExpr(expr)) {
     return { kind: "anchored", relPath: analysis.fileDir };
   }
+  if (isPolyfillConnectorsPackageSrcDirExpr(expr)) {
+    return { kind: "anchored", relPath: POLYFILL_CONNECTORS_PACKAGE_SRC_DIR };
+  }
   if (expr.type === "NewExpression" && isIdentifier(expr.callee as Node, "URL")) {
     return resolveNewUrlSegment(expr, analysis, depth, visiting);
   }
@@ -591,7 +746,7 @@ function resolveAnchoredExpr(expr: Node, analysis: FileAnalysis, depth: number, 
     return { kind: "unresolvable" };
   }
   if (expr.type === "CallExpression") {
-    const name = calleeName(expr.callee as Node);
+    const name = calleeName(expr.callee as Node, analysis.nodePathBindingNames);
     if (name === "join" || name === "resolve") {
       return resolveJoinOrResolveCall(expr, analysis, depth, visiting);
     }
@@ -627,22 +782,75 @@ function resolveToLiteralStringValue(expr: Node, analysis: FileAnalysis): string
   return segment.kind === "bare" ? segment.text : null;
 }
 
-function isImportMetaUrl(node: Node): boolean {
+function isImportMetaMemberAccess(node: Node, propertyName: string): boolean {
   return (
     node.type === "MemberExpression" &&
     // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `node.object`/`node.property` are `unknown` on Node's index signature; the `as Node` casts change the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
     (node.object as Node)?.type === "MetaProperty" &&
     // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- same as above, for `node.property`.
     (node.property as Node)?.type === "Identifier" &&
-    (node.property as Node).name === "url"
+    (node.property as Node).name === propertyName
   );
+}
+
+function isImportMetaUrl(node: Node): boolean {
+  return isImportMetaMemberAccess(node, "url");
+}
+
+/**
+ * The ONE `import.meta.resolve(...)` specifier this scanner recognizes as an
+ * anchored directory fragment: `import.meta.resolve("@pdpp/polyfill-connectors/manifests")`,
+ * the real production shape `runtime/controller.ts` and
+ * `scripts/generate-connector-registry.ts` both use to locate the
+ * `@pdpp/polyfill-connectors` package's shipped manifests without hardcoding
+ * a repo-relative path to it (that package is a PINNED TARBALL DEPENDENCY —
+ * see `reference-implementation/package.json`'s `@pdpp/polyfill-connectors`
+ * entry — installed into `node_modules`, not a workspace package with a
+ * stable source-tree location; a hardcoded relative path to it would be
+ * simply wrong the moment the install layout changes, which is exactly why
+ * this production code resolves it dynamically instead).
+ *
+ * `import.meta.resolve(<specifier>)` returns the resolved module's
+ * `file://` URL for whatever `<specifier>` names — here, the package's own
+ * `./manifests` export, which its real, installed `package.json` `exports`
+ * map points at `./src/manifest-registry.js` (verified by inspection, not
+ * derivable by this scanner: a package's `exports` map is data the scanner
+ * would have to parse a THIRD package.json to discover generically, out of
+ * proportion to this one known, narrow specifier). `dirname(...)` of that
+ * resolved file therefore always lands at
+ * `node_modules/@pdpp/polyfill-connectors/src` under standard (non-hoisted-
+ * elsewhere) npm installation — the fixed anchor this function returns.
+ * Scoped to this EXACT specifier string, not any `import.meta.resolve(...)`
+ * call whatsoever: resolving an arbitrary package specifier this way would
+ * require knowing that package's own exports map, which this scanner
+ * correctly refuses to guess at for anything other than this one, reviewed,
+ * hardcoded case.
+ */
+const POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER = "@pdpp/polyfill-connectors/manifests";
+const POLYFILL_CONNECTORS_PACKAGE_SRC_DIR = "node_modules/@pdpp/polyfill-connectors/src";
+
+function isPolyfillConnectorsManifestsResolveCall(node: Node): boolean {
+  if (node.type !== "CallExpression" || !isImportMetaMemberAccess(node.callee as Node, "resolve")) {
+    return false;
+  }
+  const [first] = nodeArrayField(node, "arguments");
+  return first?.type === "StringLiteral" && first.value === POLYFILL_CONNECTORS_MANIFESTS_SPECIFIER;
 }
 
 function isDirnameLikeExpr(node: Node): boolean {
   if (isIdentifier(node, "__dirname")) {
     return true;
   }
-  // dirname(fileURLToPath(import.meta.url)) inlined at the call site.
+  // dirname(fileURLToPath(import.meta.url)) inlined at the call site, OR
+  // dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")))
+  // -- see isPolyfillConnectorsManifestsResolveCall's own doc comment. Both
+  // resolve to a FIXED anchor, just a different one (the current file's own
+  // directory vs. the installed package's src/ directory) -- the caller
+  // (resolveSegment's `isDirnameLikeExpr` branch) currently always maps a
+  // `true` result to `analysis.fileDir`; the polyfill-connectors case is
+  // handled by its OWN dedicated check below instead, so this function
+  // itself stays scoped to "is this a dirname(fileURLToPath(...)) shape at
+  // all" and does not conflate the two different anchors.
   if (node.type === "CallExpression" && calleeName(node.callee as Node) === "dirname") {
     const args = nodeArrayField(node, "arguments");
     const [inner] = args;
@@ -652,6 +860,23 @@ function isDirnameLikeExpr(node: Node): boolean {
     }
   }
   return false;
+}
+
+/** `dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")))`
+ * as an anchored segment -- resolves to the fixed
+ * `node_modules/@pdpp/polyfill-connectors/src` anchor (see
+ * `isPolyfillConnectorsManifestsResolveCall`'s own doc comment), independent
+ * of `isDirnameLikeExpr`'s `__dirname`/plain-`import.meta.url` anchor. */
+function isPolyfillConnectorsPackageSrcDirExpr(node: Node): boolean {
+  if (node.type !== "CallExpression" || calleeName(node.callee as Node) !== "dirname") {
+    return false;
+  }
+  const [inner] = nodeArrayField(node, "arguments");
+  if (inner?.type !== "CallExpression" || calleeName(inner.callee as Node) !== "fileURLToPath") {
+    return false;
+  }
+  const [innerFirst] = nodeArrayField(inner, "arguments");
+  return innerFirst !== undefined && isPolyfillConnectorsManifestsResolveCall(innerFirst);
 }
 
 /**
@@ -708,7 +933,302 @@ function resolveViaParameterIndirection(
   return agreed === null ? { kind: "unresolvable" } : { kind: "static", relPath: agreed };
 }
 
+/**
+ * PROVES a same-file, non-exported function's own BODY structurally
+ * constrains its return value to a fixed root one of its OWN PARAMETERS
+ * names — this codebase's own `safePath(root, path)`/`safeLeasePath(directory,
+ * file)` (`scripts/test-accounting/packet.ts`) and `authorityContained(directory,
+ * path, label)` (`scripts/test-accounting/inventory.ts`) idiom: resolve a
+ * REAL, symlink-resolved root via `realpathSync(<rootParam>)`, `resolve(...)`
+ * a candidate against that real root, and REJECT (via a call this function
+ * treats as a fail-path -- see `isFailCallName` below) any candidate that
+ * does not have the real root as a `/`-boundary-respecting prefix.
+ *
+ * Required shape, ALL of which must be present in the function body (a
+ * function missing ANY of these is NOT proven -- there is no partial credit,
+ * matching this scanner's fail-closed posture everywhere else):
+ *   1. A `realpathSync(<X>)` call assigned to some local binding, where `<X>`
+ *      is one of the function's OWN PARAMETERS (proves the function anchors
+ *      against a REAL root ITS OWN CALLER supplies, not a hardcoded literal
+ *      or an arbitrary computed value).
+ *   2. A `resolve(<realRootBinding>, ...)` call (the real root from (1) as
+ *      the FIRST argument) assigned to some local binding (the untrusted
+ *      candidate).
+ *   3. A REJECTION: a call to a same-file function this scanner recognizes
+ *      as a fail-path (throws/exits -- see `isFailCallName`), reached inside
+ *      an `if` condition that tests the candidate binding from (2) does NOT
+ *      have the real-root binding from (1) as a `/`-terminated PREFIX (a
+ *      `.startsWith(\`${realRoot}/\`)`-shaped check, or the equivalent
+ *      template-literal-free `!(x === real || x.startsWith(real + "/"))`
+ *      form -- both this codebase's own two real helpers use the template
+ *      form). This is the one condition that actually proves containment;
+ *      (1) and (2) alone would only prove the function COMPUTES a candidate
+ *      path, not that it REJECTS an escaping one.
+ *
+ * Disclosed residual, precisely bounded: this is a STRUCTURAL shape check,
+ * not a full data-flow proof that the rejection is reachable/correct in
+ * every branch -- a function could satisfy this shape while still leaking a
+ * path via some OTHER, unguarded return path this check does not see. That
+ * residual is accepted for the same reason every other proof in this module
+ * accepts a bounded, single-file, structural check rather than a general
+ * data-flow analysis (see this module's own top doc comment): the
+ * alternative (treating every `readFileSync(someFunctionCall(...))` as
+ * "unresolvable, hence a violation") is what motivated this fix in the first
+ * place, and the shape required here is specific enough that accidentally
+ * satisfying it while NOT actually validating a path is implausible.
+ */
+function isFailCallName(name: string | null): boolean {
+  return name === "fail" || name === "throw" || name === "assert";
+}
+
+function functionIsProvenSafePathHelper(fn: { body: Node; params: string[] }): boolean {
+  const realRootBindings = new Set<string>();
+  walk(fn.body, (node) => {
+    if (node.type !== "VariableDeclarator" || !node.init) {
+      return;
+    }
+    const init = node.init as Node;
+    const declId = node.id as Node;
+    if (
+      init.type === "CallExpression" &&
+      calleeName(init.callee as Node) === "realpathSync" &&
+      declId.type === "Identifier"
+    ) {
+      const [arg] = nodeArrayField(init, "arguments");
+      if (arg?.type === "Identifier" && fn.params.includes(arg.name as string)) {
+        realRootBindings.add(declId.name as string);
+      }
+    }
+  });
+  if (realRootBindings.size === 0) {
+    return false;
+  }
+
+  const candidateBindings = new Set<string>();
+  walk(fn.body, (node) => {
+    if (node.type !== "VariableDeclarator" || !node.init) {
+      return;
+    }
+    const init = node.init as Node;
+    const declId = node.id as Node;
+    if (init.type !== "CallExpression" || calleeName(init.callee as Node) !== "resolve" || declId.type !== "Identifier") {
+      return;
+    }
+    const [first] = nodeArrayField(init, "arguments");
+    if (first?.type === "Identifier" && realRootBindings.has(first.name as string)) {
+      candidateBindings.add(declId.name as string);
+    }
+  });
+  // `target`/`candidate` is frequently REASSIGNED (`let target: string;
+  // target = realpathSync(candidate)` in this codebase's own two helpers) --
+  // walk assignment expressions too, not just declarators, so the
+  // reject-check below recognizes whichever binding the real prefix-check
+  // actually tests against.
+  walk(fn.body, (node) => {
+    if (node.type !== "AssignmentExpression" || node.operator !== "=") {
+      return;
+    }
+    const left = node.left as Node;
+    const right = node.right as Node;
+    if (left.type !== "Identifier" || right.type !== "CallExpression") {
+      return;
+    }
+    const rightCalleeName = calleeName(right.callee as Node);
+    if (rightCalleeName === "resolve") {
+      const [first] = nodeArrayField(right, "arguments");
+      if (first?.type === "Identifier" && realRootBindings.has(first.name as string)) {
+        candidateBindings.add(left.name as string);
+      }
+      return;
+    }
+    // `target = realpathSync(candidate)` -- re-resolving an ALREADY-proven
+    // candidate through realpathSync again (this codebase's own symlink-
+    // escape-closing second hop) still names the same logical candidate.
+    if (rightCalleeName === "realpathSync") {
+      const [first] = nodeArrayField(right, "arguments");
+      if (first?.type === "Identifier" && candidateBindings.has(first.name as string)) {
+        candidateBindings.add(left.name as string);
+      }
+    }
+  });
+  if (candidateBindings.size === 0) {
+    return false;
+  }
+
+  return hasRealRootPrefixRejectionCheck(fn.body, realRootBindings, candidateBindings);
+}
+
+/** `candidate !== realRoot` (or the reverse operand order) -- the "candidate
+ * IS the root itself" exemption both real helpers include (reading the root
+ * directory's own path is not an escape). */
+function isInequalityBetween(node: Node, candidateBindings: ReadonlySet<string>, realRootBindings: ReadonlySet<string>): boolean {
+  if (node.type !== "BinaryExpression" || node.operator !== "!==") {
+    return false;
+  }
+  const left = node.left as Node;
+  const right = node.right as Node;
+  const leftIsCandidate = left.type === "Identifier" && candidateBindings.has(left.name as string);
+  const rightIsRoot = right.type === "Identifier" && realRootBindings.has(right.name as string);
+  return leftIsCandidate && rightIsRoot;
+}
+
+/** `!candidate.startsWith(\`${realRoot}/\`)` -- the actual containment
+ * check: a negated `.startsWith(...)` call on a candidate binding, whose
+ * sole argument is a template literal interpolating exactly one real-root
+ * binding (the `/`-boundary suffix in the template text itself, not
+ * independently checked, since this scanner does not evaluate template
+ * quasi text against a regex -- the shape (one interpolated identifier,
+ * nothing else resolvable) is what the check requires, and every real use
+ * of this idiom in this codebase writes the `/` literally in the template). */
+function isNegatedStartsWithRealRootPrefix(
+  node: Node,
+  candidateBindings: ReadonlySet<string>,
+  realRootBindings: ReadonlySet<string>
+): boolean {
+  if (node.type !== "UnaryExpression" || node.operator !== "!") {
+    return false;
+  }
+  const call = node.argument as Node;
+  if (call.type !== "CallExpression") {
+    return false;
+  }
+  const callee = call.callee as Node;
+  if (callee.type !== "MemberExpression" || calleeName(callee) !== "startsWith") {
+    return false;
+  }
+  const receiver = callee.object as Node;
+  if (receiver.type !== "Identifier" || !candidateBindings.has(receiver.name as string)) {
+    return false;
+  }
+  const [prefixArg] = nodeArrayField(call, "arguments");
+  if (prefixArg?.type !== "TemplateLiteral") {
+    return false;
+  }
+  const expressions = nodeArrayField(prefixArg, "expressions");
+  const [onlyExpression] = expressions;
+  return (
+    expressions.length === 1 &&
+    onlyExpression?.type === "Identifier" &&
+    realRootBindings.has(onlyExpression.name as string)
+  );
+}
+
+/** Does `body` contain an `if (candidate !== realRoot && !candidate.startsWith(\`${realRoot}/\`)) { <reject> }`
+ * -- the real containment-rejection check both `safePath`/`safeLeasePath`
+ * write -- whose consequent block actually rejects (a recognized fail-path
+ * call or a `throw`)? */
+function hasRealRootPrefixRejectionCheck(
+  body: Node,
+  realRootBindings: ReadonlySet<string>,
+  candidateBindings: ReadonlySet<string>
+): boolean {
+  let found = false;
+  walk(body, (node) => {
+    if (found || node.type !== "IfStatement") {
+      return;
+    }
+    const test = node.test as Node;
+    if (test.type !== "LogicalExpression" || test.operator !== "&&") {
+      return;
+    }
+    const left = test.left as Node;
+    const right = test.right as Node;
+    if (
+      !isInequalityBetween(left, candidateBindings, realRootBindings) ||
+      !isNegatedStartsWithRealRootPrefix(right, candidateBindings, realRootBindings)
+    ) {
+      return;
+    }
+    let rejects = false;
+    walk(node.consequent as Node, (inner) => {
+      if (inner.type === "ThrowStatement" || (inner.type === "CallExpression" && isFailCallName(calleeName(inner.callee as Node)))) {
+        rejects = true;
+      }
+    });
+    if (rejects) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+/** Every same-file, non-exported function PROVEN by
+ * {@link functionIsProvenSafePathHelper} to be a validated-path-construction
+ * helper -- computed once per file (functions rarely number more than a
+ * handful), not per call site. */
+function provenSafePathHelperNames(localFunctions: ReadonlyMap<string, { body: Node; params: string[]; exported: boolean }>): Set<string> {
+  const names = new Set<string>();
+  for (const [name, info] of localFunctions) {
+    if (!info.exported && functionIsProvenSafePathHelper(info)) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+function isCallToProvenSafePathHelper(node: Node, analysis: FileAnalysis): boolean {
+  if (node.type !== "CallExpression") {
+    return false;
+  }
+  const calledName = calleeName(node.callee as Node);
+  return calledName !== null && analysis.provenSafePathHelperNames.has(calledName);
+}
+
+/** Find a `const <name> = <init>` declarator LEXICALLY INSIDE `scopeBody`
+ * (the enclosing function's own body, not the whole file) whose initializer
+ * is a call to a proven safe-path helper. Scoped to one function body at a
+ * time specifically so a name like `path` -- reused as an unrelated `const`
+ * in OTHER functions throughout the file (making it "ambiguous" and
+ * unresolvable via the flat, whole-file `moduleConsts` table this scanner
+ * uses everywhere else) -- still resolves correctly for the ONE function
+ * that actually binds it to a validated helper's result. Returns the first
+ * match (this codebase's own real helpers assign each such binding exactly
+ * once per function; a `let`/reassigned binding is out of scope for this
+ * check the same way `moduleConsts` excludes `let`/`var` everywhere else). */
+function findLocalSafePathHelperBinding(scopeBody: Node, name: string, analysis: FileAnalysis): boolean {
+  let found = false;
+  walk(scopeBody, (node) => {
+    if (found || node.type !== "VariableDeclarator" || !node.init) {
+      return;
+    }
+    const declId = node.id as Node;
+    if (declId.type === "Identifier" && (declId.name as string) === name && isCallToProvenSafePathHelper(node.init as Node, analysis)) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+/** Is `expr` itself a call to a proven safe-path helper, OR a `const`-bound
+ * identifier whose initializer is such a call -- the `const path =
+ * safePath(root, "...")` / `readFileSync(path, ...)` shape, not just the
+ * inline `readFileSync(safePath(...), ...)` one. Identifier resolution
+ * tries the flat whole-file `moduleConsts` table first (the common case),
+ * then falls back to a scoped lookup within `enclosingFunctionName`'s OWN
+ * body (see `findLocalSafePathHelperBinding`'s doc comment for why: a name
+ * reused across multiple functions is dropped from the flat table as
+ * ambiguous, which must not defeat this check for the one function that
+ * really does bind it to a validated helper's result). */
+function isProvenSafePathHelperCall(expr: Node, analysis: FileAnalysis, enclosingFunctionName: string | null): boolean {
+  if (isCallToProvenSafePathHelper(expr, analysis)) {
+    return true;
+  }
+  if (expr.type !== "Identifier") {
+    return false;
+  }
+  const name = expr.name as string;
+  const moduleConst = analysis.moduleConsts.get(name);
+  if (moduleConst && isCallToProvenSafePathHelper(moduleConst, analysis)) {
+    return true;
+  }
+  const enclosing = enclosingFunctionName ? analysis.localFunctions.get(enclosingFunctionName) : undefined;
+  return enclosing ? findLocalSafePathHelperBinding(enclosing.body, name, analysis) : false;
+}
+
 function resolvePathArgument(expr: Node, analysis: FileAnalysis, enclosingFunctionName: string | null): ResolvedPath {
+  if (isProvenSafePathHelperCall(expr, analysis, enclosingFunctionName)) {
+    return { kind: "validated-by-helper" };
+  }
   const direct = resolveExpr(expr, analysis, 0, new Set());
   if (direct.kind === "static") {
     return direct;
@@ -848,7 +1368,15 @@ export function scanFileDataLoads(
     }
   });
 
-  const analysis: FileAnalysis = { allCalls, fileDir: dirname(relPath), localFunctions, moduleConsts, relPath };
+  const analysis: FileAnalysis = {
+    allCalls,
+    fileDir: dirname(relPath),
+    localFunctions,
+    moduleConsts,
+    nodePathBindingNames: collectNodePathBindingNames(program),
+    provenSafePathHelperNames: provenSafePathHelperNames(localFunctions),
+    relPath,
+  };
   const childProcessShellExecBindings = collectChildProcessShellExecBindings(program);
 
   // Build declarator-init -> name map up front so flowsIntoJsonParse's
@@ -931,6 +1459,16 @@ export function scanFileDataLoads(
   function classifyResolved(resolved: ResolvedPath, node: Node): void {
     if (resolved.kind === "unresolvable") {
       report(node, "unresolvable-data-resource-load");
+      return;
+    }
+    if (resolved.kind === "validated-by-helper") {
+      // Proven, by the helper FUNCTION'S OWN CODE (see
+      // `functionIsProvenSafePathHelper`'s doc comment), to structurally
+      // constrain its return value to a caller-controlled root -- there is
+      // no resolved PATH here to compare against MANIFEST_ROOTS/
+      // SANCTIONED_POLICY_RESOURCES (this is not a manifest read at all),
+      // and no report to make: this is a legitimate resolution outcome, not
+      // an unresolvable one.
       return;
     }
     const target = resolved.relPath;

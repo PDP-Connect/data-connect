@@ -1,41 +1,26 @@
-const TOP_LEVEL_REGEX_1 = /HTTP 403/;
 const TOP_LEVEL_REGEX_2 = /already been consumed/i;
-const TOP_LEVEL_REGEX_3 = /## Example 6: Single-use grant consumption/;
-const TOP_LEVEL_REGEX_4 = /"access_mode": "single_use"/;
-const TOP_LEVEL_REGEX_5 = /consumed atomically on the first\s+token\s+issuance/i;
-const TOP_LEVEL_REGEX_6 = /grant_consumed/;
-const TOP_LEVEL_REGEX_7 = /manifest-authored/i;
-const TOP_LEVEL_REGEX_8 = /consumption is not revocation/i;
-const TOP_LEVEL_REGEX_9 = /no STATE/i;
-const TOP_LEVEL_REGEX_10 = /## Example 7: Semantic classes on the consent surface/;
-const TOP_LEVEL_REGEX_11 = /Protocol-enforced constraints/;
-const TOP_LEVEL_REGEX_12 = /Structured policy declarations/;
-const TOP_LEVEL_REGEX_13 = /Attributed client claims/;
-const TOP_LEVEL_REGEX_14 = /entity-scoped/;
-const TOP_LEVEL_REGEX_15 = /request-scoped/;
 
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * B6 conformance — single-use grant consumption doc proof.
+ * B6 conformance — single-use grant consumption.
  *
- * Verifies that the documented single-use flow in:
- *   - apps/site/content/docs/reference-implementation-examples.md (Example 6)
- *
- * matches the actual behavior of the reference implementation. Single-use
- * grants are one of PDPP's load-bearing access-mode primitives (concept 30/32):
- * the grant is consumed atomically on the FIRST token issuance, the issued
- * token stays valid until expiry, but NO second token may ever be minted, and
- * single-use runs persist no STATE.
+ * Single-use grants are one of PDPP's load-bearing access-mode primitives
+ * (concept 30/32): the grant is consumed atomically on the FIRST token
+ * issuance, the issued token stays valid until expiry, but NO second token
+ * may ever be minted, and single-use runs persist no STATE.
  *
  * Each test boots a real server, issues a real single_use grant over HTTP,
  * and asserts the documented request/response shapes against reality. The
  * second-issuance rejection is exercised through the real `issueToken`
  * protocol primitive (the same function every HTTP re-issuance path calls).
  *
- * Gate: all tests green; documented JSON shapes match reality. If the doc
- * drifts from the runtime, this suite fails.
+ * This file previously also proved the single-use flow described above
+ * matched pdpp's own docs-site content
+ * (apps/site/content/docs/reference-implementation-examples.md, Example 6) --
+ * see the removed test below for why that assertion was dropped (pdpp
+ * frontend-owned content Move B did not bring along).
  */
 
 import assert from "node:assert/strict";
@@ -53,16 +38,6 @@ import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-cre
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manifests");
-const EXAMPLES_DOC = join(
-  REFERENCE_IMPL_DIR,
-  "..",
-  "apps",
-  "site",
-  "content",
-  "docs",
-  "reference-implementation-examples.md"
-);
-
 // ─── shared helpers (mirrors b3 harness) ────────────────────────────────────
 
 type TestServer = Awaited<ReturnType<typeof startServer>> & {
@@ -376,27 +351,20 @@ test("single_use: second token issuance is rejected with grant_consumed (B6)", a
 
 // ─── B6.5 — the examples doc documents the load-bearing single-use facts ────
 
-test("single_use: examples doc documents the consumption contract (B6)", () => {
-  // Doc-coupling gate: the reviewer-facing Example 6 must keep stating the
-  // facts the runtime enforces. If someone deletes the consumption claim from
-  // the doc, this fails — the doc cannot silently drift away from the proof.
-  const doc = readFileSync(EXAMPLES_DOC, "utf8");
-  assert.match(doc, TOP_LEVEL_REGEX_3, "Example 6 present");
-  assert.match(doc, TOP_LEVEL_REGEX_4, "single_use access_mode shown");
-  assert.match(doc, TOP_LEVEL_REGEX_5, "consumption-on-first-issuance documented");
-  assert.match(doc, TOP_LEVEL_REGEX_6, "grant_consumed rejection code documented");
-  assert.match(doc, TOP_LEVEL_REGEX_1, "grant_consumed → 403 mapping documented");
-  assert.match(doc, TOP_LEVEL_REGEX_8, "token-stays-valid nuance documented");
-  assert.match(doc, TOP_LEVEL_REGEX_9, "no-STATE-persist property documented");
-  // Semantic classes (Example 7) — refined trust model.
-  assert.match(doc, TOP_LEVEL_REGEX_10, "Example 7 present");
-  assert.match(doc, TOP_LEVEL_REGEX_11, "class 1 documented");
-  assert.match(doc, TOP_LEVEL_REGEX_12, "class 2 documented");
-  assert.match(doc, TOP_LEVEL_REGEX_13, "class 3 documented");
-  assert.match(doc, TOP_LEVEL_REGEX_14, "client_display entity-scoping documented");
-  assert.match(doc, TOP_LEVEL_REGEX_15, "client_claims request-scoping documented");
-  assert.match(doc, TOP_LEVEL_REGEX_7, "manifest-authored display.detail documented");
-});
+// This file previously also asserted ("single_use: examples doc documents
+// the consumption contract (B6)") that pdpp's own `apps/site` docs-site
+// content (apps/site/content/docs/reference-implementation-examples.md,
+// Examples 6 + 7) kept stating the consumption facts this file's other
+// tests prove against the real runtime. That doc lives inside pdpp's
+// frontend docs-site content tree, which Move B did not bring along (this
+// repo has no `apps/site` at all -- only `apps/console`), unlike
+// spec-collection-profile.md (a protocol-level spec at pdpp's repo root,
+// unaffiliated with any one app, which this repo's collection-profile.test.ts
+// legitimately needed and got copied in alongside this change). Removed;
+// that doc-drift coverage belongs in pdpp's own suite, which still owns the
+// doc, not here. The runtime-behavior tests above (B6.1-B6.3, which boot a
+// real server and exercise the real single-use consumption protocol) are
+// unaffected and stay.
 
 // ─── B6.4 — control: a continuous grant is NOT consumed ─────────────────────
 
