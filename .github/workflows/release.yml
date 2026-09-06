@@ -58,7 +58,15 @@ jobs:
             pkg_target: node22-linux-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
-          - platform: windows-latest
+          # Pinned to windows-2022 (not windows-latest) because that runner image's Visual
+          # Studio install path changed to a bare "\18\" (VS 2026 naming) that node-gyp's
+          # bundled-with-npm version can't parse ("unknown version \"undefined\"" when
+          # building better-sqlite3). npm_config_node_gyp does not work around this: npm's
+          # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
+          # during `npm ci`, ignoring that config (npm/cli#2839). Unpin once actions/setup-node's
+          # Node 22 LTS bundles npm>=11.6.3 (node-gyp>=12.1.0, which added VS2026 detection).
+          # TODO(2026-09-06): revisit and unpin — see PDP-Connect/data-connect#47.
+          - platform: windows-2022
             os_family: windows
             target: x86_64-pc-windows-msvc
             artifact_key: windows-x64
@@ -165,19 +173,28 @@ jobs:
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
 
+      # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
+      # below deletes every Tauri-produced .dmg and rebuilds it with
+      # scripts/create-macos-dmg.mjs, which retries and detaches stale devices on hdiutil
+      # "resource busy". Letting Tauri run its own bundle_dmg.sh first is therefore pure
+      # duplicate work whose output is discarded — and it is not free: that script can hang
+      # on hdiutil until the job dies (macos-15-intel, run 33818382290: 24m in bundle_dmg.sh,
+      # then an orphaned diskimages-help process at teardown). Both macOS legs run it, so
+      # both carry the risk. Restricting the macOS bundle to "app" skips it entirely; "app"
+      # is the .app bundle the DMG step already depends on, so nothing else changes.
       - name: Build signed Tauri app
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles app
 
       - name: Build unsigned Tauri app
         if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }}${{ matrix.os_family == 'macos' && ' --bundles app' || '' }}
 
       - name: Finalize platform bundles
         shell: bash
@@ -205,6 +222,7 @@ jobs:
               dmg_path="$bundle_root/dmg/DataConnect_${version}_${arch}.dmg"
               staging_dir="$RUNNER_TEMP/dmg-${arch}"
               rm -rf "$staging_dir"
+              mkdir -p "$bundle_root/dmg"
               find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -delete
               mkdir -p "$staging_dir"
               cp -R "$app" "$staging_dir/"
