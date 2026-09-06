@@ -495,7 +495,10 @@ test("declaration retrieval cancels a response stream at the configured byte lim
   assert.equal(cancelled, true);
 });
 
-test("declaration retrieval turns body-read failures into typed fail-closed outcomes", async () => {
+test("declaration retrieval turns body-read failures into typed fail-closed outcomes", async (t) => {
+  // The in-memory stream has no active handle to keep AbortSignal.timeout alive.
+  const keepAlive = setInterval(() => {}, 10);
+  t.after(() => clearInterval(keepAlive));
   const dependencies = {
     resolveDns: () => Promise.resolve(["203.0.113.4"]),
     validateAddress: () => Promise.resolve(true),

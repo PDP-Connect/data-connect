@@ -511,13 +511,21 @@ if (POSTGRES_URL) {
   );
 
   function spawnFixture(env: Record<string, string | undefined>) {
-    const child = spawn(process.execPath, [FIXTURE_PATH], {
+    const child = spawn(process.execPath, ["--import", "tsx", FIXTURE_PATH], {
       env: { ...process.env, ...env },
-      stdio: ["pipe", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    let stderr = "";
     let stdoutBuffer = "";
     const lines: string[] = [];
-    const waiters: Array<(line: string) => void> = [];
+    const waiters: Array<{ reject: (error: Error) => void; resolve: (line: string) => void }> = [];
+    let protocolError: Error | undefined;
+    const rejectWaiters = (error: Error) => {
+      protocolError = error;
+      for (const waiter of waiters.splice(0)) {
+        waiter.reject(error);
+      }
+    };
     child.stdout.on("data", (chunk) => {
       stdoutBuffer += chunk.toString("utf8");
       let idx = stdoutBuffer.indexOf("\n");
@@ -526,11 +534,26 @@ if (POSTGRES_URL) {
         stdoutBuffer = stdoutBuffer.slice(idx + 1);
         const waiter = waiters.shift();
         if (waiter) {
-          waiter(line);
+          waiter.resolve(line);
         } else {
           lines.push(line);
         }
         idx = stdoutBuffer.indexOf("\n");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.once("error", (error) => {
+      rejectWaiters(new Error(`reconcile race fixture failed to start: ${error.message}`));
+    });
+    child.once("close", (code, signal) => {
+      if (code !== 0 || signal) {
+        rejectWaiters(
+          new Error(
+            `reconcile race fixture exited before completing its line protocol (code=${String(code)}, signal=${String(signal)}): ${stderr}`
+          )
+        );
       }
     });
     function nextLine(): Promise<string> {
@@ -539,7 +562,10 @@ if (POSTGRES_URL) {
         assert.ok(line !== undefined);
         return Promise.resolve(line);
       }
-      return new Promise((resolve) => waiters.push(resolve));
+      if (protocolError) {
+        return Promise.reject(protocolError);
+      }
+      return new Promise((resolve, reject) => waiters.push({ reject, resolve }));
     }
     const exitCode = new Promise<number | null>((resolve) => {
       child.once("exit", (code) => resolve(code));

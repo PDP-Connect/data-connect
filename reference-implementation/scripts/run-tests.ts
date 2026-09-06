@@ -9,15 +9,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
-import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
-import type { StructuredSummary } from "./test-accounting/receipt.ts";
-import {
-  accountingResultLine,
-  assertNamedSkipMappingsFullyConsumed,
-  repositoryPaths,
-  riConfiguredNamedSkipMappingIdentities,
-  structuredNodeSummary,
-} from "./test-accounting/receipt.ts";
 import { provisionTestDatabase } from "../server/postgres-test-database-guard.ts";
 import {
   dedicatedPostgresTestUrl,
@@ -27,7 +18,23 @@ import { collectChildProcessOutput } from "./child-process-output.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
+import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
+import {
+  clonePostgresTestDatabaseFromTemplate,
+  dropPostgresTestTemplate,
+  ensurePostgresTestTemplate,
+  POSTGRES_TEST_RUNNER_NONCE_BYTES,
+} from "./postgres-test-template.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
+import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
+import type { StructuredSummary } from "./test-accounting/receipt.ts";
+import {
+  accountingResultLine,
+  assertNamedSkipMappingsFullyConsumed,
+  repositoryPaths,
+  riConfiguredNamedSkipMappingIdentities,
+  structuredNodeSummary,
+} from "./test-accounting/receipt.ts";
 import type { ProcessEnvLike } from "./test-env.ts";
 import { buildScrubbedTestEnv } from "./test-env.ts";
 import { requireExplicitTestProfile, storageProfileEnvironment } from "./test-profile-env.ts";
@@ -188,6 +195,27 @@ await assertPostgresProfilePreflight({
 
 let fileCounter = 0;
 const runnerId = randomBytes(4).toString("hex");
+// A separate, wider nonce names the run's TEMPLATE. It is not the same value
+// as `runnerId` above because the two have different jobs: `runnerId` is
+// embedded in per-file database names, whose authorization grammar
+// (test/helpers/dedicated-postgres-test-url.ts) pins it at exactly 8 hex
+// chars, while the template name is the only thing separating this run's
+// template from any other run's on a shared cluster. External review P1-2
+// required >=128 bits there, since a collision is precisely the condition
+// under which one run could inherit another's template.
+const templateRunnerId = randomBytes(POSTGRES_TEST_RUNNER_NONCE_BYTES).toString("hex");
+
+// Set once, before the worker pool starts, when a Postgres profile is
+// active (see the ensurePostgresTestTemplate() call below). Per-file/per-test
+// database creation clones from this template instead of bootstrapping schema
+// from scratch -- see scripts/postgres-test-template.ts for the fail-closed
+// contract (a missing/unusable template throws, it is never silently skipped).
+let postgresTestTemplateName: string | null = null;
+// Identity token of the template THIS run built (scripts/postgres-test-template.ts,
+// `identityDigest`): handed to every child as PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY so a
+// child's clone-time check accepts only this exact build, not any template that
+// happens to carry the same name.
+let postgresTestTemplateIdentity: string | null = null;
 
 /**
  * Derive the admin connection URL from a per-test URL by replacing the
@@ -259,12 +287,41 @@ function armSignalCleanup(): void {
 async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDbAllocation | undefined> {
   const dbName = deriveDbName(filePath);
   const adminUrl = adminUrlFromBase(baseUrl);
+  // DEFAULT IS COLD: a template is used for this file's own per-file
+  // database only when the file appears on the explicit allowlist in
+  // postgres-template-eligibility.ts. Every other file -- including one this
+  // registry has never heard of -- gets a real, from-scratch bootstrap for
+  // its own database, regardless of whether a template happens to exist for
+  // this run. See that file's header for why this is a fail-closed default,
+  // not an opt-out.
+  const useTemplate = postgresTestTemplateName !== null && isPostgresTemplateEligibleFilePath(filePath);
   const client = new pg.Client({ connectionString: adminUrl });
   try {
     await client.connect();
     // Identifier is safe: deriveDbName produces only [a-z0-9_] chars.
     await client.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await client.query(`CREATE DATABASE "${dbName}"`);
+    if (useTemplate) {
+      const templateName = postgresTestTemplateName;
+      const templateIdentity = postgresTestTemplateIdentity;
+      if (!(templateName && templateIdentity)) {
+        throw new Error("Postgres template clone requested without a runner-bound template identity");
+      }
+      // The clone helper verifies the template's complete identity immediately
+      // before CREATE DATABASE ... TEMPLATE. Do not replace this with a raw
+      // query: a same-named stale or altered template must fail closed.
+      await clonePostgresTestDatabaseFromTemplate(baseUrl, dbName, templateName, templateIdentity);
+    } else {
+      await client.query(`CREATE DATABASE "${dbName}"`);
+    }
+    // State which provisioning path this file took. The choice is otherwise
+    // invisible from outside the runner, which is what let the eligibility
+    // half of `useTemplate` go untested (external review P1-1): a
+    // cold-required file wrongly routed through the template would still
+    // usually pass, because the template carries a correct schema. Naming
+    // the path makes the decision itself assertable.
+    process.stdout.write(
+      `PDPP_TEST_DB_PROVISION ${JSON.stringify({ file: filePath, path: useTemplate ? "template-clone" : "cold-bootstrap" })}\n`
+    );
     await client.end();
   } catch (err) {
     try {
@@ -366,7 +423,26 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     }
   }
 
-  const childEnvBase: ProcessEnvLike = allocation ? { ...baseEnv, PDPP_TEST_POSTGRES_URL: allocation.url } : baseEnv;
+  const childEnvBase: ProcessEnvLike = allocation
+    ? {
+        ...baseEnv,
+        PDPP_TEST_POSTGRES_URL: allocation.url,
+        // Passed to every child unconditionally (harmless): withTemporaryPostgresDatabase
+        // (test/helpers/postgres-temp-database.ts) only resolves this default
+        // when the CHILD's own file path is on the explicit allowlist in
+        // postgres-template-eligibility.ts, independent of whether THIS
+        // file's own per-file database above was templated. A cold-required
+        // file receiving this env var still bootstraps from scratch.
+        // Unset entirely (not set to "") when no template was built, so a
+        // Postgres run without templating is byte-identical to today.
+        ...(postgresTestTemplateName && postgresTestTemplateIdentity
+          ? {
+              PDPP_TEST_POSTGRES_TEMPLATE: postgresTestTemplateName,
+              PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY: postgresTestTemplateIdentity,
+            }
+          : {}),
+      }
+    : baseEnv;
   // Turn the preload (appended to effectiveArgs above) live in the child. Left
   // unset when the guard is disabled so the child is byte-identical to a
   // pre-guard run (guard-absent parity).
@@ -446,6 +522,25 @@ const fileConcurrency =
 const queue = [...testFiles];
 const results: NodeTestResult[] = [];
 
+// Build the per-run Postgres schema template once, before any child spawns,
+// when Postgres is in play and there is at least one file to run it for. This
+// pays the full ~2000-line DDL bootstrap exactly once per gate run instead of
+// once per file (or once per test() block for files using
+// withTemporaryPostgresDatabase) -- see scripts/postgres-test-template.ts.
+// A failure here is fatal (not caught): a gate that silently fell back to
+// per-file bootstrap on template-build failure would hide a broken template
+// behind a normal-looking (slow) green run, which is the one thing the task
+// this exists for explicitly rules out.
+if (dedicatedBasePostgresTestUrl && testFiles.length > 0) {
+  // The builder returns the identity it committed before publishing the
+  // template. Do not re-read it off the template afterwards: an expectation
+  // sourced from the thing being verified proves nothing (external review
+  // P1-2).
+  const builtTemplate = await ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId);
+  postgresTestTemplateName = builtTemplate.templateName;
+  postgresTestTemplateIdentity = builtTemplate.identityDigest;
+}
+
 async function worker(): Promise<void> {
   while (queue.length > 0) {
     const file = queue.shift();
@@ -459,7 +554,17 @@ async function worker(): Promise<void> {
   }
 }
 
-await Promise.all(Array.from({ length: fileConcurrency }, () => worker()));
+try {
+  await Promise.all(Array.from({ length: fileConcurrency }, () => worker()));
+} finally {
+  if (dedicatedBasePostgresTestUrl && postgresTestTemplateName) {
+    await dropPostgresTestTemplate(dedicatedBasePostgresTestUrl, postgresTestTemplateName).catch((error) => {
+      process.stderr.write(
+        `[run-tests] WARN: could not drop Postgres test template ${postgresTestTemplateName}: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    });
+  }
+}
 
 const selectedFiles = repositoryPaths("reference-implementation", testFiles);
 if (accountingAuthority && JSON.stringify(selectedFiles) !== JSON.stringify(accountingAuthority.files)) {
