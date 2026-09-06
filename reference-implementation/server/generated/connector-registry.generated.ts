@@ -32,11 +32,10 @@ export const LEGACY_LOCAL_ALIASES: Readonly<Record<string, string>> = Object.fre
   "google_messages": "google-messages",
   "google_takeout": "google-takeout",
   "imessage": "imessage",
-  "signal": "signal",
 });
 
 /** Manifests declaring capabilities.proven.local_collector === true. */
-export const LOCAL_COLLECTOR_PROVEN_KEYS: readonly string[] = Object.freeze(["claude-code", "codex", "google-takeout", "imessage", "apple-photos", "google-messages", "signal"]);
+export const LOCAL_COLLECTOR_PROVEN_KEYS: readonly string[] = Object.freeze(["claude-code", "codex", "google-takeout", "imessage", "apple-photos", "google-messages"]);
 
 /** Manifests declaring a runtime_requirements.bindings.browser binding. */
 export const BROWSER_BOUND_KEYS: readonly string[] = Object.freeze(["amazon", "anthropic", "chase", "chatgpt", "doordash", "heb", "linkedin", "loom", "meta", "reddit", "shopify", "uber", "usaa", "venmo", "wholefoods", "whoop"]);
