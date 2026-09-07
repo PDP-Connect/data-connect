@@ -18,6 +18,7 @@ import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../ser
 import { createPinnedHttpsAgent, resolveAllowedAddresses } from "../server/ssrf-guard.ts";
 import {
   buildAssistancePushPayload,
+  buildEscalationPushPayload,
   buildPendingInteractionPushPayload,
   buildTestPushPayload,
   classifyInteractionSensitivity,
@@ -25,6 +26,7 @@ import {
   createMemoryWebPushSubscriptionStore,
   createPostgresWebPushSubscriptionStore,
   createSqliteWebPushSubscriptionStore,
+  DEFAULT_WEB_PUSH_URGENCY,
   defaultSendNotification as defaultSendNotificationUntyped,
   fanoutAssistanceWebPush as fanoutAssistanceWebPushUntyped,
   fanoutEscalationWebPush as fanoutEscalationWebPushUntyped,
@@ -32,6 +34,7 @@ import {
   fanoutTestWebPush as fanoutTestWebPushUntyped,
   guardWebPushEndpoint as guardWebPushEndpointUntyped,
   resolveWebPushModuleApi as resolveWebPushModuleApiUntyped,
+  resolveWebPushUrgency,
   shouldFanoutAssistanceProgress,
   WEB_PUSH_SEND_TIMEOUT_MS,
 } from "../server/web-push-notifications.ts";
@@ -579,6 +582,197 @@ test("defaultSendNotification forwards the pinned agent and the exact send timeo
       }
     }
   );
+});
+
+/**
+ * RFC 8030 §5.3 Urgency. These tests assert the literal `Urgency` header on
+ * the REAL request seam — not an options mock, which would only prove this
+ * module handed a key to a stub.
+ *
+ * Two independent observation points, and they must agree:
+ *
+ *   1. OUTGOING: `https.request`'s own `options.headers.Urgency`, i.e. the
+ *      header the real `web-push` library actually built. This is the seam
+ *      the 2026-08-01 canary fix asserted on.
+ *   2. INBOUND: `req.headers.urgency` as received by a real HTTPS server
+ *      after a real TLS handshake — strictly downstream of (1), so it also
+ *      proves the header survived serialization onto the wire.
+ *
+ * Everything in between is production code: real guard, real VAPID, real
+ * aes128gcm encryption, real socket. A test here fails if the `urgency`
+ * option is dropped from `defaultSendNotification` AND if a future
+ * `web-push` upgrade stopped translating that option into the header.
+ *
+ * NOTE ON SCOPE: this proves what PDPP *requests* of the push service. It
+ * cannot and does not prove on-device delivery — whether a push service
+ * honors the hint is outside this process.
+ */
+type HttpsRequestFn = typeof https.request;
+
+async function captureUrgencyForPayload(payload: unknown): Promise<string | undefined> {
+  let inboundUrgency: string | undefined;
+  let outgoingUrgency: string | undefined;
+  let requestCount = 0;
+  await withSelfSignedWebPushServer(
+    (req, res) => {
+      requestCount += 1;
+      const header = req.headers.urgency;
+      inboundUrgency = Array.isArray(header) ? header[0] : header;
+      res.writeHead(201);
+      res.end();
+    },
+    async (port) => {
+      const keys = generateRealSubscriptionKeys();
+      const subscription = sampleSubscription(`https://web-push-seam-test.invalid:${port}/sub/urgency`, keys);
+      const originalRequest: HttpsRequestFn = https.request;
+      // Read the header off the options the library hands to Node's own
+      // https.request — the outgoing seam, before any socket write.
+      https.request = function spiedRequest(this: unknown, ...args: Parameters<HttpsRequestFn>) {
+        const [first] = args;
+        if (first && typeof first === "object" && "headers" in first) {
+          const { Urgency } = (first.headers ?? {}) as { Urgency?: unknown };
+          outgoingUrgency = typeof Urgency === "string" ? Urgency : undefined;
+        }
+        return originalRequest.apply(this, args);
+      } as HttpsRequestFn;
+
+      try {
+        const result = await defaultSendNotification(
+          subscription,
+          payload,
+          {
+            privateKey: VAPID_PRIVATE_REAL,
+            publicKey: VAPID_PUBLIC_REAL,
+            subject: "mailto:test@example.invalid",
+          },
+          { guardWebPushEndpointImpl: testGuardWithSelfSignedTrust("127.0.0.1") }
+        );
+        assert.equal(result.statusCode, 201, "the real web-push call must reach the real server");
+      } finally {
+        https.request = originalRequest;
+      }
+    }
+  );
+  assert.equal(requestCount, 1, "exactly one real push request must have been made");
+  assert.equal(
+    outgoingUrgency,
+    inboundUrgency,
+    "the Urgency header the library built must be the one the server received"
+  );
+  return inboundUrgency;
+}
+
+test("blocked OTP interaction push requests Urgency: high on the real wire (RFC 8030 §5.3)", async () => {
+  const payload = buildPendingInteractionPushPayload({
+    connectorDisplayName: "ChatGPT",
+    interaction: { kind: "otp", request_id: "req-otp-1" },
+    runId: "run-otp-1",
+  });
+  assert.equal(payload.interaction_sensitivity, "secret", "an OTP prompt must classify as secret");
+
+  assert.equal(
+    await captureUrgencyForPayload(payload),
+    "high",
+    "the Urgency header must reach the actual outgoing HTTPS request, not just an internal option"
+  );
+});
+
+test("blocked credentials interaction push requests Urgency: high on the real wire", async () => {
+  const payload = buildPendingInteractionPushPayload({
+    connectorDisplayName: "ChatGPT",
+    interaction: { kind: "credentials", request_id: "req-cred-1" },
+    runId: "run-cred-1",
+  });
+  assert.equal(payload.interaction_sensitivity, "secret");
+
+  assert.equal(await captureUrgencyForPayload(payload), "high");
+});
+
+/**
+ * `high` is deliberately reserved for the blocked, response-required
+ * interaction. An escalation says syncing stopped pending the owner, but
+ * carries no expiring value, so it keeps the default per RFC 8030's guidance
+ * against overusing `high`. Locked down as a test because the opposite
+ * choice is defensible and should not be made silently.
+ */
+test("escalation push keeps the default urgency — 'high' is reserved for the blocked, expiring prompt", async () => {
+  const payload = buildEscalationPushPayload({
+    connectorDisplayName: "ChatGPT",
+    reason: "blocked",
+  });
+  assert.equal(payload.type, "pdpp.escalation");
+
+  const observed = await captureUrgencyForPayload(payload);
+  assert.notEqual(observed, "high");
+  assert.equal(observed, DEFAULT_WEB_PUSH_URGENCY);
+});
+
+test("routine test-notification push does NOT request Urgency: high — it keeps the RFC 8030 default 'normal'", async () => {
+  const payload = buildTestPushPayload();
+  assert.equal(payload.type, "pdpp.test_notification");
+
+  const observed = await captureUrgencyForPayload(payload);
+  assert.notEqual(observed, "high", "a routine push must never claim the priority of a blocked run");
+  assert.equal(observed, DEFAULT_WEB_PUSH_URGENCY, "a routine push keeps the RFC 8030 default urgency");
+  assert.equal(DEFAULT_WEB_PUSH_URGENCY, "normal");
+});
+
+test("nonblocking assistance push does NOT request Urgency: high — PDPP is not waiting on a response", async () => {
+  const payload = buildAssistancePushPayload({
+    assistance: { assistance_request_id: "assist-1", owner_action: "approve the prompt in your phone app" },
+    connectorDisplayName: "ChatGPT",
+    runId: "run-assist-1",
+  });
+  assert.equal(payload.type, "pdpp.assistance_requested");
+  assert.equal(payload.response_contract, "none", "assistance expects no PDPP response");
+
+  const observed = await captureUrgencyForPayload(payload);
+  assert.notEqual(observed, "high");
+  assert.equal(observed, DEFAULT_WEB_PUSH_URGENCY);
+});
+
+test("resolveWebPushUrgency escalates only blocked-interaction payload types, and never on an unrecognized shape", () => {
+  assert.equal(resolveWebPushUrgency({ type: "pdpp.pending_interaction" }), "high");
+
+  assert.equal(resolveWebPushUrgency({ type: "pdpp.escalation" }), "normal");
+  assert.equal(resolveWebPushUrgency({ type: "pdpp.test_notification" }), "normal");
+  assert.equal(resolveWebPushUrgency({ type: "pdpp.assistance_requested" }), "normal");
+
+  // A caller must not be able to obtain `high` by handing over something
+  // this module did not build.
+  assert.equal(resolveWebPushUrgency(null), "normal");
+  assert.equal(resolveWebPushUrgency(undefined), "normal");
+  assert.equal(resolveWebPushUrgency("pdpp.pending_interaction"), "normal");
+  assert.equal(resolveWebPushUrgency({}), "normal");
+  assert.equal(resolveWebPushUrgency({ type: "pdpp.unknown_future_kind" }), "normal");
+  assert.equal(resolveWebPushUrgency({ urgency: "high" }), "normal");
+});
+
+/**
+ * `web-push` throws `Unsupported urgency specified.` for any urgency outside
+ * its own `supportedUrgency` set, so every value `resolveWebPushUrgency` can
+ * return must be in it. Asserted by driving the real library rather than by
+ * reading its constants: a send that reaches a real 201 proves the value was
+ * accepted, and this test fails if a future upgrade narrows the set.
+ */
+test("every urgency this module can request is one the real web-push library accepts", async () => {
+  const requestable = new Set<string>([
+    DEFAULT_WEB_PUSH_URGENCY,
+    resolveWebPushUrgency({ type: "pdpp.pending_interaction" }),
+    resolveWebPushUrgency({ type: "pdpp.escalation" }),
+    resolveWebPushUrgency({ type: "pdpp.test_notification" }),
+    resolveWebPushUrgency({ type: "pdpp.assistance_requested" }),
+  ]);
+  assert.deepEqual([...requestable].sort(), ["high", "normal"], "this module requests exactly high and normal");
+
+  for (const urgency of requestable) {
+    // A frozen payload type that maps to this exact urgency is not needed —
+    // sending with the value directly is what the library validates.
+    const observed = await captureUrgencyForPayload(
+      urgency === "high" ? { type: "pdpp.pending_interaction" } : { type: "pdpp.test_notification" }
+    );
+    assert.equal(observed, urgency, `web-push must accept and send Urgency: ${urgency}`);
+  }
 });
 
 test("defaultSendNotification destroys the pinned agent on success (production seam, real socket)", async () => {
