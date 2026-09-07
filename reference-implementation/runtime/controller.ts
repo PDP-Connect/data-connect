@@ -3580,9 +3580,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // A caller that already made an explicit `recoveryOnly` choice (e.g. the
   // controller-started recovery continuation fired automatically after
   // durable progress — see `maybeContinueRecoveryAfterProgress`, not an owner
-  // gesture) or that requested specific `resources`/streams (forward work
-  // intent by construction) is never second-guessed, and the durable probe is
-  // skipped entirely in that case.
+  // gesture, and gated there on the manifest automation policy so a
+  // manual-only connector never self-chains) or that requested specific
+  // `resources`/streams (forward work intent by construction) is never
+  // second-guessed, and the durable probe is skipped entirely in that case.
   async function resolveEffectiveRecoveryOnly(
     connectorId: string,
     connectorInstanceId: string,
@@ -3635,6 +3636,43 @@ export function createController(opts: ControllerOptions = {}): Controller {
       return;
     }
     if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+      return;
+    }
+    // Manifest automation policy gate. A recovery continuation is started BY
+    // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
+    // run wearing `triggerKind: "manual"` (that tag exists so the continuation
+    // inherits manual-run admission, not because a human pressed anything).
+    // So it must clear the same policy bar as a scheduled run.
+    //
+    // `getScheduleIneligibilityReason` is the one predicate the schedule API
+    // (`scheduleToApi`, `upsertSchedule`, `setScheduleEnabled`) and the
+    // scheduler's runnable-set filter already use to decide "this connector's
+    // manifest forbids automatic runs". Reusing it here — rather than
+    // re-reading `recommended_mode` locally — keeps one definition of the
+    // policy: `recommended_mode: "paused"`, `background_safe: false`, or
+    // `recommended_mode: "manual"` without an explicit `background_safe: true`.
+    //
+    // What happens instead of self-chaining: nothing further starts on its own.
+    // The run that just finished stands as the last run, and the withheld
+    // continuation is logged. Remaining gaps stay durable in the detail-gap
+    // store, so no recovery work is lost — an owner-initiated run is admitted
+    // (`triggerKind: "manual"` from a real gesture is not blocked by this gate,
+    // which only guards the controller's own self-chaining) and picks up the
+    // same pending work. That run's OWN post-success continuation is checked
+    // here again, so a manual gesture drains one envelope, not the backlog.
+    //
+    // The motivating case is a bank connector such as `chase`, whose manifest
+    // declares `recommended_mode: "manual"`, `background_safe: false` and
+    // `interaction_posture: "otp_likely"`. Self-chaining there can cost the
+    // owner an unprompted interactive sign-in per envelope, for a session they
+    // never asked to start.
+    const automationIneligibility = getScheduleIneligibilityReason(readManifestRefreshPolicy(input.manifest));
+    if (automationIneligibility) {
+      log.warn?.(
+        `[controller] recovery continuation withheld for ${input.connectorId} ` +
+          `(connection=${input.connectorInstanceId}): ${automationIneligibility} ` +
+          "Pending recovery work needs an owner-initiated run."
+      );
       return;
     }
     // Space continuations apart. Without this the next envelope starts within
