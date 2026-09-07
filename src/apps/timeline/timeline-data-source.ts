@@ -361,13 +361,20 @@ async function readNextTimelinePages({
     let fetched = 0
     for (const { entry, page } of pages) {
       fetched += page.data.length
+      let consumedWholePage = true
       for (const record of page.data) {
-        if (accepted >= remaining) break
+        if (accepted >= remaining) {
+          // The global budget stopped this page short. Keep the cursor that
+          // still returns this record so the next read can pick it up.
+          consumedWholePage = false
+          break
+        }
         if (entry.seenIds.has(record.id)) continue
         entry.seenIds.add(record.id)
         entry.records.push(record)
         accepted += 1
       }
+      if (!consumedWholePage) continue
       entry.hasMore = page.has_more
       entry.cursor =
         typeof page.next_cursor === "string" ? page.next_cursor : null
