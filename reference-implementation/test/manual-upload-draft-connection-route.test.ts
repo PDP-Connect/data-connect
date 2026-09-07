@@ -40,6 +40,33 @@ async function closeServer(server: StartedServer): Promise<void> {
   ]);
 }
 
+// The manual-upload route validates in a DETACHED background task
+// (`setImmediate(() => validateAndStageArtifact(...))`, see
+// server/routes/ref-manual-upload-draft-connection.ts) that nothing owns, awaits, or
+// cancels. Every store call inside it re-resolves the module-scoped `getDb()` handle
+// at call time, and starting the next server re-points that module variable. So a task
+// still in flight when a test ends writes its rows into the NEXT test's database --
+// which is how one slow validation turns into an unrelated test seeing a phantom
+// `connector_instances` row. Draining to a terminal status before teardown keeps each
+// test's writes inside its own database.
+const IN_FLIGHT_ARTIFACT_STATUSES = ["uploaded", "validating"] as const;
+
+async function drainInFlightArtifacts(budgetMs = 30_000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  const placeholders = IN_FLIGHT_ARTIFACT_STATUSES.map(() => "?").join(", ");
+  while (Date.now() < deadline) {
+    const inFlight = (
+      getDb()
+        .prepare(`SELECT COUNT(*) AS count FROM manual_upload_artifacts WHERE status IN (${placeholders})`)
+        .get(...IN_FLIGHT_ARTIFACT_STATUSES) as { count: number }
+    ).count;
+    if (inFlight === 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 async function withServer(fn: (ctx: { asUrl: string; tmp: string }) => Promise<void>): Promise<void> {
   const tmp = mkdtempSync(join(tmpdir(), "pdpp-manual-upload-"));
   const server = (await startServer({
@@ -55,6 +82,7 @@ async function withServer(fn: (ctx: { asUrl: string; tmp: string }) => Promise<v
   try {
     await fn({ asUrl, tmp });
   } finally {
+    await drainInFlightArtifacts();
     await closeServer(server);
     rmSync(tmp, { force: true, recursive: true });
   }
@@ -302,16 +330,23 @@ interface ManualUploadBody {
   validation_expectations?: string[];
 }
 
+// Budget by wall clock, not by attempt count. An attempt-counted budget silently
+// shrinks as the host gets busier -- each attempt costs an HTTP round trip plus the
+// sleep, and both stretch under CPU contention -- so the same test tolerates less
+// real validation time on a loaded machine than on an idle one. Throwing on
+// exhaustion (rather than returning a still-`validating` artifact) keeps the failure
+// inside the test that actually timed out.
 async function waitForArtifact(
   asUrl: string,
   cookie: string,
   artifactId: string,
   expectedStatuses: readonly string[],
-  maxAttempts = 30
-): Promise<JsonResult | null> {
+  budgetMs = 30_000
+): Promise<JsonResult> {
   const statuses = new Set(expectedStatuses);
+  const deadline = Date.now() + budgetMs;
   let latest: JsonResult | null = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  while (Date.now() < deadline) {
     // biome-ignore lint/performance/noAwaitInLoops: localized test assertion preserves its explicit contract.
     latest = await getArtifact(asUrl, cookie, artifactId);
     const body = latest.body as ArtifactBody;
@@ -320,7 +355,10 @@ async function waitForArtifact(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return latest;
+  const lastStatus = (latest?.body as ArtifactBody | undefined)?.status ?? "<none>";
+  throw new Error(
+    `artifact ${artifactId} did not reach [${expectedStatuses.join(", ")}] within ${budgetMs}ms; last status=${lastStatus}`
+  );
 }
 
 interface ZipEntry {
@@ -684,7 +722,8 @@ test("a WhatsApp .txt upload well past the old 1 GiB cap streams to disk and val
     assert.equal(resp.status, 202, JSON.stringify(stagedBody));
     assert.ok(stagedBody.artifact_id, "expected an artifact_id");
 
-    const done = await waitForArtifact(asUrl, cookie, stagedBody.artifact_id, ["staged", "failed"], 400);
+    // A multi-GiB streamed upload is genuinely slow, and slower still on a loaded host.
+    const done = await waitForArtifact(asUrl, cookie, stagedBody.artifact_id, ["staged", "failed"], 240_000);
     const doneBody = asBody(done?.body);
     assert.equal(doneBody.status, "staged", JSON.stringify(doneBody));
     assert.equal(doneBody.validation?.status, "valid");
