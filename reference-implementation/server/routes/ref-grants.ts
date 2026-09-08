@@ -271,6 +271,14 @@ export function mountRefGrantPackagesGet(app: AppLike, ctx: MountRefGrantsContex
         object: "grant_package",
         package_id: pkg.package_id,
         parent_package_id: pkg.parent_package_id,
+        // The raw column, alongside the derived `status`. A client deciding
+        // whether to OFFER revocation needs "has this been revoked?", which is
+        // not the same question as "what is this package's lifecycle?" — an
+        // expired package has not been revoked and is still revokable (the
+        // revoke route itself guards on this same field, below). Without it a
+        // console gating on `status === "active"` silently drops the owner's
+        // revoke control the moment a deadline passes.
+        persisted_status: pkg.persisted_status,
         revoked_at: pkg.revoked_at,
         scenario_id: pkg.scenario_id,
         status: pkg.status,

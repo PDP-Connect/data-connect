@@ -11,16 +11,23 @@
 // `grant_packages.status` default to 'active' and are flipped to 'revoked' by
 // an explicit owner action (`markPackageRevokedCascade`). Nothing ever writes
 // 'expired' to either column, because expiry is not an event the AS observes —
-// it is a deadline that passes on its own. Enforcement already handles this
-// correctly by comparing `expires_at` to the clock on every read
-// (`introspect()` in auth.ts), which is why an elapsed grant is refused with
-// 401 even though its stored status still reads 'active'.
+// it is a deadline that passes on its own.
 //
-// The reporting surfaces did not do the same comparison, so an owner auditing
-// their grants saw 'active' for a grant that had in fact lapsed. This module
-// closes that gap by deriving the reported lifecycle from the two facts that
-// determine it — the persisted status and the deadline — at the moment of
-// reporting.
+// This module fixes REPORTING only: an owner auditing their grants saw
+// 'active' for a grant that had in fact lapsed. It derives the reported
+// lifecycle from the two facts that determine it — the persisted status and
+// the deadline — at the moment of reporting.
+//
+// SCOPE — enforcement is a SEPARATE, UNRESOLVED defect. Do not read this
+// module as evidence that elapsed grants are refused. `introspect()` compares
+// `tokens.expires_at`, and for `mcp_package` tokens the member filter
+// (auth.ts, `getGrantPackageAccess`) compares only `token_expires_at`.
+// `grants.expires_at` is selected by those queries but never compared
+// temporally — outside this module its only consumer is the equality check in
+// `requirePersistedGrantColumnBindings`. The consent-acceptance dossier
+// (CONSENT-ACCEPTANCE-0907.md, "D4, re-graded") records introspection
+// returning `active: true` for an elapsed grant on both backends. Nothing here
+// changes that path.
 //
 // DERIVED, NOT PERSISTED. Two reasons:
 //
@@ -79,17 +86,17 @@ export function deriveGrantLifecycle(
  *
  * The boundary is EXCLUSIVE: a grant is expired once `nowMs` is strictly past
  * `expires_at`, and is still active at the instant the deadline is reached.
- * This matches the read-time enforcement check in `introspect()`
- * (`new Date(row.expires_at) < new Date()`, auth.ts), so the reported
- * lifecycle and the refusal flip on the same millisecond rather than leaving a
- * one-tick window where a grant reads 'expired' but still serves data.
+ * The comparison operator deliberately matches the one `introspect()` uses on
+ * `tokens.expires_at` (`new Date(row.expires_at) < new Date()`, auth.ts).
+ * Sharing the operator only aligns the two WHEN THE TWO DEADLINES ARE
+ * IDENTICAL; it says nothing about when token access is actually refused,
+ * because the deadlines are different columns.
  *
- * That enforcement check reads `tokens.expires_at` while this one reads
- * `grants.expires_at`. The two agree because
- * `requirePersistedGrantColumnBindings` (auth.ts) rejects any token whose
- * expiry outlives its grant's, so a lapsed grant cannot have a still-live
- * token. Comparing the grant's own column here is what lets a grant be
- * reported 'expired' on surfaces that never load a token at all.
+ * This function reads `grants.expires_at`, which is what lets a grant be
+ * reported 'expired' on surfaces that never load a token at all. Do not infer
+ * from the matching boundary that the two paths agree in general — see the
+ * SCOPE note at the top of this file: the package-token enforcement path does
+ * not compare the grant's deadline at all, and that defect is unresolved.
  *
  * An `expires_at` that does not parse is treated as "no usable deadline" and
  * therefore NOT expired: refusing to guess is safer than reporting a lifecycle

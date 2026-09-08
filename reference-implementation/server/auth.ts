@@ -8692,36 +8692,43 @@ async function listMemberExpiriesByPackage(packageIds: readonly string[]): Promi
   if (packageIds.length === 0) {
     return grouped;
   }
-  const wanted = new Set(packageIds);
-  let rows: readonly { grant_expires_at?: string | null; package_id: string }[];
+  const wanted = [...new Set(packageIds)];
+  const collect = (rows: readonly { grant_expires_at?: string | null; package_id: string }[]) => {
+    for (const row of rows) {
+      const existing = grouped.get(row.package_id);
+      const expiresAt = row.grant_expires_at ?? null;
+      if (existing) {
+        existing.push(expiresAt);
+      } else {
+        grouped.set(row.package_id, [expiresAt]);
+      }
+    }
+  };
   if (isPostgresStorageBackend()) {
-    ({ rows } = await postgresQuery<{ grant_expires_at: string | null; package_id: string } & DbRow>(
+    // Postgres filters to the requested packages in SQL, so one round trip.
+    const { rows } = await postgresQuery<{ grant_expires_at: string | null; package_id: string } & DbRow>(
       `SELECT gpm.package_id, g.expires_at AS grant_expires_at
          FROM grant_package_members gpm
          JOIN grants g ON gpm.grant_id = g.grant_id
         WHERE gpm.package_id = ANY($1)`,
-      [[...wanted]]
-    ));
-  } else {
-    // The reference is a single-owner instance and this table is a bounded
-    // small enumeration, so the registered artifact reads it whole and the
-    // page's packages are selected here.
-    rows = allowUnboundedReadAcknowledged<{ grant_expires_at: string | null; package_id: string } & DbRow>(
-      referenceQueries.authGrantPackageMembersExpiriesByPackage,
-      []
+      [wanted]
     );
+    collect(rows);
+    return grouped;
   }
-  for (const row of rows) {
-    if (!wanted.has(row.package_id)) {
-      continue;
-    }
-    const existing = grouped.get(row.package_id);
-    const expiresAt = row.grant_expires_at ?? null;
-    if (existing) {
-      existing.push(expiresAt);
-    } else {
-      grouped.set(row.package_id, [expiresAt]);
-    }
+  // SQLite reads one package at a time. The registered artifact is bounded per
+  // package (256 members), matching `list-all-by-package.sql`. Reading the
+  // whole joined table once and filtering here would have been fewer
+  // statements but would have converted that per-package bound into a global
+  // one, so memberships in unrelated packages could overflow it and fail a
+  // page of packages that were each well within the limit.
+  for (const packageId of wanted) {
+    collect(
+      allowUnboundedReadAcknowledged<{ grant_expires_at: string | null; package_id: string } & DbRow>(
+        referenceQueries.authGrantPackageMembersExpiriesByPackage,
+        [packageId]
+      )
+    );
   }
   return grouped;
 }
