@@ -604,6 +604,63 @@ test.describe("grant lifecycle reporting (sqlite)", () => {
 		closeDb();
 	});
 	registerCases("sqlite", false);
+
+	// Round 3 regression. The member-deadline read is annotated
+	// `@max_rows: 256` on `grant_package_members`. An earlier revision selected
+	// the WHOLE joined membership table and filtered the wanted packages in JS,
+	// which turned that PER-PACKAGE bound into a GLOBAL one: memberships in
+	// packages the caller never asked for counted toward it, so
+	// `SmallEnumerationOverflowError` could fail a small page of packages that
+	// were each well inside the limit. Scoping the read with `WHERE
+	// package_id = ?` restores the per-package invariant.
+	//
+	// SQLite only: the Postgres path already filtered to the requested ids in
+	// SQL and was never exposed to this.
+	test("sqlite: memberships in unrelated packages cannot overflow a small page", async () => {
+		// One ordinary package the listing must keep reporting correctly.
+		const packageId = "pkg_sqlite_scale_target";
+		await seedPackage(false, { expiresAt: FUTURE_DEADLINE, packageId });
+
+		// Unrelated packages whose memberships are each comfortably INSIDE the
+		// per-package bound of 256, but which together exceed it. That is the
+		// exact distinction: the annotation is a per-package invariant, and no
+		// legitimate arrangement of other packages should be able to breach it.
+		// Under the old global-scan shape these rows all counted toward one
+		// budget, so this arrangement failed the page.
+		// 10 packages x 121 members = 1210 rows table-wide. Each package is far
+		// inside the 256-per-package bound, but the total clears BOTH the 256
+		// this read now declares and the 1024 the global-scan revision declared
+		// — so the case fails against that revision rather than merely against
+		// a differently-numbered annotation.
+		for (let pkgIndex = 0; pkgIndex < 10; pkgIndex++) {
+			const noisyPackageId = `pkg_sqlite_scale_noisy_${pkgIndex}`;
+			await seedPackage(false, {
+				expiresAt: FUTURE_DEADLINE,
+				packageId: noisyPackageId,
+			});
+			for (let i = 0; i < 120; i++) {
+				await addMember(false, {
+					expiresAt: FUTURE_DEADLINE,
+					grantId: `grt_${noisyPackageId}_${i}`,
+					packageId: noisyPackageId,
+				});
+			}
+		}
+
+		// A page that does not include the noisy package must still resolve.
+		// `limit: 1` keeps the page small while the unrelated membership table
+		// is large — precisely the shape the old code failed on.
+		const page = (await listGrantPackagesForOwner({ limit: 1 })) as {
+			data: readonly { package_id: string; status?: unknown }[];
+		};
+		assert.equal(page.data.length, 1, "a one-row page must still resolve");
+
+		// And the target package still reports correctly on a page that reaches
+		// it, with unrelated memberships present.
+		const reported = await reportedLifecycles(packageId);
+		assert.equal(reported.listStatus, "active");
+		assert.equal(reported.detailStatus, "active");
+	});
 });
 
 if (POSTGRES_URL) {
