@@ -29,10 +29,17 @@
  *      (backs `GET /_ref/grant-packages/:id/cumulative`), including
  *      `active_child_count`, which must stop counting a lapsed child.
  *
- * plus the three control cases that keep the fix honest: an unexpired grant
- * still reports `active`, a revoked grant still reports `revoked` (revocation
- * is an owner act and must not be overwritten by the clock), and the boundary
- * at exactly `expires_at` is still `active`.
+ * plus the control cases that keep the fix honest: an unexpired grant still
+ * reports `active`, a revoked grant still reports `revoked` (revocation is an
+ * owner act and must not be overwritten by the clock), and a package with one
+ * live member stays `active`.
+ *
+ * Round 2 adds a mixed-UTC-offset case. The list route originally reduced
+ * member deadlines with a SQL `MAX()` over a TEXT column — a lexicographic
+ * max, not a chronological one — so with non-`Z` timestamps the list and
+ * detail routes disagreed about the same package. Every other fixture here is
+ * `Z`-suffixed and fixed-width, which is precisely why the Round 1 suite could
+ * not catch it.
  *
  * The rows are seeded directly rather than through the HTTP picker flow. The
  * defect is in how a persisted row is REPORTED, so the shortest honest setup
@@ -81,6 +88,46 @@ const PACKAGE_VERSION = "reference.mcp_package.v2";
 const PAST_DEADLINE = "2020-01-01T00:00:00.000Z";
 const FUTURE_DEADLINE = "2099-01-01T00:00:00.000Z";
 const ISSUED_AT = "2019-01-01T00:00:00.000Z";
+
+/**
+ * Renders `instantMs` as an ISO-8601 string carrying `offsetHours` rather than
+ * `Z`, i.e. the same instant written in a non-UTC local form — exactly what a
+ * client-supplied `expires_at` can look like (`auth.ts` only checks
+ * `typeof === "string"` on that path).
+ */
+function isoWithOffset(instantMs: number, offsetHours: number): string {
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const shifted = new Date(instantMs + offsetHours * 3_600_000);
+	const wall =
+		`${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}` +
+		`T${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:00.000`;
+	const sign = offsetHours >= 0 ? "+" : "-";
+	return `${wall}${sign}${pad(Math.abs(offsetHours))}:00`;
+}
+
+// Mixed-offset pair for the Round 2 regression. `grants.expires_at` is TEXT,
+// so reducing member deadlines with a SQL MAX() compares them as STRINGS and
+// the offset suffix is never interpreted. These two are built so that the
+// LEXICOGRAPHICALLY larger string is the chronologically EARLIER instant:
+//
+//   lex max  -> a PAST instant   (rendered with +14:00, so its wall-clock
+//                                 digits run ahead of the other's)
+//   true max -> a FUTURE instant (rendered with -12:00, digits run behind)
+//
+// A reducer that takes the lexicographic max therefore sees only a lapsed
+// deadline and reports the package "expired", while the detail route parses
+// both, sees a live member, and reports "active". Anchored to the current
+// clock so `now` genuinely falls between the two instants — with two
+// far-future fixtures the surfaces agree by accident and the case proves
+// nothing.
+const OFFSET_PAST_BUT_LEX_GREATER = isoWithOffset(
+	Date.now() - 6 * 3_600_000,
+	14,
+);
+const OFFSET_FUTURE_BUT_LEX_SMALLER = isoWithOffset(
+	Date.now() + 6 * 3_600_000,
+	-12,
+);
 
 interface SeedOptions {
 	readonly expiresAt: string | null;
@@ -307,6 +354,57 @@ async function reportedLifecycles(packageId: string): Promise<{
 	};
 }
 
+/** Adds one more active member grant (and its token) to an existing package. */
+async function addMember(
+	usePostgres: boolean,
+	opts: {
+		readonly expiresAt: string | null;
+		readonly grantId: string;
+		readonly packageId: string;
+	},
+): Promise<void> {
+	const { expiresAt, grantId, packageId } = opts;
+	const sourceJson = JSON.stringify({
+		kind: "connector",
+		id: "https://example.test/connectors/github",
+	});
+	if (usePostgres) {
+		await postgresQuery(
+			`INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at, expires_at)
+       VALUES($1, $2, $3, $4::jsonb, 'read', 'active', $5, $6)`,
+			[
+				grantId,
+				SUBJECT_ID,
+				CLIENT_ID,
+				grantJson(grantId, expiresAt),
+				ISSUED_AT,
+				expiresAt,
+			],
+		);
+	} else {
+		getDb()
+			.prepare(
+				`INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at, expires_at)
+         VALUES(?, ?, ?, ?, 'read', 'active', ?, ?)`,
+			)
+			.run(
+				grantId,
+				SUBJECT_ID,
+				CLIENT_ID,
+				grantJson(grantId, expiresAt),
+				ISSUED_AT,
+				expiresAt,
+			);
+	}
+	await seedMemberWithToken(usePostgres, {
+		addedAt: ISSUED_AT,
+		expiresAt,
+		grantId,
+		packageId,
+		sourceJson,
+	});
+}
+
 function registerCases(label: string, usePostgres: boolean): void {
 	// ------------------------------------------------------------------
 	// The defect itself.
@@ -401,51 +499,80 @@ function registerCases(label: string, usePostgres: boolean): void {
 		assert.equal(reported.activeChildCount, 0);
 	});
 
+	// ------------------------------------------------------------------
+	// Round 2 regression (red-team Finding 1).
+	//
+	// The list route used to reduce member deadlines with a SQL MAX() over a
+	// TEXT column — a lexicographic max, not a chronological one — while the
+	// detail route parsed every member deadline. With mixed UTC offsets the
+	// two orderings disagree, so the SAME package reported one lifecycle in
+	// the list and another in the detail view: the D4 complaint relocated
+	// rather than removed.
+	//
+	// One member has lapsed and one is still live, so the truth is "active" —
+	// but the lexicographically-largest deadline is the LAPSED one, so a
+	// SQL-MAX reducer reports "expired" on the list while detail says
+	// "active". Every other fixture in this file is `Z`-suffixed and
+	// fixed-width, which is exactly why the original suite could not catch
+	// this.
+	// ------------------------------------------------------------------
+	test(`${label}: mixed UTC offsets — list and detail agree (no lexicographic MAX)`, async () => {
+		const packageId = `pkg_${label}_offsets`;
+		// The lapsed member, written with a +14:00 offset so its wall-clock
+		// digits sort ABOVE the live member's.
+		await seedPackage(usePostgres, {
+			expiresAt: OFFSET_PAST_BUT_LEX_GREATER,
+			packageId,
+		});
+		// The live member, written with a -12:00 offset so it sorts BELOW.
+		await addMember(usePostgres, {
+			expiresAt: OFFSET_FUTURE_BUT_LEX_SMALLER,
+			grantId: `grt_${packageId}_later`,
+			packageId,
+		});
+
+		const reported = await reportedLifecycles(packageId);
+
+		// A live member still grants access, so the package is active.
+		assert.equal(
+			reported.detailStatus,
+			"active",
+			"detail parses both deadlines and sees the live member",
+		);
+		assert.equal(
+			reported.listStatus,
+			"active",
+			"the list must not reduce deadlines lexicographically",
+		);
+		// The invariant Finding 1 broke: one package, one lifecycle, whichever
+		// surface an owner happens to look at.
+		assert.equal(
+			reported.listStatus,
+			reported.detailStatus,
+			"list and detail must report the same lifecycle for one package",
+		);
+		assert.equal(
+			reported.cumulativePackageStatus,
+			reported.detailStatus,
+			"the cumulative view must agree with detail too",
+		);
+		// The children still report their own lifecycles independently.
+		assert.deepEqual([...reported.detailChildStatuses].sort(), [
+			"active",
+			"expired",
+		]);
+	});
+
 	test(`${label}: a package whose members have not all lapsed still reports "active"`, async () => {
 		// A package carries no deadline of its own. With one live member it still
 		// grants access, so reporting the package "expired" would be wrong even
 		// though one of its children has lapsed.
 		const packageId = `pkg_${label}_mixed`;
 		await seedPackage(usePostgres, { expiresAt: PAST_DEADLINE, packageId });
-		const liveGrantId = `grt_${packageId}_live`;
-		const sourceJson = JSON.stringify({
-			kind: "connector",
-			id: "https://example.test/connectors/github",
-		});
-		if (usePostgres) {
-			await postgresQuery(
-				`INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at, expires_at)
-         VALUES($1, $2, $3, $4::jsonb, 'read', 'active', $5, $6)`,
-				[
-					liveGrantId,
-					SUBJECT_ID,
-					CLIENT_ID,
-					grantJson(liveGrantId, FUTURE_DEADLINE),
-					ISSUED_AT,
-					FUTURE_DEADLINE,
-				],
-			);
-		} else {
-			getDb()
-				.prepare(
-					`INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at, expires_at)
-           VALUES(?, ?, ?, ?, 'read', 'active', ?, ?)`,
-				)
-				.run(
-					liveGrantId,
-					SUBJECT_ID,
-					CLIENT_ID,
-					grantJson(liveGrantId, FUTURE_DEADLINE),
-					ISSUED_AT,
-					FUTURE_DEADLINE,
-				);
-		}
-		await seedMemberWithToken(usePostgres, {
-			addedAt: ISSUED_AT,
+		await addMember(usePostgres, {
 			expiresAt: FUTURE_DEADLINE,
-			grantId: liveGrantId,
+			grantId: `grt_${packageId}_live`,
 			packageId,
-			sourceJson,
 		});
 
 		const reported = await reportedLifecycles(packageId);

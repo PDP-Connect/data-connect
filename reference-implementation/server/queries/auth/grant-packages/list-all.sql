@@ -16,19 +16,14 @@ SELECT
   gp.revoked_at,
   (SELECT COUNT(*)
      FROM grant_package_members gpm
-     WHERE gpm.package_id = gp.package_id) AS member_count,
-  -- Reported lifecycle needs the package's deadline, and a package has no
-  -- `expires_at` column of its own: its deadline is the LAST one any member
-  -- grant carries. Derivation happens in JS (server/grant-lifecycle.ts) so
-  -- SQLite and Postgres judge against the same clock, not each engine's own.
-  (SELECT COUNT(*)
-     FROM grant_package_members gpm
-     JOIN grants g ON gpm.grant_id = g.grant_id
-     WHERE gpm.package_id = gp.package_id
-       AND g.expires_at IS NULL) AS unbounded_member_count,
-  (SELECT MAX(g.expires_at)
-     FROM grant_package_members gpm
-     JOIN grants g ON gpm.grant_id = g.grant_id
-     WHERE gpm.package_id = gp.package_id) AS latest_member_expires_at
+     WHERE gpm.package_id = gp.package_id) AS member_count
+-- The package's reported lifecycle needs its member deadlines, but they are
+-- deliberately NOT reduced here. `grants.expires_at` is TEXT, so a SQL
+-- MAX() over it is a LEXICOGRAPHIC max, not a chronological one: a member
+-- stored as '2026-09-08T02:00:00+05:00' sorts after '2026-09-08T01:00:00Z'
+-- while being the EARLIER instant. Reducing in SQL therefore disagreed with
+-- the detail route, which parses every member deadline. The rows are fetched
+-- separately (authGrantPackageMemberExpiriesByPackage) and reduced by the
+-- same shared function both routes use. See server/grant-lifecycle.ts.
 FROM grant_packages gp
 ORDER BY gp.created_at DESC, gp.package_id DESC

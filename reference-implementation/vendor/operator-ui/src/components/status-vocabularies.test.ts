@@ -23,3 +23,17 @@ test("active stays success — the neutral unknown fix does not bleed into known
   assert.ok(active, "expected an `active` entry");
   assert.equal(active.tone, "success");
 });
+
+// `expired` is a real, derived lifecycle state (spec-core.md:533 tracks grant
+// lifecycle as active / expired / revoked). Before it was mapped, an expired
+// grant fell through to the badge's neutral fallback and read like an
+// indeterminate state rather than the definite terminal one it is.
+test("expired is an explicit, definite terminal state — not the neutral fallback", () => {
+  const entry = GRANT_LIFECYCLE_VOCABULARY.expired;
+  assert.ok(entry, "expected an explicit `expired` entry");
+  assert.equal(entry.label, "expired");
+  // Definite, so never neutral (which this vocabulary reserves for unknown).
+  assert.notEqual(entry.tone, "neutral");
+  // A lapsed deadline is not a live grant.
+  assert.notEqual(entry.tone, "success");
+});
