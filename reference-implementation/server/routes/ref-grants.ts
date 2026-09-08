@@ -75,6 +75,12 @@ export interface GrantPackageSummaryRow {
   readonly member_count: number;
   readonly package_id: string;
   readonly parent_package_id: string | null;
+  /**
+   * Raw `grant_packages.status`. `status` above is the DERIVED lifecycle
+   * (active / expired / revoked) and is what gets serialized to owners; this
+   * one is for decisions that must not treat "expired" as "already revoked".
+   */
+  readonly persisted_status: string;
   readonly revoked_at: string | null;
   readonly scenario_id: string | null;
   readonly status: string;
@@ -348,8 +354,14 @@ export function mountRefGrantPackagesRevoke(app: AppLike, ctx: MountRefGrantsCon
           ctx.pdppError(res, 404, "not_found", `grant package not found: ${id}`);
           return;
         }
-        if (pkg.status !== "active") {
-          ctx.pdppError(res, 409, "already_revoked", `grant package ${id} is already ${pkg.status}`);
+        // Deliberately the PERSISTED status, not the reported one. `status`
+        // is now a derived lifecycle that reads 'expired' once the deadline
+        // passes (see server/grant-lifecycle.ts), but an expired package has
+        // not been revoked and must stay revokable: revocation is durable and
+        // still cascades to child grants, tokens, and members. Only a real
+        // prior revocation is `already_revoked`.
+        if (pkg.persisted_status !== "active") {
+          ctx.pdppError(res, 409, "already_revoked", `grant package ${id} is already ${pkg.persisted_status}`);
           return;
         }
         const xRequestId = req.headers["x-request-id"];

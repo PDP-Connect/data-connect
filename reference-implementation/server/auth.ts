@@ -50,6 +50,7 @@ import {
   validateCoreSelectionRequest,
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
+import { derivePackageLifecycle, deriveGrantLifecycle } from "./grant-lifecycle.ts";
 import {
   base64UrlSha256,
   generateOAuthRefreshToken,
@@ -379,6 +380,8 @@ interface RegisteredClientRow extends DbRow {
 interface GrantPackageMemberRow extends DbRow {
   added_at: string;
   grant_access_mode?: string;
+  /** `grants.expires_at`; null means no expiry. Drives the derived lifecycle. */
+  grant_expires_at?: string | null;
   grant_id: string;
   grant_status: string;
   member_revoked_at?: string | null;
@@ -393,12 +396,16 @@ interface GrantPackageListRow extends DbRow {
   approved_at: string;
   client_id: string;
   created_at: string;
+  /** Latest `grants.expires_at` across members; the package's own deadline. */
+  latest_member_expires_at?: string | null;
   member_count?: number | string;
   package_id: string;
   scenario_id: string | null;
   status: string;
   subject_id: string;
   trace_id: string | null;
+  /** Members with no expiry at all; any such member keeps the package live. */
+  unbounded_member_count?: number | string;
 }
 
 interface GrantPackageCursor {
@@ -7668,7 +7675,8 @@ const postgresGrantPackageStore: GrantPackageStore = {
       await postgresQuery<GrantPackageMemberRow>(
         `SELECT gm.package_id, gm.grant_id, gm.source_json::text AS source_json,
               gm.status AS member_status, gm.added_at, gm.revoked_at AS member_revoked_at,
-              g.status AS grant_status, g.access_mode AS grant_access_mode
+              g.status AS grant_status, g.expires_at AS grant_expires_at,
+              g.access_mode AS grant_access_mode
          FROM grant_package_members gm
          JOIN grants g ON gm.grant_id = g.grant_id
          WHERE gm.package_id = $1
@@ -8690,7 +8698,17 @@ export async function listGrantPackagesForOwner(
       `SELECT gp.package_id, gp.subject_id, gp.client_id, gp.status, gp.package_json::text AS package_json,
               gp.parent_package_id, gp.trace_id, gp.scenario_id, gp.created_at, gp.approved_at, gp.revoked_at,
               (SELECT COUNT(*) FROM grant_package_members gpm
-                 WHERE gpm.package_id = gp.package_id) AS member_count
+                 WHERE gpm.package_id = gp.package_id) AS member_count,
+              -- See the same subqueries in
+              -- queries/auth/grant-packages/list-all.sql: the package deadline
+              -- is the latest one its members carry, derived in JS.
+              (SELECT COUNT(*) FROM grant_package_members gpm
+                 JOIN grants g ON gpm.grant_id = g.grant_id
+                 WHERE gpm.package_id = gp.package_id
+                   AND g.expires_at IS NULL) AS unbounded_member_count,
+              (SELECT MAX(g.expires_at) FROM grant_package_members gpm
+                 JOIN grants g ON gpm.grant_id = g.grant_id
+                 WHERE gpm.package_id = gp.package_id) AS latest_member_expires_at
          FROM grant_packages gp
          ${where}
          ORDER BY gp.created_at DESC, gp.package_id DESC
@@ -8708,6 +8726,9 @@ export async function listGrantPackagesForOwner(
     }
     rows = rows.slice(0, limit + 1);
   }
+  // One clock read for the whole page, so two packages sharing a deadline can
+  // never disagree about whether it has passed.
+  const nowMs = Date.now();
   const normalized = rows
     .map((row) => {
       const pkg = normalizePackageRow(row);
@@ -8715,9 +8736,18 @@ export async function listGrantPackagesForOwner(
         return null;
       }
       const memberCount = row.member_count === null || row.member_count === undefined ? 0 : Number(row.member_count);
+      const unboundedMembers = Number(row.unbounded_member_count ?? 0);
+      // A member with no expiry never lapses, so it keeps the whole package
+      // active. Passing an empty list in that case makes derivePackageLifecycle
+      // report the persisted status unchanged.
+      const memberExpiries =
+        memberCount > 0 && unboundedMembers === 0 ? [row.latest_member_expires_at as string | null] : [];
       return {
         ...pkg,
         member_count: Number.isFinite(memberCount) ? memberCount : 0,
+        // Raw column retained for decision paths; see getGrantPackageForOwner.
+        persisted_status: pkg.status,
+        status: derivePackageLifecycle(pkg.status, memberExpiries, nowMs),
       };
     })
     .filter((row) => row !== null);
@@ -8778,11 +8808,19 @@ export async function getGrantPackageForOwner(packageId: unknown): Promise<Recor
   // `getGrantPackageAccess`, which intentionally hides revoked rows.
   const memberRows = await store.listAllMembers(packageId);
 
+  // One clock read for the whole package so every child and the package
+  // status itself are judged against the same instant. Reading the clock
+  // per row could report a package 'active' whose every child read
+  // 'expired' if a deadline elapsed mid-loop.
+  const nowMs = Date.now();
+
   const children = await Promise.all(
     memberRows.map(async (row) => ({
       added_at: row.added_at,
       grant_id: row.grant_id,
-      grant_status: row.grant_status,
+      // Reported lifecycle, not the raw column: `grants.status` never says
+      // 'expired'. See server/grant-lifecycle.ts.
+      grant_status: deriveGrantLifecycle(row.grant_status, row.grant_expires_at, nowMs),
       member_status: row.member_status,
       revoked_at: row.member_revoked_at || null,
       source: await normalizePersistedPackageMemberSource(parsePackageJson(row.source_json) || null, {
@@ -8795,6 +8833,20 @@ export async function getGrantPackageForOwner(packageId: unknown): Promise<Recor
     ...grantPackage,
     children,
     member_count: children.length,
+    // The raw `grant_packages.status` column, kept alongside the derived one
+    // so callers that must DECIDE rather than DISPLAY (the revoke guard in
+    // routes/ref-grants.ts) can still tell "not yet revoked" from "past its
+    // deadline". Expiry must not make a package unrevokable: revocation is a
+    // durable act on the artifact and still cascades to tokens and members.
+    persisted_status: grantPackage.status,
+    // A package carries no `expires_at` of its own; its deadline is the one
+    // its member grants carry. Reported 'expired' only once every member has
+    // lapsed, since a package with any live member still grants access.
+    status: derivePackageLifecycle(
+      grantPackage.status,
+      memberRows.map((row) => row.grant_expires_at),
+      nowMs
+    ),
   };
 }
 
