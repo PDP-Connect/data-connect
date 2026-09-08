@@ -9,6 +9,9 @@ SELECT gm.package_id,
        gm.added_at,
        gm.revoked_at AS member_revoked_at,
        g.status AS grant_status,
+       -- Reported lifecycle is derived from status, expires_at and now, in
+       -- server/grant-lifecycle.ts. `status` alone never says 'expired'.
+       g.expires_at AS grant_expires_at,
        g.access_mode AS grant_access_mode
 FROM grant_package_members gm
 JOIN grants g ON gm.grant_id = g.grant_id
