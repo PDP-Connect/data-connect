@@ -226,11 +226,7 @@ async function fetchJson(url: string, opts: RequestInit = {}): Promise<FetchJson
   } catch {
     /* non-json */
   }
-  return {
-    body,
-    headers: Object.fromEntries(resp.headers.entries()),
-    status: resp.status,
-  };
+  return { body, headers: Object.fromEntries(resp.headers.entries()), status: resp.status };
 }
 
 async function initiateGrantRequest(asUrl: string, spotifyManifest: SpotifyManifest): Promise<InitiateGrantResponse> {
@@ -259,10 +255,7 @@ async function initiateGrantRequest(asUrl: string, spotifyManifest: SpotifyManif
 
 async function reviewConsent(asUrl: string, requestUri: string): Promise<string> {
   const response = await fetch(`${asUrl}/consent/review`, {
-    body: JSON.stringify({
-      request_uri: requestUri,
-      subject_id: OWNER_SUBJECT_ID,
-    }),
+    body: JSON.stringify({ request_uri: requestUri, subject_id: OWNER_SUBJECT_ID }),
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     method: "POST",
   });
@@ -277,14 +270,8 @@ async function reviewConsent(asUrl: string, requestUri: string): Promise<string>
 async function approveReviewedHtml(asUrl: string, requestUri: string): Promise<Response> {
   const revision = await reviewConsent(asUrl, requestUri);
   return fetch(`${asUrl}/consent/approve`, {
-    body: new URLSearchParams({
-      approval_review_revision: revision,
-      request_uri: requestUri,
-    }).toString(),
-    headers: {
-      Accept: "text/html",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    body: new URLSearchParams({ approval_review_revision: revision, request_uri: requestUri }).toString(),
+    headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
     method: "POST",
   });
 }
@@ -292,10 +279,7 @@ async function approveReviewedHtml(asUrl: string, requestUri: string): Promise<R
 async function approveReviewedJson(asUrl: string, requestUri: string): Promise<Response> {
   const revision = await reviewConsent(asUrl, requestUri);
   return fetch(`${asUrl}/consent/approve`, {
-    body: JSON.stringify({
-      approval_review_revision: revision,
-      request_uri: requestUri,
-    }),
+    body: JSON.stringify({ approval_review_revision: revision, request_uri: requestUri }),
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     method: "POST",
   });
@@ -388,14 +372,8 @@ test("security: harden consent token handoff", async (t) => {
       // programmatic contract used by the dashboard and every test).
       const initiateForJson = await initiateGrantRequest(asUrl, spotifyManifest);
       const reviewForJson = await fetch(`${asUrl}/consent/review`, {
-        body: JSON.stringify({
-          request_uri: initiateForJson.request_uri,
-          subject_id: "owner_local",
-        }),
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
+        body: JSON.stringify({ request_uri: initiateForJson.request_uri, subject_id: "owner_local" }),
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
         method: "POST",
       });
       const jsonReviewText = await reviewForJson.text();
@@ -408,10 +386,7 @@ test("security: harden consent token handoff", async (t) => {
           approval_review_revision: jsonReview.approval_review_revision,
           request_uri: initiateForJson.request_uri,
         }),
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
         method: "POST",
       });
       assert.equal(jsonResp.status, 200);
@@ -427,14 +402,8 @@ test("security: harden consent token handoff", async (t) => {
       // Now drive a fresh approval through the HTML branch.
       const initiateForHtml = await initiateGrantRequest(asUrl, spotifyManifest);
       const reviewForHtml = await fetch(`${asUrl}/consent/review`, {
-        body: new URLSearchParams({
-          request_uri: initiateForHtml.request_uri,
-          subject_id: "owner_local",
-        }).toString(),
-        headers: {
-          Accept: "text/html",
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        body: new URLSearchParams({ request_uri: initiateForHtml.request_uri, subject_id: "owner_local" }).toString(),
+        headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
         method: "POST",
       });
       const htmlReview = await reviewForHtml.text();
@@ -515,14 +484,8 @@ test("security: harden consent token handoff", async (t) => {
     await withHarness(async ({ asUrl, spotifyManifest }) => {
       const initiate = await initiateGrantRequest(asUrl, spotifyManifest);
       const review = await fetch(`${asUrl}/consent/review`, {
-        body: new URLSearchParams({
-          request_uri: initiate.request_uri,
-          subject_id: "owner_local",
-        }).toString(),
-        headers: {
-          Accept: "text/html",
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        body: new URLSearchParams({ request_uri: initiate.request_uri, subject_id: "owner_local" }).toString(),
+        headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
         method: "POST",
       });
       const reviewHtml = await review.text();
@@ -740,10 +703,7 @@ test("security: harden consent token handoff", async (t) => {
           approval_review_revision: pending.reviewRevision as string,
           request_uri: initiate.request_uri,
         }).toString(),
-        headers: {
-          Accept: "text/html",
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
         method: "POST",
       });
       assert.equal(resumed.status, 200);
@@ -844,9 +804,7 @@ test("security: harden consent token handoff", async (t) => {
       assert.ok(pending?.reviewRevision);
       assert.equal(await denyGrant(deniedCode), true);
       await assert.rejects(
-        approveGrant(deniedCode, OWNER_SUBJECT_ID, {
-          approval_review_revision: pending.reviewRevision,
-        }),
+        approveGrant(deniedCode, OWNER_SUBJECT_ID, { approval_review_revision: pending.reviewRevision }),
         (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
       );
       assert.equal(countConsentEvents(deniedCode, "consent.denied"), 1);
@@ -859,17 +817,12 @@ test("security: harden consent token handoff", async (t) => {
       const initiated = await initiateGrantRequest(asUrl, spotifyManifest);
       const deviceCode = parsePendingConsentRequestUri(initiated.request_uri);
       assert.ok(deviceCode);
-      const pending = await getPendingConsent(deviceCode, {
-        finalizeReview: true,
-        subjectId: OWNER_SUBJECT_ID,
-      });
+      const pending = await getPendingConsent(deviceCode, { finalizeReview: true, subjectId: OWNER_SUBJECT_ID });
       assert.ok(pending?.reviewRevision);
       const attempts = await Promise.allSettled(
         Array.from({ length: 16 }, (_, index) =>
           index % 2 === 0
-            ? approveGrant(deviceCode, OWNER_SUBJECT_ID, {
-                approval_review_revision: pending.reviewRevision,
-              })
+            ? approveGrant(deviceCode, OWNER_SUBJECT_ID, { approval_review_revision: pending.reviewRevision })
             : denyGrant(deviceCode)
         )
       );
