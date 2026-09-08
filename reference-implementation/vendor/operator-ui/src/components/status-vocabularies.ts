@@ -55,6 +55,12 @@ export const GRANT_LIFECYCLE_VOCABULARY: StatusVocabulary = {
   approved: { label: "active", tone: "success" },
   cancelled: { label: "cancelled", tone: "danger" },
   denied: { label: "denied", tone: "danger" },
+  // A lapsed deadline. Derived, never persisted (see
+  // reference-implementation/server/grant-lifecycle.ts). It reads `warning`,
+  // not `danger`: nothing went wrong and nobody revoked anything — the grant
+  // simply ran out. Without this key the badge fell back to the neutral
+  // "unknown-ish" tone, which understates a definite terminal state.
+  expired: { label: "expired", tone: "warning" },
   failed: { label: "failed", tone: "danger" },
   issued: { label: "active", tone: "success" },
   pending: { label: "pending", tone: "warning" },

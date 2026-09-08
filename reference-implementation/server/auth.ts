@@ -396,16 +396,12 @@ interface GrantPackageListRow extends DbRow {
   approved_at: string;
   client_id: string;
   created_at: string;
-  /** Latest `grants.expires_at` across members; the package's own deadline. */
-  latest_member_expires_at?: string | null;
   member_count?: number | string;
   package_id: string;
   scenario_id: string | null;
   status: string;
   subject_id: string;
   trace_id: string | null;
-  /** Members with no expiry at all; any such member keeps the package live. */
-  unbounded_member_count?: number | string;
 }
 
 interface GrantPackageCursor {
@@ -8677,6 +8673,59 @@ function decodeGrantPackageCursor(cursor: unknown): GrantPackageCursor | null {
   throw err;
 }
 
+/**
+ * Every member grant's `expires_at` for the given packages, grouped by package
+ * and deliberately NOT reduced.
+ *
+ * The detail route hands `derivePackageLifecycle` the full member list; this
+ * lets the list route hand it the same thing. Reducing in SQL instead was the
+ * defect: `grants.expires_at` is TEXT, so `MAX()` over it orders
+ * lexicographically, and '2026-09-08T02:00:00+05:00' sorts after
+ * '2026-09-08T01:00:00Z' while being four hours EARLIER. The two routes then
+ * reduced the same member set by two different orderings and disagreed.
+ *
+ * Packages with no members are simply absent from the map; the caller passes
+ * an empty list, which reports the persisted status unchanged.
+ */
+async function listMemberExpiriesByPackage(packageIds: readonly string[]): Promise<Map<string, (string | null)[]>> {
+  const grouped = new Map<string, (string | null)[]>();
+  if (packageIds.length === 0) {
+    return grouped;
+  }
+  const wanted = new Set(packageIds);
+  let rows: readonly { grant_expires_at?: string | null; package_id: string }[];
+  if (isPostgresStorageBackend()) {
+    ({ rows } = await postgresQuery<{ grant_expires_at: string | null; package_id: string } & DbRow>(
+      `SELECT gpm.package_id, g.expires_at AS grant_expires_at
+         FROM grant_package_members gpm
+         JOIN grants g ON gpm.grant_id = g.grant_id
+        WHERE gpm.package_id = ANY($1)`,
+      [[...wanted]]
+    ));
+  } else {
+    // The reference is a single-owner instance and this table is a bounded
+    // small enumeration, so the registered artifact reads it whole and the
+    // page's packages are selected here.
+    rows = allowUnboundedReadAcknowledged<{ grant_expires_at: string | null; package_id: string } & DbRow>(
+      referenceQueries.authGrantPackageMembersExpiriesByPackage,
+      []
+    );
+  }
+  for (const row of rows) {
+    if (!wanted.has(row.package_id)) {
+      continue;
+    }
+    const existing = grouped.get(row.package_id);
+    const expiresAt = row.grant_expires_at ?? null;
+    if (existing) {
+      existing.push(expiresAt);
+    } else {
+      grouped.set(row.package_id, [expiresAt]);
+    }
+  }
+  return grouped;
+}
+
 export async function listGrantPackagesForOwner(
   opts: { limit?: number; cursor?: string } = {}
 ): Promise<Record<string, unknown>> {
@@ -8698,17 +8747,11 @@ export async function listGrantPackagesForOwner(
       `SELECT gp.package_id, gp.subject_id, gp.client_id, gp.status, gp.package_json::text AS package_json,
               gp.parent_package_id, gp.trace_id, gp.scenario_id, gp.created_at, gp.approved_at, gp.revoked_at,
               (SELECT COUNT(*) FROM grant_package_members gpm
-                 WHERE gpm.package_id = gp.package_id) AS member_count,
-              -- See the same subqueries in
-              -- queries/auth/grant-packages/list-all.sql: the package deadline
-              -- is the latest one its members carry, derived in JS.
-              (SELECT COUNT(*) FROM grant_package_members gpm
-                 JOIN grants g ON gpm.grant_id = g.grant_id
-                 WHERE gpm.package_id = gp.package_id
-                   AND g.expires_at IS NULL) AS unbounded_member_count,
-              (SELECT MAX(g.expires_at) FROM grant_package_members gpm
-                 JOIN grants g ON gpm.grant_id = g.grant_id
-                 WHERE gpm.package_id = gp.package_id) AS latest_member_expires_at
+                 WHERE gpm.package_id = gp.package_id) AS member_count
+              -- Member deadlines are fetched separately and reduced in JS, NOT
+              -- reduced here. See queries/auth/grant-packages/list-all.sql:
+              -- expires_at is TEXT, so SQL MAX() is a lexicographic max, not
+              -- a chronological one.
          FROM grant_packages gp
          ${where}
          ORDER BY gp.created_at DESC, gp.package_id DESC
@@ -8729,6 +8772,10 @@ export async function listGrantPackagesForOwner(
   // One clock read for the whole page, so two packages sharing a deadline can
   // never disagree about whether it has passed.
   const nowMs = Date.now();
+  // Every member deadline for this page, UNREDUCED, keyed by package. The
+  // reduction is done by the same shared function the detail route uses, so
+  // the two surfaces cannot reach different answers about one package.
+  const memberExpiriesByPackage = await listMemberExpiriesByPackage(rows.map((row) => row.package_id));
   const normalized = rows
     .map((row) => {
       const pkg = normalizePackageRow(row);
@@ -8736,18 +8783,12 @@ export async function listGrantPackagesForOwner(
         return null;
       }
       const memberCount = row.member_count === null || row.member_count === undefined ? 0 : Number(row.member_count);
-      const unboundedMembers = Number(row.unbounded_member_count ?? 0);
-      // A member with no expiry never lapses, so it keeps the whole package
-      // active. Passing an empty list in that case makes derivePackageLifecycle
-      // report the persisted status unchanged.
-      const memberExpiries =
-        memberCount > 0 && unboundedMembers === 0 ? [row.latest_member_expires_at as string | null] : [];
       return {
         ...pkg,
         member_count: Number.isFinite(memberCount) ? memberCount : 0,
         // Raw column retained for decision paths; see getGrantPackageForOwner.
         persisted_status: pkg.status,
-        status: derivePackageLifecycle(pkg.status, memberExpiries, nowMs),
+        status: derivePackageLifecycle(pkg.status, memberExpiriesByPackage.get(pkg.package_id) ?? [], nowMs),
       };
     })
     .filter((row) => row !== null);
