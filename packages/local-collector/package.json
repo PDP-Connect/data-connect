@@ -53,13 +53,13 @@
     "verify": "npm test && npm run validate:package"
   },
   "dependencies": {
-    "zod": "^4.5.2"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@pdpp/collector-runtime": "0.0.1",
     "@pdpp/connector-protocol": "0.0.1",
-    "playwright": "^1.62.1",
-    "tsx": "^4.23.11"
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.13"
   },
   "engines": {
     "node": ">=22.14.0"
