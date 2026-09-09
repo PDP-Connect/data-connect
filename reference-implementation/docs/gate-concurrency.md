@@ -93,6 +93,12 @@ failing. Two runs that fail identically say nothing about whether either cap is
 safe, and none of it is a green-suite result. The failures are retained as
 evidence rather than hidden.
 
+On the recorded Node 22.23.1 run, both caps selected 1,033 files and produced
+6,961 assertions: 6,335 passed, 396 failed, and 230 skipped, with the same 396
+failure identities and exit code 1. The cap-2 receipt records 352.198 seconds;
+the cap-8 receipt records 141.066 seconds. These failures are retained as
+evidence, not hidden as a successful result.
+
 ## Operational use
 
 Use the default unless a measurement for the same profile and host justifies an
