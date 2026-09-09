@@ -6,15 +6,12 @@ import { resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
-// `gh attestation verify --repo <owner>/<repo> --source-digest <sha>` alone
-// accepts an attestation signed by ANY workflow in the named repository, not
-// just the release workflow that is supposed to have produced it. A
-// compromised or malicious workflow added to this same repository could
-// still forge a passing attestation for an artifact it built. This test
-// parses the REAL workflow YAML (not a hand-copied string) and asserts the
-// verification step also binds `--signer-workflow` to this exact workflow
-// file, using the flag syntax `gh attestation verify --help` documents:
-// `[host/]<owner>/<repo>/<path>/<to>/<workflow>`.
+// `--repo`/`--signer-workflow` alone bind an attestation to a repository
+// and workflow file, but not to a specific commit — a workflow run
+// triggered from a different commit on the same ref would still pass. This
+// test parses the REAL workflow YAML and the REAL verification script to
+// assert the verification also pins `--source-digest` to `$GITHUB_SHA`,
+// in addition to the repo, workflow file, and digest algorithm.
 
 interface WorkflowStep {
   name?: string
@@ -43,39 +40,44 @@ function findVerificationStep(workflow: WorkflowDocument): WorkflowStep {
   return step
 }
 
+function readVerifyScript(): string {
+  return readFileSync(resolve(process.cwd(), "scripts/verify-npm-provenance.ts"), "utf8")
+}
+
 describe("npm-release.yml attestation verification", () => {
-  it("invokes gh attestation verify with repo, source-digest, and signer-workflow", () => {
+  it("delegates to the provenance verification script for all three published packages, with GITHUB_SHA", () => {
     const step = findVerificationStep(loadNpmReleaseWorkflow())
     const run = step.run ?? ""
 
-    expect(run).toContain("gh attestation verify")
-    expect(run).toContain("--repo PDP-Connect/data-connect")
-    expect(run).toContain('--source-digest "$GITHUB_SHA"')
-    expect(run).toMatch(/--signer-workflow\s+"?PDP-Connect\/data-connect\/\.github\/workflows\/npm-release\.yml"?/)
+    expect(run).toContain("scripts/verify-npm-provenance.ts")
+    expect(run).toContain('"$GITHUB_SHA"')
+    expect(run).toContain("@pdpp/connector-protocol")
+    expect(run).toContain("@pdpp/collector-runtime")
+    expect(run).toContain("@pdpp/local-collector")
   })
 
-  it("binds signer-workflow to this exact workflow file, not a bare repo/owner", () => {
-    const step = findVerificationStep(loadNpmReleaseWorkflow())
-    const run = step.run ?? ""
-    const match = run.match(/--signer-workflow\s+"?([^"\s]+)"?/)
+  it("pins verification to this exact repo, workflow file, source commit, and digest algorithm", () => {
+    const script = readVerifyScript()
 
-    expect(match).toBeTruthy()
-    const signerWorkflow = match?.[1] ?? ""
-    // gh attestation verify --help: --signer-workflow expects
-    // [host/]<owner>/<repo>/<path>/<to>/<workflow> — a path ending in this
-    // repo's own workflow file, not just an owner/repo pair (which --repo
-    // already covers and which alone would accept any workflow in the repo).
-    expect(signerWorkflow).toBe("PDP-Connect/data-connect/.github/workflows/npm-release.yml")
-    expect(signerWorkflow.split("/").length).toBeGreaterThan(2)
+    expect(script).toContain("PDP-Connect/data-connect/.github/workflows/npm-release.yml")
+    expect(script).toContain("--source-digest")
+    expect(script).toContain("--digest-alg")
+    expect(script).toContain("sha512")
   })
 
-  it("keeps signer-workflow verification inside the loop that checks every published package", () => {
-    const step = findVerificationStep(loadNpmReleaseWorkflow())
-    const run = step.run ?? ""
-    const loopStart = run.indexOf("for pkg in")
-    const signerFlagIndex = run.indexOf("--signer-workflow")
+  it("verifies with gh attestation verify against a bundle fetched from the npm registry", () => {
+    const script = readVerifyScript()
 
-    expect(loopStart).toBeGreaterThanOrEqual(0)
-    expect(signerFlagIndex).toBeGreaterThan(loopStart)
+    expect(script).toContain('"gh"')
+    expect(script).toContain("attestation")
+    expect(script).toContain("--bundle")
+    expect(script).toMatch(/dist\.attestations\.url|attestationsUrl/)
+  })
+
+  it("retries registry propagation lag instead of failing on the first lookup", () => {
+    const script = readVerifyScript()
+
+    expect(script).toContain("E404")
+    expect(script).toMatch(/PROPAGATION_RETRY_ATTEMPTS/)
   })
 })
