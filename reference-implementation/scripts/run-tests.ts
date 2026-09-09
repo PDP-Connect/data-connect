@@ -17,6 +17,7 @@ import {
 import { collectChildProcessOutput } from "./child-process-output.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
+import { resolveFileConcurrency } from "./file-concurrency.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
 import {
@@ -515,9 +516,12 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
 }
 
 const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
-const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
-const fileConcurrency =
-  Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : defaultConcurrency;
+const fileConcurrency = resolveFileConcurrency({
+  availableCpus: availableParallelism?.() ?? null,
+  profile: selectedProfile,
+  requestedConcurrency,
+  selectedFileCount: testFiles.length,
+});
 
 const queue = [...testFiles];
 const results: NodeTestResult[] = [];
