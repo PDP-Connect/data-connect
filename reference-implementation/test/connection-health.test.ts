@@ -2011,6 +2011,110 @@ test("outbox axis: stale starting/retrying heartbeats degrade to stalled, not st
   assert.equal(retrying.cause, "stale_heartbeat");
 });
 
+test("outbox axis: a stale healthy/stopped heartbeat with a drained outbox degrades to stalled", () => {
+  // The drained-then-died fingerprint, measured on a real host (2026-08-29 to
+  // 2026-09-09): the collector finished a clean drain, reported `healthy` with
+  // zero pending, and then failed to start on every later timer tick. The
+  // failure was a module-resolution error raised before the first network
+  // call, so the server got no heartbeat and no error — only silence.
+  //
+  // The pre-fix branch returned `idle` here without ever consulting heartbeat
+  // age, which is the one axis value the console renders green. Nothing else
+  // ages: an empty outbox stays empty because nothing refills a queue nobody
+  // is writing to, and `last_heartbeat_status` is only ever rewritten by the
+  // device. Eleven days of a dead collector read as `idle`.
+  const healthy = deriveOutboxAxisFromHeartbeat(
+    heartbeat({ lastHeartbeatAt: OLD, lastHeartbeatStatus: "healthy", recordsPending: 0 }),
+    { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+  );
+  assert.equal(healthy.axis, "stalled");
+  assert.equal(healthy.cause, "stale_heartbeat");
+
+  // `stopped` shares the branch: it says the collector exited cleanly at that
+  // timestamp, not that it has checked in since.
+  const stopped = deriveOutboxAxisFromHeartbeat(
+    heartbeat({ lastHeartbeatAt: OLD, lastHeartbeatStatus: "stopped", recordsPending: 0 }),
+    { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+  );
+  assert.equal(stopped.axis, "stalled");
+  assert.equal(stopped.cause, "stale_heartbeat");
+});
+
+test("outbox axis: a fresh healthy/stopped heartbeat with a drained outbox stays idle", () => {
+  // Counterweight. A one-shot collector reports `healthy` with an empty outbox
+  // and exits by design, so this is the ordinary between-invocations shape and
+  // must stay green right up to the lease boundary. The cost of the check
+  // above is a bounded delay before a dead collector is called stale; it must
+  // not become a false stall for a live one.
+  for (const status of ["healthy", "stopped"] as const) {
+    const derived = deriveOutboxAxisFromHeartbeat(
+      heartbeat({ lastHeartbeatAt: FRESH, lastHeartbeatStatus: status, recordsPending: 0 }),
+      { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+    );
+    assert.equal(derived.axis, "idle", `a fresh ${status} heartbeat must stay idle`);
+    assert.equal(derived.cause, null);
+  }
+});
+
+test("outbox axis: an unknown pending count still reads unknown, never a stall, however old the heartbeat", () => {
+  // `recordsPending: null` means the count could not be read at all. That
+  // check precedes the age check and must keep doing so — reporting a specific
+  // cause from evidence we do not have would be a fabrication.
+  const derived = deriveOutboxAxisFromHeartbeat(
+    heartbeat({ lastHeartbeatAt: OLD, lastHeartbeatStatus: "healthy", recordsPending: null }),
+    { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+  );
+  assert.equal(derived.axis, "unknown");
+  assert.equal(derived.cause, null);
+});
+
+test("end-to-end: a drained collector that stopped checking in projects as degraded with a run-it-again remediation, not healthy", () => {
+  // Full pipeline, the same shape as the retrying end-to-end below: the
+  // age-derived axis and cause feed computeConnectionHealth, so this asserts
+  // what the console actually reads — snapshot state, the outbox axis, and the
+  // condition copy plus remediation a user is shown — rather than only the
+  // intermediate derivation. Before the fix this snapshot was `healthy` with
+  // `axes.outbox === "idle"` and no condition at all.
+  const derived = deriveOutboxAxisFromHeartbeat(
+    heartbeat({ lastHeartbeatAt: OLD, lastHeartbeatStatus: "healthy", recordsPending: 0 }),
+    { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+  );
+  const snap = computeConnectionHealth(
+    input({
+      coverage: { axis: "complete" },
+      freshness: { axis: "fresh" },
+      outbox: { axis: derived.axis, cause: derived.cause },
+      run: run(),
+    })
+  );
+  assert.equal(snap.state, "degraded");
+  assert.equal(snap.axes.outbox, "stalled");
+  const exporter = findCondition(snap, "LocalExporterAvailable");
+  assert.equal(exporter?.reason, CONNECTION_CONDITION_REASONS.LOCAL_EXPORTER_STALE_HEARTBEAT);
+  assert.equal(exporter?.severity, "error");
+  assert.equal(exporter?.status, "false");
+  assert.equal(exporter?.remediation?.action, "clear_backlog");
+  assert.match(exporter?.remediation?.label ?? "", TOP_LEVEL_REGEX_15);
+  assert.equal(findCondition(snap, "BacklogClear")?.reason, CONNECTION_CONDITION_REASONS.OUTBOX_STALE_HEARTBEAT);
+});
+
+test("end-to-end: a live drained collector still projects as healthy — the stale check is not a false-red", () => {
+  const derived = deriveOutboxAxisFromHeartbeat(
+    heartbeat({ lastHeartbeatAt: FRESH, lastHeartbeatStatus: "healthy", recordsPending: 0 }),
+    { nowIso: NOW, staleHeartbeatThresholdMs: STALE_MS }
+  );
+  const snap = computeConnectionHealth(
+    input({
+      coverage: { axis: "complete" },
+      freshness: { axis: "fresh" },
+      outbox: { axis: derived.axis, cause: derived.cause },
+      run: run(),
+    })
+  );
+  assert.equal(snap.state, "healthy");
+  assert.equal(snap.axes.outbox, "idle");
+});
+
 test("outbox axis: fresh starting/retrying heartbeats with no pending work stay active (real pending work is not hidden)", () => {
   // A collector that just started, well within the staleness window,
   // must still read as active - the fix must not make freshly-started
@@ -2595,15 +2699,53 @@ test("local exporter: a cause is ignored unless the axis is actually stalled", (
   assert.match(exporter?.message ?? "", TOP_LEVEL_REGEX_6);
 });
 
-test("outbox axis: idle heartbeat that is stale but has zero pending stays idle", () => {
-  // Stale heartbeat with no pending work is not stalled by itself.
-  // Freshness axis handles general freshness; the outbox axis only
-  // claims stalled when there is durable work that is not draining.
+test("outbox axis: a stale heartbeat with zero pending is stalled — the lease rule is uniform across statuses", () => {
+  // This test previously asserted `idle`, on the reasoning that a stale
+  // heartbeat with no pending work is not stalled by itself, and that the
+  // freshness axis handles general freshness while the outbox axis only claims
+  // stalled for durable work that is not draining.
+  //
+  // The reason to override that is uniformity, not a gap in freshness. The
+  // outbox axis ALREADY owns exactly this judgment for every other heartbeat
+  // status — `starting`/`retrying` above, and `blocked` in
+  // `classifyBlockedHeartbeat` — at this exact threshold. `healthy`/`stopped`
+  // was the sole exception, and nothing distinguishes it: all four are things a
+  // collector SAID at a moment, none of which keeps being true afterwards.
+  // Extending the rule to cover it removes a special case rather than adding a
+  // second staleness policy, and it keeps this axis from contradicting the
+  // presented heartbeat health that `heartbeat-lease.ts` derives from the same
+  // 30 minutes.
+  //
+  // Two earlier rationales for this change were wrong. Neither should be
+  // restated, and the correct account of the sibling fix is short:
+  //
+  // The idle branch of `localDeviceFreshnessHeartbeatAt` accepted a heartbeat
+  // older than the 30-minute lease as a freshness anchor. That anchor retained
+  // its original timestamp, so the existing six-hour freshness policy could
+  // still age it out. This change rejects the expired anchor and also marks the
+  // outbox stalled.
+  //
+  // Wrong #1: that local-device connectors declare no `maximum_staleness_seconds`
+  // so freshness could never age them out. The shipped `claude_code` and `codex`
+  // manifests both declare `refresh_policy.maximum_staleness_seconds` (21600s),
+  // as `ref-connectors-local-coverage-green.test.ts` asserts against the real
+  // manifest loader; the manifests are generated into an untracked directory, so
+  // a repository grep does not see them.
+  //
+  // Wrong #2: that the old idle branch "reset the freshness clock on every
+  // read". It did not. Every return in that function is the stored
+  // `last_heartbeat_at`, never the read time, so the anchor ages normally.
+  // `deriveReferenceFreshness` with a 21600s window returns `current` at 1h and
+  // `stale` at both 7h and 264h, with `captured_at` equal to the input.
+  //
+  // These tests are controlled calculations. They do not establish the complete
+  // cause of the historical eleven-day green status.
   const r = deriveOutboxAxisFromHeartbeat(heartbeat({ lastHeartbeatAt: OLD, recordsPending: 0 }), {
     nowIso: NOW,
     staleHeartbeatThresholdMs: STALE_MS,
   });
-  assert.equal(r.axis, "idle");
+  assert.equal(r.axis, "stalled");
+  assert.equal(r.cause, "stale_heartbeat");
 });
 
 test("outbox axis: missing heartbeat is unknown (not unreliable)", () => {

@@ -158,6 +158,63 @@ test("pre-existing idle/active freshness paths are unchanged", () => {
   );
 });
 
+// ── The idle branch ages out too ────────────────────────────────────────────
+//
+// The stale-heartbeat guard above was written for the terminal-backlog
+// carve-out only, but the idle branch needs it for the same reason and did not
+// have it. An `idle` axis means the outbox is empty — a state a dead collector
+// holds permanently, since nothing refills a queue nobody is writing to. So a
+// collector that drained cleanly and then stopped starting (this host,
+// 2026-08-29 to 2026-09-09: a module-resolution error before the first network
+// call, hence no heartbeat and no error, only silence) kept promoting its
+// frozen heartbeat to the freshness anchor and rendering green indefinitely.
+
+test("idle branch: a heartbeat older than the lease is not a freshness anchor", () => {
+  assert.equal(
+    localDeviceFreshnessHeartbeatAt(
+      progress({ last_heartbeat_at: STALE_HEARTBEAT, last_heartbeat_status: "healthy", outbox_counts: null }),
+      { axis: "idle" },
+      GENERATION,
+      NOW
+    ),
+    null,
+    "an empty outbox is not evidence of a live collector — only heartbeat age is"
+  );
+});
+
+test("idle branch: a null records_pending with a stale heartbeat is still not an anchor", () => {
+  // `records_pending: null` takes the same idle branch (the nullish check
+  // admits it), so the guard has to cover it as well.
+  assert.equal(
+    localDeviceFreshnessHeartbeatAt(
+      progress({
+        last_heartbeat_at: STALE_HEARTBEAT,
+        last_heartbeat_status: "healthy",
+        outbox_counts: null,
+        records_pending: null,
+      }),
+      { axis: "idle" },
+      GENERATION,
+      NOW
+    ),
+    null
+  );
+});
+
+test("idle branch: a heartbeat within the lease still anchors freshness", () => {
+  // Counterweight to the two above: the ordinary between-invocations shape of
+  // a one-shot collector must keep measuring freshness.
+  assert.equal(
+    localDeviceFreshnessHeartbeatAt(
+      progress({ last_heartbeat_status: "healthy", outbox_counts: null, records_pending: null }),
+      { axis: "idle" },
+      GENERATION,
+      NOW
+    ),
+    FRESH_HEARTBEAT
+  );
+});
+
 // ── requiredCoverageEvidenceIsAuthoritative: outbox gate ────────────────────
 //
 // Live production evidence (2026-08-28, connection cin_2de5ede05c8cc8d45935c414,

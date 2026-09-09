@@ -176,6 +176,91 @@ test("a retrying row with an old oldest_pending_at but NO oldest_retrying_at sta
   assert.equal(axis.cause, null);
 });
 
+// ─── Drained-then-died: a clean shutdown is not a live collector ────────────
+//
+// Observed on this host (2026-08-29 -> 2026-09-09): a local collector drained
+// its outbox, reported `healthy` with zero pending, and then failed to start
+// on every subsequent timer tick. The failure was a Node ESM resolution error
+// raised BEFORE the first network call, so the server received no heartbeat
+// and no error — only silence. `last_heartbeat_at` froze; `records_pending`
+// stayed 0; `last_heartbeat_status` stayed `healthy`.
+//
+// That triple is the exact input to the `healthy`/`stopped` branch of
+// `deriveOutboxAxisFromHeartbeat`, which returned `idle` without consulting
+// heartbeat age. Eleven days of a dead collector projected as `idle` — the
+// axis the console renders green. An empty outbox is not evidence of a live
+// collector; only heartbeat age is.
+
+test("a healthy heartbeat older than the lease projects as stalled — a drained collector that then died is not idle", () => {
+  const rows = [
+    hbRow({
+      lastHeartbeatAt: STALE,
+      lastHeartbeatStatus: "healthy",
+      lastIngestAt: STALE,
+      outboxDiagnostics: { pending: 0 },
+      recordsPending: 0,
+    }),
+  ];
+  const axis = projectConnectorOutboxAxisFromHeartbeats(rows, { nowIso: NOW });
+  assert.equal(axis.axis, "stalled");
+  assert.equal(axis.cause, "stale_heartbeat");
+  assert.equal(axis.hasEvidence, true);
+});
+
+test("a stopped heartbeat older than the lease projects as stalled — an announced exit still ages out", () => {
+  // `stopped` shares the branch with `healthy`: it says the collector exited
+  // cleanly at that timestamp, not that it has checked in since.
+  const rows = [
+    hbRow({
+      lastHeartbeatAt: STALE,
+      lastHeartbeatStatus: "stopped",
+      lastIngestAt: STALE,
+      outboxDiagnostics: { pending: 0 },
+      recordsPending: 0,
+    }),
+  ];
+  const axis = projectConnectorOutboxAxisFromHeartbeats(rows, { nowIso: NOW });
+  assert.equal(axis.axis, "stalled");
+  assert.equal(axis.cause, "stale_heartbeat");
+});
+
+test("a healthy heartbeat within the lease stays idle — a live drained collector is not false-flagged", () => {
+  // Counterweight: the ordinary between-invocations shape. A one-shot
+  // collector reports `healthy` with an empty outbox and exits by design, so
+  // greening this is the correct answer right up to the lease boundary.
+  const rows = [
+    hbRow({
+      lastHeartbeatAt: FRESH,
+      lastHeartbeatStatus: "healthy",
+      lastIngestAt: FRESH,
+      outboxDiagnostics: { pending: 0 },
+      recordsPending: 0,
+    }),
+  ];
+  const axis = projectConnectorOutboxAxisFromHeartbeats(rows, { nowIso: NOW });
+  assert.equal(axis.axis, "idle");
+  assert.equal(axis.cause, null);
+  assert.equal(axis.hasEvidence, true);
+});
+
+test("an unknown pending count still wins over heartbeat age — absent evidence is not a stall", () => {
+  // `recordsPending: null` means the server could not read the count at all.
+  // That check precedes the age check and must keep doing so: reporting a
+  // specific cause from evidence we do not have would be a fabrication.
+  const rows = [
+    hbRow({
+      lastHeartbeatAt: STALE,
+      lastHeartbeatStatus: "healthy",
+      lastIngestAt: STALE,
+      outboxDiagnostics: null,
+      recordsPending: null,
+    }),
+  ];
+  const axis = projectConnectorOutboxAxisFromHeartbeats(rows, { nowIso: NOW });
+  assert.equal(axis.axis, "unknown");
+  assert.equal(axis.cause, null);
+});
+
 test("a revoked device's stale-by-age backlog is not evidence — untrusted rows never drive the axis", () => {
   const rows = [
     revokedStalledRow({

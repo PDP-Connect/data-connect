@@ -35,7 +35,16 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 
 const NOW = "2026-06-03T12:00:00.000Z";
-const HEARTBEAT_AT = "2026-06-03T11:59:00.000Z";
+// Anchored to the real clock, NOT to `NOW`, for the same reason as the
+// identical constant in `ref-connectors-local-coverage-green.test.ts`:
+// `listConnectorSummaries` takes no injected clock and derives heartbeat age
+// from `Date.now()`, while `NOW` only seeds stored created/updated columns. A
+// fixed literal is one minute old on the day it is written and a further day
+// older every day after, so it drifts out of the 30-minute heartbeat lease and
+// the manifest's `maximum_staleness_seconds` and eventually degrades a source
+// these tests need healthy. One minute before the real now holds it inside both
+// windows permanently.
+const HEARTBEAT_AT = new Date(Date.now() - 60_000).toISOString();
 const OWNER = "owner_local";
 const DEVICE_ID = "dev_scope_proof";
 const SOURCE_INSTANCE_ID = "src_scope_proof";
