@@ -127,17 +127,20 @@ export function parsePostgresDerivedIndexMaintenanceWindow(
   if (value.toLowerCase() === "disabled") {
     return null;
   }
-  const match = /^(?<startHour>[01]\d|2[0-3]):(?<startMinute>[0-5]\d)-(?<endHour>[01]\d|2[0-3]):(?<endMinute>[0-5]\d)$/.exec(
-    value
-  );
-  if (!match?.groups) {
+  // Positional groups, not named ones: apps/console transpiles this module
+  // (next.config.mjs `transpilePackages`) under an ES2017 target, where named
+  // capturing groups are a syntax error (TS1503), even though this package's
+  // own tsconfig targets ES2023.
+  const match = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) {
     throw new Error(
       `${DERIVED_INDEX_MAINTENANCE_WINDOW_ENV} must be "HH:MM-HH:MM" in UTC, "disabled", or unset.`
     );
   }
+  const [, startHour, startMinute, endHour, endMinute] = match;
   return {
-    startMinute: Number(match.groups.startHour) * 60 + Number(match.groups.startMinute),
-    endMinute: Number(match.groups.endHour) * 60 + Number(match.groups.endMinute),
+    startMinute: Number(startHour) * 60 + Number(startMinute),
+    endMinute: Number(endHour) * 60 + Number(endMinute),
   };
 }
 
