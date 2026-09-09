@@ -140,6 +140,13 @@ export interface ConnectorAttentionStore {
    */
   expireAllDueAttention: (input?: ExpireAllDueInput) => Promise<AttentionRecord[]>;
   expireDueAttentionForConnection: (input?: ExpireDueInput) => Promise<AttentionRecord[]>;
+  /**
+   * Exact single-record read, independent of lifecycle. The list readers above
+   * all filter to open lifecycles, so they cannot distinguish a record that
+   * never existed from one the owner resolved — a caller that must not
+   * re-open a resolved record needs to see the resolved row itself.
+   */
+  getAttentionById: (attentionId: string) => Promise<AttentionRecord | null>;
   /** Page-scoped durable evidence keyed by exact connector_instance_id. */
   listOpenAttentionByConnectorInstanceIds: (
     connectorInstanceIds: readonly (string | null | undefined)[],
@@ -432,6 +439,26 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       }
       return expired;
     },
+
+    // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
+    async getAttentionById(attentionId: string): Promise<AttentionRecord | null> {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("getAttentionById: attentionId is required");
+      }
+      // REVIEWED-DYNAMIC: single-row lookup for the store-owned table.
+      // Deliberately unfiltered by lifecycle: the point of this read is to see
+      // terminal records, which every list reader here hides.
+      // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
+      const row = [
+        ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+          [id]
+        ),
+      ][0];
+      return row ? (rowToRecord(row) as AttentionRecord) : null;
+    },
+
     // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
     async listOpenAttentionByConnectorInstanceIds(
       connectorInstanceIds,
@@ -737,6 +764,21 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       }
       return expired;
     },
+
+    async getAttentionById(attentionId: string): Promise<AttentionRecord | null> {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("getAttentionById: attentionId is required");
+      }
+      // Deliberately unfiltered by lifecycle; see the SQLite twin's comment.
+      const lookup = await postgresQuery(
+        "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+        [id]
+      );
+      const row = lookup.rows[0] as AttentionLifecycleRow | undefined;
+      return row ? (rowToRecord(row) as AttentionRecord) : null;
+    },
+
     async listOpenAttentionByConnectorInstanceIds(
       connectorInstanceIds,
       { limit, now }: { limit?: number | null; now?: string | null } = {}
