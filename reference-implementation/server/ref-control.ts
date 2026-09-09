@@ -6204,11 +6204,14 @@ export function hasTerminalOnlyOutboxBacklog(
  * (`OUTBOX_STALE_HEARTBEAT_THRESHOLD_MS`). An unparseable or absent timestamp
  * is never fresh.
  *
- * The terminal-backlog carve-out needs this explicitly: `classifyBlockedHeartbeat`
- * returns `dead_letter_backlog` BEFORE it consults heartbeat age, so a
- * dead-lettered outbox reports the same cause whether the collector checked in
- * two minutes ago or died six months ago. Without this guard the carve-out
- * would green a long-dead collector.
+ * Every branch that promotes a heartbeat to the freshness anchor needs this
+ * explicitly, because none of the outbox states it keys on age out on their
+ * own. The terminal-backlog carve-out: `classifyBlockedHeartbeat` returns
+ * `dead_letter_backlog` BEFORE it consults heartbeat age, so a dead-lettered
+ * outbox reports the same cause whether the collector checked in two minutes
+ * ago or died six months ago. The idle branch: an empty outbox stays empty
+ * after the collector dies. Without this guard either would green a long-dead
+ * collector.
  */
 function isHeartbeatFresh(lastHeartbeatAt: string | null, nowIso: string): boolean {
   if (!lastHeartbeatAt) {
@@ -6237,10 +6240,16 @@ export function localDeviceFreshnessHeartbeatAt(
   if (outbox.axis === "active") {
     return localDeviceProgress.last_heartbeat_at;
   }
+  // Same guard, same reason as the terminal-backlog carve-out below: an idle
+  // axis means the outbox is empty, which is not by itself evidence that the
+  // collector is still checking in. A collector that drained cleanly and then
+  // died holds `healthy` + zero pending permanently, so without this the dead
+  // heartbeat would be promoted to the freshness anchor and green the source.
   if (
     outbox.axis === "idle" &&
     localDeviceProgress.last_heartbeat_status === "healthy" &&
-    (isNullish(localDeviceProgress.records_pending) || localDeviceProgress.records_pending === 0)
+    (isNullish(localDeviceProgress.records_pending) || localDeviceProgress.records_pending === 0) &&
+    isHeartbeatFresh(localDeviceProgress.last_heartbeat_at, nowIso)
   ) {
     return localDeviceProgress.last_heartbeat_at;
   }

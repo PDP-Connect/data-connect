@@ -4144,6 +4144,31 @@ export interface HeartbeatOutboxEvidence {
 }
 
 /**
+ * Whether a past-the-lease heartbeat in this status is a stall rather than
+ * something a later branch classifies more precisely.
+ *
+ * `starting`/`retrying` announce work in flight, and `healthy`/`stopped`
+ * announce a completed drain — all four describe a moment, not a condition
+ * that keeps being true, so none survives its own lease. `healthy`/`stopped`
+ * is admitted only once the pending count is readable: an unreadable count is
+ * `unknown`, and reporting a specific stall from evidence we do not have would
+ * be a fabrication.
+ *
+ * Extracted rather than inlined for the same reason as
+ * `classifyBlockedHeartbeat`: it keeps `deriveOutboxAxisFromHeartbeat` within
+ * the repo's cognitive-complexity budget.
+ */
+function heartbeatStatusAgesOut(evidence: HeartbeatOutboxEvidence): boolean {
+  if (evidence.lastHeartbeatStatus === "starting" || evidence.lastHeartbeatStatus === "retrying") {
+    return true;
+  }
+  if (evidence.lastHeartbeatStatus === "healthy" || evidence.lastHeartbeatStatus === "stopped") {
+    return evidence.recordsPending !== null;
+  }
+  return false;
+}
+
+/**
  * Outbox axis derivation from server-visible heartbeat evidence.
  *
  * Maps the most recent heartbeat for a connection's source instance onto
@@ -4201,6 +4226,16 @@ export interface HeartbeatOutboxEvidence {
  * backlog count, real pending work, or a stale heartbeat) falls through
  * to the pre-existing `state_read_failed` classification, which stays the
  * conservative default.
+ *
+ * Drained-then-died (`healthy`/`stopped` with an empty outbox): this branch
+ * used to return `idle` without consulting heartbeat age, so a collector
+ * that finished a clean drain and THEN stopped checking in read `idle`
+ * forever — the one fingerprint every other branch here already degrades.
+ * An empty outbox is not evidence of a live collector; only heartbeat age
+ * is. Past the lease it reports `stalled`/`stale_heartbeat`, the same cause
+ * and threshold the `starting`/`retrying` branch applies, so the two cannot
+ * disagree about whether a check-in is still current. See
+ * `heartbeatStatusAgesOut`.
  */
 export function deriveOutboxAxisFromHeartbeat(
   evidence: HeartbeatOutboxEvidence,
@@ -4235,10 +4270,10 @@ export function deriveOutboxAxisFromHeartbeat(
   ) {
     return { axis: "stalled", cause: "transient_upload_failure", unreliable: false };
   }
+  if (heartbeatStale && heartbeatStatusAgesOut(evidence)) {
+    return { axis: "stalled", cause: "stale_heartbeat", unreliable: false };
+  }
   if (evidence.lastHeartbeatStatus === "starting" || evidence.lastHeartbeatStatus === "retrying") {
-    if (heartbeatStale) {
-      return { axis: "stalled", cause: "stale_heartbeat", unreliable: false };
-    }
     return { axis: "active", cause: null, unreliable: false };
   }
   if (pending !== null && pending > 0) {

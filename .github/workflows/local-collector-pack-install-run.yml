@@ -26,6 +26,12 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
+      # Runs before pack-install-run so an undeclared bare specifier fails at the
+      # guard that names it rather than as an opaque resolution error at install.
+      - name: Validate @pdpp/local-collector package manifest
+        working-directory: packages/local-collector
+        run: npm run validate:package
+
       - name: Pack, install, and run @pdpp/local-collector in a clean project
         working-directory: packages/local-collector
         run: npm run pack-install-run
