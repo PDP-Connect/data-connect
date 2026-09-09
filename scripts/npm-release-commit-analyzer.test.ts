@@ -54,12 +54,18 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
     ["perf(collector-runtime): faster hashing", "patch"],
     ["fix(collector-runtime,connector-protocol,local-collector): multi-package commit", "patch"],
     ["feat(collector-runtime)!: require explicit executionRoot", "major"],
+    // @pdpp/local-collector joined this publish set when release
+    // responsibility for it moved here from PDP-Connect/pdpp. Its commits
+    // must cut releases now; before that, a fix(local-collector) commit
+    // released nothing and the packaging fix reached no user.
+    ["fix(local-collector): resolve packaged import", "patch"],
+    ["feat(local-collector): add connector", "minor"],
+    ["perf(local-collector): faster scan", "patch"],
   ])("releases %s as a %s bump", async (subject, expected) => {
     expect(await releaseTypeFor([subject])).toBe(expected)
   })
 
   it.each([
-    ["fix(local-collector): something", "scoped, but not a published package"],
     ["fix(polyfill-connectors): something", "scoped, but not a published package"],
     ["ci(drift-signal): close gaps", "scoped, but not a published package"],
     ["docs(local-collector): correct claim", "scoped, but not a published package"],
@@ -73,12 +79,12 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
   })
 
   it("a real target-package fix is not cancelled by an unrelated commit in the same batch", async () => {
-    const result = await releaseTypeFor(["fix(collector-runtime): remove dep", "fix(local-collector): unrelated"])
+    const result = await releaseTypeFor(["fix(collector-runtime): remove dep", "fix(polyfill-connectors): unrelated"])
     expect(result).toBe("patch")
   })
 
   it("a batch with no target-package commits releases nothing, even mixing scoped and unscoped", async () => {
-    const result = await releaseTypeFor(["fix(local-collector): unrelated 1", "feat: unscoped desktop feature"])
+    const result = await releaseTypeFor(["fix(polyfill-connectors): unrelated 1", "feat: unscoped desktop feature"])
     expect(result).toBeNull()
   })
 

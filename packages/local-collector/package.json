@@ -1,7 +1,6 @@
 {
   "name": "@pdpp/local-collector",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.0.1",
   "description": "Local collector runtime for PDPP: filesystem-class connectors (Claude Code, Codex, Google Takeout, iMessage, Apple Photos, Google Messages) plus the device-exporter ingest client.",
   "keywords": [
     "pdpp",
@@ -50,7 +49,7 @@
     "pack-install-run": "node --import tsx scripts/pack-install-run.ts",
     "test": "tsx scripts/run-tests.ts",
     "validate:package": "tsx scripts/validate-package.ts",
-    "verify": "npm test && npm run validate:package"
+    "verify": "npm test && npm run validate:package && npm run pack-install-run"
   },
   "dependencies": {
     "zod": "^4.5.2"
@@ -66,7 +65,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": false,
+    "provenance": true,
     "registry": "https://registry.npmjs.org/",
     "tag": "latest"
   }

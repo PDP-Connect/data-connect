@@ -14,6 +14,46 @@ does not start local processes. `PDPP_CONNECTION_ID` is the stable
 connection/source identity for a specific device/account/home binding; the
 enrollment response currently names that value `source_instance_id`.
 
+## Install and upgrade
+
+Install or upgrade to the current release. Check the affected range below
+first: `@latest` resolves to whatever npm currently marks latest, which is an
+affected version until a corrected release is published.
+
+```bash
+npm i -g @pdpp/local-collector@latest
+```
+
+Or run without installing, which always resolves the current release:
+
+```bash
+npx -y @pdpp/local-collector@latest advertise
+```
+
+### Affected versions: 1.3.0 through 1.5.4
+
+Every published version from `1.3.0` through `1.5.4` is unrunnable. Those
+tarballs contain a compiled `import ... from "@pdpp/reference-contract"` that
+is not declared as a dependency and does not exist on the npm registry. The
+import resolved for developers through the workspace link and failed closed on
+every real install, so any invocation — including `--version` — exits with:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@pdpp/reference-contract'
+```
+
+There is no workaround within that range; upgrading is the fix once a corrected
+version is published. At the time of writing no such version exists yet, so
+`@latest` still resolves to `1.5.4`. Name the first fixed version here when it
+publishes.
+
+Two gates run before any publish and are what detect this failure mode:
+`validate:package` rejects any bare import the manifest does not declare, and
+`pack-install-run` installs the packed tarball into a clean project and drives
+the real CLI against a reference server. They cover the import-resolution
+failures they test for; they are not a guarantee against every packaging
+defect.
+
 ## Usage
 
 Guided path — one command pairs the host and saves credentials, no manual
