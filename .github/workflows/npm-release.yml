@@ -93,6 +93,26 @@ jobs:
       - name: Verify collector-runtime package
         run: npm run --workspace packages/collector-runtime verify
 
+      # @pdpp/local-collector is not published by this workflow: it is
+      # `private: true` here and absent from .releaserc.yaml. Older releases
+      # identify pdpp as their source; the package has since moved to this
+      # repository, which does not yet configure its publication. It is
+      # nonetheless the largest consumer of the two packages this workflow
+      # DOES publish: it compiles against their source and vendors their
+      # built dist/ into its own tarball. A release that breaks it therefore
+      # breaks a real downstream consumer without any job here noticing.
+      # `verify` runs the package's tests plus validate:package, whose
+      # packed-import checks are what catch an undeclared cross-package
+      # import being compiled into a tarball. Which assertion fires depends
+      # on where the bad import survives: postbuild.ts rewrites a bare
+      # `@pdpp/*` specifier to a relative path before packing, so a source
+      # import surfaces via assertLiteralRelativeImportsResolve as a
+      # relative path escaping the tarball, while one injected into the
+      # built artifact after rewriting is caught by
+      # assertBareSpecifiersResolve.
+      - name: Verify local-collector package
+        run: npm run --workspace packages/local-collector verify
+
       - name: Test commit-analyzer scope gate
         run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
 

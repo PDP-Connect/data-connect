@@ -76,14 +76,32 @@ test("describeConnectScopeChoice names the boundary for every kind", () => {
   );
 });
 
-test("recentSinceDays matches @pdpp/reference-contract's day-math exactly (cross-package equivalence)", async () => {
-  const { resolveNamedCollectionScope } = await import(
-    "../../reference-contract/src/evidence/named-collection-scope.ts"
-  );
-  for (const days of [1, 7, 30, 90, 365]) {
-    const local = recentSinceDays(NOW, days);
-    const contract = resolveNamedCollectionScope({ days, kind: "recent" }, NOW);
-    assert.equal(local, contract?.since, `drift on recentSinceDays(${days}) vs reference-contract's resolver`);
+/**
+ * Pins `recentSinceDays` to the day-math `@pdpp/reference-contract`'s
+ * `resolveNamedCollectionScope` performed when this table was written.
+ *
+ * The cross-package source import this assertion used to perform named a path
+ * that does not exist in this repository, so it failed with
+ * `ERR_MODULE_NOT_FOUND` on a clean checkout, leaving this test permanently
+ * failing. A literal expectation table is the portable equivalent: `since` is
+ * `now - days` in whole UTC days, so any drift in `recentSinceDays` breaks a
+ * fixed string immediately.
+ *
+ * Scope limit: this pins THIS package's arithmetic against fixed examples. It
+ * is not a live equivalence check — it cannot observe a later change to the
+ * other repository's resolver. The values derive from `NOW` above; change
+ * `NOW` and all five must be recomputed.
+ */
+test("recentSinceDays matches @pdpp/reference-contract's day-math exactly (pinned equivalence)", () => {
+  const expectedSince: Readonly<Record<number, string>> = {
+    1: "2026-08-08T00:00:00.000Z",
+    7: "2026-08-02T00:00:00.000Z",
+    30: "2026-07-10T00:00:00.000Z",
+    90: "2026-05-11T00:00:00.000Z",
+    365: "2025-08-09T00:00:00.000Z",
+  };
+  for (const [days, since] of Object.entries(expectedSince)) {
+    assert.equal(recentSinceDays(NOW, Number(days)), since, `drift on recentSinceDays(${days})`);
   }
 });
 
