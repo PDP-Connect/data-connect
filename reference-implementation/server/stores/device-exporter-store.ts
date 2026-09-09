@@ -171,6 +171,11 @@ function mapEnrollment(row: Row | null | undefined) {
     displayName: row.display_name,
     enrollmentCodeId: row.enrollment_code_id,
     expiresAt: row.expires_at,
+    // Load-bearing at enrollment: `display_name` on an enrollment code is null
+    // unless the owner supplied one, and the enroll route falls back to this to
+    // name the device. Dropping it makes that fallback `undefined` and the
+    // device insert fails its NOT NULL constraint.
+    localBindingId: row.local_binding_id,
     ownerSubjectId: row.owner_subject_id,
     revokedAt: row.revoked_at,
     status: row.status,
@@ -190,6 +195,7 @@ function mapSourceInstance(row: Row | null | undefined) {
     lastError: parseJson(row.last_error_json, null),
     lastHeartbeatAt: row.last_heartbeat_at ?? null,
     lastHeartbeatStatus: row.last_heartbeat_status ?? null,
+    localBindingId: row.local_binding_id,
     manifestGeneration: isNullish(row.manifest_generation) ? null : Number(row.manifest_generation),
     outboxDiagnostics: parseJson(row.outbox_diagnostics_json, null),
     recordsPending: isNullish(row.records_pending) ? null : Number(row.records_pending),
