@@ -335,6 +335,7 @@ export interface CliOptions {
   deviceLabel?: string;
   deviceToken?: string;
   entrypointCommand?: string;
+  exitCode?: boolean;
   explicitOptions?: ReadonlySet<string>;
   force?: boolean;
   json?: boolean;
@@ -432,6 +433,8 @@ Everyday commands:
           [--connection-id <id>]
           [--source-instance-id <id>]
           [--profile <name>]        Optional profile name under the collector profile dir.
+          [--exit-code]            Exit 1 when the rollup is critical, else 0. Off by
+                                   default so existing JSON callers keep exiting 0.
 
 Advanced / low-level:
   advertise                       Print runtime capabilities and protocol version.
@@ -651,7 +654,14 @@ async function main(): Promise<void> {
     if (options.command === "doctor") {
       const errorSummary = readLocalOutboxDeadLetterErrorSummary(inspectOptions);
       const referenceRoute = await inspectLocalReferenceRoute(inspectOptions);
-      writeJson(buildLocalOutboxDoctor(status, errorSummary, referenceRoute));
+      const doctor = buildLocalOutboxDoctor(status, errorSummary, referenceRoute);
+      writeJson(doctor);
+      // Opt-in so the default JSON-on-stdout contract keeps exiting 0 for every
+      // caller that already parses it. Under --exit-code a supervisor that only
+      // reads the wait status can act on the rollup without a JSON parser.
+      if (options.exitCode) {
+        process.exitCode = doctorExitCode(doctor.status);
+      }
       return;
     }
     writeJson(status);
@@ -2086,6 +2096,18 @@ function doctorSeverityForChecks(checks: LocalOutboxDoctorOutput["checks"]): "ok
 }
 
 /**
+ * Map the doctor rollup onto a process exit status for `doctor --exit-code`.
+ * Only `critical` exits non-zero: a supervisor that treats `warning` as failure
+ * would flap on conditions the next scheduled run clears on its own, which is
+ * the same reason those conditions are not `critical` in the rollup. 1 is the
+ * generic-failure code the `compact` refusal path already uses, so the two
+ * scriptable commands stay consistent.
+ */
+export function doctorExitCode(severity: "ok" | "warning" | "critical"): number {
+  return severity === "critical" ? 1 : 0;
+}
+
+/**
  * Read the top dead-letter error classes from the local outbox, if the DB
  * exists and has dead-letter rows. Returns null otherwise so `doctor` stays
  * quiet on a clean host. Selects only the `last_error` column — never
@@ -3301,6 +3323,10 @@ function applyFlagOption(options: CliOptions, arg: string): boolean {
   }
   if (arg === "--force") {
     options.force = true;
+    return true;
+  }
+  if (arg === "--exit-code") {
+    options.exitCode = true;
     return true;
   }
   if (arg === "--quiet") {

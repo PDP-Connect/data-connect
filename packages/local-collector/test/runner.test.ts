@@ -24,6 +24,7 @@ import {
   CollectorInterruptedAbort,
   classifyLocalCollectorDeploymentPosture,
   compactOutbox,
+  doctorExitCode,
   findLocalCollectorProfiles,
   getBundledConnector,
   HELP_TEXT,
@@ -516,6 +517,46 @@ test("local collector doctor omits remediation when the outbox is healthy", asyn
     assert.equal(doctor.checks.outbox_failures, "ok");
     assert.equal(doctor.checks.deployment_posture, "ok");
     assert.equal(doctor.remediation, undefined);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("doctor CLI parses --exit-code and leaves it off by default", () => {
+  const optedIn = parseArgs(["doctor", "--queue", "/tmp/x.sqlite", "--exit-code"]);
+  assert.equal(optedIn.command, "doctor");
+  assert.equal(optedIn.exitCode, true);
+
+  const plain = parseArgs(["doctor", "--queue", "/tmp/x.sqlite"]);
+  assert.equal(plain.exitCode, undefined, "the default stays exit 0 for existing JSON callers");
+});
+
+test("doctorExitCode fails only on critical so a supervisor does not flap on self-healing warnings", () => {
+  assert.equal(doctorExitCode("critical"), 1);
+  assert.equal(doctorExitCode("warning"), 0);
+  assert.equal(doctorExitCode("ok"), 0);
+});
+
+test("doctor --exit-code turns a dead-lettered outbox into a non-zero status", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    outbox.enqueue({
+      id: "dead-letter-id",
+      kind: "gap",
+      payload: { secret: "dead-letter-payload" },
+      sourceInstanceId: "src-1",
+    });
+    const [claim] = outbox.claimReady({ holder: "worker-a", leaseMs: 60_000, sourceInstanceId: "src-1" });
+    assert.ok(claim);
+    outbox.deadLetter({ error: "bounded error", holder: "worker-a", id: claim.id, leaseEpoch: claim.lease_epoch });
+
+    const options = parseArgs(["doctor", "--queue", path, "--source-instance-id", "src-1", "--exit-code"]);
+    const doctor = buildLocalOutboxDoctor(
+      inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE })
+    );
+    assert.equal(doctor.status, "critical");
+    assert.equal(doctorExitCode(doctor.status), 1);
   } finally {
     outbox.close();
   }

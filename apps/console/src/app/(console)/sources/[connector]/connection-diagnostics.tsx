@@ -816,11 +816,21 @@ function SourceInstanceDiagnostics({ source }: { source: DeviceSourceInstance })
             Last error: {formatSourceLastError(source.last_error)}
           </span>
         ) : null}
+        {/*
+          The link text names the destination, not the device. It used to render
+          `source.device_id` verbatim, which is an opaque identifier: a reader
+          who has just learned from the heartbeat line above that this collector
+          stopped checking in cannot tell that the identifier is the way to go
+          look at it. The device id stays in the href fragment, which is what
+          scrolls the target page to this row.
+        */}
         <Link
           className="pdpp-caption text-muted-foreground underline-offset-2 hover:underline"
+          data-testid="diagnostics-source-device-link"
           href={`/device-exporters#${encodeURIComponent(source.device_id)}`}
+          title={`Device ${source.device_id}`}
         >
-          {source.device_id}
+          View this device
         </Link>
       </div>
     </li>
