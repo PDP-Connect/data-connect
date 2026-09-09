@@ -2716,17 +2716,30 @@ test("outbox axis: a stale heartbeat with zero pending is stalled — the lease 
   // presented heartbeat health that `heartbeat-lease.ts` derives from the same
   // 30 minutes.
   //
-  // Do NOT restate the earlier rationale here that local-device connectors
-  // declare no `maximum_staleness_seconds`, so freshness could never age them
-  // out. That is false: the shipped `claude_code` and `codex` manifests both
-  // declare `refresh_policy.maximum_staleness_seconds` (21600s), as
-  // `ref-connectors-local-coverage-green.test.ts` asserts against the real
-  // manifest loader. The manifests are generated into an untracked directory,
-  // so a grep of the repository does not see them. Freshness genuinely does age
-  // these sources out; what kept them green for eleven days is the separate
-  // unguarded `idle` branch in `localDeviceFreshnessHeartbeatAt`, which handed
-  // the freshness clock a fresh-looking anchor on every read and so kept
-  // resetting it.
+  // Two earlier rationales for this change were wrong. Neither should be
+  // restated, and the correct account of the sibling fix is short:
+  //
+  // The idle branch of `localDeviceFreshnessHeartbeatAt` accepted a heartbeat
+  // older than the 30-minute lease as a freshness anchor. That anchor retained
+  // its original timestamp, so the existing six-hour freshness policy could
+  // still age it out. This change rejects the expired anchor and also marks the
+  // outbox stalled.
+  //
+  // Wrong #1: that local-device connectors declare no `maximum_staleness_seconds`
+  // so freshness could never age them out. The shipped `claude_code` and `codex`
+  // manifests both declare `refresh_policy.maximum_staleness_seconds` (21600s),
+  // as `ref-connectors-local-coverage-green.test.ts` asserts against the real
+  // manifest loader; the manifests are generated into an untracked directory, so
+  // a repository grep does not see them.
+  //
+  // Wrong #2: that the old idle branch "reset the freshness clock on every
+  // read". It did not. Every return in that function is the stored
+  // `last_heartbeat_at`, never the read time, so the anchor ages normally.
+  // `deriveReferenceFreshness` with a 21600s window returns `current` at 1h and
+  // `stale` at both 7h and 264h, with `captured_at` equal to the input.
+  //
+  // These tests are controlled calculations. They do not establish the complete
+  // cause of the historical eleven-day green status.
   const r = deriveOutboxAxisFromHeartbeat(heartbeat({ lastHeartbeatAt: OLD, recordsPending: 0 }), {
     nowIso: NOW,
     staleHeartbeatThresholdMs: STALE_MS,
