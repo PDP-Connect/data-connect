@@ -6,16 +6,12 @@ import { resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
-// `gh attestation verify --repo <owner>/<repo>` alone would accept an
-// attestation signed by ANY workflow in the named repository — a
-// compromised or malicious workflow added to this same repository could
-// still forge a passing attestation for an artifact it built. This is moot
-// for `gh attestation verify` itself (it cannot verify npm's provenance
-// bundles at all — see scripts/verify-npm-provenance.ts), but the same
-// binding requirement applies to the replacement: this test parses the REAL
-// workflow YAML and the REAL verification script to assert both the
-// workflow step and the script pin an EXPLICIT expected signer identity
-// (repo + workflow file + ref, and OIDC issuer), not just a bare repo name.
+// `--repo`/`--signer-workflow` alone bind an attestation to a repository
+// and workflow file, but not to a specific commit — a workflow run
+// triggered from a different commit on the same ref would still pass. This
+// test parses the REAL workflow YAML and the REAL verification script to
+// assert the verification also pins `--source-digest` to `$GITHUB_SHA`,
+// in addition to the repo, workflow file, and digest algorithm.
 
 interface WorkflowStep {
   name?: string
@@ -49,32 +45,33 @@ function readVerifyScript(): string {
 }
 
 describe("npm-release.yml attestation verification", () => {
-  it("delegates to the provenance verification script for all three published packages", () => {
+  it("delegates to the provenance verification script for all three published packages, with GITHUB_SHA", () => {
     const step = findVerificationStep(loadNpmReleaseWorkflow())
     const run = step.run ?? ""
 
     expect(run).toContain("scripts/verify-npm-provenance.ts")
+    expect(run).toContain('"$GITHUB_SHA"')
     expect(run).toContain("@pdpp/connector-protocol")
     expect(run).toContain("@pdpp/collector-runtime")
     expect(run).toContain("@pdpp/local-collector")
   })
 
-  it("pins verification to this exact repo, workflow file, ref, and OIDC issuer", () => {
+  it("pins verification to this exact repo, workflow file, source commit, and digest algorithm", () => {
     const script = readVerifyScript()
 
-    expect(script).toContain(
-      "https://github.com/PDP-Connect/data-connect/.github/workflows/npm-release.yml@refs/heads/main"
-    )
-    expect(script).toContain("https://token.actions.githubusercontent.com")
-    expect(script).toContain("--certificate-identity-uri")
-    expect(script).toContain("--certificate-issuer")
+    expect(script).toContain("PDP-Connect/data-connect/.github/workflows/npm-release.yml")
+    expect(script).toContain("--source-digest")
+    expect(script).toContain("--digest-alg")
+    expect(script).toContain("sha512")
   })
 
-  it("verifies the attestation subject digest against the actual downloaded tarball", () => {
+  it("verifies with gh attestation verify against a bundle fetched from the npm registry", () => {
     const script = readVerifyScript()
 
-    expect(script).toContain("sha512sum")
-    expect(script).toMatch(/digest mismatch/i)
+    expect(script).toContain('"gh"')
+    expect(script).toContain("attestation")
+    expect(script).toContain("--bundle")
+    expect(script).toMatch(/dist\.attestations\.url|attestationsUrl/)
   })
 
   it("retries registry propagation lag instead of failing on the first lookup", () => {

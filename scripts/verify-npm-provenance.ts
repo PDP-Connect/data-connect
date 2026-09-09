@@ -4,38 +4,28 @@
 // Verifies the SLSA provenance attestation npm trusted publishing attaches
 // to a just-published package version.
 //
-// `gh attestation verify` cannot do this: npm trusted publishing signs
-// through the public-good Sigstore instance (issuer "sigstore.dev" in the
-// certificate's transparency-log entry), and `gh attestation verify`
-// unconditionally rejects any bundle not countersigned by GitHub's own
-// Sigstore instance, before it even looks at --repo/--signer-workflow.
-// Confirmed by reproduction: `gh attestation verify <tarball> --bundle
-// <registry-attestation-bundle> --repo PDP-Connect/data-connect
-// --signer-workflow ...` fails with `Error: verifying with issuer
-// "sigstore.dev"` regardless of flags. The attestation also isn't in
-// GitHub's attestations store at all — trusted publishing stores it on the
-// npm registry packument (`dist.attestations`), which is why the prior
-// revision of this check (looking it up via the GitHub attestations API)
-// got a 404: that store never had it.
+// `gh attestation verify --repo ... --signer-workflow ...` cannot fetch this
+// attestation on its own: npm trusted publishing stores its provenance
+// bundle on the npm registry packument (`dist.attestations`), never in
+// GitHub's attestations store, so the API lookup `gh attestation verify`
+// does by default 404s every time. This script fetches the bundle from the
+// registry itself (the same place `npm view <pkg> dist.attestations.url`
+// points) and hands it to `gh attestation verify --bundle` instead.
 //
-// This script instead fetches the attestation bundle straight from the
-// registry (the same place `npm view <pkg> dist.attestations.url` points)
-// and verifies it in two independent steps:
-//   1. The DSSE statement's subject digest (sha512, matching
-//      `dist.integrity`) is recomputed from the actual downloaded tarball
-//      and compared byte-for-byte — proving the attestation is actually
-//      about this artifact, not just cryptographically well-formed.
-//      (`@sigstore/cli verify --blob-file` cannot be trusted for this: it
-//      only hashes with sha256, and npm's subject digest here is sha512,
-//      so it verifies the signature but silently skips the artifact
-//      binding — confirmed by feeding it garbage input and watching it
-//      report success.)
-//   2. `@sigstore/cli verify` checks the Sigstore signature, transparency
-//      log inclusion, and the certificate identity against an EXPLICIT
-//      expected signer: --certificate-identity-uri pins the exact
-//      repo+workflow+ref, --certificate-issuer pins the OIDC issuer. Both
-//      are required flags here (not optional filters) so a mismatch on
-//      either fails closed.
+// A prior revision of this script also claimed `gh attestation verify`
+// rejects any bundle not countersigned by GitHub's own Sigstore instance,
+// and reimplemented digest and signature verification with `@sigstore/cli`
+// to work around that. That claim was wrong: the "verifying with issuer
+// sigstore.dev" failure it was based on was caused by omitting
+// `--digest-alg sha512` (this bundle's subject digest is sha512; `gh
+// attestation verify` defaults to sha256, so without the flag it hashes the
+// tarball wrong and misattributes the resulting failure to the issuer).
+// With `--digest-alg sha512` set, `gh attestation verify` verifies the
+// signature, the digest, and the identity — including `--source-digest`,
+// which binds the attestation to an exact commit SHA and was missing from
+// the reimplementation entirely. Confirmed against the real, live 2.1.1
+// bundles: correct SHA passes, an all-zero SHA fails with "expected
+// SourceRepositoryDigest to be 0000...0000, got 4bb3f161...".
 //
 // Registry propagation lag: `npm publish` returning success does not mean
 // `npm view`/`npm pack` can resolve the version immediately — observed ~3
@@ -51,9 +41,8 @@ import { promisify } from "node:util"
 
 const run = promisify(execFile)
 
-const EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
-const EXPECTED_IDENTITY_URI =
-  "https://github.com/PDP-Connect/data-connect/.github/workflows/npm-release.yml@refs/heads/main"
+const EXPECTED_REPO = "PDP-Connect/data-connect"
+const EXPECTED_SIGNER_WORKFLOW = "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
 
 const PROPAGATION_RETRY_ATTEMPTS = 6
 const PROPAGATION_RETRY_DELAY_MS = 30_000
@@ -96,29 +85,16 @@ async function withPropagationRetry<T>(spec: string, attempt: () => Promise<T>):
   throw new Error("unreachable")
 }
 
-interface DsseEnvelope {
-  payload: string
-}
-
 interface AttestationEntry {
   predicateType: string
-  bundle: { dsseEnvelope: DsseEnvelope }
+  bundle: unknown
 }
 
 interface AttestationsResponse {
   attestations: AttestationEntry[]
 }
 
-function decodeSha512Subject(entry: AttestationEntry): string {
-  const payload = JSON.parse(Buffer.from(entry.bundle.dsseEnvelope.payload, "base64").toString("utf8")) as {
-    subject: Array<{ digest: { sha512?: string } }>
-  }
-  const digest = payload.subject[0]?.digest.sha512
-  if (!digest) fail(`provenance attestation for predicate ${entry.predicateType} has no sha512 subject digest`)
-  return digest
-}
-
-async function verifyPackage(pkg: string, version: string): Promise<void> {
+async function verifyPackage(pkg: string, version: string, sourceDigest: string): Promise<void> {
   const spec = `${pkg}@${version}`
   log(`resolving ${spec} on the registry...`)
 
@@ -148,31 +124,30 @@ async function verifyPackage(pkg: string, version: string): Promise<void> {
     const provenance = attestations.find(a => a.predicateType === "https://slsa.dev/provenance/v1")
     if (!provenance) fail(`no SLSA provenance attestation found for ${spec} at ${attestationsUrl}`)
 
-    const expectedDigest = decodeSha512Subject(provenance)
-    const { stdout: tarballBuffer } = await run("sha512sum", [tarballPath])
-    const actualDigest = tarballBuffer.trim().split(/\s+/)[0]
-    if (actualDigest !== expectedDigest) {
-      fail(
-        `provenance subject digest mismatch for ${spec}: attestation says ${expectedDigest}, ` +
-          `downloaded tarball hashes to ${actualDigest}`
-      )
-    }
-    log(`provenance subject digest matches the downloaded tarball for ${spec}`)
-
     const bundlePath = join(workdir, "bundle.json")
     await writeFile(bundlePath, JSON.stringify(provenance.bundle))
 
-    log(`verifying Sigstore signature and signer identity for ${spec}...`)
-    await run("npx", [
-      "--yes",
-      "@sigstore/cli",
-      "verify",
-      bundlePath,
-      "--certificate-identity-uri",
-      EXPECTED_IDENTITY_URI,
-      "--certificate-issuer",
-      EXPECTED_ISSUER,
-    ])
+    log(`verifying provenance signature, digest, and signer identity for ${spec}...`)
+    try {
+      await run("gh", [
+        "attestation",
+        "verify",
+        tarballPath,
+        "--bundle",
+        bundlePath,
+        "--digest-alg",
+        "sha512",
+        "--repo",
+        EXPECTED_REPO,
+        "--signer-workflow",
+        EXPECTED_SIGNER_WORKFLOW,
+        "--source-digest",
+        sourceDigest,
+      ])
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      fail(`provenance verification failed for ${spec}: ${detail}`)
+    }
     log(`provenance verified for ${spec}`)
   } finally {
     await rm(workdir, { recursive: true, force: true })
@@ -181,13 +156,14 @@ async function verifyPackage(pkg: string, version: string): Promise<void> {
 
 async function main() {
   const version = process.argv[2]
-  const packages = process.argv.slice(3)
-  if (!version || packages.length === 0) {
-    fail("Usage: verify-npm-provenance.ts <version> <package>...")
+  const sourceDigest = process.argv[3]
+  const packages = process.argv.slice(4)
+  if (!version || !sourceDigest || packages.length === 0) {
+    fail("Usage: verify-npm-provenance.ts <version> <source-digest> <package>...")
   }
 
   for (const pkg of packages) {
-    await verifyPackage(pkg, version)
+    await verifyPackage(pkg, version, sourceDigest)
   }
 }
 

@@ -156,23 +156,20 @@ jobs:
 
       # Proves the npm-provenance binding claimed in
       # packages/connector-protocol/scripts/package-artifact.mjs actually
-      # holds for the version just published — with REAL verification, not
-      # a bare JSON-field presence check.
+      # holds for the version just published, at this exact commit — with
+      # REAL verification, not a bare JSON-field presence check.
       #
-      # A prior revision of this step used `gh attestation verify` against
-      # GitHub's attestations API, which cannot work: npm trusted publishing
-      # signs through the public-good Sigstore instance and stores the
-      # resulting SLSA provenance bundle on the npm registry packument
-      # (`dist.attestations`), not in GitHub's attestations store — so that
-      # lookup 404s every time, and `gh attestation verify` separately
-      # refuses any bundle not countersigned by GitHub's own Sigstore
-      # instance regardless of flags. See scripts/verify-npm-provenance.ts
-      # for the full explanation and the real verification this replaces it
-      # with: fetch the attestation bundle straight from the registry,
-      # independently recompute the downloaded tarball's sha512 and compare
-      # it against the attestation's own subject digest, then verify the
-      # Sigstore signature and certificate identity with `@sigstore/cli
-      # verify`, pinned to this exact repo+workflow+ref and OIDC issuer.
+      # A prior revision of this step called `gh attestation verify` against
+      # GitHub's attestations API with no bundle, which 404s every time: npm
+      # trusted publishing stores the SLSA provenance bundle on the npm
+      # registry packument (`dist.attestations`), never in GitHub's
+      # attestations store. See scripts/verify-npm-provenance.ts for the
+      # real verification this replaces it with: fetch the bundle straight
+      # from the registry, then hand it to `gh attestation verify --bundle`
+      # with `--digest-alg sha512` (npm's subject digest is sha512, not the
+      # sha256 this flag defaults to) and `--source-digest "$GITHUB_SHA"`,
+      # binding verification to this exact commit in addition to the repo,
+      # workflow file, and ref `--repo`/`--signer-workflow` already pin.
       #
       # Registry propagation lag: `npm publish` returning success does not
       # mean the version is immediately resolvable — observed ~3 minutes for
@@ -181,9 +178,12 @@ jobs:
       # wait rather than failing on the first lookup.
       - name: Verify npm provenance attestation
         if: needs.resolve-version.outputs.new-release-published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node --import tsx scripts/verify-npm-provenance.ts \
             "${{ needs.resolve-version.outputs.new-release-version }}" \
+            "$GITHUB_SHA" \
             "@pdpp/connector-protocol" "@pdpp/collector-runtime" "@pdpp/local-collector"
 
       # Attestation verification (above) proves provenance — that the
