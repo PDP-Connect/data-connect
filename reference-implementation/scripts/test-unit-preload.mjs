@@ -43,6 +43,22 @@
 // builtins) the `node:` prefixed form. Relative and absolute specifiers are
 // matched on the resolved path instead, so `./db.ts`, `../server/db.ts` and a
 // file URL all reach the same rule.
+//
+// Matching the raw specifier is NOT sufficient on its own, and a guard that
+// stops there has an executed hole. A caller can resolve the driver itself and
+// import the resulting location, at which point no denied package name is ever
+// spelled as a specifier:
+//
+//   const url = pathToFileURL(createRequire(import.meta.url).resolve("pg")).href;
+//   await import(url);   // specifier is "file:///.../node_modules/pg/lib/index.js"
+//
+// That load reaches the real driver without suppressing an error or opening a
+// connection, so neither the specifier rule nor the error path sees it. A
+// denied driver is therefore ALSO matched on its resolved package identity --
+// the `node_modules/<pkg>/` segment its resolved path must contain -- so every
+// spelling that lands inside the driver's own package is denied regardless of
+// how it was named. `pgvector`, `pg-boss` and `pgtools` keep resolving, since
+// the segment must match the package name exactly and not merely start with it.
 
 import { registerHooks } from "node:module";
 import { sep } from "node:path";
@@ -106,6 +122,32 @@ export function matchesDeniedSpecifier(specifier, pkg) {
   return false;
 }
 
+/**
+ * Does `resolved` land inside the package `pkg` owns on disk?
+ *
+ * A resolved driver path always carries the package name as a
+ * `node_modules/<pkg>/` segment, so that segment is the driver's identity
+ * independent of how it was spelled. The trailing separator is required: it is
+ * what keeps `node_modules/pgvector/index.js` and `node_modules/pg-boss/index.js`
+ * out while keeping `node_modules/pg/lib/index.js` in. The last occurrence is
+ * not special-cased -- a nested `node_modules/foo/node_modules/pg/...` install
+ * is still the denied driver and is still matched.
+ *
+ * Builtins (`node:sqlite`) have no package directory; they are covered by the
+ * specifier rule alone, which is exact for them because a builtin cannot be
+ * reached through a file path.
+ */
+export function matchesDeniedDriverPath(resolved, pkg) {
+  if (pkg.startsWith("node:")) {
+    return false;
+  }
+  const path = normalizePath(resolved);
+  if (path === "") {
+    return false;
+  }
+  return path.includes(`/node_modules/${pkg}/`);
+}
+
 /** Does a resolved URL/path point at one of the denied storage modules? */
 export function matchesDeniedModule(resolved) {
   const path = normalizePath(resolved);
@@ -118,14 +160,16 @@ export function matchesDeniedModule(resolved) {
 /**
  * Classify one resolution. Returns the denied rule, or undefined when the
  * load is admissible. Both the raw specifier and the resolved location are
- * inspected: a driver is caught by specifier even when it resolves into
- * node_modules under an unrelated path, and a storage module is caught by
- * resolved path even when it is reached through an alias or a relative
- * specifier that names none of the denied strings.
+ * inspected, and for drivers BOTH directions are needed: the specifier rule
+ * catches a driver named directly even when resolution fails, while the
+ * resolved-path rule catches a driver reached through a pre-resolved file URL
+ * or absolute path that never spells the package name. A storage module is
+ * likewise caught by resolved path even when it is reached through an alias or
+ * a relative specifier that names none of the denied strings.
  */
 export function classifyResolution(specifier, resolvedUrl) {
   for (const driver of DENIED_SQL_DRIVERS) {
-    if (matchesDeniedSpecifier(specifier, driver)) {
+    if (matchesDeniedSpecifier(specifier, driver) || matchesDeniedDriverPath(resolvedUrl, driver)) {
       return { kind: "sql-driver", rule: driver };
     }
   }

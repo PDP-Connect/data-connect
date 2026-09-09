@@ -50,6 +50,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { compareStrings, EXECUTABLE_TEST_SUFFIX, normalizePath, trackedFiles } from "./test-accounting/inventory.ts";
 
@@ -116,9 +117,17 @@ const REQUIRE_RE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
 // exactly this shape to reach better-sqlite3, so a scan that only looked for
 // `require(` would miss the repository's own primary SQLite entry point.
 const CREATE_REQUIRE_CALL_RE = /\bcreateRequire\s*\([^)]*\)\s*\(\s*["']([^"']+)["']\s*\)/g;
+// `req.resolve("pg")` turns a package name into a path, which can then be
+// imported as a file URL or absolute path. The load that follows carries no
+// package name at all, so a scan that ignored `resolve` would report a file
+// reaching Postgres as having no storage dependency. Naming a denied driver
+// here is treated as reaching it: the only reason to resolve a driver is to
+// load it.
+const RESOLVE_CALL_RE = /\.resolve\s*\(\s*["']([^"']+)["']\s*\)/g;
 
 /**
- * Literal module specifiers this source imports.
+ * Literal module specifiers this source uses to reach a module, by any of the
+ * loader routes above -- import, require, createRequire, or resolve.
  *
  * Only literal specifiers are recoverable by reading source. A computed
  * specifier -- `import(base + name)` -- yields no string here, which is
@@ -126,7 +135,14 @@ const CREATE_REQUIRE_CALL_RE = /\bcreateRequire\s*\([^)]*\)\s*\(\s*["']([^"']+)[
  */
 export function importedSpecifiers(source: string): string[] {
   const found = new Set<string>();
-  for (const pattern of [STATIC_IMPORT_RE, BARE_IMPORT_RE, DYNAMIC_IMPORT_RE, REQUIRE_RE, CREATE_REQUIRE_CALL_RE]) {
+  for (const pattern of [
+    STATIC_IMPORT_RE,
+    BARE_IMPORT_RE,
+    DYNAMIC_IMPORT_RE,
+    REQUIRE_RE,
+    CREATE_REQUIRE_CALL_RE,
+    RESOLVE_CALL_RE,
+  ]) {
     pattern.lastIndex = 0;
     for (const [, specifier] of source.matchAll(pattern)) {
       if (specifier) {
@@ -169,7 +185,7 @@ export function storageImports(source: string): string[] {
   for (const specifier of importedSpecifiers(source)) {
     const driver = SQL_DRIVERS.find((pkg) => specifierNamesPackage(specifier, pkg));
     if (driver) {
-      reasons.push(`imports SQL driver "${specifier}"`);
+      reasons.push(`reaches SQL driver "${specifier}"`);
       continue;
     }
     const module = specifierNamesStorageModule(specifier);
@@ -252,7 +268,12 @@ export function formatViolations(violations: readonly Violation[]): string {
   return violations.map((violation) => `${violation.path}: ${violation.kind}: ${violation.detail}`).join("\n");
 }
 
-/** CLI: check a manifest file against the current tracked tree. */
+/**
+ * CLI: check a manifest file against the current tracked tree.
+ *
+ * Returns the intended exit code rather than calling `process.exit`, so the
+ * tests can drive it directly.
+ */
 export function main(manifestPath: string, repoRoot: string): number {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as BackendManifest;
   const enumerated = enumerateTestEntries(trackedFiles(repoRoot));
@@ -263,4 +284,18 @@ export function main(manifestPath: string, repoRoot: string): number {
   }
   process.stdout.write(`test backend manifest: ${enumerated.length} entries classified\n`);
   return 0;
+}
+
+// Executed directly, this file is a command and must behave like one. Without
+// this guard `node scripts/check-test-backends.ts <bad-manifest>` exited 0 and
+// printed nothing -- a checker that passes silently when it was asked to
+// check, which is the one failure mode a checker must not have. A missing
+// argument is also a failure, not a no-op.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const [, , manifestPath] = process.argv;
+  if (!manifestPath) {
+    process.stderr.write("usage: check-test-backends <manifest.json>\n");
+    process.exit(2);
+  }
+  process.exit(main(manifestPath, join(import.meta.dirname, "..", "..")));
 }

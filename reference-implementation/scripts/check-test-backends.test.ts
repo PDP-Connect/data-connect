@@ -9,7 +9,12 @@
 // rejects everything is as useless as one that rejects nothing.
 
 import { strict as assert } from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   type Backend,
@@ -20,10 +25,47 @@ import {
   specifierNamesStorageModule,
   storageImports,
 } from "./check-test-backends.ts";
+import { trackedFiles } from "./test-accounting/inventory.ts";
 
 const NO_SOURCE = () => "";
 const NOT_ONE_OF_RE = /not one of/;
 const STORAGE_MODULE_RE = /storage module/;
+const MISSING_OR_STALE_RE = /missing-entry|stale-entry/;
+const USAGE_RE = /usage/;
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "check-test-backends.ts");
+const RI_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * Run the checker as a real command and return its actual exit code.
+ *
+ * The exit code is the entire contract of a CLI gate, and an in-process
+ * assertion cannot observe it: before the entry guard existed, calling the
+ * exported `main` rejected a bad manifest while running the file as a command
+ * exited 0 and printed nothing.
+ */
+function runCli(args: readonly string[]) {
+  const { NODE_TEST_CONTEXT: _parentTestContext, ...env } = process.env;
+  const result = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...args], {
+    cwd: RI_ROOT,
+    encoding: "utf8",
+    env,
+    timeout: 120_000,
+  });
+  return { ...result, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+}
+
+/** Write a manifest to a scratch file and hand its path to the CLI. */
+function runCliWithManifest(manifest: unknown) {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-backend-cli-"));
+  try {
+    const file = join(dir, "manifest.json");
+    writeFileSync(file, JSON.stringify(manifest));
+    return runCli([file]);
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+}
 
 function sourcesFor(sources: Record<string, string>) {
   return (path: string) => sources[path] ?? "";
@@ -176,11 +218,28 @@ for (const [loader, source] of [
   ["literal dynamic import", 'const db = await import("../server/db.ts");'],
   ["require", 'const db = require("../server/db.ts");'],
   ["createRequire", 'const db = createRequire(import.meta.url)("better-sqlite3");'],
+  // Resolving a driver and importing the resulting path is a load whose own
+  // import carries no package name. Naming the driver in `resolve` is the last
+  // point at which source reading can see it, so it counts here.
+  ["resolve then import", 'const url = pathToFileURL(req.resolve("pg")).href;\nconst pg = await import(url);'],
+  ["resolve then require", 'const pg = req(req.resolve("pg"));'],
 ] as const) {
   test(`a storage dependency loaded by ${loader} is detected`, () => {
     assert.notDeepEqual(storageImports(source), []);
   });
 }
+
+test("resolving an unrelated package or path is not a storage dependency", () => {
+  // `resolve` is a general-purpose call. Only a denied driver name makes it
+  // interesting, or every file that uses path.resolve would be flagged.
+  for (const source of [
+    'const v = req.resolve("pgvector");',
+    'const p = path.resolve("a", "b");',
+    'const p = resolve(dir, "fixture.json");',
+  ]) {
+    assert.deepEqual(storageImports(source), []);
+  }
+});
 
 test("a computed specifier yields no literal to detect, which bounds this check", () => {
   // Recorded deliberately: source reading cannot recover a computed
@@ -251,4 +310,46 @@ test("every violation kind reports the path it concerns", () => {
   for (const violation of violations) {
     assert.notEqual(violation.detail, "");
   }
+});
+
+// The command surface. `main` is exported and unit-testable, but a checker is
+// only a gate if running it as a command actually fails the caller, so each
+// case below asserts on a real process exit code.
+test("the command rejects a manifest with a violation", () => {
+  const result = runCliWithManifest({
+    entries: [{ backend: "none", path: "reference-implementation/test/does-not-exist.test.ts" }],
+  });
+
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, MISSING_OR_STALE_RE);
+});
+
+test("the command reports usage and fails when given no manifest", () => {
+  // A missing argument must not be a silent success.
+  const result = runCli([]);
+
+  assert.equal(result.status, 2, result.output);
+  assert.match(result.output, USAGE_RE);
+});
+
+test("the command fails rather than passing when the manifest is unreadable", () => {
+  const result = runCli([join(tmpdir(), "pdpp-no-such-manifest-6f2a.json")]);
+
+  assert.notEqual(result.status, 0, result.output);
+});
+
+test("the command accepts a manifest that classifies every tracked test entry", () => {
+  // The positive control: without it, a checker that rejected everything would
+  // pass every test above. The backend value is uniform because this asserts
+  // the manifest/tree agreement, not per-file obligations.
+  const entries = enumerateTestEntries(trackedFiles(join(RI_ROOT, ".."))).map((path) => ({
+    backend: "sqlite" as const,
+    path,
+  }));
+  assert.ok(entries.length > 0, "expected the tracked tree to contain test entries");
+
+  const result = runCliWithManifest({ entries });
+
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, new RegExp(`${entries.length} entries classified`));
 });
