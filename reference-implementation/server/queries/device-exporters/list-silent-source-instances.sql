@@ -100,13 +100,7 @@ WHERE dsi.last_heartbeat_at IS NOT NULL
       'att_device_silence_' || dsi.source_instance_id || '_' ||
       REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
       AND (
-        (
-          json_extract(car.record_json, '$.notification_updated_at') IS NOT NULL
-          AND NOT (
-            json_extract(car.record_json, '$.notification_state') = 'pending'
-            AND json_extract(car.record_json, '$.notification_updated_at') <= ?
-          )
-        )
+        json_extract(car.record_json, '$.notification_updated_at') IS NOT NULL
         OR car.lifecycle <> 'open'
       )
   )

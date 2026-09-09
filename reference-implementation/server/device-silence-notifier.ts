@@ -32,7 +32,6 @@
  * affect the whole fleet at once would mean re-notifying everyone at restart.
  */
 
-import { NOTIFICATION_DISPATCH_CLAIM_LEASE_MS } from "./connector-maintenance-sweep.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import type { DeviceSilenceRoundResult } from "./stores/device-silence-stage.ts";
 import { NOTIFICATION_TIERS, projectNotificationDelivery } from "./notification-policy.ts";
@@ -75,38 +74,6 @@ export async function notifyDeviceSilenceOpened(
   let sent = 0;
 
   for (const opened of result.opened) {
-    // Claim the record before sending, conditionally on it still being open and
-    // not yet dispatched. This is a write, not a read, and the difference is the
-    // point: reading the record and then deciding leaves a gap in which the
-    // owner can resolve the notice, and the send would go out anyway for
-    // something already dealt with. The claim's tests and its mark happen in one
-    // statement, so losing the claim is the same event as someone else having
-    // acted.
-    //
-    // A resolve that lands after a successful claim is a legitimately late
-    // notice: the send was already committed to, and it must not reopen the
-    // record. The outcome recorded below writes only the notification axis and
-    // leaves the lifecycle alone, so a record resolved in that window stays
-    // resolved.
-    //
-    // A claim expires, and the residual risk of that is worth stating rather
-    // than discovering. If a process dies between claiming and recording an
-    // outcome, a later tick reclaims the record and sends again — which is right
-    // when the original send never happened, and a duplicate when it had already
-    // reached the transport. The alternative is worse in the direction that
-    // matters: without expiry an abandoned claim silences that outage forever,
-    // and a collector nobody is told about is the failure this whole feature
-    // exists to prevent. The window is bounded by the lease, and only a claim
-    // still `pending` is reclaimable, so a recorded outcome is never resent.
-    const claimed = await attentionStore.claimNotificationDispatch({
-      attentionId: opened.attentionId,
-      leaseMs: NOTIFICATION_DISPATCH_CLAIM_LEASE_MS,
-      now: now.toISOString(),
-    });
-    if (!claimed) {
-      continue;
-    }
-
     // Classified INFORMATIONAL, not ACTION_REQUIRED. Quiet hours are only
     // applied to the informational tier by design, and a collector that has
     // been quiet for a day is not made worse by waiting until morning — the
@@ -180,12 +147,9 @@ export async function notifyDeviceSilenceOpened(
       // no timestamp, which is exactly what it is — untried — and the next tick
       // picks it up. A failure that repeats every tick is visible as a warning
       // per tick rather than as a silently dropped notice.
-      // Give the claim back. The claim marks a record as being sent, so leaving
-      // it set after a send that never began would read as an attempt and cost
-      // this notice its retry — the exact property the unstamped path exists to
-      // preserve. The release only clears a claim that is still unresolved, so
-      // it cannot undo a recorded outcome or an owner decision.
-      await attentionStore.releaseNotificationDispatch({ attentionId: opened.attentionId });
+      // Nothing is recorded: the push never reached the transport, so nothing is
+      // known about a delivery that never began. The record keeps no outcome and
+      // the next tick selects it again.
       const message = err instanceof Error ? err.message : String(err);
       deps.log?.warn?.(
         `[device-silence] push attempt failed before delivery for ${opened.attentionId}; will retry: ${message}`

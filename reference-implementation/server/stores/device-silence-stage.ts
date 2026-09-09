@@ -27,6 +27,28 @@
  * never-recorded rows first and rotating the retry share by attempt age. That
  * reasoning lives with the ordering it describes, in the query's own header.
  *
+ * What this deliberately does not do is coordinate with the notifier. There is
+ * no dispatch claim, lease or reclaim: sending one push does not warrant a job
+ * queue, and every mechanism of that kind added here had to be propped up by
+ * another. Three consequences follow, and they are accepted rather than
+ * overlooked.
+ *
+ * A push can still go out within one sweep interval after the owner resolves a
+ * notice. The query excludes what the owner has acted on, but a tick that has
+ * already selected a row will send for it. That is a late notification about a
+ * real outage, not a false one.
+ *
+ * A resolved record is never reopened. The stage's write is conditional on the
+ * stored lifecycle, and recording a delivery outcome touches only the
+ * notification axis, so nothing the owner decided is undone by either.
+ *
+ * Nothing is lost. A send that never records an outcome leaves the record
+ * selectable, so the next tick retries it — which also means a process that
+ * dies between sending and recording will send that notice again. A duplicate
+ * notification is the price of never dropping one, and it is the right way
+ * round for a detector whose entire purpose is that a silent collector does not
+ * go unmentioned.
+ *
  * Two tiers, one age authority. `HEARTBEAT_LEASE_MS` (30 minutes, from
  * heartbeat-lease.ts) already decides whether a heartbeat still describes the
  * collector's current state. This stage does not introduce a competing notion of
@@ -40,7 +62,6 @@
 import type { AttentionRecord } from "../../runtime/attention.ts";
 import { createAttention } from "../../runtime/attention.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
-import { NOTIFICATION_DISPATCH_CLAIM_LEASE_MS } from "../connector-maintenance-sweep.ts";
 import { getDefaultConnectorAttentionStore } from "./connector-attention-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "./connector-instance-store.ts";
 import { getDefaultDeviceExporterStore, type SilentSourceInstance } from "./device-exporter-store.ts";
@@ -149,10 +170,6 @@ export function createDeviceSilenceStage(
       const cutoff = new Date(Date.parse(now) - DEVICE_SILENT_ESCALATION_MS).toISOString();
 
       const silent = await deviceStore.listSilentSourceInstances({
-        // A dispatch claim older than its lease and still unfinished belongs to
-        // a process that is gone; the record becomes selectable again so a later
-        // tick can deliver what that process never sent.
-        claimStaleBefore: new Date(Date.parse(now) - NOTIFICATION_DISPATCH_CLAIM_LEASE_MS).toISOString(),
         limit: maxInstances ?? DEFAULT_MAX_INSTANCES_PER_TICK,
         silentBefore: cutoff,
       });

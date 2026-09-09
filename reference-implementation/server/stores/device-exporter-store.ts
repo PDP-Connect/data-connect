@@ -257,12 +257,6 @@ function mapSilentSourceInstanceRow(row: Row | null | undefined) {
 export type SilentSourceInstance = NonNullable<ReturnType<typeof mapSilentSourceInstanceRow>>;
 
 export interface SilentSourceInstanceQuery {
-  /**
-   * ISO instant. A dispatch claim still `pending` and stamped at or before this
-   * is treated as abandoned, so its record becomes selectable again. Recorded
-   * outcomes are unaffected by it.
-   */
-  readonly claimStaleBefore: string;
   /** Rows to return at most. Clamped to the artifact's declared @max_rows. */
   readonly limit?: number | null;
   /** ISO instant; instances whose last heartbeat is at or before it are silent. */
@@ -713,14 +707,9 @@ export function createSqliteDeviceExporterStore() {
       );
     },
 
-    listSilentSourceInstances({
-      silentBefore,
-      limit,
-      claimStaleBefore,
-    }: SilentSourceInstanceQuery): SilentSourceInstance[] {
+    listSilentSourceInstances({ silentBefore, limit }: SilentSourceInstanceQuery): SilentSourceInstance[] {
       return allowUnboundedReadAcknowledged<Row>(referenceQueries.deviceExportersListSilentSourceInstances, [
         silentBefore,
-        claimStaleBefore,
         clampSilentLimit(limit),
       ])
         .map(mapSilentSourceInstanceRow)
@@ -1211,7 +1200,6 @@ export function createPostgresDeviceExporterStore() {
     async listSilentSourceInstances({
       silentBefore,
       limit,
-      claimStaleBefore,
     }: SilentSourceInstanceQuery): Promise<SilentSourceInstance[]> {
       // Textual twin of queries/device-exporters/list-silent-source-instances.sql;
       // the .sql artifacts are SQLite-only, so the two backends carry the same
@@ -1240,10 +1228,6 @@ export function createPostgresDeviceExporterStore() {
                 REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
                 AND (
                   car.record_json ->> 'notification_updated_at' IS NOT NULL
-                  AND NOT (
-                    car.record_json ->> 'notification_state' = 'pending'
-                    AND car.record_json ->> 'notification_updated_at' <= $2
-                  )
                   OR car.lifecycle <> 'open'
                 )
             )
@@ -1260,8 +1244,8 @@ export function createPostgresDeviceExporterStore() {
                 REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
             ) ASC,
             dsi.last_heartbeat_at ASC, dsi.device_id ASC, dsi.source_instance_id ASC
-          LIMIT $3`,
-        [silentBefore, claimStaleBefore, clampSilentLimit(limit)]
+          LIMIT $2`,
+        [silentBefore, clampSilentLimit(limit)]
       );
       return result.rows
         .map(mapSilentSourceInstanceRow)
