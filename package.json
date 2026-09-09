@@ -80,6 +80,8 @@
     "@eslint/js": "^10.0.1",
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#48440fead5343d568773594b20cfc9306f1d6255",
     "@semantic-release/exec": "^7.1.0",
+    "@stryker-mutator/core": "10.0.0",
+    "@stryker-mutator/vitest-runner": "10.0.0",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/react": "^16.3.3",

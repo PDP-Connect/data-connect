@@ -1,0 +1,232 @@
+name: mutation
+
+# Reactive mutation testing: for each pull request revision, mutate the
+# production files that revision changed and publish the evidence as artifacts.
+#
+# There is no schedule. The trigger is the pull request itself, so the scope of
+# every run is bounded by what actually changed rather than by a time or mutant
+# budget. There are no duration, budget, or admission constants in this
+# workflow, in the Stryker configurations it invokes, or in the adapter it runs.
+#
+# This job is advisory. It publishes evidence a reviewer can read; it does not
+# block merge. Advisory does not mean permissive: failed or incomplete evidence
+# stays recorded as failed or incomplete, and an advisory job is not permission
+# to describe an incomplete run as a pass.
+#
+# The pipeline has four stages, kept deliberately separate:
+#
+#   INTENT      what was requested -- the changed-file list and the identity of
+#               every input the run depends on, frozen before Stryker starts.
+#   OBSERVATION what the run reported -- Stryker's raw JSON, retained verbatim
+#               and digested, treated as a black box's output.
+#   PROJECTION  what those observations mean -- computed from the raw facts by
+#               scripts/mutation-falsification/stryker-adapter.ts, never taken
+#               from Stryker's own status field.
+#   TRIAGE      what a reviewer concluded about a survivor. Deliberately absent
+#               from this workflow: triage is a separate record written later by
+#               someone other than the author of the change.
+#
+# The blind spot this design accepts, stated plainly: a revision that changes
+# only tests mutates nothing, so a weakened assertion protecting untouched code
+# produces no mutation evidence here. That revision is reported as
+# `not_applicable` -- which is neither a pass nor a failure -- rather than as a
+# clean run.
+
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: mutate changed production files (${{ matrix.cohort }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cohort: client
+            root: "."
+            prefixes: "src/"
+          - cohort: reference-implementation
+            root: reference-implementation
+            prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history is what makes the merge base computable; a shallow
+          # clone would leave the diff unable to name a base at all.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # INTENT. The diff is taken from the merge base of the base branch and the
+      # exact tested head, not from the base branch tip, so unrelated commits
+      # landing on the base branch mid-review do not enter this revision's scope.
+      # `-z` keeps paths with spaces or newlines intact; the list is written to a
+      # file and read from there rather than concatenated into a shell command.
+      - name: Freeze intent
+        id: intent
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          COHORT: ${{ matrix.cohort }}
+          COHORT_ROOT: ${{ matrix.root }}
+          COHORT_PREFIXES: ${{ matrix.prefixes }}
+        run: |
+          set -euo pipefail
+          mkdir -p "reports/mutation/${COHORT}"
+
+          if [[ -n "${BASE_REF}" ]]; then
+            base_commit="$(git merge-base "${BASE_REF}" "${HEAD_REF}")"
+          else
+            # workflow_dispatch has no pull request to take a base from.
+            base_commit="$(git rev-parse "${HEAD_REF}^" 2>/dev/null || git rev-parse "${HEAD_REF}")"
+          fi
+
+          git diff --name-status -z --diff-filter=ACMRT \
+            "${base_commit}" "${HEAD_REF}" > "reports/mutation/${COHORT}/diff.nul"
+
+          node --experimental-strip-types scripts/mutation-falsification/run-intent.ts \
+            --cohort "${COHORT}" \
+            --cohort-root "${COHORT_ROOT}" \
+            --prefixes "${COHORT_PREFIXES}" \
+            --base "${base_commit}" \
+            --head "${HEAD_REF}" \
+            --diff "reports/mutation/${COHORT}/diff.nul" \
+            --out "reports/mutation/${COHORT}/intent.json"
+
+          applicability="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).applicability)' "reports/mutation/${COHORT}/intent.json")"
+          echo "applicability=${applicability}" >> "$GITHUB_OUTPUT"
+          echo "Intent applicability: ${applicability}"
+
+      # Reuse is keyed on input identity and nothing else -- never on the cache's
+      # age, and never on how expensive a fresh run would be. The restore key is
+      # the digest of the frozen execution inputs, so a lockfile, tool, runtime,
+      # or configuration change simply does not match a stored cache. There is
+      # no broad fallback restore key, because a partial match here would mean
+      # reusing verdicts about inputs that no longer exist.
+      - name: Restore incremental cache by input identity
+        if: steps.intent.outputs.applicability == 'applicable'
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: reports/mutation/${{ matrix.cohort }}/stryker-incremental.json
+          key: mutation-${{ matrix.cohort }}-${{ hashFiles(format('reports/mutation/{0}/intent.json', matrix.cohort)) }}
+
+      - name: Build workspace packages
+        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        run: |
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+
+      # OBSERVATION. Stryker runs as a black box. Its exit status and its own
+      # per-mutant statuses are recorded, never interpreted here.
+      - name: Run mutation testing on the changed files
+        if: steps.intent.outputs.applicability == 'applicable'
+        id: observe
+        continue-on-error: true
+        env:
+          COHORT: ${{ matrix.cohort }}
+          COHORT_ROOT: ${{ matrix.root }}
+          PDPP_OWNER_PASSWORD: reference-implementation-ci
+          PDPP_TEST_PROFILE: "memory-default"
+        run: |
+          set -uo pipefail
+          mapfile -t mutate < <(node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).mutate.forEach((f)=>console.log(f))' "reports/mutation/${COHORT}/intent.json")
+          printf 'Mutating %d file(s):\n' "${#mutate[@]}"
+          printf '  %s\n' "${mutate[@]}"
+
+          # The exit status is recorded rather than acted on: the projection
+          # step decides what it means. A non-zero status makes the baseline
+          # incomplete, which makes every mutant in the batch inconclusive.
+          npx stryker run "${COHORT_ROOT}/stryker.config.mjs" --mutate "$(IFS=,; echo "${mutate[*]}")"
+          stryker_exit=$?
+          echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
+          exit "${stryker_exit}"
+
+      # PROJECTION. Stryker's raw statuses are re-projected through the adapter's
+      # conservative table. A `Killed` without retained owning-assertion evidence
+      # is inconclusive, not a kill; a timeout is inconclusive, not a kill; code
+      # with no coverage is inconclusive, not a survivor. The receipt binds the
+      # frozen intent digest, a digest of the retained raw report bytes, and the
+      # computed projection.
+      - name: Project observations and write the attempt receipt
+        if: always() && steps.intent.outputs.applicability == 'applicable'
+        env:
+          COHORT: ${{ matrix.cohort }}
+          COHORT_ROOT: ${{ matrix.root }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit }}
+        run: |
+          set -euo pipefail
+          # Stryker resolves its reporter paths against the cohort root it ran
+          # in, so the report for a non-root cohort lands under that root.
+          if [[ "${COHORT_ROOT}" == "." ]]; then
+            report="reports/mutation/${COHORT}/mutation.json"
+          else
+            report="${COHORT_ROOT}/reports/mutation/${COHORT}/mutation.json"
+          fi
+
+          node --experimental-strip-types scripts/mutation-falsification/run-projection.ts \
+            --cohort "${COHORT}" \
+            --intent "reports/mutation/${COHORT}/intent.json" \
+            --report "${report}" \
+            --cache-hit "${CACHE_HIT:-false}" \
+            --stryker-exit "${STRYKER_EXIT:-unknown}" \
+            --out "reports/mutation/${COHORT}/receipt.json"
+
+      # A digest whose bytes are not also retained is not evidence, so the raw
+      # report ships alongside the receipt that digests it. The upload runs even
+      # when the run failed: an absent artifact would make an incomplete attempt
+      # indistinguishable from one that never started.
+      - name: Publish mutation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-evidence-${{ matrix.cohort }}
+          # Both roots are listed because the intent and receipt are written at
+          # the repository root while a non-root cohort's raw report is written
+          # under its own root. The raw bytes travel with the receipt that
+          # digests them: a digest whose bytes are not retained is not evidence.
+          path: |
+            reports/mutation/${{ matrix.cohort }}/
+            ${{ matrix.root }}/reports/mutation/${{ matrix.cohort }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summarize
+        if: always()
+        env:
+          COHORT: ${{ matrix.cohort }}
+          APPLICABILITY: ${{ steps.intent.outputs.applicability }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Mutation evidence: ${COHORT}"
+            echo
+            if [[ "${APPLICABILITY}" != "applicable" ]]; then
+              echo "No production source in this cohort changed in this revision, so no mutation"
+              echo "evidence exists for it. This is not a pass and not a failure."
+              exit 0
+            fi
+            node --experimental-strip-types scripts/mutation-falsification/summarize-receipt.ts \
+              "reports/mutation/${COHORT}/receipt.json"
+          } >> "$GITHUB_STEP_SUMMARY"
