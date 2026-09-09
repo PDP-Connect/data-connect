@@ -43,6 +43,33 @@ function readWorkflowRunScript(workflow: string, name: string) {
     .join("\n")
 }
 
+// Values GitHub Actions would substitute into a run script before the runner's
+// shell ever sees it. Tests that execute a step's script have to do the same
+// substitution, because `${{ ... }}` is not shell syntax -- bash rejects it as a
+// bad substitution and the step dies before reaching the behaviour under test.
+const ACTIONS_EXPRESSION_VALUES: Record<string, string> = {
+  "github.repository": "PDP-Connect/data-connect",
+}
+
+const ACTIONS_EXPRESSION_PATTERN = /\$\{\{\s*(.+?)\s*\}\}/g
+
+// Substitutes the expressions in ACTIONS_EXPRESSION_VALUES and throws on any
+// other, so a workflow edit that introduces an unmapped expression fails here
+// with the expression named rather than as an opaque shell error -- or, worse,
+// silently runs a script that no longer matches the real step.
+function substituteActionsExpressions(script: string) {
+  return script.replace(ACTIONS_EXPRESSION_PATTERN, (match, expression) => {
+    const value = ACTIONS_EXPRESSION_VALUES[expression]
+    if (value === undefined) {
+      throw new Error(
+        `Unmapped Actions expression in workflow step script: ${match}. ` +
+          `Add "${expression}" to ACTIONS_EXPRESSION_VALUES with the value the test should run against.`
+      )
+    }
+    return value
+  })
+}
+
 describe("release workflow", () => {
   it("builds manual-install artifacts on demand without an updater", () => {
     const workflow = readReleaseWorkflow()
@@ -195,9 +222,11 @@ describe("release workflow", () => {
   })
 
   it("publishes five files from upload-artifact's preserved subdirectories", () => {
-    const publishScript = readWorkflowRunScript(
-      readReleaseWorkflow(),
-      "Publish complete platform set"
+    const publishScript = substituteActionsExpressions(
+      readWorkflowRunScript(
+        readReleaseWorkflow(),
+        "Publish complete platform set"
+      )
     )
     const root = mkdtempSync(join(tmpdir(), "data-connect-publish-layout-"))
     const expectedAssets = [
@@ -230,10 +259,14 @@ describe("release workflow", () => {
         .map(line => line.slice("GH_ARG=".length))
 
       expect(uploadArgs.slice(0, 3)).toEqual(["release", "upload", "v0.7.54"])
-      expect(uploadArgs.slice(3, -1).sort()).toEqual(
+      expect(uploadArgs.slice(-3)).toEqual([
+        "--clobber",
+        "--repo",
+        ACTIONS_EXPRESSION_VALUES["github.repository"],
+      ])
+      expect(uploadArgs.slice(3, -3).sort()).toEqual(
         expectedAssets.map(asset => `release-artifacts/${asset}`).sort()
       )
-      expect(uploadArgs.at(-1)).toBe("--clobber")
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -1,0 +1,119 @@
+name: client-tests
+
+# Runs the root (client) Vitest suite and the root typecheck in CI. Before this
+# workflow, .github/workflows/ covered the reference implementation, releases, the
+# local collector pack, the consumer drift signal and the SPDX header sweep -- but
+# nothing ran `vitest` over src/, src-tauri/, scripts/ or playwright-runner/, so the
+# 88 client test files in vite.config.ts's `test.include` were only ever run locally.
+#
+# Node is pinned to 22.23.1 to match every other workflow in this directory and to
+# stay inside the root package.json `engines` range (>=22.14.0 <24).
+#
+# Two jobs, not one: the root `npm test` script is `npm run typecheck && vitest run`,
+# which short-circuits -- a typecheck error means the suite never runs and CI reports
+# a single fused red. Splitting them keeps the typecheck result readable independently
+# of the suite result, so a type error cannot mask a suite regression (or vice versa).
+#
+# NOT YET A REQUIRED CHECK. scripts/release-workflow.test.ts >
+# "publishes five files from upload-artifact's preserved subdirectories" fails on main:
+# it extracts the "Publish complete platform set" step out of .github/workflows/release.yml
+# and runs it through `bash -c`, but that step has carried the literal, unexpanded Actions
+# expression `${{ github.repository }}` since #23 (11b986d19, "fix(release): target
+# repository for artifact upload"), and bash rejects it as `bad substitution`. The test was
+# not updated alongside it. Restoring release.yml to 11b986d19's parent makes the file pass
+# 5/5, which is what identifies that commit as the cause. Fixing it means changing either
+# the workflow or the test's expression handling -- a product decision that belongs in its
+# own change, not smuggled into CI wiring. Promote this workflow to a required check once
+# that test passes on main; until then it reports honestly and does not block merges.
+
+on:
+  pull_request: {}
+  merge_group: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: client-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck-client:
+    name: typecheck client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck client
+        run: npm run typecheck
+
+  test-client:
+    name: test client
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
+      # so a vite.config.ts `test.include` that silently stops matching fails the job
+      # instead of reporting a green zero-test run. The JSON report records which files
+      # Vitest actually collected and executed, so a dropped file is visible in the log
+      # and in the artifact rather than hidden behind a total that still looks plausible.
+      - name: Test client
+        run: npx vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/vitest-results.json"
+
+      - name: Report collected and executed files
+        if: always()
+        env:
+          RESULTS: ${{ runner.temp }}/vitest-results.json
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$RESULTS" ]]; then
+            echo "::error::Vitest wrote no JSON report; the run did not reach reporting."
+            exit 1
+          fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs"
+            const report = JSON.parse(readFileSync(process.env.RESULTS, "utf8"))
+            const files = [...new Set((report.testResults ?? []).map(r => r.name))].sort()
+            console.log(`collected files: ${files.length}`)
+            for (const file of files) console.log(`  ${file}`)
+            console.log(
+              `tests: ${report.numTotalTests} total, ${report.numPassedTests} passed, ` +
+                `${report.numFailedTests} failed, ${report.numPendingTests} pending`
+            )
+          '
+
+      - name: Upload Vitest results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: client-vitest-results
+          path: ${{ runner.temp }}/vitest-results.json
+          if-no-files-found: error
