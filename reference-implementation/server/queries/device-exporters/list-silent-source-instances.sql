@@ -58,6 +58,15 @@
 -- stayed selected would silently overwrite that decision and re-announce work
 -- the owner had already dismissed or taken up.
 --
+-- A claim that was taken and never finished is the one exception. The notifier
+-- marks a record as being sent before it sends, so a process that dies in
+-- between leaves a stamp with the state still `pending` and no outcome behind
+-- it. Excluding on the stamp alone would silence that outage forever, so a
+-- `pending` stamp older than the caller-supplied cutoff no longer excludes: the
+-- record becomes selectable again and the claim itself decides who gets it. Only
+-- `pending` ages out — a recorded sent, failed or suppressed outcome excludes
+-- regardless of how old it is, so nothing already accounted for is resent.
+--
 -- Neither test alone is sufficient. Excluding only on the delivery outcome loses
 -- owner decisions made before a first delivery succeeded. Excluding on the
 -- record existing at all would drop a notice permanently whenever the notifier
@@ -91,7 +100,13 @@ WHERE dsi.last_heartbeat_at IS NOT NULL
       'att_device_silence_' || dsi.source_instance_id || '_' ||
       REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
       AND (
-        json_extract(car.record_json, '$.notification_updated_at') IS NOT NULL
+        (
+          json_extract(car.record_json, '$.notification_updated_at') IS NOT NULL
+          AND NOT (
+            json_extract(car.record_json, '$.notification_state') = 'pending'
+            AND json_extract(car.record_json, '$.notification_updated_at') <= ?
+          )
+        )
         OR car.lifecycle <> 'open'
       )
   )

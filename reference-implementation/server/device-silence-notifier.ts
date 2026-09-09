@@ -32,6 +32,7 @@
  * affect the whole fleet at once would mean re-notifying everyone at restart.
  */
 
+import { NOTIFICATION_DISPATCH_CLAIM_LEASE_MS } from "./connector-maintenance-sweep.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import type { DeviceSilenceRoundResult } from "./stores/device-silence-stage.ts";
 import { NOTIFICATION_TIERS, projectNotificationDelivery } from "./notification-policy.ts";
@@ -87,7 +88,22 @@ export async function notifyDeviceSilenceOpened(
     // record. The outcome recorded below writes only the notification axis and
     // leaves the lifecycle alone, so a record resolved in that window stays
     // resolved.
-    if (!(await attentionStore.claimNotificationDispatch({ attentionId: opened.attentionId, now: now.toISOString() }))) {
+    //
+    // A claim expires, and the residual risk of that is worth stating rather
+    // than discovering. If a process dies between claiming and recording an
+    // outcome, a later tick reclaims the record and sends again — which is right
+    // when the original send never happened, and a duplicate when it had already
+    // reached the transport. The alternative is worse in the direction that
+    // matters: without expiry an abandoned claim silences that outage forever,
+    // and a collector nobody is told about is the failure this whole feature
+    // exists to prevent. The window is bounded by the lease, and only a claim
+    // still `pending` is reclaimable, so a recorded outcome is never resent.
+    const claimed = await attentionStore.claimNotificationDispatch({
+      attentionId: opened.attentionId,
+      leaseMs: NOTIFICATION_DISPATCH_CLAIM_LEASE_MS,
+      now: now.toISOString(),
+    });
+    if (!claimed) {
       continue;
     }
 

@@ -147,7 +147,10 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey, isInternalConnectorId, legacyLocalAliasMap } from "./connector-key.ts";
-import { createResumableConnectorMaintenanceSweep } from "./connector-maintenance-sweep.ts";
+import {
+  CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS,
+  createResumableConnectorMaintenanceSweep,
+} from "./connector-maintenance-sweep.ts";
 import { notifyDeviceSilenceOpened } from "./device-silence-notifier.ts";
 import {
   getConnectorSummaryEvidence,
@@ -975,7 +978,7 @@ const STARTUP_SUMMARY_EVIDENCE_MAX_RESUME_ROUNDS = 20;
 // short relative to human-observed dashboard refresh cadence without
 // running meaningfully more often than the durable state it sweeps
 // actually changes.
-const CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS = 60_000;
+// Canonical definition lives with the sweep it paces; imported above.
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_MAX_DURATION_MS = 2000;
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE = 25;
 // Run-history backfill (terminal-read-architecture-fable-0730.md §9):

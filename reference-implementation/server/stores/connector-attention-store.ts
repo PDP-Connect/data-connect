@@ -173,7 +173,12 @@ export interface ConnectorAttentionStore {
    * anyway. The comparison has to happen in the statement that marks the
    * record as being sent.
    */
-  claimNotificationDispatch: (input: { attentionId: string; now?: string | null }) => Promise<boolean>;
+  claimNotificationDispatch: (input: {
+    attentionId: string;
+    /** Milliseconds after which an unfinished claim may be taken by another tick. */
+    leaseMs: number;
+    now?: string | null;
+  }) => Promise<boolean>;
   /**
    * Give a claim back when the send never began, so the notice stays eligible
    * for a later attempt. Only clears a claim that is still unresolved — a
@@ -576,18 +581,29 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
     },
 
     // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
-    async claimNotificationDispatch({ attentionId, now }: { attentionId: string; now?: string | null }) {
+    async claimNotificationDispatch({
+      attentionId,
+      leaseMs,
+      now,
+    }: { attentionId: string; leaseMs: number; now?: string | null }) {
       const id = nonEmptyString(attentionId);
       if (!id) {
         throw new Error("claimNotificationDispatch: attentionId is required");
       }
       const claimedAt = nonEmptyString(now) || nowIso();
-      // One statement: the lifecycle test, the not-yet-dispatched test and the
-      // write that marks the record as taken all happen together, so nothing can
-      // land between deciding to send and recording that a send is under way.
-      // Stamping `notification_updated_at` is what makes the claim exclusive —
-      // it is the same field every other reader already treats as "an attempt
-      // has been made".
+      const staleBefore = new Date(Date.parse(claimedAt) - leaseMs).toISOString();
+      // One statement: the lifecycle test, the eligibility test and the write
+      // that marks the record as taken all happen together, so nothing can land
+      // between deciding to send and recording that a send is under way.
+      // Stamping `notification_updated_at` is what makes the claim exclusive.
+      //
+      // Eligible means never claimed, OR claimed longer ago than the lease and
+      // still unfinished. The second half is what makes an abandoned claim
+      // recoverable: a process that dies between claiming and recording an
+      // outcome would otherwise hold the record forever, since nothing else can
+      // release it. `notification_state = 'pending'` is load-bearing there — a
+      // recorded outcome moves the state off `pending`, so a sent, failed or
+      // suppressed record can never be reclaimed by age.
       // REVIEWED-DYNAMIC: notification-axis mutation for the store-owned table.
       const claimed = execDynamicSqlAcknowledged(
         `UPDATE connector_attention_records
@@ -596,8 +612,14 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
                   '$.notification_updated_at', ?)
           WHERE attention_id = ?
             AND lifecycle = 'open'
-            AND json_extract(record_json, '$.notification_updated_at') IS NULL`,
-        [claimedAt, id]
+            AND (
+              json_extract(record_json, '$.notification_updated_at') IS NULL
+              OR (
+                json_extract(record_json, '$.notification_state') = 'pending'
+                AND json_extract(record_json, '$.notification_updated_at') <= ?
+              )
+            )`,
+        [claimedAt, id, staleBefore]
       );
       return claimed.changes === 1;
     },
@@ -954,13 +976,19 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       );
     },
 
-    async claimNotificationDispatch({ attentionId, now }: { attentionId: string; now?: string | null }) {
+    async claimNotificationDispatch({
+      attentionId,
+      leaseMs,
+      now,
+    }: { attentionId: string; leaseMs: number; now?: string | null }) {
       const id = nonEmptyString(attentionId);
       if (!id) {
         throw new Error("claimNotificationDispatch: attentionId is required");
       }
       const claimedAt = nonEmptyString(now) || nowIso();
-      // See the SQLite twin: the tests and the write must be one statement.
+      const staleBefore = new Date(Date.parse(claimedAt) - leaseMs).toISOString();
+      // See the SQLite twin for why the tests and the write are one statement,
+      // and why an expired-but-unfinished claim is reclaimable.
       const claimed = await postgresQuery(
         `UPDATE connector_attention_records
             SET record_json = jsonb_set(
@@ -968,8 +996,14 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
                   '{notification_updated_at}', to_jsonb($2::text))
           WHERE attention_id = $3
             AND lifecycle = 'open'
-            AND record_json ->> 'notification_updated_at' IS NULL`,
-        ["pending", claimedAt, id]
+            AND (
+              record_json ->> 'notification_updated_at' IS NULL
+              OR (
+                record_json ->> 'notification_state' = 'pending'
+                AND record_json ->> 'notification_updated_at' <= $4
+              )
+            )`,
+        ["pending", claimedAt, id, staleBefore]
       );
       return claimed.rowCount === 1;
     },

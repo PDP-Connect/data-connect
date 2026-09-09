@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { closeDb, initDb } from "../server/db.ts";
+import { NOTIFICATION_DISPATCH_CLAIM_LEASE_MS } from "../server/connector-maintenance-sweep.ts";
 import { notifyDeviceSilenceOpened } from "../server/device-silence-notifier.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -419,6 +420,109 @@ test("a resolve that lands after the dispatch claim leaves the record resolved",
     const stored = await attentionStore.getAttentionById(attentionId);
     assert.equal(stored?.lifecycle, "resolved", "recording the outcome must not reopen the record");
     assert.equal(stored?.notification_state, "sent", "and the delivery is still recorded honestly");
+  } finally {
+    closeDb();
+  }
+});
+
+test("a claim abandoned by a dying process is reclaimed by a later tick", async () => {
+  // Models process loss at the claim/send boundary: the record is claimed, then
+  // nothing records an outcome. Before the lease, the claim marked the record as
+  // being sent and nothing could ever release it, so that outage was silenced
+  // permanently — the failure this feature exists to prevent.
+  //
+  // The restart is real in the way that matters: every in-process object is
+  // discarded and rebuilt from the same database, so the claim's expiry is the
+  // only thing that can make the record eligible again.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const result = await createDeviceSilenceStage().run({ nowIso: new Date(NOW_MS).toISOString() });
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    // The dying process claims and then vanishes.
+    const claimed = await attentionStore.claimNotificationDispatch({
+      attentionId,
+      leaseMs: NOTIFICATION_DISPATCH_CLAIM_LEASE_MS,
+      now: new Date(NOW_MS).toISOString(),
+    });
+    assert.equal(claimed, true, "the first process wins the claim");
+    assert.equal(
+      (await attentionStore.getAttentionById(attentionId))?.notification_state,
+      "pending",
+      "and no outcome was ever recorded for it"
+    );
+
+    // Within the lease, the record is still held: a live but slow dispatch keeps
+    // its claim rather than being raced by the next tick.
+    const pushesEarly: SentPush[] = [];
+    await notifyDeviceSilenceOpened(result, {
+      config: CONFIG,
+      connectorDisplayName: () => "Claude Code",
+      now: () => new Date(NOW_MS + 60_000),
+      ownerSubjectId: "owner_local",
+      sendEscalationPush: ((args: SentPush) => {
+        pushesEarly.push(args);
+        return Promise.resolve({ attempted: 1, sent: 1, unavailable: false });
+      }) as never,
+    });
+    assert.equal(pushesEarly.length, 0, "a claim inside its lease is not stolen");
+
+    // Past the lease, a fresh process rebuilt from the same database delivers it.
+    const afterLease = NOW_MS + NOTIFICATION_DISPATCH_CLAIM_LEASE_MS + 60_000;
+    const rebuiltStage = createDeviceSilenceStage();
+    const rebuiltResult = await rebuiltStage.run({ nowIso: new Date(afterLease).toISOString() });
+    assert.equal(rebuiltResult.opened.length, 1, "the abandoned record is selected again");
+
+    const pushes: SentPush[] = [];
+    await notifyDeviceSilenceOpened(rebuiltResult, {
+      config: CONFIG,
+      connectorDisplayName: () => "Claude Code",
+      now: () => new Date(afterLease),
+      ownerSubjectId: "owner_local",
+      sendEscalationPush: ((args: SentPush) => {
+        pushes.push(args);
+        return Promise.resolve({ attempted: 1, sent: 1, unavailable: false });
+      }) as never,
+    });
+
+    assert.equal(pushes.length, 1, "the notice the dead process never sent is delivered");
+    assert.equal((await attentionStore.getAttentionById(attentionId))?.notification_state, "sent");
+  } finally {
+    closeDb();
+  }
+});
+
+test("a recorded outcome is never reclaimed, however old it is", async () => {
+  // The other half of the expiry rule. Only a claim still `pending` may be taken
+  // by age; a sent, failed or suppressed record has an outcome, and reclaiming
+  // it would resend something already accounted for.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const result = await createDeviceSilenceStage().run({ nowIso: new Date(NOW_MS).toISOString() });
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    await attentionStore.claimNotificationDispatch({
+      attentionId,
+      leaseMs: NOTIFICATION_DISPATCH_CLAIM_LEASE_MS,
+      now: new Date(NOW_MS).toISOString(),
+    });
+    await attentionStore.recordNotificationOutcomeById({ attentionId, outcome: "sent", reason: null });
+
+    // Ten days later — far past any lease.
+    const muchLater = new Date(NOW_MS + 10 * 24 * 60 * 60 * 1000).toISOString();
+    assert.equal(
+      await attentionStore.claimNotificationDispatch({
+        attentionId,
+        leaseMs: NOTIFICATION_DISPATCH_CLAIM_LEASE_MS,
+        now: muchLater,
+      }),
+      false,
+      "a delivered notice is not resent because its stamp got old"
+    );
   } finally {
     closeDb();
   }

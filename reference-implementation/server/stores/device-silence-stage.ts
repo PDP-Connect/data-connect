@@ -40,6 +40,7 @@
 import type { AttentionRecord } from "../../runtime/attention.ts";
 import { createAttention } from "../../runtime/attention.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
+import { NOTIFICATION_DISPATCH_CLAIM_LEASE_MS } from "../connector-maintenance-sweep.ts";
 import { getDefaultConnectorAttentionStore } from "./connector-attention-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "./connector-instance-store.ts";
 import { getDefaultDeviceExporterStore, type SilentSourceInstance } from "./device-exporter-store.ts";
@@ -148,6 +149,10 @@ export function createDeviceSilenceStage(
       const cutoff = new Date(Date.parse(now) - DEVICE_SILENT_ESCALATION_MS).toISOString();
 
       const silent = await deviceStore.listSilentSourceInstances({
+        // A dispatch claim older than its lease and still unfinished belongs to
+        // a process that is gone; the record becomes selectable again so a later
+        // tick can deliver what that process never sent.
+        claimStaleBefore: new Date(Date.parse(now) - NOTIFICATION_DISPATCH_CLAIM_LEASE_MS).toISOString(),
         limit: maxInstances ?? DEFAULT_MAX_INSTANCES_PER_TICK,
         silentBefore: cutoff,
       });

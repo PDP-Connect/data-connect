@@ -46,6 +46,24 @@ import {
   type ResumableRunHistoryBackfillStage,
 } from "./stores/run-history-backfill-stage.ts";
 
+/**
+ * Periodic tick interval for the connector-maintenance sweep. Defined here, with
+ * the sweep it paces, so anything deriving a duration from the sweep's cadence
+ * has one place to read it rather than restating the number.
+ */
+export const CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * How long a notification dispatch claim stays valid before another tick may
+ * take it. A claim marks a record as being sent; if the process dies between
+ * claiming and recording an outcome, nothing else would ever be able to send it.
+ * Ten sweep intervals is long enough that a slow but living dispatch keeps its
+ * claim, and short enough that an abandoned one is recovered in minutes rather
+ * than never. Derived from the sweep cadence rather than chosen independently,
+ * so the two cannot drift apart.
+ */
+export const NOTIFICATION_DISPATCH_CLAIM_LEASE_MS = 10 * CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS;
+
 export interface ConnectorMaintenanceSweepOptions {
   readonly attentionExpireLimit?: number;
   /**
