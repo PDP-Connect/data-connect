@@ -5091,6 +5091,7 @@ a.rr-x-row {
 
 /* D-14: Copy-ID buttons — expand the tap zone to ≥44×44px without
    changing the visible icon size. The padding creates invisible touch area. */
+/* biome-ignore lint/style/noDescendingSpecificity: Compiled IDs intentionally keep their more-specific block display while sharing this touch-target sizing. */
 .rr-copyid {
   display: inline-flex;
   align-items: center;

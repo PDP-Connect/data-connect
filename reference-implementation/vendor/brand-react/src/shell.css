@@ -304,6 +304,7 @@ html:has(.rr-app) {
     animation: rr-fade-in var(--duration-fast) ease both;
   }
 }
+/* biome-ignore lint/style/noDescendingSpecificity: The earlier dark-theme selector sets only mark color tokens; these drawer layout declarations do not override them. */
 .pdpp-dialog.rr-drawer {
   position: fixed;
   top: 0;

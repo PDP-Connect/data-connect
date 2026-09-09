@@ -28,15 +28,15 @@
   "devDependencies": {
     "@testing-library/user-event": "^14.6.6",
     "@types/jsdom": "^30.0.0",
-    "@types/node": "^26.4.1",
+    "@types/node": "^26.5.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "jsdom": "30.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2",
-    "ultracite": "7.10.8"
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "ultracite": "7.11.0"
   },
   "peerDependencies": {
     "next": "^16.3.4",
