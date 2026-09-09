@@ -167,8 +167,8 @@ tail:
 ## Scope counts and comparison baseline
 
 `scripts/run-tests.ts` discovers 1,034 profile files. The template equivalence
-registry is a different measure: 122 eligible plus 26 cold-required files,
-for **148** total. No current tracked source contains a 170-file claim.
+registry is a different measure: 122 eligible plus 29 cold-required files,
+for **151** total. No current tracked source contains a 170-file claim.
 
 The sibling report supplies only a memory-default cap-2 baseline (10,252
 assertions, 9,690 passed, 209 failed, 353 skipped; about 10 minutes). It is not

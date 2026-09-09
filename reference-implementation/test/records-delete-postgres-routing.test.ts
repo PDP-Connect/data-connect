@@ -38,12 +38,68 @@ import test from "node:test";
 
 import { closeDb, initDb } from "../server/db.ts";
 import { postgresIngestRecord } from "../server/postgres-records.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  initPostgresStorage,
+  isPostgresSemanticVectorEmbedding,
+  postgresQuery,
+} from "../server/postgres-storage.ts";
 import { deleteAllRecords, deleteAllRecordsForConnector } from "../server/records.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 if (POSTGRES_URL) {
+  test("Postgres bootstrap applies the bloat-control autovacuum policy to heap tables and TOAST", async () => {
+    initDb(":memory:");
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+
+    try {
+      const result = await postgresQuery<{
+        relname: string;
+        reloptions: string[] | null;
+        toast_reloptions: string[] | null;
+      }>(
+        `SELECT heap.relname, heap.reloptions, toast.reloptions AS toast_reloptions
+           FROM pg_class AS heap
+           LEFT JOIN pg_class AS toast ON toast.oid = heap.reltoastrelid
+          WHERE heap.relnamespace = current_schema()::regnamespace
+            AND heap.relname = ANY($1::text[])`,
+        [["records", "record_changes", "blobs", "spine_events"]]
+      );
+      const expectedHeapOptions = [
+        "autovacuum_enabled=true",
+        "autovacuum_vacuum_threshold=1",
+        "autovacuum_vacuum_scale_factor=0.01",
+        "autovacuum_vacuum_insert_threshold=50",
+        "autovacuum_vacuum_insert_scale_factor=0.02",
+        "autovacuum_analyze_threshold=50",
+        "autovacuum_analyze_scale_factor=0.02",
+      ];
+      const expectedToastOptions = [
+        "autovacuum_enabled=true",
+        "autovacuum_vacuum_threshold=1",
+        "autovacuum_vacuum_scale_factor=0.01",
+        "autovacuum_vacuum_insert_threshold=50",
+        "autovacuum_vacuum_insert_scale_factor=0.02",
+      ];
+
+      assert.equal(result.rows.length, 4, "all high-churn tables exist in the active schema");
+      for (const row of result.rows) {
+        const heapOptions = new Set(row.reloptions ?? []);
+        const toastOptions = new Set(row.toast_reloptions ?? []);
+        for (const option of expectedHeapOptions) {
+          assert.ok(heapOptions.has(option), `${row.relname} heap sets ${option}`);
+        }
+        for (const option of expectedToastOptions) {
+          assert.ok(toastOptions.has(option), `${row.relname} TOAST sets ${option}`);
+        }
+      }
+    } finally {
+      await closePostgresStorage();
+      closeDb();
+    }
+  });
+
   test("deleteAllRecordsForConnector invalidates Postgres-backed records", async () => {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const connectorId = `https://registry.pdpp.test/connectors/pg_invalidate_${suffix}`;
@@ -168,8 +224,9 @@ if (POSTGRES_URL) {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const connectorId = `https://registry.pdpp.test/connectors/pg_stream_delete_${suffix}`;
     const connectorInstanceId = `cin_pg_stream_delete_${suffix}`;
-    const streamTarget = "top_artists";
-    const streamSibling = "saved_tracks";
+    // `%` would match the sibling under an unescaped SQL LIKE predicate.
+    const streamTarget = "a%b";
+    const streamSibling = "axb";
 
     initDb(":memory:");
     await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
@@ -200,6 +257,27 @@ if (POSTGRES_URL) {
         op: "upsert",
         stream: streamSibling,
       });
+      // `semantic_search_blob.embedding` is `vector` when pgvector is
+      // available and `jsonb` otherwise, so the cast has to follow the same
+      // branch the production writer uses (`insertSemanticRows` in
+      // postgres-search.ts). A JSON array literal is valid input for both
+      // types; hardcoding `::jsonb` fails on a pgvector database — which is
+      // the production configuration — with
+      // `column "embedding" is of type vector but expression is of type jsonb`.
+      const embeddingCast = isPostgresSemanticVectorEmbedding() ? "vector" : "jsonb";
+      await postgresQuery(
+        `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding)
+         VALUES ($1, $2, $3, $4, $5::${embeddingCast}), ($1, $2, $6, $7, $5::${embeddingCast})`,
+        [
+          connectorId,
+          connectorInstanceId,
+          JSON.stringify([streamTarget, "body"]),
+          "a-1",
+          "[0.25, 0.75]",
+          JSON.stringify([streamSibling, "body"]),
+          "s-1",
+        ]
+      );
 
       const targetBaseline = await postgresQuery(
         `SELECT COUNT(*)::int AS count FROM records
@@ -251,12 +329,24 @@ if (POSTGRES_URL) {
         [connectorInstanceId, streamSibling]
       );
       assert.equal(Number(siblingCounter.rows[0]?.count || 0), 1, "sibling stream version_counter row is untouched");
+
+      const siblingSemantic = await postgresQuery(
+        `SELECT COUNT(*)::int AS count FROM semantic_search_blob
+           WHERE connector_instance_id = $1 AND scope_key = $2`,
+        [connectorInstanceId, JSON.stringify([streamSibling, "body"])]
+      );
+      assert.equal(
+        Number(siblingSemantic.rows[0]?.count || 0),
+        1,
+        "a wildcard-like stream name cannot delete a sibling semantic scope during record cleanup"
+      );
     } finally {
       try {
         await postgresQuery("DELETE FROM blob_bindings WHERE connector_id = $1", [connectorId]);
         await postgresQuery("DELETE FROM record_changes WHERE connector_id = $1", [connectorId]);
         await postgresQuery("DELETE FROM records WHERE connector_id = $1", [connectorId]);
         await postgresQuery("DELETE FROM version_counter WHERE connector_instance_id = $1", [connectorInstanceId]);
+        await postgresQuery("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1", [connectorInstanceId]);
         // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
       } catch {}
       await closePostgresStorage();

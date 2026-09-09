@@ -233,6 +233,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Pending consent transactions must not be silently dropped by a coherent restore.",
   },
+  postgres_derived_index_maintenance_receipts: {
+    classification: "backup_required",
+    reason:
+      "A 'running' receipt is the in-flight marker that keeps a second VACUUM/REINDEX window off a database already being maintained, so it must be reconciled after a crash. Kept backup_required rather than derived_rebuildable because no executable rebuild oracle reconstructs it.",
+  },
   presentation_screen_states: {
     classification: "backup_required",
     reason: "Presentation screen state is tied to live browser/screen surfaces.",
@@ -365,7 +370,12 @@ const POSTGRES_SQLITE_ONLY_TABLES = ["semantic_search_rowid"] as const;
 // pgvector/HNSW has no SQLite counterpart; the build-progress row only ever exists
 // under the Postgres backend, so it is the Postgres-side mirror of the
 // SQLite-only exception above rather than part of the shared storage seam.
-const SQLITE_POSTGRES_ONLY_TABLES = ["semantic_hnsw_index_build"] as const;
+// The derived-index maintenance receipt is Postgres-only for the same reason:
+// it records VACUUM/REINDEX windows, which SQLite's backend never runs.
+const SQLITE_POSTGRES_ONLY_TABLES = [
+  "postgres_derived_index_maintenance_receipts",
+  "semantic_hnsw_index_build",
+] as const;
 
 export function isInternalBackupCatalogTable(name: string): boolean {
   return SQLITE_INTERNAL_TABLES.has(name) || isShadowTable(name);

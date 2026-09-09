@@ -172,7 +172,9 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/polyfill-manifest-reconcile-invalidation-postgres.test.ts",
   "test/postgres-boot-migration-resume.test.ts",
   "test/postgres-bootstrap-deadlock-retry.test.ts",
+  "test/postgres-derived-index-maintenance.test.ts",
   "test/postgres-hnsw-postlisten.test.ts",
+  "test/postgres-orphan-blob-reclaim.test.ts",
   "test/postgres-record-index-bootstrap.test.ts",
   "test/postgres-record-index-idempotency-oracle.test.ts",
   "test/postgres-record-index-repair-oracle.test.ts",
@@ -183,6 +185,7 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
+  "test/semantic-index-skip-unchanged-postgres.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

@@ -27,12 +27,113 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { closeDb, initDb } from "../server/db.ts";
-import { postgresIngestRecord } from "../server/postgres-records.ts";
+import {
+  postgresIngestRecord,
+  postgresPersistContentAddressedBlob,
+  postgresPrepareDeviceFinalRecords,
+} from "../server/postgres-records.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 if (POSTGRES_URL) {
+  test("N identical large-payload reconciliations leave records and history physically flat", async () => {
+    const databaseName = `pdpp_large_payload_noop_${Date.now().toString(36)}`;
+    await withTemporaryPostgresDatabase(
+      { closeConnections: closePostgresStorage, connectionString: POSTGRES_URL, databaseName },
+      async (databaseUrl) => {
+        initDb(":memory:");
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        try {
+          const storageTarget = { connectorId: "pg_large_payload_noop", connectorInstanceId: "cin_large_payload_noop" };
+          const record = {
+            data: { body: "x".repeat(256 * 1024), id: "large-record" },
+            emitted_at: "2026-09-03T12:00:00.000Z",
+            key: "large-record",
+            op: "upsert" as const,
+            stream: "items",
+          };
+          const attemptContext = {
+            streams: { items: { consentTimeField: null, cursorField: "id", primaryKey: ["id"] } },
+          };
+          const blobData = Buffer.alloc(256 * 1024, 0xa5);
+          const first = await postgresIngestRecord(storageTarget, record, { attemptContext });
+          assert.equal(first.changed, true);
+          const firstBlob = await postgresPersistContentAddressedBlob({
+            connectorId: storageTarget.connectorId,
+            connectorInstanceId: storageTarget.connectorInstanceId,
+            data: blobData,
+            mimeType: "application/octet-stream",
+            recordKey: "large-record",
+            stream: "items",
+          });
+          assert.equal(firstBlob.binding_inserted, true);
+          const before = await postgresQuery<{ bytes: string; relname: string }>(
+            `SELECT relname, pg_total_relation_size(relid)::text AS bytes
+               FROM pg_stat_user_tables
+              WHERE relname = ANY($1::text[])
+              ORDER BY relname`,
+            [["blobs", "blob_bindings", "records", "record_changes"]]
+          );
+
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            // biome-ignore lint/performance/noAwaitInLoops: each call is one real reconciliation transaction.
+            const repeated = await postgresIngestRecord(storageTarget, record, { attemptContext });
+            assert.equal(repeated.changed, false, `reconciliation ${attempt + 1} must be a durable no-op`);
+            // This preparation path recomputes record metadata from the same
+            // attempt facts; it must not rewrite equal large JSONB rows.
+            await postgresPrepareDeviceFinalRecords(
+              storageTarget,
+              [{ record: { key: "large-record", stream: "items" } }],
+              attemptContext
+            );
+            // biome-ignore lint/performance/noAwaitInLoops: each call is one real content-addressed blob write transaction.
+            const repeatedBlob = await postgresPersistContentAddressedBlob({
+              connectorId: storageTarget.connectorId,
+              connectorInstanceId: storageTarget.connectorInstanceId,
+              data: blobData,
+              mimeType: "application/octet-stream",
+              recordKey: "large-record",
+              stream: "items",
+            });
+            assert.equal(repeatedBlob.binding_inserted, false, `blob reconciliation ${attempt + 1} must be a durable no-op`);
+          }
+          await postgresQuery("ANALYZE records");
+          await postgresQuery("ANALYZE record_changes");
+          await postgresQuery("ANALYZE blobs");
+          await postgresQuery("ANALYZE blob_bindings");
+          const after = await postgresQuery<{
+            bytes: string;
+            n_dead_tup: string;
+            n_live_tup: string;
+            relname: string;
+          }>(
+            `SELECT relname, n_live_tup::text, n_dead_tup::text, pg_total_relation_size(relid)::text AS bytes
+               FROM pg_stat_user_tables
+              WHERE relname = ANY($1::text[])
+              ORDER BY relname`,
+            [["blobs", "blob_bindings", "records", "record_changes"]]
+          );
+
+          assert.equal(after.rows.length, 4, "fixture measures JSONB and BYTEA large-payload storage relations");
+          for (const row of after.rows) {
+            const baseline = before.rows.find((candidate) => candidate.relname === row.relname);
+            assert.ok(baseline, `fixture captured ${row.relname} before reconciliation`);
+            assert.ok(Number(row.n_dead_tup) <= 1, `${row.relname} leaves no meaningful dead tuples`);
+            assert.ok(
+              Number(row.bytes) <= Number(baseline.bytes) + 8192,
+              `${row.relname} stays within one Postgres page after repeated large payloads`
+            );
+          }
+        } finally {
+          await closePostgresStorage();
+          closeDb();
+        }
+      }
+    );
+  });
+
   test("postgres byte-identical re-ingest does not allocate a new version", async () => {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const connectorId = `pg_noop_${suffix}`;

@@ -6683,6 +6683,11 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           exec(referenceQueries.recordsDeleteDeleteRecordChangesByStream, [connectorInstanceId, stream]);
           exec(referenceQueries.recordsDeleteDeleteVersionCounterByStream, [connectorInstanceId, stream]);
           exec(referenceQueries.recordsDeleteDeleteBlobBindingsByStream, [connectorInstanceId, stream]);
+          // Reclaim blobs the binding delete above just orphaned. Refcount-gated
+          // (see delete-blobs-by-stream.sql) because content-addressed blob rows
+          // are shared across connections and the FK cascades. Postgres parity:
+          // the same pair runs in `postgresDeleteAllRecordsForConnector`.
+          exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
       });
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
@@ -6788,6 +6793,32 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           connectorInstanceId,
           stream,
         ]);
+        // Reclaim blobs this delete just unbound, mirroring
+        // `deleteConnectionRecordRowsPostgres` (and SQLite's
+        // `delete-blobs-by-instance.sql`). Dropping the bindings above without
+        // this left the `blobs` rows behind permanently — nothing else in the
+        // codebase collects orphans, so those bytes were junk forever.
+        //
+        // Refcount-gated, NOT supersede-and-delete. `blobs` is globally
+        // content-addressed (the insert conflicts on `blob_id` alone, with no
+        // connector or instance in the conflict target), so identical bytes
+        // from a sibling connection share ONE row; and the FK from
+        // `blob_bindings` is ON DELETE CASCADE, so an ungated delete here
+        // would silently destroy a live sibling's binding. `NOT EXISTS`
+        // deletes only rows no binding still references. Scoped to this
+        // instance for the same reason the whole-connection sibling is: a
+        // delete reclaims its own bytes, never another connection's.
+        await postgresQuery(
+          `DELETE FROM blobs
+            WHERE connector_instance_id = $1
+              AND stream = $2
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM blob_bindings
+                 WHERE blob_bindings.blob_id = blobs.blob_id
+              )`,
+          [connectorInstanceId, stream]
+        );
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
