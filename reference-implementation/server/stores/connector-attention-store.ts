@@ -88,6 +88,15 @@ interface UpsertArgs {
 interface UpsertInput {
   connectorId?: string | null;
   connectorInstanceId?: string | null;
+  /**
+   * Compare-and-set guard. When set, an UPDATE of an existing row only happens
+   * if that row's lifecycle is still one of these; otherwise the write is a
+   * no-op and the stored record is returned unchanged. A caller that reads,
+   * decides, then writes cannot otherwise avoid clobbering a transition that
+   * landed in between — checking before writing only narrows the window, it does
+   * not close it, because the check and the write are two statements.
+   */
+  onlyIfLifecycleIn?: readonly string[];
   record: AttentionRecord;
 }
 
@@ -605,13 +614,26 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       return next;
     },
     // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
-    async upsertAttention({ record, connectorId, connectorInstanceId }: UpsertInput): Promise<AttentionRecord> {
+    async upsertAttention({
+      record,
+      connectorId,
+      connectorInstanceId,
+      onlyIfLifecycleIn,
+    }: UpsertInput): Promise<AttentionRecord> {
       const id = nonEmptyString(connectorId);
       if (!id) {
         throw new Error("upsertAttention: connectorId is required");
       }
       const instance = nonEmptyString(connectorInstanceId) || defaultConnectorInstanceId(id);
       const args = encodeUpsertArgs(record, id, instance);
+      // Compare-and-set on the stored lifecycle, evaluated by the database as
+      // part of the same statement that writes. A guard in the caller cannot do
+      // this: between its read and its write, an owner request can land, and the
+      // write would then overwrite a decision the caller never saw.
+      const guard = onlyIfLifecycleIn?.length
+        ? ` WHERE connector_attention_records.lifecycle IN (${onlyIfLifecycleIn.map(() => "?").join(", ")})`
+        : "";
+      const guardParams = onlyIfLifecycleIn?.length ? [...onlyIfLifecycleIn] : [];
       // REVIEWED-DYNAMIC: connector_attention_records is owned by this store
       // and is not represented in the static query registry yet.
       execDynamicSqlAcknowledged(
@@ -630,7 +652,7 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
            sensitivity = excluded.sensitivity,
            expires_at = excluded.expires_at,
            record_json = excluded.record_json,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at${guard}`,
         [
           args.attentionId,
           args.dedupeKey,
@@ -645,8 +667,20 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
           args.recordJson,
           args.createdAt,
           args.updatedAt,
+          ...guardParams,
         ]
       );
+      // A refused write leaves the stored row untouched; return what is actually
+      // stored so a caller cannot mistake its own candidate for the outcome.
+      if (guard) {
+        const stored = [
+          ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+            "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+            [args.attentionId]
+          ),
+        ][0];
+        return stored ? (rowToRecord(stored) as AttentionRecord) : record;
+      }
       return record;
     },
   };
@@ -892,13 +926,26 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       );
       return next;
     },
-    async upsertAttention({ record, connectorId, connectorInstanceId }: UpsertInput): Promise<AttentionRecord> {
+    async upsertAttention({
+      record,
+      connectorId,
+      connectorInstanceId,
+      onlyIfLifecycleIn,
+    }: UpsertInput): Promise<AttentionRecord> {
       const id = nonEmptyString(connectorId);
       if (!id) {
         throw new Error("upsertAttention: connectorId is required");
       }
       const instance = nonEmptyString(connectorInstanceId) || defaultConnectorInstanceId(id);
       const args = encodeUpsertArgs(record, id, instance);
+      // See the SQLite twin: the guard belongs in the writing statement, because
+      // a caller-side check and the write are two statements with a gap.
+      const guard = onlyIfLifecycleIn?.length
+        ? ` WHERE connector_attention_records.lifecycle IN (${onlyIfLifecycleIn
+            .map((_unused, index) => `$${14 + index}`)
+            .join(", ")})`
+        : "";
+      const guardParams = onlyIfLifecycleIn?.length ? [...onlyIfLifecycleIn] : [];
       await postgresQuery(
         `INSERT INTO connector_attention_records(
            attention_id, dedupe_key, connector_id, connector_instance_id, connection_id,
@@ -915,7 +962,7 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
            sensitivity = EXCLUDED.sensitivity,
            expires_at = EXCLUDED.expires_at,
            record_json = EXCLUDED.record_json,
-           updated_at = EXCLUDED.updated_at`,
+           updated_at = EXCLUDED.updated_at${guard}`,
         [
           args.attentionId,
           args.dedupeKey,
@@ -930,8 +977,17 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
           args.recordJson,
           args.createdAt,
           args.updatedAt,
+          ...guardParams,
         ]
       );
+      if (guard) {
+        const stored = await postgresQuery(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+          [args.attentionId]
+        );
+        const storedRow = stored.rows[0] as AttentionLifecycleRow | undefined;
+        return storedRow ? (rowToRecord(storedRow) as AttentionRecord) : record;
+      }
       return record;
     },
   };

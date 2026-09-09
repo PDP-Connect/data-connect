@@ -1237,6 +1237,12 @@ export function createPostgresDeviceExporterStore() {
                 'att_device_silence_' || dsi.source_instance_id || '_' ||
                 REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
             ) ASC,
+            (
+              SELECT car.updated_at FROM connector_attention_records car
+              WHERE car.attention_id =
+                'att_device_silence_' || dsi.source_instance_id || '_' ||
+                REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
+            ) ASC,
             dsi.last_heartbeat_at ASC, dsi.device_id ASC, dsi.source_instance_id ASC
           LIMIT $2`,
         [silentBefore, clampSilentLimit(limit)]

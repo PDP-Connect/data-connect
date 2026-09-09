@@ -155,11 +155,25 @@ export function createDeviceSilenceStage(
         const connectorInstanceId = instance.connectorInstanceId ?? undefined;
         const record = buildSilenceAttention(instance, { connectorInstanceId, now });
 
-        await attentionStore.upsertAttention({
+        // Conditional on the stored lifecycle, evaluated by the database in the
+        // same statement that writes. The query already excludes episodes the
+        // owner has acted on, but that decision is made when the page is read
+        // and the write happens afterwards — an owner resolving a notice in
+        // between would otherwise have it silently reopened and re-pushed. An
+        // insert of a brand-new row is unaffected; only an update is guarded.
+        const written = await attentionStore.upsertAttention({
           connectorId: instance.connectorId,
           ...(connectorInstanceId === undefined ? {} : { connectorInstanceId }),
+          onlyIfLifecycleIn: ["open"],
           record,
         });
+
+        // The store returns what is actually stored, so a refused write is
+        // visible here rather than assumed away. Nothing is reported for it:
+        // the owner has already dealt with this notice.
+        if (written.lifecycle !== "open") {
+          continue;
+        }
 
         opened.push({
           attentionId: record.id,

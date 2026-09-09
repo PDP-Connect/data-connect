@@ -484,3 +484,84 @@ test(
     );
   })
 );
+
+test(
+  "a retry that has already been attempted still gets a turn",
+  withDb(async () => {
+    // Blocker A. Priority for never-recorded rows fixes first attempts, but once
+    // every instance owns a record the count key ties for all of them. With a
+    // static tiebreak the same rows win every batch forever, so an instance that
+    // was failing and has since healed is never tried again.
+    //
+    // 201 instances, batch of 200, and no delivery ever recorded — the shape a
+    // correlated outage produces. The tail is reached on tick 2 by the count
+    // key; the question is whether it is ever reached a second time.
+    const total = 201;
+    await seed(
+      Array.from({ length: total }, (_unused, index) => ({
+        sourceInstanceId: `dsi_${String(index).padStart(4, "0")}`,
+      }))
+    );
+    const stage = createDeviceSilenceStage();
+    const tailId = deviceSilenceAttentionId(`dsi_${String(total - 1).padStart(4, "0")}`, SILENT_AT);
+
+    let tailAttemptsAfterFirst = 0;
+    for (let tick = 0; tick < 8; tick += 1) {
+      const result = await stage.run({
+        maxInstances: 200,
+        nowIso: new Date(NOW_MS + tick * 60_000).toISOString(),
+      });
+      const sawTail = result.opened.some((entry) => entry.attentionId === tailId);
+      if (tick > 1 && sawTail) {
+        tailAttemptsAfterFirst += 1;
+      }
+    }
+
+    assert.ok(
+      tailAttemptsAfterFirst > 0,
+      "an instance whose first attempt failed must be retried again rather than losing every later batch to the same rows"
+    );
+  })
+);
+
+test(
+  "an owner decision that lands between the query and the write is not overwritten",
+  withDb(async () => {
+    // Blocker B. The query's lifecycle filter is evaluated when the page is read;
+    // the write happens afterwards. An owner resolving a notice in that gap needs
+    // one maintenance tick and one owner request, not concurrency.
+    //
+    // The interleaving is forced by wrapping only the roster read: the row is
+    // returned, then the owner's real transition runs, then the stage continues
+    // to its write. Selection, transition and write are all the real thing.
+    await seed([{ sourceInstanceId: "dsi_1" }]);
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const deviceStore = getDefaultDeviceExporterStore();
+    const attentionId = deviceSilenceAttentionId("dsi_1", SILENT_AT);
+
+    // First tick creates the notice and leaves it unstamped, as a pre-send
+    // failure would.
+    await createDeviceSilenceStage().run({ nowIso: NOW });
+    assert.equal((await attentionStore.getAttentionById(attentionId))?.lifecycle, "open");
+
+    const racingStage = createDeviceSilenceStage({
+      deviceStore: {
+        listSilentSourceInstances: async (args: never) => {
+          const rows = await deviceStore.listSilentSourceInstances(args);
+          // The owner acts here: after selection, before the stage writes.
+          await attentionStore.transitionAttention({ attentionId, to: "resolved" });
+          return rows as never;
+        },
+      } as never,
+    });
+
+    const result = await racingStage.run({ nowIso: new Date(NOW_MS + 60_000).toISOString() });
+
+    assert.equal(
+      (await attentionStore.getAttentionById(attentionId))?.lifecycle,
+      "resolved",
+      "the owner's decision survives a write that was already in flight"
+    );
+    assert.equal(result.opened.length, 0, "and nothing is reported for a notice the owner has resolved");
+  })
+);
