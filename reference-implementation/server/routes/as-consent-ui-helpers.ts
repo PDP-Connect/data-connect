@@ -150,7 +150,11 @@ export interface HostedMcpPickerRow {
   streams: Array<{
     name: string;
     description: string | null;
-    schema?: { properties?: Record<string, { description?: string | null } | unknown> | null; required?: readonly string[] | null } | null;
+    // A JSON Schema property is an arbitrary value, so it stays `unknown` here
+    // (matching the manifest type it is copied from); the picker guards the one
+    // field it reads off it at runtime. Spelling this `{ description?: ... } |
+    // unknown` would collapse to plain `unknown` anyway and only look narrower.
+    schema?: { properties?: Record<string, unknown> | null; required?: readonly string[] | null } | null;
     /** What this stream's declaration permits the picker to offer. */
     scope: StreamScopeCapability;
   }>;
@@ -884,8 +888,11 @@ export async function buildHostedMcpConsentChallengeModel(
           .sort()
           .map((name) => {
             const property = stream.schema?.properties?.[name];
+            // `in` (not a bare property read) is what narrows an `unknown`
+            // schema property to something carrying `description`; the
+            // `typeof === "string"` check still decides whether it is usable.
             const description =
-              property && typeof property === "object" && typeof property.description === "string"
+              property && typeof property === "object" && "description" in property && typeof property.description === "string"
                 ? property.description.trim()
                 : "";
             return {
@@ -942,7 +949,10 @@ async function buildConnectorPickerRows(
   const streamSummaries = manifestStreams.map((stream) => ({
     description: typeof stream.description === "string" ? stream.description : null,
     name: stream.name,
-    schema: stream.schema,
+    // Omit the key entirely when the declaration has no schema, rather than
+    // setting it to `undefined`: `exactOptionalPropertyTypes` treats a
+    // present-but-undefined optional property as a distinct, rejected shape.
+    ...(stream.schema ? { schema: stream.schema } : {}),
     // Resolved here rather than at render time so the capability check happens
     // once per row, and so no surface can offer a control the declaration does
     // not support (which would 400 at issuance, after the owner chose).
