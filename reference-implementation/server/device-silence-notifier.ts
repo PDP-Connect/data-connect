@@ -167,7 +167,16 @@ async function stamp(
   reason: string | null
 ): Promise<void> {
   try {
-    await attentionStore.recordNotificationOutcomeById({ attentionId, outcome, reason });
+    // First write wins. The record is only updated while it is still open and
+    // carries no outcome, evaluated inside the UPDATE — so an owner decision
+    // taken while this send was in flight is preserved, and an outcome already
+    // recorded is not replaced by a later one.
+    await attentionStore.recordNotificationOutcomeById({
+      attentionId,
+      onlyIfUnresolvedAndUnrecorded: true,
+      outcome,
+      reason,
+    });
   } catch {
     // A failed stamp must not fail the sweep phase. The worst case is a repeat
     // push on a subsequent transition, which the open-record check still bounds.

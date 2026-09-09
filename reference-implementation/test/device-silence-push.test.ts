@@ -376,7 +376,11 @@ test("a resolved notice is not reopened, and its late push does not undo the own
 
     const stored = await attentionStore.getAttentionById(attentionId);
     assert.equal(stored?.lifecycle, "resolved", "the owner's decision stands");
-    assert.equal(stored?.notification_state, "sent", "and the delivery is recorded honestly");
+    // The outcome write is refused because the record is no longer open. The
+    // push did go out — that is the accepted late-notice residual — but the
+    // record carries no outcome, because writing one would mean touching a
+    // record the owner had closed.
+    assert.equal(stored?.notification_updated_at, null, "and no outcome is written onto a record the owner closed");
 
     // And the next tick does not select it again, so the lateness is bounded to
     // the one tick that had already chosen the row.
@@ -418,6 +422,78 @@ test("an outcome that was never recorded is retried on a later tick", async () =
     });
     assert.equal(pushes.length, 1, "the notice nobody recorded is delivered");
     assert.equal((await attentionStore.getAttentionById(attentionId))?.notification_state, "sent");
+  } finally {
+    closeDb();
+  }
+});
+
+test("a recorded outcome is not replaced by a later one", async () => {
+  // The outcome writer was a read-then-replace, so a second call overwrote the
+  // first: a `sent` record became `failed` on a later attempt. Under the guard
+  // the first write wins, because the record already carries an outcome.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const result = await createDeviceSilenceStage().run({ nowIso: new Date(NOW_MS).toISOString() });
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    await attentionStore.recordNotificationOutcomeById({
+      attentionId,
+      onlyIfUnresolvedAndUnrecorded: true,
+      outcome: "sent",
+      reason: null,
+    });
+    const second = await attentionStore.recordNotificationOutcomeById({
+      attentionId,
+      onlyIfUnresolvedAndUnrecorded: true,
+      outcome: "failed",
+      reason: "no_delivery",
+    });
+
+    assert.equal(second?.notification_state, "sent", "the refused write returns what is actually stored");
+    assert.equal(
+      (await attentionStore.getAttentionById(attentionId))?.notification_state,
+      "sent",
+      "and the recorded delivery is not downgraded by a later attempt"
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("an owner decision taken while a send is in flight is not overwritten by the outcome", async () => {
+  // The forced interleaving: the outcome writer reads the record, the owner
+  // resolves, then the write lands. A caller-side check cannot prevent this
+  // because the check and the write are two statements; the guard moves the
+  // comparison into the UPDATE.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const result = await createDeviceSilenceStage().run({ nowIso: new Date(NOW_MS).toISOString() });
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    await notifyDeviceSilenceOpened(result, {
+      config: CONFIG,
+      connectorDisplayName: () => "Claude Code",
+      now: () => new Date(NOW_MS),
+      ownerSubjectId: "owner_local",
+      sendEscalationPush: (async () => {
+        // The owner resolves while the push is in flight, before the notifier
+        // records its outcome.
+        await attentionStore.transitionAttention({ attentionId, to: "resolved" });
+        return { attempted: 1, sent: 1, unavailable: false };
+      }) as never,
+    });
+
+    const stored = await attentionStore.getAttentionById(attentionId);
+    assert.equal(stored?.lifecycle, "resolved", "the owner's decision stands");
+    assert.equal(
+      stored?.notification_updated_at,
+      null,
+      "and the outcome write is refused rather than landing on a record the owner closed"
+    );
   } finally {
     closeDb();
   }

@@ -122,6 +122,18 @@ interface TransitionInput {
 interface NotificationOutcomeInput {
   attentionId?: string | null;
   now?: string | null;
+  /**
+   * When true, the write only lands if the record is still `open` and carries
+   * no outcome yet, and the comparison happens inside the UPDATE rather than in
+   * a preceding read. Without it this is a read-then-replace: an owner decision
+   * taken between the read and the write is lost, and an outcome already
+   * recorded is overwritten by a later one.
+   *
+   * Opt-in because the other callers of this method record outcomes for runs
+   * whose lifecycle is not `open` and legitimately restate an outcome; only the
+   * silence notifier needs first-write-wins.
+   */
+  onlyIfUnresolvedAndUnrecorded?: boolean;
   outcome: string;
   reason?: string | null;
 }
@@ -552,6 +564,7 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       outcome,
       reason,
       now,
+      onlyIfUnresolvedAndUnrecorded,
     }: NotificationOutcomeInput): Promise<AttentionRecord | null> {
       const id = nonEmptyString(attentionId);
       if (!id) {
@@ -575,10 +588,33 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       // `updated_at` and `lifecycle` columns are intentionally left as-is so
       // an external notification outcome does not look like a lifecycle event
       // to projection consumers that read the column shape.
-      execDynamicSqlAcknowledged("UPDATE connector_attention_records SET record_json = ? WHERE attention_id = ?", [
-        JSON.stringify(next),
-        id,
-      ]);
+      //
+      // Under the guard the predicate is evaluated by the database as part of
+      // the write, not by the SELECT above. That is the whole point: the owner
+      // can resolve the notice between the read and the write, and a caller-side
+      // check would still overwrite the decision it never saw.
+      const guarded = Boolean(onlyIfUnresolvedAndUnrecorded);
+      const changed = execDynamicSqlAcknowledged(
+        guarded
+          ? `UPDATE connector_attention_records SET record_json = ?
+              WHERE attention_id = ?
+                AND lifecycle = 'open'
+                AND json_extract(record_json, '$.notification_updated_at') IS NULL`
+          : "UPDATE connector_attention_records SET record_json = ? WHERE attention_id = ?",
+        [JSON.stringify(next), id]
+      );
+      if (guarded && changed.changes !== 1) {
+        // Refused. Return what is stored so the caller sees the outcome that
+        // actually holds rather than the one it proposed.
+        // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
+        const stored = [
+          ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+            "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+            [id]
+          ),
+        ][0];
+        return stored ? (rowToRecord(stored) as AttentionRecord) : null;
+      }
       return next;
     },
 
@@ -877,6 +913,7 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       outcome,
       reason,
       now,
+      onlyIfUnresolvedAndUnrecorded,
     }: NotificationOutcomeInput): Promise<AttentionRecord | null> {
       const id = nonEmptyString(attentionId);
       if (!id) {
@@ -893,10 +930,25 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       }
       const record = rowToRecord(row) as AttentionRecord;
       const next = applyNotificationOutcomeToRecord(record, { now: updatedAt, outcome, reason });
-      await postgresQuery("UPDATE connector_attention_records SET record_json = $1::jsonb WHERE attention_id = $2", [
-        JSON.stringify(next),
-        id,
-      ]);
+      // See the SQLite twin: under the guard the predicate belongs to the write.
+      const guarded = Boolean(onlyIfUnresolvedAndUnrecorded);
+      const changed = await postgresQuery(
+        guarded
+          ? `UPDATE connector_attention_records SET record_json = $1::jsonb
+              WHERE attention_id = $2
+                AND lifecycle = 'open'
+                AND record_json ->> 'notification_updated_at' IS NULL`
+          : "UPDATE connector_attention_records SET record_json = $1::jsonb WHERE attention_id = $2",
+        [JSON.stringify(next), id]
+      );
+      if (guarded && changed.rowCount !== 1) {
+        const stored = await postgresQuery(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+          [id]
+        );
+        const storedRow = stored.rows[0] as AttentionLifecycleRow | undefined;
+        return storedRow ? (rowToRecord(storedRow) as AttentionRecord) : null;
+      }
       return next;
     },
 
