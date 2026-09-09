@@ -32,6 +32,11 @@ import { retireExpiredBrowserEnrollmentShellsForMaintenance } from "./ref-contro
 import { runSearchIndexDirtyReconcileRound } from "./search-index-reconcile.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import {
+  createDeviceSilenceStage,
+  type DeviceSilenceRoundResult,
+  type DeviceSilenceStage,
+} from "./stores/device-silence-stage.ts";
+import {
   type ConnectorMaintenanceCursorLease,
   type ConnectorMaintenanceCursorStore,
   createConnectorMaintenanceCursorStore,
@@ -41,8 +46,21 @@ import {
   type ResumableRunHistoryBackfillStage,
 } from "./stores/run-history-backfill-stage.ts";
 
+/**
+ * Periodic tick interval for the connector-maintenance sweep. Defined here, with
+ * the sweep it paces, so anything deriving a duration from the sweep's cadence
+ * has one place to read it rather than restating the number.
+ */
+export const CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS = 60_000;
+
 export interface ConnectorMaintenanceSweepOptions {
   readonly attentionExpireLimit?: number;
+  /**
+   * Injectable for tests; defaults to the real silence detector. One more
+   * independently best-effort branch, in the shape `runHistoryBackfillStage`
+   * already established.
+   */
+  readonly deviceSilenceStage?: DeviceSilenceStage;
   readonly evidenceSweepLeaseDurationMs?: number;
   readonly evidenceSweepMaxDurationMs?: number;
   readonly evidenceSweepPageSize?: number;
@@ -61,8 +79,15 @@ export interface ConnectorMaintenanceSweepOptions {
     readonly consecutiveNoProgressPasses: number;
     readonly eligibleBacklog: number;
   }) => void;
+  /**
+   * Fires with the silence records that crossed into open on this tick, and
+   * never with records that were already open. This is the edge a notifier may
+   * act on; the tick itself is level-triggered and firing on it would resend
+   * every minute for as long as the collector stayed quiet.
+   */
+  readonly onDeviceSilenceOpened?: (result: DeviceSilenceRoundResult) => void | Promise<void>;
   readonly onPhaseError?: (
-    phase: "attention" | "evidence" | "run_history_backfill" | "search_index_dirty" | "shells",
+    phase: "attention" | "device_silence" | "evidence" | "run_history_backfill" | "search_index_dirty" | "shells",
     err: unknown
   ) => void;
   /** Emits non-secret evidence after the TTL phase actually revoked shells. */
@@ -423,6 +448,12 @@ export function createResumableConnectorMaintenanceSweep(
  * starvation mode this closes and why alternation (not a shorter
  * sub-deadline) is what structurally closes it (2026-08-12).
  */
+let defaultDeviceSilenceStage: DeviceSilenceStage | null = null;
+function getDefaultDeviceSilenceStage(): DeviceSilenceStage {
+  defaultDeviceSilenceStage ??= createDeviceSilenceStage();
+  return defaultDeviceSilenceStage;
+}
+
 let defaultRunHistoryBackfillStage: ResumableRunHistoryBackfillStage | null = null;
 function getDefaultRunHistoryBackfillStage(): ResumableRunHistoryBackfillStage {
   defaultRunHistoryBackfillStage ??= createResumableRunHistoryBackfillStage();
@@ -445,6 +476,20 @@ export async function runConnectorMaintenanceSweep(options: ConnectorMaintenance
     Promise.resolve(getDefaultConnectorAttentionStore().expireAllDueAttention({ now: nowIso() })).catch((err) => {
       onPhaseError?.("attention", err);
     }),
+    (options.deviceSilenceStage ?? getDefaultDeviceSilenceStage())
+      .run({ nowIso: nowIso() })
+      .then(async (result) => {
+        // Only a non-empty transition list is worth reporting. Calling the
+        // callback on every tick with an empty list would push the "did
+        // anything change" decision onto each consumer, and the whole point of
+        // computing the edge here is that no consumer has to.
+        if (result.opened.length > 0) {
+          await options.onDeviceSilenceOpened?.(result);
+        }
+      })
+      .catch((err) => {
+        onPhaseError?.("device_silence", err);
+      }),
     options
       .runEvidenceSweep({
         maxDurationMs: options.evidenceSweepMaxDurationMs ?? 2000,

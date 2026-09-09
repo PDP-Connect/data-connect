@@ -88,6 +88,15 @@ interface UpsertArgs {
 interface UpsertInput {
   connectorId?: string | null;
   connectorInstanceId?: string | null;
+  /**
+   * Compare-and-set guard. When set, an UPDATE of an existing row only happens
+   * if that row's lifecycle is still one of these; otherwise the write is a
+   * no-op and the stored record is returned unchanged. A caller that reads,
+   * decides, then writes cannot otherwise avoid clobbering a transition that
+   * landed in between — checking before writing only narrows the window, it does
+   * not close it, because the check and the write are two statements.
+   */
+  onlyIfLifecycleIn?: readonly string[];
   record: AttentionRecord;
 }
 
@@ -113,6 +122,18 @@ interface TransitionInput {
 interface NotificationOutcomeInput {
   attentionId?: string | null;
   now?: string | null;
+  /**
+   * When true, the write only lands if the record is still `open` and carries
+   * no outcome yet, and the comparison happens inside the UPDATE rather than in
+   * a preceding read. Without it this is a read-then-replace: an owner decision
+   * taken between the read and the write is lost, and an outcome already
+   * recorded is overwritten by a later one.
+   *
+   * Opt-in because the other callers of this method record outcomes for runs
+   * whose lifecycle is not `open` and legitimately restate an outcome; only the
+   * silence notifier needs first-write-wins.
+   */
+  onlyIfUnresolvedAndUnrecorded?: boolean;
   outcome: string;
   reason?: string | null;
 }
@@ -140,6 +161,13 @@ export interface ConnectorAttentionStore {
    */
   expireAllDueAttention: (input?: ExpireAllDueInput) => Promise<AttentionRecord[]>;
   expireDueAttentionForConnection: (input?: ExpireDueInput) => Promise<AttentionRecord[]>;
+  /**
+   * Exact single-record read, independent of lifecycle. The list readers above
+   * all filter to open lifecycles, so they cannot distinguish a record that
+   * never existed from one the owner resolved — a caller that must not
+   * re-open a resolved record needs to see the resolved row itself.
+   */
+  getAttentionById: (attentionId: string) => Promise<AttentionRecord | null>;
   /** Page-scoped durable evidence keyed by exact connector_instance_id. */
   listOpenAttentionByConnectorInstanceIds: (
     connectorInstanceIds: readonly (string | null | undefined)[],
@@ -432,6 +460,26 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       }
       return expired;
     },
+
+    // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
+    async getAttentionById(attentionId: string): Promise<AttentionRecord | null> {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("getAttentionById: attentionId is required");
+      }
+      // REVIEWED-DYNAMIC: single-row lookup for the store-owned table.
+      // Deliberately unfiltered by lifecycle: the point of this read is to see
+      // terminal records, which every list reader here hides.
+      // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
+      const row = [
+        ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+          [id]
+        ),
+      ][0];
+      return row ? (rowToRecord(row) as AttentionRecord) : null;
+    },
+
     // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
     async listOpenAttentionByConnectorInstanceIds(
       connectorInstanceIds,
@@ -516,6 +564,7 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       outcome,
       reason,
       now,
+      onlyIfUnresolvedAndUnrecorded,
     }: NotificationOutcomeInput): Promise<AttentionRecord | null> {
       const id = nonEmptyString(attentionId);
       if (!id) {
@@ -539,10 +588,33 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       // `updated_at` and `lifecycle` columns are intentionally left as-is so
       // an external notification outcome does not look like a lifecycle event
       // to projection consumers that read the column shape.
-      execDynamicSqlAcknowledged("UPDATE connector_attention_records SET record_json = ? WHERE attention_id = ?", [
-        JSON.stringify(next),
-        id,
-      ]);
+      //
+      // Under the guard the predicate is evaluated by the database as part of
+      // the write, not by the SELECT above. That is the whole point: the owner
+      // can resolve the notice between the read and the write, and a caller-side
+      // check would still overwrite the decision it never saw.
+      const guarded = Boolean(onlyIfUnresolvedAndUnrecorded);
+      const changed = execDynamicSqlAcknowledged(
+        guarded
+          ? `UPDATE connector_attention_records SET record_json = ?
+              WHERE attention_id = ?
+                AND lifecycle = 'open'
+                AND json_extract(record_json, '$.notification_updated_at') IS NULL`
+          : "UPDATE connector_attention_records SET record_json = ? WHERE attention_id = ?",
+        [JSON.stringify(next), id]
+      );
+      if (guarded && changed.changes !== 1) {
+        // Refused. Return what is stored so the caller sees the outcome that
+        // actually holds rather than the one it proposed.
+        // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
+        const stored = [
+          ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+            "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+            [id]
+          ),
+        ][0];
+        return stored ? (rowToRecord(stored) as AttentionRecord) : null;
+      }
       return next;
     },
 
@@ -578,13 +650,26 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       return next;
     },
     // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
-    async upsertAttention({ record, connectorId, connectorInstanceId }: UpsertInput): Promise<AttentionRecord> {
+    async upsertAttention({
+      record,
+      connectorId,
+      connectorInstanceId,
+      onlyIfLifecycleIn,
+    }: UpsertInput): Promise<AttentionRecord> {
       const id = nonEmptyString(connectorId);
       if (!id) {
         throw new Error("upsertAttention: connectorId is required");
       }
       const instance = nonEmptyString(connectorInstanceId) || defaultConnectorInstanceId(id);
       const args = encodeUpsertArgs(record, id, instance);
+      // Compare-and-set on the stored lifecycle, evaluated by the database as
+      // part of the same statement that writes. A guard in the caller cannot do
+      // this: between its read and its write, an owner request can land, and the
+      // write would then overwrite a decision the caller never saw.
+      const guard = onlyIfLifecycleIn?.length
+        ? ` WHERE connector_attention_records.lifecycle IN (${onlyIfLifecycleIn.map(() => "?").join(", ")})`
+        : "";
+      const guardParams = onlyIfLifecycleIn?.length ? [...onlyIfLifecycleIn] : [];
       // REVIEWED-DYNAMIC: connector_attention_records is owned by this store
       // and is not represented in the static query registry yet.
       execDynamicSqlAcknowledged(
@@ -603,7 +688,7 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
            sensitivity = excluded.sensitivity,
            expires_at = excluded.expires_at,
            record_json = excluded.record_json,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at${guard}`,
         [
           args.attentionId,
           args.dedupeKey,
@@ -618,8 +703,20 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
           args.recordJson,
           args.createdAt,
           args.updatedAt,
+          ...guardParams,
         ]
       );
+      // A refused write leaves the stored row untouched; return what is actually
+      // stored so a caller cannot mistake its own candidate for the outcome.
+      if (guard) {
+        const stored = [
+          ...iterateDynamicSqlAcknowledged<AttentionLifecycleRow>(
+            "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = ? LIMIT 1",
+            [args.attentionId]
+          ),
+        ][0];
+        return stored ? (rowToRecord(stored) as AttentionRecord) : record;
+      }
       return record;
     },
   };
@@ -737,6 +834,21 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       }
       return expired;
     },
+
+    async getAttentionById(attentionId: string): Promise<AttentionRecord | null> {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("getAttentionById: attentionId is required");
+      }
+      // Deliberately unfiltered by lifecycle; see the SQLite twin's comment.
+      const lookup = await postgresQuery(
+        "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+        [id]
+      );
+      const row = lookup.rows[0] as AttentionLifecycleRow | undefined;
+      return row ? (rowToRecord(row) as AttentionRecord) : null;
+    },
+
     async listOpenAttentionByConnectorInstanceIds(
       connectorInstanceIds,
       { limit, now }: { limit?: number | null; now?: string | null } = {}
@@ -801,6 +913,7 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       outcome,
       reason,
       now,
+      onlyIfUnresolvedAndUnrecorded,
     }: NotificationOutcomeInput): Promise<AttentionRecord | null> {
       const id = nonEmptyString(attentionId);
       if (!id) {
@@ -817,10 +930,25 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       }
       const record = rowToRecord(row) as AttentionRecord;
       const next = applyNotificationOutcomeToRecord(record, { now: updatedAt, outcome, reason });
-      await postgresQuery("UPDATE connector_attention_records SET record_json = $1::jsonb WHERE attention_id = $2", [
-        JSON.stringify(next),
-        id,
-      ]);
+      // See the SQLite twin: under the guard the predicate belongs to the write.
+      const guarded = Boolean(onlyIfUnresolvedAndUnrecorded);
+      const changed = await postgresQuery(
+        guarded
+          ? `UPDATE connector_attention_records SET record_json = $1::jsonb
+              WHERE attention_id = $2
+                AND lifecycle = 'open'
+                AND record_json ->> 'notification_updated_at' IS NULL`
+          : "UPDATE connector_attention_records SET record_json = $1::jsonb WHERE attention_id = $2",
+        [JSON.stringify(next), id]
+      );
+      if (guarded && changed.rowCount !== 1) {
+        const stored = await postgresQuery(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+          [id]
+        );
+        const storedRow = stored.rows[0] as AttentionLifecycleRow | undefined;
+        return storedRow ? (rowToRecord(storedRow) as AttentionRecord) : null;
+      }
       return next;
     },
 
@@ -850,13 +978,26 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
       );
       return next;
     },
-    async upsertAttention({ record, connectorId, connectorInstanceId }: UpsertInput): Promise<AttentionRecord> {
+    async upsertAttention({
+      record,
+      connectorId,
+      connectorInstanceId,
+      onlyIfLifecycleIn,
+    }: UpsertInput): Promise<AttentionRecord> {
       const id = nonEmptyString(connectorId);
       if (!id) {
         throw new Error("upsertAttention: connectorId is required");
       }
       const instance = nonEmptyString(connectorInstanceId) || defaultConnectorInstanceId(id);
       const args = encodeUpsertArgs(record, id, instance);
+      // See the SQLite twin: the guard belongs in the writing statement, because
+      // a caller-side check and the write are two statements with a gap.
+      const guard = onlyIfLifecycleIn?.length
+        ? ` WHERE connector_attention_records.lifecycle IN (${onlyIfLifecycleIn
+            .map((_unused, index) => `$${14 + index}`)
+            .join(", ")})`
+        : "";
+      const guardParams = onlyIfLifecycleIn?.length ? [...onlyIfLifecycleIn] : [];
       await postgresQuery(
         `INSERT INTO connector_attention_records(
            attention_id, dedupe_key, connector_id, connector_instance_id, connection_id,
@@ -873,7 +1014,7 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
            sensitivity = EXCLUDED.sensitivity,
            expires_at = EXCLUDED.expires_at,
            record_json = EXCLUDED.record_json,
-           updated_at = EXCLUDED.updated_at`,
+           updated_at = EXCLUDED.updated_at${guard}`,
         [
           args.attentionId,
           args.dedupeKey,
@@ -888,8 +1029,17 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
           args.recordJson,
           args.createdAt,
           args.updatedAt,
+          ...guardParams,
         ]
       );
+      if (guard) {
+        const stored = await postgresQuery(
+          "SELECT record_json, lifecycle FROM connector_attention_records WHERE attention_id = $1",
+          [args.attentionId]
+        );
+        const storedRow = stored.rows[0] as AttentionLifecycleRow | undefined;
+        return storedRow ? (rowToRecord(storedRow) as AttentionRecord) : record;
+      }
       return record;
     },
   };

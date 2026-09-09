@@ -76,6 +76,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/device-exporter-postgres-proof.test.ts",
   "test/device-exporter-store-by-connector-scoped-ingest-outcome-summary.test.ts",
   "test/device-exporter-store.test.ts",
+  "test/device-silence-postgres.test.ts",
   "test/device-ingest-attempt-context-store.test.ts",
   "test/device-ingest-conformance.test.ts",
   "test/error-code-query-not-found.test.ts",

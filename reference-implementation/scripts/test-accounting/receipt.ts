@@ -68,6 +68,13 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "PostgreSQL: zero spine_events statements for a connection with no run at all",
   "PostgreSQL: zero spine_events statements for a terminal run's GET",
   "PostgreSQL: zero spine_events statements for an in-progress run's GET (collection_rate merged via run.progress_reported)",
+  // device-silence PostgreSQL coverage (PR #74): the .sql artifacts are read
+  // only by the SQLite path, so these exercise the hand-written PostgreSQL copy
+  // of the silence query directly. All three are added together because the
+  // accounting parser aborts on the FIRST unexplained skip in a run.
+  "Postgres: an undelivered notice stays retryable but an owner decision does not",
+  "Postgres: never-reported collectors are ordered ahead of retries",
+  "Postgres: the silence query reports an unreported collector and then stops",
   "Postgres ClientEventSubscriptionStore round-trips a full lifecycle",
   "Postgres connection revoke revokes its bound credential and stamps the timestamp",
   "Postgres connection revoke leaves a same-connector sibling credential active",

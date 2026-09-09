@@ -147,7 +147,11 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey, isInternalConnectorId, legacyLocalAliasMap } from "./connector-key.ts";
-import { createResumableConnectorMaintenanceSweep } from "./connector-maintenance-sweep.ts";
+import {
+  CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS,
+  createResumableConnectorMaintenanceSweep,
+} from "./connector-maintenance-sweep.ts";
+import { notifyDeviceSilenceOpened } from "./device-silence-notifier.ts";
 import {
   getConnectorSummaryEvidence,
   markConnectorSummaryEvidenceDirty,
@@ -974,7 +978,7 @@ const STARTUP_SUMMARY_EVIDENCE_MAX_RESUME_ROUNDS = 20;
 // short relative to human-observed dashboard refresh cadence without
 // running meaningfully more often than the durable state it sweeps
 // actually changes.
-const CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS = 60_000;
+// Canonical definition lives with the sweep it paces; imported above.
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_MAX_DURATION_MS = 2000;
 const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE = 25;
 // Run-history backfill (terminal-read-architecture-fable-0730.md §9):
@@ -8225,6 +8229,22 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorMaintenanceSweep = createResumableConnectorMaintenanceSweep({
     evidenceSweepMaxDurationMs: CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_MAX_DURATION_MS,
     evidenceSweepPageSize: CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE,
+    // Fires only for silence records that crossed into open on this tick,
+    // never for the tick itself. The sweep runs every 60 seconds and re-observes
+    // the same silent collector every time; pushing on the tick would be 1,440
+    // notifications a day per device for as long as the collector stayed down.
+    onDeviceSilenceOpened: async (result) => {
+      await notifyDeviceSilenceOpened(result, {
+        config: webPushConfig,
+        connectorDisplayName: async (connectorId) => {
+          const summary = await getConnectorSummaryForRoute(connectorId, controller);
+          return summary?.display_name || summary?.connector_display_name || connectorId;
+        },
+        log: logger as never,
+        ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
+        store: webPushStore,
+      });
+    },
     onNoProgressAlert: ({ consecutiveNoProgressPasses, eligibleBacklog }) => {
       logger.warn?.(
         { consecutiveNoProgressPasses, eligibleBacklog },

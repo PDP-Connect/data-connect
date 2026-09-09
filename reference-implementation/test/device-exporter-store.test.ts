@@ -90,11 +90,26 @@ async function runConformance(
     createdAt: NOW,
     enrollmentCodeId: "enroll_1",
     expiresAt: "2026-05-01T12:00:00.000Z",
+    localBindingId: "conformance-laptop",
     ownerSubjectId: "owner_1",
   });
 
   assert.equal(await driver.call("findEnrollmentByCodeHash", "plaintext-enrollment-code"), null);
   assert.equal(asRecord(await driver.call("findEnrollmentByCodeHash", "sha256:enrollment-code")).status, "pending");
+
+  // An enrollment code carries no display name unless the owner supplied one,
+  // and the enroll route names the device from the binding instead. Devices are
+  // NOT NULL on display_name, so a projection that drops `localBindingId` turns
+  // every default enrollment into a 500 at the point a real collector first
+  // talks to the server — which is what happened, and which no store-level test
+  // caught because none of them read this field back.
+  const enrollment = asRecord(await driver.call("findEnrollmentByCodeHash", "sha256:enrollment-code"));
+  assert.equal(enrollment.displayName, null, "no display name was supplied, as in a default enrollment");
+  assert.equal(
+    enrollment.localBindingId,
+    "conformance-laptop",
+    "the binding survives the projection, so the enroll route has something to name the device with"
+  );
 
   await driver.call("createDevice", {
     createdAt: NOW,

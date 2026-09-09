@@ -347,6 +347,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly deviceExportersInsertProcessingBatch: MutationQuery;
   readonly deviceExportersListBatchOutcomes: ReadManyQuery;
   readonly deviceExportersListDevices: SmallEnumerationQuery;
+  readonly deviceExportersListSilentSourceInstances: SmallEnumerationQuery;
   readonly deviceExportersListSourceInstanceHeartbeatsByConnector: SmallEnumerationQuery;
   readonly deviceExportersListSourceInstances: SmallEnumerationQuery;
   readonly deviceExportersMarkCredentialUsed: MutationQuery;

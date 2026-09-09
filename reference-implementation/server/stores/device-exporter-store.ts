@@ -171,6 +171,10 @@ function mapEnrollment(row: Row | null | undefined) {
     displayName: row.display_name,
     enrollmentCodeId: row.enrollment_code_id,
     expiresAt: row.expires_at,
+    // Load-bearing at enrollment: `display_name` on an enrollment code is null
+    // unless the owner supplied one, and the enroll route falls back to this to
+    // name the device. Dropping it makes that fallback `undefined` and the
+    // device insert fails its NOT NULL constraint.
     localBindingId: row.local_binding_id,
     ownerSubjectId: row.owner_subject_id,
     revokedAt: row.revoked_at,
@@ -223,6 +227,56 @@ function mapSourceInstanceHeartbeatRow(row: Row | null | undefined) {
     sourceStatus: row.source_status,
     updatedAt: row.updated_at ?? null,
   };
+}
+
+/**
+ * Projection for the fleet-wide silence scan. Narrower than
+ * `mapSourceInstanceHeartbeatRow` on purpose: the sweep only needs enough to
+ * identify the instance, address an attention record to it, and name the
+ * connector in owner-facing copy. It deliberately omits `last_error_json` and
+ * the outbox diagnostics blob, because the silence class this feeds on has
+ * neither — carrying them would invite a reader to believe an empty error field
+ * means the collector is fine.
+ */
+function mapSilentSourceInstanceRow(row: Row | null | undefined) {
+  if (!row) {
+    return null;
+  }
+  return {
+    connectorId: row.connector_id,
+    connectorInstanceId: row.connector_instance_id ?? null,
+    deviceId: row.device_id,
+    lastHeartbeatAt: row.last_heartbeat_at ?? null,
+    lastHeartbeatStatus: row.last_heartbeat_status ?? null,
+    recordsPending: isNullish(row.records_pending) ? null : Number(row.records_pending),
+    sourceInstanceId: row.source_instance_id,
+  };
+}
+
+/** One device source instance whose last check-in predates the silence cutoff. */
+export type SilentSourceInstance = NonNullable<ReturnType<typeof mapSilentSourceInstanceRow>>;
+
+export interface SilentSourceInstanceQuery {
+  /** Rows to return at most. Clamped to the artifact's declared @max_rows. */
+  readonly limit?: number | null;
+  /** ISO instant; instances whose last heartbeat is at or before it are silent. */
+  readonly silentBefore: string;
+}
+
+/**
+ * Ceiling for one silence batch, equal to the `@max_rows` the query artifact
+ * declares. Clamping here rather than trusting the caller keeps the SQLite
+ * reader's overflow assertion unreachable: that reader throws when a result
+ * exceeds `@max_rows`, and throwing is the wrong failure for the fleet-wide
+ * outage this query is meant to survive.
+ */
+const SILENT_SOURCE_INSTANCE_MAX_ROWS = 2048;
+
+function clampSilentLimit(limit: number | null | undefined): number {
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+    return SILENT_SOURCE_INSTANCE_MAX_ROWS;
+  }
+  return Math.min(Math.floor(limit), SILENT_SOURCE_INSTANCE_MAX_ROWS);
 }
 
 const HEARTBEAT_STATUS_VALUES = new Set(["starting", "healthy", "retrying", "blocked", "stopped"]);
@@ -651,6 +705,15 @@ export function createSqliteDeviceExporterStore() {
       return allowUnboundedReadAcknowledged<Row>(referenceQueries.deviceExportersListDevices, [ownerSubjectId]).map(
         mapDevice
       );
+    },
+
+    listSilentSourceInstances({ silentBefore, limit }: SilentSourceInstanceQuery): SilentSourceInstance[] {
+      return allowUnboundedReadAcknowledged<Row>(referenceQueries.deviceExportersListSilentSourceInstances, [
+        silentBefore,
+        clampSilentLimit(limit),
+      ])
+        .map(mapSilentSourceInstanceRow)
+        .filter((row): row is SilentSourceInstance => row !== null);
     },
 
     listSourceInstanceHeartbeatsByConnector(connectorId: string, options?: { connectorInstanceId?: string | null }) {
@@ -1132,6 +1195,61 @@ export function createPostgresDeviceExporterStore() {
         [ownerSubjectId]
       );
       return result.rows.map(mapDevice);
+    },
+
+    async listSilentSourceInstances({
+      silentBefore,
+      limit,
+    }: SilentSourceInstanceQuery): Promise<SilentSourceInstance[]> {
+      // Textual twin of queries/device-exporters/list-silent-source-instances.sql;
+      // the .sql artifacts are SQLite-only, so the two backends carry the same
+      // statement in two places and must be edited together — including the
+      // LIMIT, which is what keeps a fleet-wide outage a bounded batch.
+      const result = await postgresQuery(
+        `SELECT dsi.source_instance_id,
+                dsi.device_id,
+                dsi.connector_id,
+                dsi.connector_instance_id,
+                dsi.last_heartbeat_at,
+                dsi.last_heartbeat_status,
+                dsi.records_pending
+           FROM device_source_instances dsi
+           JOIN device_exporters de ON de.device_id = dsi.device_id
+          WHERE dsi.last_heartbeat_at IS NOT NULL
+            AND dsi.last_heartbeat_at <= $1
+            AND dsi.status = 'active'
+            AND dsi.revoked_at IS NULL
+            AND de.status = 'active'
+            AND de.revoked_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM connector_attention_records car
+              WHERE car.attention_id =
+                'att_device_silence_' || dsi.source_instance_id || '_' ||
+                REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
+                AND (
+                  car.record_json ->> 'notification_updated_at' IS NOT NULL
+                  OR car.lifecycle <> 'open'
+                )
+            )
+          ORDER BY (
+              SELECT COUNT(*) FROM connector_attention_records car
+              WHERE car.attention_id =
+                'att_device_silence_' || dsi.source_instance_id || '_' ||
+                REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
+            ) ASC,
+            (
+              SELECT car.updated_at FROM connector_attention_records car
+              WHERE car.attention_id =
+                'att_device_silence_' || dsi.source_instance_id || '_' ||
+                REPLACE(REPLACE(REPLACE(dsi.last_heartbeat_at, '-', ''), ':', ''), '.', '')
+            ) ASC,
+            dsi.last_heartbeat_at ASC, dsi.device_id ASC, dsi.source_instance_id ASC
+          LIMIT $2`,
+        [silentBefore, clampSilentLimit(limit)]
+      );
+      return result.rows
+        .map(mapSilentSourceInstanceRow)
+        .filter((row): row is SilentSourceInstance => row !== null);
     },
 
     async listSourceInstanceHeartbeatsByConnector(

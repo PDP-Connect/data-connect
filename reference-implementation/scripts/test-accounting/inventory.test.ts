@@ -1248,3 +1248,23 @@ test("a suite-scoped authority run does not fail closed on an unrelated suite's 
     INCLUDE_LIST_MATCHES_NO_TRACKED_FILE_PATTERN
   );
 });
+
+// Aggregate gate regression (2026-09-09, PR #74 device-silence PostgreSQL
+// coverage): test/device-silence-postgres.test.ts added three PostgreSQL tests
+// using the bare-boolean `skip: !POSTGRES_URL` shape, and a hosted runner with
+// no PostgreSQL rejected the first one encountered as an unexplained skip
+// because none of the three exact names were in
+// POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS. As with the earlier instances of this
+// same regression, all three must be present together: the accounting parser
+// aborts on the FIRST unexplained skip per run, so a partial fix fails serially.
+test("keeps every device-silence PostgreSQL skip title in the exact receipt mapping", () => {
+  const names = [
+    "Postgres: an undelivered notice stays retryable but an owner decision does not",
+    "Postgres: never-reported collectors are ordered ahead of retries",
+    "Postgres: the silence query reports an unreported collector and then stops",
+  ];
+  assert.deepEqual(
+    names.filter((name) => POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name)),
+    names
+  );
+});
