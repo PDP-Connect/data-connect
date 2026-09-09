@@ -474,17 +474,27 @@ test("an owner decision taken while a send is in flight is not overwritten by th
     const result = await createDeviceSilenceStage().run({ nowIso: new Date(NOW_MS).toISOString() });
     const attentionId = result.opened[0]?.attentionId ?? "";
 
+    // Force the gap the guard exists to close: the owner's transition has to
+    // land AFTER the outcome writer has begun, not merely before it is called.
+    // Resolving inside the sender would complete before the writer's own read,
+    // which proves the guard works but not against the interleaving it names.
+    // Wrapping the store lets the transition run between the writer being
+    // invoked and the write being attempted.
+    const racingStore = {
+      ...attentionStore,
+      recordNotificationOutcomeById: async (input: Parameters<typeof attentionStore.recordNotificationOutcomeById>[0]) => {
+        await attentionStore.transitionAttention({ attentionId, to: "resolved" });
+        return await attentionStore.recordNotificationOutcomeById(input);
+      },
+    };
+
     await notifyDeviceSilenceOpened(result, {
+      attentionStore: racingStore as never,
       config: CONFIG,
       connectorDisplayName: () => "Claude Code",
       now: () => new Date(NOW_MS),
       ownerSubjectId: "owner_local",
-      sendEscalationPush: (async () => {
-        // The owner resolves while the push is in flight, before the notifier
-        // records its outcome.
-        await attentionStore.transitionAttention({ attentionId, to: "resolved" });
-        return { attempted: 1, sent: 1, unavailable: false };
-      }) as never,
+      sendEscalationPush: (() => Promise.resolve({ attempted: 1, sent: 1, unavailable: false })) as never,
     });
 
     const stored = await attentionStore.getAttentionById(attentionId);

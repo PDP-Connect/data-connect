@@ -11,21 +11,12 @@
  * trigger. The silence stage reports separately which attention records crossed
  * into open, and only that transition reaches this module.
  *
- * A transition alone is not enough in either direction, so the record's
- * `notification_state` field is both written and read here.
- *
- * Read, because the stage reports an open record with no recorded delivery as
- * an edge. That is deliberate: it is how a crash between opening the record and
- * sending the push is recovered, since without it that outage would be reported
- * to nobody, forever. But it means the same edge can be offered more than once,
- * so this checks the durable field immediately before dispatch and skips any
- * record already marked delivered.
- *
- * Written, because a claim that is not recorded is not a claim. The stage does
- * not carry the notification axis forward — it builds a fresh record each tick —
- * so the field would be reset on every re-write if the stage ever saw the row
- * again. It does not: the query excludes any episode with a recorded outcome
- * before the stage reaches it, which is what keeps the two consistent.
+ * Nothing is read before dispatch. The query has already excluded every episode
+ * with a recorded outcome and every one the owner has acted on, so this module
+ * sends for what it is handed and then records the result. A record the owner
+ * resolves after that selection still gets its push — the accepted late-notice
+ * residual — and the outcome write is conditional, so it cannot land on a record
+ * the owner closed or replace an outcome already recorded.
  *
  * Both halves have to be durable. The scheduler's existing dedupe lives in
  * in-memory sets that are lost on every deploy, which for a condition that can
