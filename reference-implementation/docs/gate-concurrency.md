@@ -1,65 +1,96 @@
-# Gate concurrency: measured safe ceiling
+# Gate concurrency: policy, evidence, and use
 
-## The finding
+## Policy
 
-`scripts/run-tests.ts` caps file concurrency at **2**:
+`scripts/run-tests.ts` caps file concurrency at **2** by default, clamped to the
+available CPU parallelism and the number of selected test files:
 
 ```ts
 const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
 ```
 
-On a 24-core host that is the difference between a ~20-minute gate and an
-~8-minute one. `PDPP_TEST_CONCURRENCY` already overrides it — no code change is
-required to go faster.
+`PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces that
+default. A positive override is **not** clamped to the CPU count or the selected
+file count.
 
-## Measured, on 24 cores
+## What the cap does and does not protect
 
-| Concurrency | Elapsed | Exit | Failures |
-|---|---:|---:|---:|
-| 2 (default) | ~1200s | 0 | 0 |
-| 6 | **465s** | **0** | **0** |
-| 12 | 399s | 1 | 4 |
+Each test file runs in its own child process, so files do not share a runner
+process. Process isolation alone does not bound resource use: files still open
+SQLite databases and temporary directories on the same host, and several tests
+assert real serialization ordering that heavy parallelism can break.
 
-995 files, 9,935 passing assertions at concurrency 6 — identical verdict to the
-default, in 39% of the wall clock.
+The PostgreSQL path has a stronger reason to stay low. Its backup/restore oracle
+shares the restore database named by `PDPP_TEST_POSTGRES_RESTORE_URL`, so
+otherwise-independent file workers can contend for the same restore resource.
+Raising concurrency for PostgreSQL needs its own restore-aware measurement on a
+PostgreSQL host; a memory-profile result is not authority for it.
 
-## Why 12 fails, and why the cap is not arbitrary
+## Archived memory-default measurements
 
-The four failures at 12 are all timing/lock-sensitive:
+Two memory-default runs of the same tree and selection, one at cap 2 and one at
+cap 8, are archived with this document:
 
-- `SQLite connector-wide bulk deletion serializes the actual same-instance writer, while a sibling instance overlaps`
-- `SQLite direct ingest queued before bulk deletion deterministically leaves the bulk-delete final state`
-- `SQLite lexical manifest backfill waits on its actual instance but does not block a sibling writer`
-- `a WhatsApp .txt upload well past the old 1 GiB cap streams to disk and validates successfully`
+- `receipts/gate-concurrency-20260903.tar.gz` — the raw receipts and
+  transcripts, four members, byte-for-byte as recorded
+- `receipts/gate-concurrency-20260903.summary.json` — a readable pairing of the
+  two runs
 
-All four pass in isolation (26 tests, 0 failures), so these are CONTENTION
-ARTIFACTS, not code defects. Three assert real serialization ordering against
-SQLite writers; the fourth streams a >1 GiB file. Under enough parallel load
-they lose their timing assumptions.
-
-That is worth stating plainly: a faster gate that reports failures which are
-not real is worse than a slow one, because it teaches the reader to discount
-red. **6 is the measured ceiling at which the verdict stays trustworthy on this
-host.** It is a host-specific number, not a universal one — re-measure on
-different hardware rather than porting the constant.
-
-## Recommendation
-
-Do NOT change `defaultConcurrency`. The cap of 2 is a safe default for unknown
-hardware, and CI may well be a 2-core runner where raising it would only cause
-contention.
-
-Set it per-invocation where the host is known:
+Read a member without unpacking the archive:
 
 ```sh
-PDPP_TEST_CONCURRENCY=6 pnpm --dir reference-implementation test
+tar -xzOf docs/receipts/gate-concurrency-20260903.tar.gz \
+  gate-concurrency-memory-cap-8.receipt.json
 ```
 
-## Sharding beyond this
+Replay the archived pair, which re-derives each receipt's counts, failure names
+and selection digests from its own archived raw output:
 
-Per-package parallelism (RI / connectors / console as concurrent invocations)
-is orthogonal to this and stacks with it: those suites share no SQLite files or
-temp directories, so they do not contend the way intra-RI files do. RI is by
-far the longest pole, so raising ITS concurrency is where the wall-clock win
-actually is — a separate console/connectors invocation saves little if RI still
-takes 8 minutes alone.
+```sh
+node --test --experimental-strip-types scripts/evidence/gate-concurrency-receipts.test.ts
+```
+
+## What the receipts establish
+
+Three different things are worth keeping separate:
+
+- **Recorded provenance.** Git head, Node version, profile and source-tree
+  digest are values the measuring process wrote down. Nothing here authenticates
+  the host or the toolchain; matching digests and paired metadata do not make
+  recorded provenance independently verified.
+- **Digest binding.** Each receipt's digests bind its transcript, selected-file
+  list and selection manifest. This shows the bytes were not edited after
+  recording.
+- **Re-derived outcomes.** The counts and failure identities are recomputed from
+  the raw structured output the transcript carries, so a forged count or a
+  renamed failure is rejected even when every digest still matches.
+
+`counts.completed_files` is a legacy field derived from the exit code, not an
+observed completion count. It is 0 on both archived runs because both exited
+non-zero. A real per-file completion claim needs raw file-outcome events, which
+this schema does not carry.
+
+## What the pair observed
+
+On the archived Node 22.23.1 runs, both caps selected 1,033 files and produced
+6,961 assertions: 6,335 passed, 396 failed and 230 skipped, with the same 396
+failure identities and exit code 1 in both runs. The cap-2 receipt records
+352.198 seconds; the cap-8 receipt records 141.066 seconds.
+
+This is **failure-set equality for this pair**, on one host, with both runs
+failing. Two runs that fail identically say nothing about whether either cap is
+safe, and none of it is a green-suite result. The failures are retained as
+evidence rather than hidden.
+
+## Operational use
+
+Use the default unless a measurement for the same profile and host justifies an
+override. `8` below is an override, not the effective default on any host:
+
+```sh
+# Memory profile, cap 8 as an explicit override of the default.
+PDPP_TEST_CONCURRENCY=8 pnpm --dir reference-implementation test
+
+# PostgreSQL stays low unless its own restore-aware measurement says otherwise.
+PDPP_TEST_PROFILE=postgres PDPP_TEST_CONCURRENCY=2 pnpm --dir reference-implementation test
+```
