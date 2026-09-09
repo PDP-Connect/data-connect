@@ -6,15 +6,16 @@ import { resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
-// `gh attestation verify --repo <owner>/<repo> --source-digest <sha>` alone
-// accepts an attestation signed by ANY workflow in the named repository, not
-// just the release workflow that is supposed to have produced it. A
+// `gh attestation verify --repo <owner>/<repo>` alone would accept an
+// attestation signed by ANY workflow in the named repository — a
 // compromised or malicious workflow added to this same repository could
-// still forge a passing attestation for an artifact it built. This test
-// parses the REAL workflow YAML (not a hand-copied string) and asserts the
-// verification step also binds `--signer-workflow` to this exact workflow
-// file, using the flag syntax `gh attestation verify --help` documents:
-// `[host/]<owner>/<repo>/<path>/<to>/<workflow>`.
+// still forge a passing attestation for an artifact it built. This is moot
+// for `gh attestation verify` itself (it cannot verify npm's provenance
+// bundles at all — see scripts/verify-npm-provenance.ts), but the same
+// binding requirement applies to the replacement: this test parses the REAL
+// workflow YAML and the REAL verification script to assert both the
+// workflow step and the script pin an EXPLICIT expected signer identity
+// (repo + workflow file + ref, and OIDC issuer), not just a bare repo name.
 
 interface WorkflowStep {
   name?: string
@@ -43,39 +44,43 @@ function findVerificationStep(workflow: WorkflowDocument): WorkflowStep {
   return step
 }
 
+function readVerifyScript(): string {
+  return readFileSync(resolve(process.cwd(), "scripts/verify-npm-provenance.ts"), "utf8")
+}
+
 describe("npm-release.yml attestation verification", () => {
-  it("invokes gh attestation verify with repo, source-digest, and signer-workflow", () => {
+  it("delegates to the provenance verification script for all three published packages", () => {
     const step = findVerificationStep(loadNpmReleaseWorkflow())
     const run = step.run ?? ""
 
-    expect(run).toContain("gh attestation verify")
-    expect(run).toContain("--repo PDP-Connect/data-connect")
-    expect(run).toContain('--source-digest "$GITHUB_SHA"')
-    expect(run).toMatch(/--signer-workflow\s+"?PDP-Connect\/data-connect\/\.github\/workflows\/npm-release\.yml"?/)
+    expect(run).toContain("scripts/verify-npm-provenance.ts")
+    expect(run).toContain("@pdpp/connector-protocol")
+    expect(run).toContain("@pdpp/collector-runtime")
+    expect(run).toContain("@pdpp/local-collector")
   })
 
-  it("binds signer-workflow to this exact workflow file, not a bare repo/owner", () => {
-    const step = findVerificationStep(loadNpmReleaseWorkflow())
-    const run = step.run ?? ""
-    const match = run.match(/--signer-workflow\s+"?([^"\s]+)"?/)
+  it("pins verification to this exact repo, workflow file, ref, and OIDC issuer", () => {
+    const script = readVerifyScript()
 
-    expect(match).toBeTruthy()
-    const signerWorkflow = match?.[1] ?? ""
-    // gh attestation verify --help: --signer-workflow expects
-    // [host/]<owner>/<repo>/<path>/<to>/<workflow> — a path ending in this
-    // repo's own workflow file, not just an owner/repo pair (which --repo
-    // already covers and which alone would accept any workflow in the repo).
-    expect(signerWorkflow).toBe("PDP-Connect/data-connect/.github/workflows/npm-release.yml")
-    expect(signerWorkflow.split("/").length).toBeGreaterThan(2)
+    expect(script).toContain(
+      "https://github.com/PDP-Connect/data-connect/.github/workflows/npm-release.yml@refs/heads/main"
+    )
+    expect(script).toContain("https://token.actions.githubusercontent.com")
+    expect(script).toContain("--certificate-identity-uri")
+    expect(script).toContain("--certificate-issuer")
   })
 
-  it("keeps signer-workflow verification inside the loop that checks every published package", () => {
-    const step = findVerificationStep(loadNpmReleaseWorkflow())
-    const run = step.run ?? ""
-    const loopStart = run.indexOf("for pkg in")
-    const signerFlagIndex = run.indexOf("--signer-workflow")
+  it("verifies the attestation subject digest against the actual downloaded tarball", () => {
+    const script = readVerifyScript()
 
-    expect(loopStart).toBeGreaterThanOrEqual(0)
-    expect(signerFlagIndex).toBeGreaterThan(loopStart)
+    expect(script).toContain("sha512sum")
+    expect(script).toMatch(/digest mismatch/i)
+  })
+
+  it("retries registry propagation lag instead of failing on the first lookup", () => {
+    const script = readVerifyScript()
+
+    expect(script).toContain("E404")
+    expect(script).toMatch(/PROPAGATION_RETRY_ATTEMPTS/)
   })
 })
