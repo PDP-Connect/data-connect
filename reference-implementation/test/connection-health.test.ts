@@ -2699,25 +2699,34 @@ test("local exporter: a cause is ignored unless the axis is actually stalled", (
   assert.match(exporter?.message ?? "", TOP_LEVEL_REGEX_6);
 });
 
-test("outbox axis: a stale heartbeat with zero pending is stalled — the freshness axis cannot cover it", () => {
+test("outbox axis: a stale heartbeat with zero pending is stalled — the lease rule is uniform across statuses", () => {
   // This test previously asserted `idle`, on the reasoning that a stale
   // heartbeat with no pending work is not stalled by itself, and that the
   // freshness axis handles general freshness while the outbox axis only claims
-  // stalled for durable work that is not draining. That division is coherent,
-  // but it has no receiver for a local-device source: `buildReferenceFreshness`
-  // only ages a source out when its collection profile declares
-  // `maximum_staleness_seconds` (server/freshness.ts), and the local-device
-  // connectors declare no `refresh_policy` at all — only the chatgpt-pdpp and
-  // github-pdpp profiles do. So freshness stays `unknown` and never degrades,
-  // and delegating to it left the drained-then-died collector with no axis
-  // willing to call it: the connection read `healthy` indefinitely.
+  // stalled for durable work that is not draining.
   //
-  // The outbox axis already owns the same judgment for every other heartbeat
-  // status (`starting`/`retrying` above, `blocked` in classifyBlockedHeartbeat)
-  // using this exact threshold. Extending it to `healthy`/`stopped` makes the
-  // rule uniform rather than adding a second staleness policy. If a cadence
-  // signal is later persisted for local-device sources, that becomes the
-  // sharper instrument and this can delegate again.
+  // The reason to override that is uniformity, not a gap in freshness. The
+  // outbox axis ALREADY owns exactly this judgment for every other heartbeat
+  // status — `starting`/`retrying` above, and `blocked` in
+  // `classifyBlockedHeartbeat` — at this exact threshold. `healthy`/`stopped`
+  // was the sole exception, and nothing distinguishes it: all four are things a
+  // collector SAID at a moment, none of which keeps being true afterwards.
+  // Extending the rule to cover it removes a special case rather than adding a
+  // second staleness policy, and it keeps this axis from contradicting the
+  // presented heartbeat health that `heartbeat-lease.ts` derives from the same
+  // 30 minutes.
+  //
+  // Do NOT restate the earlier rationale here that local-device connectors
+  // declare no `maximum_staleness_seconds`, so freshness could never age them
+  // out. That is false: the shipped `claude_code` and `codex` manifests both
+  // declare `refresh_policy.maximum_staleness_seconds` (21600s), as
+  // `ref-connectors-local-coverage-green.test.ts` asserts against the real
+  // manifest loader. The manifests are generated into an untracked directory,
+  // so a grep of the repository does not see them. Freshness genuinely does age
+  // these sources out; what kept them green for eleven days is the separate
+  // unguarded `idle` branch in `localDeviceFreshnessHeartbeatAt`, which handed
+  // the freshness clock a fresh-looking anchor on every read and so kept
+  // resetting it.
   const r = deriveOutboxAxisFromHeartbeat(heartbeat({ lastHeartbeatAt: OLD, recordsPending: 0 }), {
     nowIso: NOW,
     staleHeartbeatThresholdMs: STALE_MS,

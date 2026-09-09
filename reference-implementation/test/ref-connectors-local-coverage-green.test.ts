@@ -86,7 +86,20 @@ const OWNER = "owner_local";
 const NOW = "2026-06-03T12:00:00.000Z";
 // A heartbeat well within the 30-minute stale window so a drained collector
 // reads as `idle`, not `stalled` (the live evidence is freshly healthy).
-const HEARTBEAT_AT = "2026-06-03T11:59:00.000Z";
+//
+// Anchored to the real clock, NOT to `NOW`. These are DB-backed projection
+// tests: `listConnectorSummaries` takes no injected clock and derives heartbeat
+// age from `Date.now()`, while `NOW` only ever seeds stored created/updated
+// columns. A fixed literal here was one minute old on the day it was written
+// and ages a further day with every day that passes, so it silently drifts out
+// of both windows this fixture depends on — the 30-minute heartbeat lease and
+// the connector manifest's `maximum_staleness_seconds` (21600s for claude_code
+// and codex). It stayed green only because the `healthy` + zero-pending branch
+// used to ignore heartbeat age entirely; once that branch started honouring the
+// lease, the drift became visible as four failures here. One minute before the
+// real now keeps this fixture inside both windows permanently and preserves its
+// stated intent: freshly healthy live evidence.
+const HEARTBEAT_AT = new Date(Date.now() - 60_000).toISOString();
 const STALE_HISTORICAL_RUN_AT = "2026-05-22T14:31:18.319Z";
 const STATE_CONNECTOR_ID = CONNECTOR_ID;
 
