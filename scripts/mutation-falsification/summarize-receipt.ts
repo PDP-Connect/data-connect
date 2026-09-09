@@ -17,7 +17,7 @@ const { killed, survived, inconclusive, validDenominator, rawStatusCounts } = re
 const lines: string[] = [
   "| Projected outcome | Count |",
   "| --- | --- |",
-  `| killed (an assertion failed) | ${killed} |`,
+  `| killed (a test protecting this code failed) | ${killed} |`,
   `| survived (pending triage) | ${survived} |`,
   `| inconclusive | ${inconclusive} |`,
   `| valid denominator (killed + survived) | ${validDenominator} |`,
@@ -50,8 +50,8 @@ if (survived > 0) {
 if (inconclusive > 0) {
   lines.push(
     "Inconclusive trials produced no evidence either way. In particular a timeout is",
-    "not a kill, unreached code is not a survivor, and an engine `Killed` without",
-    "retained assertion output is not an assertion kill.",
+    "not a kill, unreached code is not a survivor, and an engine `Killed` that names",
+    "no failing test, or whose output shows the runner crashed, is not a kill.",
     ""
   )
 }

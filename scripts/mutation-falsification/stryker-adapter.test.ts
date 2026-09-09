@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import {
   aggregateTrial,
   buildAttemptReceipt,
-  hasOwningAssertionEvidence,
+  hasOwningTestEvidence,
   type MutantObservation,
   projectOutcome,
   readObservations,
@@ -42,60 +42,91 @@ const intent = freezeIntent({
   },
 })
 
-describe("hasOwningAssertionEvidence", () => {
-  it("accepts a node --test assertion failure, the reference-implementation dialect", () => {
-    expect(hasOwningAssertionEvidence("AssertionError [ERR_ASSERTION]: no")).toBe(true)
+describe("hasOwningTestEvidence", () => {
+  it("accepts a kill that names a killing test, in either runner's dialect", () => {
+    expect(hasOwningTestEvidence("AssertionError [ERR_ASSERTION]: no", ["t1"])).toBe(true)
+    expect(hasOwningTestEvidence("expected 'http:' to be 'https:'", ["38"])).toBe(true)
   })
 
-  it("accepts Vitest comparison output, the client dialect", () => {
-    // Verbatim from a real client-cohort run: the two dialects differ enough
-    // that a predicate written for one rejects every kill from the other.
-    expect(hasOwningAssertionEvidence("expected [Function] to throw an error")).toBe(true)
-    expect(hasOwningAssertionEvidence("expected 'http:' to be 'https:'")).toBe(true)
+  it("accepts a real assertion kill whose retained text carries no assertion words", () => {
+    // The measured regression this predicate was rewritten for. On the first
+    // client file it ran against, five of six real kills looked like this: the
+    // mutant made a validator reject a valid input, so a ZodError was thrown
+    // inside the subject expression of a genuine `expect(...).toEqual(...)` and
+    // the retained text is the Zod issue array. `killedBy` names the test that
+    // failed -- `src/apps/submission-registry.test.ts` "parses a live
+    // submission" -- so this is a kill, and the earlier vocabulary match called
+    // it inconclusive.
+    const zodIssues =
+      '[{"code":"custom","path":["externalUrl"],"message":"externalUrl must use https://."}]'
+    expect(hasOwningTestEvidence(zodIssues, ["38"])).toBe(true)
   })
 
   it("rejects a crash, which is the engine falling over rather than a test catching a fault", () => {
-    expect(hasOwningAssertionEvidence("RangeError: Maximum call stack size exceeded")).toBe(false)
-    expect(hasOwningAssertionEvidence("TypeError: x is not a function")).toBe(false)
-  })
-
-  it("rejects a bare thrown value carrying no assertion vocabulary", () => {
-    // Also verbatim from a real client-cohort run. A test that asserted on a
-    // rejection can print only the rejected value, which does not show that an
-    // assertion is what failed. Conservative by design: this understates what
-    // the suite detects rather than overstating it.
+    // A named killing test does not rescue these: the mutant broke the harness,
+    // so the failure says nothing about whether the suite protects the code.
     expect(
-      hasOwningAssertionEvidence('[{"code":"custom","message":"externalUrl must use https://."}]')
+      hasOwningTestEvidence("RangeError: Maximum call stack size exceeded", ["t1"])
     ).toBe(false)
+    expect(hasOwningTestEvidence("FATAL ERROR: JavaScript heap out of memory", ["t1"])).toBe(
+      false
+    )
+    expect(hasOwningTestEvidence("Error: Cannot find module '/x/test'", ["t1"])).toBe(false)
   })
 
-  it("rejects absent or empty output", () => {
-    expect(hasOwningAssertionEvidence(undefined)).toBe(false)
-    expect(hasOwningAssertionEvidence("   ")).toBe(false)
+  it("rejects a Killed that names no test at all", () => {
+    // A status the engine wrote about itself with nothing to attribute it to.
+    // Conservative by design: it understates what the suite detects.
+    expect(hasOwningTestEvidence("something failed", [])).toBe(false)
+    expect(hasOwningTestEvidence(undefined, [])).toBe(false)
+    expect(hasOwningTestEvidence("expected 1 to be 2", ["  "])).toBe(false)
+  })
+
+  it("accepts a named killing test even when the runner retained no output", () => {
+    // The command runner reports no failure text for individual tests. Requiring
+    // prose here is what made that cohort unable to record a kill at all.
+    expect(hasOwningTestEvidence(undefined, ["test/a.test.ts"])).toBe(true)
   })
 })
 
 describe("projectOutcome", () => {
-  it("projects Killed with owning-assertion evidence as killed", () => {
+  it("projects Killed with an owning test identity as killed", () => {
     const projected = projectOutcome(observation())
     expect(projected.outcome).toBe("killed")
-    expect(projected.basis).toBe("owning_assertion_failed")
+    expect(projected.basis).toBe("owning_test_failed")
     expect(projected.rawStatus).toBe("Killed")
   })
 
-  it("refuses to call a Killed a kill when the failure was a crash, not an assertion", () => {
+  it("refuses to call a Killed a kill when the failure was a crash, not a test", () => {
     // The measured case that motivates the whole adapter: the same engine
     // reports Killed for both, and only one is evidence about the suite.
     const projected = projectOutcome(
       observation({ failureOutput: "RangeError: Maximum call stack size exceeded" })
     )
     expect(projected.outcome).toBe("inconclusive")
-    expect(projected.basis).toBe("killed_without_owning_assertion_evidence")
+    expect(projected.basis).toBe("killed_by_runner_crash")
     expect(projected.rawStatus).toBe("Killed")
   })
 
-  it("refuses to call a Killed a kill when no failure output was retained", () => {
-    expect(projectOutcome(observation({ failureOutput: undefined })).outcome).toBe("inconclusive")
+  it("refuses to call a Killed a kill when it names no killing test", () => {
+    const projected = projectOutcome(observation({ failureOutput: undefined, killedBy: [] }))
+    expect(projected.outcome).toBe("inconclusive")
+    expect(projected.basis).toBe("killed_without_owning_test_identity")
+  })
+
+  it("counts a real assertion kill whose thrown value carries no assertion words", () => {
+    // Reproduces the five undercounted kills from the measured client run. The
+    // earlier predicate matched failure prose, so a ZodError thrown inside a
+    // genuine assertion's subject expression read as "no assertion evidence".
+    const projected = projectOutcome(
+      observation({
+        failureOutput:
+          '[{"code":"custom","path":["externalUrl"],"message":"externalUrl must use https://."}]',
+        killedBy: ["38"],
+      })
+    )
+    expect(projected.outcome).toBe("killed")
+    expect(projected.basis).toBe("owning_test_failed")
   })
 
   it("projects Survived as survived, pending triage", () => {

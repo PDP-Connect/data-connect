@@ -103,6 +103,10 @@ jobs:
           git diff --name-status -z --diff-filter=ACMRT \
             "${base_commit}" "${HEAD_REF}" > "reports/mutation/${COHORT}/diff.nul"
 
+          # `--selected-tests` writes the tests this attempt runs, for cohorts
+          # whose runner cannot select tests itself. `--inputs-digest` writes the
+          # execution-input identity on its own, so the cache below can be keyed
+          # on it without folding in the per-revision fields.
           node --experimental-strip-types scripts/mutation-falsification/run-intent.ts \
             --cohort "${COHORT}" \
             --cohort-root "${COHORT_ROOT}" \
@@ -110,25 +114,60 @@ jobs:
             --base "${base_commit}" \
             --head "${HEAD_REF}" \
             --diff "reports/mutation/${COHORT}/diff.nul" \
-            --out "reports/mutation/${COHORT}/intent.json"
+            --out "reports/mutation/${COHORT}/intent.json" \
+            --inputs-digest "reports/mutation/${COHORT}/execution-inputs.digest" \
+            --selected-tests "reports/mutation/${COHORT}/selected-tests.txt"
+
+          # Stryker resolves the selection path against the cohort root it runs
+          # in, so a non-root cohort's config reads it from under that root.
+          if [[ "${COHORT_ROOT}" != "." ]]; then
+            mkdir -p "${COHORT_ROOT}/reports/mutation/${COHORT}"
+            cp "reports/mutation/${COHORT}/selected-tests.txt" \
+              "${COHORT_ROOT}/reports/mutation/${COHORT}/selected-tests.txt"
+          fi
+
+          echo "Selected tests for this attempt:"
+          cat "reports/mutation/${COHORT}/selected-tests.txt"
 
           applicability="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).applicability)' "reports/mutation/${COHORT}/intent.json")"
           echo "applicability=${applicability}" >> "$GITHUB_OUTPUT"
           echo "Intent applicability: ${applicability}"
 
       # Reuse is keyed on input identity and nothing else -- never on the cache's
-      # age, and never on how expensive a fresh run would be. The restore key is
-      # the digest of the frozen execution inputs, so a lockfile, tool, runtime,
-      # or configuration change simply does not match a stored cache. There is
-      # no broad fallback restore key, because a partial match here would mean
-      # reusing verdicts about inputs that no longer exist.
+      # age, and never on how expensive a fresh run would be. The key is the
+      # digest of the frozen execution inputs ALONE: the config, tool version,
+      # runtime version and lockfile digests. It deliberately does not include
+      # the head commit or the changed-file list, which differ on every revision
+      # and would make every key unique and every run cold. There is no broad
+      # fallback restore key, because a partial match here would mean reusing
+      # verdicts about inputs that no longer exist.
       - name: Restore incremental cache by input identity
         if: steps.intent.outputs.applicability == 'applicable'
         id: cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: reports/mutation/${{ matrix.cohort }}/stryker-incremental.json
-          key: mutation-${{ matrix.cohort }}-${{ hashFiles(format('reports/mutation/{0}/intent.json', matrix.cohort)) }}
+          path: |
+            reports/mutation/${{ matrix.cohort }}/stryker-incremental.json
+            reports/mutation/${{ matrix.cohort }}/cached-execution-inputs.json
+          key: mutation-${{ matrix.cohort }}-${{ hashFiles(format('reports/mutation/{0}/execution-inputs.digest', matrix.cohort)) }}
+
+      # The cache key is Actions' coarse mechanism; `mayReuseCache` is the
+      # design's. This step compares the execution inputs recorded alongside a
+      # restored cache against the ones just frozen, and deletes the cache when
+      # they do not match, so a stale or unattributable cache cannot be consumed
+      # even if the key collided. Its verdict is what the receipt records.
+      - name: Decide cache reuse by recorded input identity
+        if: steps.intent.outputs.applicability == 'applicable'
+        id: reuse
+        env:
+          COHORT: ${{ matrix.cohort }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/mutation-falsification/run-cache-decision.ts \
+            --intent "reports/mutation/${COHORT}/intent.json" \
+            --cached-inputs "reports/mutation/${COHORT}/cached-execution-inputs.json" \
+            --incremental-file "reports/mutation/${COHORT}/stryker-incremental.json" \
+            --out "reports/mutation/${COHORT}/cache-decision.json" >> "$GITHUB_OUTPUT"
 
       - name: Build workspace packages
         if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
@@ -163,17 +202,22 @@ jobs:
           exit "${stryker_exit}"
 
       # PROJECTION. Stryker's raw statuses are re-projected through the adapter's
-      # conservative table. A `Killed` without retained owning-assertion evidence
-      # is inconclusive, not a kill; a timeout is inconclusive, not a kill; code
-      # with no coverage is inconclusive, not a survivor. The receipt binds the
-      # frozen intent digest, a digest of the retained raw report bytes, and the
-      # computed projection.
+      # conservative table. A `Killed` that names no failing test, or whose
+      # output shows the runner crashed, is inconclusive rather than a kill; a
+      # timeout is inconclusive, not a kill; code with no coverage is
+      # inconclusive, not a survivor. The receipt binds the frozen intent
+      # digest, a digest of the retained raw report bytes, and the computed
+      # projection.
+      #
+      # This step fails when an applicable attempt produced no evidence at all
+      # -- a rejected baseline, no report, or every trial inconclusive. The
+      # receipt records that honestly either way, but a green check on top of an
+      # empty receipt does not, and the check is what a reader sees first.
       - name: Project observations and write the attempt receipt
         if: always() && steps.intent.outputs.applicability == 'applicable'
         env:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
           STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit }}
         run: |
           set -euo pipefail
@@ -189,7 +233,7 @@ jobs:
             --cohort "${COHORT}" \
             --intent "reports/mutation/${COHORT}/intent.json" \
             --report "${report}" \
-            --cache-hit "${CACHE_HIT:-false}" \
+            --cache-decision "reports/mutation/${COHORT}/cache-decision.json" \
             --stryker-exit "${STRYKER_EXIT:-unknown}" \
             --out "reports/mutation/${COHORT}/receipt.json"
 
@@ -202,13 +246,14 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mutation-evidence-${{ matrix.cohort }}
-          # Both roots are listed because the intent and receipt are written at
-          # the repository root while a non-root cohort's raw report is written
-          # under its own root. The raw bytes travel with the receipt that
-          # digests them: a digest whose bytes are not retained is not evidence.
+          # The intent and receipt are written at the repository root; a non-root
+          # cohort's raw report is written under its own root. Both are listed so
+          # the raw bytes travel with the receipt that digests them, because a
+          # digest whose bytes are not retained is not evidence. For the client
+          # cohort the second path repeats the first and is skipped.
           path: |
             reports/mutation/${{ matrix.cohort }}/
-            ${{ matrix.root }}/reports/mutation/${{ matrix.cohort }}/
+            ${{ matrix.root != '.' && format('{0}/reports/mutation/{1}/', matrix.root, matrix.cohort) || '' }}
           if-no-files-found: warn
           retention-days: 30
 

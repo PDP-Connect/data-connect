@@ -28,9 +28,17 @@
 import { readFileSync } from "node:fs"
 
 // The workflow writes the tests to run for this attempt, one path per line,
-// derived from the same diff that produced the mutate list. A missing file
-// means "no selection recorded", and the command runs the suite the ordinary
-// runner would, rather than quietly narrowing to nothing.
+// derived from the same diff that produced the mutate list, by
+// `run-intent.ts --selected-tests`. A missing or empty file means "no selection
+// recorded", and the command runs every test file in the cohort rather than
+// quietly narrowing to nothing -- a mutant must never be recorded as surviving a
+// selection that was empty.
+//
+// The fallback is a glob and not a bare `test/` directory: Node resolves a bare
+// directory argument as a module rather than expanding it, so `node --test
+// test/` fails with MODULE_NOT_FOUND and takes the whole baseline down with it.
+const WHOLE_COHORT_TESTS = ["test/**/*.test.ts"]
+
 function selectedTestArguments() {
   try {
     const listed = readFileSync("reports/mutation/reference-implementation/selected-tests.txt", "utf8")
@@ -41,9 +49,9 @@ function selectedTestArguments() {
       return listed
     }
   } catch {
-    // Fall through to the full selection below.
+    // Fall through to the whole-cohort selection below.
   }
-  return ["test/"]
+  return WHOLE_COHORT_TESTS
 }
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */

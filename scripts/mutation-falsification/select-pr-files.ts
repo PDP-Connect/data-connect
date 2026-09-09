@@ -177,6 +177,40 @@ export function classifyForCohort(
   return { selected: true }
 }
 
+/**
+ * The tests a command-runner cohort should run for this attempt.
+ *
+ * The command runner reports no per-test identities, so Stryker cannot select
+ * tests itself and the selection has to be expressed inside the command. This
+ * derives it from the same diff that produced the `mutate` list: every test file
+ * the revision touched, cohort-relative, sorted and deduplicated.
+ *
+ * An empty result means the revision touched no test file in this cohort, which
+ * is not the same as "run nothing". The caller falls back to the cohort's whole
+ * suite, so a mutant is never recorded as surviving a selection that was empty.
+ */
+export function selectCohortTests(
+  diff: readonly DiffEntry[],
+  cohort: CohortDefinition
+): SelectedFile[] {
+  const selected: SelectedFile[] = []
+  for (const entry of diff) {
+    if (entry.status.startsWith("D")) {
+      continue
+    }
+    if (!isTestPath(entry.path) || !isProductionSourceExtension(entry.path)) {
+      continue
+    }
+    // Test files live inside the cohort root but outside the production
+    // prefixes, so cohort membership is decided by the root here.
+    if (cohort.root !== "." && !entry.path.startsWith(`${cohort.root}/`)) {
+      continue
+    }
+    selected.push(toCohortRelative(entry.path, cohort.root))
+  }
+  return [...new Set(selected)].sort()
+}
+
 /** Make a repository-relative path cohort-relative, so it can be a `mutate` glob. */
 export function toCohortRelative(path: string, cohortRoot: string): string {
   if (cohortRoot === ".") {

@@ -41,10 +41,11 @@ export default {
   // Leave the checked-out tree alone: mutants are applied inside a sandbox.
   inPlace: false,
 
-  // Stryker copies the working tree into that sandbox, so anything not needed
-  // to run the client suite is excluded. This keeps the copy proportional to
-  // the cohort and, in a working checkout, avoids copying local agent-tooling
-  // directories whose entries may be symlinks pointing outside the repository.
+  // Stryker copies the working tree into that sandbox, so anything the client
+  // suite does not need to run is excluded, keeping the copy proportional to
+  // the cohort. The agent-tooling directories are here for the same reason as
+  // the rest: no client test reads them. They additionally hold symlinks in a
+  // developer checkout, which the copy cannot follow.
   ignorePatterns: [
     "reference-implementation",
     "src-tauri/target",

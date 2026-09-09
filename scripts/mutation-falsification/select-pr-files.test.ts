@@ -10,6 +10,7 @@ import {
   freezeIntent,
   mayReuseCache,
   parseNameStatusZ,
+  selectCohortTests,
   toCohortRelative,
   verifyIntentDigest,
 } from "./select-pr-files.ts"
@@ -196,6 +197,48 @@ describe("canonicalJSON", () => {
   it("orders object keys so equal content has equal bytes", () => {
     expect(canonicalJSON({ b: 1, a: 2 })).toBe('{"a":2,"b":1}')
     expect(canonicalJSON({ a: 2, b: 1 })).toBe(canonicalJSON({ b: 1, a: 2 }))
+  })
+})
+
+describe("selectCohortTests", () => {
+  it("derives the cohort-relative test files the revision touched", () => {
+    // This is the selection the command runner cannot make for itself, so it is
+    // written to a file the cohort's config reads. Nothing wrote that file
+    // before, which left the reference-implementation cohort running a fallback
+    // that could not resolve and rejecting its own baseline on every run.
+    const diff = parseNameStatusZ(
+      "M\0reference-implementation/lib/nullish.ts\0" +
+        "M\0reference-implementation/test/acknowledged-loss.test.ts\0" +
+        "A\0reference-implementation/test/record-expand-helpers-branches.test.ts\0"
+    )
+    expect(selectCohortTests(diff, referenceCohort)).toEqual([
+      "test/acknowledged-loss.test.ts",
+      "test/record-expand-helpers-branches.test.ts",
+    ])
+  })
+
+  it("selects no test from another cohort's tree", () => {
+    const diff = parseNameStatusZ("M\0src/apps/external-url.test.ts\0")
+    expect(selectCohortTests(diff, referenceCohort)).toEqual([])
+  })
+
+  it("takes a renamed test's destination, since that is the file at head", () => {
+    const diff = parseNameStatusZ(
+      "R100\0reference-implementation/test/old.test.ts\0reference-implementation/test/new.test.ts\0"
+    )
+    expect(selectCohortTests(diff, referenceCohort)).toEqual(["test/new.test.ts"])
+  })
+
+  it("omits a deleted test, which cannot be run", () => {
+    const diff = parseNameStatusZ("D\0reference-implementation/test/gone.test.ts\0")
+    expect(selectCohortTests(diff, referenceCohort)).toEqual([])
+  })
+
+  it("returns nothing when the revision touched no test, so the caller runs the whole cohort", () => {
+    // An empty selection must never narrow the command to nothing: a mutant
+    // recorded as surviving an empty selection would be a false survivor.
+    const diff = parseNameStatusZ("M\0reference-implementation/lib/nullish.ts\0")
+    expect(selectCohortTests(diff, referenceCohort)).toEqual([])
   })
 })
 

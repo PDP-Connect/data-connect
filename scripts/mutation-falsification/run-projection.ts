@@ -45,14 +45,23 @@ const observations =
     ? []
     : readObservations(JSON.parse(rawReportBytes), { baselineComplete })
 
+// The cache decision is `mayReuseCache`'s, recorded by the step that made it.
+// It is read rather than re-derived here so the receipt reports the mechanism
+// that actually governed the run. An absent file means that step did not run,
+// which is not the same as a decision to run cold.
+const cacheDecisionPath = argument("cache-decision")
+const cacheDecision = existsSync(cacheDecisionPath)
+  ? (JSON.parse(readFileSync(cacheDecisionPath, "utf8")) as {
+      readonly reuse: boolean
+      readonly reason: string
+    })
+  : { reuse: false, reason: "no_cache_decision_recorded" }
+
 const receipt = buildAttemptReceipt({
   intent,
   rawReportBytes,
   observations,
-  cacheDecision:
-    argument("cache-hit") === "true"
-      ? { reuse: true, reason: "execution_inputs_match" }
-      : { reuse: false, reason: "execution_inputs_changed_or_absent" },
+  cacheDecision,
 })
 
 writeFileSync(argument("out"), `${JSON.stringify(receipt, null, 2)}\n`)
@@ -63,3 +72,43 @@ process.stdout.write(
     `killed=${killed} survived=${survived} inconclusive=${inconclusive} ` +
     `valid_denominator=${validDenominator} stryker_exit=${strykerExit}\n`
 )
+
+// A run that was applicable and produced no evidence must not report success.
+//
+// The receipt is honest either way -- it records "no evidence" accurately -- but
+// a green check on top of an empty receipt is not, and the surface is what a
+// reader sees first. The failure modes this catches are exactly the ones that
+// look identical to a clean run from the outside: a rejected baseline makes
+// every mutant inconclusive, and a run that never wrote a report produces no
+// trials at all.
+//
+// This is not a mutation-score gate. Survivors do not fail the job; only the
+// absence of any evidence does. A revision that mutates nothing never reaches
+// here, because the workflow reports it as not_applicable instead.
+const failures: string[] = []
+if (!baselineComplete) {
+  failures.push(
+    `the baseline was rejected (engine exit ${strykerExit}), so every mutant in this ` +
+      "batch is inconclusive and the run established nothing about the suite"
+  )
+}
+if (receipt.projections.length === 0) {
+  failures.push("no mutant trials were recorded, so this attempt produced no evidence")
+} else if (validDenominator === 0) {
+  failures.push(
+    `all ${inconclusive} trial(s) were inconclusive, so no fault was shown to be ` +
+      "either detected or missed"
+  )
+}
+
+if (failures.length > 0) {
+  process.stderr.write(
+    `\nThis attempt produced no mutation evidence:\n${failures
+      .map((failure) => `  - ${failure}\n`)
+      .join("")}` +
+      "\nThe receipt and the raw report are still published, and they record this " +
+      "accurately. This step fails so the absence of evidence is visible without " +
+      "opening the artifact.\n"
+  )
+  process.exitCode = 1
+}

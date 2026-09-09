@@ -18,10 +18,10 @@
 // Two disagreements with Stryker's own vocabulary are deliberate:
 //
 //   - A `Killed` status only means some test failed. It does not distinguish
-//     "the assertion protecting this code failed" from "the mutant crashed the
+//     "a test protecting this code failed" from "the mutant crashed the
 //     runner". Only the first is evidence that the suite would catch the fault.
-//     Without retained failure output showing an assertion failure, a `Killed`
-//     is `inconclusive` here, not a kill.
+//     A `Killed` that names no killing test, or whose retained output shows the
+//     runner crashed, is `inconclusive` here, not a kill.
 //   - `Timeout`, `RuntimeError`, `CompileError` and `NoCoverage` are all
 //     `inconclusive`. In particular a timeout is not a kill, and code with no
 //     coverage is not a survivor -- it is an absence of evidence either way.
@@ -74,46 +74,65 @@ export interface Projection {
 }
 
 /**
- * Patterns that identify retained output as an assertion failure.
+ * Failures that are the runner falling over rather than a test catching a fault.
  *
- * Both cohorts are represented, because their runners speak different
- * dialects and a predicate written for one silently rejects the other:
+ * These are the cases where a mutant broke the harness itself, so the failure
+ * says nothing about whether the suite protects the mutated code. Stack
+ * overflows and out-of-memory kills are the ones a mutated loop or recursion
+ * actually produces; the engine's own infrastructure errors are the rest.
  *
- *   - `node --test` (reference-implementation) raises `AssertionError
- *     [ERR_ASSERTION]`.
- *   - Vitest (client) raises `AssertionError` and prints comparisons in the
- *     form "expected X to be Y" / "expected X to throw an error", and for a
- *     thrown rejection prints the rejected value on its own.
- *
- * A crash produces none of these: `RangeError: Maximum call stack size
- * exceeded` is what the engine reports when the mutant broke the runner rather
- * than when a test caught the fault, and it must not read as a kill.
+ * This list disqualifies a kill. It is deliberately not the mirror image of an
+ * "assertion vocabulary" allow-list: see `hasOwningTestEvidence` for why
+ * that direction does not work.
  */
-const ASSERTION_EVIDENCE_PATTERNS: readonly RegExp[] = [
-  /ERR_ASSERTION/,
-  /AssertionError/,
-  /\bexpected\b[\s\S]*\b(?:to (?:be|equal|throw|contain|match|have)|received)\b/i,
-  /\bAssertionFailed\b/,
+const RUNNER_CRASH_PATTERNS: readonly RegExp[] = [
+  /Maximum call stack size exceeded/i,
+  /JavaScript heap out of memory/i,
+  /\bENOMEM\b/,
+  /Cannot find module/i,
+  /Stryker\w* (?:error|failed)/i,
+  /\bSIGKILL\b|\bSIGSEGV\b|\bSIGABRT\b/,
 ]
 
-/**
- * Evidence that a real assertion failed, rather than the process falling over.
- *
- * This is the distinction the whole design turns on. Stryker reports `Killed`
- * for both "the assertion protecting this code failed" and "the mutant crashed
- * the runner", and only the first says anything about whether the suite would
- * catch the fault in production. So the question is asked of retained output
- * rather than of the status field.
- *
- * When a runner supplies no recognisable output the answer is "no evidence",
- * which projects to `inconclusive`. That is the conservative direction: it
- * understates what the suite detects rather than overstating it.
- */
-export function hasOwningAssertionEvidence(failureOutput: string | undefined): boolean {
-  if (failureOutput === undefined || failureOutput.trim().length === 0) {
+export function isRunnerCrashOutput(failureOutput: string | undefined): boolean {
+  if (failureOutput === undefined) {
     return false
   }
-  return ASSERTION_EVIDENCE_PATTERNS.some((pattern) => pattern.test(failureOutput))
+  return RUNNER_CRASH_PATTERNS.some((pattern) => pattern.test(failureOutput))
+}
+
+/**
+ * Evidence that a test owning this code failed, rather than the process falling
+ * over.
+ *
+ * This is the distinction the whole design turns on. Stryker reports `Killed`
+ * for both "a test protecting this code failed" and "the mutant crashed the
+ * runner", and only the first says anything about whether the suite would catch
+ * the fault in production.
+ *
+ * The question is answered from STRUCTURE, not from prose. An earlier version
+ * regex-matched the failure text for assertion vocabulary, and that was wrong in
+ * a way execution exposed: on the first client file it was run against, five of
+ * six real kills were refused. Those mutants made a validator reject a valid
+ * input, so a `ZodError` was thrown inside the subject expression of a genuine
+ * `expect(...).toEqual(...)`, and the retained text was the Zod issue array with
+ * no assertion words in it. A dialect list cannot fix that: the failure text of
+ * a real assertion kill is whatever the thrown value happened to print. The
+ * predicate was separating message dialects, not assertions from crashes.
+ *
+ * So a kill requires a killing test IDENTITY -- `killedBy`, which Stryker
+ * populates from the runner's own per-test results -- and the absence of
+ * crash evidence. A `Killed` with no named test is a status the engine wrote
+ * about itself with nothing to attribute it to, which stays `inconclusive`.
+ */
+export function hasOwningTestEvidence(
+  failureOutput: string | undefined,
+  killedBy: readonly string[] = []
+): boolean {
+  if (isRunnerCrashOutput(failureOutput)) {
+    return false
+  }
+  return killedBy.some((test) => test.trim().length > 0)
 }
 
 /**
@@ -131,14 +150,17 @@ export function projectOutcome(observation: MutantObservation): Projection {
 
   switch (observation.rawStatus) {
     case "Killed": {
-      if (!hasOwningAssertionEvidence(observation.failureOutput)) {
+      if (isRunnerCrashOutput(observation.failureOutput)) {
+        return { ...carry, outcome: "inconclusive", basis: "killed_by_runner_crash" }
+      }
+      if (!hasOwningTestEvidence(observation.failureOutput, observation.killedBy)) {
         return {
           ...carry,
           outcome: "inconclusive",
-          basis: "killed_without_owning_assertion_evidence",
+          basis: "killed_without_owning_test_identity",
         }
       }
-      return { ...carry, outcome: "killed", basis: "owning_assertion_failed" }
+      return { ...carry, outcome: "killed", basis: "owning_test_failed" }
     }
     case "Survived":
       // Survival is an observation pending independent triage, not a defect
