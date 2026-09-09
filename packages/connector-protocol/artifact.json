@@ -1,11 +1,11 @@
 {
   "artifact_filename": "pdpp-connector-protocol-0.0.1.tgz",
-  "artifact_sha1": "5e9576ad9a7b3e10f23f81e69062006abaa9fa45",
-  "artifact_sha256": "1c29073158fc98079da897df05982fc69869d709b9fc50122100243dc5773d7d",
-  "artifact_sha512": "4c8f43e607111f3604509fc415a22de10c83a4d5c5fe62b4f37f3d2f35c64f6f2cf650878973040f150b0b87d59aa1618699c00fd71e22f13b42956df453876d",
+  "artifact_sha1": "b2ce7615952d0fe7ad30857c5560eac994c42daf",
+  "artifact_sha256": "2d683a30179ab9d557fe52f9a7f565232aaa82a2ae69a2e7f09b7ee92fd25da1",
+  "artifact_sha512": "d1f6cdca0f03678138531b26f2388bd5b528d54a784fad2280534c8c32b15227409bdb33184133a8625daf8b4d5c77c2d0bab62b5f558578b20ae82d66d19ef6",
   "declarations_sha256": "fe3b0b245fec5472ae1640e80a572adf15cef6019e60d563669d397120e0dcf1",
   "metadata_version": 1,
   "package_name": "@pdpp/connector-protocol",
   "package_version": "0.0.1",
-  "source_inputs_sha256": "2daaf7afc5aa438f3b05e322c41fd202e753ddd26d016aad04616896cd16a867"
+  "source_inputs_sha256": "9a14f07f966a4c61f88cee7f8a222086c4839ddb34d2a4adcd6187cb419092bc"
 }
