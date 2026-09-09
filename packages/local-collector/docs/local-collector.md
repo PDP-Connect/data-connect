@@ -608,6 +608,37 @@ systemctl enable --now pdpp-local-collector@claude_code.timer
 systemctl status pdpp-local-collector@claude_code.service
 ```
 
+#### Optional: surface a failed run on the host with `OnFailure=`
+
+`doctor --exit-code` exits 1 when the diagnostics roll up to `critical`, which
+makes the collector's own health readable by a supervisor rather than only by a
+human reading JSON. Paired with systemd's `OnFailure=`, a failed run can trigger
+a local desktop notification instead of sitting silent in the journal:
+
+```ini
+# Drop-in for pdpp-local-collector@.service
+[Unit]
+OnFailure=pdpp-local-collector-alert@%i.service
+```
+
+where `pdpp-local-collector-alert@.service` is an operator-supplied one-shot
+that runs `pdpp-local-collector doctor --exit-code --connection-id %i` and, on a
+non-zero exit, calls whatever the host uses to reach the person at the keyboard
+(`notify-send`, a logger to a monitored file, a local webhook).
+
+**This is a local-visibility aid, not the liveness answer, and it is important
+not to confuse the two.** `OnFailure=` fires only when systemd observes a
+failure, which requires the unit to have run and exited non-zero on a host whose
+manager is up and whose desktop session is present to receive the notification.
+None of that holds for the failure class this repository actually observed: a
+collector that crashed on every timer tick for eleven days had `ActiveState=failed`
+locally the entire time, and nobody looked. It also does nothing when the timer
+itself stops firing, when the host is powered off, or when the person is away
+from that machine — all cases where the only observer that can still notice is
+the server, which sees the absent heartbeat. Treat `OnFailure=` as a convenience
+for an operator already sitting at the host, and rely on server-side heartbeat
+staleness for whether a collector is alive at all.
+
 ### launchd
 
 For a durable macOS host, use the same environment split and let `launchd`
