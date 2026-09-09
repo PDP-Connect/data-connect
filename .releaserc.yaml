@@ -1,6 +1,6 @@
-# @pdpp/connector-protocol and @pdpp/collector-runtime publish in lockstep
-# from a single release channel: 0.x versions released from `main` to npm's
-# default `latest` dist-tag, no prerelease branch. Mirrors PDP-Connect/pdpp's
+# @pdpp/connector-protocol, @pdpp/collector-runtime, and @pdpp/local-collector
+# publish in lockstep from a single release channel: released from `main` to
+# npm's default `latest` dist-tag, no prerelease branch. Mirrors PDP-Connect/pdpp's
 # own semantic-release posture (see that repo's .releaserc.yaml) for the same
 # stated reason — a second moving prerelease branch is drift risk with no
 # offsetting benefit at 0.x.
@@ -59,7 +59,7 @@ plugins:
     - preset: conventionalcommits
       releaseRules:
         - breaking: true
-          scope: &SCOPE_GLOB "@(collector-runtime|connector-protocol)*|*,@(collector-runtime|connector-protocol)|*,@(collector-runtime|connector-protocol),*"
+          scope: &SCOPE_GLOB "@(collector-runtime|connector-protocol|local-collector)*|*,@(collector-runtime|connector-protocol|local-collector)|*,@(collector-runtime|connector-protocol|local-collector),*"
           release: major
         - type: feat
           scope: *SCOPE_GLOB
@@ -74,10 +74,12 @@ plugins:
           scope: *SCOPE_GLOB
           release: patch
         # Matches any commit whose scope is a real string that is NOT one of
-        # the target packages (e.g. `fix(local-collector): ...`,
-        # `fix(polyfill-connectors): ...`). Mutually exclusive with the five
-        # rules above by construction.
-        - scope: "!(@(collector-runtime|connector-protocol)*|*,@(collector-runtime|connector-protocol)|*,@(collector-runtime|connector-protocol),*)"
+        # the target packages (e.g. `fix(polyfill-connectors): ...`).
+        # Mutually exclusive with the five rules above by construction — this
+        # negation must stay the exact complement of SCOPE_GLOB, or a commit
+        # can match both a real rule and this one, and the `false` wins and
+        # silently cancels the whole release batch (see the header note).
+        - scope: "!(@(collector-runtime|connector-protocol|local-collector)*|*,@(collector-runtime|connector-protocol|local-collector)|*,@(collector-runtime|connector-protocol|local-collector),*)"
           release: false
         # Matches genuinely unscoped commits (conventional-commits-parser
         # sets `scope: null`, not `undefined`, when a commit has no
@@ -106,6 +108,15 @@ plugins:
           - type: perf
             scope: collector-runtime
             section: "Performance Improvements (@pdpp/collector-runtime)"
+          - type: feat
+            scope: local-collector
+            section: "Features (@pdpp/local-collector)"
+          - type: fix
+            scope: local-collector
+            section: "Bug Fixes (@pdpp/local-collector)"
+          - type: perf
+            scope: local-collector
+            section: "Performance Improvements (@pdpp/local-collector)"
           - type: revert
             section: "Reverts"
   # Pins collector-runtime's dependency on connector-protocol to this
@@ -133,6 +144,23 @@ plugins:
     - publishCmd: "node --import tsx scripts/verify-connector-protocol-published.ts ${nextRelease.version}"
   - - "@semantic-release/npm"
     - pkgRoot: "packages/collector-runtime"
+  # @pdpp/local-collector publishes last in this lockstep stream. It is the
+  # only one of the three that is an end-user CLI (`npx @pdpp/local-collector`)
+  # rather than a library, and its `prepack` builds against the other two
+  # workspaces, so publishing it after them keeps the published set
+  # internally consistent for the version this release computes.
+  #
+  # Version continuity: this package published independently up to 1.5.4
+  # before release responsibility moved to this repository (see pdpp's
+  # .releaserc.yaml). Joining this stream is what keeps the next publish
+  # ABOVE that line rather than colliding with it: semantic-release derives
+  # the version from this repo's `v${version}` git tags, whose highest is
+  # already v2.1.0 (= the published @pdpp/connector-protocol@2.1.0), so the
+  # next release is >= 2.1.1 and strictly greater than 1.5.4. The version
+  # field in each package.json stays a placeholder; @semantic-release/npm
+  # sets the real version at publish time.
+  - - "@semantic-release/npm"
+    - pkgRoot: "packages/local-collector"
   - - "@semantic-release/github"
     - successComment: false
       failComment: false
