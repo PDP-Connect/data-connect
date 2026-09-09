@@ -242,7 +242,7 @@ function literalRelativeSpecifiers(source: string): Set<string> {
 
 /**
  * The exact defect this check exists to catch: every published
- * `@pdpp/local-collector` 1.5.1-1.5.4 shipped a compiled `import … from
+ * `@pdpp/local-collector` 1.3.0-1.5.4 shipped a compiled `import … from
  * "@pdpp/reference-contract/common"` that is NOT in `dependencies` and does
  * not exist on the npm registry. It resolved for every developer through the
  * pnpm workspace link and failed closed for every real npm install with
@@ -290,7 +290,7 @@ async function assertBareSpecifiersResolve(manifest: Manifest, packedFiles: stri
         throw new Error(
           `${packedFile} imports private workspace package "${packageName}" (specifier "${specifier}") which is ` +
             "not declared in dependencies/peerDependencies/optionalDependencies and does not exist on the npm " +
-            "registry. This is the exact defect that made every published @pdpp/local-collector 1.5.1-1.5.4 " +
+            "registry. This is the exact defect that made every published @pdpp/local-collector 1.3.0-1.5.4 " +
             "unrunnable (ERR_MODULE_NOT_FOUND on every install). Vendor the needed symbol, declare a real " +
             "dependency, or rewrite the specifier at build time before packing."
         );
