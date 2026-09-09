@@ -15,12 +15,17 @@
  * sweep, and each tick opens an attention record for silent collectors that do
  * not have one yet.
  *
- * "That do not have one yet" is the query's job, not this file's. The query
- * excludes any instance already carrying a record for its current silence
- * episode, so every row it returns is unreported work and every row this stage
- * handles disappears from the next tick's results. A bounded batch of shrinking
- * work cannot starve anything, which is why there is no cursor here, nothing
- * persisted between ticks, and no wrap rule.
+ * "That do not have one yet" is the query's job, not this file's, which is why
+ * there is no cursor here, nothing persisted between ticks, and no wrap rule.
+ * The query excludes any episode the owner has been told about or has acted on,
+ * so every row it returns is unfinished work.
+ *
+ * A handled row usually leaves the next tick's results, but not always: a
+ * notifier that fails before handing the push over records no outcome, so the
+ * row stays selected to be retried. A bounded batch therefore does NOT on its
+ * own guarantee progress — the query's ORDER BY is what does, by putting
+ * never-recorded rows first and rotating the retry share by attempt age. That
+ * reasoning lives with the ordering it describes, in the query's own header.
  *
  * Two tiers, one age authority. `HEARTBEAT_LEASE_MS` (30 minutes, from
  * heartbeat-lease.ts) already decides whether a heartbeat still describes the

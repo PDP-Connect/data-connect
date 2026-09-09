@@ -162,6 +162,25 @@ export interface ConnectorAttentionStore {
     input?: { limit?: number | null; now?: string | null }
   ) => Promise<Map<string, AttentionRecord[]>>;
   listOpenAttentionForConnection: (input?: ListInput) => Promise<(AttentionRecord | null)[]>;
+  /**
+   * Claim a record for notification dispatch, conditionally on it still being
+   * open and not yet dispatched. Returns true only for the caller that won the
+   * claim; every other caller, and any caller reaching a record the owner has
+   * already acted on, gets false and must not send.
+   *
+   * Reading the record and then deciding cannot achieve this: the owner can
+   * resolve a notice between the read and the send, and the caller would send
+   * anyway. The comparison has to happen in the statement that marks the
+   * record as being sent.
+   */
+  claimNotificationDispatch: (input: { attentionId: string; now?: string | null }) => Promise<boolean>;
+  /**
+   * Give a claim back when the send never began, so the notice stays eligible
+   * for a later attempt. Only clears a claim that is still unresolved — a
+   * recorded outcome, or an owner transition, must not be undone by a caller
+   * abandoning its attempt.
+   */
+  releaseNotificationDispatch: (input: { attentionId: string }) => Promise<void>;
   recordNotificationOutcomeById: (input: NotificationOutcomeInput) => Promise<AttentionRecord | null>;
   transitionAttention: (input: TransitionInput) => Promise<AttentionRecord | null>;
   upsertAttention: (input: UpsertInput) => Promise<AttentionRecord>;
@@ -536,6 +555,53 @@ export function createSqliteConnectorAttentionStore(): ConnectorAttentionStore {
       return rows.map(rowToRecord);
     },
 
+    // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
+    async releaseNotificationDispatch({ attentionId }: { attentionId: string }) {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("releaseNotificationDispatch: attentionId is required");
+      }
+      // Only a claim still in `pending` is released: once an outcome is recorded
+      // the state is no longer `pending`, and once the owner acts the lifecycle
+      // is no longer `open`, so neither can be undone here.
+      // REVIEWED-DYNAMIC: notification-axis mutation for the store-owned table.
+      execDynamicSqlAcknowledged(
+        `UPDATE connector_attention_records
+            SET record_json = json_set(record_json, '$.notification_updated_at', json('null'))
+          WHERE attention_id = ?
+            AND lifecycle = 'open'
+            AND json_extract(record_json, '$.notification_state') = 'pending'`,
+        [id]
+      );
+    },
+
+    // biome-ignore lint/suspicious/useAwait: sync sqlite driver; async satisfies the shared ConnectorAttentionStore contract.
+    async claimNotificationDispatch({ attentionId, now }: { attentionId: string; now?: string | null }) {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("claimNotificationDispatch: attentionId is required");
+      }
+      const claimedAt = nonEmptyString(now) || nowIso();
+      // One statement: the lifecycle test, the not-yet-dispatched test and the
+      // write that marks the record as taken all happen together, so nothing can
+      // land between deciding to send and recording that a send is under way.
+      // Stamping `notification_updated_at` is what makes the claim exclusive —
+      // it is the same field every other reader already treats as "an attempt
+      // has been made".
+      // REVIEWED-DYNAMIC: notification-axis mutation for the store-owned table.
+      const claimed = execDynamicSqlAcknowledged(
+        `UPDATE connector_attention_records
+            SET record_json = json_set(
+                  json_set(record_json, '$.notification_state', 'pending'),
+                  '$.notification_updated_at', ?)
+          WHERE attention_id = ?
+            AND lifecycle = 'open'
+            AND json_extract(record_json, '$.notification_updated_at') IS NULL`,
+        [claimedAt, id]
+      );
+      return claimed.changes === 1;
+    },
+
     /**
      * Update the durable `notification_state` axis on an existing row
      * without touching lifecycle. The push fanout uses this to record
@@ -870,6 +936,42 @@ export function createPostgresConnectorAttentionStore(): ConnectorAttentionStore
         [id, instance, OPEN_LIFECYCLES, nowIso(), bounded]
       );
       return (result.rows as AttentionListRow[]).map(rowToRecord);
+    },
+
+    async releaseNotificationDispatch({ attentionId }: { attentionId: string }) {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("releaseNotificationDispatch: attentionId is required");
+      }
+      // See the SQLite twin.
+      await postgresQuery(
+        `UPDATE connector_attention_records
+            SET record_json = jsonb_set(record_json, '{notification_updated_at}', 'null'::jsonb)
+          WHERE attention_id = $1
+            AND lifecycle = 'open'
+            AND record_json ->> 'notification_state' = 'pending'`,
+        [id]
+      );
+    },
+
+    async claimNotificationDispatch({ attentionId, now }: { attentionId: string; now?: string | null }) {
+      const id = nonEmptyString(attentionId);
+      if (!id) {
+        throw new Error("claimNotificationDispatch: attentionId is required");
+      }
+      const claimedAt = nonEmptyString(now) || nowIso();
+      // See the SQLite twin: the tests and the write must be one statement.
+      const claimed = await postgresQuery(
+        `UPDATE connector_attention_records
+            SET record_json = jsonb_set(
+                  jsonb_set(record_json, '{notification_state}', to_jsonb($1::text)),
+                  '{notification_updated_at}', to_jsonb($2::text))
+          WHERE attention_id = $3
+            AND lifecycle = 'open'
+            AND record_json ->> 'notification_updated_at' IS NULL`,
+        ["pending", claimedAt, id]
+      );
+      return claimed.rowCount === 1;
     },
 
     async recordNotificationOutcomeById({

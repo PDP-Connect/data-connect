@@ -345,3 +345,81 @@ test(
     assert.equal((await attentionStore.getAttentionById(attentionId))?.notification_state, "failed");
   })
 );
+
+test("a notice the owner resolves before dispatch is not sent, and stays resolved", async () => {
+  // The stage and the notifier are separate awaited operations, so an ordinary
+  // owner action can land between them — one maintenance round and one request,
+  // no concurrency. Before the dispatch claim, the notifier read the record and
+  // checked only whether a delivery had been recorded, so a known-resolved
+  // notice was still pushed as needing attention.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const stage = createDeviceSilenceStage();
+    const pushes: SentPush[] = [];
+
+    const result = await stage.run({ nowIso: new Date(NOW_MS).toISOString() });
+    assert.equal(result.opened.length, 1);
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    // The owner resolves it here: after the stage returned, before the notifier runs.
+    await attentionStore.transitionAttention({ attentionId, to: "resolved" });
+
+    await notifyDeviceSilenceOpened(result, {
+      config: CONFIG,
+      connectorDisplayName: () => "Claude Code",
+      now: () => new Date(NOW_MS),
+      ownerSubjectId: "owner_local",
+      sendEscalationPush: ((args: SentPush) => {
+        pushes.push(args);
+        return Promise.resolve({ attempted: 1, sent: 1, unavailable: false });
+      }) as never,
+    });
+
+    assert.equal(pushes.length, 0, "a notice already resolved when the notifier reaches it is not sent");
+    assert.equal(
+      (await attentionStore.getAttentionById(attentionId))?.lifecycle,
+      "resolved",
+      "and declining to send leaves the owner's decision alone"
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("a resolve that lands after the dispatch claim leaves the record resolved", async () => {
+  // The other side of the same boundary. Once the claim succeeds the send is
+  // committed to, so a resolve arriving during the send is a legitimately late
+  // notice. Recording the outcome must not reopen what the owner closed.
+  initDb(":memory:");
+  try {
+    await seedSilentDevice();
+    const attentionStore = getDefaultConnectorAttentionStore();
+    const stage = createDeviceSilenceStage();
+    const pushes: SentPush[] = [];
+
+    const result = await stage.run({ nowIso: new Date(NOW_MS).toISOString() });
+    const attentionId = result.opened[0]?.attentionId ?? "";
+
+    await notifyDeviceSilenceOpened(result, {
+      config: CONFIG,
+      connectorDisplayName: () => "Claude Code",
+      now: () => new Date(NOW_MS),
+      ownerSubjectId: "owner_local",
+      sendEscalationPush: (async (args: SentPush) => {
+        pushes.push(args);
+        // The owner resolves while the push is in flight, after the claim won.
+        await attentionStore.transitionAttention({ attentionId, to: "resolved" });
+        return { attempted: 1, sent: 1, unavailable: false };
+      }) as never,
+    });
+
+    assert.equal(pushes.length, 1, "the claim was won before the resolve, so the send is legitimate");
+    const stored = await attentionStore.getAttentionById(attentionId);
+    assert.equal(stored?.lifecycle, "resolved", "recording the outcome must not reopen the record");
+    assert.equal(stored?.notification_state, "sent", "and the delivery is still recorded honestly");
+  } finally {
+    closeDb();
+  }
+});

@@ -21,10 +21,11 @@
  * so this checks the durable field immediately before dispatch and skips any
  * record already marked delivered.
  *
- * Written, because that check is only as good as the field. `upsertAttention`
- * overwrites the whole record body, and the notification state lives inside it,
- * so the stage carries the field forward explicitly on every re-write rather
- * than letting a freshly-constructed record reset it.
+ * Written, because a claim that is not recorded is not a claim. The stage does
+ * not carry the notification axis forward — it builds a fresh record each tick —
+ * so the field would be reset on every re-write if the stage ever saw the row
+ * again. It does not: the query excludes any episode with a recorded outcome
+ * before the stage reaches it, which is what keeps the two consistent.
  *
  * Both halves have to be durable. The scheduler's existing dedupe lives in
  * in-memory sets that are lost on every deploy, which for a condition that can
@@ -73,11 +74,20 @@ export async function notifyDeviceSilenceOpened(
   let sent = 0;
 
   for (const opened of result.opened) {
-    // Re-read the recorded outcome before sending. The query already excludes
-    // episodes with one, so this is not the primary gate; it closes the window
-    // where two callers act on the same round, or where a caller replays one.
-    const current = await attentionStore.getAttentionById(opened.attentionId);
-    if (current?.notification_updated_at) {
+    // Claim the record before sending, conditionally on it still being open and
+    // not yet dispatched. This is a write, not a read, and the difference is the
+    // point: reading the record and then deciding leaves a gap in which the
+    // owner can resolve the notice, and the send would go out anyway for
+    // something already dealt with. The claim's tests and its mark happen in one
+    // statement, so losing the claim is the same event as someone else having
+    // acted.
+    //
+    // A resolve that lands after a successful claim is a legitimately late
+    // notice: the send was already committed to, and it must not reopen the
+    // record. The outcome recorded below writes only the notification axis and
+    // leaves the lifecycle alone, so a record resolved in that window stays
+    // resolved.
+    if (!(await attentionStore.claimNotificationDispatch({ attentionId: opened.attentionId, now: now.toISOString() }))) {
       continue;
     }
 
@@ -154,6 +164,12 @@ export async function notifyDeviceSilenceOpened(
       // no timestamp, which is exactly what it is — untried — and the next tick
       // picks it up. A failure that repeats every tick is visible as a warning
       // per tick rather than as a silently dropped notice.
+      // Give the claim back. The claim marks a record as being sent, so leaving
+      // it set after a send that never began would read as an attempt and cost
+      // this notice its retry — the exact property the unstamped path exists to
+      // preserve. The release only clears a claim that is still unresolved, so
+      // it cannot undo a recorded outcome or an owner decision.
+      await attentionStore.releaseNotificationDispatch({ attentionId: opened.attentionId });
       const message = err instanceof Error ? err.message : String(err);
       deps.log?.warn?.(
         `[device-silence] push attempt failed before delivery for ${opened.attentionId}; will retry: ${message}`
