@@ -148,6 +148,7 @@ import {
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey, isInternalConnectorId, legacyLocalAliasMap } from "./connector-key.ts";
 import { createResumableConnectorMaintenanceSweep } from "./connector-maintenance-sweep.ts";
+import { notifyDeviceSilenceOpened } from "./device-silence-notifier.ts";
 import {
   getConnectorSummaryEvidence,
   markConnectorSummaryEvidenceDirty,
@@ -8225,6 +8226,22 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorMaintenanceSweep = createResumableConnectorMaintenanceSweep({
     evidenceSweepMaxDurationMs: CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_MAX_DURATION_MS,
     evidenceSweepPageSize: CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE,
+    // Fires only for silence records that crossed into open on this tick,
+    // never for the tick itself. The sweep runs every 60 seconds and re-observes
+    // the same silent collector every time; pushing on the tick would be 1,440
+    // notifications a day per device for as long as the collector stayed down.
+    onDeviceSilenceOpened: async (result) => {
+      await notifyDeviceSilenceOpened(result, {
+        config: webPushConfig,
+        connectorDisplayName: async (connectorId) => {
+          const summary = await getConnectorSummaryForRoute(connectorId, controller);
+          return summary?.display_name || summary?.connector_display_name || connectorId;
+        },
+        log: logger as never,
+        ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
+        store: webPushStore,
+      });
+    },
     onNoProgressAlert: ({ consecutiveNoProgressPasses, eligibleBacklog }) => {
       logger.warn?.(
         { consecutiveNoProgressPasses, eligibleBacklog },
