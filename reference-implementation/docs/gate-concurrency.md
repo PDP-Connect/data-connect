@@ -26,61 +26,38 @@ otherwise-independent file workers can contend for the same restore resource.
 Raising concurrency for PostgreSQL needs its own restore-aware measurement on a
 PostgreSQL host; a memory-profile result is not authority for it.
 
-## Archived memory-default measurements
+## The one-off measurement behind the cap
 
-Two memory-default runs of the same tree and selection, one at cap 2 and one at
-cap 8, are archived with this document:
+The cap was set after a single pair of memory-default runs on 2026-09-03: the
+same tree and the same selection, once at cap 2 and once at cap 8, on one host
+at Node 22.23.1, git head `eb6a890d`.
 
-- `receipts/gate-concurrency-20260903.tar.gz` — the raw receipts and
-  transcripts, four members, byte-for-byte as recorded
-- `receipts/gate-concurrency-20260903.summary.json` — a readable pairing of the
-  two runs
+| | cap 2 | cap 8 |
+| --- | --- | --- |
+| Elapsed | 352.198 s | 141.066 s |
+| Selected files | 1,033 | 1,033 |
+| Assertions | 6,961 | 6,961 |
+| Passed / failed / skipped | 6,335 / 396 / 230 | 6,335 / 396 / 230 |
+| Failure identities | 396 | 396 (same set) |
+| Exit code | 1 | 1 |
 
-Read a member without unpacking the archive:
+Both runs failed, and they failed on the identical set of 396 assertions. That
+is **failure-set equality for one pair on one host** — it says the cap did not
+change which assertions failed, and nothing more. It is not a green-suite
+result, and two equally failing runs are not evidence that either cap is safe.
 
-```sh
-tar -xzOf docs/receipts/gate-concurrency-20260903.tar.gz \
-  gate-concurrency-memory-cap-8.receipt.json
-```
+The raw receipts and transcripts for that pair are not retained. They were a
+snapshot of one day's tree, they went stale the moment the tree moved, and
+re-verifying a frozen archive proves only that the archive is unchanged. Going
+forward, **the evidence is the ongoing CI runs at the current cap**: every
+`reference-implementation` CI run exercises the default cap against the tree as
+it actually is, which is the claim worth holding.
 
-Replay the archived pair, which re-derives each receipt's counts, failure names
-and selection digests from its own archived raw output:
-
-```sh
-node --test --experimental-strip-types scripts/evidence/gate-concurrency-receipts.test.ts
-```
-
-## What the receipts establish
-
-Three different things are worth keeping separate:
-
-- **Recorded provenance.** Git head, Node version, profile and source-tree
-  digest are values the measuring process wrote down. Nothing here authenticates
-  the host or the toolchain; matching digests and paired metadata do not make
-  recorded provenance independently verified.
-- **Digest binding.** Each receipt's digests bind its transcript, selected-file
-  list and selection manifest. This shows the bytes were not edited after
-  recording.
-- **Re-derived outcomes.** The counts and failure identities are recomputed from
-  the raw structured output the transcript carries, so a forged count or a
-  renamed failure is rejected even when every digest still matches.
-
-`counts.completed_files` is a legacy field derived from the exit code, not an
-observed completion count. It is 0 on both archived runs because both exited
-non-zero. A real per-file completion claim needs raw file-outcome events, which
-this schema does not carry.
-
-## What the pair observed
-
-On the archived Node 22.23.1 runs, both caps selected 1,033 files and produced
-6,961 assertions: 6,335 passed, 396 failed and 230 skipped, with the same 396
-failure identities and exit code 1 in both runs. The cap-2 receipt records
-352.198 seconds; the cap-8 receipt records 141.066 seconds.
-
-This is **failure-set equality for this pair**, on one host, with both runs
-failing. Two runs that fail identically say nothing about whether either cap is
-safe, and none of it is a green-suite result. The failures are retained as
-evidence rather than hidden.
+Reading any run's counts, then or now: `completed_files` is derived from the
+exit code (`run-tests.ts` writes `failed ? 0 : results.length`), not from an
+observed per-file completion count, so it is 0 for any run that exits non-zero.
+A real per-file completion claim needs raw file-outcome events, which the
+receipt schema does not carry.
 
 ## Operational use
 
