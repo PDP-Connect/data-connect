@@ -23,11 +23,13 @@ import {
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { encodeHostedMcpSelection, encodeHostedMcpStreamSelection, hostedMcpSourceKey } from "../server/hosted-mcp-selection.ts";
+import { scopeFieldsInputName, scopeSinceInputName, scopeUntilInputName } from "../server/hosted-mcp-stream-scope.ts";
 import { computeHostedMcpDecisionDigest } from "../server/routes/as-consent-ui-helpers.ts";
 import { startServer } from "../server/index.ts";
 import { basicIntrospectionAuthorization } from "../server/introspection-http.ts";
 import { ingestRecord, queryRecordsAcrossBindings, resolveReadRequestBindings } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { bindHostedMcpConsentChallenge } from "./helpers/hosted-mcp-consent-challenge.ts";
 import {
   TEST_INTROSPECTION_SERVER_OPTS,
   TEST_RS_INTROSPECTION_CREDENTIALS,
@@ -2929,6 +2931,7 @@ async function exchangePackageCode({
   client: RegisteredClient;
   params: URLSearchParams;
 }): Promise<Response> {
+  await bindHostedMcpConsentChallenge(asUrl, params);
   const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
     body: params.toString(),
     headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
@@ -4722,6 +4725,7 @@ async function approvePinPackage({
     sources: [{ connectionId, connectorId: PIN_CONNECTOR_ID, streamNames: names }],
   });
 
+  await bindHostedMcpConsentChallenge(asUrl, params);
   const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
     body: params.toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -6020,6 +6024,7 @@ test("POST /oauth/authorize/mcp-package mints when the decision_digest matches t
       state: "bound-approval",
     });
 
+    await bindHostedMcpConsentChallenge(asUrl, params);
     const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
       body: params.toString(),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -6752,3 +6757,294 @@ test("accepting a consent challenge carries the owner's selected fields onto the
     await closeServer(server);
   }
 });
+
+const malformedConsentRestrictions: Array<{
+  name: string;
+  restriction: (streamId: string) => Record<string, unknown>;
+}> = [
+  { name: "field map string", restriction: () => ({ stream_fields: "id" }) },
+  { name: "field map array", restriction: () => ({ stream_fields: [] }) },
+  { name: "field map null", restriction: () => ({ stream_fields: null }) },
+  { name: "field list string", restriction: (id) => ({ stream_fields: { [id]: "id" } }) },
+  { name: "field list null", restriction: (id) => ({ stream_fields: { [id]: null } }) },
+  { name: "field list mixed types", restriction: (id) => ({ stream_fields: { [id]: ["id", 1] } }) },
+  { name: "field list blank entry", restriction: (id) => ({ stream_fields: { [id]: [""] } }) },
+  { name: "range map array", restriction: () => ({ stream_range: [] }) },
+  { name: "range map null", restriction: () => ({ stream_range: null }) },
+  { name: "range entry string", restriction: (id) => ({ stream_range: { [id]: "2025-01-01" } }) },
+  { name: "range entry array", restriction: (id) => ({ stream_range: { [id]: [] } }) },
+  { name: "numeric since", restriction: (id) => ({ stream_range: { [id]: { since: 20_250_101 } } }) },
+  { name: "numeric until", restriction: (id) => ({ stream_range: { [id]: { until: 20_251_231 } } }) },
+  { name: "null since", restriction: (id) => ({ stream_range: { [id]: { since: null } } }) },
+  { name: "unknown field", restriction: (id) => ({ stream_fields: { [id]: ["undeclared-secret"] } }) },
+  { name: "invalid date", restriction: (id) => ({ stream_range: { [id]: { since: "garbage" } } }) },
+  { name: "unknown date key", restriction: (id) => ({ stream_range: { [id]: { before: "2025-01-01" } } }) },
+  { name: "impossible date", restriction: (id) => ({ stream_range: { [id]: { until: "2026-02-31" } } }) },
+];
+
+for (const { name, restriction } of malformedConsentRestrictions) {
+  test(`consent security regression: ${name} rejects without minting or consuming`, async () => {
+    const server = await startOpenTestServer();
+    const asUrl = `http://localhost:${server.asPort}`;
+    try {
+      await registerAuthorizedSpotify(asUrl);
+      const client = await registerAuthCodeClient(asUrl);
+      const challenge = await startConsentChallenge(asUrl, client, "invalid-narrowing");
+      const model = await fetchConsentChallengeModel(asUrl, challenge);
+      const source = mustExist(model.sources[0], "source");
+      const stream = mustExist(
+        source.streams.find((entry) => entry.timePhrase),
+        "time-capable stream"
+      );
+      const validBody = consentChallengeAcceptBody({ chosen: [{ source, streams: [stream] }], client, model });
+      const before = await countGrantPackagesForOwner();
+      const result = await postConsentChallenge(asUrl, challenge, "accept", {
+        ...validBody,
+        ...restriction(stream.id),
+      });
+      assert.equal(result.status, 400, JSON.stringify(result.body));
+      assert.equal(result.body.error, "invalid_request");
+      assert.equal(await countGrantPackagesForOwner(), before);
+      const pending = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`);
+      assert.equal(pending.status, 200, "invalid restrictions must leave the challenge retryable");
+      const corrected = await postConsentChallenge(asUrl, challenge, "accept", validBody);
+      assert.equal(corrected.status, 200, JSON.stringify(corrected.body));
+      assert.equal(await countGrantPackagesForOwner(), before + 1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+}
+
+test("consent security regression: authenticated legacy approval cannot bypass rejected challenge", async () => {
+  const password = "consent-replay-fixture";
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    ownerAuthPassword: password,
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const login = await fetch(`${asUrl}/owner/login`, {
+      body: JSON.stringify({ password }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.equal(login.status, 302);
+    const [cookie] = mustExist(
+      login.headers.getSetCookie().find((value) => value.startsWith("pdpp_owner_session=")),
+      "owner cookie"
+    ).split(";");
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const authorize = await fetch(hostedMcpAuthorizeUrl(asUrl, client, "legacy-replay"), {
+      headers: { cookie },
+      redirect: "manual",
+    });
+    const challenge = mustExist(
+      new URL(mustExist(authorize.headers.get("location"), "handoff")).searchParams.get("challenge"),
+      "challenge"
+    );
+    const rejected = await fetch(`${asUrl}/oauth/authorize/consent-challenges/${challenge}/reject`, {
+      body: "{}",
+      headers: { "Content-Type": "application/json", cookie },
+      method: "POST",
+    });
+    assert.equal(rejected.status, 200);
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(consentChallengeVerifier),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "legacy-replay",
+    });
+    const body = {
+      ...Object.fromEntries(params),
+      selection: params.getAll("selection"),
+      stream: params.getAll("stream"),
+    };
+    const before = await countGrantPackagesForOwner();
+    for (const consentChallenge of [undefined, challenge, challenge]) {
+      // biome-ignore lint/performance/noAwaitInLoops: each replay must observe the preceding decision's terminal state.
+      const approval = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+        body: JSON.stringify({ ...body, consent_challenge: consentChallenge }),
+        headers: { Accept: "application/json", "Content-Type": "application/json", cookie },
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(approval.status, consentChallenge ? 404 : 400, await approval.text());
+      assert.equal(approval.headers.get("location"), null);
+      assert.equal(await countGrantPackagesForOwner(), before);
+    }
+    assert.equal(
+      getDb().prepare("SELECT status FROM consent_challenges WHERE id = ?").get<{ status: string }>(challenge)?.status,
+      "rejected"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("consent security regression: legacy approval binds owner, OAuth parameters, and single-use state", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(consentChallengeVerifier),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "stored-state",
+    });
+    await bindHostedMcpConsentChallenge(asUrl, params);
+    const challenge = mustExist(params.get("consent_challenge"), "bound challenge");
+    const submit = () =>
+      fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+        body: params.toString(),
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+        redirect: "manual",
+      });
+    const before = await countGrantPackagesForOwner();
+    getDb().prepare("UPDATE consent_challenges SET owner_subject_id = ? WHERE id = ?").run("another-owner", challenge);
+    assert.equal((await submit()).status, 404, "wrong owner cannot approve");
+    assert.equal(
+      getDb().prepare("SELECT status FROM consent_challenges WHERE id = ?").get<{ status: string }>(challenge)?.status,
+      "pending"
+    );
+    assert.equal(await countGrantPackagesForOwner(), before);
+    getDb().prepare("UPDATE consent_challenges SET owner_subject_id = ? WHERE id = ?").run("owner_local", challenge);
+    params.set("client_id", "attacker-client");
+    params.set("redirect_uri", "https://attacker.example/steal");
+    params.set("state", "attacker-state");
+    params.set("code_challenge", "attacker-pkce");
+    const approved = await submit();
+    assert.equal(approved.status, 302, await approved.text());
+    const callback = new URL(mustExist(approved.headers.get("location"), "callback"));
+    assert.equal(callback.origin, "https://client.example");
+    assert.equal(callback.searchParams.get("state"), "stored-state");
+    const token = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code: mustExist(callback.searchParams.get("code"), "code"),
+        code_verifier: consentChallengeVerifier,
+        grant_type: "authorization_code",
+        redirect_uri: HOSTED_MCP_REDIRECT_URI,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(token.status, 200, JSON.stringify(token.body));
+    assert.equal((await submit()).status, 404, "legacy replay cannot issue");
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", {})).status, 404, "API replay cannot issue");
+    assert.equal(
+      (await postConsentChallenge(asUrl, challenge, "reject", {})).status,
+      404,
+      "rejection cannot replace acceptance"
+    );
+    assert.equal(await countGrantPackagesForOwner(), before + 1);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("consent security regression: competing API and legacy decisions have exactly one winner", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const params = buildHostedMcpPickerForm({
+      challenge: pkceChallenge(consentChallengeVerifier),
+      client,
+      sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+      state: "competing-approval",
+    });
+    await bindHostedMcpConsentChallenge(asUrl, params);
+    const challenge = mustExist(params.get("consent_challenge"), "bound challenge");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "source");
+    const stream = mustExist(
+      source.streams.find((entry) => entry.name === "saved_tracks"),
+      "stream"
+    );
+    const before = await countGrantPackagesForOwner();
+    const results = await Promise.all([
+      fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+        body: params.toString(),
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+        redirect: "manual",
+      }),
+      postConsentChallenge(
+        asUrl,
+        challenge,
+        "accept",
+        consentChallengeAcceptBody({ chosen: [{ source, streams: [stream] }], client, model })
+      ),
+      postConsentChallenge(asUrl, challenge, "reject", {}),
+    ]);
+    const statuses = results.map((result) => result.status);
+    assert.equal(statuses.filter((status) => status === 200 || status === 302).length, 1, JSON.stringify(statuses));
+    assert.equal(statuses.filter((status) => status === 404).length, 2, JSON.stringify(statuses));
+    const row = getDb()
+      .prepare("SELECT status FROM consent_challenges WHERE id = ?")
+      .get<{ status: string }>(challenge);
+    assert.equal(await countGrantPackagesForOwner(), before + (row?.status === "accepted" ? 1 : 0));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+for (const [name, inputName, value] of [
+  ["numeric since", scopeSinceInputName, 20_250_101],
+  ["numeric until", scopeUntilInputName, 20_251_231],
+  ["null date", scopeSinceInputName, null],
+  ["impossible date", scopeUntilInputName, "2026-02-31"],
+  ["mixed field list", scopeFieldsInputName, ["added_at", 1]],
+  ["null field list", scopeFieldsInputName, null],
+] as const) {
+  test(`legacy narrowing regression: ${name} rejects without minting or consuming`, async () => {
+    const server = await startOpenTestServer();
+    const asUrl = `http://localhost:${server.asPort}`;
+    try {
+      const spotify = await registerAuthorizedSpotify(asUrl);
+      const client = await registerAuthCodeClient(asUrl);
+      const params = buildHostedMcpPickerForm({
+        challenge: pkceChallenge(consentChallengeVerifier),
+        client,
+        sourceSelections: [{ connectorId: spotify.connector_id, streamNames: ["saved_tracks"] }],
+        state: "legacy-invalid-narrowing",
+      });
+      await bindHostedMcpConsentChallenge(asUrl, params);
+      const challenge = mustExist(params.get("consent_challenge"), "challenge");
+      const model = await fetchConsentChallengeModel(asUrl, challenge);
+      const declaredField = mustExist(
+        model.sources[0]?.streams.find((stream) => stream.name === "saved_tracks")?.fields[0],
+        "declared field"
+      ).name;
+      const sourceKey = hostedMcpSourceKey({ connectionId: null, connectorId: spotify.connector_id });
+      const before = await countGrantPackagesForOwner();
+      const approval = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+        body: JSON.stringify({
+          ...Object.fromEntries(params),
+          [inputName(sourceKey, "saved_tracks")]: Array.isArray(value) ? [declaredField, 1] : value,
+          selection: params.getAll("selection"),
+          stream: params.getAll("stream"),
+        }),
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(approval.status, 400, await approval.text());
+      assert.equal(await countGrantPackagesForOwner(), before);
+      assert.equal((await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`)).status, 200);
+    } finally {
+      await closeServer(server);
+    }
+  });
+}

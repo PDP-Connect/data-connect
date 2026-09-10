@@ -130,7 +130,7 @@ export function normalizeScopeBound(value: unknown, bound: "since" | "until"): s
     return undefined;
   }
   const parsed = Date.parse(`${trimmed}T00:00:00.000Z`);
-  if (!Number.isFinite(parsed)) {
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== trimmed) {
     return undefined;
   }
   const instant = bound === "until" ? parsed + 24 * 60 * 60 * 1000 : parsed;
@@ -274,18 +274,26 @@ export interface SubmittedStreamScope {
 }
 
 function normalizeSubmittedList(value: unknown): string[] {
+  let fields: unknown[];
   if (Array.isArray(value)) {
-    return value.filter(isNonEmptyString);
+    fields = value;
+  } else if (typeof value === "string") {
+    fields = [value];
+  } else if (value && typeof value === "object") {
+    // qs yields a numeric-keyed object rather than an array once repeated
+    // params exceed its arrayLimit, which per-field checkboxes reach easily.
+    fields = Object.values(value as Record<string, unknown>);
+  } else {
+    throw Object.assign(new Error("Stream fields must be a field name or list of field names"), {
+      code: "invalid_request",
+    });
   }
-  if (isNonEmptyString(value)) {
-    return [value];
+  if (!fields.every(isNonEmptyString)) {
+    throw Object.assign(new Error("Stream fields must contain only nonempty field names"), {
+      code: "invalid_request",
+    });
   }
-  // qs yields a numeric-keyed object rather than an array once repeated
-  // params exceed its arrayLimit, which per-field checkboxes reach easily.
-  if (value && typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).filter(isNonEmptyString);
-  }
-  return [];
+  return fields;
 }
 
 /**
@@ -324,8 +332,13 @@ export function parseSubmittedStreamScopes(
       const existing = scopes.get(streamName) ?? {};
       if (key === "fields") {
         existing.fields = normalizeSubmittedList(value);
-      } else if (isNonEmptyString(value)) {
-        existing[key] = value.trim();
+      } else {
+        if (typeof value !== "string") {
+          throw Object.assign(new Error("Stream date bounds must be strings"), { code: "invalid_request" });
+        }
+        if (value.trim()) {
+          existing[key] = value.trim();
+        }
       }
       scopes.set(streamName, existing);
     }

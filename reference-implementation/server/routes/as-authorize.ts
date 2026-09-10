@@ -894,7 +894,7 @@ async function buildPackageAndRedirect(
   // Required, with no default: a default would silently disable the approval
   // binding for any future caller that forgot it — the exact fail-open shape
   // this check exists to remove.
-  approval: { body: Record<string, unknown>; packageAccessMode: string },
+  approval: { body: Record<string, unknown>; packageAccessMode: string; consumeChallenge: () => Promise<boolean> },
   /** Owner-chosen grant expiry; null means no scheduled end date. */
   grantExpiresAt: string | null = null
 ): Promise<unknown> {
@@ -957,6 +957,11 @@ async function buildPackageAndRedirect(
     authorizationDetails: acc.authorizationDetails,
     clientId: pkce.clientId,
   });
+
+  // Validate first, then atomically claim the owner-bound transaction before minting.
+  if (!(await approval.consumeChallenge())) {
+    return;
+  }
 
   const packageResult = await ctx.createHostedMcpGrantPackage({
     authorizationDetails: acc.authorizationDetails,
@@ -1037,7 +1042,8 @@ async function resolveMcpPackageIntake(
 async function handleHostedMcpPackageApproval(
   req: RouteRequest,
   res: RouteResponse,
-  ctx: MountAsAuthorizeContext
+  ctx: MountAsAuthorizeContext,
+  consumeChallenge: () => Promise<boolean>
 ): Promise<unknown> {
   const body = req.body || {};
   const clientId = requireAuthorizeString(body, "client_id");
@@ -1088,7 +1094,7 @@ async function handleHostedMcpPackageApproval(
     ownerSubjectId,
     ctx,
     client,
-    { body, packageAccessMode },
+    { body, consumeChallenge, packageAccessMode },
     expiryResult.expiresAt
   );
 }
@@ -1141,41 +1147,43 @@ function submittedStrings(value: unknown): string[] {
  */
 function submittedStreamRanges(value: unknown): Map<string, { since?: string; until?: string }> {
   const ranges = new Map<string, { since?: string; until?: string }>();
-  if (!(value && typeof value === "object") || Array.isArray(value)) {
+  if (value === undefined) {
     return ranges;
   }
+  if (!(value && typeof value === "object") || Array.isArray(value)) {
+    throw Object.assign(new Error("stream_range must be an object of date ranges"), { code: "invalid_request" });
+  }
   for (const [streamId, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (!(raw && typeof raw === "object")) {
-      continue;
+    if (!(raw && typeof raw === "object") || Array.isArray(raw)) {
+      throw Object.assign(new Error("Each stream_range must be an object"), { code: "invalid_request" });
+    }
+    if (Object.keys(raw).some((key) => key !== "since" && key !== "until")) {
+      throw Object.assign(new Error("Stream date ranges may contain only since and until"), { code: "invalid_request" });
     }
     const { since, until } = raw as { since?: unknown; until?: unknown };
-    const entry: { since?: string; until?: string } = {};
-    if (typeof since === "string" && since.trim()) {
-      entry.since = since.trim();
+    if ((since !== undefined && typeof since !== "string") || (until !== undefined && typeof until !== "string")) {
+      throw Object.assign(new Error("Stream date bounds must be strings"), { code: "invalid_request" });
     }
-    if (typeof until === "string" && until.trim()) {
-      entry.until = until.trim();
-    }
-    if (entry.since || entry.until) {
-      ranges.set(streamId, entry);
-    }
+    ranges.set(streamId, { since: (since ?? "").trim(), until: (until ?? "").trim() });
   }
   return ranges;
 }
 
 function submittedStreamFields(value: unknown): Map<string, string[]> {
   const fields = new Map<string, string[]>();
-  if (!(value && typeof value === "object") || Array.isArray(value)) {
+  if (value === undefined) {
     return fields;
   }
+  if (!(value && typeof value === "object") || Array.isArray(value)) {
+    throw Object.assign(new Error("stream_fields must be an object of field lists"), { code: "invalid_request" });
+  }
   for (const [streamId, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (!Array.isArray(raw)) {
-      continue;
+    if (!Array.isArray(raw) || raw.some((field) => typeof field !== "string" || !field.trim())) {
+      throw Object.assign(new Error("Each stream_fields value must be an array of nonempty field names"), {
+        code: "invalid_request",
+      });
     }
-    fields.set(
-      streamId,
-      raw.filter((field): field is string => typeof field === "string" && field.trim().length > 0).map((field) => field.trim())
-    );
+    fields.set(streamId, raw.map((field: string) => field.trim()));
   }
   return fields;
 }
@@ -1322,6 +1330,20 @@ async function handleHostedMcpCancel(
 
 export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): void {
   const consentChallengeStore = ctx.consentChallengeStore ?? createConsentChallengeStore();
+
+  async function consumeApprovalChallenge(req: RouteRequest, res: RouteResponse, id: string): Promise<boolean> {
+    const consumed = await consentChallengeStore.consume(
+      id,
+      ownerSubjectIdFromRequest(req),
+      "accepted",
+      typeof req.body?.decision_digest === "string" ? req.body.decision_digest : null
+    );
+    if (!consumed) {
+      ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
+      return false;
+    }
+    return true;
+  }
   // GET /oauth/authorize
   //
   // Entry point for the OAuth authorization flow. Three paths:
@@ -1468,7 +1490,22 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     ctx.requireCsrf,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
-        return await handleHostedMcpPackageApproval(req, res, ctx);
+        const id = typeof req.body?.consent_challenge === "string" ? req.body.consent_challenge.trim() : "";
+        const challenge = id ? await consentChallengeStore.readPending(id, ownerSubjectIdFromRequest(req)) : null;
+        if (id && !challenge) {
+          return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
+        }
+        // The compatibility form may still display validation errors without
+        // a challenge, but it cannot issue. Bound requests use stored OAuth
+        // parameters so the form cannot replace the client, callback, or PKCE.
+        const boundRequest = challenge ? { ...req, body: { ...req.body, ...challenge.authorizeParams } } : req;
+        return await handleHostedMcpPackageApproval(boundRequest, res, ctx, async () => {
+          if (!id) {
+            ctx.oauthError(res, 400, "invalid_request", "consent_challenge is required to approve access");
+            return false;
+          }
+          return await consumeApprovalChallenge(boundRequest, res, id);
+        });
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };
         return ctx.oauthError(
@@ -1526,20 +1563,18 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
       const id = challengeIdFromParams(req);
       try {
         const submitted = req.body || {};
-        const challenge = await consentChallengeStore.consume(
-          id,
-          ownerSubjectIdFromRequest(req),
-          "accepted",
-          typeof submitted.decision_digest === "string" ? submitted.decision_digest : null
-        );
+        const challenge = await consentChallengeStore.readPending(id, ownerSubjectIdFromRequest(req));
         if (!challenge) {
           return ctx.oauthError(res, 404, "not_found", "Unknown or expired consent challenge");
         }
-        // Consume BEFORE minting. The conditional database update makes this
-        // single-use across processes as well as concurrent requests.
+        // Resolve and validate before consuming, so invalid decisions can be
+        // corrected. The shared issuer atomically consumes just before minting.
         const body = await buildChallengeApprovalBody(challenge, submitted, ctx);
         const { response, redirectUrl } = captureRedirectResponse(res);
-        await handleHostedMcpPackageApproval({ ...req, body, wantsJson: true }, response, ctx);
+        const boundRequest = { ...req, body, wantsJson: true };
+        await handleHostedMcpPackageApproval(boundRequest, response, ctx, () =>
+          consumeApprovalChallenge(boundRequest, response, id)
+        );
         const url = redirectUrl();
         if (!url) {
           // The approval path already wrote its own typed error envelope
