@@ -454,7 +454,9 @@ export function buildHostedMcpAuthorizationDetailForConnector(
    * narrowing", which is the pre-existing behavior: the resolver reads an
    * omitted `fields` as every field and an omitted `time_range` as no bound
    * (spec-core.md:775). A wildcard selection carries no scope, because there
-   * is no named stream to attach it to until the wildcard is expanded.
+   * is no named stream to attach it to until the wildcard is expanded — which
+   * is why the picker names its streams instead of passing null here. See
+   * `issuedStreamNamesForSource` in as-authorize.ts.
    */
   streamScopes: ReadonlyMap<string, StreamScopeSelection> | null = null
 ): {

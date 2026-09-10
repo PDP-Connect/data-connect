@@ -457,10 +457,15 @@ async function accumulateSourceEntry(
     return "rejected";
   }
 
+  // Issue the streams by name, never the wildcard: it would drop the
+  // field/date restrictions validated just above and re-resolve "all streams"
+  // against a declaration that may have changed since this review.
+  const issuedStreamNames = issuedStreamNamesForSource(manifest, narrowedStreamNames);
+
   acc.authorizationDetails.push(
     buildHostedMcpAuthorizationDetailForConnector(
       connectorId,
-      narrowedStreamNames,
+      issuedStreamNames,
       packageAccessMode,
       pinnedConnectionId,
       source,
@@ -469,15 +474,14 @@ async function accumulateSourceEntry(
   );
   acc.storageBindings.push({ connector_id: connectorId });
   acc.connectionIds.push(connectionId || null);
-  // `narrowedStreamNames === null` is the canonical wildcard: every stream
-  // the manifest declares. The decision digest must name them explicitly,
-  // because "all of them" is not a term the owner can review — and because a
-  // manifest that gained a stream between render and submit would otherwise
-  // silently widen what "all" means.
+  // The decision digest names the streams explicitly, because "all of them" is
+  // not a term the owner can review — and because a manifest that gained a
+  // stream between render and submit would otherwise silently widen what "all"
+  // means. These are the same names now issued on the detail above.
   acc.decisionSources.push({
     sourceKey: caps.hostedMcpSourceKey({ connectionId, connectorId }),
     streamNames: [
-      ...(narrowedStreamNames ??
+      ...(issuedStreamNames ??
         (manifest.streams ?? []).map((stream) => stream.name).filter((name): name is string => typeof name === "string")),
     ].sort(),
   });
@@ -499,9 +503,9 @@ async function accumulateSourceEntry(
  * likewise ignored — `resolveNarrowedStreams` has already bounded the grant to
  * declared names, so there is nothing for it to attach to.
  *
- * Wildcard selections (`narrowedStreamNames === null`, meaning every stream)
- * still resolve scopes by name, so narrowing survives the wildcard being
- * expanded against the retained snapshot at issuance.
+ * An "every stream" selection (`narrowedStreamNames === null`) still resolves
+ * scopes by name, because it is issued under those names rather than the
+ * wildcard — see `issuedStreamNamesForSource`.
  */
 function resolveSubmittedStreamScopes(
   manifest: ConsentPickerManifest,
@@ -537,9 +541,10 @@ function resolveSubmittedStreamScopes(
 }
 
 // Resolves the narrowed stream name list for a source, accounting for:
-//   (a) no manifest streams  → null (wildcard preserved)
+//   (a) no manifest streams  → null (nothing to narrow)
 //   (b) owner deselected all → "deselected" sentinel
-//   (c) all streams selected → null (canonical wildcard)
+//   (c) all streams selected → null ("no narrowing"; `issuedStreamNamesForSource`
+//                                    resolves it to the declared names)
 //   (d) subset selected      → the filtered list
 // Extracted to reduce cognitive complexity of accumulateSourceEntry.
 function resolveNarrowedStreams(
@@ -564,6 +569,44 @@ function resolveNarrowedStreams(
     return null; // (c)
   }
   return validStreamNames; // (d)
+}
+
+/**
+ * Resolves the stream names the picker issues, expanding an "every stream"
+ * selection to the names the owner actually reviewed.
+ *
+ * The picker never issues the `*` wildcard, for two reasons:
+ *
+ *  1. Narrowing would be lost. `buildHostedMcpAuthorizationDetailForConnector`
+ *     emits a single `{name: "*"}` for a wildcard and keys per-stream scopes by
+ *     name, so a validated field list or date range has nothing to attach to.
+ *     The AS then re-expands `*` against the declaration at issuance and copies
+ *     only `instance_ids` (`resolveCoreSelection` in
+ *     `core-source-authorization.ts`), so a narrowed all-streams approval
+ *     persisted every field with no time bound.
+ *
+ *  2. The grant would not be bound to the reviewed declaration. `*` is resolved
+ *     again after the challenge is consumed, so a stream declared between
+ *     validation and issuance silently widened what "all of them" meant. Naming
+ *     the streams pins the grant to this validated snapshot, matching the
+ *     explicit names the decision digest already covers (see
+ *     `acc.decisionSources` below).
+ *
+ * `null` is returned only when the declaration names no streams, where the
+ * wildcard remains the sole way to express the request. Clients may still send
+ * `*` in their own `authorization_details`; this governs the picker alone.
+ */
+function issuedStreamNamesForSource(
+  manifest: ConsentPickerManifest,
+  narrowedStreamNames: string[] | null
+): string[] | null {
+  if (narrowedStreamNames) {
+    return narrowedStreamNames;
+  }
+  const declaredNames = (manifest.streams ?? [])
+    .map((stream) => stream.name)
+    .filter((name): name is string => typeof name === "string");
+  return declaredNames.length > 0 ? declaredNames : null;
 }
 
 // ─── PAR-redirect helper (extracted to reduce GET handler complexity) ─────────
