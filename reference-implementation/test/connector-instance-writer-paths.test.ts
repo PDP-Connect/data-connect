@@ -12,6 +12,7 @@ import {
 import {
   deleteAllRecordsForConnector,
   deleteConnectionRecordRowsPostgres as deleteConnectionRecordRowsPostgresUntyped,
+  drainConnectorInstanceIndexWorkForTests,
   enumerateConnectionStreams as enumerateConnectionStreamsUntyped,
   ingestRecord,
   teardownConnectionSearchProjection as teardownConnectionSearchProjectionUntyped,
@@ -164,6 +165,8 @@ test("SQLite connector-wide bulk deletion serializes the actual same-instance wr
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, bulk, sameInstanceIngest].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -200,6 +203,8 @@ test("SQLite direct ingest queued before bulk deletion deterministically leaves 
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, directIngest, bulk].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -241,6 +246,8 @@ test("SQLite lexical manifest backfill waits on its actual instance but does not
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, backfill].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -283,6 +290,8 @@ test("SQLite direct ingest queued before lexical backfill is indexed by the late
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, directIngest, backfill].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -348,6 +357,8 @@ test("SQLite connection purge is fenced through its durable delete and post-comm
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, deletion].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
