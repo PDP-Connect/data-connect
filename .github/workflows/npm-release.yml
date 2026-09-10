@@ -11,11 +11,33 @@ name: npm-release
 # desktop app via .github/workflows/release.yml (a completely separate
 # artifact class — GitHub Release installers, not npm packages), which this
 # workflow does not touch.
+#
+# FORCED RELEASES: the scope gate above has one silent failure mode — a real
+# packaged change that lands under an unscoped `fix:` or a `chore:` re-vendor
+# commit resolves no version, so `quality` and `release` skip and nothing
+# publishes, with no failure to notice. The `release_type` dispatch input is
+# the honest way out: it forces a bump when the packages have shipped
+# changes no commit scope announced. It does NOT weaken the gate for
+# ordinary pushes — a push with no `release_type` runs exactly the commit
+# analysis it always did. A forced run still goes through the SAME `quality`
+# job and the same OIDC trusted publishing; the only thing bypassed is which
+# commits count as releasable. See scripts/forced-release-config.ts.
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Force a release at this bump, bypassing commit analysis. Leave empty to run ordinary commit analysis."
+        required: false
+        type: choice
+        options: ["", "patch", "minor", "major"]
+        default: ""
+      reason:
+        description: "Why this release is being forced (recorded in the run log and job summary). Required when release_type is set."
+        required: false
+        type: string
 
 concurrency:
   group: npm-release-${{ github.ref }}
@@ -54,13 +76,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # A forced run resolves its version through the same dry run and the
+      # same output parser as an ordinary one — only the commit-analyzer
+      # rules differ. That keeps `quality` gating publication in both cases:
+      # forcing changes which commits count as releasable, never whether the
+      # release has to pass its checks.
       - name: Determine next version
         id: version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          REASON: ${{ inputs.reason }}
+          FORCED_RELEASE_DRY_RUN: "true"
         run: |
           set -o pipefail
-          npm run release:npm:dry-run 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
+          if [ -n "$RELEASE_TYPE" ]; then
+            node --import tsx scripts/forced-release.ts "$RELEASE_TYPE" "$REASON" 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
+          else
+            npm run release:npm:dry-run 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
+          fi
           node --import tsx scripts/semantic-release-github-output.ts dry-run "$RUNNER_TEMP/semantic-release-dry-run.log"
 
   quality:
@@ -149,10 +183,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Publishes through the same plugin chain either way. The forced path
+      # must re-apply the forced rules here: this job runs a fresh
+      # semantic-release, so running the gated config would re-analyze the
+      # same commits, resolve nothing, and publish nothing — the exact
+      # silent no-op this mechanism exists to end.
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release:npm
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          if [ -n "$RELEASE_TYPE" ]; then
+            node --import tsx scripts/forced-release.ts "$RELEASE_TYPE" "$REASON"
+          else
+            npm run release:npm
+          fi
 
       # Proves the npm-provenance binding claimed in
       # packages/connector-protocol/scripts/package-artifact.mjs actually

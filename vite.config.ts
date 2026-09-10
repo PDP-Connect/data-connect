@@ -30,6 +30,7 @@ export default defineConfig({
       "scripts/mutation-falsification/*.test.ts",
       "scripts/npm-release-commit-analyzer.test.ts",
       "scripts/npm-release-signer-workflow.test.ts",
+      "scripts/forced-release.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",
