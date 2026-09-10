@@ -10,22 +10,10 @@
  * The scenario under test is a real server restart: the AS process exits
  * and a new AS process later starts against the SAME on-disk SQLite file,
  * and a consent-exchange code minted before the exit must still redeem
- * after the restart. Running the pre-restart AND post-restart server
- * inside one `node:test` process (two sequential `startServer()`/
- * `closeDb()` cycles against a real, non-`:memory:`, WAL-mode SQLite file
- * within one process, OR even a single such cycle followed by spawning
- * one child process) triggers a `node:test` runner defect: the file hangs
- * forever after all assertions pass, reported as "Promise resolution is
- * still pending but the event loop has already resolved", even though
- * `process.report.getReport().libuv` and `process._getActiveHandles()` are
- * both empty by then — there is no real handle leak, it is the runner's
- * own idle-detection bookkeeping getting confused by real-file WAL-mode
- * SQLite activity in-process. Running BOTH halves of the restart as
- * genuinely separate child processes (this fixture, used twice) keeps the
- * PARENT `node:test` process free of any real-file SQLite activity at
- * all, which reliably avoids the defect — and is also a more faithful
- * model of the actual scenario, since a production restart is a new
- * process too.
+ * after the restart. Running both halves through this fixture models that
+ * faithfully — `closeDb()` plus a second in-process `startServer()`
+ * cannot exercise cross-process WAL recovery or SQLite file-lock handover,
+ * because the file never leaves the one process that opened it.
  *
  * Protocol (stdio-based, matching
  * test/fixtures/connector-instance-two-process-race-fixture.ts):

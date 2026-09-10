@@ -8,7 +8,6 @@ const FORCED_ORDINARY_DENIAL_ROLLBACK_RE = /forced ordinary denial rollback/;
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -45,6 +44,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { runConsentHandoffRestartFixture } from "./helpers/consent-handoff-restart-fixture.ts";
 import { introspectionHeaders } from "./helpers/introspection.ts";
 import { TEST_RS_INTROSPECTION_CREDENTIALS } from "./helpers/introspection-test-credentials.ts";
 
@@ -123,100 +123,7 @@ async function closeServer(server: TestServerHandle): Promise<void> {
   await Promise.allSettled([closeOne(server.asServer), closeOne(server.rsServer)]);
 }
 
-const CONSENT_HANDOFF_RESTART_FIXTURE_PATH = fileURLToPath(
-  new URL("./fixtures/consent-handoff-restart-server-fixture.mjs", import.meta.url)
-);
 const SPOTIFY_MANIFEST_PATH = join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json");
-
-/**
- * Runs one AS/RS server session against `dbPath` in a genuinely separate OS
- * process, performs `go` against it, and returns its single JSON result
- * line — simulating a real AS process lifetime. A real server restart is
- * two SEPARATE processes sharing one on-disk SQLite file; running that
- * sequence (two `startServer()`/`closeDb()` cycles against a real,
- * non-`:memory:`, WAL-mode SQLite file) inside ONE `node:test` process
- * trips a `node:test` runner defect: the file hangs forever after every
- * assertion passes, reported as "Promise resolution is still pending but
- * the event loop has already resolved", even though there is no real
- * handle left open (`process.report.getReport().libuv` and
- * `process._getActiveHandles()` are both empty by then). Keeping the
- * PARENT `node:test` process itself free of any real-file SQLite activity
- * — by running BOTH the pre-restart and post-restart server as child
- * processes via this helper — reliably avoids the defect.
- */
-async function runConsentHandoffRestartFixture(
-  dbPath: string,
-  go: { op: "exchange"; code: string } | { op: "mint"; spotifyManifestPath: string }
-): Promise<Record<string, unknown>> {
-  const child = spawn(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      CONSENT_HANDOFF_RESTART_FIXTURE_PATH,
-      dbPath,
-      JSON.stringify(TEST_RS_INTROSPECTION_CREDENTIALS),
-    ],
-    { stdio: ["pipe", "pipe", "pipe"] }
-  );
-  child.stderr.pipe(process.stderr);
-  let stdoutBuffer = "";
-  const lines: string[] = [];
-  const lineWaiters: Array<(line: string) => void> = [];
-  child.stdout.on("data", (chunk: Buffer) => {
-    stdoutBuffer += chunk.toString("utf8");
-    let idx = stdoutBuffer.indexOf("\n");
-    while (idx >= 0) {
-      const line = stdoutBuffer.slice(0, idx);
-      stdoutBuffer = stdoutBuffer.slice(idx + 1);
-      const waiter = lineWaiters.shift();
-      if (waiter) {
-        waiter(line);
-      } else {
-        lines.push(line);
-      }
-      idx = stdoutBuffer.indexOf("\n");
-    }
-  });
-  function nextLine(): Promise<string> {
-    if (lines.length > 0) {
-      const line = lines.shift();
-      assert.ok(line !== undefined, "a line just confirmed present in the buffer must be shiftable");
-      return Promise.resolve(line);
-    }
-    return new Promise((resolve) => lineWaiters.push(resolve));
-  }
-
-  const readyLine = await nextLine();
-  const ready = JSON.parse(readyLine) as { ready: true };
-  assert.equal(ready.ready, true, `fixture did not report ready: ${readyLine}`);
-
-  child.stdin.write(`${JSON.stringify(go)}\n`);
-  child.stdin.end();
-
-  const resultLine = await nextLine();
-  const result = JSON.parse(resultLine) as Record<string, unknown>;
-
-  // Bounded wait for the child's own process/sockets to actually release
-  // (not just for its result line) before returning control — otherwise a
-  // still-listening child server can outlive this call and leave a
-  // referenced handle behind. Bounded, not indefinite: the same real-file
-  // SQLite activity that motivates this whole fixture (see doc comment
-  // above) can occasionally leave THIS process's own child-exit-event
-  // delivery delayed well past the child's actual OS-level exit.
-  await Promise.race([
-    new Promise<void>((resolve) => child.once("exit", () => resolve())),
-    new Promise<void>((resolve) => setTimeout(resolve, 2000)),
-  ]);
-  child.stdout.destroy();
-  child.stdin.destroy();
-  child.stderr.unpipe(process.stderr);
-  child.stderr.destroy();
-  child.removeAllListeners();
-  child.unref();
-  assert.ok(!("error" in result), `fixture reported an error: ${JSON.stringify(result)}`);
-  return result;
-}
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<FetchJsonResult> {
   const resp = await fetch(url, opts);
@@ -719,11 +626,9 @@ test("security: harden consent token handoff", async (t) => {
     const dbPath = join(directory, "pdpp.sqlite");
     try {
       // Both the pre-restart and post-restart server run in genuinely
-      // separate OS processes (see runConsentHandoffRestartFixture) —
-      // both because that's what a real restart is, and to keep this
-      // node:test process itself free of the real-file, WAL-mode SQLite
-      // activity that trips a node:test runner defect (see that helper's
-      // doc comment).
+      // separate OS processes (see runConsentHandoffRestartFixture),
+      // because that is what a real restart is: the code has to survive
+      // in the SQLite file, not in process memory.
       const minted = await runConsentHandoffRestartFixture(dbPath, {
         op: "mint",
         spotifyManifestPath: SPOTIFY_MANIFEST_PATH,
