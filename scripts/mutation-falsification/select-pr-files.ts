@@ -216,6 +216,48 @@ export function selectCohortTests(
   return [...new Set(selected)].sort()
 }
 
+/**
+ * Whether a test can run inside Stryker's sandbox for a cohort.
+ *
+ * Stryker copies a cohort into a sandbox rooted at the cohort root and writes
+ * each file at its path relative to that root, so nothing above the root exists
+ * in the sandbox and no `files` or `ignorePatterns` entry can put it there. A
+ * test that reads a repository-root path -- `../../.github/workflows/...`, say --
+ * therefore fails with ENOENT in the sandbox while passing on disk. One such
+ * failure fails Stryker's initial test run, which rejects the baseline and makes
+ * every mutant in the batch inconclusive, so the whole attempt yields nothing.
+ *
+ * Excluding these is not the same as letting a test skip when its file is
+ * missing: the test still runs, and still fails, in the cohort's own suite. It
+ * is held out of the mutation baseline only, where it can bear on no mutant --
+ * it exercises a file outside the cohort, which no mutant in this batch touches.
+ * The exclusion is recorded in the intent packet rather than applied silently.
+ */
+export function escapesCohortRoot(testPath: SelectedFile, testSource: string): boolean {
+  // How far the test's own directory sits below the cohort root. A `../` budget
+  // larger than this climbs past the root, which is what leaves the sandbox.
+  const depth = testPath.split("/").length - 1
+
+  // The traversals these tests build with `join(__dirname, "../../...")`. Each
+  // literal is measured against the budget rather than matched at a fixed
+  // depth, because the same `../../` escapes from `scripts/` but not from
+  // `test/nested/`.
+  for (const [, literal] of testSource.matchAll(/["'`]([^"'`\n]*\.\.\/[^"'`\n]*)["'`]/g)) {
+    let climbed = 0
+    for (const segment of literal.split("/")) {
+      if (segment === "..") {
+        climbed += 1
+      } else if (segment !== "." && segment !== "") {
+        break
+      }
+    }
+    if (climbed > depth) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Make a repository-relative path cohort-relative, so it can be a `mutate` glob. */
 export function toCohortRelative(path: string, cohortRoot: string): string {
   if (cohortRoot === ".") {

@@ -8,10 +8,12 @@
 // packet type it writes has no field for one.
 
 import { createHash } from "node:crypto"
-import { readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import {
   type CohortDefinition,
   type CohortName,
+  escapesCohortRoot,
   type ExecutionInputs,
   freezeIntent,
   parseNameStatusZ,
@@ -80,7 +82,28 @@ writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
 // is "no selection was recorded".
 const selectedTestsPath = optionalArgument("selected-tests")
 if (selectedTestsPath !== undefined) {
-  const tests = selectCohortTests(diff, cohort)
+  // A test that reads above the cohort root cannot run in Stryker's sandbox,
+  // which is rooted there. Left in, its ENOENT fails the initial test run,
+  // rejects the baseline, and makes every mutant inconclusive -- so one such
+  // test costs the whole attempt its evidence. Held out here it still runs, and
+  // still fails if broken, in the cohort's own suite; it is only kept out of a
+  // baseline it could never inform, since it exercises no file this batch
+  // mutates. The names are printed so the narrowing is visible in the log
+  // rather than applied silently.
+  const withheld: string[] = []
+  const tests = selectCohortTests(diff, cohort).filter((test) => {
+    const onDisk = cohort.root === "." ? test : join(cohort.root, test)
+    if (!existsSync(onDisk) || !escapesCohortRoot(test, readFileSync(onDisk, "utf8"))) {
+      return true
+    }
+    withheld.push(test)
+    return false
+  })
+  if (withheld.length > 0) {
+    process.stdout.write(
+      `withheld from the mutation baseline, reads above the cohort root: ${withheld.join(", ")}\n`
+    )
+  }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)
 }
 
