@@ -39,6 +39,26 @@ export interface ConsentChallengeStore {
   ) => Promise<ConsentChallengeRecord | null>;
   create: (record: ConsentChallengeRecord) => Promise<void>;
   readPending: (id: string, ownerSubjectId: string, now?: number) => Promise<ConsentChallengeRecord | null>;
+  /**
+   * Returns a challenge this request consumed but could not issue against to
+   * `pending`, clearing the decision it never actually authorized.
+   *
+   * Consumption claims the challenge before minting so two concurrent
+   * approvals cannot both issue. When minting then fails — a source revoked at
+   * that boundary, say — leaving the row `accepted` would record a decision
+   * that produced no grant and answer the owner's honest retry with 404. This
+   * restores retryability without weakening single-use: the row only returns
+   * to `pending` if it is still `accepted` with the digest this caller wrote,
+   * so a challenge some other request has since decided is left alone.
+   *
+   * Returns true when the row was released.
+   */
+  release: (
+    id: string,
+    ownerSubjectId: string,
+    decisionDigest: string | null,
+    now?: number
+  ) => Promise<boolean>;
 }
 
 function iso(now: number): string {
@@ -153,6 +173,29 @@ export function createConsentChallengeStore(): ConsentChallengeStore {
             .get(id, ownerSubjectId) as ConsentChallengeRow | undefined
       );
       return row ? rowToRecord(row) : null;
+    },
+    async release(id, ownerSubjectId, decisionDigest, now = Date.now()) {
+      const nowIso = iso(now);
+      // Expiry still wins: a challenge whose window closed while this request
+      // was minting stays terminal rather than becoming approvable again.
+      if (isPostgresStorageBackend()) {
+        const result = await postgresQuery(
+          `UPDATE consent_challenges SET status = 'pending', decision_digest = NULL, decided_at = NULL
+          WHERE id = $1 AND owner_subject_id = $2 AND status = 'accepted'
+            AND decision_digest IS NOT DISTINCT FROM $3 AND expires_at > $4`,
+          [id, ownerSubjectId, decisionDigest, nowIso]
+        );
+        return (result.rowCount ?? 0) === 1;
+      }
+      const changes = await runWithSqliteBusyRetry(
+        () =>
+          getDb()
+            .prepare(`UPDATE consent_challenges SET status = 'pending', decision_digest = NULL, decided_at = NULL
+          WHERE id = ? AND owner_subject_id = ? AND status = 'accepted'
+            AND decision_digest IS ? AND expires_at > ?`)
+            .run(id, ownerSubjectId, decisionDigest, nowIso).changes
+      );
+      return changes === 1;
     },
   };
 }
