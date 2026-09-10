@@ -81,18 +81,21 @@ export default {
   // reports no per-test identities, so the whole selection runs in one command
   // and the baseline costs as much as the selection does.
   //
-  // Stryker's default allows five minutes for it. A revision that touches many
-  // test files selects many, and this cohort's tests are integration-weight:
-  // a 25-file selection ran past five minutes and the run aborted before a
-  // single mutant was tried, reporting no evidence. The ceiling was the
-  // baseline's, not the suite's -- the same tests pass in the cohort's own test
-  // job.
+  // Stryker allows five minutes by default. This cohort's tests are
+  // integration-weight and the selection grows with the number of test files a
+  // revision touches, so a large revision can exceed that while every test
+  // still passes -- the ceiling is the baseline's, not the suite's.
   //
-  // Twenty minutes is sized to that job, which runs the whole cohort well
-  // inside it. This bounds only the unmutated baseline; `timeoutMS` and
-  // `timeoutFactor` still bound each mutant, so a mutant that induces an
-  // infinite loop is still killed on time rather than waiting this out.
-  dryRunTimeoutMinutes: 20,
+  // Ten minutes is headroom over the cohort's own test job, not a fix for a
+  // baseline that fails to terminate. A dry run that does not finish inside
+  // this is a hang to diagnose, not a number to raise: the console prebuild in
+  // the mutation workflow exists because its absence produced exactly that,
+  // and raising this instead only delays the same empty result.
+  //
+  // This bounds only the unmutated baseline. `timeoutMS` and `timeoutFactor`
+  // still bound each mutant, so a mutant that induces an infinite loop is
+  // killed on time rather than waiting this out.
+  dryRunTimeoutMinutes: 10,
 
   // Stryker copies the working tree into the sandbox, so anything not needed to
   // run this cohort's tests is excluded. `node_modules` is deliberately absent
