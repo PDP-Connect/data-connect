@@ -56,9 +56,9 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -77,6 +77,7 @@ import {
 	isPathWithinSourceRoots,
 	readEnumerationScope,
 	scopeBoundsEnumeration,
+	shouldDescendIntoDirectory,
 } from "../../src/collection-scope-enumeration.ts";
 import { flushAndExitAfterRuntimeAck } from "../../src/connector-exit.ts";
 import {
@@ -118,12 +119,21 @@ import type {
 	PendingCall,
 	RolloutAggregate,
 	RolloutFileCursor,
+	RolloutJsonlGap,
 	RolloutObject,
 	RolloutPayload,
+	RolloutSourceGap,
 	StartMessage,
 	ThreadFingerprint,
 	ThreadRow,
 } from "./types.ts";
+
+// Literal values keep every emitted reason visible to the completeness scan.
+const JSONL_GAP_SKIP_REASON: Record<RolloutJsonlGap["reason"], string> = {
+	malformed_jsonl_line: "malformed_jsonl_line",
+	non_object_jsonl_record: "non_object_jsonl_record",
+	truncated_jsonl_tail: "truncated_jsonl_tail",
+};
 
 const DEFAULT_ACTIVE_ROLLOUT_QUIET_MS = 120_000;
 const ACTIVE_ROLLOUT_QUIET_MS_ENV = "PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS";
@@ -287,6 +297,37 @@ export interface RolloutLineYield {
 	obj: RolloutObject;
 }
 
+interface RolloutReadProgress {
+	committedOffset: number;
+	lineNumber: number;
+}
+
+class RolloutSourceError extends Error {
+	readonly path: string;
+	constructor(path: string, cause: unknown) {
+		super("Codex rollout source could not be read", { cause });
+		this.path = path;
+	}
+}
+
+/** Only filesystem failures are wrapped; consumer/transport errors stay fatal. */
+async function* readRolloutChunks(
+	path: string,
+	start: number,
+	end?: number,
+): AsyncGenerator<Buffer> {
+	try {
+		for await (const chunk of createReadStream(path, {
+			start,
+			...(end === undefined ? {} : { end }),
+		})) {
+			yield chunk as Buffer;
+		}
+	} catch (error) {
+		throw new RolloutSourceError(path, error);
+	}
+}
+
 /**
  * Stream a rollout JSONL file from `startOffset` (bytes), yielding each
  * newline-terminated JSON object together with the byte offset just past its
@@ -298,14 +339,18 @@ export interface RolloutLineYield {
  * Byte offsets are tracked over the raw bytes (Buffer length), not decoded
  * characters, so a multi-byte UTF-8 sequence advances the offset by its true
  * byte length and the resume offset always lands on a real byte boundary.
- * A malformed complete line throws instead of being consumed, so callers
- * cannot checkpoint past an unresolved source gap.
+ * A malformed complete line throws unless the caller supplies an awaited gap
+ * reporter. The collector discloses and persists each gap before checkpointing.
  */
 export async function* iterJsonlLinesFromOffset(
 	path: string,
 	startOffset: number,
+	options?: {
+		onGap: (gap: RolloutJsonlGap) => Promise<void>;
+		progress: RolloutReadProgress;
+	},
 ): AsyncGenerator<RolloutLineYield> {
-	const stream = createReadStream(path, { start: startOffset });
+	const stream = readRolloutChunks(path, startOffset);
 	let pending: Buffer = Buffer.alloc(0);
 	// Byte offset (from file start) just past the last `\n` we have emitted.
 	let committed = startOffset;
@@ -315,29 +360,57 @@ export async function* iterJsonlLinesFromOffset(
 		let nl = pending.indexOf(0x0a);
 		while (nl !== -1) {
 			const lineBuf = pending.subarray(0, nl);
+			const lineStart = committed;
 			committed += nl + 1; // bytes consumed up to and including the `\n`
+			if (options) {
+				options.progress.lineNumber += 1;
+				options.progress.committedOffset = committed;
+			}
 			const line = lineBuf.toString("utf8");
 			const trimmed = line.trim();
 			if (trimmed) {
-				let parsed: RolloutObject | null = null;
+				let parsed: unknown;
+				let reason: RolloutJsonlGap["reason"] | null = null;
 				try {
-					parsed = JSON.parse(line) as RolloutObject;
+					parsed = JSON.parse(line);
 				} catch (error) {
-					// A complete malformed line is a source gap. Throw before yielding
-					// the next record so parseRolloutFile cannot return a cursor beyond
-					// this line and the connector can disclose the unresolved stream.
-					throw new LocalJsonlMalformedLineError(committed, { cause: error });
+					if (!options) {
+						throw new LocalJsonlMalformedLineError(committed, { cause: error });
+					}
+					reason = "malformed_jsonl_line";
 				}
-				if (parsed) {
-					yield { obj: parsed, committedOffset: committed };
+				if (
+					reason === null &&
+					(!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+				) {
+					reason = "non_object_jsonl_record";
+				}
+				if (reason) {
+					if (!options) throw new LocalJsonlMalformedLineError(committed);
+					await options.onGap({
+						path,
+						line_number: options.progress.lineNumber,
+						byte_offset: lineStart,
+						reason,
+					});
+				} else {
+					yield { obj: parsed as RolloutObject, committedOffset: committed };
 				}
 			}
 			pending = pending.subarray(nl + 1);
 			nl = pending.indexOf(0x0a);
 		}
 	}
-	// Any leftover `pending` is a partial (unterminated) line — intentionally
-	// dropped without advancing `committed`, so it is re-read next run.
+	// Retain the entire unterminated tail for the next append, with explicit
+	// coverage evidence. Even valid JSON is not committed until its newline.
+	if (pending.toString("utf8").trim() && options) {
+		await options.onGap({
+			path,
+			line_number: options.progress.lineNumber + 1,
+			byte_offset: committed,
+			reason: "truncated_jsonl_tail",
+		});
+	}
 }
 
 // ─── Rollout file integrity guard ───────────────────────────────────────
@@ -346,7 +419,7 @@ export async function* iterJsonlLinesFromOffset(
  * SHA-256 over the first `guardBytes` bytes of `path`. Bounded read — never
  * loads more than the guard prefix into memory. Returns null if the file is
  * shorter than `guardBytes` (caller treats a short read as an integrity
- * mismatch and full-reparses) or on any read error.
+ * mismatch and full-reparses). Read failures remain explicit source gaps.
  */
 async function hashFilePrefix(
 	path: string,
@@ -355,28 +428,47 @@ async function hashFilePrefix(
 	if (guardBytes <= 0) {
 		return createHash("sha256").update(Buffer.alloc(0)).digest("hex");
 	}
-	return await new Promise<string | null>((resolve) => {
-		const hash = createHash("sha256");
-		let read = 0;
-		const stream = createReadStream(path, { start: 0, end: guardBytes - 1 });
-		stream.on("data", (chunk) => {
-			const buf = chunk as Buffer;
-			read += buf.length;
-			hash.update(buf);
-		});
-		stream.on("error", () => resolve(null));
-		stream.on("end", () => {
-			// A guard prefix that came up short means the file shrank below the
-			// boundary we committed against — treat as replaced.
-			resolve(read >= guardBytes ? hash.digest("hex") : null);
-		});
-	});
+	const hash = createHash("sha256");
+	let read = 0;
+	for await (const chunk of readRolloutChunks(path, 0, guardBytes - 1)) {
+		read += chunk.length;
+		hash.update(chunk);
+	}
+	return read >= guardBytes ? hash.digest("hex") : null;
 }
 
 // ─── Rollout directory walking ──────────────────────────────────────────
 
+type RolloutSymlinkHandler = (path: string) => Promise<void>;
+
+async function isRolloutSymlink(
+	path: string,
+	onSymlink: RolloutSymlinkHandler,
+	onError?: RolloutDirectoryErrorHandler,
+): Promise<boolean> {
+	let linked: boolean;
+	try {
+		linked = (await lstat(path)).isSymbolicLink();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		const sourceError = new RolloutSourceError(path, error);
+		if (!onError) throw sourceError;
+		await onError(sourceError);
+		return true;
+	}
+	if (!linked) return false;
+	await onSymlink(path);
+	return true;
+}
+
 // Distinguish ENOENT (legitimate absence) from other errors (unreadable/permission failure)
-async function listIfExists(dir: string): Promise<string[] | null> {
+async function listIfExists(
+	dir: string,
+	onError?: RolloutDirectoryErrorHandler,
+	onSymlink?: RolloutSymlinkHandler,
+): Promise<string[] | null> {
+	if (onSymlink && (await isRolloutSymlink(dir, onSymlink, onError)))
+		return null;
 	try {
 		return await readdir(dir);
 	} catch (e) {
@@ -384,15 +476,24 @@ async function listIfExists(dir: string): Promise<string[] | null> {
 		if (err?.code === "ENOENT") {
 			return null;
 		}
-		throw e;
+		const error = new RolloutSourceError(dir, e);
+		if (!onError) throw error;
+		await onError(error);
+		return null;
 	}
 }
+
+type RolloutDirectoryErrorHandler = (
+	error: RolloutSourceError,
+) => Promise<void>;
 
 async function* walkDayFiles(
 	dayPath: string,
 	year: string,
 	month: string,
 	day: string,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -400,12 +501,14 @@ async function* walkDayFiles(
 	day: string;
 	file: string;
 }> {
-	const files = await listIfExists(dayPath);
+	const files = await listIfExists(dayPath, onDirectoryError, onSymlink);
 	if (files === null) {
 		return;
 	}
 	for (const f of files) {
 		if (isRolloutFile(f)) {
+			if (await isRolloutSymlink(join(dayPath, f), onSymlink, onDirectoryError))
+				continue;
 			yield { path: join(dayPath, f), year, month, day, file: f };
 		}
 	}
@@ -416,6 +519,8 @@ async function* walkMonthDays(
 	year: string,
 	month: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -423,7 +528,7 @@ async function* walkMonthDays(
 	day: string;
 	file: string;
 }> {
-	const days = await listIfExists(monthPath);
+	const days = await listIfExists(monthPath, onDirectoryError, onSymlink);
 	if (days === null) {
 		return;
 	}
@@ -436,7 +541,14 @@ async function* walkMonthDays(
 		if (!dateDirectoryInRange({ day: d, month, year }, scope)) {
 			continue;
 		}
-		yield* walkDayFiles(join(monthPath, d), year, month, d);
+		yield* walkDayFiles(
+			join(monthPath, d),
+			year,
+			month,
+			d,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -444,6 +556,8 @@ async function* walkYearMonths(
 	yearPath: string,
 	year: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -451,7 +565,7 @@ async function* walkYearMonths(
 	day: string;
 	file: string;
 }> {
-	const months = await listIfExists(yearPath);
+	const months = await listIfExists(yearPath, onDirectoryError, onSymlink);
 	if (months === null) {
 		return;
 	}
@@ -462,7 +576,14 @@ async function* walkYearMonths(
 		if (!dateDirectoryInRange({ month: m, year }, scope)) {
 			continue;
 		}
-		yield* walkMonthDays(join(yearPath, m), year, m, scope);
+		yield* walkMonthDays(
+			join(yearPath, m),
+			year,
+			m,
+			scope,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -470,6 +591,8 @@ async function* walkYearMonths(
 export async function* walkRollouts(
 	baseDir: string,
 	scope?: EnumerationScope | null,
+	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -477,7 +600,7 @@ export async function* walkRollouts(
 	day: string;
 	file: string;
 }> {
-	const years = await listIfExists(baseDir);
+	const years = await listIfExists(baseDir, onDirectoryError, onSymlink);
 	if (years === null) {
 		return;
 	}
@@ -488,7 +611,13 @@ export async function* walkRollouts(
 		if (!dateDirectoryInRange({ year: y }, scope)) {
 			continue;
 		}
-		yield* walkYearMonths(join(baseDir, y), y, scope);
+		yield* walkYearMonths(
+			join(baseDir, y),
+			y,
+			scope,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -1178,6 +1307,7 @@ function emitSessionsFromRows({
 // rolloutAggregates write-back.
 
 interface ParseRolloutFileArgs {
+	priorCursor: RolloutFileCursor | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
 	file: string;
 	path: string;
@@ -1191,7 +1321,9 @@ interface ParseRolloutFileArgs {
 }
 
 interface ParseRolloutFileResult {
-	/** Byte offset just past the last fully-parsed line — the new commit
+	jsonlGaps: RolloutJsonlGap[];
+	sourceLineCount: number;
+	/** Byte offset past the last parsed or explicitly gapped complete line — the commit
 	 *  boundary for this file's cursor. Equals `startOffset` when the suffix
 	 *  contained no newline-terminated line. */
 	committedOffset: number;
@@ -1207,6 +1339,34 @@ async function parseRolloutFile(
 	args: ParseRolloutFileArgs,
 ): Promise<ParseRolloutFileResult> {
 	const state = makeRolloutParseState(args.seed);
+	const jsonlGaps = (args.priorCursor?.jsonl_gaps ?? []).filter(
+		(gap) => gap.byte_offset < args.startOffset,
+	);
+	for (const gap of jsonlGaps) {
+		await reportMalformedRolloutGap(args.requested, gap);
+	}
+	const progress: RolloutReadProgress = {
+		committedOffset: args.startOffset,
+		lineNumber: args.priorCursor?.source_line_count ?? 0,
+	};
+	// Legacy cursors count parsed objects, not physical lines. Count the bounded
+	// prefix once on migration so blank lines cannot make gap locations lie.
+	if (
+		args.startOffset > 0 &&
+		args.priorCursor?.source_line_count === undefined
+	) {
+		for await (const chunk of readRolloutChunks(
+			args.path,
+			0,
+			args.startOffset - 1,
+		)) {
+			let newline = chunk.indexOf(0x0a);
+			while (newline !== -1) {
+				progress.lineNumber += 1;
+				newline = chunk.indexOf(0x0a, newline + 1);
+			}
+		}
+	}
 	const deps: LineEmitDeps = {
 		emitRecord: args.emitRecord,
 		progress: (message: string): void => {
@@ -1214,13 +1374,29 @@ async function parseRolloutFile(
 		},
 		requested: args.requested,
 	};
-	let committedOffset = args.startOffset;
-	for await (const {
-		obj,
-		committedOffset: lineEnd,
-	} of iterJsonlLinesFromOffset(args.path, args.startOffset)) {
+	for await (const { obj } of iterJsonlLinesFromOffset(
+		args.path,
+		args.startOffset,
+		{
+			progress,
+			onGap: async (gap) => {
+				jsonlGaps.push(gap);
+				if (gap.reason !== "truncated_jsonl_tail") state.lineCount += 1;
+				await reportMalformedRolloutGap(args.requested, gap);
+			},
+		},
+	)) {
+		// A damaged initial session_meta must not starve its remaining messages.
+		// A valid metadata line still wins; only a preceding parse gap permits the
+		// canonical rollout filename UUID to supply otherwise missing identity.
+		if (
+			state.sessionId === null &&
+			obj.type !== "session_meta" &&
+			jsonlGaps.some((gap) => gap.reason !== "truncated_jsonl_tail")
+		) {
+			state.sessionId = extractRolloutUuidFromFilename(args.file);
+		}
 		processRolloutLine({ obj, state, deps, file: args.file });
-		committedOffset = lineEnd;
 		await waitForEmitDrain();
 	}
 	flushPendingCalls(state, deps);
@@ -1238,7 +1414,9 @@ async function parseRolloutFile(
 		});
 	}
 	return {
-		committedOffset,
+		committedOffset: progress.committedOffset,
+		sourceLineCount: progress.lineNumber,
+		jsonlGaps,
 		sessionId: state.sessionId,
 		lineCount: state.lineCount,
 		messageCount: state.messageCount,
@@ -1320,6 +1498,7 @@ interface RolloutRoot {
 }
 
 interface ScanRolloutsArgs {
+	sourceGaps: Record<string, RolloutSourceGap>;
 	activeQuietMs: number;
 	emitRecord: (stream: string, data: RecordData) => void;
 	fileCursors: Record<string, RolloutFileCursor>;
@@ -1421,18 +1600,23 @@ async function buildFileCursorAfterParse(
 	result: ParseRolloutFileResult,
 ): Promise<RolloutFileCursor> {
 	const guardBytes = Math.min(result.committedOffset, GUARD_PREFIX_BYTES);
-	const head = (await hashFilePrefix(path, guardBytes)) ?? "";
-	// Re-stat AFTER the parse so mtime reflects any mid-parse append. Fall back to
-	// the committed offset for size if the re-stat fails (file vanished): never
-	// record a size that disagrees with what we committed.
+	const head = await hashFilePrefix(path, guardBytes);
+	if (head === null)
+		throw new RolloutSourceError(
+			path,
+			new Error("Rollout prefix shortened during parsing"),
+		);
+	// Re-stat AFTER parsing; a source race must keep the old retry boundary.
 	let mtimeMs = 0;
 	try {
 		({ mtimeMs } = statSync(path));
-	} catch {
-		mtimeMs = 0;
+	} catch (error) {
+		throw new RolloutSourceError(path, error);
 	}
 	return {
 		mtime_ms: mtimeMs,
+		source_line_count: result.sourceLineCount,
+		jsonl_gaps: result.jsonlGaps,
 		// Invariant: size_bytes == offset_bytes. The cursor vouches for exactly the
 		// committed prefix; everything past it is re-read on a later run.
 		size_bytes: result.committedOffset,
@@ -1487,8 +1671,8 @@ async function processRolloutEntry(
 	let st: Stats;
 	try {
 		st = statSync(entry.path);
-	} catch {
-		return "missing";
+	} catch (error) {
+		throw new RolloutSourceError(entry.path, error);
 	}
 	const mtime = st.mtimeMs;
 	const cursorKey = cursorKeyForEntry(entry);
@@ -1524,12 +1708,18 @@ async function processRolloutEntry(
 	// This map stays PATH-keyed (its pre-existing semantics): a relocated file
 	// has a new path, so it never spuriously hits this fast path — it falls
 	// through to resolveRolloutAction, which is keyed by the stable UUID.
-	if (!cursor && args.fileMtimes[entry.path] === mtime) {
+	if (
+		!cursor &&
+		!args.sourceGaps[entry.path] &&
+		args.fileMtimes[entry.path] === mtime
+	) {
 		args.newMtimes[entry.path] = mtime;
 		return "skipped";
 	}
 
-	const action = await resolveRolloutAction(entry.path, st, cursor);
+	let action = await resolveRolloutAction(entry.path, st, cursor);
+	if (args.sourceGaps[entry.path] && action.kind === "skip")
+		action = { kind: "full" };
 	if (action.kind === "skip") {
 		carryFileCursorForward(args, entry, mtime);
 		return "skipped";
@@ -1570,13 +1760,14 @@ async function processRolloutEntry(
 	await waitForEmitDrain();
 
 	const result = await parseRolloutFile({
+		priorCursor: isAppend ? cursor : undefined,
 		path: entry.path,
 		file: entry.file,
 		requested: args.requested,
 		emitRecord: args.emitRecord,
 		rolloutAggregates: args.rolloutAggregates,
-		startOffset: isAppend ? action.startOffset : 0,
-		seed: isAppend ? action.seed : undefined,
+		startOffset: action.kind === "append" ? action.startOffset : 0,
+		seed: action.kind === "append" ? action.seed : undefined,
 	});
 
 	args.newFileCursors[cursorKey] = await buildFileCursorAfterParse(
@@ -1584,6 +1775,7 @@ async function processRolloutEntry(
 		result,
 	);
 	args.newMtimes[entry.path] = mtime;
+	delete args.sourceGaps[entry.path];
 	return "parsed";
 }
 
@@ -1591,13 +1783,17 @@ async function processRolloutEntry(
  *  error the same way `listIfExists` does. */
 async function rootExists(
 	baseDir: string,
+	onDirectoryError: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler,
 ): Promise<{ exists: boolean; unreadable: boolean }> {
 	try {
 		return {
-			exists: (await listIfExists(baseDir)) !== null,
+			exists: (await listIfExists(baseDir, undefined, onSymlink)) !== null,
 			unreadable: false,
 		};
-	} catch {
+	} catch (error) {
+		if (!(error instanceof RolloutSourceError)) throw error;
+		await onDirectoryError(error);
 		return { exists: false, unreadable: true };
 	}
 }
@@ -1618,9 +1814,79 @@ async function rootExists(
  * each entry's filename) — this function just walks every existing root in
  * turn and folds the counts together.
  */
-async function scanRollouts(
+export async function scanRollouts(
 	args: ScanRolloutsArgs,
 ): Promise<ScanRolloutsResult> {
+	const reportedCursorKeys = new Set<string>();
+	const priorPaths = new Set([
+		...Object.keys(args.fileMtimes),
+		...Object.keys(args.sourceGaps),
+		...Object.entries(args.fileCursors).flatMap(([key, cursor]) => [
+			...(isAbsolute(key) ? [key] : []),
+			...(cursor.jsonl_gaps ?? []).map((gap) => gap.path),
+		]),
+	]);
+	const keyForPath = (path: string) =>
+		cursorKeyForEntry({ path, file: basename(path) });
+	const locatedKeys = new Set([...priorPaths].map(keyForPath));
+	// Disappearance does not repair a declared line gap. Keep its evidence until
+	// a successful scan of that file replaces it, including when all roots vanish.
+	for (const [key, cursor] of Object.entries(args.fileCursors)) {
+		if ((cursor.jsonl_gaps?.length ?? 0) > 0) args.newFileCursors[key] = cursor;
+	}
+	let directoryFailed = false;
+	const retainUnavailable = (unavailablePath: string) => {
+		directoryFailed = true;
+		for (const path of priorPaths) {
+			if (path !== unavailablePath && !path.startsWith(unavailablePath + sep))
+				continue;
+			const key = keyForPath(path);
+			const prior = args.fileCursors[key];
+			if (prior && !args.newFileCursors[key]) args.newFileCursors[key] = prior;
+		}
+		// Older UUID-only cursors can lack every path hint. An unreadable subtree
+		// cannot establish their absence, so preserve those boundaries conservatively.
+		for (const [key, cursor] of Object.entries(args.fileCursors)) {
+			if (!locatedKeys.has(key) && !args.newFileCursors[key])
+				args.newFileCursors[key] = cursor;
+		}
+	};
+	const onDirectoryError: RolloutDirectoryErrorHandler = async (error) => {
+		retainUnavailable(error.path);
+		await reportRolloutSourceGap(args.requested, buildRolloutSourceGap(error));
+	};
+	const skippedSymlinks = new Set<string>();
+	const onSymlink: RolloutSymlinkHandler = async (path) => {
+		if (!shouldDescendIntoDirectory(path, args.scope)) return;
+		if (skippedSymlinks.has(path)) return;
+		skippedSymlinks.add(path);
+		retainUnavailable(path);
+		let target: string;
+		try {
+			target = await readlink(path);
+		} catch (error) {
+			await onDirectoryError(new RolloutSourceError(path, error));
+			return;
+		}
+		for (const stream of ["sessions", "messages", "function_calls"] as const) {
+			if (args.requested.has(stream))
+				emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "symlink_skipped",
+					message: "Codex skipped a symbolic link without reading its target",
+					diagnostics: { path, target_path: resolve(dirname(path), target) },
+				});
+		}
+		await waitForEmitDrain();
+	};
+	const reportRetainedGaps = async () => {
+		for (const [key, cursor] of Object.entries(args.newFileCursors)) {
+			if (reportedCursorKeys.has(key)) continue;
+			for (const gap of cursor.jsonl_gaps ?? [])
+				await reportMalformedRolloutGap(args.requested, gap);
+		}
+	};
 	// Sequential, not Promise.all: `args.roots` is a short, fixed list (today:
 	// two — the primary and archive roots), and each check is a single cheap
 	// listIfExists(). No ordering or parallelism benefit is worth the added
@@ -1631,13 +1897,29 @@ async function scanRollouts(
 		unreadable: boolean;
 	}> = [];
 	for (const root of args.roots) {
-		rootChecks.push({ root, ...(await rootExists(root.baseDir)) });
+		rootChecks.push({
+			root,
+			...(await rootExists(root.baseDir, onDirectoryError, onSymlink)),
+		});
 	}
 	const existingRoots = rootChecks.filter((r) => r.exists).map((r) => r.root);
 	const anyUnreadable = rootChecks.some((r) => r.unreadable);
 
 	if (existingRoots.length === 0) {
-		return await reportMissingSessionsBase(anyUnreadable ? "unreadable" : null);
+		await reportRetainedGaps();
+		for (const gap of Object.values(args.sourceGaps)) {
+			await reportRolloutSourceGap(args.requested, gap);
+		}
+		return await reportMissingSessionsBase(
+			anyUnreadable ||
+				directoryFailed ||
+				Object.keys(args.sourceGaps).length > 0 ||
+				Object.values(args.newFileCursors).some(
+					(cursor) => (cursor.jsonl_gaps?.length ?? 0) > 0,
+				)
+				? "unreadable"
+				: null,
+		);
 	}
 
 	// Local wrapper to track emissions without mutating args
@@ -1662,9 +1944,14 @@ async function scanRollouts(
 	let messagesExamined = 0;
 	let functionCallsExamined = 0;
 
-	outer: for (const root of existingRoots) {
+	for (const root of existingRoots) {
 		try {
-			for await (const entry of walkRollouts(root.baseDir, args.scope)) {
+			for await (const entry of walkRollouts(
+				root.baseDir,
+				args.scope,
+				onDirectoryError,
+				onSymlink,
+			)) {
 				if (!isPathWithinSourceRoots(entry.path, args.scope)) {
 					continue;
 				}
@@ -1685,27 +1972,56 @@ async function scanRollouts(
 					// scan) contributes nothing: its cursor was already counted at first
 					// sighting, so adding it again would double-count the file.
 					if (result === "parsed" || result === "skipped") {
+						const gaps =
+							args.newFileCursors[cursorKeyForEntry(entry)]?.jsonl_gaps ?? [];
+						if (gaps.length > 0) {
+							scanOutcome = "parse_error";
+							if (result === "skipped") {
+								for (const gap of gaps)
+									await reportMalformedRolloutGap(args.requested, gap);
+							}
+						}
 						const counts = examinedCountsFromCursor(
 							args.newFileCursors[cursorKeyForEntry(entry)],
 						);
 						messagesExamined += counts.messages;
 						functionCallsExamined += counts.functionCalls;
+						reportedCursorKeys.add(cursorKeyForEntry(entry));
 					}
 				} catch (error) {
-					if (error instanceof LocalJsonlMalformedLineError) {
-						await reportMalformedRolloutGap(args.requested);
-					}
-					// Any error during parsing (without code or other) makes scan incomplete
-					scanOutcome = "parse_error";
-					break outer;
+					if (!(error instanceof RolloutSourceError)) throw error;
+					scanOutcome = "unreadable";
+					// Preserve the retry boundary, including a partially emitted file.
+					const key = cursorKeyForEntry(entry);
+					const prior = args.fileCursors[key];
+					if (prior) args.newFileCursors[key] = prior;
+					else delete args.newFileCursors[key];
+					delete args.newMtimes[entry.path];
+					args.sourceGaps[error.path] = buildRolloutSourceGap(error);
 				}
 			}
-		} catch {
+		} catch (error) {
+			if (!(error instanceof RolloutSourceError)) throw error;
 			// Enumeration error (e.g., directory traversal failure) makes scan incomplete
 			scanOutcome = "unreadable";
+			// Directory failures are reprobed each run; only file retry gaps belong
+			// in the cursor ledger, since files have individual success boundaries.
+			await onDirectoryError(error);
 		}
 	}
+	await reportRetainedGaps();
+	if (directoryFailed) scanOutcome = "unreadable";
+	else if (
+		Object.values(args.newFileCursors).some(
+			(cursor) => (cursor.jsonl_gaps?.length ?? 0) > 0,
+		)
+	)
+		scanOutcome = "parse_error";
 
+	for (const gap of Object.values(args.sourceGaps)) {
+		scanOutcome = "unreadable";
+		await reportRolloutSourceGap(args.requested, gap);
+	}
 	emit({
 		type: "PROGRESS",
 		message: `Codex phase=index pass=index total_items=${totalRollouts} parsed_items=${parsedRollouts}`,
@@ -1722,20 +2038,48 @@ async function scanRollouts(
 	};
 }
 
+function buildRolloutSourceGap(error: RolloutSourceError): RolloutSourceGap {
+	const cause = error.cause as NodeJS.ErrnoException | null;
+	return {
+		path: error.path,
+		reason: "rollout_source_read_error",
+		error_code: typeof cause?.code === "string" ? cause.code : null,
+	};
+}
+
+async function reportRolloutSourceGap(
+	requested: Map<string, StreamScope>,
+	gap: RolloutSourceGap,
+): Promise<void> {
+	for (const stream of ["sessions", "messages", "function_calls"] as const) {
+		if (requested.has(stream))
+			emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "rollout_source_read_error",
+				message:
+					"Codex could not read a rollout source; it will retry while other files continue",
+				diagnostics: { ...gap },
+			});
+	}
+	await waitForEmitDrain();
+}
+
 async function reportMalformedRolloutGap(
 	requested: Map<string, StreamScope>,
+	gap: RolloutJsonlGap,
 ): Promise<void> {
-	// The malformed line was complete, so it is a real unresolved source item
-	// rather than an in-flight tail. Do not checkpoint this file; disclose the
-	// gap on every requested rollout-derived stream.
-	for (const stream of ["messages", "function_calls"] as const) {
+	for (const stream of ["sessions", "messages", "function_calls"] as const) {
 		if (requested.has(stream)) {
 			emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "malformed_jsonl_line",
+				reason: JSONL_GAP_SKIP_REASON[gap.reason],
 				message:
-					"Codex contains a malformed complete JSONL line; the source cursor was not advanced past it",
+					gap.reason !== "truncated_jsonl_tail"
+						? "Codex skipped an invalid JSONL record and continued scanning"
+						: "Codex retained an unterminated JSONL tail for the next append and continued scanning",
+				diagnostics: { ...gap },
 			});
 		}
 	}
@@ -1840,6 +2184,32 @@ function readFileMtimes(startMsg: StartMessage): Record<string, number> {
 	);
 }
 
+function readPriorSourceGaps(
+	start: StartMessage,
+): Record<string, RolloutSourceGap> {
+	const raw =
+		start.state?.messages?.source_gaps ??
+		start.state?.function_calls?.source_gaps ??
+		start.state?.sessions?.source_gaps;
+	const gaps: Record<string, RolloutSourceGap> = {};
+	if (!raw || typeof raw !== "object") return gaps;
+	for (const value of Object.values(raw)) {
+		if (
+			value &&
+			typeof value.path === "string" &&
+			value.reason === "rollout_source_read_error"
+		) {
+			gaps[value.path] = {
+				path: value.path,
+				reason: value.reason,
+				error_code:
+					typeof value.error_code === "string" ? value.error_code : null,
+			};
+		}
+	}
+	return gaps;
+}
+
 function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		return null;
@@ -1867,7 +2237,39 @@ function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
 	) {
 		return null;
 	}
+	const gaps: RolloutJsonlGap[] = [];
+	if (v.jsonl_gaps !== undefined) {
+		if (!Array.isArray(v.jsonl_gaps)) return null;
+		for (const gap of v.jsonl_gaps) {
+			if (
+				!gap ||
+				typeof gap !== "object" ||
+				typeof gap.path !== "string" ||
+				!Number.isSafeInteger(gap.line_number) ||
+				gap.line_number < 1 ||
+				!Number.isSafeInteger(gap.byte_offset) ||
+				gap.byte_offset < 0 ||
+				(gap.reason !== "malformed_jsonl_line" &&
+					gap.reason !== "non_object_jsonl_record" &&
+					gap.reason !== "truncated_jsonl_tail")
+			)
+				return null;
+			gaps.push({
+				path: gap.path,
+				line_number: gap.line_number,
+				byte_offset: gap.byte_offset,
+				reason: gap.reason,
+			});
+		}
+	}
+	const sourceLines = num(v.source_line_count);
 	return {
+		...(sourceLines !== null &&
+		Number.isSafeInteger(sourceLines) &&
+		sourceLines >= 0
+			? { source_line_count: sourceLines }
+			: {}),
+		...(v.jsonl_gaps !== undefined ? { jsonl_gaps: gaps } : {}),
 		mtime_ms: mtime,
 		size_bytes: size,
 		offset_bytes: offset,
@@ -1905,7 +2307,12 @@ export function readPriorFileCursors(
 	for (const [path, value] of Object.entries(raw)) {
 		const cursor = coerceRolloutFileCursor(value);
 		if (cursor) {
-			out[path] = cursor;
+			// Earlier collectors used absolute paths. Normalize those aliases to
+			// the current UUID key so a successful reread replaces their old gaps.
+			const key = isAbsolute(path)
+				? cursorKeyForEntry({ path, file: basename(path) })
+				: path;
+			if (path === key || !out[key]) out[key] = cursor;
 		}
 	}
 	return out;
@@ -1989,13 +2396,16 @@ async function assertRequestedCodexSources(
 	const needsRollouts =
 		requested.has("messages") || requested.has("function_calls");
 
-	if (needsRollouts) {
+	// Link exclusion is reported by the rollout scan, including dangling roots.
+	const linkedRoot =
+		(await lstat(dirs.baseDir).catch(() => null))?.isSymbolicLink() ?? false;
+	if (needsRollouts && !linkedRoot) {
 		const status = await checkDirectoryReadable(dirs.baseDir);
 		if (status === "unreadable") {
 			unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
 		}
 	}
-	if (requested.has("sessions")) {
+	if (requested.has("sessions") && !linkedRoot) {
 		const hasRollouts = await isReadableDirectory(dirs.baseDir);
 		const hasThreadsDb = await isReadableFile(dirs.stateDbPath);
 		if (!(hasRollouts || hasThreadsDb)) {
@@ -2021,6 +2431,7 @@ async function assertRequestedCodexSources(
 }
 
 interface EmitStateCursorsArgs {
+	sourceGaps: Record<string, RolloutSourceGap>;
 	newFileCursors: Record<string, RolloutFileCursor>;
 	newMtimes: Record<string, number>;
 	nowIso: () => string;
@@ -2030,6 +2441,7 @@ interface EmitStateCursorsArgs {
 }
 
 function emitStateCursors({
+	sourceGaps,
 	requested,
 	newFileCursors,
 	newMtimes,
@@ -2045,6 +2457,7 @@ function emitStateCursors({
 				fetched_at: nowIso(),
 				source_mtime_ms: sessionsSourceMtimeMs,
 				thread_fingerprints: threadFingerprints.toState(),
+				source_gaps: sourceGaps,
 			},
 		});
 	}
@@ -2062,6 +2475,7 @@ function emitStateCursors({
 			cursor: {
 				file_mtimes: newMtimes,
 				file_cursors: newFileCursors,
+				source_gaps: sourceGaps,
 				fetched_at: nowIso(),
 			},
 		});
@@ -2469,11 +2883,12 @@ async function main(): Promise<void> {
 	// function_call_count even when state_5 provides the canonical metadata).
 	const rolloutAggregates = new Map<string, RolloutAggregate>();
 	const newMtimes: Record<string, number> = { ...fileMtimes };
-	// Seed the next rich-cursor map from the prior one; processRolloutEntry
-	// overwrites a file's entry when it parses/tails it and otherwise carries
-	// the prior cursor forward unchanged (so unscanned/deferred files keep
-	// their offset). Deleted files naturally drop out — they are never walked.
+	// The scan retains declared gaps and boundaries hidden by unreadable
+	// directories, then replaces successfully read entries. Ungapped deleted
+	// files drop out; disappearance alone cannot resolve a saved line gap.
 	const newFileCursors: Record<string, RolloutFileCursor> = {};
+	const sourceGaps: Record<string, RolloutSourceGap> =
+		readPriorSourceGaps(startMsg);
 	const scanStartedAtMs = Date.now();
 	const sessionsSourceMtimeMs = fileMtimeMs(dirs.stateDbPath);
 	let parsedRolloutFiles = 0;
@@ -2549,6 +2964,7 @@ async function main(): Promise<void> {
 	};
 	if (needRollouts) {
 		rolloutScan = await scanRollouts({
+			sourceGaps,
 			activeQuietMs: resolveActiveRolloutQuietMs(),
 			roots: [
 				{ baseDir: dirs.baseDir, label: "sessions" },
@@ -2593,6 +3009,7 @@ async function main(): Promise<void> {
 	}
 
 	emitStateCursors({
+		sourceGaps,
 		requested,
 		newFileCursors,
 		newMtimes,
