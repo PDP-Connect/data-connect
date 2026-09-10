@@ -22,8 +22,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { resolveCoreSelection } from "../server/core-source-authorization.ts";
 import {
@@ -39,9 +39,9 @@ import { buildHostedMcpAuthorizationDetailForConnector } from "../server/routes/
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/chatgpt";
 const SOURCE_KEY = JSON.stringify([CONNECTOR_ID, ""]);
 
-const MANIFEST = JSON.parse(
-  readFileSync(`${import.meta.dirname}/../../packages/polyfill-connectors/manifests/chatgpt.json`, "utf8")
-) as { streams: Array<Record<string, unknown> & { name: string }> };
+const manifestEntry = readPolyfillManifests().find((entry) => entry.file === "chatgpt.json");
+assert.ok(manifestEntry, "expected the shipped ChatGPT manifest");
+const MANIFEST = manifestEntry.manifest as { streams: Array<Record<string, unknown> & { name: string }> };
 
 const DECLARATION = sourceDeclarationFromLegacyConnectorManifest(MANIFEST as never, {
   connectorImplementationId: CONNECTOR_ID,
