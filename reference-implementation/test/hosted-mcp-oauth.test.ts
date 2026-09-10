@@ -7048,3 +7048,91 @@ for (const [name, inputName, value] of [
     }
   });
 }
+
+for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] as const) {
+  test(`consent validation retry: ${invalidDecision} stays pending until an honest approval succeeds`, async () => {
+    const server = await startOpenTestServer();
+    const asUrl = `http://localhost:${server.asPort}`;
+    try {
+      await registerAuthorizedSpotify(asUrl);
+      const client = await registerAuthCodeClient(asUrl);
+      const challenge = await startConsentChallenge(asUrl, client, "recoverable-validation");
+      const originalModel = await fetchConsentChallengeModel(asUrl, challenge);
+      const originalSource = mustExist(originalModel.sources[0], "source");
+      const originalStream = mustExist(originalSource.streams[0], "stream");
+      const submitted = consentChallengeAcceptBody({
+        chosen: [{ source: originalSource, streams: [originalStream] }],
+        client,
+        model: originalModel,
+      });
+      if (invalidDecision === "stale review") {
+        // Model a real source change in another tab after the owner reviewed.
+        await registerAuthorizedGithub(asUrl);
+      } else if (invalidDecision === "bad expiry") {
+        submitted.grant_expiry = "not-an-expiry";
+      } else {
+        submitted.source_id = [];
+        submitted.stream = [];
+      }
+      const packagesBefore = await countGrantPackagesForOwner();
+      const rejected = await postConsentChallenge(asUrl, challenge, "accept", submitted);
+      assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+      assert.equal(rejected.body.error, "invalid_request");
+      assert.equal(await countGrantPackagesForOwner(), packagesBefore, "invalid decisions mint nothing");
+      const pending = getDb()
+        .prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?")
+        .get<{ status: string; decision_digest: string | null }>(challenge);
+      assert.deepEqual(
+        pending,
+        { decision_digest: null, status: "pending" },
+        "a rejected decision must not be recorded as accepted"
+      );
+
+      // Reload the same challenge and approve only what its fresh model shows.
+      const freshModel = await fetchConsentChallengeModel(asUrl, challenge);
+      const freshSource = mustExist(
+        freshModel.sources.find((source) => source.id === originalSource.id),
+        "original source remains available"
+      );
+      const freshStream = mustExist(
+        freshSource.streams.find((stream) => stream.id === originalStream.id),
+        "original stream remains available"
+      );
+      if (invalidDecision === "stale review") {
+        assert.notEqual(
+          freshModel.reviewDigest,
+          originalModel.reviewDigest,
+          "the source change invalidates the original review"
+        );
+      }
+      const corrected = consentChallengeAcceptBody({
+        chosen: [{ source: freshSource, streams: [freshStream] }],
+        client,
+        model: freshModel,
+      });
+      const accepted = await postConsentChallenge(asUrl, challenge, "accept", corrected);
+      assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+      assert.ok(new URL(stringField(accepted.body, "redirect_url")).searchParams.get("code"));
+      assert.equal(await countGrantPackagesForOwner(), packagesBefore + 1);
+      const terminal = getDb()
+        .prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?")
+        .get<{ status: string; decision_digest: string | null }>(challenge);
+      assert.deepEqual(terminal, { decision_digest: corrected.decision_digest, status: "accepted" });
+      assert.equal((await postConsentChallenge(asUrl, challenge, "accept", corrected)).status, 404);
+      assert.equal(
+        await countGrantPackagesForOwner(),
+        packagesBefore + 1,
+        "the corrected approval still issues exactly once"
+      );
+      if (invalidDecision === "stale review") {
+        assert.match(
+          stringField(rejected.body, "error_description"),
+          /Reload this page.*review.*approve/i,
+          "stale-review recovery must tell the owner to load fresh terms before approving"
+        );
+      }
+    } finally {
+      await closeServer(server);
+    }
+  });
+}
