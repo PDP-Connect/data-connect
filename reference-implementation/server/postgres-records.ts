@@ -3140,7 +3140,16 @@ async function postgresPersistContentAddressedBlobWithinFence({
       return { ...storedRow, binding_inserted: (binding.rowCount ?? 0) > 0 };
     },
     { lockConnectorInstanceId: effectiveConnectorInstanceId }
-  );
+  ).catch((error: unknown) => {
+    const queryError = error as { code?: string; constraint?: string } | null;
+    if (queryError?.code === "23503" && queryError.constraint === "blob_bindings_blob_id_fkey") {
+      throw Object.assign(new Error("Blob was reclaimed during publication; retry the upload.", { cause: error }), {
+        code: "blob_publication_conflict",
+        statusCode: 409,
+      });
+    }
+    throw error;
+  });
 
   return {
     binding_inserted: Boolean(row.binding_inserted),

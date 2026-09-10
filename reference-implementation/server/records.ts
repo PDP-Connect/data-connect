@@ -60,6 +60,8 @@ import {
   resolveRequestBindings,
 } from "./connection-identity.ts";
 import {
+  ConnectorInstanceAdmissionError,
+  connectorInstanceLockWaitMs,
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
@@ -6810,28 +6812,7 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
             // deletes only rows no binding still references. Scoped to this
             // instance for the same reason the whole-connection sibling is: a
             // delete reclaims its own bytes, never another connection's.
-            // The FK takes KEY SHARE when a writer adds a binding. Lock candidates
-            // first, then check references in a NEW READ COMMITTED statement so a
-            // writer that committed while this lock waited is visible to DELETE.
-            // Keep both statements in this transaction; a single CTE is not enough.
-            const candidates = await client.query<{ blob_id: string }>(
-              `SELECT blob_id FROM blobs
-              WHERE connector_instance_id = $1 AND stream = $2
-              ORDER BY blob_id FOR UPDATE`,
-              [connectorInstanceId, stream]
-            );
-            await client.query(
-              `DELETE FROM blobs
-              WHERE connector_instance_id = $1
-                AND stream = $2
-                AND blob_id = ANY($3::text[])
-                AND NOT EXISTS (
-                  SELECT 1
-                    FROM blob_bindings
-                   WHERE blob_bindings.blob_id = blobs.blob_id
-                )`,
-              [connectorInstanceId, stream, candidates.rows.map((row) => row.blob_id)]
-            );
+            await deleteUnreferencedBlobsPostgres(client, connectorInstanceId, stream);
           },
           { lockConnectorInstanceId: connectorInstanceId }
         );
@@ -7036,6 +7017,57 @@ export function deleteConnectionRecordRowsSqlite(connectorInstanceId: string) {
   return count;
 }
 
+/** Reclaim only locked candidates, with a fresh reference snapshot per batch. */
+async function deleteUnreferencedBlobsPostgres(
+  client: PostgresClient,
+  connectorInstanceId: string,
+  stream: string | null = null
+): Promise<void> {
+  // Match the store's admission budget even for caller-owned transactions that
+  // did not acquire an instance advisory lock. SET LOCAL ends at COMMIT/ROLLBACK.
+  await client.query(`SET LOCAL lock_timeout = '${connectorInstanceLockWaitMs()}ms'`);
+  const batchSize = 256;
+  let afterBlobId = "";
+  let hasMore = true;
+  try {
+    while (hasMore) {
+      // The FK takes KEY SHARE when a writer adds a binding. Wait here, then
+      // check references in a NEW READ COMMITTED statement so committed writers
+      // are visible. A single CTE would retain the stale statement snapshot.
+      // Keyset batches bound the IDs held in Node; locks remain transaction-wide.
+      // biome-ignore lint/performance/noAwaitInLoops: each batch follows the preceding locked key range.
+      const candidates = await client.query<{ blob_id: string }>(
+        `SELECT blob_id FROM blobs
+          WHERE connector_instance_id = $1 AND blob_id > $2
+            AND ($3::text IS NULL OR stream = $3)
+          ORDER BY blob_id LIMIT $4 FOR UPDATE`,
+        [connectorInstanceId, afterBlobId, stream, batchSize]
+      );
+      const lastCandidate = candidates.rows.at(-1);
+      if (!lastCandidate) {
+        return;
+      }
+      const blobIds = candidates.rows.map((row) => row.blob_id);
+      await client.query(
+        `DELETE FROM blobs
+          WHERE blob_id = ANY($1::text[])
+            AND NOT EXISTS (
+              SELECT 1 FROM blob_bindings WHERE blob_bindings.blob_id = blobs.blob_id
+            )`,
+        [blobIds]
+      );
+      afterBlobId = lastCandidate.blob_id;
+      hasMore = blobIds.length === batchSize;
+    }
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === "55P03") {
+      // biome-ignore lint/style/useErrorCause: preserve the coordinator's no-argument admission error contract.
+      throw new ConnectorInstanceAdmissionError();
+    }
+    throw err;
+  }
+}
+
 /**
  * Phase 2 (Postgres): same as the SQLite arm, but binds against the explicit
  * transaction `client` the store opened, so the record-family deletes run in
@@ -7051,24 +7083,7 @@ export async function deleteConnectionRecordRowsPostgres(client: PostgresClient,
   await client.query("DELETE FROM record_changes WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM version_counter WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM blob_bindings WHERE connector_instance_id = $1", [connectorInstanceId]);
-  // Wait for binding writers before taking the reference-check snapshot.
-  // The caller keeps these locks through DELETE in its READ COMMITTED transaction.
-  const candidates = await client.query<{ blob_id: string }>(
-    `SELECT blob_id FROM blobs WHERE connector_instance_id = $1
-      ORDER BY blob_id FOR UPDATE`,
-    [connectorInstanceId]
-  );
-  await client.query(
-    `DELETE FROM blobs
-      WHERE connector_instance_id = $1
-        AND blob_id = ANY($2::text[])
-        AND NOT EXISTS (
-          SELECT 1
-            FROM blob_bindings
-           WHERE blob_bindings.blob_id = blobs.blob_id
-        )`,
-    [connectorInstanceId, candidates.rows.map((row) => row.blob_id)]
-  );
+  await deleteUnreferencedBlobsPostgres(client, connectorInstanceId);
   await client.query("DELETE FROM connector_attention_records WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM records WHERE connector_instance_id = $1", [connectorInstanceId]);
   return count;
