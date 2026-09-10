@@ -5,6 +5,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants";
 import { resolveReferenceTopology } from "pdpp-reference-implementation/reference-topology";
 import { normalizeDashboardReturnTo } from "@/app/(console)/lib/return-to.ts";
+import { proxyReferenceRequest } from "./app/reference-proxy.ts";
 
 const referenceTopology = resolveReferenceTopology();
 const AS_PROXY_TARGET = referenceTopology.asInternalUrl;
@@ -155,6 +156,16 @@ function resolveReferenceProxyTarget(pathname: string): string | null {
 export default function proxy(request: NextRequest) {
   if (!isAllowedConsoleHost(request)) {
     return new NextResponse("Host not allowed", { status: 403 });
+  }
+
+  // PAR and pending approvals still use the AS consent shell. The console
+  // page owns challenge requests; preserve that choice when parameters mix.
+  if (
+    request.nextUrl.pathname === "/consent" &&
+    !request.nextUrl.searchParams.has("challenge") &&
+    (request.nextUrl.searchParams.has("request_uri") || request.nextUrl.searchParams.has("approval_id"))
+  ) {
+    return proxyReferenceRequest(request, "as", ["consent"]);
   }
 
   // AS-proxied protocol paths first, so paths that share a prefix with an owner
