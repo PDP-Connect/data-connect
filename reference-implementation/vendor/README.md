@@ -220,3 +220,8 @@ before packing; host-provided dependencies and bundled local collector sources
 are updated using the same post-pack procedure above.
 Before merging data-connect#89, rerun the helper with data-connectors#92's actual
 merge commit and record that SHA here. A squash merge produces a different SHA.
+
+**Update (2026-09-10): temporary PR-head pin refreshed to data-connectors commit `f5adf2546ae9a9fea5598dd5bf9da515eb39f6df`.**
+Rebuilt with `scripts/revendor-polyfill-connectors.sh` after the final malformed-source
+isolation changes in data-connectors#92. This remains a PR-head artifact; before merging
+data-connect#89, rerun the helper with #92's actual merge commit and record that SHA.

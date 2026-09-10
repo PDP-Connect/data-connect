@@ -439,7 +439,10 @@ async function hashFilePrefix(
 // ─── Rollout directory walking ──────────────────────────────────────────
 
 // Distinguish ENOENT (legitimate absence) from other errors (unreadable/permission failure)
-async function listIfExists(dir: string): Promise<string[] | null> {
+async function listIfExists(
+	dir: string,
+	onError?: RolloutDirectoryErrorHandler,
+): Promise<string[] | null> {
 	try {
 		return await readdir(dir);
 	} catch (e) {
@@ -447,26 +450,16 @@ async function listIfExists(dir: string): Promise<string[] | null> {
 		if (err?.code === "ENOENT") {
 			return null;
 		}
-		throw new RolloutSourceError(dir, e);
+		const error = new RolloutSourceError(dir, e);
+		if (!onError) throw error;
+		await onError(error);
+		return null;
 	}
 }
 
 type RolloutDirectoryErrorHandler = (
 	error: RolloutSourceError,
 ) => Promise<void>;
-
-async function listRolloutDirectory(
-	path: string,
-	onError?: RolloutDirectoryErrorHandler,
-): Promise<string[] | null> {
-	try {
-		return await listIfExists(path);
-	} catch (error) {
-		if (!(error instanceof RolloutSourceError) || !onError) throw error;
-		await onError(error);
-		return null;
-	}
-}
 
 async function* walkDayFiles(
 	dayPath: string,
@@ -481,7 +474,7 @@ async function* walkDayFiles(
 	day: string;
 	file: string;
 }> {
-	const files = await listRolloutDirectory(dayPath, onDirectoryError);
+	const files = await listIfExists(dayPath, onDirectoryError);
 	if (files === null) {
 		return;
 	}
@@ -505,7 +498,7 @@ async function* walkMonthDays(
 	day: string;
 	file: string;
 }> {
-	const days = await listRolloutDirectory(monthPath, onDirectoryError);
+	const days = await listIfExists(monthPath, onDirectoryError);
 	if (days === null) {
 		return;
 	}
@@ -534,7 +527,7 @@ async function* walkYearMonths(
 	day: string;
 	file: string;
 }> {
-	const months = await listRolloutDirectory(yearPath, onDirectoryError);
+	const months = await listIfExists(yearPath, onDirectoryError);
 	if (months === null) {
 		return;
 	}
@@ -561,7 +554,7 @@ export async function* walkRollouts(
 	day: string;
 	file: string;
 }> {
-	const years = await listRolloutDirectory(baseDir, onDirectoryError);
+	const years = await listIfExists(baseDir, onDirectoryError);
 	if (years === null) {
 		return;
 	}
@@ -1315,11 +1308,10 @@ async function parseRolloutFile(
 			0,
 			args.startOffset - 1,
 		)) {
-			const bytes = chunk as Buffer;
-			let newline = bytes.indexOf(0x0a);
+			let newline = chunk.indexOf(0x0a);
 			while (newline !== -1) {
 				progress.lineNumber += 1;
-				newline = bytes.indexOf(0x0a, newline + 1);
+				newline = chunk.indexOf(0x0a, newline + 1);
 			}
 		}
 	}

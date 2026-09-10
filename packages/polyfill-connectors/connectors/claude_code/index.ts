@@ -28,9 +28,9 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { createInterface as createFileReader } from "node:readline";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -589,6 +589,7 @@ async function readFilesRecursively(
 	rootDir: string,
 	predicate: (ent: Dirent) => boolean,
 	onDirectoryError?: DirectoryReadFailure,
+	onSymlink?: SymlinkSkipped,
 ): Promise<Array<{ fullPath: string; relPath: string }>> {
 	const out: Array<{ fullPath: string; relPath: string }> = [];
 	const walk = async (dir: string, prefix: string): Promise<void> => {
@@ -596,11 +597,18 @@ async function readFilesRecursively(
 		// A missing directory (ENOENT) is honestly empty; an unreadable one is a
 		// source-boundary failure and must never be reported as "no files".
 		let items: Dirent[] | null;
+		let symlinkRoot = false;
 		try {
-			items = await readLocalDirOrFailClosed(dir);
+			symlinkRoot = Boolean(onSymlink && (await lstat(dir)).isSymbolicLink());
+			items = symlinkRoot ? null : await readLocalDirOrFailClosed(dir);
 		} catch (error) {
+			if (isRecord(error) && error.code === "ENOENT") return;
 			if (!onDirectoryError) throw error;
 			await onDirectoryError(dir, error);
+			return;
+		}
+		if (symlinkRoot) {
+			await onSymlink?.(dir);
 			return;
 		}
 		if (items === null) {
@@ -612,6 +620,10 @@ async function readFilesRecursively(
 			}
 			const relPath = prefix ? `${prefix}/${ent.name}` : ent.name;
 			const fullPath = join(dir, ent.name);
+			if (onSymlink && ent.isSymbolicLink()) {
+				await onSymlink(fullPath);
+				continue;
+			}
 			if (ent.isDirectory()) {
 				await walk(fullPath, relPath);
 				continue;
@@ -1024,9 +1036,13 @@ async function emitProjectMemoryNotes({
 
 // ─── Projects directory scan ────────────────────────────────────────────
 
+type SymlinkSkipped = (path: string) => Promise<void>;
+
 type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
 
 export interface ScanProjectDirsArgs {
+	scope?: EnumerationScope | null;
+	onSymlink?: SymlinkSkipped;
 	onDirectoryError?: DirectoryReadFailure;
 	baseDir: string;
 	/** Threaded through to parseJsonlFile/processJsonlLine so pass 1 is
@@ -1112,12 +1128,13 @@ async function processTopLevelJsonl(
 async function readSubagentFiles(
 	subagentsDir: string,
 	onDirectoryError?: DirectoryReadFailure,
+	onSymlink?: SymlinkSkipped,
 ): Promise<string[]> {
 	const files = await readFilesRecursively(
 		subagentsDir,
-		(ent) =>
-			(ent.isFile() || ent.isSymbolicLink()) && ent.name.endsWith(".jsonl"),
+		(ent) => ent.isFile() && ent.name.endsWith(".jsonl"),
 		onDirectoryError,
+		onSymlink ?? (async () => {}),
 	);
 	return files.map((file) => file.relPath);
 }
@@ -1137,6 +1154,7 @@ async function processSessionDir(
 		const subFiles = await readSubagentFiles(
 			subagentsDir,
 			args.onDirectoryError,
+			args.onSymlink,
 		);
 		for (const f of subFiles) {
 			await processJsonlFile({
@@ -1173,6 +1191,12 @@ async function scanProjectDir(
 		await args.onDirectoryError?.(projectPath, error);
 		return;
 	}
+	for (const entry of entries)
+		if (
+			entry.isSymbolicLink() &&
+			(entry.name.endsWith(".jsonl") || SESSION_DIR_PREFIX_RE.test(entry.name))
+		)
+			await args.onSymlink?.(join(projectPath, entry.name));
 	if (
 		args.requested.has("memory_notes") &&
 		(args.buildOnly || args.skipJsonl)
@@ -1205,12 +1229,16 @@ async function listProjectDirs(
 	baseDir: string,
 	emit: CollectContext["emit"],
 	onDirectoryError?: DirectoryReadFailure,
+	onSymlink?: SymlinkSkipped,
+	scope?: EnumerationScope | null,
 ): Promise<string[] | null> {
-	let projectDirs: string[];
+	let entries: Dirent[];
+	let symlinkRoot = false;
 	try {
-		projectDirs = (await readdir(baseDir)).filter(
-			(name) => !name.startsWith("."),
-		);
+		symlinkRoot = (await lstat(baseDir)).isSymbolicLink();
+		entries = symlinkRoot
+			? []
+			: await readdir(baseDir, { withFileTypes: true });
 	} catch (error) {
 		if (onDirectoryError) {
 			await onDirectoryError(baseDir, error);
@@ -1224,10 +1252,35 @@ async function listProjectDirs(
 		});
 		return null;
 	}
-	// Optional scoping — comma-separated substrings; a dir is included if any match.
+	if (symlinkRoot) {
+		await onSymlink?.(baseDir);
+		return [];
+	}
 	const include = parseCsvEnv(process.env.CLAUDE_CODE_PROJECT_INCLUDE);
 	const exclude = parseCsvEnv(process.env.CLAUDE_CODE_PROJECT_EXCLUDE);
-	return applyProjectDirScope(projectDirs, include, exclude);
+	const selected = new Set(
+		applyProjectDirScope(
+			entries
+				.map((entry) => entry.name)
+				.filter((name) => !name.startsWith(".")),
+			include,
+			exclude,
+		),
+	);
+	const projectDirs: string[] = [];
+	for (const entry of entries) {
+		if (
+			!selected.has(entry.name) ||
+			!projectDirMatchesSourceRoots(entry.name, scope)
+		)
+			continue;
+		if (entry.isSymbolicLink()) {
+			await onSymlink?.(join(baseDir, entry.name));
+			continue;
+		}
+		projectDirs.push(entry.name);
+	}
+	return projectDirs;
 }
 
 export async function scanProjectDirs(
@@ -1237,6 +1290,8 @@ export async function scanProjectDirs(
 		args.baseDir,
 		args.emit,
 		args.onDirectoryError,
+		args.onSymlink,
+		args.scope,
 	);
 	if (projectDirs === null) {
 		return;
@@ -1623,8 +1678,15 @@ export async function discoverClaudeJsonlSources(
 	emit: CollectContext["emit"],
 	scope?: EnumerationScope | null,
 	onDirectoryError?: DirectoryReadFailure,
+	onSymlink?: SymlinkSkipped,
 ): Promise<ClaudeJsonlSource[] | null> {
 	let directoryFailed = false;
+	const reportSkippedSymlink: SymlinkSkipped | undefined = onSymlink
+		? async (path) => {
+				directoryFailed = true;
+				await onSymlink(path);
+			}
+		: undefined;
 	const reportNestedDirectoryError: DirectoryReadFailure | undefined =
 		onDirectoryError
 			? async (path, error) => {
@@ -1636,6 +1698,8 @@ export async function discoverClaudeJsonlSources(
 		baseDir,
 		emit,
 		reportNestedDirectoryError,
+		reportSkippedSymlink,
+		scope,
 	);
 	if (projectDirs === null) return null;
 	const sources: ClaudeJsonlSource[] = [];
@@ -1652,6 +1716,15 @@ export async function discoverClaudeJsonlSources(
 			await onDirectoryError?.(projectPath, error);
 			continue;
 		}
+		for (const entry of entries)
+			if (
+				entry.isSymbolicLink() &&
+				(entry.name.endsWith(".jsonl") ||
+					SESSION_DIR_PREFIX_RE.test(entry.name))
+			) {
+				directoryFailed = true;
+				await reportSkippedSymlink?.(join(projectPath, entry.name));
+			}
 		for (const entry of entries
 			.filter((item) => item.isFile() && item.name.endsWith(".jsonl"))
 			.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -1670,6 +1743,7 @@ export async function discoverClaudeJsonlSources(
 			for (const relPath of await readSubagentFiles(
 				subagentsDir,
 				reportNestedDirectoryError,
+				reportSkippedSymlink,
 			)) {
 				sources.push({
 					forcedSessionId: entry.name,
@@ -2369,9 +2443,33 @@ if (isMainModule(import.meta.url)) {
 					reportedGaps.add(JSON.stringify(gap));
 				}
 			};
+			const skippedSymlinks = new Set<string>();
+			const reportSymlink: SymlinkSkipped = async (path) => {
+				if (skippedSymlinks.has(path)) return;
+				skippedSymlinks.add(path);
+				let target: string;
+				try {
+					target = await readlink(path);
+				} catch (error) {
+					await reportDirectoryError(path, error);
+					return;
+				}
+				for (const stream of ["sessions", "messages", "attachments"]) {
+					if (!requested.has(stream)) continue;
+					await emit({
+						type: "SKIP_RESULT",
+						stream,
+						reason: "symlink_skipped",
+						message:
+							"Claude Code skipped a symbolic link without reading its target",
+						diagnostics: { path, target_path: resolve(dirname(path), target) },
+					});
+					reportedGaps.add(`symlink:${path}`);
+				}
+			};
 			const isUnavailablePath = (path: string): boolean =>
-				[...failedDirectories].some((directory) =>
-					path.startsWith(directory + sep),
+				[...failedDirectories, ...skippedSymlinks].some(
+					(directory) => path === directory || path.startsWith(directory + sep),
 				);
 			const retainUnavailable = <T>(
 				prior: Record<string, T>,
@@ -2573,6 +2671,7 @@ if (isMainModule(import.meta.url)) {
 					emit,
 					enumerationScope,
 					reportDirectoryError,
+					reportSymlink,
 				);
 				if (sources === null) {
 					return;
@@ -2796,6 +2895,8 @@ if (isMainModule(import.meta.url)) {
 						sessionAccumulators: new Map(),
 						skipJsonl: true,
 						onDirectoryError: reportDirectoryError,
+						onSymlink: reportSymlink,
+						scope: enumerationScope,
 					});
 					retainUnavailable(messageFileMtimes, newMessageFileMtimes);
 					retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
@@ -2831,10 +2932,7 @@ if (isMainModule(import.meta.url)) {
 						const candidateLegacyBaseline =
 							messageUsesLegacyJsonlMtimes &&
 							messageLegacyJsonlMtimes.has(source.path);
-						let scanned:
-							| Awaited<ReturnType<typeof scanChildSource>>
-							| undefined;
-						scanned = await tryScanTranscript(
+						let scanned = await tryScanTranscript(
 							source.path,
 							childSourceGaps,
 							() =>
