@@ -67,6 +67,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-summary-repair-prescan-ordering-postgres.test.ts",
   "test/connector-summary-stream-facts-monotonic-postgres.test.ts",
   "test/connector-summary-stream-facts-reliability-postgres.test.ts",
+  // Exercises challenge persistence, expiry, and single-use decisions, not schema bootstrap or migration.
+  "test/consent-challenge-store-postgres-path.test.ts",
   "test/controller-browser-surface-leases-postgres.test.ts",
   "test/controller-phantom-active-run.test.ts",
   "test/credential-state-attribution-postgres.test.ts",
