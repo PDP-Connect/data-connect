@@ -7,7 +7,7 @@
  * Exercises two sentences of spec-core.md (pdpp
  * `spec/int0902-13v3-registry-queries`).
  *
- * The interoperability obligation, spec-core.md:719:
+ * The interoperability obligation, spec-core.md#client-display:
  *
  *   "a conforming authorization server MUST NOT reject a valid client ID
  *    metadata document solely because the client is not preregistered. [...] A
@@ -15,7 +15,7 @@
  *    unregistered valid document that is accepted as an identity, and a policy
  *    denial that is not a rejection of the identity form."
  *
- * The reliance-record obligation, spec-core.md:111:
+ * The reliance-record obligation, spec-core.md#trust-registry-queries:
  *
  *   "An authorization server records the trust signal it relied on — subject,
  *    role or scope, status, governance-framework URI, issuer or trust-anchor
@@ -51,7 +51,8 @@ const CONNECTOR_SOURCE_ID = "https://registry.pdpp.dev/connectors/spotify";
 const SUBJECT_ID = "cimd_oracle_owner";
 const INTROSPECTION_AUTHORIZATION = basicIntrospectionAuthorization(TEST_RS_INTROSPECTION_CREDENTIALS);
 
-// Core requires these three on the retained trust signal (spec-core.md:109).
+// Core requires these three on the retained trust signal
+// (spec-core.md#trust-registry-queries).
 // The judge's fuller ToIP-shaped ask adds subject, role/scope, issuer and lookup
 // time; those are a superset of what Core mandates, so they are reported as a
 // gap rather than asserted here.
@@ -301,14 +302,15 @@ test("cimd oracle: the trust signal the AS relied on is retained on the grant", 
 
     // The AS did rely on a trust signal here: it retrieved this client's metadata
     // from a URL under its own control and confirmed the document names the same
-    // client_id, which spec-core.md:729 calls verified domain control. A relying
+    // client_id, which spec-core.md#client-display obligation 5, "Domain control
+    // as a trust signal", calls verified domain control. A relying
     // party has to be able to read back *which* signal was relied on and when,
     // because a status can be withdrawn after issuance.
     const pdpp = introspection.body.pdpp as Record<string, unknown> | undefined;
     const trustSignal = (pdpp?.trust_signal ?? introspection.body.trust_signal) as Record<string, unknown> | undefined;
     assert.ok(
       trustSignal,
-      "the issued grant retains the trust signal the AS relied on (spec-core.md:111) — currently absent from the server"
+      "the issued grant retains the trust signal the AS relied on (spec-core.md#trust-registry-queries) — currently absent from the server"
     );
     for (const field of CORE_RELIANCE_TUPLE_FIELDS) {
       assert.ok(field in trustSignal, `the retained trust signal names ${field}`);
