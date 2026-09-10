@@ -6762,6 +6762,160 @@ test("all-stream consent preserves field and date restrictions in persisted gran
   }
 });
 
+// ─── Issuance is bound to the validated snapshot ────────────────────────────
+//
+// Approval validates the decision, then consumes the challenge, then mints.
+// State the decision depends on can change at that boundary. Both tests below
+// inject the change exactly there, with a `BEFORE UPDATE` trigger on the
+// consume — the same fault-injection idiom as "SQLite authorization-code
+// failure rolls back consumption" above. The trigger is test-only; the point is
+// that the boundary is a real asynchronous one, not that an unauthenticated
+// party can drive it.
+
+test("a stream declared after review is not added to the issued grant", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "declaration-drift");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "source");
+    // Approve every stream, which is the selection that used to be issued as a
+    // wildcard and therefore re-resolved against whatever was declared later.
+    const body = consentChallengeAcceptBody({ chosen: [{ source, streams: source.streams }], client, model });
+    const reviewedNames = source.streams.map((entry) => entry.name).sort();
+
+    // Register the widened declaration through the real endpoint, then put the
+    // reviewed one back so validation sees exactly what the owner reviewed.
+    const reviewedManifest = (
+      getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(manifest.connector_id) as {
+        manifest: string;
+      }
+    ).manifest;
+    const widened = structuredClone(manifest) as typeof manifest & { streams: Record<string, unknown>[] };
+    widened.streams.push({ ...structuredClone(widened.streams[0]), name: "late_declared_stream" });
+    assert.equal(
+      (
+        await fetchJson(`${asUrl}/connectors`, {
+          body: JSON.stringify(widened),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        })
+      ).status,
+      201
+    );
+    const widenedManifest = (
+      getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(manifest.connector_id) as {
+        manifest: string;
+      }
+    ).manifest;
+    getDb().prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?").run(reviewedManifest, manifest.connector_id);
+
+    const sqlLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+    getDb().exec(`
+      CREATE TRIGGER widen_declaration_at_consume
+      BEFORE UPDATE OF status ON consent_challenges
+      WHEN NEW.id = ${sqlLiteral(challenge)} AND NEW.status = 'accepted'
+      BEGIN
+        UPDATE connectors SET manifest = ${sqlLiteral(widenedManifest)}
+        WHERE connector_id = ${sqlLiteral(manifest.connector_id)};
+      END
+    `);
+    try {
+      const approval = await postConsentChallenge(asUrl, challenge, "accept", body);
+      assert.equal(approval.status, 200, JSON.stringify(approval.body));
+      const callback = new URL(stringField(approval.body, "redirect_url"));
+      const token = await fetchJson(`${asUrl}/oauth/token`, {
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          code: mustExist(callback.searchParams.get("code"), "authorization code"),
+          code_verifier: consentChallengeVerifier,
+          grant_type: "authorization_code",
+          redirect_uri: HOSTED_MCP_REDIRECT_URI,
+        }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+      assert.equal(token.status, 200, JSON.stringify(token.body));
+      const access = mustExist(await getGrantPackageAccess(stringField(token.body, "grant_package_id")), "package");
+      const issuedNames = (access.members as Record<string, unknown>[])
+        .flatMap((member) => ((member.grant as Record<string, unknown>).streams as Record<string, unknown>[]) ?? [])
+        .map((stream) => stream.name as string)
+        .sort();
+      assert.deepEqual(issuedNames, reviewedNames, "the grant carries exactly the reviewed streams");
+    } finally {
+      getDb().exec("DROP TRIGGER widen_declaration_at_consume");
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("a source revoked while minting leaves the consent challenge retryable", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "revoked-while-minting");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "source");
+    const body = consentChallengeAcceptBody({
+      chosen: [{ source, streams: [mustExist(source.streams[0], "stream")] }],
+      client,
+      model,
+    });
+    const packagesBefore = await countGrantPackagesForOwner();
+
+    const sqlLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+    getDb().exec(`
+      CREATE TRIGGER revoke_connection_at_consume
+      BEFORE UPDATE OF status ON consent_challenges
+      WHEN NEW.id = ${sqlLiteral(challenge)} AND NEW.status = 'accepted'
+      BEGIN
+        UPDATE connector_instances SET status = 'revoked'
+        WHERE connector_id = ${sqlLiteral(manifest.connector_id)};
+      END
+    `);
+    let failed: JsonResponse;
+    try {
+      failed = await postConsentChallenge(asUrl, challenge, "accept", body);
+    } finally {
+      getDb().exec("DROP TRIGGER revoke_connection_at_consume");
+    }
+    assert.equal(failed.status, 400, JSON.stringify(failed.body));
+
+    // Nothing was authorized, so nothing may be recorded as authorized: no
+    // decision on the challenge, and no package row standing in for a grant
+    // that was never minted.
+    assert.deepEqual(
+      getDb().prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?").get(challenge),
+      { decision_digest: null, status: "pending" },
+      "a failed approval must not be recorded as accepted"
+    );
+    assert.equal(await countGrantPackagesForOwner(), packagesBefore, "a failed approval mints no package");
+
+    // The owner restores the connection and approves the same terms again.
+    getDb().prepare("UPDATE connector_instances SET status = 'active' WHERE connector_id = ?").run(manifest.connector_id);
+    assert.equal(
+      (await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`)).status,
+      200,
+      "the challenge is still loadable"
+    );
+    const retried = await postConsentChallenge(asUrl, challenge, "accept", body);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.equal(await countGrantPackagesForOwner(), packagesBefore + 1, "the retry issues exactly once");
+    assert.equal(
+      (await postConsentChallenge(asUrl, challenge, "accept", body)).status,
+      404,
+      "the successful approval is still single-use"
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
 // The consent screen must not offer a cosmetic field picker. A narrowed list
 // travels through the existing scope resolver and is persisted on the child
 // grant, which is the same record the read path enforces.
