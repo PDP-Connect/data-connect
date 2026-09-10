@@ -16,7 +16,7 @@
 //   - selecting one stream without "select all" was confusing/impossible
 //   - a stream selected without its parent produced a raw JSON invalid_request
 //
-// This file loads the real picker HTML the AS renders and executes its script
+// This file loads the real legacy form fallback HTML the AS renders and executes its script
 // in a real DOM (jsdom), then drives the picker the way a person would and
 // asserts the resulting DOM state. It fails on each of the UAT regressions
 // above at the level they were actually observed: in-browser behavior.
@@ -159,8 +159,8 @@ function mustExist<T>(value: T | null | undefined, description: string): T {
 }
 
 // Boot the AS, register three connectors, seed two active owner bindings, and
-// fetch the live picker HTML the way the browser would (GET /oauth/authorize
-// with no authorization_details / connector_id). The unheld third catalog entry
+// verify GET /oauth/authorize hands off to the console, then load the legacy
+// form's validation fallback. The unheld third catalog entry
 // proves the picker filters registered sources through owner holdings. Returns a
 // jsdom window with the inline picker script executed, plus helpers to drive and
 // inspect it.
@@ -184,8 +184,20 @@ async function openPickerDom() {
     authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
-    const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-    assert.equal(pickerResp.status, 200);
+    const handoff = await fetch(authorizeUrl, { redirect: "manual" });
+    assert.equal(handoff.status, 302, "new approvals hand off to the console");
+    const location = new URL(mustExist(handoff.headers.get("location"), "handoff must have a location"));
+    assert.ok(location.searchParams.get("challenge"), "handoff must carry a consent challenge");
+
+    // The inline script still runs when a legacy form submission needs repair.
+    // Request that actual HTTP surface; the console challenge page uses React.
+    const pickerResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: authorizeUrl.searchParams.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.equal(pickerResp.status, 400, "an empty legacy submission renders the repair form");
     const html = await pickerResp.text();
 
     // runScripts: 'dangerously' executes the inline picker <script>, wiring the
