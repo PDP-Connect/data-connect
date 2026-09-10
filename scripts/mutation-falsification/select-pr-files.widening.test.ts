@@ -130,6 +130,79 @@ describe("widening covers whole statements at both ends", () => {
     ])
   })
 
+  it("widens a hunk on a `} else {` line past the block it first grows to", () => {
+    // Real ASTs produce statement spans that *partially* overlap: a consequent
+    // block ends on the same line the alternative block starts. Boundaries here
+    // are 1-9 (the function), 2-2, 3-7 (the if), 3-5 (consequent), 4-4, 5-7
+    // (alternative), 6-6, 8-8.
+    //
+    // Editing `} else {` changes control flow for both branches. One widening
+    // pass grows hunk 5-5 to the smallest statement containing it -- 3-5, the
+    // consequent -- which leaves the 5-7 alternative straddled, so Stryker
+    // generates nothing for `out = b + 2` while reporting completion. Growing
+    // again from 3-5 reaches 3-7 and covers both branches.
+    const boundaries = statementBoundaries(
+      [
+        "function f(a, b) {",
+        "  let out = 0",
+        "  if (a > 1) {",
+        "    out = b + 1",
+        "  } else {",
+        "    out = b + 2",
+        "  }",
+        "  return out",
+        "}",
+      ].join("\n")
+    )
+    expect(widenToStatements([{ startLine: 5, endLine: 5 }], boundaries)).toEqual([
+      { startLine: 3, endLine: 7 },
+    ])
+  })
+
+  it("widens a nested `} else {` hunk to the innermost if, not the outer one", () => {
+    // The same shape one level in, which also holds the fixpoint to the smallest
+    // region containing the straddled statements whole: the inner if is 4-8, the
+    // outer 3-11, and a hunk on the inner `} else {` must not reach the outer one
+    // or the tightness this scoping exists for is lost.
+    const boundaries = statementBoundaries(
+      [
+        "function f(a, b) {",
+        "  let out = 0",
+        "  if (a > 1) {",
+        "    if (b > 1) {",
+        "      out = 1",
+        "    } else {",
+        "      out = 2",
+        "    }",
+        "  } else {",
+        "    out = 3",
+        "  }",
+        "  return out",
+        "}",
+      ].join("\n")
+    )
+    expect(widenToStatements([{ startLine: 6, endLine: 6 }], boundaries)).toEqual([
+      { startLine: 4, endLine: 8 },
+    ])
+  })
+
+  it("keeps growing while a further statement straddles the widened edge", () => {
+    // A hunk that starts inside a nested statement and runs into the next
+    // top-level statement. One pass grew the start edge to the innermost
+    // statement it cut (3-4) and stopped, leaving the enclosing 1-5 statement
+    // straddled -- so Stryker generated nothing for it, though this revision
+    // changed lines inside it. Growing again from 3-6 reaches 1-5 and covers it.
+    const boundaries: LineRange[] = [
+      { startLine: 1, endLine: 5 },
+      { startLine: 2, endLine: 2 },
+      { startLine: 3, endLine: 4 },
+      { startLine: 6, endLine: 6 },
+    ]
+    expect(widenToStatements([{ startLine: 4, endLine: 6 }], boundaries)).toEqual([
+      { startLine: 1, endLine: 6 },
+    ])
+  })
+
   it("returns a range unchanged when the file has no statements", () => {
     expect(widenToStatements([{ startLine: 3, endLine: 4 }], [])).toEqual([
       { startLine: 3, endLine: 4 },

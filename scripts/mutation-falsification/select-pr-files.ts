@@ -266,7 +266,10 @@ export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
  * between. Both halves matter: a range spanning two adjacent top-level
  * statements has no single containing statement, and looking only for one left
  * it slicing both, generating nothing for either while the run still reported
- * completion.
+ * completion. Growth repeats until no statement is left straddling the range,
+ * because moving an edge can expose a further statement across the new edge --
+ * the ordinary shape wherever statement spans partially overlap, as an `if`'s
+ * two blocks do on the `} else {` line.
  *
  * `boundaries` gives, for each statement in the file, its first and last line.
  * Supplying it as data keeps this function a pure interval computation that can
@@ -311,6 +314,30 @@ export function widenToStatements(
         (statement.endLine > range.endLine && statement.startLine <= range.endLine)
     )
 
+  /** Whether some statement's span is exactly `range`. */
+  const isWholeStatement = (range: LineRange): boolean =>
+    boundaries.some(
+      (statement) =>
+        statement.startLine === range.startLine && statement.endLine === range.endLine
+    )
+
+  /**
+   * Whether any statement overlaps `range` while the range neither holds it
+   * whole nor is held whole by it -- the statements Stryker generates nothing
+   * for. A statement inside the range is mutated; one containing the range is
+   * the unit the range sits within, and Stryker still mutates the statements
+   * nested inside it. Anything else is a genuine loss, and is what growing must
+   * eliminate.
+   */
+  const straddlesAStatement = (range: LineRange): boolean =>
+    boundaries.some(
+      (statement) =>
+        statement.startLine <= range.endLine &&
+        statement.endLine >= range.startLine &&
+        !(statement.startLine >= range.startLine && statement.endLine <= range.endLine) &&
+        !(statement.startLine <= range.startLine && statement.endLine >= range.endLine)
+    )
+
   const widenOne = (range: LineRange): LineRange => {
     // A range that cuts nothing is already made of whole statements, whatever
     // else encloses it. Growing it out to that encloser would reach the
@@ -327,6 +354,14 @@ export function widenToStatements(
     let covering: LineRange | undefined
     for (const statement of boundaries) {
       if (statement.startLine > range.startLine || statement.endLine < range.endLine) {
+        continue
+      }
+      // A statement whose span is exactly the range is no progress: returning it
+      // makes growth a fixed point at a range a sibling still straddles. That is
+      // the `} else {` shape -- the consequent block ends on the line the
+      // alternative starts, so a hunk on that line is contained by both, and this
+      // lookup returns the one the range already equals.
+      if (statement.startLine === range.startLine && statement.endLine === range.endLine) {
         continue
       }
       if (smaller(statement, covering)) {
@@ -366,17 +401,56 @@ export function widenToStatements(
     }
   }
 
-  // Both edges are treated, and treated repeatedly. Asking instead for a single
-  // statement covering the *whole* range failed in three ways, each measured:
-  // at the top level of a module nothing covers a range spanning two adjacent
-  // statements, so it was returned still cutting both; a range whose two ends
-  // happened to touch the boundaries of two *different* statements was taken as
-  // already clean while a third statement straddled it; and growing an edge can
-  // expose a further statement straddling the new edge, which one pass misses.
-  // Each shape yielded zero mutants for genuinely changed code while the run
-  // reported completion -- the silent false evidence this widening exists to
-  // prevent.
-  return mergeRanges(ranges.map(widenOne))
+  /**
+   * Grow a range until no statement straddles it.
+   *
+   * `widenOne` treats both edges, but one application of it is not enough:
+   * moving an edge can expose a further statement straddling the *new* edge.
+   * Real ASTs make this ordinary, because statement spans partially overlap --
+   * an `if`'s consequent block ends on the line its alternative begins
+   * (`} else {`), so a hunk on that line grows to one block while the other is
+   * left straddled and Stryker generates nothing for it. A hunk that starts
+   * inside a nested statement and runs into the next top-level statement fails
+   * the same way: the start edge grows to the innermost statement it cut and
+   * leaves the encloser straddled.
+   *
+   * Termination: growth is monotone, each step only moving edges outward, and it
+   * is bounded by the outermost statement in `boundaries`. The step cap is a
+   * guard against a malformed boundary set rather than a normal exit -- one
+   * statement can move an edge at most once, so a run longer than `boundaries`
+   * means the range had already stopped growing.
+   */
+  const widenToFixpoint = (range: LineRange): LineRange => {
+    let current = range
+    for (let step = 0; step <= boundaries.length + 1; step += 1) {
+      // A range that is exactly some statement's span with nothing straddling it
+      // is done: every statement it touches is either held whole by it or holds
+      // it whole. Stopping here is what keeps a one-line change inside a long
+      // function at its own line rather than following the function out to the
+      // module. A range that is not yet a whole statement falls through to
+      // `widenOne`, whose own `cutsAStatement` gate decides whether to grow.
+      if (isWholeStatement(current) && !straddlesAStatement(current)) {
+        return current
+      }
+      const grown = widenOne(current)
+      if (grown.startLine === current.startLine && grown.endLine === current.endLine) {
+        return current
+      }
+      current = grown
+    }
+    return current
+  }
+
+  // Asking instead for a single statement covering the *whole* range failed in
+  // three ways, each measured: at the top level of a module nothing covers a
+  // range spanning two adjacent statements, so it was returned still cutting
+  // both; a range whose two ends happened to touch the boundaries of two
+  // *different* statements was taken as already clean while a third statement
+  // straddled it; and one pass of edge growth leaves the shapes `widenToFixpoint`
+  // above exists for. Each yielded zero mutants for genuinely changed code while
+  // the run reported completion -- the silent false evidence this widening exists
+  // to prevent.
+  return mergeRanges(ranges.map(widenToFixpoint))
 }
 
 /**
