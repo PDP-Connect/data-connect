@@ -36,6 +36,12 @@ interface ChallengeError {
  * selection, bad expiry). Surfacing that text rather than a status code is
  * deliberate: the AS is the only party that knows why the approval was
  * refused, and the owner is the one who has to act on it.
+ *
+ * This server-to-server JSON request carries the owner session, but no
+ * `_csrf` token. The AS intentionally exempts application/json from its CSRF
+ * token-pair check; with owner auth enabled, non-JSON browser submissions
+ * still require a valid cookie/form token pair. The JSON exemption relies on
+ * browsers requiring permission through CORS preflight for cross-origin JSON.
  */
 async function postChallenge(challenge: string, action: "accept" | "reject", body: unknown): Promise<string> {
   await verifyDashboardSession();
