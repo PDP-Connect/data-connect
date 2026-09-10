@@ -313,6 +313,17 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // the scanner (no rule here folds an `execFileSync` call result as a path
   // anchor, matching this scanner's stated bounded-resolver scope).
   "reference-implementation/scripts/test-accounting/with-local-full-suite-lock.mjs:44",
+  // main(manifestPath, repoRoot) in check-test-backends.ts: readFileSync(manifestPath,
+  // "utf8") where `manifestPath` is the operator's own CLI positional
+  // argument (process.argv[2]), same class as deploy-canary.ts:606 and
+  // cli/lib/common.ts:35 above. The file it names is a TEST BACKEND manifest
+  // (one `Backend` value -- "none"/"sqlite"/"postgres"/"sqlite+postgres" --
+  // per tracked test-file path); checkBackendManifest validates its shape
+  // and rejects any entry that disagrees with the file's own imports, so it
+  // can carry no connector/provider identity the harness would act on.
+  // Line-pinned by design (see this array's own doc comment above); it must
+  // be re-derived if an edit above the call site moves it.
+  "reference-implementation/scripts/check-test-backends.ts:285",
 ]);
 
 /** Directory segments, relative to a production scan root (e.g. `server/`),
