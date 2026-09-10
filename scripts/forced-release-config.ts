@@ -22,6 +22,33 @@
 // lands exactly where an ordinary one would and cannot collide with or
 // regress the published line.
 //
+// IMPORTANT — why the forced config is passed as OPTIONS, not `--extends`:
+// semantic-release's config loader (lib/get-config.js) computes
+// `{...configFile, ...cliOptions}` and then `{...extendsOptions, ...options}`.
+// An extended config therefore loses every key the repository's own
+// .releaserc.yaml defines, `plugins` included — so `--extends forced.json`
+// from this repo resolves the GATED rules, not the forced one, and a forced
+// dispatch publishes nothing. Reproduced against semantic-release 25.0.9:
+// `getConfig(ctx, {extends: forced.json})` with cwd at the repo root yields
+// the seven gated rules ending in the two `release: false` catch-alls, while
+// `getConfig(ctx, {plugins: forced.plugins})` yields `[{release: "patch"}]`.
+// cliOptions/API options are the only shape that wins over the file, which
+// is why forced-release.ts's buildForcedReleaseOptions hands this straight to
+// the programmatic API. scripts/forced-release.test.ts asserts this THROUGH
+// the real loader, because a test against this builder's return value cannot
+// see the difference — that blind spot is exactly how the `--extends` version
+// shipped with a full green suite.
+//
+// NOT what this fixes, and still live on `main`: the v2.2.0 tag with no npm
+// release was NOT the scope gate refusing a release. That run resolved and
+// published connector-protocol@2.2.0 correctly, then aborted because
+// scripts/verify-connector-protocol-published.ts does a single `npm view`
+// with no retry and lost a race with registry propagation (the same lag
+// npm-release.yml's own comment records as ~3 minutes for 2.1.1, and which
+// scripts/verify-npm-provenance.ts already retries around). That is a
+// separate defect on the publish barrier, out of this change's scope; the
+// unscoped connector fixes since v2.2.0 are what this mechanism addresses.
+//
 // IMPORTANT — why the rules are REPLACED rather than prepended:
 // .releaserc.yaml's gate ends in two `release: false` catch-alls. Per that
 // file's header note (and reproduced directly against the installed
@@ -80,11 +107,11 @@ export function buildForcedReleaseConfig(
       return plugin
     }
     const [name, options] = plugin
-    // Drop the scope-gate releaseRules wholesale (see header). `preset` and
-    // `presetConfig` are preserved so forced release notes keep the same
-    // per-package sectioning as an ordinary release.
-    const { releaseRules: _dropped, ...rest } = options
-    return [name, { ...rest, releaseRules: [{ release: releaseType }] }]
+    // Replace the scope-gate releaseRules wholesale (see header): the spread
+    // carries `preset` and `presetConfig` through, so forced release notes
+    // keep the same per-package sectioning as an ordinary release, and the
+    // explicit releaseRules below overwrites the gate's.
+    return [name, { ...options, releaseRules: [{ release: releaseType }] }]
   })
 
   return { ...config, plugins }

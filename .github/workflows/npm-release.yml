@@ -29,11 +29,16 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: "Force a release at this bump, bypassing commit analysis. Leave empty to run ordinary commit analysis."
+        # `none` is a sentinel, not an empty string: an empty `options` entry
+        # is invalid workflow syntax (actionlint: "string should not be
+        # empty") and GitHub renders and validates it inconsistently in the
+        # dispatch form. `none` is the conventional shape and reads clearly in
+        # the run's own inputs display.
+        description: "Force a release at this bump, bypassing commit analysis. Leave as none to run ordinary commit analysis."
         required: false
         type: choice
-        options: ["", "patch", "minor", "major"]
-        default: ""
+        options: ["none", "patch", "minor", "major"]
+        default: "none"
       reason:
         description: "Why this release is being forced (recorded in the run log and job summary). Required when release_type is set."
         required: false
@@ -88,9 +93,12 @@ jobs:
           RELEASE_TYPE: ${{ inputs.release_type }}
           REASON: ${{ inputs.reason }}
           FORCED_RELEASE_DRY_RUN: "true"
+        # On a `push` event the `inputs` context is empty, so RELEASE_TYPE is
+        # the empty string; on a dispatch that is not forcing it is the `none`
+        # sentinel. Both mean "run ordinary commit analysis".
         run: |
           set -o pipefail
-          if [ -n "$RELEASE_TYPE" ]; then
+          if [ -n "$RELEASE_TYPE" ] && [ "$RELEASE_TYPE" != "none" ]; then
             node --import tsx scripts/forced-release.ts "$RELEASE_TYPE" "$REASON" 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
           else
             npm run release:npm:dry-run 2>&1 | tee "$RUNNER_TEMP/semantic-release-dry-run.log"
@@ -194,7 +202,7 @@ jobs:
           RELEASE_TYPE: ${{ inputs.release_type }}
           REASON: ${{ inputs.reason }}
         run: |
-          if [ -n "$RELEASE_TYPE" ]; then
+          if [ -n "$RELEASE_TYPE" ] && [ "$RELEASE_TYPE" != "none" ]; then
             node --import tsx scripts/forced-release.ts "$RELEASE_TYPE" "$REASON"
           else
             npm run release:npm

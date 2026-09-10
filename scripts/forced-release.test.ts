@@ -1,13 +1,24 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { analyzeCommits } from "@semantic-release/commit-analyzer"
 import { load } from "js-yaml"
+// The REAL loader semantic-release runs, not a stand-in. Every "the forced
+// path publishes" assertion below goes through this, because the defect this
+// suite failed to catch lived entirely in the loader's merge order and was
+// invisible to any test that inspected the config object directly.
+import getConfig from "semantic-release/lib/get-config.js"
 import { describe, expect, it } from "vitest"
 import { buildForcedReleaseConfig, loadReleaseConfig } from "./forced-release-config.ts"
-import { ForcedReleaseRefusal, formatAuditRecord, planForcedRelease } from "./forced-release.ts"
+import {
+  buildForcedReleaseOptions,
+  ForcedReleaseRefusal,
+  formatAuditRecord,
+  planForcedRelease,
+} from "./forced-release.ts"
 
 // The forced-release path exists because this repo's scope gate has a silent
 // failure mode: a real packaged change under an unscoped `fix:` or a
@@ -38,6 +49,135 @@ async function releaseTypeFor(options: Record<string, unknown>, subjects: string
     cwd: process.cwd(),
   })
 }
+
+// ---------------------------------------------------------------------------
+// Resolution through the REAL semantic-release config loader.
+//
+// This block exists because the suite it joins could not see a fatal defect:
+// the forced config was handed to semantic-release with `--extends`, and
+// lib/get-config.js computes `{...configFile, ...cliOptions}` and then
+// `{...extendsOptions, ...options}` — so an EXTENDED config sits UNDERNEATH
+// the repository's own .releaserc.yaml. With .releaserc.yaml present, which
+// is every CI run, a forced dispatch resolved the gated rules, published
+// nothing, and printed an audit record claiming the gate had been bypassed.
+// Every pre-existing "forced path publishes" test passed throughout, because
+// all of them called analyzeCommits on the builder's return value and nothing
+// went through the loader.
+//
+// So: resolve the way semantic-release resolves, then assert on the rules
+// that actually come out.
+// ---------------------------------------------------------------------------
+const REPO_ROOT = process.cwd()
+
+function silentContext(cwd: string) {
+  const noop = () => {}
+  const logger = { log: noop, error: noop, warn: noop, success: noop, scope: () => logger }
+  return { cwd, env: process.env, stdout: process.stdout, stderr: process.stderr, logger }
+}
+
+/** The commit-analyzer releaseRules semantic-release ACTUALLY resolves. */
+async function resolvedReleaseRules(
+  cliOptions: Record<string, unknown>,
+  cwd: string = REPO_ROOT
+): Promise<unknown> {
+  const { options } = (await getConfig(silentContext(cwd), cliOptions)) as {
+    options: { plugins: unknown[] }
+  }
+  const entry = options.plugins.find(
+    plugin => Array.isArray(plugin) && plugin[0] === "@semantic-release/commit-analyzer"
+  ) as [string, Record<string, unknown>] | undefined
+  if (!entry) throw new Error("resolved config has no @semantic-release/commit-analyzer entry")
+  return entry[1].releaseRules
+}
+
+describe("the forced config survives semantic-release's config loader", () => {
+  const plan = { releaseType: "patch" as const, reason: "connector fix merged unscoped", actor: "ci", dryRun: false }
+
+  // THE regression test for the fatal defect. It runs from the repo root, so
+  // cosmiconfig finds the real .releaserc.yaml exactly as it does in CI. If
+  // the forced options ever stop overriding that file, the resolved rules
+  // become the gated seven and this fails.
+  it("resolves the unconditional forced rule, not the gate, with .releaserc.yaml present", async () => {
+    expect(await resolvedReleaseRules(buildForcedReleaseOptions(plan))).toEqual([{ release: "patch" }])
+  })
+
+  it.each(["patch", "minor", "major"] as const)(
+    "resolves a forced %s bump through the loader",
+    async releaseType => {
+      const rules = await resolvedReleaseRules(buildForcedReleaseOptions({ ...plan, releaseType }))
+      expect(rules).toEqual([{ release: releaseType }])
+    }
+  )
+
+  // The resolved rules must not merely LOOK right — they must actually
+  // release the commits that silently published nothing. This closes the
+  // loop from loader output to release decision.
+  it.each(["patch", "minor", "major"] as const)(
+    "the loader-resolved forced %s config releases the real unscoped commits",
+    async releaseType => {
+      const { options } = (await getConfig(
+        silentContext(REPO_ROOT),
+        buildForcedReleaseOptions({ ...plan, releaseType })
+      )) as { options: { plugins: unknown[] } }
+      const analyzer = options.plugins.find(
+        plugin => Array.isArray(plugin) && plugin[0] === "@semantic-release/commit-analyzer"
+      ) as [string, Record<string, unknown>]
+      expect(await releaseTypeFor(analyzer[1], REAL_UNPUBLISHED_COMMITS)).toBe(releaseType)
+    }
+  )
+
+  // Pins the exact mistake that was shipped: the same forced config passed as
+  // `extends` resolves the GATE, because an extended config loses to
+  // .releaserc.yaml. Keeping this as an executable assertion means a future
+  // change back to `--extends` fails here with the reason attached, rather
+  // than passing every test and publishing nothing.
+  it("would resolve the gate instead if the forced config were passed via extends", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "forced-release-extends-"))
+    const configPath = join(dir, "forced-release.json")
+    writeFileSync(configPath, JSON.stringify(buildForcedReleaseConfig("patch"), null, 2))
+
+    const viaExtends = (await resolvedReleaseRules({ extends: configPath })) as unknown[]
+    expect(viaExtends).not.toEqual([{ release: "patch" }])
+    expect(viaExtends).toEqual(loadReleaseConfig().plugins.flatMap(plugin =>
+      Array.isArray(plugin) && plugin[0] === "@semantic-release/commit-analyzer"
+        ? [plugin[1].releaseRules]
+        : []
+    )[0])
+    // And those gated rules are exactly the ones that refuse the commits a
+    // forced release exists to publish.
+    expect(await releaseTypeFor({ preset: "conventionalcommits", releaseRules: viaExtends }, REAL_UNPUBLISHED_COMMITS)).toBeNull()
+  })
+
+  // The ordinary path must still resolve the gate through the same loader.
+  it("leaves an unforced run resolving .releaserc.yaml's gated rules", async () => {
+    const gated = await resolvedReleaseRules({})
+    expect(await releaseTypeFor({ preset: "conventionalcommits", releaseRules: gated as unknown[] }, REAL_UNPUBLISHED_COMMITS)).toBeNull()
+    expect(
+      await releaseTypeFor({ preset: "conventionalcommits", releaseRules: gated as unknown[] }, [
+        "fix(local-collector): resolve packaged import",
+      ])
+    ).toBe("patch")
+  })
+
+  // Forcing changes which commits count as releasable and nothing else: the
+  // resolved plugin chain must still be the full publish chain.
+  it("resolves the same plugin chain an ordinary release uses", async () => {
+    const forced = (await getConfig(silentContext(REPO_ROOT), buildForcedReleaseOptions(plan))) as {
+      options: { plugins: unknown[] }
+    }
+    const ordinary = (await getConfig(silentContext(REPO_ROOT), {})) as {
+      options: { plugins: unknown[] }
+    }
+    const names = (plugins: unknown[]) =>
+      plugins.map(plugin => (Array.isArray(plugin) ? plugin[0] : plugin))
+    expect(names(forced.options.plugins)).toEqual(names(ordinary.options.plugins))
+  })
+
+  it("carries the dry-run flags through as API options", () => {
+    expect(buildForcedReleaseOptions({ ...plan, dryRun: true })).toMatchObject({ dryRun: true, ci: false })
+    expect(buildForcedReleaseOptions(plan)).not.toHaveProperty("dryRun")
+  })
+})
 
 describe("forced release publishes what commit analysis refuses", () => {
   // The core assertion this mechanism must satisfy: the exact commits that
@@ -132,6 +272,16 @@ describe("forced-release refusals", () => {
     expect(() => planForcedRelease({ ...valid, ref: "refs/tags/v2.2.0" })).toThrow(ForcedReleaseRefusal)
   })
 
+  // An ABSENT ref is refused as hard as a wrong one. Anything running on a
+  // runner sets GITHUB_REF, so the only caller that gets here without one is
+  // a developer shell — which previously sailed past this guard entirely and
+  // was stopped only by semantic-release's own branch check, a layer deeper
+  // than this script claims to hold.
+  it("refuses a request with no ref at all", () => {
+    expect(() => planForcedRelease({ ...valid, ref: undefined })).toThrow(ForcedReleaseRefusal)
+    expect(() => planForcedRelease({ ...valid, ref: undefined })).toThrow(/no ref/i)
+  })
+
   it.each(["", "  ", undefined as unknown as string])("refuses a missing reason (%j)", reason => {
     expect(() => planForcedRelease({ ...valid, reason })).toThrow(ForcedReleaseRefusal)
   })
@@ -158,19 +308,47 @@ describe("npm-release workflow wiring", () => {
     env?: Record<string, string>
   }
   interface Workflow {
-    on: { workflow_dispatch: { inputs: Record<string, { type: string; options?: string[] }> } }
-    jobs: Record<string, { if?: string; steps: Step[]; permissions?: Record<string, string> }>
+    on: {
+      workflow_dispatch: {
+        inputs: Record<string, { type: string; options?: string[]; default?: string }>
+      }
+    }
+    jobs: Record<
+      string,
+      { if?: string; needs?: string | string[]; steps: Step[]; permissions?: Record<string, string> }
+    >
   }
 
   const workflow = load(
     readFileSync(resolve(process.cwd(), ".github/workflows/npm-release.yml"), "utf8")
   ) as Workflow
 
-  it("offers release_type and reason as dispatch inputs", () => {
+  // The opt-out is a `none` sentinel, not an empty string: an empty choice
+  // option is invalid workflow syntax and GitHub validates it inconsistently.
+  it("offers release_type and reason as dispatch inputs, with a none sentinel", () => {
     const inputs = workflow.on.workflow_dispatch.inputs
-    expect(inputs.release_type.options).toEqual(["", "patch", "minor", "major"])
+    expect(inputs.release_type.options).toEqual(["none", "patch", "minor", "major"])
+    expect(inputs.release_type.options).not.toContain("")
+    expect(inputs.release_type.default).toBe("none")
     expect(inputs.reason).toBeDefined()
   })
+
+  // `none` and the empty string a `push` event produces must BOTH take the
+  // ordinary path. Asserting the guard text keeps the sentinel and the shell
+  // condition from drifting apart — a `-n "$RELEASE_TYPE"` test alone would
+  // treat "none" as a request to force and hand it to a script that refuses
+  // it as an invalid release type.
+  it.each(["Determine next version", "Run semantic-release"])(
+    "treats the none sentinel as not forcing in %s",
+    stepName => {
+      const step = [
+        ...(workflow.jobs["resolve-version"]?.steps ?? []),
+        ...(workflow.jobs.release?.steps ?? []),
+      ].find(candidate => candidate.name === stepName)
+      expect(step?.run).toContain('[ "$RELEASE_TYPE" != "none" ]')
+      expect(step?.run).toContain('[ -n "$RELEASE_TYPE" ]')
+    }
+  )
 
   it("still refuses to run from any ref other than main", () => {
     expect(workflow.jobs["resolve-version"]?.if).toBe("github.ref == 'refs/heads/main'")
@@ -178,12 +356,24 @@ describe("npm-release workflow wiring", () => {
 
   // A forced release must not skip the checks. `quality` still gates
   // `release`, and both still key off the resolved version.
+  //
+  // The `needs` assertion is not redundant with the `if` ones: dropping
+  // `quality` from `release.needs` leaves both `if:` strings untouched, so an
+  // earlier version of this test passed while `release` no longer waited on
+  // the quality job at all. Asserting the dependency edge itself is what
+  // makes "quality gates release" a claim this test can actually falsify.
   it("keeps quality gating release on both paths", () => {
     expect(workflow.jobs.quality?.if).toBe(
       "needs.resolve-version.outputs.new-release-published == 'true'"
     )
     expect(workflow.jobs.release?.if).toBe(
       "needs.resolve-version.outputs.new-release-published == 'true'"
+    )
+
+    expect(workflow.jobs.quality?.needs).toBe("resolve-version")
+    const releaseNeeds = workflow.jobs.release?.needs
+    expect(Array.isArray(releaseNeeds) ? releaseNeeds : [releaseNeeds]).toEqual(
+      expect.arrayContaining(["resolve-version", "quality"])
     )
   })
 

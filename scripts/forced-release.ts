@@ -4,18 +4,19 @@
 
 // Entry point for a forced npm release: publishes `main` at a named bump
 // when the packages have shipped changes no commit scope announced.
-// See scripts/forced-release-config.ts for why this mechanism exists and
-// why it replaces (rather than prepends to) the commit-analyzer rules.
+// See scripts/forced-release-config.ts for why this mechanism exists, why it
+// replaces (rather than prepends to) the commit-analyzer rules, and why the
+// result is handed to semantic-release's programmatic API rather than
+// `--extends` (an extended config loses to the repository's .releaserc.yaml,
+// so `--extends` forced nothing at all).
 //
 // Refusals here are deliberate and are the reason this is a script rather
 // than an inline `run:` block in the workflow: they hold no matter who
 // invokes it or from where, and they are unit-testable without dispatching
 // a real workflow run.
 
-import { spawnSync } from "node:child_process"
-import { mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { writeFileSync } from "node:fs"
+import semanticRelease from "semantic-release"
 import {
   buildForcedReleaseConfig,
   FORCED_RELEASE_TYPES,
@@ -54,9 +55,20 @@ export function planForcedRelease(request: ForcedReleaseRequest): ForcedReleaseP
   // `if: github.ref == 'refs/heads/main'` guard says the same thing, but a
   // dispatch can be aimed at any ref, so the refusal is enforced here too
   // rather than living only in a job condition someone could edit around.
-  if (ref !== undefined && ref !== RELEASE_REF) {
+  //
+  // An ABSENT ref is refused as hard as a wrong one. Anything on a runner
+  // sets GITHUB_REF, so the only caller that reaches here without it is a
+  // developer shell — exactly the invocation that must not be able to reach
+  // a publish just because there was no ref to compare. Refusing on
+  // `undefined` is what makes "these hold no matter who invokes it or from
+  // where" true rather than aspirational; previously an unset GITHUB_REF
+  // sailed past this check and was stopped only by semantic-release's own
+  // branch guard, one layer deeper than intended.
+  if (ref !== RELEASE_REF) {
     throw new ForcedReleaseRefusal(
-      `Refusing to force a release from ${ref}: forced releases are only allowed from ${RELEASE_REF}.`
+      ref === undefined
+        ? `Refusing to force a release with no ref: set GITHUB_REF to ${RELEASE_REF}. Forced releases run only from ${RELEASE_REF} on CI.`
+        : `Refusing to force a release from ${ref}: forced releases are only allowed from ${RELEASE_REF}.`
     )
   }
 
@@ -90,12 +102,25 @@ export function formatAuditRecord(plan: ForcedReleasePlan): string {
   ].join("\n")
 }
 
-function runForcedRelease(plan: ForcedReleasePlan): number {
-  const config = buildForcedReleaseConfig(plan.releaseType)
-  const dir = mkdtempSync(join(tmpdir(), "forced-release-"))
-  const configPath = join(dir, "forced-release.json")
-  writeFileSync(configPath, JSON.stringify(config, null, 2))
+/**
+ * Options for semantic-release's programmatic API. These are API options, so
+ * the config loader merges them OVER .releaserc.yaml — which is the whole
+ * point: handing the same object to `--extends` puts it UNDER the repository
+ * file and the gated rules win. See forced-release-config.ts's header.
+ */
+export function buildForcedReleaseOptions(
+  plan: ForcedReleasePlan,
+  cwd: string = process.cwd()
+): Record<string, unknown> {
+  const options: Record<string, unknown> = { ...buildForcedReleaseConfig(plan.releaseType, cwd) }
+  if (plan.dryRun) {
+    options.dryRun = true
+    options.ci = false
+  }
+  return options
+}
 
+async function runForcedRelease(plan: ForcedReleasePlan): Promise<number> {
   const audit = formatAuditRecord(plan)
   console.log(audit)
 
@@ -107,16 +132,31 @@ function runForcedRelease(plan: ForcedReleasePlan): number {
     })
   }
 
-  const args = ["semantic-release", "--extends", configPath]
-  if (plan.dryRun) {
-    args.push("--dry-run", "--no-ci")
+  // Programmatic API rather than `npx semantic-release --extends`: only API
+  // options override .releaserc.yaml. Its logs still go to this process's
+  // stdout/stderr, so the workflow's `tee` + semantic-release-github-output.ts
+  // dry-run parser reads the same "next release version is" line it always did.
+  const result = await semanticRelease(buildForcedReleaseOptions(plan), {
+    cwd: process.cwd(),
+    env: process.env,
+  })
+
+  // A forced run that resolves nothing is the silent no-op this whole
+  // mechanism exists to end, so it fails loudly instead of reporting success
+  // with an audit record that claims a bypass which did not happen. This is
+  // also the last line of defence if the forced rules ever stop taking
+  // effect the way they did under `--extends`.
+  if (!result) {
+    console.error(
+      `::error::Forced ${plan.releaseType} release resolved no version. The forced release rules did not take effect; nothing was published.`
+    )
+    return 1
   }
 
-  const result = spawnSync("npx", args, { stdio: "inherit" })
-  return result.status ?? 1
+  return 0
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const [releaseType = "", ...reasonParts] = process.argv.slice(2)
   let plan: ForcedReleasePlan
   try {
@@ -134,9 +174,12 @@ function main(): void {
     }
     throw error
   }
-  process.exit(runForcedRelease(plan))
+  process.exit(await runForcedRelease(plan))
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  main()
+  main().catch((error: unknown) => {
+    console.error(`::error::${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  })
 }
