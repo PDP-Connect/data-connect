@@ -6698,6 +6698,70 @@ test("accepting with no date range leaves the issued grant unbounded in time", a
   }
 });
 
+// Selecting every stream used to take a wildcard branch that emitted a single
+// `{name: "*"}` entry. Per-stream scopes are keyed by stream name, so the
+// field list and date range the owner chose validated and were then dropped:
+// the AS re-expanded `*` against the declaration at issuance and carried only
+// instance_ids, persisting every field with no time bound. The subset-selection
+// tests below never reached that branch.
+test("all-stream consent preserves field and date restrictions in persisted grants", async (t) => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "all-streams-narrowing");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const source = mustExist(model.sources[0], "source");
+    assert.ok(source.streams.length > 1, "exercise selection of every stream in a multi-stream declaration");
+    const stream = mustExist(source.streams.find((entry) => entry.name === "saved_tracks"), "saved tracks");
+    const chosenFields = [mustExist(stream.fields.find((field) => !field.required), "optional field").name];
+    const requiredFields = stream.fields.filter((field) => field.required).map((field) => field.name);
+    assert.ok(requiredFields.length > 0, "verify the manifest-required consent floor survives narrowing");
+    const approval = await postConsentChallenge(asUrl, challenge, "accept", consentChallengeAcceptBody({
+      chosen: [{ source, streams: source.streams }],
+      client,
+      model,
+      streamFields: { [stream.id]: chosenFields },
+      streamRanges: { [stream.id]: { since: "2025-03-01", until: "2025-03-31" } },
+    }));
+    assert.equal(approval.status, 200, JSON.stringify(approval.body));
+    const callback = new URL(stringField(approval.body, "redirect_url"));
+    const token = await fetchJson(`${asUrl}/oauth/token`, {
+      body: new URLSearchParams({
+        client_id: client.client_id,
+        code: mustExist(callback.searchParams.get("code"), "authorization code"),
+        code_verifier: consentChallengeVerifier,
+        grant_type: "authorization_code",
+        redirect_uri: HOSTED_MCP_REDIRECT_URI,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(token.status, 200, JSON.stringify(token.body));
+    const packageId = stringField(token.body, "grant_package_id");
+    await t.test("selected fields and required fields survive", async () => {
+      assert.deepEqual(await issuedStreamFields(packageId, stream.name), [...new Set([...chosenFields, ...requiredFields])].sort());
+    });
+    await t.test("selected date bounds survive with an exclusive end", async () => {
+      const declaration = mustExist(spotify.streams.find((entry) => entry.name === stream.name), "declaration");
+      assert.deepEqual(await issuedStreamTimeConstraint(packageId, stream.name), {
+        field: declaration.consent_time_field,
+        since: "2025-03-01T00:00:00.000Z",
+        until: "2025-04-01T00:00:00.000Z",
+      });
+    });
+    await t.test("other selected streams remain present without copied date bounds", async () => {
+      for (const other of source.streams.filter((entry) => entry.name !== stream.name)) {
+        assert.equal(await issuedStreamTimeConstraint(packageId, other.name), null);
+      }
+    });
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", {})).status, 404, "approval stays single-use");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 // The consent screen must not offer a cosmetic field picker. A narrowed list
 // travels through the existing scope resolver and is persisted on the child
 // grant, which is the same record the read path enforces.
