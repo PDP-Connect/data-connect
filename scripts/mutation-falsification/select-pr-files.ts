@@ -16,10 +16,23 @@
 //
 // There are deliberately no duration, budget, mutant-count, or admission
 // thresholds in this file. Scope is whatever the pull request touched.
+//
+// "What the pull request touched" is measured in LINES, not files. Stryker's
+// `mutate` entries take a `path:startLine-endLine` form, so the diff's own hunk
+// ranges become the scope directly. A file entry with no range mutates every
+// statement in the file, which for a 10,000-line file means thousands of
+// mutants for a four-line change -- work that produces no evidence about the
+// change, because a mutant a thousand lines away is not a fault this revision
+// could have introduced.
 
 import { createHash } from "node:crypto"
 
-/** A production source file selected for mutation, relative to the cohort root. */
+/**
+ * A production source entry selected for mutation, relative to the cohort root.
+ *
+ * Either a bare path -- the whole file -- or `path:startLine-endLine`, the form
+ * Stryker reads as "mutate only the statements overlapping these lines".
+ */
 export type SelectedFile = string
 
 export type CohortName = "client" | "reference-implementation"
@@ -53,8 +66,26 @@ export interface IntentPacket {
   readonly baseCommit: string
   /** The exact commit the evidence is about. */
   readonly headCommit: string
-  /** Production files selected for mutation, sorted, deduplicated. */
+  /**
+   * Stryker `mutate` entries, sorted, deduplicated. Each is either
+   * `path:startLine-endLine` -- the changed line ranges of a modified file,
+   * widened to whole statements -- or a bare path for a newly added file, where
+   * the whole file is the change.
+   *
+   * This is the exact list handed to the engine, so the evidence says precisely
+   * what was mutated rather than only which files were involved.
+   */
   readonly mutate: readonly SelectedFile[]
+  /**
+   * How each selected file was scoped, kept beside `mutate` so a reader can see
+   * the derivation without re-parsing the entries. `whole_file` appears only for
+   * a newly added file.
+   */
+  readonly scope: readonly {
+    readonly path: string
+    readonly kind: "changed_ranges" | "whole_file"
+    readonly ranges: readonly LineRange[]
+  }[]
   /** Files the diff named that were deliberately not selected, with the reason. */
   readonly excluded: readonly { readonly path: string; readonly reason: ExclusionReason }[]
   readonly executionInputs: ExecutionInputs
@@ -118,6 +149,188 @@ export function parseNameStatusZ(raw: string): DiffEntry[] {
     entries.push({ status, path: first })
   }
   return entries
+}
+
+/** A closed, 1-based line interval in the head revision of a file. */
+export interface LineRange {
+  readonly startLine: number
+  readonly endLine: number
+}
+
+/** The changed line ranges of one file at head, as read from `git diff -U0`. */
+export interface FileHunks {
+  /** Path in the head tree. */
+  readonly path: string
+  readonly ranges: readonly LineRange[]
+}
+
+/**
+ * Parse the hunk headers of `git diff -U0 <base> <head>`.
+ *
+ * Only two line kinds matter: `+++ b/<path>` names the file the following hunks
+ * belong to, and `@@ -<old> +<newStart>[,<newCount>] @@` gives the range those
+ * hunks occupy in the head revision. Zero context (`-U0`) is what makes those
+ * ranges the changed lines themselves rather than the changed lines plus three
+ * lines of neighbourhood on each side.
+ *
+ * A `newCount` of 0 marks a pure deletion: the hunk removed lines and added
+ * none, so there is nothing at head to mutate and the hunk contributes no
+ * range. Git reports the position as the line *before* the removal for such a
+ * hunk, so treating it as a one-line range would scope mutation to an unrelated
+ * surviving line. Deleted content cannot carry a fault into head.
+ *
+ * `/dev/null` as the destination is a deleted file; it is skipped for the same
+ * reason, and the file-level classifier records the deletion separately.
+ */
+export function parseUnifiedZeroHunks(diff: string): FileHunks[] {
+  const byPath = new Map<string, LineRange[]>()
+  let current: LineRange[] | undefined
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      const destination = line.slice(4).trim()
+      if (destination === "/dev/null") {
+        current = undefined
+        continue
+      }
+      // `+++ b/<path>`. Git prefixes the destination with `b/` unless
+      // `--no-prefix` was used, in which case the path stands alone.
+      const path = destination.startsWith("b/") ? destination.slice(2) : destination
+      current = byPath.get(path) ?? []
+      byPath.set(path, current)
+      continue
+    }
+    if (!line.startsWith("@@") || current === undefined) {
+      continue
+    }
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    if (header === null) {
+      continue
+    }
+    const startLine = Number(header[1])
+    const count = header[2] === undefined ? 1 : Number(header[2])
+    if (count === 0) {
+      continue
+    }
+    current.push({ startLine, endLine: startLine + count - 1 })
+  }
+  return [...byPath].map(([path, ranges]) => ({ path, ranges: mergeRanges(ranges) }))
+}
+
+/**
+ * Merge ranges that touch or overlap, so the mutate list carries one entry per
+ * contiguous region instead of several that name the same statements. Adjacent
+ * ranges are merged too: two hunks on lines 10 and 11 describe one region, and
+ * emitting them separately would ask Stryker the same question twice.
+ */
+export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
+  const sorted = [...ranges].sort((left, right) => left.startLine - right.startLine)
+  const merged: LineRange[] = []
+  for (const range of sorted) {
+    const last = merged[merged.length - 1]
+    if (last !== undefined && range.startLine <= last.endLine + 1) {
+      merged[merged.length - 1] = {
+        startLine: last.startLine,
+        endLine: Math.max(last.endLine, range.endLine),
+      }
+      continue
+    }
+    merged.push(range)
+  }
+  return merged
+}
+
+/**
+ * Grow each range until it covers whole statements.
+ *
+ * This is a correctness requirement, not tidying. Stryker mutates a node only
+ * when the node is wholly *inside* a range -- `locationIncluded`, not
+ * `locationOverlaps` -- so a range that starts in the middle of a multi-line
+ * statement mutates nothing in that statement. PR #83 changes exactly this
+ * shape: one hunk replaces the first lines of a `setImmediate(...)` call whose
+ * remaining lines are unchanged, and a range of only the changed lines would
+ * silently mutate none of it while still reporting a completed run.
+ *
+ * Widening goes outward only, and only as far as the *smallest* statement that
+ * each end of the range falls inside. Taking every enclosing statement instead
+ * would widen a one-line change to its enclosing function, and then to the
+ * module -- on `server/index.ts` that turned four changed lines into ranges
+ * covering a third of a 10,000-line file, which is the whole-file cost this
+ * change exists to remove.
+ *
+ * Only the two ends need this treatment. A statement lying wholly within the
+ * range is already covered, and a statement wholly containing the range is
+ * deliberately not covered: Stryker will not mutate that outer statement as a
+ * unit, which is correct, because the revision did not change it as a unit.
+ *
+ * `boundaries` gives, for each statement in the file, its first and last line.
+ * Supplying it as data keeps this function a pure interval computation that can
+ * be tested without a parser, and lets the caller decide what "statement" means
+ * for a given language.
+ */
+export function widenToStatements(
+  ranges: readonly LineRange[],
+  boundaries: readonly LineRange[]
+): LineRange[] {
+  /**
+   * The smallest statement that covers the whole range.
+   *
+   * "Smallest" is what keeps this tight. Every statement from the innermost one
+   * up to the module body covers the range, and taking all of them would widen
+   * a one-line change to its enclosing function and then to the file -- on
+   * `server/index.ts` that turned four changed lines into ranges covering a
+   * third of a 10,000-line file. The innermost covering statement is the
+   * smallest region Stryker can actually mutate as a unit, so it is the
+   * accurate scope for the change.
+   *
+   * A range already covering whole statements has no smaller covering statement
+   * and is returned unchanged.
+   */
+  const smallestCovering = (range: LineRange): LineRange | undefined => {
+    let tightest: LineRange | undefined
+    for (const statement of boundaries) {
+      if (statement.startLine > range.startLine || statement.endLine < range.endLine) {
+        continue
+      }
+      if (statement.startLine === range.startLine && statement.endLine === range.endLine) {
+        continue
+      }
+      if (
+        tightest === undefined ||
+        statement.endLine - statement.startLine < tightest.endLine - tightest.startLine
+      ) {
+        tightest = statement
+      }
+    }
+    return tightest
+  }
+
+  const widened = ranges.map((range) => {
+    // Only grow when the range would otherwise cut a statement in half: if both
+    // ends already fall on statement boundaries, Stryker can mutate what is
+    // there and nothing needs to move.
+    const startsCleanly = boundaries.some((statement) => statement.startLine === range.startLine)
+    const endsCleanly = boundaries.some((statement) => statement.endLine === range.endLine)
+    if (startsCleanly && endsCleanly) {
+      return range
+    }
+    const covering = smallestCovering(range)
+    return covering ?? range
+  })
+  return mergeRanges(widened)
+}
+
+/**
+ * Render one file's ranges as Stryker `mutate` entries.
+ *
+ * A file with no ranges yields a bare path -- whole-file scope. That is the
+ * correct reading for a newly added file, where every line is part of the
+ * change, and it is what the caller passes for one.
+ */
+export function toMutateEntries(path: string, ranges: readonly LineRange[]): SelectedFile[] {
+  if (ranges.length === 0) {
+    return [path]
+  }
+  return ranges.map((range) => `${path}:${range.startLine}-${range.endLine}`)
 }
 
 export interface CohortDefinition {
@@ -302,18 +515,45 @@ export function freezeIntent(input: {
   readonly headCommit: string
   readonly diff: readonly DiffEntry[]
   readonly executionInputs: ExecutionInputs
+  /**
+   * Changed line ranges per repository-relative path, already widened to whole
+   * statements by the caller, which is the only place with a parser. A selected
+   * path absent from this map is scoped to the whole file.
+   */
+  readonly hunks?: ReadonlyMap<string, readonly LineRange[]>
 }): IntentPacket {
-  const selected: SelectedFile[] = []
+  const selectedPaths: string[] = []
   const excluded: { path: string; reason: ExclusionReason }[] = []
   for (const entry of input.diff) {
     const verdict = classifyForCohort(entry, input.cohort)
     if (verdict.selected) {
-      selected.push(toCohortRelative(entry.path, input.cohort.root))
+      selectedPaths.push(entry.path)
       continue
     }
     excluded.push({ path: entry.path, reason: verdict.reason })
   }
-  const mutate = [...new Set(selected)].sort()
+
+  // A newly added file has no prior revision to diff against line by line: the
+  // whole file is the change, so whole-file scope is the accurate scope for it
+  // rather than a concession. Every other selected file is scoped to the ranges
+  // the diff attributed to it.
+  const addedPaths = new Set(
+    input.diff.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path)
+  )
+
+  const scope: { path: string; kind: "changed_ranges" | "whole_file"; ranges: LineRange[] }[] = []
+  const mutate: SelectedFile[] = []
+  for (const path of [...new Set(selectedPaths)].sort()) {
+    const relative = toCohortRelative(path, input.cohort.root)
+    const ranges = addedPaths.has(path) ? [] : [...(input.hunks?.get(path) ?? [])]
+    scope.push({
+      path: relative,
+      kind: ranges.length === 0 ? "whole_file" : "changed_ranges",
+      ranges,
+    })
+    mutate.push(...toMutateEntries(relative, ranges))
+  }
+  mutate.sort()
   excluded.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
 
   const body = {
@@ -322,6 +562,7 @@ export function freezeIntent(input: {
     baseCommit: input.baseCommit,
     headCommit: input.headCommit,
     mutate,
+    scope,
     excluded,
     executionInputs: input.executionInputs,
     applicability: (mutate.length === 0 ? "not_applicable" : "applicable") as

@@ -8,16 +8,21 @@
 // packet type it writes has no field for one.
 
 import { createHash } from "node:crypto"
+import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import ts from "typescript"
 import {
   type CohortDefinition,
   type CohortName,
   escapesCohortRoot,
   type ExecutionInputs,
   freezeIntent,
+  type LineRange,
   parseNameStatusZ,
+  parseUnifiedZeroHunks,
   selectCohortTests,
+  widenToStatements,
 } from "./select-pr-files.ts"
 
 function argument(name: string): string {
@@ -66,12 +71,66 @@ const executionInputs: ExecutionInputs = {
 
 const diff = parseNameStatusZ(readFileSync(argument("diff"), "utf8"))
 
+/**
+ * First and last line of every statement in a TypeScript source file.
+ *
+ * Stryker mutates a node only when the node lies wholly inside a `mutate`
+ * range, so a range must not start or end in the middle of a statement. These
+ * boundaries are what the widening step grows a hunk out to.
+ *
+ * Every statement is reported, at every nesting depth, and the widener takes
+ * the union of the ones a hunk touches. That is what keeps widening tight: a
+ * changed line inside a long function is enclosed by its own small statement as
+ * well as by the function body, and both are covered, but the nearest enclosing
+ * statements are what determine the result -- the outer ones only matter when a
+ * hunk genuinely spans them.
+ */
+function statementBoundaries(source: string, fileName: string): LineRange[] {
+  const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const boundaries: LineRange[] = []
+  const visit = (node: ts.Node): void => {
+    // Line numbers from the compiler are 0-based; Stryker's `mutate` ranges and
+    // git's hunk headers are both 1-based.
+    if (ts.isStatement(node) || ts.isPropertyAssignment(node) || ts.isPropertySignature(node)) {
+      const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
+      const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1
+      boundaries.push({ startLine: start, endLine: end })
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(sourceFile, visit)
+  return boundaries
+}
+
+// The line ranges the revision changed, per file, taken from the same
+// merge-base..head comparison the name-status diff came from. `-U0` is what
+// makes these the changed lines rather than the changed lines plus context.
+const hunkDiff = execFileSync(
+  "git",
+  ["diff", "-U0", "--no-color", argument("base"), argument("head")],
+  { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 }
+)
+
+const hunks = new Map<string, readonly LineRange[]>()
+for (const file of parseUnifiedZeroHunks(hunkDiff)) {
+  const onDisk = file.path
+  if (!existsSync(onDisk)) {
+    continue
+  }
+  const widened = widenToStatements(
+    file.ranges,
+    statementBoundaries(readFileSync(onDisk, "utf8"), onDisk)
+  )
+  hunks.set(file.path, widened)
+}
+
 const intent = freezeIntent({
   cohort,
   baseCommit: argument("base"),
   headCommit: argument("head"),
   diff,
   executionInputs,
+  hunks,
 })
 
 writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
@@ -105,6 +164,17 @@ if (selectedTestsPath !== undefined) {
     )
   }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)
+}
+
+// The scope is printed in full. It is the difference between "this revision was
+// mutated" and "these lines of this revision were mutated", and a reader of the
+// log should not have to open the artifact to tell which one happened.
+for (const entry of intent.scope) {
+  const where =
+    entry.kind === "whole_file"
+      ? "whole file (added in this revision)"
+      : entry.ranges.map((range) => `${range.startLine}-${range.endLine}`).join(", ")
+  process.stdout.write(`scope ${entry.path}: ${where}\n`)
 }
 
 process.stdout.write(
