@@ -857,7 +857,7 @@ async function rejectIfHostedMcpReviewDigestStale(
       req,
       res,
       ctx,
-      "This request changed since you loaded the page — review and approve again.",
+      "This request changed since you loaded the page. Reload this page, review the current request, and approve again.",
       client
     );
     return true;
