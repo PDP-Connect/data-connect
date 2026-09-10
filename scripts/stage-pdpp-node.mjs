@@ -12,7 +12,7 @@ const SUPPORTED_TARGETS = new Map([
   ["x86_64-unknown-linux-gnu", { platform: "linux", arch: "x64" }],
   ["x86_64-pc-windows-msvc", { platform: "win32", arch: "x64" }],
 ])
-export const RELEASE_NODE_VERSION = "22.23.1"
+export const RELEASE_NODE_VERSION = "24.14.1"
 
 export function nativeTauriTarget(platform, arch) {
   const match = [...SUPPORTED_TARGETS].find(
