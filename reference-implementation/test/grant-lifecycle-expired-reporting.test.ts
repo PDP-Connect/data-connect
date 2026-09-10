@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Defect D4 — expiry was ENFORCED but not REPORTED.
+ * Defect D4 — expiry was not REPORTED. Scope is reporting only.
  *
- * A grant whose `expires_at` had passed was correctly refused on read, yet
- * both `grants.status` and `GET /_ref/grant-packages/:id` still reported
- * `"active"`. From the D4 diagnostic:
+ * A grant whose `expires_at` had passed was reported `"active"` by both
+ * `grants.status` and `GET /_ref/grant-packages/:id`. These tests fix and pin
+ * the REPORTING. They do NOT establish that such a grant is refused: the
+ * enforcement path compares `tokens.expires_at` and never `grants.expires_at`,
+ * so introspection can still return `active: true` for an elapsed grant. That
+ * is a separate, unresolved defect (CONSENT-ACCEPTANCE-0907.md, "D4,
+ * re-graded"); see the SCOPE note in server/grant-lifecycle.ts. Nothing in
+ * this file changes that path or asserts anything about it.
+ *
+ * From the D4 diagnostic:
  *
  *     DIAGPKG pkgStatus="active"
  *            grantRows=[{"status":"active","expires_at":"2026-09-07T23:47:38.373Z"}]

@@ -50,7 +50,11 @@ import {
   validateCoreSelectionRequest,
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
-import { derivePackageLifecycle, deriveGrantLifecycle } from "./grant-lifecycle.ts";
+import {
+  derivePackageLifecycle,
+  deriveGrantLifecycle,
+  type PackageMemberLifecycleInput,
+} from "./grant-lifecycle.ts";
 import {
   base64UrlSha256,
   generateOAuthRefreshToken,
@@ -8673,13 +8677,35 @@ function decodeGrantPackageCursor(cursor: unknown): GrantPackageCursor | null {
   throw err;
 }
 
+/** One page of the keyset-paged member read. */
+interface MemberLifecycleRow extends DbRow {
+  grant_expires_at: string | null;
+  grant_id: string;
+  grant_status: string;
+  member_status: string;
+  package_id: string;
+}
+
 /**
- * Every member grant's `expires_at` for the given packages, grouped by package
+ * Rows per SQLite page. Must match the `LIMIT` in
+ * `queries/auth/grant-package-members/expiries-by-package.sql` and that file's
+ * `@max_rows`: the artifact bounds ONE page, and the loop below asks for
+ * another page whenever a full one comes back.
+ */
+const MEMBER_LIFECYCLE_PAGE_SIZE = 256;
+
+/**
+ * Every member's lifecycle inputs for the given packages, grouped by package
  * and deliberately NOT reduced.
+ *
+ * Returns status as well as deadline. Reducing on deadlines alone was a
+ * defect: a member revoked before its deadline carries no `expires_at`, read
+ * as "no deadline, therefore live", and a package with every child revoked
+ * reported 'active' beside an `active_child_count` of 0.
  *
  * The detail route hands `derivePackageLifecycle` the full member list; this
  * lets the list route hand it the same thing. Reducing in SQL instead was the
- * defect: `grants.expires_at` is TEXT, so `MAX()` over it orders
+ * other defect: `grants.expires_at` is TEXT, so `MAX()` over it orders
  * lexicographically, and '2026-09-08T02:00:00+05:00' sorts after
  * '2026-09-08T01:00:00Z' while being four hours EARLIER. The two routes then
  * reduced the same member set by two different orderings and disagreed.
@@ -8687,27 +8713,34 @@ function decodeGrantPackageCursor(cursor: unknown): GrantPackageCursor | null {
  * Packages with no members are simply absent from the map; the caller passes
  * an empty list, which reports the persisted status unchanged.
  */
-async function listMemberExpiriesByPackage(packageIds: readonly string[]): Promise<Map<string, (string | null)[]>> {
-  const grouped = new Map<string, (string | null)[]>();
+async function listMemberLifecycleByPackage(
+  packageIds: readonly string[]
+): Promise<Map<string, PackageMemberLifecycleInput[]>> {
+  const grouped = new Map<string, PackageMemberLifecycleInput[]>();
   if (packageIds.length === 0) {
     return grouped;
   }
   const wanted = [...new Set(packageIds)];
-  const collect = (rows: readonly { grant_expires_at?: string | null; package_id: string }[]) => {
+  const collect = (rows: readonly MemberLifecycleRow[]) => {
     for (const row of rows) {
+      const member: PackageMemberLifecycleInput = {
+        expiresAt: row.grant_expires_at ?? null,
+        grantStatus: row.grant_status,
+        memberStatus: row.member_status,
+      };
       const existing = grouped.get(row.package_id);
-      const expiresAt = row.grant_expires_at ?? null;
       if (existing) {
-        existing.push(expiresAt);
+        existing.push(member);
       } else {
-        grouped.set(row.package_id, [expiresAt]);
+        grouped.set(row.package_id, [member]);
       }
     }
   };
   if (isPostgresStorageBackend()) {
     // Postgres filters to the requested packages in SQL, so one round trip.
-    const { rows } = await postgresQuery<{ grant_expires_at: string | null; package_id: string } & DbRow>(
-      `SELECT gpm.package_id, g.expires_at AS grant_expires_at
+    const { rows } = await postgresQuery<MemberLifecycleRow>(
+      `SELECT gpm.package_id, gpm.grant_id, gpm.status AS member_status,
+              g.status AS grant_status, g.expires_at AS grant_expires_at
          FROM grant_package_members gpm
          JOIN grants g ON gpm.grant_id = g.grant_id
         WHERE gpm.package_id = ANY($1)`,
@@ -8716,19 +8749,37 @@ async function listMemberExpiriesByPackage(packageIds: readonly string[]): Promi
     collect(rows);
     return grouped;
   }
-  // SQLite reads one package at a time. The registered artifact is bounded per
-  // package (256 members), matching `list-all-by-package.sql`. Reading the
-  // whole joined table once and filtering here would have been fewer
-  // statements but would have converted that per-package bound into a global
-  // one, so memberships in unrelated packages could overflow it and fail a
-  // page of packages that were each well within the limit.
+  // SQLite reads one package at a time, in keyset pages of
+  // MEMBER_LIFECYCLE_PAGE_SIZE ordered by grant_id.
+  //
+  // Paged rather than read whole because membership has NO enforced ceiling.
+  // The artifact previously declared @max_rows: 256 as though 256 members per
+  // package were an established invariant; no issuance path enforces one, so a
+  // 257-member package overflowed `allowUnboundedReadAcknowledged` and failed
+  // the entire list route for every package on the page. Paging makes the
+  // declared bound a property the SQL actually guarantees (it is a LIMIT) and
+  // lets any member count read correctly.
+  //
+  // Reading the whole joined table once and filtering here would have been
+  // fewer statements but would have converted a per-package bound into a
+  // global one, so memberships in unrelated packages could overflow it.
   for (const packageId of wanted) {
-    collect(
-      allowUnboundedReadAcknowledged<{ grant_expires_at: string | null; package_id: string } & DbRow>(
+    // grant_id is the membership primary key within a package: unique and
+    // never rewritten, so the keyset is total and no member is skipped or
+    // repeated across pages. '' sorts before every real id.
+    let afterGrantId = "";
+    for (;;) {
+      const page = allowUnboundedReadAcknowledged<MemberLifecycleRow>(
         referenceQueries.authGrantPackageMembersExpiriesByPackage,
-        [packageId]
-      )
-    );
+        [packageId, afterGrantId]
+      );
+      collect(page);
+      const last = page.at(-1);
+      if (page.length < MEMBER_LIFECYCLE_PAGE_SIZE || !last) {
+        break;
+      }
+      afterGrantId = last.grant_id;
+    }
   }
   return grouped;
 }
@@ -8779,28 +8830,36 @@ export async function listGrantPackagesForOwner(
   // One clock read for the whole page, so two packages sharing a deadline can
   // never disagree about whether it has passed.
   const nowMs = Date.now();
-  // Every member deadline for this page, UNREDUCED, keyed by package. The
-  // reduction is done by the same shared function the detail route uses, so
-  // the two surfaces cannot reach different answers about one package.
-  const memberExpiriesByPackage = await listMemberExpiriesByPackage(rows.map((row) => row.package_id));
-  const normalized = rows
+  // Normalize BEFORE enriching, so the lookahead row is identified against the
+  // same rows that will actually be returned.
+  const normalizedRows = rows
     .map((row) => {
       const pkg = normalizePackageRow(row);
       if (!pkg) {
         return null;
       }
       const memberCount = row.member_count === null || row.member_count === undefined ? 0 : Number(row.member_count);
-      return {
-        ...pkg,
-        member_count: Number.isFinite(memberCount) ? memberCount : 0,
-        // Raw column retained for decision paths; see getGrantPackageForOwner.
-        persisted_status: pkg.status,
-        status: derivePackageLifecycle(pkg.status, memberExpiriesByPackage.get(pkg.package_id) ?? [], nowMs),
-      };
+      return { ...pkg, member_count: Number.isFinite(memberCount) ? memberCount : 0 };
     })
     .filter((row) => row !== null);
-  const data = normalized.slice(0, limit);
-  const hasMore = normalized.length > limit;
+  // The (limit + 1)th row exists ONLY to answer `has_more`. Drop it before
+  // enriching: reading the members of a package that is about to be discarded
+  // is work whose only observable effect was failure — one oversized package
+  // just past the page boundary could overflow the bounded read and fail a
+  // page of packages that were each fine.
+  const hasMore = normalizedRows.length > limit;
+  const pageRows = normalizedRows.slice(0, limit);
+  // Every member's lifecycle inputs for the RETURNED packages, UNREDUCED,
+  // keyed by package. The reduction is done by the same shared function the
+  // detail route uses, so the two surfaces cannot reach different answers
+  // about one package.
+  const memberLifecycleByPackage = await listMemberLifecycleByPackage(pageRows.map((row) => row.package_id));
+  const data = pageRows.map((pkg) => ({
+    ...pkg,
+    // Raw column retained for decision paths; see getGrantPackageForOwner.
+    persisted_status: pkg.status,
+    status: derivePackageLifecycle(pkg.status, memberLifecycleByPackage.get(pkg.package_id) ?? [], nowMs),
+  }));
   const tail = hasMore ? data.at(-1) : null;
   return {
     data,
@@ -8887,12 +8946,23 @@ export async function getGrantPackageForOwner(packageId: unknown): Promise<Recor
     // deadline". Expiry must not make a package unrevokable: revocation is a
     // durable act on the artifact and still cascades to tokens and members.
     persisted_status: grantPackage.status,
-    // A package carries no `expires_at` of its own; its deadline is the one
-    // its member grants carry. Reported 'expired' only once every member has
-    // lapsed, since a package with any live member still grants access.
+    // A package carries no `expires_at` and no revocation of its own beyond an
+    // explicit owner revoke; both are carried by its members. Reported
+    // terminal only once NO member is live, since a package with any live
+    // member still grants access. Revocation is passed in alongside the
+    // deadline because a member revoked before its deadline carries no
+    // `expires_at` at all — reducing on deadlines alone reported a package
+    // with every child revoked as 'active'.
     status: derivePackageLifecycle(
       grantPackage.status,
-      memberRows.map((row) => row.grant_expires_at),
+      memberRows.map((row) => ({
+        expiresAt: row.grant_expires_at,
+        grantStatus: row.grant_status,
+        // `member_status` is optional on the row type; an absent value means
+        // the membership carries no revocation of its own, which is the same
+        // default `active_child_count` applies when it filters on this column.
+        memberStatus: row.member_status ?? "active",
+      })),
       nowMs
     ),
   };

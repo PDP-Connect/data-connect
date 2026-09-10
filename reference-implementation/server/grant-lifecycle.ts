@@ -78,7 +78,17 @@ export function deriveGrantLifecycle(
 	if (persistedStatus !== "active") {
 		return persistedStatus;
 	}
-	return hasGrantExpired(expiresAt, nowMs) ? "expired" : persistedStatus;
+	switch (classifyGrantDeadline(expiresAt, nowMs)) {
+		case "expired":
+			return "expired";
+		// A deadline we cannot read is reported as such rather than as 'active'.
+		// Silently falling back to the persisted status would make unreadable
+		// data indistinguishable from a grant with no expiry.
+		case "indeterminate":
+			return "indeterminate";
+		default:
+			return persistedStatus;
+	}
 }
 
 /**
@@ -98,47 +108,152 @@ export function deriveGrantLifecycle(
  * SCOPE note at the top of this file: the package-token enforcement path does
  * not compare the grant's deadline at all, and that defect is unresolved.
  *
- * An `expires_at` that does not parse is treated as "no usable deadline" and
- * therefore NOT expired: refusing to guess is safer than reporting a lifecycle
- * we cannot substantiate, and enforcement is unaffected either way.
+ * An `expires_at` that does not parse is INDETERMINATE and throws here. It is
+ * not "no deadline": returning `false` for both made an unreadable column
+ * indistinguishable from an absent one, which turned data we cannot read into
+ * an affirmative "active" claim on an owner-facing audit surface. Callers that
+ * must tolerate the condition use `classifyGrantDeadline` and surface it.
  */
 export function hasGrantExpired(
 	expiresAt: string | null | undefined,
 	nowMs: number,
 ): boolean {
-	if (!expiresAt) {
-		return false;
+	const deadline = classifyGrantDeadline(expiresAt, nowMs);
+	if (deadline === "indeterminate") {
+		throw new Error(
+			`grant expires_at is indeterminate (unparsable): ${JSON.stringify(expiresAt)}`,
+		);
 	}
-	const deadlineMs = new Date(expiresAt).getTime();
-	if (!Number.isFinite(deadlineMs)) {
-		return false;
-	}
-	return deadlineMs < nowMs;
+	return deadline === "expired";
 }
 
 /**
- * Package-level lifecycle. A package has no `expires_at` column of its own —
- * its deadline is the one carried by its member grants — so an active package
- * is reported 'expired' only when it has members and EVERY member has lapsed.
- * While any member is still live the package as a whole still grants access,
- * so it is still 'active'.
+ * How a single `expires_at` reads against `nowMs`.
  *
- * A package with no members has no deadline to have passed, so it stays
- * 'active' (or whatever terminal status it already carries).
+ * Four outcomes, deliberately distinct:
+ *
+ *   - `none`          — null/absent/empty. Spec-core: "null means no expiry",
+ *                       so such a grant is never reported expired.
+ *   - `active`        — a readable deadline that has not been passed.
+ *   - `expired`       — a readable deadline strictly in the past.
+ *   - `indeterminate` — a value that does not parse. We cannot say the grant
+ *                       is live and we cannot say it has lapsed. Reporting
+ *                       either would be a claim the data does not support.
+ *
+ * The boundary between `active` and `expired` is EXCLUSIVE: a grant is expired
+ * once `nowMs` is strictly past `expires_at`, and is still active at the
+ * instant the deadline is reached. That matches the operator `introspect()`
+ * uses on `tokens.expires_at` — but see the SCOPE note at the top of this
+ * file: matching the operator aligns the two only when the two deadlines are
+ * identical, and says nothing about when access is actually refused.
+ */
+export type GrantDeadlineClassification =
+	| "active"
+	| "expired"
+	| "indeterminate"
+	| "none";
+
+export function classifyGrantDeadline(
+	expiresAt: string | null | undefined,
+	nowMs: number,
+): GrantDeadlineClassification {
+	if (!expiresAt) {
+		return "none";
+	}
+	const deadlineMs = new Date(expiresAt).getTime();
+	if (!Number.isFinite(deadlineMs)) {
+		return "indeterminate";
+	}
+	return deadlineMs < nowMs ? "expired" : "active";
+}
+
+/**
+ * The three facts that decide whether one package member is still live.
+ *
+ * Taking only `expiresAt` was a defect: revocation is the ONE lifecycle
+ * transition this system actually persists, and it was the one input the
+ * package reduction could not see. A package whose children had every one been
+ * revoked still reported 'active', while `active_child_count` in the very same
+ * response reported 0 — two contradictory answers about one package.
+ *
+ * `memberStatus` and `grantStatus` are separate columns because they are
+ * revoked by different paths: `markPackageRevokedCascade` writes
+ * `grants.status`, `markMemberRevoked` writes `grant_package_members.status`.
+ * Either one alone takes the member out of the live set, which is exactly the
+ * predicate `active_child_count` already filters on.
+ */
+export interface PackageMemberLifecycleInput {
+	/** `grants.expires_at`; null/absent means no expiry. */
+	readonly expiresAt: string | null | undefined;
+	/** `grants.status`. */
+	readonly grantStatus: string;
+	/** `grant_package_members.status`. */
+	readonly memberStatus: string;
+}
+
+/**
+ * Package-level lifecycle. A package has no `expires_at` and no revocation
+ * event of its own beyond an explicit owner revoke, so its reported lifecycle
+ * is reduced from its members.
+ *
+ * Precedence, applied to the members that are NOT live:
+ *
+ *   1. Any live member          → 'active'. One member still granting access
+ *                                 makes the package active, whatever the rest
+ *                                 of them say. Checked first, so a definite
+ *                                 liveness always beats an unreadable sibling.
+ *   2. Any indeterminate member → 'indeterminate'. Nothing is definitely live
+ *                                 and at least one deadline cannot be read, so
+ *                                 we cannot substantiate any terminal answer.
+ *   3. Any expired member       → 'expired'. Nothing live, nothing unreadable,
+ *                                 and at least one member simply lapsed. The
+ *                                 package was not revoked — some members were,
+ *                                 and the rest ran out.
+ *   4. Otherwise                → 'revoked'. Every member was revoked, which
+ *                                 is a real owner act and is reported as one.
+ *
+ * A package with no members has no member to be dead and no deadline to have
+ * passed, so it keeps its persisted status.
+ *
+ * An explicitly revoked package is never recomputed from its children: that is
+ * an owner act and outranks anything the members say.
  */
 export function derivePackageLifecycle(
 	persistedStatus: string,
-	memberExpiries: readonly (string | null | undefined)[],
+	members: readonly PackageMemberLifecycleInput[],
 	nowMs: number,
 ): string {
 	if (persistedStatus !== "active") {
 		return persistedStatus;
 	}
-	if (memberExpiries.length === 0) {
+	if (members.length === 0) {
 		return persistedStatus;
 	}
-	const allExpired = memberExpiries.every((expiresAt) =>
-		hasGrantExpired(expiresAt, nowMs),
-	);
-	return allExpired ? "expired" : persistedStatus;
+
+	let sawIndeterminate = false;
+	let sawExpired = false;
+	for (const member of members) {
+		// A revoked member is dead regardless of its deadline — including the
+		// common case of a grant revoked BEFORE any deadline, which carries no
+		// `expires_at` at all and used to read as "no deadline, therefore live".
+		if (member.grantStatus !== "active" || member.memberStatus !== "active") {
+			continue;
+		}
+		switch (classifyGrantDeadline(member.expiresAt, nowMs)) {
+			case "active":
+			case "none":
+				return persistedStatus;
+			case "indeterminate":
+				sawIndeterminate = true;
+				break;
+			default:
+				sawExpired = true;
+				break;
+		}
+	}
+
+	if (sawIndeterminate) {
+		return "indeterminate";
+	}
+	return sawExpired ? "expired" : "revoked";
 }

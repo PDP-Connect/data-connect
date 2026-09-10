@@ -62,6 +62,12 @@ export const GRANT_LIFECYCLE_VOCABULARY: StatusVocabulary = {
   // "unknown-ish" tone, which understates a definite terminal state.
   expired: { label: "expired", tone: "warning" },
   failed: { label: "failed", tone: "danger" },
+  // A deadline we cannot read. `grants.expires_at` is TEXT and nothing
+  // validates it on write, so an unparsable value is possible; reporting it as
+  // `active` would be an affirmative claim the data does not support. Neutral,
+  // for the same reason `unknown` is: an unreadable state must never be folded
+  // into a definite live one.
+  indeterminate: { label: "indeterminate", tone: "neutral" },
   issued: { label: "active", tone: "success" },
   pending: { label: "pending", tone: "warning" },
   rejected: { label: "denied", tone: "danger" },

@@ -4,9 +4,15 @@
 // Unit tests for the pure grant-lifecycle derivation
 // (server/grant-lifecycle.ts).
 //
-// Defect D4: a grant whose `expires_at` had passed was correctly refused on
-// read (401/403) but still REPORTED "active" by `grants.status` and by
-// `GET /_ref/grant-packages/:id`. spec-core.md:533 and the AS conformance
+// Defect D4, REPORTING ONLY: a grant whose `expires_at` had passed was
+// REPORTED "active" by `grants.status` and by
+// `GET /_ref/grant-packages/:id`. This module does not make such a grant be
+// refused, and these tests do not show that it is. Enforcement compares
+// `tokens.expires_at`, never `grants.expires_at`, so introspection can still
+// return active for an elapsed grant — a separate, unresolved defect. See the
+// SCOPE note in server/grant-lifecycle.ts.
+//
+// spec-core.md:533 and the AS conformance
 // list at :1360 require the AS to track lifecycle as active / expired /
 // revoked; only `revoked` was ever persisted, so `expired` could never be
 // reported. These tests pin the derivation that closes that gap.
@@ -82,11 +88,13 @@ test("deriveGrantLifecycle: a grant with no expiry is never expired", () => {
 	assert.equal(deriveGrantLifecycle("active", undefined, farFuture), "active");
 });
 
-test("deriveGrantLifecycle: an unparseable expires_at is not reported expired", () => {
+test("deriveGrantLifecycle: an unparseable expires_at is reported indeterminate", () => {
 	// Refusing to guess beats reporting a lifecycle we cannot substantiate.
+	// Reporting 'active' here WAS the guess: it made an unreadable deadline
+	// indistinguishable from a grant that has no deadline at all.
 	assert.equal(
 		deriveGrantLifecycle("active", "not-a-date", DEADLINE_MS + 1),
-		"active",
+		"indeterminate",
 	);
 });
 
@@ -106,23 +114,45 @@ test("hasGrantExpired: pins the raw predicate at and around the boundary", () =>
 	assert.equal(hasGrantExpired("", DEADLINE_MS + 1), false);
 });
 
+// `derivePackageLifecycle` takes full member lifecycle inputs, not bare
+// expiry strings: revocation is a lifecycle fact the reduction must see. See
+// grant-lifecycle-revocation-and-indeterminate.test.ts for the revocation
+// cases; these pin the expiry-only reduction.
+const activeMember = (expiresAt: string | null) => ({
+	expiresAt,
+	grantStatus: "active",
+	memberStatus: "active",
+});
+
 test("derivePackageLifecycle: expired only when EVERY member has lapsed", () => {
 	const later = "2026-12-31T00:00:00.000Z";
 	const now = DEADLINE_MS + 1; // past DEADLINE, before `later`
 
 	// All members lapsed -> the package as a whole grants nothing.
 	assert.equal(
-		derivePackageLifecycle("active", [DEADLINE, DEADLINE], now),
+		derivePackageLifecycle(
+			"active",
+			[activeMember(DEADLINE), activeMember(DEADLINE)],
+			now,
+		),
 		"expired",
 	);
 	// One member still live -> the package still grants access.
 	assert.equal(
-		derivePackageLifecycle("active", [DEADLINE, later], now),
+		derivePackageLifecycle(
+			"active",
+			[activeMember(DEADLINE), activeMember(later)],
+			now,
+		),
 		"active",
 	);
 	// A member with no expiry never lapses, so it keeps the package live.
 	assert.equal(
-		derivePackageLifecycle("active", [DEADLINE, null], now),
+		derivePackageLifecycle(
+			"active",
+			[activeMember(DEADLINE), activeMember(null)],
+			now,
+		),
 		"active",
 	);
 });
@@ -133,7 +163,11 @@ test("derivePackageLifecycle: a package with no members has no deadline to pass"
 
 test("derivePackageLifecycle: a revoked package stays revoked even once every member lapses", () => {
 	assert.equal(
-		derivePackageLifecycle("revoked", [DEADLINE], DEADLINE_MS + 1),
+		derivePackageLifecycle(
+			"revoked",
+			[activeMember(DEADLINE)],
+			DEADLINE_MS + 1,
+		),
 		"revoked",
 	);
 });
