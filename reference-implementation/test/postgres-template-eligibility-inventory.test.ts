@@ -36,6 +36,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -48,6 +49,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const testDir = __dirname;
 const reportPath = join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md");
+const REPORT_SCOPE_COUNTS_SCRIPT_RE = /<<'POSTGRES_TEMPLATE_SCOPE_COUNTS'\r?\n([\s\S]*?)\r?\nPOSTGRES_TEMPLATE_SCOPE_COUNTS/;
 
 /**
  * A file is Postgres-profile-relevant when it either clones/bootstraps its
@@ -120,10 +122,15 @@ test("every listed file still exists and is still Postgres-profile-relevant (lis
 
 test("the PostgreSQL profile report derives its scope counts from the eligibility registry", async () => {
   const report = await readFile(reportPath, "utf8");
+  const script = REPORT_SCOPE_COUNTS_SCRIPT_RE.exec(report)?.[1];
+  assert.ok(script, "report must provide an executable registry count command");
+  const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: join(testDir, "..", ".."),
+    encoding: "utf8",
+  });
   const eligible = POSTGRES_TEMPLATE_ELIGIBLE_FILES.length;
   const coldRequired = POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length;
   const total = eligible + coldRequired;
 
-  assert.match(report, new RegExp(`${eligible} eligible plus ${coldRequired} cold-required files`));
-  assert.match(report, new RegExp(`\\*\\*${total}\\*\\* total`));
+  assert.equal(output.trim(), `${eligible} eligible plus ${coldRequired} cold-required files, ${total} total`);
 });
