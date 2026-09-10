@@ -165,6 +165,9 @@ function dataRangeSummary(stream: ConsentStreamModel, range: { since: string; un
   if (range.since) {
     return `Data from ${humanDate(range.since)} onward`;
   }
+  if (range.until) {
+    return `Data through ${humanDate(range.until)}`;
+  }
   return "All dates";
 }
 
@@ -313,8 +316,8 @@ function StreamRow({
                         type="checkbox"
                       />
                       <span>
-                        <span className="pdpp-caption">{field.description || field.name}</span>
-                        {field.description && <span className={styles.fieldRaw}>{field.name}</span>}
+                        <span className="pdpp-caption">{field.label || field.name}</span>
+                        {field.label && <span className={styles.fieldRaw}>{field.name}</span>}
                         {field.required && <span className={styles.fieldRequired}>Required</span>}
                         {field.description && <span className="pdpp-caption">{field.description}</span>}
                       </span>
@@ -574,7 +577,7 @@ export function ConsentScreen({
       const next = { ...prev };
       for (const source of model.sources) {
         for (const stream of source.streams) {
-          if (selection[source.id]?.[stream.name]) {
+          if (selection[source.id]?.[stream.name] && stream.timePhrase) {
             next[stream.id] = { since, until };
           }
         }
@@ -628,10 +631,16 @@ export function ConsentScreen({
     // unchecked is noise, not a narrowing, and an empty entry would ask the
     // server to record "no bound" as if it were one.
     const chosenStreamIds = new Set(sources.flatMap((source) => source.streamIds));
+    const timeCapableStreamIds = new Set(
+      model.sources.flatMap((source) => source.streams.filter((stream) => stream.timePhrase).map((stream) => stream.id))
+    );
     const streamFields: Record<string, readonly string[]> = {};
     const streamRanges: Record<string, { since?: string; until?: string }> = {};
     for (const [streamId, range] of Object.entries(ranges)) {
       if (!chosenStreamIds.has(streamId)) {
+        continue;
+      }
+      if (!timeCapableStreamIds.has(streamId)) {
         continue;
       }
       const entry: { since?: string; until?: string } = {};

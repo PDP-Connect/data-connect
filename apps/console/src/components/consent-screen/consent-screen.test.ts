@@ -235,8 +235,8 @@ test("field panels expose bulk selection while preserving required fields", () =
   assert.match(CLIENT_SOURCE, /disabled=\{field\.required\}/);
 });
 
-test("described fields show description first and raw names as mono hints", () => {
-  assert.match(CLIENT_SOURCE, /field\.description \|\| field\.name/);
+test("declared field titles label controls and raw names remain available", () => {
+  assert.match(CLIENT_SOURCE, /field\.label \|\| field\.name/);
   assert.match(CLIENT_SOURCE, /className=\{styles\.fieldRaw\}>\{field\.name\}<\/span>/);
 });
 
@@ -414,7 +414,7 @@ test("the owner's selected fields are submitted through the declaration-checked 
   assert.match(ACTIONS_SOURCE, /stream_fields: decision\.streamFields/, "the accept request must carry field selections");
   assert.match(
     AS_HELPERS_SOURCE,
-    /readonly fields: ReadonlyArray<\{ readonly description\?: string; readonly name: string; readonly required: boolean \}>/,
+    /readonly fields: ReadonlyArray<\{\s*readonly description\?: string;\s*readonly label\?: string;\s*readonly name: string;\s*readonly required: boolean;?\s*\}>/,
     "the AS model must publish the declaration-backed field list"
   );
 });

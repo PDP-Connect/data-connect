@@ -108,6 +108,7 @@ export interface ConsentPickerManifest {
     name: string;
     consent_time_field?: string | null;
     description?: string | null;
+    display?: { label?: string | null; detail?: string | null } | null;
     schema?: {
       properties?: Record<string, { description?: string | null } | unknown> | null;
       required?: readonly string[] | null;
@@ -150,6 +151,7 @@ export interface HostedMcpPickerRow {
   streams: Array<{
     name: string;
     description: string | null;
+    display?: { label?: string | null; detail?: string | null } | null;
     // A JSON Schema property is an arbitrary value, so it stays `unknown` here
     // (matching the manifest type it is copied from); the picker guards the one
     // field it reads off it at runtime. Spelling this `{ description?: ... } |
@@ -761,7 +763,12 @@ export interface HostedMcpConsentChallengeModel {
     readonly selectionValue: string;
     readonly streams: ReadonlyArray<{
       /** Fields the owner can narrow, with required fields marked as the consent floor. */
-      readonly fields: ReadonlyArray<{ readonly description?: string; readonly name: string; readonly required: boolean }>;
+      readonly fields: ReadonlyArray<{
+        readonly description?: string;
+        readonly label?: string;
+        readonly name: string;
+        readonly required: boolean;
+      }>;
       readonly fieldsTotal: number;
       readonly id: string;
       readonly label: string;
@@ -895,15 +902,20 @@ export async function buildHostedMcpConsentChallengeModel(
               property && typeof property === "object" && "description" in property && typeof property.description === "string"
                 ? property.description.trim()
                 : "";
+            const label =
+              property && typeof property === "object" && "title" in property && typeof property.title === "string"
+                ? property.title.trim()
+                : "";
             return {
               ...(description ? { description } : {}),
+              ...(label ? { label } : {}),
               name,
               required: stream.scope.requiredFields.includes(name),
             };
           }),
         fieldsTotal: Object.keys(stream.schema?.properties ?? {}).length,
         id: `${row.sourceKey}:${stream.name}`,
-        label: humanizeStreamLabel(stream.name),
+        label: stream.display?.label?.trim() || humanizeStreamLabel(stream.name),
         name: stream.name,
         selectionValue: caps.encodeHostedMcpStreamSelection({
           connectionId: row.connectionId,
@@ -911,7 +923,11 @@ export async function buildHostedMcpConsentChallengeModel(
           streamName: stream.name,
         }),
         selected: false,
-        sentence: consentSafeStreamDescription(stream.description) || humanizeStreamLabel(stream.name),
+        sentence:
+          stream.display?.detail?.trim() ||
+          consentSafeStreamDescription(stream.description) ||
+          stream.display?.label?.trim() ||
+          humanizeStreamLabel(stream.name),
         // Same phrasing the HTML picker's date controls use, from the same
         // helper, so the two surfaces describe the same field identically.
         ...(stream.scope.timeField ? { timePhrase: describeTimeField(stream.scope.timeField) } : {}),
@@ -948,6 +964,7 @@ async function buildConnectorPickerRows(
   // COUNT must reflect real holdings — see `listStreamsWithRecords` below.
   const streamSummaries = manifestStreams.map((stream) => ({
     description: typeof stream.description === "string" ? stream.description : null,
+    ...(stream.display ? { display: stream.display } : {}),
     name: stream.name,
     // Omit the key entirely when the declaration has no schema, rather than
     // setting it to `undefined`: `exactOptionalPropertyTypes` treats a

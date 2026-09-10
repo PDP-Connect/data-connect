@@ -22,6 +22,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import {
@@ -34,6 +35,8 @@ import { escapeHtml, renderKeyValueList } from "../server/hosted-ui.ts";
 import {
   type ConsentPickerCapabilities,
   type ConsentUiRenderer,
+  buildHostedMcpConsentChallengeModel,
+  listHostedMcpPickerRows,
   renderHostedMcpSourceSelection,
 } from "../server/routes/as-consent-ui-helpers.ts";
 
@@ -110,6 +113,83 @@ function makeCaps(): ConsentPickerCapabilities {
 function renderPicker(): Promise<string> {
   return renderHostedMcpSourceSelection("owner_local", AUTHORIZE_QUERY, "csrf-token", "PDPP", makeCaps(), ui, {});
 }
+
+test("consent preserves shipped stream display labels, scope details, and field descriptions", async () => {
+  let displayedStreams = 0;
+  let describedFields = 0;
+  for (const entry of readPolyfillManifests()) {
+    const manifest = entry.manifest as {
+      streams: Array<{
+        name: string;
+        display?: { label?: string; detail?: string };
+        schema?: { properties?: Record<string, { description?: string }> };
+      }>;
+    };
+    const caps = { ...makeCaps(), getConnectorManifest: async () => manifest };
+    const rows = await listHostedMcpPickerRows(caps, "owner_local");
+    const model = await buildHostedMcpConsentChallengeModel("challenge", "owner_local", caps, ui, null);
+    for (const declaration of manifest.streams) {
+      const stream = model.sources[0]?.streams.find((candidate) => candidate.name === declaration.name);
+      assert.ok(stream, `${entry.file}: ${declaration.name}`);
+      if (declaration.display?.label) {
+        displayedStreams += 1;
+        assert.deepEqual(rows[0]?.streams.find((candidate) => candidate.name === declaration.name)?.display, declaration.display);
+        assert.equal(stream.label, declaration.display.label.trim());
+      }
+      if (declaration.display?.detail) assert.equal(stream.sentence, declaration.display.detail.trim());
+      for (const field of stream.fields) {
+        const description = declaration.schema?.properties?.[field.name]?.description;
+        if (description) {
+          describedFields += 1;
+          assert.equal(field.description, description.trim());
+        }
+      }
+      if (entry.file === "spotify.json" && declaration.name === "playlists") {
+        assert.equal(stream.label, "Your playlists");
+        assert.match(stream.sentence, /ownership.*collaborative.*track counts.*snapshot IDs/);
+      }
+    }
+  }
+  assert.ok(displayedStreams >= 160, "all shipped display declarations are exercised");
+  assert.ok(describedFields >= 47, "all shipped selectable field descriptions are exercised");
+});
+
+test("consent falls back honestly when display metadata is absent or blank", async () => {
+  const caps = makeCaps();
+  caps.getConnectorManifest = async () => ({
+    ...MANIFEST,
+    streams: MANIFEST.streams.map((stream) => ({ ...stream, display: { label: "  ", detail: " " } })),
+  });
+  const model = await buildHostedMcpConsentChallengeModel("challenge", "owner_local", caps, ui, null);
+  const stream = model.sources[0]?.streams[0];
+  assert.equal(stream?.label, "Messages");
+  assert.equal(stream?.sentence, "Your conversations");
+  assert.deepEqual(stream?.fields.find((field) => field.name === "author"), { name: "author", required: false });
+});
+
+test("consent uses JSON Schema field titles without changing field identifiers", async () => {
+  const caps = makeCaps();
+  caps.getConnectorManifest = async () => ({
+    ...MANIFEST,
+    streams: [{
+      name: "messages",
+      selection: { fields: true },
+      schema: {
+        properties: {
+          author_id: { title: " Author ", description: "Who wrote this message." },
+          empty_title: { title: " " },
+          invalid_title: { title: 42 },
+        },
+      },
+    }],
+  });
+  const model = await buildHostedMcpConsentChallengeModel("challenge", "owner_local", caps, ui, null);
+  assert.deepEqual(model.sources[0]?.streams[0]?.fields, [
+    { description: "Who wrote this message.", label: "Author", name: "author_id", required: false },
+    { name: "empty_title", required: false },
+    { name: "invalid_title", required: false },
+  ]);
+});
 
 test("a stream declaring both capabilities gets both controls", async () => {
   const html = await renderPicker();
