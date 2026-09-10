@@ -107,9 +107,7 @@ jobs:
             "${base_commit}" "${HEAD_REF}" > "reports/mutation/${COHORT}/diff.nul"
 
           # `--selected-tests` writes the tests this attempt runs, for cohorts
-          # whose runner cannot select tests itself. `--inputs-digest` writes the
-          # execution-input identity on its own, so the cache below can be keyed
-          # on it without folding in the per-revision fields.
+          # whose runner cannot select tests itself.
           node --experimental-strip-types scripts/mutation-falsification/run-intent.ts \
             --cohort "${COHORT}" \
             --cohort-root "${COHORT_ROOT}" \
@@ -118,7 +116,6 @@ jobs:
             --head "${HEAD_REF}" \
             --diff "reports/mutation/${COHORT}/diff.nul" \
             --out "reports/mutation/${COHORT}/intent.json" \
-            --inputs-digest "reports/mutation/${COHORT}/execution-inputs.digest" \
             --selected-tests "reports/mutation/${COHORT}/selected-tests.txt"
 
           # The configuration's selection lookup is relative to the directory
@@ -136,41 +133,14 @@ jobs:
           echo "applicability=${applicability}" >> "$GITHUB_OUTPUT"
           echo "Intent applicability: ${applicability}"
 
-      # Reuse is keyed on input identity and nothing else -- never on the cache's
-      # age, and never on how expensive a fresh run would be. The key is the
-      # digest of the frozen execution inputs ALONE: the config, tool version,
-      # runtime version and lockfile digests. It deliberately does not include
-      # the head commit or the changed-file list, which differ on every revision
-      # and would make every key unique and every run cold. There is no broad
-      # fallback restore key, because a partial match here would mean reusing
-      # verdicts about inputs that no longer exist.
-      - name: Restore incremental cache by input identity
-        if: steps.intent.outputs.applicability == 'applicable'
-        id: cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            reports/mutation/${{ matrix.cohort }}/stryker-incremental.json
-            reports/mutation/${{ matrix.cohort }}/cached-execution-inputs.json
-          key: mutation-${{ matrix.cohort }}-${{ hashFiles(format('reports/mutation/{0}/execution-inputs.digest', matrix.cohort)) }}
-
-      # The cache key is Actions' coarse mechanism; `mayReuseCache` is the
-      # design's. This step compares the execution inputs recorded alongside a
-      # restored cache against the ones just frozen, and deletes the cache when
-      # they do not match, so a stale or unattributable cache cannot be consumed
-      # even if the key collided. Its verdict is what the receipt records.
-      - name: Decide cache reuse by recorded input identity
-        if: steps.intent.outputs.applicability == 'applicable'
-        id: reuse
-        env:
-          COHORT: ${{ matrix.cohort }}
-        run: |
-          set -euo pipefail
-          node --experimental-strip-types scripts/mutation-falsification/run-cache-decision.ts \
-            --intent "reports/mutation/${COHORT}/intent.json" \
-            --cached-inputs "reports/mutation/${COHORT}/cached-execution-inputs.json" \
-            --incremental-file "reports/mutation/${COHORT}/stryker-incremental.json" \
-            --out "reports/mutation/${COHORT}/cache-decision.json" >> "$GITHUB_OUTPUT"
+      # There is deliberately no result cache here. An earlier revision carried
+      # one, and it was wrong twice: the reference implementation read its
+      # incremental file from its own root while the cache saved and refused a
+      # copy at the repository root, and the identity that authorised reuse did
+      # not cover the resolved test command, so two runs executing different
+      # tests hashed identically. Every run is therefore cold, which costs time
+      # and cannot reuse a stale verdict. Caching returns only with a measured
+      # cost need and invalidation proven against the paths the engine reads.
 
       - name: Build workspace packages
         if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
@@ -197,8 +167,8 @@ jobs:
           printf '  %s\n' "${mutate[@]}"
 
           # Run from the cohort root. Every relative path in play -- the mutate
-          # globs, the configuration's reporter and incremental-file paths, its
-          # selection lookup and its ignorePatterns -- is cohort-relative, and
+          # globs, the configuration's reporter paths, its selection lookup and
+          # its ignorePatterns -- is cohort-relative, and
           # Stryker resolves all of them against the working directory, not
           # against the configuration's own location. Invoking this from the
           # repository root made the globs match nothing, so the cohort mutated
@@ -207,7 +177,7 @@ jobs:
           # The exit status is recorded rather than acted on: the projection
           # step decides what it means. A non-zero status makes the baseline
           # incomplete, which makes every mutant in the batch inconclusive.
-          cd "${COHORT_ROOT}"
+          cd "${COHORT_ROOT}" || exit 1
           npx stryker run stryker.config.mjs --mutate "$(IFS=,; echo "${mutate[*]}")"
           stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
@@ -246,7 +216,6 @@ jobs:
             --cohort "${COHORT}" \
             --intent "reports/mutation/${COHORT}/intent.json" \
             --report "${report}" \
-            --cache-decision "reports/mutation/${COHORT}/cache-decision.json" \
             --stryker-exit "${STRYKER_EXIT:-unknown}" \
             --out "reports/mutation/${COHORT}/receipt.json"
 

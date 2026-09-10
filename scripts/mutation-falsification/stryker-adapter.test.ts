@@ -259,7 +259,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes,
       observations: [observation({ id: "1" })],
-      cacheDecision: { reuse: false, reason: "execution_inputs_changed" },
       ...ranCleanly,
     })
     expect(receipt.intentDigest).toBe(intent.intentDigest)
@@ -275,7 +274,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes,
       observations: [observation({ id: "1", rawStatus: "Survived", failureOutput: undefined })],
-      cacheDecision: { reuse: false, reason: "no_recorded_inputs" },
       ...ranCleanly,
     })
     const tampered = {
@@ -294,7 +292,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes,
       observations: [observation({ id: "1" })],
-      cacheDecision: { reuse: true, reason: "execution_inputs_match" },
       ...ranCleanly,
     })
     expect(verifyReceipt(receipt, JSON.stringify({ files: { "src/a.ts": {} } }))).toEqual({
@@ -311,7 +308,6 @@ describe("buildAttemptReceipt", () => {
         observation({ id: "1" }),
         observation({ id: "1", rawStatus: "Survived", failureOutput: undefined }),
       ],
-      cacheDecision: { reuse: false, reason: "no_recorded_inputs" },
       ...ranCleanly,
     })
     expect(receipt.projections).toHaveLength(1)
@@ -328,7 +324,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes: "",
       observations: [],
-      cacheDecision: { reuse: false, reason: "no_cache_restored" },
       engineExit: "1",
       reportPresent: false,
     })
@@ -336,7 +331,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes: "",
       observations: [],
-      cacheDecision: { reuse: false, reason: "no_cache_restored" },
       engineExit: "0",
       reportPresent: false,
     })
@@ -355,7 +349,6 @@ describe("buildAttemptReceipt", () => {
       intent,
       rawReportBytes,
       observations: [observation({ id: "1" })],
-      cacheDecision: { reuse: false, reason: "no_cache_restored" },
       ...ranCleanly,
     })
     expect(receipt.attempt).toEqual({

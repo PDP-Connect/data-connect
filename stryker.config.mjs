@@ -10,26 +10,19 @@
 // for a revision that touched no client production source.
 //
 // No duration, budget, mutant-count, or admission threshold appears in this
-// file. Scope is whatever the revision touched; cost is controlled by that
-// scope and by incremental reuse, not by a constant.
+// file. Scope is whatever the revision touched, and that scope is the only
+// thing controlling cost -- there is no result cache.
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
   testRunner: "vitest",
   // The client suite is a Vitest project, so the native runner applies: it
   // reports per-test identities, which is what lets `perTest` coverage analysis
-  // and incremental reuse work on real test-level data rather than guesses.
+  // work on real test-level data rather than guesses.
   coverageAnalysis: "perTest",
   vitest: { configFile: "vite.config.ts" },
 
   mutate: [],
-
-  // Reuse is keyed on recorded execution inputs, checked by the workflow before
-  // the cache is restored. Stryker's own tracking does not see changes outside
-  // mutated and test files, so the workflow refuses the cache on any other
-  // input change rather than leaving that gap open.
-  incremental: true,
-  incrementalFile: "reports/mutation/client/stryker-incremental.json",
 
   // `json` is the mutation-testing-elements report the evidence adapter reads
   // as an observation artifact; `html` is for a human reading the PR artifact.

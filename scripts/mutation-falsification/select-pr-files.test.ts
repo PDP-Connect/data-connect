@@ -8,7 +8,6 @@ import {
   type CohortDefinition,
   type ExecutionInputs,
   freezeIntent,
-  mayReuseCache,
   parseNameStatusZ,
   selectCohortTests,
   toCohortRelative,
@@ -260,40 +259,5 @@ describe("selectCohortTests", () => {
     // recorded as surviving an empty selection would be a false survivor.
     const diff = parseNameStatusZ("M\0reference-implementation/lib/nullish.ts\0")
     expect(selectCohortTests(diff, referenceCohort)).toEqual([])
-  })
-})
-
-describe("mayReuseCache", () => {
-  it("reuses only when every execution input matches", () => {
-    expect(mayReuseCache(inputs, inputs)).toEqual({
-      reuse: true,
-      reason: "execution_inputs_match",
-    })
-  })
-
-  it("refuses reuse when the lockfile changed", () => {
-    // Stryker's own incremental tracking does not see changes outside mutated
-    // and test files, so a dependency bump would otherwise reuse stale verdicts.
-    const changed: ExecutionInputs = {
-      ...inputs,
-      lockfileDigests: [{ path: "package-lock.json", digest: "sha256:different" }],
-    }
-    expect(mayReuseCache(inputs, changed)).toEqual({
-      reuse: false,
-      reason: "execution_inputs_changed",
-    })
-  })
-
-  it("refuses reuse when the tool version, runtime, or config digest changed", () => {
-    expect(mayReuseCache(inputs, { ...inputs, toolVersion: "10.0.1" }).reuse).toBe(false)
-    expect(mayReuseCache(inputs, { ...inputs, runtimeVersion: "v24.0.0" }).reuse).toBe(false)
-    expect(mayReuseCache(inputs, { ...inputs, configDigest: "sha256:other" }).reuse).toBe(false)
-  })
-
-  it("refuses reuse when no inputs were recorded at all", () => {
-    expect(mayReuseCache(undefined, inputs)).toEqual({
-      reuse: false,
-      reason: "no_recorded_inputs",
-    })
   })
 })

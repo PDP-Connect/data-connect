@@ -10,10 +10,8 @@
 import { createHash } from "node:crypto"
 import { readFileSync, writeFileSync } from "node:fs"
 import {
-  canonicalJSON,
   type CohortDefinition,
   type CohortName,
-  digestOf,
   type ExecutionInputs,
   freezeIntent,
   parseNameStatusZ,
@@ -75,15 +73,6 @@ const intent = freezeIntent({
 })
 
 writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
-
-// The execution-input identity, written on its own so the incremental cache can
-// be keyed on it alone. Keying on the whole intent packet would fold in the head
-// commit and the changed-file list, which differ on every revision, so no key
-// could ever match and every run would be cold.
-const inputsDigestPath = optionalArgument("inputs-digest")
-if (inputsDigestPath !== undefined) {
-  writeFileSync(inputsDigestPath, `${digestOf(canonicalJSON(executionInputs))}\n`)
-}
 
 // The tests this attempt runs, for cohorts whose runner cannot select tests
 // itself. Written unconditionally when asked for: an absent file and an empty

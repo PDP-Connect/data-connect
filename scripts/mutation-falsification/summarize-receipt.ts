@@ -37,7 +37,6 @@ const lines: string[] = [
   `Intent: \`${receipt.intentDigest}\``,
   `Raw report: \`${receipt.rawReportDigest}\``,
   `Receipt: \`${receipt.receiptDigest}\``,
-  `Incremental cache reused: ${receipt.cacheDecision.reuse} (${receipt.cacheDecision.reason})`,
   "",
 ]
 

@@ -13,10 +13,9 @@
 //   2. Because there is no per-test data, test selection has to happen inside
 //      the command itself -- Stryker's own `testFiles` option is not supported
 //      for this runner and would be silently ignored.
-//   3. With no test identities, Stryker's incremental reuse has its weakest
-//      signal exactly where each mutant costs the most. The workflow therefore
-//      keys reuse on a recorded execution-input identity and forces a fresh run
-//      of the current scope whenever any of those inputs changed or is unknown.
+//   3. With no test identities, Stryker's incremental reuse would have its
+//      weakest signal exactly where each mutant costs the most, so this cohort
+//      carries no result cache and every run is cold.
 //
 // The reference implementation runs TypeScript sources directly under Node's
 // native type stripping, so there is no build step to instrument: the sandbox
@@ -69,9 +68,6 @@ export default {
   // Populated from the pull request diff by the workflow; empty means this
   // revision touched no reference-implementation production source.
   mutate: [],
-
-  incremental: true,
-  incrementalFile: "reports/mutation/reference-implementation/stryker-incremental.json",
 
   reporters: ["json", "html", "progress"],
   jsonReporter: { fileName: "reports/mutation/reference-implementation/mutation.json" },

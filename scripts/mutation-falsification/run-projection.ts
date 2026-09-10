@@ -46,23 +46,10 @@ const observations =
     ? []
     : readObservations(JSON.parse(rawReportBytes), { baselineComplete })
 
-// The cache decision is `mayReuseCache`'s, recorded by the step that made it.
-// It is read rather than re-derived here so the receipt reports the mechanism
-// that actually governed the run. An absent file means that step did not run,
-// which is not the same as a decision to run cold.
-const cacheDecisionPath = argument("cache-decision")
-const cacheDecision = existsSync(cacheDecisionPath)
-  ? (JSON.parse(readFileSync(cacheDecisionPath, "utf8")) as {
-      readonly reuse: boolean
-      readonly reason: string
-    })
-  : { reuse: false, reason: "no_cache_decision_recorded" }
-
 const receipt = buildAttemptReceipt({
   intent,
   rawReportBytes,
   observations,
-  cacheDecision,
   engineExit: strykerExit,
   reportPresent,
 })

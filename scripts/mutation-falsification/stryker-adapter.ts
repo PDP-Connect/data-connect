@@ -347,8 +347,6 @@ export interface AttemptReceipt {
   readonly observations: readonly MutantObservation[]
   readonly projections: readonly Projection[]
   readonly summary: ProjectionSummary
-  /** Whether a stored incremental cache was reused, and on what basis. */
-  readonly cacheDecision: { readonly reuse: boolean; readonly reason: string }
   /** Derived from this receipt's own canonical bytes. */
   readonly receiptDigest: string
 }
@@ -365,7 +363,6 @@ export function buildAttemptReceipt(input: {
   readonly intent: IntentPacket
   readonly rawReportBytes: string
   readonly observations: readonly MutantObservation[]
-  readonly cacheDecision: { readonly reuse: boolean; readonly reason: string }
   /** The engine's exit status, verbatim. "unknown" when the step never ran. */
   readonly engineExit: string
   /** Whether the engine wrote a report for this attempt at all. */
@@ -402,7 +399,6 @@ export function buildAttemptReceipt(input: {
     observations: input.observations,
     projections,
     summary,
-    cacheDecision: input.cacheDecision,
   }
   return { ...body, receiptDigest: digestOf(canonicalJSON(body)) }
 }

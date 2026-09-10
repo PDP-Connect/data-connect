@@ -25,10 +25,11 @@ export type SelectedFile = string
 export type CohortName = "client" | "reference-implementation"
 
 /**
- * Everything a cohort's mutation run reads, named so that a later run can tell
- * whether it is looking at the same inputs. Reuse of a prior incremental cache
- * is keyed on this identity and nothing else -- never on the cache's age, and
- * never on how expensive a fresh run would be.
+ * Everything a cohort's mutation run reads, recorded in the intent so a reader
+ * can tell what the evidence was produced against. It is a description of the
+ * attempt, not an authorisation to reuse anything: this pipeline has no result
+ * cache, and an earlier revision that used this identity for that purpose got
+ * it wrong -- it did not cover the resolved test command.
  */
 export interface ExecutionInputs {
   /** Cohort root relative to the repository root, e.g. "." or "reference-implementation". */
@@ -40,9 +41,7 @@ export interface ExecutionInputs {
   /** Resolved runtime version the cohort's tests execute under, e.g. "v22.23.1". */
   readonly runtimeVersion: string
   /**
-   * Digests of the dependency manifests governing the cohort. A lockfile change
-   * is exactly the class of change Stryker's own incremental tracking does not
-   * see, so it belongs in the identity rather than being left to the tool.
+   * Digests of the dependency manifests governing the cohort.
    */
   readonly lockfileDigests: readonly { readonly path: string; readonly digest: string }[]
 }
@@ -293,26 +292,4 @@ export function freezeIntent(input: {
 export function verifyIntentDigest(packet: IntentPacket): boolean {
   const { intentDigest, ...body } = packet
   return digestOf(canonicalJSON(body)) === intentDigest
-}
-
-/**
- * Decide whether a stored incremental cache may be reused.
- *
- * Reuse requires the recorded execution inputs to match the current ones
- * exactly. Anything else -- a missing record, an unreadable record, an
- * unrecognised field -- forces a fresh run of the current scope. There is no
- * age check and no cost check, because neither says anything about whether the
- * cached verdicts describe the code now under test.
- */
-export function mayReuseCache(
-  recorded: ExecutionInputs | undefined,
-  current: ExecutionInputs
-): { readonly reuse: boolean; readonly reason: string } {
-  if (recorded === undefined) {
-    return { reuse: false, reason: "no_recorded_inputs" }
-  }
-  if (canonicalJSON(recorded) !== canonicalJSON(current)) {
-    return { reuse: false, reason: "execution_inputs_changed" }
-  }
-  return { reuse: true, reason: "execution_inputs_match" }
 }
