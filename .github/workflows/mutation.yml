@@ -177,9 +177,19 @@ jobs:
           # The exit status is recorded rather than acted on: the projection
           # step decides what it means. A non-zero status makes the baseline
           # incomplete, which makes every mutant in the batch inconclusive.
+          #
+          # The status is captured with `|| stryker_exit=$?` rather than a bare
+          # invocation followed by `$?`. GitHub runs this script as
+          # `bash -e {0}`, and `set -uo pipefail` above does not clear the `-e`
+          # the shell was started with, so a bare non-zero `npx stryker` aborts
+          # the script at that line: the assignment and the `$GITHUB_OUTPUT`
+          # write never run, the projection step reads an empty `STRYKER_EXIT`
+          # and records the engine exit as `unknown`. A command on the left of
+          # `||` is exempt from `-e`, so this form records a real status on
+          # every path.
           cd "${COHORT_ROOT}" || exit 1
-          npx stryker run stryker.config.mjs --mutate "$(IFS=,; echo "${mutate[*]}")"
-          stryker_exit=$?
+          stryker_exit=0
+          npx stryker run stryker.config.mjs --mutate "$(IFS=,; echo "${mutate[*]}")" || stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
           exit "${stryker_exit}"
 

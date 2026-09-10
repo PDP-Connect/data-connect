@@ -6,6 +6,7 @@ import {
   canonicalJSON,
   classifyForCohort,
   type CohortDefinition,
+  escapesCohortRoot,
   type ExecutionInputs,
   freezeIntent,
   parseNameStatusZ,
@@ -259,5 +260,37 @@ describe("selectCohortTests", () => {
     // recorded as surviving an empty selection would be a false survivor.
     const diff = parseNameStatusZ("M\0reference-implementation/lib/nullish.ts\0")
     expect(selectCohortTests(diff, referenceCohort)).toEqual([])
+  })
+})
+
+describe("escapesCohortRoot", () => {
+  it("detects the repository-root read that rejected the baseline", () => {
+    // Verbatim from reference-implementation/scripts/ci-console-prebuild.test.ts.
+    // Stryker's sandbox is rooted at the cohort root, so this resolves to a path
+    // the sandbox does not contain; the ENOENT failed the initial test run and
+    // left the whole attempt with no evidence.
+    const source = `const __dirname = dirname(fileURLToPath(import.meta.url));
+const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-implementation.yml");`
+    expect(escapesCohortRoot("scripts/ci-console-prebuild.test.ts", source)).toBe(true)
+  })
+
+  it("measures the climb against the test's own depth, not a fixed one", () => {
+    // The same literal escapes from `scripts/` but stays inside the root from
+    // one directory deeper, so depth is what decides.
+    const source = `readFileSync(join(__dirname, "../../lib/nullish.ts"))`
+    expect(escapesCohortRoot("test/nested/deep.test.ts", source)).toBe(false)
+    expect(escapesCohortRoot("scripts/shallow.test.ts", source)).toBe(true)
+  })
+
+  it("keeps a test that climbs only to the cohort root", () => {
+    // Reaching a sibling directory inside the cohort is fine: the sandbox holds
+    // the whole cohort, so this path resolves there exactly as it does on disk.
+    const source = `await readFile(join(__dirname, "../test/composed-origin.test.ts"), "utf8")`
+    expect(escapesCohortRoot("scripts/ci-console-prebuild.test.ts", source)).toBe(false)
+  })
+
+  it("keeps a test that reads no relative path at all", () => {
+    const source = `import assert from "node:assert/strict"\ntest("x", () => assert.ok(true))`
+    expect(escapesCohortRoot("test/plain.test.ts", source)).toBe(false)
   })
 })
