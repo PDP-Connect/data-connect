@@ -31,6 +31,9 @@
 
 import assert from "node:assert/strict"
 import test from "node:test"
+import { setTimeout as delay } from "node:timers/promises"
+
+import pg from "pg"
 
 import { exec, getOne, referenceQueries } from "../lib/db.ts"
 import { closeDb, initDb } from "../server/db.ts"
@@ -42,8 +45,12 @@ import {
   closePostgresStorage,
   initPostgresStorage,
   postgresQuery,
+  withPostgresTransaction,
 } from "../server/postgres-storage.ts"
-import { deleteAllRecordsForConnector } from "../server/records.ts"
+import {
+  deleteAllRecordsForConnector,
+  deleteConnectionRecordRowsPostgres,
+} from "../server/records.ts"
 import { getChangeHistoryLimit } from "../server/storage-utils.ts"
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts"
 
@@ -222,6 +229,97 @@ if (POSTGRES_URL) {
       }
     )
   })
+  for (const scope of ["per-stream", "whole-connection"] as const) {
+    test(`${scope} delete preserves a sibling binding committed during reclamation`, async () => {
+      await withTemporaryPostgresDatabase(
+        {
+          closeConnections: closePostgresStorage,
+          connectionString: POSTGRES_URL,
+          databaseName: `pdpp_blob_reclaim_race_${Date.now().toString(36)}`,
+        },
+        async url => {
+          initDb(":memory:")
+          await initPostgresStorage({ backend: "postgres", databaseUrl: url })
+          const writer = new pg.Client({ connectionString: url })
+          let deletion: Promise<unknown> | undefined
+          try {
+            await writer.connect()
+            const doomedConnectorId =
+              "https://registry.pdpp.test/connectors/blob_race_doomed"
+            const survivingConnectorId =
+              "https://registry.pdpp.test/connectors/blob_race_survivor"
+            const bytes = Buffer.alloc(1024, 0x5a)
+            const blobId = await seedRecordWithBlob({
+              bytes,
+              connectorId: doomedConnectorId,
+              connectorInstanceId: "cin_blob_race_doomed",
+              recordKey: "att-1",
+            })
+
+            // Pause a sibling publication after its FK has locked the shared
+            // blob but before COMMIT makes its binding visible to cleanup.
+            await writer.query("BEGIN")
+            const pid = await writer.query<{ pid: number }>(
+              "SELECT pg_backend_pid() AS pid"
+            )
+            const writerPid = pid.rows[0]?.pid
+            assert.ok(writerPid)
+            await writer.query(
+              `INSERT INTO blob_bindings
+                 (blob_id, connector_id, connector_instance_id, stream, record_key, json_path)
+               VALUES ($1, $2, $3, $4, $5, '@record')`,
+              [blobId, survivingConnectorId, "cin_blob_race_survivor", STREAM, "att-1"]
+            )
+            deletion = scope === "per-stream"
+              ? deleteAllRecordsForConnector(doomedConnectorId)
+              : withPostgresTransaction(client =>
+                  deleteConnectionRecordRowsPostgres(client, "cin_blob_race_doomed")
+                )
+            // Attach a rejection handler immediately while observing the lock.
+            deletion.catch(() => undefined)
+            let blocked = false
+            const deadline = Date.now() + 10_000
+            while (!blocked && Date.now() < deadline) {
+              // biome-ignore lint/performance/noAwaitInLoops: observe the actual database lock, not a timing assumption.
+              const waiting = await postgresQuery<{ blocked: boolean }>(
+                `SELECT EXISTS (
+                   SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND $1::int = ANY(pg_blocking_pids(pid))
+                 ) AS blocked`,
+                [writerPid]
+              )
+              blocked = waiting.rows[0]?.blocked ?? false
+              if (!blocked) {
+                await delay(10)
+              }
+            }
+            assert.ok(blocked, "cleanup must reach the sibling transaction's blob lock")
+            await writer.query("COMMIT")
+            await deletion
+
+            assert.equal(await countBlobs(blobId), 1, "committed sibling bytes survive cleanup")
+            const bindings = await postgresQuery<{ connector_id: string }>(
+              "SELECT connector_id FROM blob_bindings WHERE blob_id = $1",
+              [blobId]
+            )
+            assert.deepEqual(bindings.rows, [{ connector_id: survivingConnectorId }])
+            const stored = await postgresQuery<{ data: Buffer }>(
+              "SELECT data FROM blobs WHERE blob_id = $1",
+              [blobId]
+            )
+            assert.deepEqual(stored.rows[0]?.data, bytes)
+          } finally {
+            await writer.query("ROLLBACK").catch(() => undefined)
+            await deletion?.catch(() => undefined)
+            await writer.end()
+            await closePostgresStorage()
+            closeDb()
+          }
+        }
+      )
+    })
+  }
   /**
    * Why superseded blobs are NOT deleted at the point of supersession.
    *
