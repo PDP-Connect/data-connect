@@ -73,7 +73,7 @@ jobs:
           # remains only because unpinning has not been verified against a windows-latest
           # runner, not because a known blocker survives. Unpin when a release build on
           # windows-latest is confirmed green — see PDP-Connect/data-connect#47.
-          - platform: windows-2022
+          - platform: windows-latest
             os_family: windows
             target: x86_64-pc-windows-msvc
             artifact_key: windows-x64
