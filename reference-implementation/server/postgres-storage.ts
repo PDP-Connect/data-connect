@@ -3578,6 +3578,9 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresRunHistoryCompletedAtNullable(client);
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);
+    // Legacy blob tables gain connector_instance_id in the migration above.
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_blobs_instance_blob_id
+      ON blobs(connector_instance_id, blob_id)`);
     await migratePostgresClientEventSubscriptionAuthority(client);
     // Install the ledger BEFORE the first data migration that consults it.
     // A migration that reads a missing ledger table would have to guess its

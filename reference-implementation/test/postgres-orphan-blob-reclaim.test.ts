@@ -36,6 +36,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import pg from "pg"
 
 import { exec, getOne, referenceQueries } from "../lib/db.ts"
+import { ConnectorInstanceAdmissionError } from "../server/connector-instance-write-coordinator.ts"
 import { closeDb, initDb } from "../server/db.ts"
 import {
   postgresIngestRecord,
@@ -107,6 +108,64 @@ async function seedRecordWithBlob({
 }
 
 if (POSTGRES_URL) {
+  test("whole-connection delete fails within its lock budget behind a held blob lock", async () => {
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: `pdpp_blob_delete_timeout_${Date.now().toString(36)}`,
+      },
+      async url => {
+        initDb(":memory:")
+        await initPostgresStorage({ backend: "postgres", databaseUrl: url })
+        const writer = new pg.Client({ connectionString: url })
+        const previousLockWait = process.env.PDPP_INGEST_LOCK_WAIT_MS
+        let deletion: Promise<unknown> | undefined
+        try {
+          process.env.PDPP_INGEST_LOCK_WAIT_MS = "100"
+          await writer.connect()
+          const connectorInstanceId = "cin_blob_delete_timeout"
+          const blobId = await seedRecordWithBlob({
+            bytes: Buffer.alloc(1024, 0x5a),
+            connectorId: "https://registry.pdpp.test/connectors/blob_delete_timeout",
+            connectorInstanceId,
+            recordKey: "att-1",
+          })
+          await writer.query("BEGIN")
+          await writer.query("SELECT blob_id FROM blobs WHERE blob_id = $1 FOR KEY SHARE", [blobId])
+          deletion = withPostgresTransaction(client =>
+            deleteConnectionRecordRowsPostgres(client, connectorInstanceId)
+          )
+          // The watchdog lets the assertion fail on the unbounded implementation;
+          // finally releases the writer before draining the deletion promise.
+          const outcome = await Promise.race([
+            deletion.then(
+              () => ({ status: "deleted" as const }),
+              (error: unknown) => ({ status: "rejected" as const, error })
+            ),
+            delay(1500).then(() => ({ status: "still-waiting" as const })),
+          ])
+          assert.equal(outcome.status, "rejected", "delete must fail while the writer still holds its lock")
+          assert.ok(outcome.status === "rejected" && outcome.error instanceof ConnectorInstanceAdmissionError)
+          assert.equal(outcome.error.code, "connector_instance_busy")
+          assert.equal(await countBlobs(blobId), 1, "timeout rolls back blob cleanup")
+          assert.equal(await countBindings(blobId), 1, "timeout restores the deleted binding")
+        } finally {
+          await writer.query("ROLLBACK").catch(() => undefined)
+          await deletion?.catch(() => undefined)
+          await writer.end()
+          if (previousLockWait === undefined) {
+            delete process.env.PDPP_INGEST_LOCK_WAIT_MS
+          } else {
+            process.env.PDPP_INGEST_LOCK_WAIT_MS = previousLockWait
+          }
+          await closePostgresStorage()
+          closeDb()
+        }
+      }
+    )
+  })
+
   test("per-stream connector delete reclaims blobs whose last binding it removed", async () => {
     const databaseName = `pdpp_orphan_blob_reclaim_${Date.now().toString(36)}`
     await withTemporaryPostgresDatabase(
@@ -230,6 +289,86 @@ if (POSTGRES_URL) {
     )
   })
   for (const scope of ["per-stream", "whole-connection"] as const) {
+    test(`${scope} delete reclaims more than one batch while retaining shared blobs`, async () => {
+      await withTemporaryPostgresDatabase(
+        {
+          closeConnections: closePostgresStorage,
+          connectionString: POSTGRES_URL,
+          databaseName: `pdpp_blob_reclaim_batches_${Date.now().toString(36)}`,
+        },
+        async url => {
+          initDb(":memory:")
+          await initPostgresStorage({ backend: "postgres", databaseUrl: url })
+          try {
+            const connectorId = "https://registry.pdpp.test/connectors/blob_batches"
+            const connectorInstanceId = "cin_blob_batches"
+            await seedRecordWithBlob({
+              bytes: Buffer.alloc(1024, 0x5a),
+              connectorId,
+              connectorInstanceId,
+              recordKey: "att-1",
+            })
+            await postgresQuery(
+              `INSERT INTO blobs
+                 (blob_id, connector_id, connector_instance_id, stream, record_key, mime_type, size_bytes, sha256, data)
+               SELECT 'blob_batch_' || lpad(n::text, 4, '0'), $1, $2, $3,
+                      'att-' || n, 'application/octet-stream', 1, md5(n::text), decode('5a', 'hex')
+                 FROM generate_series(1, 257) AS n`,
+              [connectorId, connectorInstanceId, STREAM]
+            )
+            await postgresQuery(
+              `INSERT INTO blob_bindings
+                 (blob_id, connector_id, connector_instance_id, stream, record_key)
+               SELECT blob_id, connector_id, connector_instance_id, stream, record_key
+                 FROM blobs WHERE blob_id LIKE 'blob_batch_%'`
+            )
+            // Keep the first candidate: pagination must advance beyond retained rows.
+            await postgresQuery(
+              `INSERT INTO blob_bindings
+                 (blob_id, connector_id, connector_instance_id, stream, record_key)
+               VALUES ('blob_batch_0001', $1, 'cin_blob_batches_survivor', $2, 'att-1')`,
+              ["https://registry.pdpp.test/connectors/blob_batches_survivor", STREAM]
+            )
+
+            if (scope === "per-stream") {
+              await deleteAllRecordsForConnector(connectorId)
+            } else {
+              const lockBatchSizes: number[] = []
+              await withPostgresTransaction(async client => {
+                const observedClient = new Proxy(client, {
+                  get(target, property, receiver) {
+                    if (property !== "query") {
+                      return Reflect.get(target, property, receiver)
+                    }
+                    return async (sql: string, values?: unknown[]) => {
+                      const result = await target.query(sql, values)
+                      if (sql.includes("FOR UPDATE") && sql.includes("FROM blobs")) {
+                        lockBatchSizes.push(result.rows.length)
+                      }
+                      return result
+                    }
+                  },
+                })
+                await deleteConnectionRecordRowsPostgres(observedClient, connectorInstanceId)
+              })
+              assert.ok(lockBatchSizes.filter(size => size > 0).length > 1, "cleanup locks multiple batches")
+              assert.ok(lockBatchSizes.every(size => size <= 256), "no lock query returns the entire connection")
+            }
+
+            const blobs = await postgresQuery<{ blob_id: string }>("SELECT blob_id FROM blobs")
+            assert.deepEqual(blobs.rows, [{ blob_id: "blob_batch_0001" }])
+            const bindings = await postgresQuery<{ connector_instance_id: string }>(
+              "SELECT connector_instance_id FROM blob_bindings"
+            )
+            assert.deepEqual(bindings.rows, [{ connector_instance_id: "cin_blob_batches_survivor" }])
+          } finally {
+            await closePostgresStorage()
+            closeDb()
+          }
+        }
+      )
+    })
+
     test(`${scope} delete preserves a sibling binding committed during reclamation`, async () => {
       await withTemporaryPostgresDatabase(
         {

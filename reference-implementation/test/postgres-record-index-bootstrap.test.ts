@@ -46,6 +46,33 @@ async function readIndex(
 }
 
 if (POSTGRES_URL) {
+  test("blob cleanup index follows legacy instance-column migration and survives restart", async () => {
+    await withTempDb(POSTGRES_URL, async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const bytes = Buffer.from("legacy blob bytes");
+      await getPostgresPool().query(
+        `INSERT INTO blobs
+          (blob_id, connector_id, connector_instance_id, stream, record_key, mime_type, size_bytes, sha256, data)
+         VALUES ('legacy-blob', 'legacy-connector', 'legacy-instance', 'attachments', 'one',
+           'application/octet-stream', $1, 'legacy-sha', $2)`,
+        [bytes.length, bytes]
+      );
+      // Model a populated legacy table whose instance column has not migrated.
+      await getPostgresPool().query("ALTER TABLE blobs DROP COLUMN connector_instance_id CASCADE");
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const migrated = await getPostgresPool().query(
+        "SELECT data, connector_instance_id FROM blobs WHERE blob_id = 'legacy-blob'"
+      );
+      assert.deepEqual(migrated.rows[0]?.data, bytes);
+      assert.ok(migrated.rows[0]?.connector_instance_id);
+      const before = await readIndex(getPostgresPool(), "idx_blobs_instance_blob_id");
+      assert.ok(before?.definition.includes("(connector_instance_id, blob_id)"));
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const after = await readIndex(getPostgresPool(), "idx_blobs_instance_blob_id");
+      assert.equal(after?.oid, before?.oid);
+    });
+  });
+
   test("bootstrap lock contender survives a real holder that releases before the deadline", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });

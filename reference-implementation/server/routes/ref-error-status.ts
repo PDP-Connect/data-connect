@@ -97,6 +97,7 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   archive_reconnect_resume_failed: 502,
   authentication_error: 401,
   blob_not_found: 404,
+  blob_publication_conflict: 409,
   browser_enrollment_shell_required: 400,
   connection_is_grouping_canonical: 409,
   connection_not_found: 404,
