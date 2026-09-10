@@ -246,6 +246,7 @@ export interface MountRefManualUploadDraftConnectionContext {
   handleError: (res: unknown, err: unknown) => void;
   importBaseDir: string;
   now?: () => string;
+  onManualUploadValidationTask?: (task: Promise<void>) => void;
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike>;
@@ -911,6 +912,7 @@ async function validateAndStageArtifact(
     // three success/failed/duplicate branches above. force:true makes this
     // a safe no-op if rename() already moved the file out before the error.
     await removeStagingArtifact(artifact.stagingPath);
+    throw err;
   }
 }
 
@@ -1525,18 +1527,24 @@ function mountPostStagedArtifact(app: AppLike, ctx: MountRefManualUploadDraftCon
           status: "uploaded",
         });
 
-        setImmediate(() => {
-          validateAndStageArtifact(ctx, {
-            artifactId,
-            connectorId,
-            displayNameRaw: rawDisplayName,
-            fileName,
-            manifest,
-            ownerSubjectId: ownerSubjectId as string,
-            setup,
-            targetConnectionId,
-          }).catch(() => undefined);
+        const validationTask = new Promise<void>((resolve, reject) => {
+          setImmediate(() => {
+            validateAndStageArtifact(ctx, {
+              artifactId,
+              connectorId,
+              displayNameRaw: rawDisplayName,
+              fileName,
+              manifest,
+              ownerSubjectId: ownerSubjectId as string,
+              setup,
+              targetConnectionId,
+            }).then(resolve, reject);
+          });
         });
+        // Keep the original promise available to lifecycle owners, including tests.
+        // The observer can report rejection even though the HTTP response is already 202.
+        validationTask.catch(() => undefined);
+        ctx.onManualUploadValidationTask?.(validationTask);
 
         await emitManualUploadAudit(ctx, req, res, {
           // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.

@@ -777,6 +777,8 @@ interface ServerOpts {
   nekoProxyAllowedHosts?: readonly string[] | null;
   nekoProxyAutoLogin?: boolean;
   nekoWindowSettleProbe?: ((url: string) => Promise<unknown>) | null;
+  /** Receives each scheduled validation promise before it starts. */
+  onManualUploadValidationTask?: (task: Promise<void>) => void;
   onScheduleMutation?: (() => void) | null;
   ownerAuthForceSecureCookies?: boolean;
   ownerAuthPassword?: string;
@@ -6228,6 +6230,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
       getOwnerSubjectId,
       handleError,
       importBaseDir,
+      onManualUploadValidationTask: opts.onManualUploadValidationTask,
       pdppError,
       requireOwnerSession: ownerAuth.requireOwnerSession,
       resolveRegisteredConnectorManifest,
@@ -8397,6 +8400,7 @@ export async function startServer(opts: ServerOpts = {}) {
     nekoProxyAllowedHosts: opts.nekoProxyAllowedHosts,
     nekoProxyAutoLogin: opts.nekoProxyAutoLogin,
     nekoWindowSettleProbe: opts.nekoWindowSettleProbe,
+    onManualUploadValidationTask: opts.onManualUploadValidationTask,
     ownerAuthForceSecureCookies: opts.ownerAuthForceSecureCookies,
     ownerAuthPassword: opts.ownerAuthPassword,
     ownerAuthSameSite: opts.ownerAuthSameSite,
