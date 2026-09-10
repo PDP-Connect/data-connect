@@ -7411,11 +7411,19 @@ export function archiveRenderedVerdict<T extends RenderedVerdict>(
     const restartAddendum = setupFailedReason?.interruptedByRestart
       ? " (We restarted our system while you were signing in — this was not something you or the provider did wrong.)"
       : "";
+    // The named reason the connector recorded, appended to the SAME
+    // server-owned sentence rather than shipped as a separate field for a
+    // client to compose. Absent (or generic, and therefore withheld) it is
+    // the empty string and the copy below is byte-identical to its prior
+    // output.
+    const reportedAddendum = setupFailedReason?.connectorFailureReason
+      ? ` The last attempt reported: ${setupFailedReason.connectorFailureReason}.`
+      : "";
     if (setupFailedReason?.cause === "ttl_expired") {
       return {
         ...verdict,
         channel: "calm",
-        forward_statement: `This setup attempt expired while waiting for you to finish signing in. No records were collected.${restartAddendum} Start a fresh attempt when you're ready.`,
+        forward_statement: `This setup attempt expired while waiting for you to finish signing in. No records were collected.${reportedAddendum}${restartAddendum} Start a fresh attempt when you're ready.`,
         pill: { label: "Expired while waiting for you", tone: "grey" },
         progress: { ...verdict.progress, headline: "This connection attempt expired before you finished signing in." },
         required_actions: [],
@@ -7424,7 +7432,7 @@ export function archiveRenderedVerdict<T extends RenderedVerdict>(
     return {
       ...verdict,
       channel: "calm",
-      forward_statement: `Setup never finished for this source. No records were collected.${restartAddendum}`,
+      forward_statement: `Setup never finished for this source. No records were collected.${reportedAddendum}${restartAddendum}`,
       pill: { label: "Setup never completed", tone: "grey" },
       progress: { ...verdict.progress, headline: "This connection attempt did not finish." },
       required_actions: [],
@@ -7443,6 +7451,20 @@ export function archiveRenderedVerdict<T extends RenderedVerdict>(
 // `revocation_reason` was ever stamped for it, so nothing is guessed.
 export interface SetupFailedReason {
   readonly cause: "ttl_expired" | "owner_abandoned" | "unknown";
+  // The NAMED reason the connector itself recorded for the failed sign-in
+  // (`run_history.failure_reason`), e.g. `venmo_login_incomplete_after_submit`.
+  //
+  // `cause` above is a closed enum describing how the shell died on OUR side;
+  // it cannot say why the sign-in failed. That fact was already recorded by
+  // the run and simply never reached the owner, who read a bare "Setup never
+  // completed" while the system knew more than it was saying.
+  //
+  // `null` when no run recorded one, when the row predates this, or when the
+  // recorded value is a GENERIC placeholder — `connector_reported_failed` and
+  // friends name nothing the owner can act on, so showing them would trade a
+  // vague sentence for a jargon one. Withheld, the copy is byte-identical to
+  // its prior output.
+  readonly connectorFailureReason: string | null;
   // True when the owner's LATEST run against this shell was killed by our
   // own controller restart while they were mid-sign-in
   // (`controller_terminated_while_awaiting_owner_interaction` —
@@ -7474,8 +7496,27 @@ export function deriveSetupFailedReason(
   const cause = recorded === "ttl_expired" || recorded === "owner_abandoned" ? recorded : "unknown";
   return {
     cause,
+    connectorFailureReason: namedConnectorFailureReason(lastRun),
     interruptedByRestart: lastRun?.terminal_reason === SELF_INFLICTED_RESTART_TERMINAL_REASON,
   };
+}
+
+/**
+ * The connector-recorded failure reason, but only when it NAMES something.
+ * Generic placeholders (`GENERIC_TERMINAL_FAILURE_REASONS`) are withheld:
+ * they are the run's way of saying "it failed", which the owner can already
+ * see, so surfacing them would add jargon and no information.
+ */
+function namedConnectorFailureReason(lastRun: ConnectorRunSummary | null): string | null {
+  const reason = lastRun?.failure_reason;
+  if (typeof reason !== "string") {
+    return null;
+  }
+  const trimmed = reason.trim();
+  if (trimmed.length === 0 || GENERIC_TERMINAL_FAILURE_REASONS.has(trimmed)) {
+    return null;
+  }
+  return trimmed;
 }
 
 function deriveSourceVisibility(instance: ConnectorInstanceRow): "active" | "archived" | "setup_failed" {
