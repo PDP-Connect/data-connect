@@ -6306,7 +6306,7 @@ export interface ListConnectorSummariesOptions {
   readonly visibleConnections?: readonly ConnectorInstanceRow[];
 }
 
-type ConnectorRunSummaryInclusion = boolean | "singleton-active";
+export type ConnectorRunSummaryInclusion = boolean | "singleton-active";
 
 export type ConnectorSummariesCacheEntry = ConnectorSummaryCacheEntryForRuntime<ConnectorSummary>;
 
@@ -6523,7 +6523,21 @@ interface PageProductEvidence {
   > | null;
 }
 
-function shouldHydrateRunSummariesForInstance(
+// A revoked row whose binding is still a setup-shell kind: setup was started
+// and never completed. This is exactly the population `deriveSetupFailedReason`
+// answers for and exactly the population `deriveSourceVisibility` marks
+// `setup_failed`, so hydration and rendering share ONE predicate — a row can
+// never be rendered from a run the projection declined to read.
+function isRetiredSetupShell(instance: ConnectorInstanceRow): boolean {
+  const binding = instance.sourceBinding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+    return false;
+  }
+  const kind = (binding as Record<string, unknown>).kind;
+  return instance.status === "revoked" && typeof kind === "string" && RETIRED_SETUP_SHELL_BINDING_KINDS.has(kind);
+}
+
+export function shouldHydrateRunSummariesForInstance(
   mode: ConnectorRunSummaryInclusion,
   instance: ConnectorInstanceRow,
   _activeVisibleConnectionCount: number
@@ -6533,6 +6547,21 @@ function shouldHydrateRunSummariesForInstance(
   }
   if (mode === false) {
     return false;
+  }
+  // A retired setup shell is `revoked` BY CONSTRUCTION — that is the only
+  // status a `setup_failed` row can have (`deriveSetupFailedReason` returns
+  // null for anything else). Excluding `revoked` wholesale therefore
+  // guaranteed `lastRun === null` for exactly the rows whose verdict reads a
+  // run: `deriveSetupFailedReason` inspects `lastRun.terminal_reason` to tell
+  // our own restart apart from the owner's or the provider's failure, so the
+  // "we restarted on you" addendum could never render on the Sources list. The
+  // reader was correct and simply never handed the run it reads.
+  //
+  // Scoped deliberately to retired setup shells rather than to `revoked` at
+  // large: an ordinary revoked connection has no verdict that consults a run,
+  // so hydrating it would buy nothing and cost a run-history read per row.
+  if (instance.status === "revoked") {
+    return isRetiredSetupShell(instance);
   }
   // "singleton-active" controls legacy connector-wide fallback, not whether
   // exact connection-scoped evidence is allowed. `getLatestRunSummaryForConnection`
@@ -7437,20 +7466,10 @@ export function deriveSetupFailedReason(
   instance: ConnectorInstanceRow,
   lastRun: ConnectorRunSummary | null
 ): SetupFailedReason | null {
-  const binding = instance.sourceBinding;
-  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+  if (!isRetiredSetupShell(instance)) {
     return null;
   }
-  const record = binding as Record<string, unknown>;
-  if (
-    !(
-      instance.status === "revoked" &&
-      typeof record.kind === "string" &&
-      RETIRED_SETUP_SHELL_BINDING_KINDS.has(record.kind)
-    )
-  ) {
-    return null;
-  }
+  const record = instance.sourceBinding as Record<string, unknown>;
   const recorded = record.revocation_reason;
   const cause = recorded === "ttl_expired" || recorded === "owner_abandoned" ? recorded : "unknown";
   return {

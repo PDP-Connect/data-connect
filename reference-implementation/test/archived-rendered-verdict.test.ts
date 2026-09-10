@@ -23,6 +23,7 @@ import {
   type ConnectorInstanceRow,
   type ConnectorRunSummary,
   deriveSetupFailedReason,
+  shouldHydrateRunSummariesForInstance,
 } from "../server/ref-control.ts";
 
 const RECONNECT_RE = /reconnect/i;
@@ -358,4 +359,65 @@ test("deriveSetupFailedReason treats a null lastRun as never interrupted by our 
   const instance = revokedShellInstance({ revocation_reason: "ttl_expired" });
   const reason = deriveSetupFailedReason(instance, null);
   assert.equal(reason?.interruptedByRestart, false);
+});
+
+// shouldHydrateRunSummariesForInstance: the gate that decides whether
+// `deriveSetupFailedReason` is ever HANDED a run to read.
+//
+// The tests above prove the reader is correct once a run reaches it. They pass
+// `lastRun` in directly, so none of them can observe the upstream gate. That
+// gap is the defect these tests pin: a `setup_failed` row is by construction
+// `revoked`, so if the gate hydrates only `active`/`draft`, the reader is
+// permanently handed `null` on the Sources list and `interruptedByRestart` can
+// never be true there — the "we restarted on you" addendum is unreachable no
+// matter how correct the reader is.
+
+test("a revoked retired-setup-shell row hydrates its run summaries — the setup_failed reader needs the run", () => {
+  const instance = revokedShellInstance({ revocation_reason: "ttl_expired" });
+
+  assert.equal(
+    shouldHydrateRunSummariesForInstance("singleton-active", instance, 0),
+    true,
+    "a revoked setup shell must hydrate: it is the ONLY status a setup_failed row can have, and deriveSetupFailedReason reads lastRun.terminal_reason to detect our own restart"
+  );
+});
+
+test("the restart addendum is reachable end to end for a revoked setup shell, not just in isolation", () => {
+  const instance = revokedShellInstance({ revocation_reason: "ttl_expired" });
+  const lastRun = runSummary({ terminal_reason: "controller_terminated_while_awaiting_owner_interaction" });
+
+  // Model the real projection order: the gate decides whether a run is read at
+  // all, and only then does the reader see it.
+  const hydrated = shouldHydrateRunSummariesForInstance("singleton-active", instance, 0);
+  const reason = deriveSetupFailedReason(instance, hydrated ? lastRun : null);
+  const verdict = archiveRenderedVerdict(livingVerdict(), "setup_failed", reason);
+
+  assert.match(
+    verdict.forward_statement,
+    RESTARTED_ADDENDUM_RE,
+    "the owner must be told we restarted on him; gating hydration to active/draft makes this addendum dead code on the Sources list"
+  );
+});
+
+test("an ordinary revoked connection still does not hydrate — the fix is scoped to retired setup shells", () => {
+  const instance: ConnectorInstanceRow = {
+    ...revokedShellInstance(),
+    sourceBinding: { kind: "browser_collector" },
+  };
+
+  assert.equal(
+    shouldHydrateRunSummariesForInstance("singleton-active", instance, 0),
+    false,
+    "widening hydration to every revoked row would be a different change with a cost this defect does not justify"
+  );
+});
+
+test("an explicit false inclusion mode still wins over the retired-setup-shell allowance", () => {
+  const instance = revokedShellInstance({ revocation_reason: "ttl_expired" });
+
+  assert.equal(
+    shouldHydrateRunSummariesForInstance(false, instance, 0),
+    false,
+    "a caller that asked for no run summaries must not have them forced back on"
+  );
 });
