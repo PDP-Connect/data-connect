@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createInterface as createFileReader } from "node:readline";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -51,8 +51,9 @@ import {
 } from "../../src/connector-runtime.ts";
 import {
 	isLocalJsonlPhysicalCursorV1,
-	LocalJsonlMalformedLineError,
 	type LocalJsonlScanResult,
+	LocalJsonlSourceReadError,
+	LocalJsonlUnstableSourceError,
 	scanLocalJsonl,
 } from "../../src/local-jsonl-cursor.ts";
 import {
@@ -87,13 +88,22 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	ClaudeChildFileCursorV1,
 	ClaudeCodeState,
+	ClaudeJsonlGap,
 	ClaudeSessionFileCursorV1,
+	ClaudeSourceGap,
 	JsonlObject,
 	JsonlObservations,
 	SessionAccumulator,
 } from "./types.ts";
 
 export type { JsonlObservations } from "./types.ts";
+
+// Literal values keep every emitted reason visible to the completeness scan.
+const JSONL_GAP_SKIP_REASON: Record<ClaudeJsonlGap["reason"], string> = {
+	malformed_jsonl_line: "malformed_jsonl_line",
+	non_object_jsonl_record: "non_object_jsonl_record",
+	truncated_jsonl_tail: "truncated_jsonl_tail",
+};
 
 const nowIso = (): string => new Date().toISOString();
 const MD_FILE_RE = /\.md$/i;
@@ -578,13 +588,21 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 async function readFilesRecursively(
 	rootDir: string,
 	predicate: (ent: Dirent) => boolean,
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<Array<{ fullPath: string; relPath: string }>> {
 	const out: Array<{ fullPath: string; relPath: string }> = [];
 	const walk = async (dir: string, prefix: string): Promise<void> => {
 		// Fail closed on an unreadable directory — see `readLocalDirOrFailClosed`.
 		// A missing directory (ENOENT) is honestly empty; an unreadable one is a
 		// source-boundary failure and must never be reported as "no files".
-		const items = await readLocalDirOrFailClosed(dir);
+		let items: Dirent[] | null;
+		try {
+			items = await readLocalDirOrFailClosed(dir);
+		} catch (error) {
+			if (!onDirectoryError) throw error;
+			await onDirectoryError(dir, error);
+			return;
+		}
 		if (items === null) {
 			return;
 		}
@@ -1006,7 +1024,10 @@ async function emitProjectMemoryNotes({
 
 // ─── Projects directory scan ────────────────────────────────────────────
 
+type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
+
 export interface ScanProjectDirsArgs {
+	onDirectoryError?: DirectoryReadFailure;
 	baseDir: string;
 	/** Threaded through to parseJsonlFile/processJsonlLine so pass 1 is
 	 *  silent (accumulator-only) and pass 2 emits messages/attachments. */
@@ -1088,11 +1109,15 @@ async function processTopLevelJsonl(
 	}
 }
 
-async function readSubagentFiles(subagentsDir: string): Promise<string[]> {
+async function readSubagentFiles(
+	subagentsDir: string,
+	onDirectoryError?: DirectoryReadFailure,
+): Promise<string[]> {
 	const files = await readFilesRecursively(
 		subagentsDir,
 		(ent) =>
 			(ent.isFile() || ent.isSymbolicLink()) && ent.name.endsWith(".jsonl"),
+		onDirectoryError,
 	);
 	return files.map((file) => file.relPath);
 }
@@ -1109,7 +1134,10 @@ async function processSessionDir(
 	if (!args.skipJsonl) {
 		// subagents/*.jsonl → parse as messages belonging to this session.
 		const subagentsDir = join(sessionDir, "subagents");
-		const subFiles = await readSubagentFiles(subagentsDir);
+		const subFiles = await readSubagentFiles(
+			subagentsDir,
+			args.onDirectoryError,
+		);
 		for (const f of subFiles) {
 			await processJsonlFile({
 				args,
@@ -1141,7 +1169,8 @@ async function scanProjectDir(
 	let entries: Dirent[];
 	try {
 		entries = await readdir(projectPath, { withFileTypes: true });
-	} catch {
+	} catch (error) {
+		await args.onDirectoryError?.(projectPath, error);
 		return;
 	}
 	if (
@@ -1175,13 +1204,18 @@ async function scanProjectDir(
 async function listProjectDirs(
 	baseDir: string,
 	emit: CollectContext["emit"],
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<string[] | null> {
 	let projectDirs: string[];
 	try {
 		projectDirs = (await readdir(baseDir)).filter(
 			(name) => !name.startsWith("."),
 		);
-	} catch {
+	} catch (error) {
+		if (onDirectoryError) {
+			await onDirectoryError(baseDir, error);
+			return [];
+		}
 		await emit({
 			type: "SKIP_RESULT",
 			stream: "sessions",
@@ -1199,7 +1233,11 @@ async function listProjectDirs(
 export async function scanProjectDirs(
 	args: ScanProjectDirsArgs,
 ): Promise<void> {
-	const projectDirs = await listProjectDirs(args.baseDir, args.emit);
+	const projectDirs = await listProjectDirs(
+		args.baseDir,
+		args.emit,
+		args.onDirectoryError,
+	);
 	if (projectDirs === null) {
 		return;
 	}
@@ -1310,6 +1348,27 @@ function readSessionAccumulator(
 	};
 }
 
+function hasValidJsonlGaps(cursor: Record<string, unknown>): boolean {
+	if (cursor.jsonl_gaps === undefined) return true;
+	return (
+		Array.isArray(cursor.jsonl_gaps) &&
+		cursor.jsonl_gaps.every(
+			(gap) =>
+				isRecord(gap) &&
+				typeof gap.path === "string" &&
+				typeof gap.line_number === "number" &&
+				Number.isSafeInteger(gap.line_number) &&
+				gap.line_number > 0 &&
+				typeof gap.byte_offset === "number" &&
+				Number.isSafeInteger(gap.byte_offset) &&
+				gap.byte_offset >= 0 &&
+				(gap.reason === "malformed_jsonl_line" ||
+					gap.reason === "non_object_jsonl_record" ||
+					gap.reason === "truncated_jsonl_tail"),
+		)
+	);
+}
+
 function readChildFileCursors(
 	value: unknown,
 ): Record<string, ClaudeChildFileCursorV1> {
@@ -1321,6 +1380,7 @@ function readChildFileCursors(
 		if (
 			isRecord(cursor) &&
 			isLocalJsonlPhysicalCursorV1(cursor) &&
+			hasValidJsonlGaps(cursor) &&
 			readStringOrNull(cursor.current_session_id) !== undefined
 		) {
 			out[path] = {
@@ -1345,7 +1405,15 @@ function readSessionFileCursors(value: unknown): {
 			? readJsonlObservations(cursor.observation)
 			: undefined;
 		if (
-			!(isRecord(cursor) && isLocalJsonlPhysicalCursorV1(cursor) && observation)
+			!(
+				isRecord(cursor) &&
+				isLocalJsonlPhysicalCursorV1(cursor) &&
+				hasValidJsonlGaps(cursor) &&
+				(cursor.session_ids === undefined ||
+					(Array.isArray(cursor.session_ids) &&
+						cursor.session_ids.every((id) => typeof id === "string"))) &&
+				observation
+			)
 		) {
 			return { cursors: {}, valid: false };
 		}
@@ -1382,54 +1450,70 @@ function cloneObservations(
 	};
 }
 
-function parseJsonlLine(
-	line: Buffer,
-	committedOffsetBytes: number,
-): JsonlObject | null {
-	const text = line.toString("utf8");
-	if (!text.trim()) {
-		return null;
-	}
-	try {
-		return JSON.parse(text) as JsonlObject;
-	} catch (error) {
-		// A complete malformed line is a source gap. Throwing prevents the
-		// physical cursor from being returned past this line; the collect caller
-		// reports the unresolved stream gap instead of silently consuming it.
-		throw new LocalJsonlMalformedLineError(committedOffsetBytes, {
-			cause: error,
-		});
-	}
-}
-
-async function reportMalformedJsonlGap(input: {
-	error: unknown;
-	reportStreamFailure:
-		| ((
-				stream: string,
-				message: string,
-				options?: { retryable?: boolean },
-		  ) => Promise<void>)
+async function scanClaudeJsonl(input: {
+	path: string;
+	prior:
+		| (LocalJsonlScanResult["cursor"] & { jsonl_gaps?: ClaudeJsonlGap[] })
 		| undefined;
-	requested: Map<string, StreamScope>;
-}): Promise<void> {
-	if (
-		!(
-			input.error instanceof LocalJsonlMalformedLineError &&
-			input.reportStreamFailure
-		)
-	) {
-		return;
+	onObject: (obj: JsonlObject) => Promise<void>;
+}): Promise<
+	LocalJsonlScanResult & {
+		cursor: LocalJsonlScanResult["cursor"] & { jsonl_gaps: ClaudeJsonlGap[] };
 	}
-	for (const stream of ["sessions", "messages", "attachments"] as const) {
-		if (input.requested.has(stream)) {
-			await input.reportStreamFailure(
-				stream,
-				"Claude Code contains a malformed complete JSONL line; the source cursor was not advanced past it",
-				{ retryable: false },
-			);
-		}
-	}
+> {
+	const gaps: ClaudeJsonlGap[] = [];
+	const result = await scanLocalJsonl({
+		path: input.path,
+		prior: input.prior,
+		onLine: async (line, byteOffset, lineNumber) => {
+			const text = line.toString("utf8");
+			if (!text.trim()) return;
+			let obj: unknown;
+			try {
+				obj = JSON.parse(text);
+			} catch {
+				gaps.push({
+					path: input.path,
+					line_number: lineNumber,
+					byte_offset: byteOffset,
+					reason: "malformed_jsonl_line",
+				});
+				return;
+			}
+			if (!isRecord(obj)) {
+				gaps.push({
+					path: input.path,
+					line_number: lineNumber,
+					byte_offset: byteOffset,
+					reason: "non_object_jsonl_record",
+				});
+				return;
+			}
+			await input.onObject(obj);
+		},
+		onIncompleteLine: async (_line, byteOffset, lineNumber) => {
+			gaps.push({
+				path: input.path,
+				line_number: lineNumber,
+				byte_offset: byteOffset,
+				reason: "truncated_jsonl_tail",
+			});
+		},
+	});
+	// Rewrites recompute gaps. Appends retain only committed-prefix gaps;
+	// the pending tail is examined again and can now be complete.
+	const retained =
+		result.decision.kind === "rebuild"
+			? []
+			: (input.prior?.jsonl_gaps ?? []).filter(
+					(gap) =>
+						result.decision.kind === "fast_skip" ||
+						gap.byte_offset < (input.prior?.committed_offset_bytes ?? 0),
+				);
+	return {
+		...result,
+		cursor: { ...result.cursor, jsonl_gaps: [...retained, ...gaps] },
+	};
 }
 
 interface LocalJsonlTelemetry {
@@ -1538,11 +1622,22 @@ export async function discoverClaudeJsonlSources(
 	baseDir: string,
 	emit: CollectContext["emit"],
 	scope?: EnumerationScope | null,
+	onDirectoryError?: DirectoryReadFailure,
 ): Promise<ClaudeJsonlSource[] | null> {
-	const projectDirs = await listProjectDirs(baseDir, emit);
-	if (projectDirs === null) {
-		return null;
-	}
+	let directoryFailed = false;
+	const reportNestedDirectoryError: DirectoryReadFailure | undefined =
+		onDirectoryError
+			? async (path, error) => {
+					directoryFailed = true;
+					await onDirectoryError(path, error);
+				}
+			: undefined;
+	const projectDirs = await listProjectDirs(
+		baseDir,
+		emit,
+		reportNestedDirectoryError,
+	);
+	if (projectDirs === null) return null;
 	const sources: ClaudeJsonlSource[] = [];
 	for (const projectDir of projectDirs) {
 		if (!projectDirMatchesSourceRoots(projectDir, scope)) {
@@ -1552,7 +1647,9 @@ export async function discoverClaudeJsonlSources(
 		let entries: Dirent[];
 		try {
 			entries = await readdir(projectPath, { withFileTypes: true });
-		} catch {
+		} catch (error) {
+			directoryFailed = true;
+			await onDirectoryError?.(projectPath, error);
 			continue;
 		}
 		for (const entry of entries
@@ -1570,7 +1667,10 @@ export async function discoverClaudeJsonlSources(
 			)
 			.sort((a, b) => a.name.localeCompare(b.name))) {
 			const subagentsDir = join(projectPath, entry.name, "subagents");
-			for (const relPath of await readSubagentFiles(subagentsDir)) {
+			for (const relPath of await readSubagentFiles(
+				subagentsDir,
+				reportNestedDirectoryError,
+			)) {
 				sources.push({
 					forcedSessionId: entry.name,
 					path: join(subagentsDir, relPath),
@@ -1586,7 +1686,11 @@ export async function discoverClaudeJsonlSources(
 	// outcome: the runtime already treats it as an unresolved attempt, so the
 	// stream cannot reach `complete`, and the owner gets an actionable message
 	// naming the expected root format.
-	if (sources.length === 0 && (scope?.source_roots?.length ?? 0) > 0) {
+	if (
+		!directoryFailed &&
+		sources.length === 0 &&
+		(scope?.source_roots?.length ?? 0) > 0
+	) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: "sessions",
@@ -1604,6 +1708,58 @@ export async function discoverClaudeJsonlSources(
 	return sources;
 }
 
+function readSourceGaps(value: unknown): Record<string, ClaudeSourceGap> {
+	if (!isRecord(value)) return {};
+	const gaps: Record<string, ClaudeSourceGap> = {};
+	for (const [path, gap] of Object.entries(value)) {
+		if (
+			isRecord(gap) &&
+			gap.path === path &&
+			gap.reason === "source_read_error" &&
+			typeof gap.error_code === "string"
+		) {
+			gaps[path] = {
+				path,
+				reason: "source_read_error",
+				error_code: gap.error_code,
+			};
+		}
+	}
+	return gaps;
+}
+
+async function tryScanTranscript<T>(
+	path: string,
+	gaps: Record<string, ClaudeSourceGap>,
+	scan: () => Promise<T>,
+): Promise<T | undefined> {
+	try {
+		const result = await scan();
+		delete gaps[path];
+		return result;
+	} catch (error) {
+		if (
+			!(
+				error instanceof LocalJsonlSourceReadError ||
+				error instanceof LocalJsonlUnstableSourceError
+			)
+		)
+			throw error;
+		const cause = error.cause;
+		gaps[path] = {
+			path,
+			reason: "source_read_error",
+			error_code:
+				isRecord(cause) && typeof cause.code === "string"
+					? cause.code
+					: error instanceof LocalJsonlUnstableSourceError
+						? "SOURCE_CHANGED"
+						: "UNKNOWN",
+		};
+		return undefined;
+	}
+}
+
 async function scanSessionSource(input: {
 	cursor: ClaudeSessionFileCursorV1 | undefined;
 	projectDir: string;
@@ -1619,14 +1775,11 @@ async function scanSessionSource(input: {
 		? cloneObservations(input.cursor.observation, input.source.forcedSessionId)
 		: makeJsonlObservations(input.source.forcedSessionId);
 	const sessionIds = new Set<string>();
-	const result = await scanLocalJsonl({
+	const pendingAggregates = new Map<string, SessionAccumulator>();
+	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
-		onLine: async (line, committedOffsetBytes) => {
-			const obj = parseJsonlLine(line, committedOffsetBytes);
-			if (!obj) {
-				return;
-			}
+		onObject: async (obj) => {
 			const before = observation.messageCount;
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
 			await processJsonlLine({
@@ -1640,8 +1793,15 @@ async function scanSessionSource(input: {
 				obj,
 				obs: observation,
 			});
+			if (
+				observation.sessionId &&
+				!pendingAggregates.has(observation.sessionId)
+			) {
+				const prior = input.sessionAccumulators.get(observation.sessionId);
+				if (prior) pendingAggregates.set(observation.sessionId, { ...prior });
+			}
 			updateSessionAccumulatorFromCurrentLine(
-				input.sessionAccumulators,
+				pendingAggregates,
 				input.projectDir,
 				observation,
 				obj,
@@ -1652,9 +1812,26 @@ async function scanSessionSource(input: {
 			}
 		},
 	});
+	// A failed snapshot must not leave partial counts in the shared fold.
+	for (const [id, aggregate] of pendingAggregates)
+		input.sessionAccumulators.set(id, aggregate);
 	observeLocalJsonlScan(input.telemetry, result);
 	return {
-		cursor: { ...result.cursor, observation },
+		cursor: {
+			...result.cursor,
+			observation,
+			session_ids: [
+				...new Set([
+					...(result.decision.kind === "rebuild"
+						? []
+						: (input.cursor?.session_ids ??
+							(input.cursor?.observation.sessionId
+								? [input.cursor.observation.sessionId]
+								: []))),
+					...sessionIds,
+				]),
+			],
+		},
 		rebuilt: Boolean(input.cursor && result.decision.kind === "rebuild"),
 		sessionIds,
 	};
@@ -1677,14 +1854,10 @@ async function scanChildSource(input: {
 		input.cursor?.current_session_id ?? observation.sessionId;
 	let messagesExamined = 0;
 	let attachmentsExamined = 0;
-	const result = await scanLocalJsonl({
+	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
-		onLine: async (line, committedOffsetBytes) => {
-			const obj = parseJsonlLine(line, committedOffsetBytes);
-			if (!obj) {
-				return;
-			}
+		onObject: async (obj) => {
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
 			// Classify by the same dispatch rule processJsonlLine applies (a line
 			// without a pinned session id is never dispatched to either stream) so
@@ -1842,14 +2015,15 @@ async function emitCoverageDiagnosticsState(input: {
  * with Codex's identical derived-stream problem — see
  * `buildDerivedCoverageRecord` in local-source-inventory.ts. A thrown error
  * during any scan above fails the whole run before this ever gets called
- * (see `run().catch` in connector-runtime.ts), so `scanComplete: true` is
- * honest whenever this is reached.
+ * (see `run().catch` in connector-runtime.ts). JSONL parse gaps instead
+ * leave the affected transcript streams incomplete while collection continues.
  */
 function buildDerivedCoverageRecords(input: {
 	requested: Map<string, StreamScope>;
 	scanComplete: boolean;
 	attachments: DerivedStreamCounts;
 	memoryNotes: DerivedStreamCounts;
+	memoryNotesComplete: boolean;
 	messages: DerivedStreamCounts;
 }): CoverageRecord[] {
 	const records: CoverageRecord[] = [];
@@ -1884,7 +2058,7 @@ function buildDerivedCoverageRecords(input: {
 				emitted: input.memoryNotes.emitted,
 				examined: input.memoryNotes.examined,
 				label: "memory note",
-				scanComplete: input.scanComplete,
+				scanComplete: input.memoryNotesComplete,
 				stream: "memory_notes",
 			}),
 		);
@@ -2117,7 +2291,97 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "claude_code",
 		validateRecord,
-		async collect({ state, requested, emit, emitRecord, reportStreamFailure }) {
+		async collect({ state, requested, emit, emitRecord }) {
+			const reportedGaps = new Set<string>();
+			const reportGaps = async (gaps: ClaudeJsonlGap[] | undefined) => {
+				for (const gap of gaps ?? []) {
+					const key = JSON.stringify(gap);
+					if (reportedGaps.has(key)) continue;
+					reportedGaps.add(key);
+					for (const stream of ["sessions", "messages", "attachments"]) {
+						if (requested.has(stream))
+							await emit({
+								type: "SKIP_RESULT",
+								stream,
+								reason: JSONL_GAP_SKIP_REASON[gap.reason],
+								message:
+									gap.reason === "truncated_jsonl_tail"
+										? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
+										: "Claude Code skipped an invalid JSONL record; other source records were collected",
+								diagnostics: { ...gap },
+							});
+					}
+				}
+			};
+			const reportSourceGaps = async (
+				streams: string[],
+				gaps: Record<string, ClaudeSourceGap>,
+			) => {
+				if (!streams.some((stream) => requested.has(stream))) return;
+				for (const gap of Object.values(gaps)) {
+					reportedGaps.add(JSON.stringify(gap));
+					for (const stream of streams) {
+						if (requested.has(stream))
+							await emit({
+								type: "SKIP_RESULT",
+								stream,
+								reason: "source_read_error",
+								message:
+									"Claude Code could not read a transcript; its prior cursor is retained for retry",
+								diagnostics: { ...gap },
+							});
+					}
+				}
+			};
+			const failedDirectories = new Set<string>();
+			const reportedDirectoryStreams = new Set<string>();
+			const reportDirectoryError: DirectoryReadFailure = async (
+				path,
+				error,
+			) => {
+				failedDirectories.add(path);
+				const gap = {
+					path,
+					reason: "source_directory_read_error",
+					error_code:
+						isRecord(error) && typeof error.code === "string"
+							? error.code
+							: "UNKNOWN",
+				};
+				for (const stream of [
+					"sessions",
+					"messages",
+					"attachments",
+					"memory_notes",
+				]) {
+					const key = `${path}\0${stream}`;
+					if (!requested.has(stream) || reportedDirectoryStreams.has(key))
+						continue;
+					await emit({
+						type: "SKIP_RESULT",
+						stream,
+						reason: "source_directory_read_error",
+						message:
+							"Claude Code could not enumerate a source directory; known file cursors are retained for retry",
+						diagnostics: gap,
+					});
+					reportedDirectoryStreams.add(key);
+					reportedGaps.add(JSON.stringify(gap));
+				}
+			};
+			const isUnavailablePath = (path: string): boolean =>
+				[...failedDirectories].some((directory) =>
+					path.startsWith(directory + sep),
+				);
+			const retainUnavailable = <T>(
+				prior: Record<string, T>,
+				next: Record<string, T>,
+			): void => {
+				for (const [path, value] of Object.entries(prior))
+					if (isUnavailablePath(path) && next[path] === undefined)
+						next[path] = value;
+			};
+
 			const claudeHome =
 				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 			const baseDir =
@@ -2164,8 +2428,33 @@ if (isMainModule(import.meta.url)) {
 					}`,
 				});
 			}
-			await assertRequestedClaudeSources({ baseDir, claudeHome, requested });
 			const typedState = state as ClaudeCodeState;
+			try {
+				await assertRequestedClaudeSources({ baseDir, claudeHome, requested });
+			} catch (error) {
+				// A failed source preflight cannot prove older parse gaps repaired.
+				await reportSourceGaps(
+					["sessions"],
+					readSourceGaps(typedState.sessions?.source_gaps),
+				);
+				await reportSourceGaps(
+					["messages", "attachments"],
+					readSourceGaps(typedState.messages?.source_gaps),
+				);
+				if (requested.has("sessions")) {
+					for (const cursor of Object.values(
+						readSessionFileCursors(typedState.sessions?.file_cursors).cursors,
+					))
+						await reportGaps(cursor.jsonl_gaps);
+				}
+				if (requested.has("messages") || requested.has("attachments")) {
+					for (const cursor of Object.values(
+						readChildFileCursors(typedState.messages?.file_cursors),
+					))
+						await reportGaps(cursor.jsonl_gaps);
+				}
+				throw error;
+			}
 			// STATE is stream-keyed per Collection Profile. JSONL child emits and
 			// session aggregation use separate cursors so sessions can backfill
 			// without re-emitting unchanged child records. Fall back to top-level
@@ -2247,6 +2536,8 @@ if (isMainModule(import.meta.url)) {
 
 				const messageRaw = typedState.messages;
 				const sessionsRaw = typedState.sessions;
+				const sessionSourceGaps = readSourceGaps(sessionsRaw?.source_gaps);
+				const childSourceGaps = readSourceGaps(messageRaw?.source_gaps);
 				const messageUsesLegacyJsonlMtimes =
 					messageRaw?.local_jsonl_cursor_version !== 1;
 				const sessionsUsesLegacyJsonlMtimes =
@@ -2281,19 +2572,44 @@ if (isMainModule(import.meta.url)) {
 					baseDir,
 					emit,
 					enumerationScope,
+					reportDirectoryError,
 				);
 				if (sources === null) {
 					return;
 				}
-				const sourcePaths = new Set(sources.map((source) => source.path));
+				const enumeratedPaths = new Set(sources.map((source) => source.path));
+				const sourcePaths = new Set(enumeratedPaths);
+				const unavailableSessionCursors: Record<
+					string,
+					ClaudeSessionFileCursorV1
+				> = {};
+				retainUnavailable(priorSessionCursors, unavailableSessionCursors);
+				// Absence cannot prove a saved parse gap repaired. Keep the original
+				// boundary and evidence until this file can actually be read again.
+				for (const [path, cursor] of Object.entries(priorSessionCursors)) {
+					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+						unavailableSessionCursors[path] = cursor;
+				}
+				for (const path of Object.keys(unavailableSessionCursors))
+					sourcePaths.add(path);
 				const telemetry = makeLocalJsonlTelemetry();
 				// Rich cursor state is authoritative. Rebuild these compatibility maps
-				// only from files discovered in this pass so removed/rotated paths do
-				// not become a retained per-file ledger.
+				// from discovered files and known files under unreadable directories;
+				// prune paths only when their directories were successfully enumerated.
 				const newMessageFileMtimes: Record<string, number> = {};
 				const newSessionFileMtimes: Record<string, number> = {};
-				let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {};
+				retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+				retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+				retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
+				let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {
+					...unavailableSessionCursors,
+				};
 				const nextChildCursors: Record<string, ClaudeChildFileCursorV1> = {};
+				retainUnavailable(priorChildCursors, nextChildCursors);
+				for (const [path, cursor] of Object.entries(priorChildCursors)) {
+					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+						nextChildCursors[path] = cursor;
+				}
 				let stagedSessionCursor:
 					| {
 							file_cursors: Record<string, ClaudeSessionFileCursorV1>;
@@ -2301,6 +2617,8 @@ if (isMainModule(import.meta.url)) {
 							fetched_at: string;
 							local_jsonl_cursor_version: 1;
 							session_aggregates: Record<string, SessionAccumulator>;
+							source_gaps: Record<string, ClaudeSourceGap>;
+							session_rebuild_required: boolean;
 					  }
 					| undefined;
 
@@ -2311,6 +2629,7 @@ if (isMainModule(import.meta.url)) {
 							!priorSessionCursors[source.path],
 					);
 					let rebuildAll =
+						sessionsRaw?.session_rebuild_required === true ||
 						!sessionSnapshotIsValid ||
 						missingRichCursorForKnownFile ||
 						Object.keys(priorSessionCursors).some(
@@ -2323,25 +2642,28 @@ if (isMainModule(import.meta.url)) {
 					);
 					const changedLegacySessionIds = new Set<string>();
 					for (const source of sources) {
-						let scanned: Awaited<ReturnType<typeof scanSessionSource>>;
-						try {
-							scanned = await scanSessionSource({
-								cursor: rebuildAll
-									? undefined
-									: priorSessionCursors[source.path],
-								projectDir: source.projectDir,
-								sessionAccumulators,
-								source,
-								telemetry,
-							});
-						} catch (error) {
-							await reportMalformedJsonlGap({
-								error,
-								reportStreamFailure,
-								requested,
-							});
-							throw error;
+						const scanned = await tryScanTranscript(
+							source.path,
+							sessionSourceGaps,
+							() =>
+								scanSessionSource({
+									cursor: rebuildAll
+										? undefined
+										: priorSessionCursors[source.path],
+									projectDir: source.projectDir,
+									sessionAccumulators,
+									source,
+									telemetry,
+								}),
+						);
+						if (!scanned) {
+							const prior = priorSessionCursors[source.path];
+							if (prior) nextSessionCursors[source.path] = prior;
+							delete newSessionFileMtimes[source.path];
+							continue;
 						}
+
+						await reportGaps(scanned.cursor.jsonl_gaps);
 						nextSessionCursors[source.path] = scanned.cursor;
 						newSessionFileMtimes[source.path] =
 							scanned.cursor.observed_mtime_ms;
@@ -2361,15 +2683,28 @@ if (isMainModule(import.meta.url)) {
 					}
 					if (rebuildAll && sessionSnapshotIsValid) {
 						sessionAccumulators = new Map();
-						nextSessionCursors = {};
+						nextSessionCursors = { ...unavailableSessionCursors };
 						for (const source of sources) {
-							const scanned = await scanSessionSource({
-								cursor: undefined,
-								projectDir: source.projectDir,
-								sessionAccumulators,
-								source,
-								telemetry,
-							});
+							const scanned = await tryScanTranscript(
+								source.path,
+								sessionSourceGaps,
+								() =>
+									scanSessionSource({
+										cursor: undefined,
+										projectDir: source.projectDir,
+										sessionAccumulators,
+										source,
+										telemetry,
+									}),
+							);
+							if (!scanned) {
+								const prior = priorSessionCursors[source.path];
+								if (prior) nextSessionCursors[source.path] = prior;
+								delete newSessionFileMtimes[source.path];
+								continue;
+							}
+
+							await reportGaps(scanned.cursor.jsonl_gaps);
 							nextSessionCursors[source.path] = scanned.cursor;
 							newSessionFileMtimes[source.path] =
 								scanned.cursor.observed_mtime_ms;
@@ -2378,6 +2713,32 @@ if (isMainModule(import.meta.url)) {
 					if (rebuildAll) {
 						telemetry.sessionRebuildAll += 1;
 					}
+					if (
+						rebuildAll &&
+						(Object.keys(sessionSourceGaps).length > 0 ||
+							Object.keys(unavailableSessionCursors).length > 0)
+					) {
+						// Preserve summaries only where an unreadable prior contributor
+						// makes the rebuilt fold incomplete. Unrelated sessions can advance.
+						for (const path of new Set([
+							...Object.keys(sessionSourceGaps),
+							...Object.keys(unavailableSessionCursors),
+						])) {
+							const prior = priorSessionCursors[path];
+							const ids =
+								prior?.session_ids ??
+								(prior?.observation.sessionId
+									? [prior.observation.sessionId]
+									: []);
+							for (const id of ids) {
+								const aggregate = priorSessionAggregates[id];
+								if (aggregate) sessionAccumulators.set(id, { ...aggregate });
+							}
+						}
+					}
+					for (const cursor of Object.values(nextSessionCursors))
+						await reportGaps(cursor.jsonl_gaps);
+					await reportSourceGaps(["sessions"], sessionSourceGaps);
 					await emitChangedSessions({
 						emitRecord,
 						next: sessionAccumulators,
@@ -2402,6 +2763,11 @@ if (isMainModule(import.meta.url)) {
 						fetched_at: nowIso(),
 						local_jsonl_cursor_version: 1 as const,
 						session_aggregates: sessionAggregates,
+						source_gaps: sessionSourceGaps,
+						session_rebuild_required:
+							rebuildAll &&
+							(Object.keys(sessionSourceGaps).length > 0 ||
+								Object.keys(unavailableSessionCursors).length > 0),
 					};
 				}
 
@@ -2429,7 +2795,11 @@ if (isMainModule(import.meta.url)) {
 						requested,
 						sessionAccumulators: new Map(),
 						skipJsonl: true,
+						onDirectoryError: reportDirectoryError,
 					});
+					retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+					retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+					retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
 				};
 				if (requested.has("sessions")) {
 					await scanLegacyNonJsonl();
@@ -2461,23 +2831,27 @@ if (isMainModule(import.meta.url)) {
 						const candidateLegacyBaseline =
 							messageUsesLegacyJsonlMtimes &&
 							messageLegacyJsonlMtimes.has(source.path);
-						let scanned: Awaited<ReturnType<typeof scanChildSource>>;
-						try {
-							scanned = await scanChildSource({
-								cursor: priorChildCursors[source.path],
-								emitRecord: countingEmitRecord,
-								emitRecords: !candidateLegacyBaseline,
-								requested,
-								source,
-								telemetry,
-							});
-						} catch (error) {
-							await reportMalformedJsonlGap({
-								error,
-								reportStreamFailure,
-								requested,
-							});
-							throw error;
+						let scanned:
+							| Awaited<ReturnType<typeof scanChildSource>>
+							| undefined;
+						scanned = await tryScanTranscript(
+							source.path,
+							childSourceGaps,
+							() =>
+								scanChildSource({
+									cursor: priorChildCursors[source.path],
+									emitRecord: countingEmitRecord,
+									emitRecords: !candidateLegacyBaseline,
+									requested,
+									source,
+									telemetry,
+								}),
+						);
+						if (!scanned) {
+							const prior = priorChildCursors[source.path];
+							if (prior) nextChildCursors[source.path] = prior;
+							delete newMessageFileMtimes[source.path];
+							continue;
 						}
 						// The scan, not a pre-scan stat, decides whether the old mtime
 						// actually describes the bytes that were cursorized. A change in
@@ -2491,22 +2865,24 @@ if (isMainModule(import.meta.url)) {
 								scanned.cursor.observed_mtime_ms,
 							)
 						) {
-							try {
-								scanned = await scanChildSource({
-									cursor: undefined,
-									emitRecord: countingEmitRecord,
-									emitRecords: true,
-									requested,
-									source,
-									telemetry,
-								});
-							} catch (error) {
-								await reportMalformedJsonlGap({
-									error,
-									reportStreamFailure,
-									requested,
-								});
-								throw error;
+							scanned = await tryScanTranscript(
+								source.path,
+								childSourceGaps,
+								() =>
+									scanChildSource({
+										cursor: undefined,
+										emitRecord: countingEmitRecord,
+										emitRecords: true,
+										requested,
+										source,
+										telemetry,
+									}),
+							);
+							if (!scanned) {
+								const prior = priorChildCursors[source.path];
+								if (prior) nextChildCursors[source.path] = prior;
+								delete newMessageFileMtimes[source.path];
+								continue;
 							}
 						}
 						if (requested.has("messages")) {
@@ -2515,11 +2891,18 @@ if (isMainModule(import.meta.url)) {
 						if (requested.has("attachments")) {
 							derivedCounts.attachments.examined += scanned.attachmentsExamined;
 						}
+						await reportGaps(scanned.cursor.jsonl_gaps);
 						nextChildCursors[source.path] = scanned.cursor;
 						newMessageFileMtimes[source.path] =
 							scanned.cursor.observed_mtime_ms;
 					}
 				}
+
+				if (requested.has("messages") || requested.has("attachments")) {
+					for (const cursor of Object.values(nextChildCursors))
+						await reportGaps(cursor.jsonl_gaps);
+				}
+				await reportSourceGaps(["messages", "attachments"], childSourceGaps);
 
 				if (!requested.has("sessions")) {
 					await scanLegacyNonJsonl();
@@ -2531,21 +2914,32 @@ if (isMainModule(import.meta.url)) {
 						cursor: { file_mtimes: newMemoryNoteMtimes, fetched_at: nowIso() },
 					});
 				}
-				// messages/attachments/memory_notes are parsed out of the same
-				// on-disk files as `sessions`, so they have no KnownLocalStore entry
+				// Transcript children and memory notes have no dedicated
+				// KnownLocalStore entry for their derived content streams
 				// and would otherwise never appear in coverage_diagnostics — see
 				// buildDerivedCoverageRecords. Every branch above that could touch
 				// these streams ran (or was gated by !requested.has(...)) before
-				// this point, so scanComplete: true is honest here; a thrown error
-				// anywhere above fails the whole run via run().catch before this
-				// line is ever reached.
+				// this point. Declared transcript gaps remain incomplete coverage even
+				// though all readable records have been collected.
+				if (reportedGaps.size > 0) {
+					for (const record of inventory.coverage) {
+						if (record.stream === "sessions") {
+							record.status = "unaccounted";
+							record.reason =
+								"Source gaps were declared in SKIP_RESULT events; affected coverage remains incomplete";
+							if (requested.has("coverage_diagnostics"))
+								await emitRecord("coverage_diagnostics", record);
+						}
+					}
+				}
 				const derivedCoverageRecords = requested.has("coverage_diagnostics")
 					? buildDerivedCoverageRecords({
 							attachments: derivedCounts.attachments,
 							memoryNotes: derivedCounts.memoryNotes,
+							memoryNotesComplete: failedDirectories.size === 0,
 							messages: derivedCounts.messages,
 							requested,
-							scanComplete: true,
+							scanComplete: reportedGaps.size === 0,
 						})
 					: [];
 				await emitDerivedCoverage({
@@ -2555,8 +2949,8 @@ if (isMainModule(import.meta.url)) {
 				// Re-commit coverage STATE now that the full collection pass
 				// completed. This supersedes the early static-only snapshot written
 				// right after the inventory pass (see the top of `collect()`) with
-				// the same content — the inventory itself did not change — but keeps
-				// the STATE cursor's `fetched_at` current for a full, successful run.
+				// the final gap classifications and derived coverage, and keeps
+				// the STATE cursor's `fetched_at` current for this completed run.
 				await emitCoverageDiagnosticsState({
 					derived: derivedCoverageRecords,
 					emit,
@@ -2567,6 +2961,7 @@ if (isMainModule(import.meta.url)) {
 				if (requested.has("messages") || requested.has("attachments")) {
 					const cursor = {
 						file_cursors: nextChildCursors,
+						source_gaps: childSourceGaps,
 						file_mtimes: newMessageFileMtimes,
 						fetched_at: nowIso(),
 						local_jsonl_cursor_version: 1 as const,

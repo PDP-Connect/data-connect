@@ -211,3 +211,9 @@ connector-protocol are removed. Its three in-repo dependencies
 `@pdpp/reference-contract`) are declared as `*`, so the host's pinned copies remain the
 single runtime source. The tarball checksum and root lock integrity bind this exact
 post-pack artifact.
+
+**Update (2026-09-10): pin moved to data-connectors commit `f57aa6f5a31df31aa3b389d5866d3a5ef791dbe8`.**
+Rebuilt with `scripts/revendor-polyfill-connectors.sh` for the malformed-line
+isolation fix in data-connectors#92. The upstream connector index is regenerated
+before packing; host-provided dependencies and bundled local collector sources
+are updated using the same post-pack procedure above.

@@ -10,6 +10,7 @@ const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 export interface LocalJsonlPhysicalCursorV1 {
 	committed_offset_bytes: number;
+	committed_line_count?: number;
 	committed_prefix_sha256: string;
 	observed_mtime_ms: number;
 	observed_size_bytes: number;
@@ -33,9 +34,17 @@ export interface LocalJsonlScanResult {
 }
 
 export interface ScanLocalJsonlArgs {
-	/** The second argument is the byte boundary that would be committed if the
-	 * callback completes successfully. */
-	onLine: (line: Buffer, committedOffsetBytes: number) => Promise<void>;
+	/** Byte offset is the start of the line; line numbers are one-based. */
+	onLine: (
+		line: Buffer,
+		byteOffset: number,
+		lineNumber: number,
+	) => Promise<void>;
+	onIncompleteLine?: (
+		line: Buffer,
+		byteOffset: number,
+		lineNumber: number,
+	) => Promise<void>;
 	path: string;
 	prior: LocalJsonlPhysicalCursorV1 | undefined;
 }
@@ -44,6 +53,36 @@ export class LocalJsonlUnstableSourceError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "LocalJsonlUnstableSourceError";
+	}
+}
+
+/** Filesystem failure, distinct from callback or output-transport failure. */
+export class LocalJsonlSourceReadError extends Error {
+	readonly path: string;
+	readonly operation: "open" | "read" | "stat" | "close";
+
+	constructor(
+		path: string,
+		operation: LocalJsonlSourceReadError["operation"],
+		cause: unknown,
+	) {
+		super(`local JSONL source ${operation} failed`, { cause });
+		this.name = "LocalJsonlSourceReadError";
+		this.path = path;
+		this.operation = operation;
+	}
+}
+
+/** Wrap only the filesystem call supplied here, never a consumer callback. */
+async function sourceIo<T>(
+	path: string,
+	operation: LocalJsonlSourceReadError["operation"],
+	action: () => Promise<T>,
+): Promise<T> {
+	try {
+		return await action();
+	} catch (error) {
+		throw new LocalJsonlSourceReadError(path, operation, error);
 	}
 }
 
@@ -70,6 +109,8 @@ export function isLocalJsonlPhysicalCursorV1(
 	}
 	return (
 		isFiniteNonNegativeInteger(value.committed_offset_bytes) &&
+		(value.committed_line_count === undefined ||
+			isFiniteNonNegativeInteger(value.committed_line_count)) &&
 		typeof value.committed_prefix_sha256 === "string" &&
 		SHA256_HEX_RE.test(value.committed_prefix_sha256) &&
 		typeof value.observed_mtime_ms === "number" &&
@@ -89,14 +130,19 @@ function sameOpenFile(
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function hashRange(handle: FileHandle, bytes: number): Promise<string> {
-	return (await hashRangeState(handle, bytes)).digest("hex");
+async function hashRange(
+	handle: FileHandle,
+	bytes: number,
+	path: string,
+): Promise<string> {
+	return (await hashRangeState(handle, bytes, path)).digest("hex");
 }
 
 /** Read a prefix once and retain its hash state for a later continuation. */
 async function hashRangeState(
 	handle: FileHandle,
 	bytes: number,
+	path: string,
 ): Promise<Hash> {
 	const hash = createHash("sha256");
 	let offset = 0;
@@ -104,7 +150,9 @@ async function hashRangeState(
 		const buffer = Buffer.allocUnsafe(
 			Math.min(READ_CHUNK_BYTES, bytes - offset),
 		);
-		const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+		const { bytesRead } = await sourceIo(path, "read", () =>
+			handle.read(buffer, 0, buffer.length, offset),
+		);
 		if (bytesRead !== buffer.length) {
 			throw new LocalJsonlUnstableSourceError(
 				"local JSONL source ended during a required prefix read",
@@ -122,8 +170,8 @@ async function verifyStablePath(
 	snapshot: { dev: number; ino: number; size: number; mtimeMs: number },
 ): Promise<void> {
 	const [afterHandle, afterPath] = await Promise.all([
-		handle.stat(),
-		stat(path),
+		sourceIo(path, "stat", () => handle.stat()),
+		sourceIo(path, "stat", () => stat(path)),
 	]);
 	if (
 		!(sameOpenFile(snapshot, afterHandle) && sameOpenFile(snapshot, afterPath))
@@ -161,9 +209,9 @@ async function proveCommittedPrefix(input: {
 	bytes: number;
 }): Promise<number> {
 	await verifyStablePath(input.path, input.handle, input.snapshot);
-	const first = await hashRange(input.handle, input.bytes);
+	const first = await hashRange(input.handle, input.bytes, input.path);
 	await verifyStablePath(input.path, input.handle, input.snapshot);
-	const second = await hashRange(input.handle, input.bytes);
+	const second = await hashRange(input.handle, input.bytes, input.path);
 	await verifyStablePath(input.path, input.handle, input.snapshot);
 	if (first !== input.expectedSha256 || second !== input.expectedSha256) {
 		throw new LocalJsonlUnstableSourceError(
@@ -183,16 +231,20 @@ async function proveCommittedPrefix(input: {
  */
 export async function scanLocalJsonl({
 	onLine,
+	onIncompleteLine,
 	path,
 	prior,
 }: ScanLocalJsonlArgs): Promise<LocalJsonlScanResult> {
-	const handle = await open(path, "r");
+	const handle = await sourceIo(path, "open", () => open(path, "r"));
+	let scanFailed = false;
 	try {
-		const snapshot = await handle.stat();
+		const snapshot = await sourceIo(path, "stat", () => handle.stat());
 		if (
 			prior &&
+			isLocalJsonlPhysicalCursorV1(prior) &&
 			prior.observed_size_bytes === snapshot.size &&
-			prior.observed_mtime_ms === snapshot.mtimeMs
+			prior.observed_mtime_ms === snapshot.mtimeMs &&
+			(!onIncompleteLine || prior.committed_offset_bytes === snapshot.size)
 		) {
 			return {
 				cursor: prior,
@@ -218,6 +270,7 @@ export async function scanLocalJsonl({
 			const actualPrefix = await hashRangeState(
 				handle,
 				prior.committed_offset_bytes,
+				path,
 			);
 			prefixBytesHashed += prior.committed_offset_bytes;
 			if (actualPrefix.copy().digest("hex") === prior.committed_prefix_sha256) {
@@ -232,6 +285,24 @@ export async function scanLocalJsonl({
 			}
 		}
 
+		let lineCount = startOffset > 0 ? prior?.committed_line_count : 0;
+		if (lineCount === undefined) {
+			lineCount = 0;
+			for (let offset = 0; offset < startOffset; ) {
+				const buffer = Buffer.allocUnsafe(
+					Math.min(READ_CHUNK_BYTES, startOffset - offset),
+				);
+				const { bytesRead } = await sourceIo(path, "read", () =>
+					handle.read(buffer, 0, buffer.length, offset),
+				);
+				if (bytesRead !== buffer.length)
+					throw new LocalJsonlUnstableSourceError(
+						"local JSONL source ended while counting prefix lines",
+					);
+				for (const byte of buffer) if (byte === 0x0a) lineCount += 1;
+				offset += bytesRead;
+			}
+		}
 		let position = startOffset;
 		let committed = startOffset;
 		let pending = Buffer.alloc(0);
@@ -240,11 +311,8 @@ export async function scanLocalJsonl({
 			const buffer = Buffer.allocUnsafe(
 				Math.min(READ_CHUNK_BYTES, snapshot.size - position),
 			);
-			const { bytesRead } = await handle.read(
-				buffer,
-				0,
-				buffer.length,
-				position,
+			const { bytesRead } = await sourceIo(path, "read", () =>
+				handle.read(buffer, 0, buffer.length, position),
 			);
 			if (bytesRead !== buffer.length) {
 				throw new LocalJsonlUnstableSourceError(
@@ -259,12 +327,17 @@ export async function scanLocalJsonl({
 				// Hash the bytes before invoking the callback: this is the exact
 				// committed prefix the callback observed, including the LF boundary.
 				deliveredPrefix.update(pending.subarray(0, lineEnd + 1));
-				await onLine(pending.subarray(0, lineEnd), committed);
+				await onLine(pending.subarray(0, lineEnd), committed, lineCount + 1);
+				lineCount += 1;
 				linesDelivered += 1;
 				committed += lineEnd + 1;
 				pending = pending.subarray(lineEnd + 1);
 				lineEnd = pending.indexOf(0x0a);
 			}
+		}
+
+		if (pending.length > 0 && onIncompleteLine) {
+			await onIncompleteLine(pending, committed, lineCount + 1);
 		}
 
 		const committedPrefix = deliveredPrefix.digest("hex");
@@ -277,6 +350,7 @@ export async function scanLocalJsonl({
 		});
 		const cursor = {
 			committed_offset_bytes: committed,
+			committed_line_count: lineCount,
 			committed_prefix_sha256: committedPrefix,
 			observed_mtime_ms: snapshot.mtimeMs,
 			observed_size_bytes: snapshot.size,
@@ -291,7 +365,16 @@ export async function scanLocalJsonl({
 			prefix_bytes_hashed: prefixBytesHashed,
 			tail_bytes_parsed: snapshot.size - startOffset,
 		};
+	} catch (error) {
+		scanFailed = true;
+		throw error;
 	} finally {
-		await handle.close();
+		if (scanFailed) {
+			// Preserve the original failure, particularly a transport failure that
+			// must not become a recoverable source gap because cleanup also failed.
+			await handle.close().catch(() => undefined);
+		} else {
+			await sourceIo(path, "close", () => handle.close());
+		}
 	}
 }

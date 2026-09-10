@@ -27,7 +27,7 @@ export interface ThreadFingerprint {
  * its last committed byte boundary instead of fully reparsed on every append.
  *
  * `offset_bytes` always ends on a line terminator — the byte position after the
- * last fully-parsed `\n`. `line_count`, `session_id`, the two counts, and the
+ * last parsed or explicitly gapped complete line. `line_count`, `session_id`, the two counts, and the
  * ts-range are the parser state at that boundary, carried forward so a suffix
  * parse continues the same record-key sequence and produces prior+delta
  * cumulative counts. `head_sha256` over the first `guard_bytes` of the file is
@@ -35,6 +35,9 @@ export interface ThreadFingerprint {
  * the file was truncated/replaced and the offset is no longer trustworthy.
  */
 export interface RolloutFileCursor {
+	/** Physical newline count, separate from the historical record-key counter. */
+	source_line_count?: number;
+	jsonl_gaps?: RolloutJsonlGap[];
 	first_ts: string | null;
 	function_call_count: number;
 	guard_bytes: number;
@@ -48,7 +51,24 @@ export interface RolloutFileCursor {
 	size_bytes: number;
 }
 
+export interface RolloutJsonlGap {
+	path: string;
+	line_number: number;
+	byte_offset: number;
+	reason:
+		| "malformed_jsonl_line"
+		| "non_object_jsonl_record"
+		| "truncated_jsonl_tail";
+}
+
+export interface RolloutSourceGap {
+	path: string;
+	reason: "rollout_source_read_error";
+	error_code: string | null;
+}
+
 interface RolloutStreamState {
+	source_gaps?: Record<string, RolloutSourceGap>;
 	file_cursors?: Record<string, RolloutFileCursor>;
 	file_mtimes?: Record<string, number>;
 }
