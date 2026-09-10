@@ -144,6 +144,33 @@ const MANIFEST = {
 
 const SCHEDULED_POLICY = projectRunAutomationPolicy({ refreshPolicy: null, triggerKind: "scheduled" });
 
+// `maxRunWallClockMs` is a RESETTABLE no-progress allowance, not a total-run
+// budget: `createAttemptWatchdog`'s `markProgress` re-arms the timer on every
+// PROGRESS message (run-executor.ts `arm()`). The watchdog is armed at
+// construction in `createActiveRunAttemptLease`, BEFORE the connector
+// subprocess is spawned, so the FIRST allowance must cover `node` startup, the
+// START handshake and the ingest round-trip together.
+//
+// Measured on a 24-core host (the run-executor's own `elapsed_ms` at the
+// phase-boundary latch — total attempt time, spawn included): 84-124 ms idle,
+// up to 148 ms under load. Against the previous 150 ms allowance that is a 2 ms
+// margin, which is why this file was the one remaining load-sensitive test in
+// the suite.
+//
+// This raises the no-progress allowance to 400 ms and resets it on connector
+// readiness; the completion case stays at three allowances and the secondary
+// ceiling at four. Startup remains subject to the initial allowance — the ready
+// message widens the allowance available AFTER it, it does not make startup
+// unbounded or remove timing sensitivity.
+//
+// Deadline-honesty is unweakened: every "must time out" test still hangs
+// forever with no further progress, and the phase-boundary test's post-boundary
+// sleep is still a multiple of the allowance.
+const WALL_CLOCK_BUDGET_MS = 400;
+// The post-boundary sleep must be unambiguously longer than the budget, so a
+// re-armed (not disarmed) watchdog would still kill the run and fail the test.
+const POST_BOUNDARY_SLEEP_MS = WALL_CLOCK_BUDGET_MS * 3;
+
 /**
  * Writes a connector that emits `recordCount` RECORD messages + a STATE
  * checkpoint, then (if `hang` is true) blocks forever without sending DONE or
@@ -168,6 +195,10 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   const msg = JSON.parse(line);
   if (msg.type !== "START") return;
+  // Reset the no-progress allowance now that this process is up. Startup
+  // itself still had to fit the initial allowance; this widens what is
+  // available after it. See WALL_CLOCK_BUDGET_MS.
+  process.stdout.write(JSON.stringify({ message: "connector ready", type: "PROGRESS" }) + "\\n");
   const records = ${JSON.stringify(records)};
   for (const r of records) {
     process.stdout.write(JSON.stringify(r) + "\\n");
@@ -220,6 +251,10 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", async (line) => {
   const msg = JSON.parse(line);
   if (msg.type !== "START") return;
+  // Reset the no-progress allowance now that this process is up. Startup
+  // itself still had to fit the initial allowance; this widens what is
+  // available after it. See WALL_CLOCK_BUDGET_MS.
+  process.stdout.write(JSON.stringify({ message: "connector ready", type: "PROGRESS" }) + "\\n");
   const records = ${JSON.stringify(records)};
   for (const r of records) {
     process.stdout.write(JSON.stringify(r) + "\\n");
@@ -357,10 +392,12 @@ test(
   "a run that durably emits N records before being killed by the wall-clock watchdog reports records_emitted: N, not 0",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    // 150ms is comfortably longer than the ingest round-trip for 5 records
-    // but short enough the test doesn't hang; the connector hangs forever
-    // after emitting, so ONLY the watchdog can end this run.
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    // The allowance resets on the connector's "ready" PROGRESS, so the ingest
+    // round-trip for 5 records gets a full allowance of its own rather than
+    // sharing one with startup. It is still short enough that the test doesn't
+    // hang; the connector hangs forever after emitting, so ONLY the watchdog
+    // can end this run.
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
     const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
 
@@ -378,7 +415,7 @@ test(
   "a run that emits zero records before being killed by the watchdog still reports records_emitted: 0 (no fabrication in either direction)",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
     const record = await launchRun(schedule(writeConnector(tmpDir, 0, true), ownerToken), false, SCHEDULED_POLICY);
 
@@ -396,7 +433,7 @@ test(
   "a run killed by the watchdog with unfinished work records a typed gap, not an empty known_gaps array",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
     const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
 
@@ -430,15 +467,16 @@ test(
   "a connector that declares a local-only phase boundary is not truncated by maxRunWallClockMs, even though it runs well past that budget",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    // Budget (150ms) is far shorter than the connector's post-boundary sleep
-    // (500ms). Without the phase-boundary fix this run would be killed by
-    // run_timed_out at ~150ms; with the fix, the watchdog disarms itself once
-    // the PROGRESS phase_boundary message arrives and the run is free to run
-    // past 150ms to genuine completion.
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    // The budget is far shorter than the connector's post-boundary sleep
+    // (POST_BOUNDARY_SLEEP_MS = 3x the budget). Without the phase-boundary fix
+    // this run would be killed by run_timed_out one budget after the boundary;
+    // with the fix, the watchdog disarms itself once the PROGRESS
+    // phase_boundary message arrives and the run is free to run past the budget
+    // to genuine completion.
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
     const record = await launchRun(
-      schedule(writeConnectorWithPhaseBoundary(tmpDir, 5, 500), ownerToken),
+      schedule(writeConnectorWithPhaseBoundary(tmpDir, 5, POST_BOUNDARY_SLEEP_MS), ownerToken),
       false,
       SCHEDULED_POLICY
     );
@@ -472,7 +510,11 @@ test(
     };
     assert.equal(event.connector_instance_id, CONNECTOR_INSTANCE_ID);
     assert.equal(data.phase_boundary, "local_only_phase_started");
-    assert.equal(data.disarmed_timer_ms, 150, "must name the maxRunWallClockMs value the timer was disarmed from");
+    assert.equal(
+      data.disarmed_timer_ms,
+      WALL_CLOCK_BUDGET_MS,
+      "must name the maxRunWallClockMs value the timer was disarmed from"
+    );
     assert.ok(
       typeof data.elapsed_ms === "number" && data.elapsed_ms >= 0,
       `expected a non-negative elapsed_ms at latch, got ${String(data.elapsed_ms)}`
@@ -484,7 +526,7 @@ test(
   "a run with no phase-boundary declaration never emits a local_only_phase_started spine event (control for the durable-trace test above)",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
     const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
 
@@ -505,13 +547,15 @@ test(
   "without a phase-boundary declaration, a connector running past maxRunWallClockMs IS killed (control for the phase-boundary test above)",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
-    // Same shape as the phase-boundary connector (5 records, then a 500ms
-    // sleep before DONE) but with no phase_boundary PROGRESS message — proves
-    // the watchdog's default behavior (kill at maxRunWallClockMs) is still
-    // intact and it is specifically the phase_boundary signal, not merely
-    // "the connector kept emitting PROGRESS", that disarms it.
+    // Same shape as the phase-boundary connector but with no phase_boundary
+    // PROGRESS message — proves the watchdog's default behavior (kill at
+    // maxRunWallClockMs) is still intact and that it is specifically the
+    // phase_boundary signal, not merely "the connector kept emitting
+    // PROGRESS", that disarms it. This connector DOES emit a plain "ready"
+    // PROGRESS, so that distinction is now exercised rather than assumed:
+    // a plain PROGRESS re-arms the timer, it does not disarm it.
     const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
 
     assert.equal(record.status, "failed");
@@ -523,10 +567,14 @@ test(
   "a connector that hangs after the local-only phase boundary is still killed by the secondary ceiling",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
     const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, 150);
+    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
 
+    // hangAfterBoundary=true, so the connector never reaches its sleep and the
+    // sleepMs argument is unreachable — the secondary ceiling
+    // (WALL_CLOCK_BUDGET_MS * 4, see createAttemptWatchdog) is what must end
+    // this attempt.
     const record = await launchRun(
-      schedule(writeConnectorWithPhaseBoundary(tmpDir, 1, 2_000, true), ownerToken),
+      schedule(writeConnectorWithPhaseBoundary(tmpDir, 1, POST_BOUNDARY_SLEEP_MS, true), ownerToken),
       false,
       SCHEDULED_POLICY
     );

@@ -12,6 +12,7 @@ import {
 import {
   deleteAllRecordsForConnector,
   deleteConnectionRecordRowsPostgres as deleteConnectionRecordRowsPostgresUntyped,
+  drainConnectorInstanceIndexWorkForTests,
   enumerateConnectionStreams as enumerateConnectionStreamsUntyped,
   ingestRecord,
   teardownConnectionSearchProjection as teardownConnectionSearchProjectionUntyped,
@@ -54,6 +55,29 @@ import {
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
 const DEDICATED_POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
+
+// Every writer-path case here deliberately holds a connector-instance gate
+// (see `holdInstance`) while a second writer queues behind it, then does real
+// durable work — a full `ingestRecord`, a `deleteAllRecordsForConnector`, a
+// lexical backfill — before releasing. The queued writer is waiting under
+// `connectorInstanceLockWaitMs()`, a REAL wall-clock `setTimeout` in
+// server/connector-instance-write-coordinator.ts. At the production default
+// (2000ms) that budget is a host-speed race the assertions never intended to
+// run: measured on an idle 24-core host the held window of the first case is
+// 531-585ms, only ~3.4x under the budget, and a hosted 4-CPU runner executing
+// four test files at the gate's concurrency cap is routinely slower than that
+// margin. When the budget expires the queued writer rejects with
+// ConnectorInstanceAdmissionError from a promise the test has not awaited yet
+// (unhandledRejection), and the poisoned teardown then closes the database
+// under the next case, which fails with "[db] No database is open".
+//
+// These holds are bounded and test-controlled: the release always happens, in
+// the body and again in `finally`. So the wait budget is raised here to a
+// value no deliberate hold can plausibly exceed, which removes the wall-clock
+// dependency rather than trading one host-speed threshold for another. Cases
+// that mean to OBSERVE the timeout set their own short budget instead (see
+// test/connector-instance-write-coordinator.test.ts).
+process.env.PDPP_INGEST_LOCK_WAIT_MS = "600000";
 
 // `server/search.js` is plain JS: `lexicalIndexBackfillForManifest`'s
 // destructured-default parameter (`{ manifest, log = () => {}, signal = null } = {}`)
@@ -164,6 +188,8 @@ test("SQLite connector-wide bulk deletion serializes the actual same-instance wr
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, bulk, sameInstanceIngest].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -200,6 +226,8 @@ test("SQLite direct ingest queued before bulk deletion deterministically leaves 
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, directIngest, bulk].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -241,6 +269,8 @@ test("SQLite lexical manifest backfill waits on its actual instance but does not
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, backfill].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -283,6 +313,8 @@ test("SQLite direct ingest queued before lexical backfill is indexed by the late
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, directIngest, backfill].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });
@@ -348,6 +380,8 @@ test("SQLite connection purge is fenced through its durable delete and post-comm
       held.release.resolve();
     }
     await Promise.allSettled([held?.held, deletion].filter(Boolean));
+    // Ingest's deferred index work outlives the promises above; closing under it fails.
+    await drainConnectorInstanceIndexWorkForTests();
     closeDb();
   }
 });

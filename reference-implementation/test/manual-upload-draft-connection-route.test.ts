@@ -3,6 +3,8 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -40,20 +42,38 @@ async function closeServer(server: StartedServer): Promise<void> {
   ]);
 }
 
-async function withServer(fn: (ctx: { asUrl: string; tmp: string }) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (ctx: { asUrl: string; tmp: string; server: StartedServer }) => Promise<void>
+): Promise<void> {
+  const validationTasks: Promise<void>[] = [];
   const tmp = mkdtempSync(join(tmpdir(), "pdpp-manual-upload-"));
   const server = (await startServer({
     asPort: 0,
     autoEnrollEligibleSchedules: false,
     dbPath: join(tmp, "pdpp.sqlite"),
+    onManualUploadValidationTask: (task) => {
+      // Observe immediately, retain the original rejection, and await every task at teardown.
+      task.catch(() => undefined);
+      validationTasks.push(task);
+    },
     ownerAuthPassword: OWNER_PASSWORD,
     ownerAuthSubjectId: OWNER_SUBJECT_ID,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;
   const asUrl = `http://localhost:${server.asPort}`;
+  const bodyResults = await Promise.allSettled([fn({ asUrl, server, tmp })]);
   try {
-    await fn({ asUrl, tmp });
+    // A terminal row can precede filesystem cleanup. Only settled task handles
+    // establish that this test can release its database and staging directory.
+    const taskResults = await Promise.allSettled(validationTasks);
+    const failures = [...bodyResults, ...taskResults].filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        "Manual upload test or validation failed"
+      );
+    }
   } finally {
     await closeServer(server);
     rmSync(tmp, { force: true, recursive: true });
@@ -302,16 +322,20 @@ interface ManualUploadBody {
   validation_expectations?: string[];
 }
 
+// A wall-clock budget bounds status assertions; attempt-count budgets stretch
+// with slower HTTP requests. Exhaustion fails the assertion, while withServer
+// separately awaits actual validation completion before teardown.
 async function waitForArtifact(
   asUrl: string,
   cookie: string,
   artifactId: string,
   expectedStatuses: readonly string[],
-  maxAttempts = 30
-): Promise<JsonResult | null> {
+  budgetMs = 30_000
+): Promise<JsonResult> {
   const statuses = new Set(expectedStatuses);
+  const deadline = Date.now() + budgetMs;
   let latest: JsonResult | null = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  while (Date.now() < deadline) {
     // biome-ignore lint/performance/noAwaitInLoops: localized test assertion preserves its explicit contract.
     latest = await getArtifact(asUrl, cookie, artifactId);
     const body = latest.body as ArtifactBody;
@@ -320,7 +344,10 @@ async function waitForArtifact(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return latest;
+  const lastStatus = (latest?.body as ArtifactBody | undefined)?.status ?? "<none>";
+  throw new Error(
+    `artifact ${artifactId} did not reach [${expectedStatuses.join(", ")}] within ${budgetMs}ms; last status=${lastStatus}`
+  );
 }
 
 interface ZipEntry {
@@ -627,31 +654,116 @@ test("a successfully staged upload leaves no orphaned _staging directory behind"
   });
 });
 
-test("a WhatsApp .txt upload well past the old 1 GiB cap streams to disk and validates successfully", async () => {
-  // Proves the production HTTP route end-to-end for an artifact well beyond
-  // the old hardcoded 1 GiB WhatsApp cap this task raised — this upload
-  // would have been REJECTED outright before this change, purely on size,
-  // before any streaming/memory question even arose. The upload body is
-  // generated and streamed via a ReadableStream (never materialized as one
-  // Buffer/string in THIS test process).
-  //
-  // This test does NOT assert a memory-growth bound. Measured directly
-  // (see this task's report): even with the raw-file-buffering bug fixed,
-  // parsing a large-message-COUNT .txt export still holds the full parsed
-  // message array in memory before any record is emitted, and that array's
-  // total object/string overhead measurably EXCEEDS the raw file size for
-  // realistic prose-length messages (confirmed ~1.6x at 1.9 GiB) — a
-  // separate, disclosed residual from the whole-file-buffer bug this task
-  // fixed. The deterministic proof that the RAW FILE is never buffered
-  // whole lives in manual-upload-whatsapp-no-whole-file-read.test.ts (call-
-  // interception via mock.module, not an RSS heuristic); this test's job is
-  // functional correctness (the upload is accepted and validates) at a size
-  // that would have been rejected by the old cap, not a memory assertion.
+test("teardown waits for validation cleanup after the artifact reaches failed status", async (t) => {
+  const originalRm = fsPromises.rm;
+  let releaseCleanup!: () => void;
+  const cleanupGate = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let cleanupStarted!: () => void;
+  const cleanupEntered = new Promise<void>((resolve) => {
+    cleanupStarted = resolve;
+  });
+  let bodyFinished!: () => void;
+  const bodyDone = new Promise<void>((resolve) => {
+    bodyFinished = resolve;
+  });
+  let tmpPath = "";
+  let finished = false;
+  let closeStarted = false;
+  const rmMock = t.mock.method(fsPromises, "rm", async (...[path, options]: Parameters<typeof fsPromises.rm>) => {
+    if (tmpPath && String(path).startsWith(join(tmpPath, "imports", "_staging"))) {
+      cleanupStarted();
+      await cleanupGate;
+    }
+    return originalRm(path, options);
+  });
+  syncBuiltinESMExports();
+  const run = withServer(async ({ asUrl, tmp, server }) => {
+    tmpPath = tmp;
+    const originalClose = server.asServer.close;
+    t.mock.method(server.asServer, "close", function (this: CloseableServer, callback?: (err?: Error) => void) {
+      closeStarted = true;
+      return originalClose.call(this, callback);
+    });
+    await registerConnector(asUrl, "google_maps");
+    const cookie = await login(asUrl);
+    const staged = await stageUpload(asUrl, cookie, "google-maps", "Timeline.json", '{"not":"timeline"}');
+    assert.equal(staged.status, 202, staged.text);
+    const artifactId = asBody(staged.body).artifact_id;
+    assert.ok(artifactId);
+    await waitForArtifact(asUrl, cookie, artifactId, ["failed"]);
+    bodyFinished();
+  });
+  const observed = run.finally(() => {
+    finished = true;
+  });
+  // Attach now so even a premature teardown failure cannot become unhandled.
+  observed.catch(() => undefined);
+  try {
+    await Promise.race([cleanupEntered, observed]);
+    await Promise.race([bodyDone, observed]);
+    // Flush the callback continuation so teardown reaches its task wait.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closeStarted, false, "server closure must wait for the actual task");
+    assert.equal(finished, false, "terminal status must not release an unfinished validation task");
+    assert.equal(existsSync(tmpPath), true, "the task still owns its directory");
+    releaseCleanup();
+    await observed;
+    assert.equal(existsSync(tmpPath), false);
+  } finally {
+    releaseCleanup();
+    await observed.catch(() => undefined);
+    rmMock.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test("a validation filesystem failure rejects teardown after cleanup", async (t) => {
+  const originalRename = fsPromises.rename;
+  const failure = new Error("injected validation rename failure");
+  let tmpPath = "";
+  const renameMock = t.mock.method(
+    fsPromises,
+    "rename",
+    async (...[from, to]: Parameters<typeof fsPromises.rename>) => {
+      if (tmpPath && String(from).startsWith(join(tmpPath, "imports", "_staging"))) {
+        throw failure;
+      }
+      return await originalRename(from, to);
+    }
+  );
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      withServer(async ({ asUrl, tmp }) => {
+        tmpPath = tmp;
+        await registerConnector(asUrl, "google_maps");
+        const cookie = await login(asUrl);
+        const staged = await stageUpload(asUrl, cookie, "google-maps", "Timeline.json", VALID_TIMELINE_BODY);
+        assert.equal(staged.status, 202, staged.text);
+        const artifactId = asBody(staged.body).artifact_id;
+        assert.ok(artifactId);
+        await waitForArtifact(asUrl, cookie, artifactId, ["failed"]);
+      }),
+      (error: unknown) => error instanceof AggregateError && error.errors.includes(failure)
+    );
+    assert.equal(existsSync(tmpPath), false, "rejection must still release the test directory");
+  } finally {
+    renameMock.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test("a roughly 200 MiB WhatsApp .txt upload streams to disk and validates successfully", async () => {
+  // Exercise the real HTTP upload and validation path with a generated stream.
+  // This fixture does not exceed 1 GiB or assert a memory-growth bound; the
+  // no-whole-file-read test separately checks file buffering by interception.
   await withServer(async ({ asUrl }) => {
     await registerConnector(asUrl, "whatsapp");
     const cookie = await login(asUrl);
 
-    const targetBytes = 200 * 1024 * 1024; // 200 MiB — well past the old 1 GiB cap's REASON for being tested (proves the cap is gone), far below multi-GB OOM/tmpfs risk
+    const targetBytes = 200 * 1024 * 1024; // Exercise a large streamed body without a multi-GiB fixture.
     const oneMessage =
       "[6/5/24, 9:15:22 AM] Alice: Hello there, this is a realistically-sized conversational message for the test.\n";
     const chunkText = oneMessage.repeat(1000); // ~120 KB per chunk
@@ -684,7 +796,8 @@ test("a WhatsApp .txt upload well past the old 1 GiB cap streams to disk and val
     assert.equal(resp.status, 202, JSON.stringify(stagedBody));
     assert.ok(stagedBody.artifact_id, "expected an artifact_id");
 
-    const done = await waitForArtifact(asUrl, cookie, stagedBody.artifact_id, ["staged", "failed"], 400);
+    // Validating the roughly 200 MiB fixture can be slow on a loaded host.
+    const done = await waitForArtifact(asUrl, cookie, stagedBody.artifact_id, ["staged", "failed"], 240_000);
     const doneBody = asBody(done?.body);
     assert.equal(doneBody.status, "staged", JSON.stringify(doneBody));
     assert.equal(doneBody.validation?.status, "valid");

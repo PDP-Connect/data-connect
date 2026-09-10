@@ -2,16 +2,19 @@
 
 ## Policy
 
-`scripts/run-tests.ts` caps file concurrency at **2** by default, clamped to the
-available CPU parallelism and the number of selected test files:
-
-```ts
-const defaultConcurrency = Math.max(1, Math.min(2, availableParallelism?.() ?? 1, testFiles.length || 1));
-```
+`scripts/file-concurrency.ts` decides how many test files the gate runs at
+once. Each storage profile has a cap: **8** for `memory-default`, **2** for
+`postgres`. The cap is clamped by the available CPU parallelism and by the
+number of selected test files, and never falls below 1.
 
 `PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces that
-default. A positive override is **not** clamped to the CPU count or the selected
-file count.
+default. A positive override is **not** clamped to the CPU count or the
+selected file count. The runner reads it with `Number.parseInt`, which
+truncates, so `1.5` becomes 1; a non-positive or unparseable value falls back
+to the profile default, which is then clamped as above.
+
+Because of the clamps the cap is a ceiling rather than a target. A 4-CPU
+hosted runner resolves to 4 and never reaches 8.
 
 ## What the cap does and does not protect
 
@@ -26,11 +29,34 @@ otherwise-independent file workers can contend for the same restore resource.
 Raising concurrency for PostgreSQL needs its own restore-aware measurement on a
 PostgreSQL host; a memory-profile result is not authority for it.
 
+## Load-sensitive failures are defects, not artifacts
+
+An earlier revision of this document listed four tests that failed only at high
+concurrency, called them contention artifacts rather than code defects, and
+concluded that the cap should stay low to avoid them. That reading was wrong.
+Each has since been traced to a real defect and repaired at its root:
+
+- Three SQLite writer-path tests closed the database while deferred index
+  maintenance they had started was still running, so the lane failed with
+  "no database is open" from a promise nobody awaited. They now drain the lane
+  before teardown.
+- The same three tests also raced a wall clock. Each holds a write gate on
+  purpose while a queued writer waits on the production admission budget of
+  two seconds, and a slow four-CPU runner spends that margin on real I/O. The
+  test file now sets `PDPP_INGEST_LOCK_WAIT_MS` far above any deliberate hold,
+  because the property under test is serialization order, not the timeout;
+  the cases that test the timeout set their own short budget.
+- A large-upload test let a detached validation task outlive the test that
+  started it and write into the next test's database.
+
+A test that only passes because the gate is slow is hiding a defect. Raising
+the cap surfaced these; keeping it low would have preserved them.
+
 ## The one-off measurement behind the cap
 
-The cap was set after a single pair of memory-default runs on 2026-09-03: the
-same tree and the same selection, once at cap 2 and once at cap 8, on one host
-at Node 22.23.1, git head `eb6a890d`.
+The memory-default cap was set after a single pair of runs on 2026-09-03: the
+same tree and the same selection, once at cap 2 and once at cap 8, on one
+24-core host at Node 22.23.1.
 
 | | cap 2 | cap 8 |
 | --- | --- | --- |
@@ -45,6 +71,8 @@ Both runs failed, and they failed on the identical set of 396 assertions. That
 is **failure-set equality for one pair on one host** — it says the cap did not
 change which assertions failed, and nothing more. It is not a green-suite
 result, and two equally failing runs are not evidence that either cap is safe.
+What supports the cap is the clamps that bound it and the repairs above, not
+this wall-clock pair on its own.
 
 The raw receipts and transcripts for that pair are not retained. They were a
 snapshot of one day's tree, they went stale the moment the tree moved, and
@@ -61,13 +89,16 @@ receipt schema does not carry.
 
 ## Operational use
 
-Use the default unless a measurement for the same profile and host justifies an
-override. `8` below is an override, not the effective default on any host:
+The defaults above apply with no configuration. Override only where the host is
+known and a measurement for the same profile justifies it:
 
 ```sh
-# Memory profile, cap 8 as an explicit override of the default.
-PDPP_TEST_CONCURRENCY=8 pnpm --dir reference-implementation test
+# Memory profile, overriding the default cap of 8.
+PDPP_TEST_PROFILE=memory-default PDPP_TEST_CONCURRENCY=4 npm --prefix reference-implementation test
 
-# PostgreSQL stays low unless its own restore-aware measurement says otherwise.
-PDPP_TEST_PROFILE=postgres PDPP_TEST_CONCURRENCY=2 pnpm --dir reference-implementation test
+# PostgreSQL stays at 2 unless its own restore-aware measurement says otherwise.
+PDPP_TEST_PROFILE=postgres npm --prefix reference-implementation test
 ```
+
+Whether 8 suits hardware larger than the measured host is not settled here;
+re-measure rather than porting the number.

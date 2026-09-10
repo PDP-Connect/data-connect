@@ -166,6 +166,13 @@ jobs:
           npm --prefix packages/collector-runtime run build
           npm --prefix reference-implementation/vendor/mcp-server run build
 
+      - name: Build console
+        # Otherwise composed-origin.test.ts builds it silently mid-gate and
+        # trips the no-output watchdog; see scripts/ci-console-prebuild.test.ts.
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm --prefix apps/console run build
+
       - name: Test reference implementation
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
