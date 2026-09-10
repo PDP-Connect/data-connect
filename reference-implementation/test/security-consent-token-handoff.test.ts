@@ -41,9 +41,10 @@ import {
   revokeGrant,
 } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { closeDb, getDb } from "../server/db.ts";
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { runConsentHandoffRestartFixture } from "./helpers/consent-handoff-restart-fixture.ts";
 import { introspectionHeaders } from "./helpers/introspection.ts";
 import { TEST_RS_INTROSPECTION_CREDENTIALS } from "./helpers/introspection-test-credentials.ts";
 
@@ -121,6 +122,8 @@ async function closeServer(server: TestServerHandle): Promise<void> {
     });
   await Promise.allSettled([closeOne(server.asServer), closeOne(server.rsServer)]);
 }
+
+const SPOTIFY_MANIFEST_PATH = join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json");
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<FetchJsonResult> {
   const resp = await fetch(url, opts);
@@ -621,61 +624,27 @@ test("security: harden consent token handoff", async (t) => {
   await t.test("an exchange code survives a SQLite-backed server restart", async () => {
     const directory = mkdtempSync(join(tmpdir(), "pdpp-consent-handoff-restart-"));
     const dbPath = join(directory, "pdpp.sqlite");
-    const spotifyManifest = JSON.parse(
-      readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
-    ) as SpotifyManifest;
-    let first: TestServerHandle | null = null;
-    let second: TestServerHandle | null = null;
     try {
-      first = await startServer({
-        asPort: 0,
-        dbPath,
-        introspectionCallerCredentials: TEST_RS_INTROSPECTION_CREDENTIALS,
-        quiet: true,
-        rsPort: 0,
+      // Both the pre-restart and post-restart server run in genuinely
+      // separate OS processes (see runConsentHandoffRestartFixture),
+      // because that is what a real restart is: the code has to survive
+      // in the SQLite file, not in process memory.
+      const minted = await runConsentHandoffRestartFixture(dbPath, {
+        op: "mint",
+        spotifyManifestPath: SPOTIFY_MANIFEST_PATH,
       });
-      const firstUrl = `http://localhost:${first.asPort}`;
-      const registerResp = await fetch(`${firstUrl}/connectors`, {
-        body: JSON.stringify(spotifyManifest),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      });
-      assert.equal(registerResp.status, 201);
-      await seedSpotifyInstance(spotifyManifest);
-      const initiate = await initiateGrantRequest(firstUrl, spotifyManifest);
-      const approval = await approveReviewedHtml(firstUrl, initiate.request_uri);
-      assert.equal(approval.status, 200);
-      const code = (await approval.text()).match(TOP_LEVEL_REGEX_1)?.[0];
-      assert.ok(code);
+      const code = minted.code as string;
+      assert.ok(code, `fixture did not mint a code: ${JSON.stringify(minted)}`);
 
-      await closeServer(first);
-      first = null;
-      closeDb();
-
-      second = await startServer({
-        asPort: 0,
-        dbPath,
-        introspectionCallerCredentials: TEST_RS_INTROSPECTION_CREDENTIALS,
-        quiet: true,
-        rsPort: 0,
+      const restarted = await runConsentHandoffRestartFixture(dbPath, {
+        code,
+        op: "exchange",
       });
-      const response = await fetch(`http://localhost:${second.asPort}/consent/exchange`, {
-        body: JSON.stringify({ code }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      });
-      assert.equal(response.status, 200);
-      const result = (await response.json()) as ExchangeResponse;
+      assert.equal(restarted.status, 200, JSON.stringify(restarted));
+      const result = restarted.body as ExchangeResponse;
       assert.ok(result.token);
       assert.ok(result.grant_id);
     } finally {
-      if (first) {
-        await closeServer(first);
-      }
-      if (second) {
-        await closeServer(second);
-      }
-      closeDb();
       rmSync(directory, { force: true, recursive: true });
     }
   });
