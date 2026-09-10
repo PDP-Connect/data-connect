@@ -225,3 +225,9 @@ merge commit and record that SHA here. A squash merge produces a different SHA.
 Rebuilt with `scripts/revendor-polyfill-connectors.sh` after the final malformed-source
 isolation changes in data-connectors#92. This remains a PR-head artifact; before merging
 data-connect#89, rerun the helper with #92's actual merge commit and record that SHA.
+
+**Update (2026-09-10): temporary PR-head pin refreshed to data-connectors commit `b173427439bc6f3ec98b7c364221e1da0f8542dc`.**
+Rebuilt with `scripts/revendor-polyfill-connectors.sh` for the malformed-line
+isolation fix in data-connectors#92. The upstream connector index is regenerated
+before packing; host-provided dependencies and bundled local collector sources
+are updated using the same post-pack procedure above.

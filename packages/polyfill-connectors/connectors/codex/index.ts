@@ -56,9 +56,9 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -77,6 +77,7 @@ import {
 	isPathWithinSourceRoots,
 	readEnumerationScope,
 	scopeBoundsEnumeration,
+	shouldDescendIntoDirectory,
 } from "../../src/collection-scope-enumeration.ts";
 import { flushAndExitAfterRuntimeAck } from "../../src/connector-exit.ts";
 import {
@@ -438,11 +439,36 @@ async function hashFilePrefix(
 
 // ─── Rollout directory walking ──────────────────────────────────────────
 
+type RolloutSymlinkHandler = (path: string) => Promise<void>;
+
+async function isRolloutSymlink(
+	path: string,
+	onSymlink: RolloutSymlinkHandler,
+	onError?: RolloutDirectoryErrorHandler,
+): Promise<boolean> {
+	let linked: boolean;
+	try {
+		linked = (await lstat(path)).isSymbolicLink();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		const sourceError = new RolloutSourceError(path, error);
+		if (!onError) throw sourceError;
+		await onError(sourceError);
+		return true;
+	}
+	if (!linked) return false;
+	await onSymlink(path);
+	return true;
+}
+
 // Distinguish ENOENT (legitimate absence) from other errors (unreadable/permission failure)
 async function listIfExists(
 	dir: string,
 	onError?: RolloutDirectoryErrorHandler,
+	onSymlink?: RolloutSymlinkHandler,
 ): Promise<string[] | null> {
+	if (onSymlink && (await isRolloutSymlink(dir, onSymlink, onError)))
+		return null;
 	try {
 		return await readdir(dir);
 	} catch (e) {
@@ -467,6 +493,7 @@ async function* walkDayFiles(
 	month: string,
 	day: string,
 	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -474,12 +501,14 @@ async function* walkDayFiles(
 	day: string;
 	file: string;
 }> {
-	const files = await listIfExists(dayPath, onDirectoryError);
+	const files = await listIfExists(dayPath, onDirectoryError, onSymlink);
 	if (files === null) {
 		return;
 	}
 	for (const f of files) {
 		if (isRolloutFile(f)) {
+			if (await isRolloutSymlink(join(dayPath, f), onSymlink, onDirectoryError))
+				continue;
 			yield { path: join(dayPath, f), year, month, day, file: f };
 		}
 	}
@@ -491,6 +520,7 @@ async function* walkMonthDays(
 	month: string,
 	scope?: EnumerationScope | null,
 	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -498,7 +528,7 @@ async function* walkMonthDays(
 	day: string;
 	file: string;
 }> {
-	const days = await listIfExists(monthPath, onDirectoryError);
+	const days = await listIfExists(monthPath, onDirectoryError, onSymlink);
 	if (days === null) {
 		return;
 	}
@@ -511,7 +541,14 @@ async function* walkMonthDays(
 		if (!dateDirectoryInRange({ day: d, month, year }, scope)) {
 			continue;
 		}
-		yield* walkDayFiles(join(monthPath, d), year, month, d, onDirectoryError);
+		yield* walkDayFiles(
+			join(monthPath, d),
+			year,
+			month,
+			d,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -520,6 +557,7 @@ async function* walkYearMonths(
 	year: string,
 	scope?: EnumerationScope | null,
 	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -527,7 +565,7 @@ async function* walkYearMonths(
 	day: string;
 	file: string;
 }> {
-	const months = await listIfExists(yearPath, onDirectoryError);
+	const months = await listIfExists(yearPath, onDirectoryError, onSymlink);
 	if (months === null) {
 		return;
 	}
@@ -538,7 +576,14 @@ async function* walkYearMonths(
 		if (!dateDirectoryInRange({ month: m, year }, scope)) {
 			continue;
 		}
-		yield* walkMonthDays(join(yearPath, m), year, m, scope, onDirectoryError);
+		yield* walkMonthDays(
+			join(yearPath, m),
+			year,
+			m,
+			scope,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -547,6 +592,7 @@ export async function* walkRollouts(
 	baseDir: string,
 	scope?: EnumerationScope | null,
 	onDirectoryError?: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler = async () => {},
 ): AsyncGenerator<{
 	path: string;
 	year: string;
@@ -554,7 +600,7 @@ export async function* walkRollouts(
 	day: string;
 	file: string;
 }> {
-	const years = await listIfExists(baseDir, onDirectoryError);
+	const years = await listIfExists(baseDir, onDirectoryError, onSymlink);
 	if (years === null) {
 		return;
 	}
@@ -565,7 +611,13 @@ export async function* walkRollouts(
 		if (!dateDirectoryInRange({ year: y }, scope)) {
 			continue;
 		}
-		yield* walkYearMonths(join(baseDir, y), y, scope, onDirectoryError);
+		yield* walkYearMonths(
+			join(baseDir, y),
+			y,
+			scope,
+			onDirectoryError,
+			onSymlink,
+		);
 	}
 }
 
@@ -1732,10 +1784,11 @@ async function processRolloutEntry(
 async function rootExists(
 	baseDir: string,
 	onDirectoryError: RolloutDirectoryErrorHandler,
+	onSymlink: RolloutSymlinkHandler,
 ): Promise<{ exists: boolean; unreadable: boolean }> {
 	try {
 		return {
-			exists: (await listIfExists(baseDir)) !== null,
+			exists: (await listIfExists(baseDir, undefined, onSymlink)) !== null,
 			unreadable: false,
 		};
 	} catch (error) {
@@ -1782,10 +1835,11 @@ export async function scanRollouts(
 		if ((cursor.jsonl_gaps?.length ?? 0) > 0) args.newFileCursors[key] = cursor;
 	}
 	let directoryFailed = false;
-	const onDirectoryError: RolloutDirectoryErrorHandler = async (error) => {
+	const retainUnavailable = (unavailablePath: string) => {
 		directoryFailed = true;
 		for (const path of priorPaths) {
-			if (!path.startsWith(error.path + sep)) continue;
+			if (path !== unavailablePath && !path.startsWith(unavailablePath + sep))
+				continue;
 			const key = keyForPath(path);
 			const prior = args.fileCursors[key];
 			if (prior && !args.newFileCursors[key]) args.newFileCursors[key] = prior;
@@ -1796,7 +1850,35 @@ export async function scanRollouts(
 			if (!locatedKeys.has(key) && !args.newFileCursors[key])
 				args.newFileCursors[key] = cursor;
 		}
+	};
+	const onDirectoryError: RolloutDirectoryErrorHandler = async (error) => {
+		retainUnavailable(error.path);
 		await reportRolloutSourceGap(args.requested, buildRolloutSourceGap(error));
+	};
+	const skippedSymlinks = new Set<string>();
+	const onSymlink: RolloutSymlinkHandler = async (path) => {
+		if (!shouldDescendIntoDirectory(path, args.scope)) return;
+		if (skippedSymlinks.has(path)) return;
+		skippedSymlinks.add(path);
+		retainUnavailable(path);
+		let target: string;
+		try {
+			target = await readlink(path);
+		} catch (error) {
+			await onDirectoryError(new RolloutSourceError(path, error));
+			return;
+		}
+		for (const stream of ["sessions", "messages", "function_calls"] as const) {
+			if (args.requested.has(stream))
+				emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "symlink_skipped",
+					message: "Codex skipped a symbolic link without reading its target",
+					diagnostics: { path, target_path: resolve(dirname(path), target) },
+				});
+		}
+		await waitForEmitDrain();
 	};
 	const reportRetainedGaps = async () => {
 		for (const [key, cursor] of Object.entries(args.newFileCursors)) {
@@ -1817,7 +1899,7 @@ export async function scanRollouts(
 	for (const root of args.roots) {
 		rootChecks.push({
 			root,
-			...(await rootExists(root.baseDir, onDirectoryError)),
+			...(await rootExists(root.baseDir, onDirectoryError, onSymlink)),
 		});
 	}
 	const existingRoots = rootChecks.filter((r) => r.exists).map((r) => r.root);
@@ -1830,6 +1912,7 @@ export async function scanRollouts(
 		}
 		return await reportMissingSessionsBase(
 			anyUnreadable ||
+				directoryFailed ||
 				Object.keys(args.sourceGaps).length > 0 ||
 				Object.values(args.newFileCursors).some(
 					(cursor) => (cursor.jsonl_gaps?.length ?? 0) > 0,
@@ -1867,6 +1950,7 @@ export async function scanRollouts(
 				root.baseDir,
 				args.scope,
 				onDirectoryError,
+				onSymlink,
 			)) {
 				if (!isPathWithinSourceRoots(entry.path, args.scope)) {
 					continue;
@@ -2312,13 +2396,16 @@ async function assertRequestedCodexSources(
 	const needsRollouts =
 		requested.has("messages") || requested.has("function_calls");
 
-	if (needsRollouts) {
+	// Link exclusion is reported by the rollout scan, including dangling roots.
+	const linkedRoot =
+		(await lstat(dirs.baseDir).catch(() => null))?.isSymbolicLink() ?? false;
+	if (needsRollouts && !linkedRoot) {
 		const status = await checkDirectoryReadable(dirs.baseDir);
 		if (status === "unreadable") {
 			unreadable.push(`CODEX_SESSIONS_DIR=${dirs.baseDir}`);
 		}
 	}
-	if (requested.has("sessions")) {
+	if (requested.has("sessions") && !linkedRoot) {
 		const hasRollouts = await isReadableDirectory(dirs.baseDir);
 		const hasThreadsDb = await isReadableFile(dirs.stateDbPath);
 		if (!(hasRollouts || hasThreadsDb)) {
