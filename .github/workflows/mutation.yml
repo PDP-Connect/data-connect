@@ -65,6 +65,16 @@ jobs:
           # clone would leave the diff unable to name a base at all.
           fetch-depth: 0
           persist-credentials: false
+          # The tested head, not the ephemeral merge commit this event would
+          # check out by default. The scope is derived for `head.sha` and the
+          # widening reads statement boundaries off the working tree, so the two
+          # have to be the same revision. On a merge tree the line numbers shift
+          # by whatever landed on the base branch: a simulation moved code down
+          # three lines and Stryker then mutated an unchanged line while
+          # generating nothing for a changed one, with the run still reporting
+          # complete. File-level scope was insensitive to this; line-level scope
+          # is not.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

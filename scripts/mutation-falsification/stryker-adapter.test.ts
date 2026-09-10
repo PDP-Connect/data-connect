@@ -33,6 +33,7 @@ const intent = freezeIntent({
   baseCommit: "base",
   headCommit: "head",
   diff: parseNameStatusZ("M\0src/a.ts\0"),
+  hunks: new Map([["src/a.ts", [{ startLine: 1, endLine: 2 }]]]),
   executionInputs: {
     cohortRoot: ".",
     configDigest: "sha256:config",

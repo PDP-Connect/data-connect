@@ -9,10 +9,15 @@ import {
   escapesCohortRoot,
   type ExecutionInputs,
   freezeIntent,
+  type LineRange,
+  mergeRanges,
   parseNameStatusZ,
+  parseUnifiedZeroHunks,
   selectCohortTests,
   toCohortRelative,
+  toMutateEntries,
   verifyIntentDigest,
+  widenToStatements,
 } from "./select-pr-files.ts"
 
 const clientCohort: CohortDefinition = {
@@ -145,8 +150,11 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/b.ts\0A\0src/a.ts\0D\0src/gone.ts\0M\0src/a.test.ts\0"),
       executionInputs: inputs,
+      // `src/a.ts` is added, so it needs none; a modified file must carry
+      // ranges or freezing rejects it.
+      hunks: new Map([["src/b.ts", [{ startLine: 3, endLine: 4 }]]]),
     })
-    expect(intent.mutate).toEqual(["src/a.ts", "src/b.ts"])
+    expect(intent.mutate).toEqual(["src/a.ts", "src/b.ts:3-4"])
     expect(intent.excluded).toEqual([
       { path: "src/a.test.ts", reason: "test_file" },
       { path: "src/gone.ts", reason: "deleted" },
@@ -171,12 +179,17 @@ describe("freezeIntent", () => {
   })
 
   it("produces the same digest regardless of the order the diff arrived in", () => {
+    const ordered = new Map([
+      ["src/a.ts", [{ startLine: 1, endLine: 1 }]],
+      ["src/b.ts", [{ startLine: 2, endLine: 2 }]],
+    ])
     const forward = freezeIntent({
       cohort: clientCohort,
       baseCommit: "base",
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/a.ts\0M\0src/b.ts\0"),
       executionInputs: inputs,
+      hunks: ordered,
     })
     const reversed = freezeIntent({
       cohort: clientCohort,
@@ -184,6 +197,7 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/b.ts\0M\0src/a.ts\0"),
       executionInputs: inputs,
+      hunks: ordered,
     })
     expect(reversed.intentDigest).toBe(forward.intentDigest)
   })
@@ -195,6 +209,7 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0reference-implementation/server/a.ts\0"),
       executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map([["reference-implementation/server/a.ts", [{ startLine: 7, endLine: 7 }]]]),
     })
     expect(verifyIntentDigest(intent)).toBe(true)
     const tampered = { ...intent, mutate: ["server/somewhere-else.ts"] }
@@ -207,6 +222,7 @@ describe("freezeIntent", () => {
       baseCommit: "base",
       diff: parseNameStatusZ("M\0src/a.ts\0"),
       executionInputs: inputs,
+      hunks: new Map([["src/a.ts", [{ startLine: 5, endLine: 5 }]]]),
     }
     const first = freezeIntent({ ...common, headCommit: "head-one" })
     const second = freezeIntent({ ...common, headCommit: "head-two" })
@@ -260,6 +276,270 @@ describe("selectCohortTests", () => {
     // recorded as surviving an empty selection would be a false survivor.
     const diff = parseNameStatusZ("M\0reference-implementation/lib/nullish.ts\0")
     expect(selectCohortTests(diff, referenceCohort)).toEqual([])
+  })
+})
+
+describe("parseUnifiedZeroHunks", () => {
+  it("reads the head-side range of each hunk", () => {
+    const diff = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -10,0 +11,2 @@ function f() {",
+      "+  const x = 1;",
+      "+  const y = 2;",
+      "@@ -40,3 +42,1 @@ function g() {",
+      "+  return 3;",
+    ].join("\n")
+    expect(parseUnifiedZeroHunks(diff)).toEqual([
+      { path: "src/a.ts", ranges: [{ startLine: 11, endLine: 12 }, { startLine: 42, endLine: 42 }] },
+    ])
+  })
+
+  it("reads a hunk header with no count as a single line", () => {
+    const diff = ["--- a/src/a.ts", "+++ b/src/a.ts", "@@ -783,0 +784 @@", "+  const x = 1;"].join(
+      "\n"
+    )
+    expect(parseUnifiedZeroHunks(diff)).toEqual([
+      { path: "src/a.ts", ranges: [{ startLine: 784, endLine: 784 }] },
+    ])
+  })
+
+  it("contributes no range for a pure deletion hunk", () => {
+    // `+42,0` means the hunk removed lines and added none. Git reports the
+    // position as the line before the removal, so reading it as a one-line
+    // range would scope mutation to a surviving line the revision never
+    // touched. Deleted content cannot carry a fault into head.
+    const diff = [
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -42,3 +41,0 @@",
+      "-  const gone = 1;",
+    ].join("\n")
+    expect(parseUnifiedZeroHunks(diff)).toEqual([{ path: "src/a.ts", ranges: [] }])
+  })
+
+  it("skips a deleted file, which has no head revision to mutate", () => {
+    const diff = [
+      "diff --git a/src/gone.ts b/src/gone.ts",
+      "--- a/src/gone.ts",
+      "+++ /dev/null",
+      "@@ -1,3 +0,0 @@",
+      "-  const gone = 1;",
+    ].join("\n")
+    expect(parseUnifiedZeroHunks(diff)).toEqual([])
+  })
+
+  it("attributes a rename's hunks to the destination path", () => {
+    // The destination is the file that exists at head, so it is the only one
+    // Stryker can mutate. Attributing these lines to the source path would
+    // produce a `mutate` entry naming a file that is not there.
+    const diff = [
+      "diff --git a/src/old.ts b/src/new.ts",
+      "similarity index 92%",
+      "rename from src/old.ts",
+      "rename to src/new.ts",
+      "--- a/src/old.ts",
+      "+++ b/src/new.ts",
+      "@@ -5,0 +6 @@",
+      "+  const added = 1;",
+    ].join("\n")
+    expect(parseUnifiedZeroHunks(diff)).toEqual([
+      { path: "src/new.ts", ranges: [{ startLine: 6, endLine: 6 }] },
+    ])
+  })
+
+  it("keeps each file's hunks under its own path", () => {
+    const diff = [
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1,0 +2 @@",
+      "+a",
+      "--- a/src/b.ts",
+      "+++ b/src/b.ts",
+      "@@ -9,0 +10 @@",
+      "+b",
+    ].join("\n")
+    expect(parseUnifiedZeroHunks(diff)).toEqual([
+      { path: "src/a.ts", ranges: [{ startLine: 2, endLine: 2 }] },
+      { path: "src/b.ts", ranges: [{ startLine: 10, endLine: 10 }] },
+    ])
+  })
+})
+
+describe("mergeRanges", () => {
+  it("merges overlapping and adjacent ranges", () => {
+    expect(
+      mergeRanges([
+        { startLine: 10, endLine: 12 },
+        { startLine: 13, endLine: 15 },
+        { startLine: 11, endLine: 14 },
+      ])
+    ).toEqual([{ startLine: 10, endLine: 15 }])
+  })
+
+  it("keeps separated ranges apart and sorts them", () => {
+    expect(
+      mergeRanges([
+        { startLine: 40, endLine: 41 },
+        { startLine: 10, endLine: 11 },
+      ])
+    ).toEqual([
+      { startLine: 10, endLine: 11 },
+      { startLine: 40, endLine: 41 },
+    ])
+  })
+})
+
+describe("widenToStatements", () => {
+  // One statement spanning lines 5-20 -- a multi-line call, say -- inside a
+  // function body spanning 1-100.
+  const boundaries: LineRange[] = [
+    { startLine: 1, endLine: 100 },
+    { startLine: 5, endLine: 20 },
+    { startLine: 30, endLine: 31 },
+  ]
+
+  it("grows a range that starts inside a statement out to that statement", () => {
+    // Stryker mutates a node only when the node lies wholly inside the range,
+    // so a range starting at line 8 would generate nothing for the 5-20
+    // statement while still reporting a completed run.
+    expect(widenToStatements([{ startLine: 8, endLine: 9 }], boundaries)).toEqual([
+      { startLine: 5, endLine: 20 },
+    ])
+  })
+
+  it("does not grow a range out to a statement that merely contains it whole", () => {
+    // The 1-100 function body contains every range here. Widening to it would
+    // restore the whole-file cost this scoping exists to remove, and the
+    // revision did not change that body as a unit.
+    expect(widenToStatements([{ startLine: 30, endLine: 31 }], boundaries)).toEqual([
+      { startLine: 30, endLine: 31 },
+    ])
+  })
+
+  it("leaves a range already covering whole statements untouched", () => {
+    expect(widenToStatements([{ startLine: 5, endLine: 20 }], boundaries)).toEqual([
+      { startLine: 5, endLine: 20 },
+    ])
+  })
+
+  it("merges ranges that widening brought together", () => {
+    expect(
+      widenToStatements(
+        [
+          { startLine: 8, endLine: 8 },
+          { startLine: 19, endLine: 19 },
+        ],
+        boundaries
+      )
+    ).toEqual([{ startLine: 5, endLine: 20 }])
+  })
+
+  it("returns nothing for no ranges, so a file with no head-side change stays unscoped", () => {
+    expect(widenToStatements([], boundaries)).toEqual([])
+  })
+})
+
+describe("toMutateEntries", () => {
+  it("renders ranges in the path:startLine-endLine form Stryker parses", () => {
+    expect(
+      toMutateEntries("server/index.ts", [
+        { startLine: 725, endLine: 850 },
+        { startLine: 6226, endLine: 6242 },
+      ])
+    ).toEqual(["server/index.ts:725-850", "server/index.ts:6226-6242"])
+  })
+
+  it("renders a bare path when there are no ranges, which is whole-file scope", () => {
+    expect(toMutateEntries("server/added.ts", [])).toEqual(["server/added.ts"])
+  })
+})
+
+describe("freezeIntent line-range scope", () => {
+  const hunks = new Map<string, readonly LineRange[]>([
+    ["reference-implementation/server/index.ts", [{ startLine: 725, endLine: 850 }]],
+  ])
+
+  it("scopes a modified file to its changed ranges", () => {
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("M\0reference-implementation/server/index.ts\0"),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks,
+    })
+    expect(intent.mutate).toEqual(["server/index.ts:725-850"])
+    expect(intent.scope).toEqual([
+      { path: "server/index.ts", kind: "changed_ranges", ranges: [{ startLine: 725, endLine: 850 }] },
+    ])
+  })
+
+  it("keeps whole-file scope for a newly added file, where the whole file is the change", () => {
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("A\0reference-implementation/server/added.ts\0"),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map(),
+    })
+    expect(intent.mutate).toEqual(["server/added.ts"])
+    expect(intent.scope).toEqual([
+      { path: "server/added.ts", kind: "whole_file", ranges: [] },
+    ])
+  })
+
+  it("scopes a renamed file by its destination ranges", () => {
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ(
+        "R92\0reference-implementation/server/old.ts\0reference-implementation/server/new.ts\0"
+      ),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map([
+        ["reference-implementation/server/new.ts", [{ startLine: 6, endLine: 6 }]],
+      ]),
+    })
+    expect(intent.mutate).toEqual(["server/new.ts:6-6"])
+  })
+
+  it("selects nothing for a deleted file and records the deletion", () => {
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("D\0reference-implementation/server/gone.ts\0"),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map(),
+    })
+    expect(intent.mutate).toEqual([])
+    expect(intent.applicability).toBe("not_applicable")
+    expect(intent.excluded).toEqual([
+      { path: "reference-implementation/server/gone.ts", reason: "deleted" },
+    ])
+  })
+
+  it("covers the scope in the digest, so the mutated lines cannot be restated later", () => {
+    const common = {
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("M\0reference-implementation/server/index.ts\0"),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+    }
+    const narrow = freezeIntent({ ...common, hunks })
+    const wide = freezeIntent({
+      ...common,
+      hunks: new Map([
+        ["reference-implementation/server/index.ts", [{ startLine: 1, endLine: 9000 }]],
+      ]),
+    })
+    expect(verifyIntentDigest(narrow)).toBe(true)
+    expect(narrow.intentDigest).not.toBe(wide.intentDigest)
   })
 })
 

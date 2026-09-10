@@ -80,7 +80,17 @@ export default {
   // run this cohort's tests is excluded. `node_modules` is deliberately absent
   // from this list: the tests import from it, and Stryker links it into the
   // sandbox rather than copying it.
-  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "openapi"],
+  //
+  // `quality` is checked-in report output that no test or script in this cohort
+  // reads, so it is copied into every sandbox for nothing. Measured, it is worth
+  // 2.9 MB of a 46 MB sandbox -- real, but small: the disk exhaustion that
+  // failed a hosted run of this cohort after 91 minutes came from the mutant
+  // count, not the copied tree, and is addressed by scoping mutation to the
+  // changed lines rather than by this list. Stated so the next reader does not
+  // over-credit it. `connectors` and `examples` are deliberately NOT excluded:
+  // tests read them. `docs` above is a pre-existing entry, and ~65 cohort files
+  // do reference `docs/` -- worth revisiting separately, not changed here.
+  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "openapi", "quality"],
 
   tempDirName: ".stryker-tmp/reference-implementation",
 }
