@@ -937,7 +937,13 @@ async function buildPackageAndRedirect(
   // Required, with no default: a default would silently disable the approval
   // binding for any future caller that forgot it — the exact fail-open shape
   // this check exists to remove.
-  approval: { body: Record<string, unknown>; packageAccessMode: string; consumeChallenge: () => Promise<boolean> },
+  approval: {
+    body: Record<string, unknown>;
+    packageAccessMode: string;
+    consumeChallenge: () => Promise<boolean>;
+    /** Undoes `consumeChallenge` when minting fails. See `releaseApprovalChallenge`. */
+    releaseChallenge: () => Promise<void>;
+  },
   /** Owner-chosen grant expiry; null means no scheduled end date. */
   grantExpiresAt: string | null = null
 ): Promise<unknown> {
@@ -1006,15 +1012,29 @@ async function buildPackageAndRedirect(
     return;
   }
 
-  const packageResult = await ctx.createHostedMcpGrantPackage({
-    authorizationDetails: acc.authorizationDetails,
-    clientId: pkce.clientId,
-    connectionIds: acc.connectionIds,
-    opts: { grantExpiresAt, reviewDigest },
-    sourceMetadata: acc.sourceMetadata,
-    storageBindings: acc.storageBindings,
-    subjectId: ownerSubjectId,
-  });
+  // Consumption and issuance must land together. State the approval depends on
+  // can still change at this boundary — a source revoked between validation and
+  // minting makes `createHostedMcpGrantPackage` reject — and a claimed
+  // challenge left `accepted` would record a decision that authorized no grant
+  // and answer the owner's honest retry with 404. Releasing the claim back to
+  // pending leaves the challenge exactly as the failed attempt found it, so the
+  // owner can fix the source and approve again. Single-use is unaffected: the
+  // release is conditional on this request's own claim still standing.
+  let packageResult: Awaited<ReturnType<MountAsAuthorizeContext["createHostedMcpGrantPackage"]>>;
+  try {
+    packageResult = await ctx.createHostedMcpGrantPackage({
+      authorizationDetails: acc.authorizationDetails,
+      clientId: pkce.clientId,
+      connectionIds: acc.connectionIds,
+      opts: { grantExpiresAt, reviewDigest },
+      sourceMetadata: acc.sourceMetadata,
+      storageBindings: acc.storageBindings,
+      subjectId: ownerSubjectId,
+    });
+  } catch (err) {
+    await approval.releaseChallenge();
+    throw err;
+  }
   return issuePackageAuthCodeRedirect(res, packageResult, pkce, ctx);
 }
 
@@ -1086,7 +1106,8 @@ async function handleHostedMcpPackageApproval(
   req: RouteRequest,
   res: RouteResponse,
   ctx: MountAsAuthorizeContext,
-  consumeChallenge: () => Promise<boolean>
+  consumeChallenge: () => Promise<boolean>,
+  releaseChallenge: () => Promise<void>
 ): Promise<unknown> {
   const body = req.body || {};
   const clientId = requireAuthorizeString(body, "client_id");
@@ -1137,7 +1158,7 @@ async function handleHostedMcpPackageApproval(
     ownerSubjectId,
     ctx,
     client,
-    { body, consumeChallenge, packageAccessMode },
+    { body, consumeChallenge, packageAccessMode, releaseChallenge },
     expiryResult.expiresAt
   );
 }
@@ -1387,6 +1408,22 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
     }
     return true;
   }
+
+  // Undoes `consumeApprovalChallenge` after a failed mint, so the owner's
+  // approval stays retryable. Best-effort by construction: the caller is
+  // already returning a typed failure for the underlying error, and a release
+  // that cannot land must not replace that error with a different one.
+  async function releaseApprovalChallenge(req: RouteRequest, id: string): Promise<void> {
+    try {
+      await consentChallengeStore.release(
+        id,
+        ownerSubjectIdFromRequest(req),
+        typeof req.body?.decision_digest === "string" ? req.body.decision_digest : null
+      );
+    } catch {
+      // Leaves the challenge consumed; the owner starts a new one.
+    }
+  }
   // GET /oauth/authorize
   //
   // Entry point for the OAuth authorization flow. Three paths:
@@ -1542,13 +1579,23 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         // a challenge, but it cannot issue. Bound requests use stored OAuth
         // parameters so the form cannot replace the client, callback, or PKCE.
         const boundRequest = challenge ? { ...req, body: { ...req.body, ...challenge.authorizeParams } } : req;
-        return await handleHostedMcpPackageApproval(boundRequest, res, ctx, async () => {
-          if (!id) {
-            ctx.oauthError(res, 400, "invalid_request", "consent_challenge is required to approve access");
-            return false;
+        return await handleHostedMcpPackageApproval(
+          boundRequest,
+          res,
+          ctx,
+          async () => {
+            if (!id) {
+              ctx.oauthError(res, 400, "invalid_request", "consent_challenge is required to approve access");
+              return false;
+            }
+            return await consumeApprovalChallenge(boundRequest, res, id);
+          },
+          async () => {
+            if (id) {
+              await releaseApprovalChallenge(boundRequest, id);
+            }
           }
-          return await consumeApprovalChallenge(boundRequest, res, id);
-        });
+        );
       } catch (err) {
         const { streams } = err as { streams?: readonly string[] };
         return ctx.oauthError(
@@ -1615,8 +1662,12 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         const body = await buildChallengeApprovalBody(challenge, submitted, ctx);
         const { response, redirectUrl } = captureRedirectResponse(res);
         const boundRequest = { ...req, body, wantsJson: true };
-        await handleHostedMcpPackageApproval(boundRequest, response, ctx, () =>
-          consumeApprovalChallenge(boundRequest, response, id)
+        await handleHostedMcpPackageApproval(
+          boundRequest,
+          response,
+          ctx,
+          () => consumeApprovalChallenge(boundRequest, response, id),
+          () => releaseApprovalChallenge(boundRequest, id)
         );
         const url = redirectUrl();
         if (!url) {

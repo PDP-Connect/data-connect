@@ -45,6 +45,35 @@ if (postgresUrl) {
           null
         );
 
+        // Releasing an accepted-but-unissued challenge restores retryability.
+        // Only the caller that wrote the decision may release it, and the
+        // released row consumes exactly once afterwards.
+        const released = { ...record, id: "cc_postgres_released" };
+        await createConsentChallengeStore().create(released);
+        await createConsentChallengeStore().consume(released.id, released.ownerSubjectId, "accepted", "sha256:mine");
+        assert.equal(
+          await createConsentChallengeStore().release(released.id, released.ownerSubjectId, "sha256:someone-else"),
+          false,
+          "a decision this caller did not write is left alone"
+        );
+        assert.equal(
+          await createConsentChallengeStore().release(released.id, released.ownerSubjectId, "sha256:mine"),
+          true
+        );
+        assert.deepEqual(
+          await createConsentChallengeStore().readPending(released.id, released.ownerSubjectId),
+          released,
+          "the released challenge is pending again"
+        );
+        assert.ok(
+          await createConsentChallengeStore().consume(released.id, released.ownerSubjectId, "accepted", "sha256:retry")
+        );
+        assert.equal(
+          await createConsentChallengeStore().consume(released.id, released.ownerSubjectId, "accepted", "sha256:retry"),
+          null,
+          "the retry is still single-use"
+        );
+
         const expired = { ...record, expiresAt: createdAt - 1, id: "cc_postgres_expired" };
         await createConsentChallengeStore().create(expired);
         assert.equal(await createConsentChallengeStore().readPending(expired.id, expired.ownerSubjectId), null);

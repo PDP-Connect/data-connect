@@ -8489,6 +8489,36 @@ export async function createHostedMcpGrantPackage({
     version: CURRENT_GRANT_PACKAGE_VERSION,
   };
 
+  // Resolve and check every source BEFORE writing anything. Normalization,
+  // declaration retention, and eligibility all reject — a source revoked since
+  // the owner approved, a manifest that no longer matches — and inserting the
+  // package first meant a rejection on the second source left an approved
+  // package row with no child grants behind it. Nothing here writes; the
+  // failures surface with no package to clean up.
+  const resolvedSources: Array<{
+    childRegisteredClient: Awaited<ReturnType<typeof requirePendingRequestClientRegistration>>;
+    request: PendingRequest;
+    resolvedStreams: Awaited<ReturnType<typeof resolvePendingRequestForApproval>>;
+    storageBinding: StorageBinding;
+  }> = [];
+  await forEachSequential(authorizationDetails, async (detail, index) => {
+    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
+    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
+    if (selectedStorageBinding) {
+      request.storage_binding = selectedStorageBinding;
+    }
+    requireStructuredPendingRequestShape(request);
+    request.trace_context = traceContext;
+    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
+    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
+    request.source_binding = describeSourceBinding(sourceBinding);
+    request.storage_binding = normalizeStorageBinding(storageBinding);
+    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
+    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
+    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+    resolvedSources.push({ childRegisteredClient, request, resolvedStreams, storageBinding });
+  });
+
   await getGrantPackageStore().insertPackage({
     approvedAt: createdAt,
     clientId,
@@ -8507,21 +8537,8 @@ export async function createHostedMcpGrantPackage({
     source: Record<string, unknown> | null;
     token: string;
   }[] = [];
-  await forEachSequential(authorizationDetails, async (detail, index) => {
-    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
-    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
-    if (selectedStorageBinding) {
-      request.storage_binding = selectedStorageBinding;
-    }
-    requireStructuredPendingRequestShape(request);
-    request.trace_context = traceContext;
-    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
-    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
-    request.source_binding = describeSourceBinding(sourceBinding);
-    request.storage_binding = normalizeStorageBinding(storageBinding);
-    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
-    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
-    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+  await forEachSequential(resolvedSources, async (resolved, index) => {
+    const { childRegisteredClient, request, resolvedStreams, storageBinding } = resolved;
     const { grant, token } = await persistChildGrantForPackage({
       grantExpiresAt: opts.grantExpiresAt ?? null,
       registeredClient: childRegisteredClient,
