@@ -101,6 +101,7 @@ export interface IntentPacket {
 
 export type ExclusionReason =
   | "deleted"
+  | "no_mutable_lines"
   | "not_production_source"
   | "outside_cohort"
   | "test_file"
@@ -694,7 +695,21 @@ export function freezeIntent(input: {
       continue
     }
 
-    const ranges = [...(input.hunks?.get(path) ?? [])]
+    // A modification whose every hunk is a pure deletion carries no line into
+    // head for a mutant to alter, so there is nothing to mutate and nothing to
+    // report surviving. It is excluded with a recorded reason rather than
+    // failing the run: the diff is real and was seen, it just leaves no mutable
+    // target. This is distinguished from the file being absent from the hunks
+    // map entirely -- a 100%-similarity rename -- which still fails below,
+    // because there the derivation produced nothing at all rather than
+    // producing "no ranges" from hunks it did read.
+    const derived = input.hunks?.get(path)
+    if (derived !== undefined && derived.length === 0) {
+      excluded.push({ path, reason: "no_mutable_lines" })
+      continue
+    }
+
+    const ranges = [...(derived ?? [])]
     if (ranges.length === 0) {
       // Failing here is the point. The caller selected this file, so the
       // evidence has to say which of its lines were mutated; there is no
