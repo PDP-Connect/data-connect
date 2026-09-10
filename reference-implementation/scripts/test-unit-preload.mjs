@@ -43,10 +43,12 @@
 //   new DatabaseSync(":memory:").prepare("select 42").get();
 //
 // That executes real SQL and never resolves anything, so a resolve hook cannot
-// see it at all. `process.getBuiltinModule` is therefore wrapped as well, as is
-// the CJS `require` path for builtins. Wrapping the one function that returns
-// builtins is what makes a COMPUTED name -- `"node:" + "sqlite"` -- as covered
-// as a literal one: the check runs on the runtime value, after any computation.
+// see it at all. `process.getBuiltinModule` is therefore wrapped as well (the
+// CJS `require` path for builtins needs no separate wrap -- `registerHooks`
+// already intercepts CJS resolution, see installBuiltinGuard's own doc
+// comment). Wrapping the one function that returns builtins is what makes a
+// COMPUTED name -- `"node:" + "sqlite"` -- as covered as a literal one: the
+// check runs on the runtime value, after any computation.
 //
 // Denial is per specifier FORM, not per file. A pattern that matches
 // "pg/lib/client" but not the bare specifier "pg" reports zero violations on a

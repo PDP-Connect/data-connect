@@ -160,7 +160,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
  */
 export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/absent-only-grant-expiry-postgres.test.ts",
-  "test/backup-table-inventory.test.ts",
+  "test/backup-table-inventory-postgres.test.ts",
   "test/browser-surface-lease-store.test.ts",
   "test/connector-detail-gap-store.test.ts",
   "test/connector-instance-store.test.ts",
