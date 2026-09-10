@@ -159,6 +159,20 @@ jobs:
           npm --prefix packages/collector-runtime run build
           npm --prefix reference-implementation/vendor/mcp-server run build
 
+      - name: Build console
+        # The dry run executes this cohort's selected tests, and those tests
+        # require the console's production build for the same reason the test
+        # job does: absent it, composed-origin.test.ts builds it in a
+        # subprocess whose output it captures rather than forwards, so the run
+        # goes silent for the length of a cold build. Here that silence is
+        # spent against Stryker's dry-run timeout, and the baseline never
+        # completes -- no mutant is tried and the attempt reports no evidence.
+        # See scripts/ci-console-prebuild.test.ts.
+        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm --prefix apps/console run build
+
       # OBSERVATION. Stryker runs as a black box. Its exit status and its own
       # per-mutant statuses are recorded, never interpreted here.
       - name: Run mutation testing on the changed files
