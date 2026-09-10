@@ -86,6 +86,103 @@ export function resolveAuth(config: AuthConfig | undefined, runtime: AuthStrateg
   return resolver(config, runtime);
 }
 
+// ─── Sign-in pair resolution ───────────────────────────────────────────
+
+/**
+ * A connector's sign-in pair is BOTH-OR-NOTHING, and an absent pair is
+ * reported by naming the credential rather than by blaming the provider.
+ *
+ * The owner harm this prevents is a misdiagnosis. Handed a username with no
+ * password, a connector would type the half it had into a real provider form,
+ * submit, and then read the resulting page as the provider misbehaving —
+ * telling the owner the sign-in form "did not render". So the owner went and
+ * debugged the provider, while the true cause was a credential he had never
+ * saved and was never told to save.
+ *
+ * `missing` names the absent fields and `reason` is safe to show: it contains
+ * field NAMES only, never a credential value.
+ */
+
+/** A resolved, complete credential pair for one connection's sign-in. */
+export interface ResolvedLoginCredentials {
+  readonly kind: "resolved";
+  readonly password: string;
+  readonly username: string;
+}
+
+/** No usable credential for this connection. */
+export interface AbsentLoginCredentials {
+  readonly kind: "absent";
+  /** The credential field names that were absent or blank. */
+  readonly missing: readonly string[];
+  /**
+   * Owner-facing reason. Names the CREDENTIAL, never the page. Safe to
+   * surface: it contains only field names, never credential values.
+   */
+  readonly reason: string;
+}
+
+export type LoginCredentialsResolution = AbsentLoginCredentials | ResolvedLoginCredentials;
+
+/**
+ * Field names, as they appear in the runtime-resolved `credentials` object,
+ * that carry one connector's sign-in pair.
+ */
+export interface LoginCredentialFields {
+  /** Credential field name(s) holding the password. First non-empty wins. */
+  readonly password: readonly string[];
+  /** Credential field name(s) holding the username/email. First non-empty wins. */
+  readonly username: readonly string[];
+}
+
+function firstNonEmpty(
+  credentials: Readonly<Record<string, string | undefined>>,
+  names: readonly string[]
+): string | undefined {
+  return names
+    .map((name) => credentials[name])
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+}
+
+/**
+ * Resolve one connection's sign-in pair from the runtime-supplied credentials.
+ *
+ * A pair is both-or-nothing. A username with no password is reported absent
+ * with the password named as missing, never submitted as half a login.
+ */
+export function resolveLoginCredentials(
+  credentials: Readonly<Record<string, string | undefined>> | undefined,
+  fields: LoginCredentialFields,
+  connectorName: string
+): LoginCredentialsResolution {
+  const source = credentials ?? {};
+  const username = firstNonEmpty(source, fields.username);
+  const password = firstNonEmpty(source, fields.password);
+  if (username && password) {
+    return { kind: "resolved", password, username };
+  }
+  const missing: string[] = [];
+  if (!username) {
+    missing.push(fields.username[0] ?? "username");
+  }
+  if (!password) {
+    missing.push(fields.password[0] ?? "password");
+  }
+  return {
+    kind: "absent",
+    missing,
+    reason: noStoredCredentialReason(connectorName, missing),
+  };
+}
+
+export function noStoredCredentialReason(connectorName: string, missing: readonly string[]): string {
+  const fieldList = missing.length > 0 ? missing.join(", ") : "username, password";
+  return (
+    `no stored credential for this ${connectorName} connection (missing: ${fieldList}). ` +
+    "Automated sign-in was not attempted. Save this connection's credentials to enable it."
+  );
+}
+
 // ─── Built-in strategy: environment variables ──────────────────────────
 
 const SECRET_NAME = /PASSWORD|SECRET|TOKEN/i;
@@ -176,8 +273,17 @@ registerAuthStrategy<EnvAuthConfig>("env", async (config, runtime) => {
   // repair run would otherwise put a username/password form in front of an
   // owner whose account signs in through SSO, blocking the streamed-browser
   // journey the run had already prepared a surface for.
+  //
+  // The credential set is BOTH-OR-NOTHING, so an incomplete one resolves
+  // EMPTY rather than partial. Returning `have` handed a username with no
+  // password to the connector, which typed it into the provider's real form,
+  // submitted, and then reported the resulting page as the PROVIDER
+  // misbehaving — sending the owner to debug the provider over a credential
+  // he had simply never saved. Resolving empty routes the connector down its
+  // no-credential path (manual/session sign-in) instead, which is the honest
+  // one. What `authOptional` suppresses is the QUESTION, never the fact.
   if (runtime.authOptional) {
-    return have;
+    return {};
   }
 
   const resp = await runtime.sendInteraction({

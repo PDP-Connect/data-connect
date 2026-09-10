@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { resolveAuth } from "./auth.ts";
+import { noStoredCredentialReason, resolveAuth, resolveLoginCredentials } from "./auth.ts";
 import type { InteractionRequest, InteractionResponse } from "./connector-runtime-protocol.ts";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -87,9 +87,16 @@ test("authOptional: a missing credential resolves without ever prompting", async
   assert.deepEqual(spy.calls, [], "a session-first connector must never raise a credentials interaction");
 });
 
-test("authOptional: a PARTIAL credential returns what is present, still without prompting", async () => {
-  // The strategy returns `have`, not `{}` — a half-configured connector still
-  // gets its usable value rather than silently discarding it.
+test("authOptional: a PARTIAL credential is reported as missing rather than handed on as half a login", async () => {
+  // A username with no password is not a usable sign-in. Handing the partial
+  // through let a connector type a username into a real provider form,
+  // submit, and then read the resulting page as the PROVIDER misbehaving —
+  // the misdiagnosis this both-or-nothing rule exists to prevent. The owner
+  // debugs the provider while the true cause is a credential he never saved.
+  //
+  // Suppressing the PROMPT is what `authOptional` buys; it never meant
+  // suppressing the FACT. `missing` still names the absent field so the
+  // caller can say precisely what is absent.
   delete process.env.CHATGPT_PASSWORD;
   process.env.CHATGPT_USERNAME = "owner@example.test";
   const spy = interactionSpy();
@@ -99,8 +106,101 @@ test("authOptional: a PARTIAL credential returns what is present, still without 
     { authOptional: true, connectorName: "chatgpt", sendInteraction: spy.sendInteraction }
   );
 
-  assert.deepEqual(credentials, { CHATGPT_USERNAME: "owner@example.test" });
+  assert.deepEqual(
+    credentials,
+    {},
+    "half a login must not reach the provider's form — a partial resolves empty, so the connector takes its no-credential path"
+  );
   assert.deepEqual(spy.calls, [], "a partially-filled optional credential must not prompt for the remainder");
+});
+
+/**
+ * `resolveLoginCredentials` — the both-or-nothing resolver a connector uses to
+ * decide whether it has a sign-in to attempt at all.
+ *
+ * The owner harm it prevents is a MISDIAGNOSIS, not a crash. With no saved
+ * password the old path attempted a login anyway and reported that the
+ * provider's sign-in form "did not render" — so the owner went and debugged
+ * the provider instead of saving a credential. The honest reason names the
+ * CREDENTIAL, never the page, and never leaks a value.
+ */
+
+test("resolveLoginCredentials: a complete pair resolves and carries both values", () => {
+  const resolved = resolveLoginCredentials(
+    { VENMO_PASSWORD: "correct-horse", VENMO_USERNAME: "owner@example.test" },
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME"] },
+    "venmo"
+  );
+
+  assert.deepEqual(resolved, {
+    kind: "resolved",
+    password: "correct-horse",
+    username: "owner@example.test",
+  });
+});
+
+test("resolveLoginCredentials: a username with no password is absent, naming the password", () => {
+  const resolved = resolveLoginCredentials(
+    { VENMO_USERNAME: "owner@example.test" },
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME"] },
+    "venmo"
+  );
+
+  assert.equal(resolved.kind, "absent");
+  assert.deepEqual(resolved.kind === "absent" ? resolved.missing : null, ["VENMO_PASSWORD"]);
+});
+
+test("resolveLoginCredentials: the reason names the credential and never blames the provider's page", () => {
+  const resolved = resolveLoginCredentials(
+    undefined,
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME"] },
+    "venmo"
+  );
+
+  assert.equal(resolved.kind, "absent");
+  const reason = resolved.kind === "absent" ? resolved.reason : "";
+  assert.match(reason, /no stored credential for this venmo connection \(missing: VENMO_USERNAME, VENMO_PASSWORD\)/);
+  assert.doesNotMatch(
+    reason,
+    /sign-in form did not render|unexpected UI|page did not render/i,
+    "blaming the page is the misdiagnosis: the owner debugs the provider instead of saving a credential"
+  );
+});
+
+test("resolveLoginCredentials: a blank or whitespace value counts as absent, not as a credential", () => {
+  const resolved = resolveLoginCredentials(
+    { VENMO_PASSWORD: "   ", VENMO_USERNAME: "" },
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME"] },
+    "venmo"
+  );
+
+  assert.equal(resolved.kind, "absent");
+  assert.deepEqual(resolved.kind === "absent" ? resolved.missing : null, ["VENMO_USERNAME", "VENMO_PASSWORD"]);
+});
+
+test("resolveLoginCredentials: the first non-empty alias wins for each field", () => {
+  const resolved = resolveLoginCredentials(
+    { VENMO_EMAIL: "owner@example.test", VENMO_PASSWORD: "correct-horse", VENMO_USERNAME: "" },
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME", "VENMO_EMAIL"] },
+    "venmo"
+  );
+
+  assert.equal(resolved.kind === "resolved" ? resolved.username : null, "owner@example.test");
+});
+
+test("resolveLoginCredentials: no reason ever contains a credential value", () => {
+  const resolved = resolveLoginCredentials(
+    { VENMO_USERNAME: "owner@example.test" },
+    { password: ["VENMO_PASSWORD"], username: ["VENMO_USERNAME"] },
+    "venmo"
+  );
+
+  const reason = resolved.kind === "absent" ? resolved.reason : "";
+  assert.doesNotMatch(reason, /owner@example\.test/, "a reason is owner-visible copy and must carry field names only");
+});
+
+test("noStoredCredentialReason: falls back to naming both fields when nothing was recorded", () => {
+  assert.match(noStoredCredentialReason("venmo", []), /missing: username, password/);
 });
 
 test("authOptional: a fully PRESENT credential is used normally and never prompts", async () => {
