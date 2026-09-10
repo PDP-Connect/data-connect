@@ -95,6 +95,27 @@ describe("classifyForCohort", () => {
     ).toEqual({ selected: false, reason: "outside_cohort" })
   })
 
+  it("calls a cohort's own test file a test file, not something outside the cohort", () => {
+    // The reference implementation keeps its tests in `test/`, which is outside
+    // every production prefix, so deciding cohort membership first labelled
+    // every one of them `outside_cohort`. Both reasons exclude, so the mutate
+    // list never changed -- but the receipt's stated reason was wrong.
+    expect(
+      classifyForCohort(
+        { status: "M", path: "reference-implementation/test/acknowledged-loss.test.ts" },
+        referenceCohort
+      )
+    ).toEqual({ selected: false, reason: "test_file" })
+  })
+
+  it("excludes a deleted production file, which the diff now reports", () => {
+    // The workflow used to filter deletions out of the diff before the
+    // classifier saw them, so this branch could not fire in a real run.
+    expect(
+      classifyForCohort({ status: "D", path: "src/apps/gone.ts" }, clientCohort)
+    ).toEqual({ selected: false, reason: "deleted" })
+  })
+
   it("excludes non-source files and declaration files", () => {
     expect(classifyForCohort({ status: "M", path: "src/styles.css" }, clientCohort)).toEqual({
       selected: false,

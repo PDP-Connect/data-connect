@@ -43,9 +43,13 @@ export default {
 
   // Stryker copies the working tree into that sandbox, so anything the client
   // suite does not need to run is excluded, keeping the copy proportional to
-  // the cohort. The agent-tooling directories are here for the same reason as
-  // the rest: no client test reads them. They additionally hold symlinks in a
-  // developer checkout, which the copy cannot follow.
+  // the cohort.
+  //
+  // The last three entries are a developer-machine workaround, stated plainly
+  // rather than dressed up as scoping: these directories hold local tooling
+  // whose entries can be symlinks to directories, and the sandbox copy fails
+  // with EISDIR when it meets one. They do not exist on CI. No client test
+  // reads them either way, so excluding them costs nothing.
   ignorePatterns: [
     "reference-implementation",
     "src-tauri/target",

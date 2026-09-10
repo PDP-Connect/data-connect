@@ -94,7 +94,7 @@ const RUNNER_CRASH_PATTERNS: readonly RegExp[] = [
   /\bSIGKILL\b|\bSIGSEGV\b|\bSIGABRT\b/,
 ]
 
-export function isRunnerCrashOutput(failureOutput: string | undefined): boolean {
+function isRunnerCrashOutput(failureOutput: string | undefined): boolean {
   if (failureOutput === undefined) {
     return false
   }
@@ -320,6 +320,30 @@ export interface AttemptReceipt {
    * receipt is part of the contract, not a convenience.
    */
   readonly rawReportDigest: string
+  /**
+   * What the run itself did, as opposed to what its mutants did.
+   *
+   * Without this, a rejected attempt and an attempt that produced an empty
+   * report on a clean exit wrote byte-identical receipts: both have no trials,
+   * so the projection alone cannot tell them apart. The check that fails is not
+   * enough, because the artifact is what outlives the run -- so the facts a
+   * reader needs in order to know whether the attempt happened at all belong
+   * here, in the retained record.
+   */
+  readonly attempt: {
+    /** The engine's own exit status, verbatim, or "unknown" if unrecorded. */
+    readonly engineExit: string
+    /** Whether the engine wrote a report for this attempt at all. */
+    readonly reportPresent: boolean
+    /** Whether a baseline established that the tests pass on unmutated code. */
+    readonly baselineComplete: boolean
+    /**
+     * `evidence` only when this attempt produced at least one killed or
+     * survived trial. Anything else is `no_evidence`: the attempt ran, and
+     * established nothing either way.
+     */
+    readonly status: "evidence" | "no_evidence"
+  }
   readonly observations: readonly MutantObservation[]
   readonly projections: readonly Projection[]
   readonly summary: ProjectionSummary
@@ -342,6 +366,10 @@ export function buildAttemptReceipt(input: {
   readonly rawReportBytes: string
   readonly observations: readonly MutantObservation[]
   readonly cacheDecision: { readonly reuse: boolean; readonly reason: string }
+  /** The engine's exit status, verbatim. "unknown" when the step never ran. */
+  readonly engineExit: string
+  /** Whether the engine wrote a report for this attempt at all. */
+  readonly reportPresent: boolean
 }): AttemptReceipt {
   const byId = new Map<string, Projection[]>()
   for (const observation of input.observations) {
@@ -354,14 +382,26 @@ export function buildAttemptReceipt(input: {
     existing.push(projection)
   }
   const projections = [...byId.values()].map((group) => aggregateTrial(group))
+  const summary = summarize(projections)
+  const baselineComplete = input.observations.every(
+    (observation) => observation.baselineComplete
+  )
 
   const body = {
     schema: "pdpp.mutation.receipt.v1" as const,
     intentDigest: input.intent.intentDigest,
     rawReportDigest: digestOf(input.rawReportBytes),
+    attempt: {
+      engineExit: input.engineExit,
+      reportPresent: input.reportPresent,
+      baselineComplete: input.observations.length > 0 && baselineComplete,
+      status: (summary.validDenominator > 0 ? "evidence" : "no_evidence") as
+        | "evidence"
+        | "no_evidence",
+    },
     observations: input.observations,
     projections,
-    summary: summarize(projections),
+    summary,
     cacheDecision: input.cacheDecision,
   }
   return { ...body, receiptDigest: digestOf(canonicalJSON(body)) }

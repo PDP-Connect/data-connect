@@ -33,7 +33,8 @@ const strykerExit = argument("stryker-exit")
 // A missing report means the run did not get far enough to write one. That is
 // recorded as an empty observation set, which the projector turns into zero
 // trials rather than into a clean result.
-const rawReportBytes = existsSync(reportPath) ? readFileSync(reportPath, "utf8") : ""
+const reportPresent = existsSync(reportPath)
+const rawReportBytes = reportPresent ? readFileSync(reportPath, "utf8") : ""
 
 // The baseline is complete only when Stryker itself exited cleanly. Anything
 // else makes every mutant in the batch inconclusive, because there is no
@@ -62,6 +63,8 @@ const receipt = buildAttemptReceipt({
   rawReportBytes,
   observations,
   cacheDecision,
+  engineExit: strykerExit,
+  reportPresent,
 })
 
 writeFileSync(argument("out"), `${JSON.stringify(receipt, null, 2)}\n`)

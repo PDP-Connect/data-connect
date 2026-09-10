@@ -164,12 +164,18 @@ export function classifyForCohort(
   if (entry.status.startsWith("D")) {
     return { selected: false, reason: "deleted" }
   }
+  // `test_file` is decided before cohort membership, because a cohort's tests
+  // usually live outside its production prefixes -- the reference
+  // implementation keeps them in `test/` -- and calling those `outside_cohort`
+  // describes them wrongly. Both reasons exclude, so the mutate list is the
+  // same either way; only the recorded reason differs, and the receipt is
+  // supposed to say why a file was skipped.
+  if (isTestPath(entry.path)) {
+    return { selected: false, reason: "test_file" }
+  }
   const withinCohort = cohort.productionPrefixes.some((prefix) => entry.path.startsWith(prefix))
   if (!withinCohort) {
     return { selected: false, reason: "outside_cohort" }
-  }
-  if (isTestPath(entry.path)) {
-    return { selected: false, reason: "test_file" }
   }
   if (!isProductionSourceExtension(entry.path)) {
     return { selected: false, reason: "not_production_source" }

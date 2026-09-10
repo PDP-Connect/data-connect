@@ -252,6 +252,7 @@ describe("readObservations", () => {
 
 describe("buildAttemptReceipt", () => {
   const rawReportBytes = JSON.stringify({ files: {} })
+  const ranCleanly = { engineExit: "0", reportPresent: true } as const
 
   it("binds the intent digest, the raw report digest, and the computed projection", () => {
     const receipt = buildAttemptReceipt({
@@ -259,6 +260,7 @@ describe("buildAttemptReceipt", () => {
       rawReportBytes,
       observations: [observation({ id: "1" })],
       cacheDecision: { reuse: false, reason: "execution_inputs_changed" },
+      ...ranCleanly,
     })
     expect(receipt.intentDigest).toBe(intent.intentDigest)
     expect(receipt.summary).toMatchObject({ killed: 1, validDenominator: 1 })
@@ -274,6 +276,7 @@ describe("buildAttemptReceipt", () => {
       rawReportBytes,
       observations: [observation({ id: "1", rawStatus: "Survived", failureOutput: undefined })],
       cacheDecision: { reuse: false, reason: "no_recorded_inputs" },
+      ...ranCleanly,
     })
     const tampered = {
       ...receipt,
@@ -292,6 +295,7 @@ describe("buildAttemptReceipt", () => {
       rawReportBytes,
       observations: [observation({ id: "1" })],
       cacheDecision: { reuse: true, reason: "execution_inputs_match" },
+      ...ranCleanly,
     })
     expect(verifyReceipt(receipt, JSON.stringify({ files: { "src/a.ts": {} } }))).toEqual({
       valid: false,
@@ -308,9 +312,57 @@ describe("buildAttemptReceipt", () => {
         observation({ id: "1", rawStatus: "Survived", failureOutput: undefined }),
       ],
       cacheDecision: { reuse: false, reason: "no_recorded_inputs" },
+      ...ranCleanly,
     })
     expect(receipt.projections).toHaveLength(1)
     expect(receipt.projections[0]).toMatchObject({ basis: "contradictory_observations" })
     expect(receipt.summary).toMatchObject({ inconclusive: 1, validDenominator: 0 })
+  })
+
+  it("distinguishes a rejected attempt from a clean attempt that produced nothing", () => {
+    // Both have zero trials, so the projection alone cannot tell them apart.
+    // They used to write byte-identical receipts, which meant the artifact --
+    // the thing that outlives the run -- could not say whether the engine had
+    // even succeeded. The check failing is not enough on its own.
+    const rejected = buildAttemptReceipt({
+      intent,
+      rawReportBytes: "",
+      observations: [],
+      cacheDecision: { reuse: false, reason: "no_cache_restored" },
+      engineExit: "1",
+      reportPresent: false,
+    })
+    const cleanButEmpty = buildAttemptReceipt({
+      intent,
+      rawReportBytes: "",
+      observations: [],
+      cacheDecision: { reuse: false, reason: "no_cache_restored" },
+      engineExit: "0",
+      reportPresent: false,
+    })
+    expect(rejected.attempt).toEqual({
+      engineExit: "1",
+      reportPresent: false,
+      baselineComplete: false,
+      status: "no_evidence",
+    })
+    expect(cleanButEmpty.attempt.engineExit).toBe("0")
+    expect(rejected.receiptDigest).not.toBe(cleanButEmpty.receiptDigest)
+  })
+
+  it("records an attempt that produced evidence as having produced it", () => {
+    const receipt = buildAttemptReceipt({
+      intent,
+      rawReportBytes,
+      observations: [observation({ id: "1" })],
+      cacheDecision: { reuse: false, reason: "no_cache_restored" },
+      ...ranCleanly,
+    })
+    expect(receipt.attempt).toEqual({
+      engineExit: "0",
+      reportPresent: true,
+      baselineComplete: true,
+      status: "evidence",
+    })
   })
 })

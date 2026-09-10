@@ -31,6 +31,9 @@ const lines: string[] = [
     .sort(([left], [right]) => (left < right ? -1 : 1))
     .map(([status, count]) => `| ${status} | ${count} |`),
   "",
+  `Engine exit: \`${receipt.attempt.engineExit}\` · report written: ${receipt.attempt.reportPresent} · ` +
+    `baseline established: ${receipt.attempt.baselineComplete}`,
+  "",
   `Intent: \`${receipt.intentDigest}\``,
   `Raw report: \`${receipt.rawReportDigest}\``,
   `Receipt: \`${receipt.receiptDigest}\``,

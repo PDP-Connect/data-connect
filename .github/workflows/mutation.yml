@@ -47,7 +47,6 @@ jobs:
   mutation:
     name: mutate changed production files (${{ matrix.cohort }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +99,11 @@ jobs:
             base_commit="$(git rev-parse "${HEAD_REF}^" 2>/dev/null || git rev-parse "${HEAD_REF}")"
           fi
 
-          git diff --name-status -z --diff-filter=ACMRT \
+          # Deletions are included so the classifier sees them and records them
+          # as excluded. Filtering them out here would have made the receipt's
+          # `excluded` list an incomplete account of the diff, which is the one
+          # thing that list promises to be.
+          git diff --name-status -z --diff-filter=ACMRTD \
             "${base_commit}" "${HEAD_REF}" > "reports/mutation/${COHORT}/diff.nul"
 
           # `--selected-tests` writes the tests this attempt runs, for cohorts
@@ -118,8 +121,8 @@ jobs:
             --inputs-digest "reports/mutation/${COHORT}/execution-inputs.digest" \
             --selected-tests "reports/mutation/${COHORT}/selected-tests.txt"
 
-          # Stryker resolves the selection path against the cohort root it runs
-          # in, so a non-root cohort's config reads it from under that root.
+          # The configuration's selection lookup is relative to the directory
+          # Stryker runs in, which for a non-root cohort is that cohort's root.
           if [[ "${COHORT_ROOT}" != "." ]]; then
             mkdir -p "${COHORT_ROOT}/reports/mutation/${COHORT}"
             cp "reports/mutation/${COHORT}/selected-tests.txt" \
@@ -193,10 +196,19 @@ jobs:
           printf 'Mutating %d file(s):\n' "${#mutate[@]}"
           printf '  %s\n' "${mutate[@]}"
 
+          # Run from the cohort root. Every relative path in play -- the mutate
+          # globs, the configuration's reporter and incremental-file paths, its
+          # selection lookup and its ignorePatterns -- is cohort-relative, and
+          # Stryker resolves all of them against the working directory, not
+          # against the configuration's own location. Invoking this from the
+          # repository root made the globs match nothing, so the cohort mutated
+          # zero files and wrote its report where the next step does not read.
+          #
           # The exit status is recorded rather than acted on: the projection
           # step decides what it means. A non-zero status makes the baseline
           # incomplete, which makes every mutant in the batch inconclusive.
-          npx stryker run "${COHORT_ROOT}/stryker.config.mjs" --mutate "$(IFS=,; echo "${mutate[*]}")"
+          cd "${COHORT_ROOT}"
+          npx stryker run stryker.config.mjs --mutate "$(IFS=,; echo "${mutate[*]}")"
           stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
           exit "${stryker_exit}"
@@ -221,8 +233,9 @@ jobs:
           STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit }}
         run: |
           set -euo pipefail
-          # Stryker resolves its reporter paths against the cohort root it ran
-          # in, so the report for a non-root cohort lands under that root.
+          # Stryker resolves its reporter paths against the directory it ran in,
+          # and the observation step runs from the cohort root, so a non-root
+          # cohort's report lands under that root.
           if [[ "${COHORT_ROOT}" == "." ]]; then
             report="reports/mutation/${COHORT}/mutation.json"
           else
