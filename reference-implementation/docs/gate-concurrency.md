@@ -40,6 +40,12 @@ Each has since been traced to a real defect and repaired at its root:
   maintenance they had started was still running, so the lane failed with
   "no database is open" from a promise nobody awaited. They now drain the lane
   before teardown.
+- The same three tests also raced a wall clock. Each holds a write gate on
+  purpose while a queued writer waits on the production admission budget of
+  two seconds, and a slow four-CPU runner spends that margin on real I/O. The
+  test file now sets `PDPP_INGEST_LOCK_WAIT_MS` far above any deliberate hold,
+  because the property under test is serialization order, not the timeout;
+  the cases that test the timeout set their own short budget.
 - A large-upload test let a detached validation task outlive the test that
   started it and write into the next test's database.
 
@@ -88,10 +94,10 @@ known and a measurement for the same profile justifies it:
 
 ```sh
 # Memory profile, overriding the default cap of 8.
-PDPP_TEST_CONCURRENCY=4 pnpm --dir reference-implementation test
+PDPP_TEST_PROFILE=memory-default PDPP_TEST_CONCURRENCY=4 npm --prefix reference-implementation test
 
 # PostgreSQL stays at 2 unless its own restore-aware measurement says otherwise.
-PDPP_TEST_PROFILE=postgres pnpm --dir reference-implementation test
+PDPP_TEST_PROFILE=postgres npm --prefix reference-implementation test
 ```
 
 Whether 8 suits hardware larger than the measured host is not settled here;
