@@ -30,7 +30,12 @@ export interface ConsentSourceIcon {
 
 export interface ConsentStreamModel {
   /** Manifest-declared selectable fields; required fields remain selected. */
-  readonly fields: ReadonlyArray<{ readonly description?: string; readonly name: string; readonly required: boolean }>;
+  readonly fields: ReadonlyArray<{
+    readonly description?: string;
+    readonly label?: string;
+    readonly name: string;
+    readonly required: boolean;
+  }>;
   /** Total schema fields this stream would expose. `0` means the manifest declared none. */
   readonly fieldsTotal: number;
   /** `${sourceId}:${name}` — the id the accept request sends back. */
