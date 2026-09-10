@@ -45,14 +45,22 @@ test("the test job builds the console before it runs the gate", async () => {
   );
 });
 
-test("the console build the workflow runs is the one the test looks for", async () => {
-  // The test locates the build through apps/console's own build script. If the
-  // workflow built some other target the prebuild would not satisfy the test,
-  // and the silent in-test build would come back without the workflow
-  // appearing to change.
-  const consolePackage = JSON.parse(await readFile(join(__dirname, "../../apps/console/package.json"), "utf8")) as {
-    scripts?: Record<string, string>;
-  };
+test("the workflow builds the same target the test would build itself", async () => {
+  // A prebuild of some other target would leave composed-origin.test.ts still
+  // building silently while the workflow looked correct. Derive the command
+  // from the test's own spawn arguments rather than restating it here, so the
+  // two cannot drift apart silently.
+  const testSource = await readFile(join(__dirname, "../test/composed-origin.test.ts"), "utf8");
+  const spawnArgs = testSource.match(/runCommand\("npm",\s*\[([^\]]+)\]/);
+  assert.ok(spawnArgs?.[1], "expected composed-origin.test.ts to build the console with runCommand(\"npm\", [...])");
 
-  assert.ok(consolePackage.scripts?.build, "apps/console must define the build script the workflow invokes");
+  const argv = [...spawnArgs[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  const command = `npm ${argv.join(" ")}`;
+  assert.equal(command, "npm --prefix apps/console run build", "unexpected console build command in the test");
+
+  const workflow = await readFile(WORKFLOW_PATH, "utf8");
+  assert.ok(
+    workflow.includes(command),
+    `the workflow must run ${command}, the exact build composed-origin.test.ts falls back to`
+  );
 });

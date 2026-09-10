@@ -167,16 +167,8 @@ jobs:
           npm --prefix reference-implementation/vendor/mcp-server run build
 
       - name: Build console
-        # composed-origin.test.ts needs the console's production build and
-        # builds it itself if it is absent. That build is a subprocess whose
-        # output the test captures rather than forwards, and Node's test
-        # runner owns the file's stdio, so nothing the file writes during the
-        # build reaches the gate. The gate kills a file that produces no
-        # output for 120s, which made a cold console build race that budget:
-        # the build gets a smaller share of the machine as file concurrency
-        # rises, and on a hosted runner it loses. Building it here keeps the
-        # step visible in its own log and leaves the test with nothing slow
-        # and silent to do.
+        # Otherwise composed-origin.test.ts builds it silently mid-gate and
+        # trips the no-output watchdog; see scripts/ci-console-prebuild.test.ts.
         env:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm --prefix apps/console run build

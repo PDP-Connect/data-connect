@@ -6,7 +6,8 @@
  * available CPUs and by the number of selected files, never below 1. A
  * positive explicit override wins and is not clamped. The override arrives
  * already parsed with `Number.parseInt` in run-tests.ts (so `1.5` is 1 and
- * `abc` is NaN); non-positive or NaN falls back to the profile cap.
+ * `abc` is NaN); non-positive or NaN falls back to the profile default, which
+ * is then clamped by CPUs and file count.
  */
 
 /** Storage profiles the gate runs under, as validated by test-profile-env.ts. */
@@ -25,7 +26,7 @@ export interface FileConcurrencyInput {
 /**
  * Per-profile ceiling before the clamps. `postgres` stays at 2: that lane's
  * restore target is shared across files. The measurement behind 8 is in
- * docs/gate-concurrency.md.
+ * reference-implementation/docs/gate-concurrency.md.
  */
 const PROFILE_CAPS: Record<TestProfile, number> = {
   "memory-default": 8,
