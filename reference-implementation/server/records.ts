@@ -6789,35 +6789,51 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
-        await postgresQuery("DELETE FROM blob_bindings WHERE connector_instance_id = $1 AND stream = $2", [
-          connectorInstanceId,
-          stream,
-        ]);
-        // Reclaim blobs this delete just unbound, mirroring
-        // `deleteConnectionRecordRowsPostgres` (and SQLite's
-        // `delete-blobs-by-instance.sql`). Dropping the bindings above without
-        // this left the `blobs` rows behind permanently — nothing else in the
-        // codebase collects orphans, so those bytes were junk forever.
-        //
-        // Refcount-gated, NOT supersede-and-delete. `blobs` is globally
-        // content-addressed (the insert conflicts on `blob_id` alone, with no
-        // connector or instance in the conflict target), so identical bytes
-        // from a sibling connection share ONE row; and the FK from
-        // `blob_bindings` is ON DELETE CASCADE, so an ungated delete here
-        // would silently destroy a live sibling's binding. `NOT EXISTS`
-        // deletes only rows no binding still references. Scoped to this
-        // instance for the same reason the whole-connection sibling is: a
-        // delete reclaims its own bytes, never another connection's.
-        await postgresQuery(
-          `DELETE FROM blobs
-            WHERE connector_instance_id = $1
-              AND stream = $2
-              AND NOT EXISTS (
-                SELECT 1
-                  FROM blob_bindings
-                 WHERE blob_bindings.blob_id = blobs.blob_id
-              )`,
-          [connectorInstanceId, stream]
+        await withPostgresTransaction(
+          async (client) => {
+            await client.query("DELETE FROM blob_bindings WHERE connector_instance_id = $1 AND stream = $2", [
+              connectorInstanceId,
+              stream,
+            ]);
+            // Reclaim blobs this delete just unbound, mirroring
+            // `deleteConnectionRecordRowsPostgres` (and SQLite's
+            // `delete-blobs-by-instance.sql`). Dropping the bindings above without
+            // this left the `blobs` rows behind permanently — nothing else in the
+            // codebase collects orphans, so those bytes were junk forever.
+            //
+            // Refcount-gated, NOT supersede-and-delete. `blobs` is globally
+            // content-addressed (the insert conflicts on `blob_id` alone, with no
+            // connector or instance in the conflict target), so identical bytes
+            // from a sibling connection share ONE row; and the FK from
+            // `blob_bindings` is ON DELETE CASCADE, so an ungated delete here
+            // would silently destroy a live sibling's binding. `NOT EXISTS`
+            // deletes only rows no binding still references. Scoped to this
+            // instance for the same reason the whole-connection sibling is: a
+            // delete reclaims its own bytes, never another connection's.
+            // The FK takes KEY SHARE when a writer adds a binding. Lock candidates
+            // first, then check references in a NEW READ COMMITTED statement so a
+            // writer that committed while this lock waited is visible to DELETE.
+            // Keep both statements in this transaction; a single CTE is not enough.
+            const candidates = await client.query<{ blob_id: string }>(
+              `SELECT blob_id FROM blobs
+              WHERE connector_instance_id = $1 AND stream = $2
+              ORDER BY blob_id FOR UPDATE`,
+              [connectorInstanceId, stream]
+            );
+            await client.query(
+              `DELETE FROM blobs
+              WHERE connector_instance_id = $1
+                AND stream = $2
+                AND blob_id = ANY($3::text[])
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM blob_bindings
+                   WHERE blob_bindings.blob_id = blobs.blob_id
+                )`,
+              [connectorInstanceId, stream, candidates.rows.map((row) => row.blob_id)]
+            );
+          },
+          { lockConnectorInstanceId: connectorInstanceId }
         );
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
         // Parity with the SQLite arm above: a connector-wide record delete
@@ -7035,15 +7051,23 @@ export async function deleteConnectionRecordRowsPostgres(client: PostgresClient,
   await client.query("DELETE FROM record_changes WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM version_counter WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM blob_bindings WHERE connector_instance_id = $1", [connectorInstanceId]);
+  // Wait for binding writers before taking the reference-check snapshot.
+  // The caller keeps these locks through DELETE in its READ COMMITTED transaction.
+  const candidates = await client.query<{ blob_id: string }>(
+    `SELECT blob_id FROM blobs WHERE connector_instance_id = $1
+      ORDER BY blob_id FOR UPDATE`,
+    [connectorInstanceId]
+  );
   await client.query(
     `DELETE FROM blobs
       WHERE connector_instance_id = $1
+        AND blob_id = ANY($2::text[])
         AND NOT EXISTS (
           SELECT 1
             FROM blob_bindings
            WHERE blob_bindings.blob_id = blobs.blob_id
         )`,
-    [connectorInstanceId]
+    [connectorInstanceId, candidates.rows.map((row) => row.blob_id)]
   );
   await client.query("DELETE FROM connector_attention_records WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM records WHERE connector_instance_id = $1", [connectorInstanceId]);
