@@ -35,6 +35,19 @@
 //     import in try/catch, or asserts that the import throws, therefore still
 //     fails the run. Catching the guard cannot turn a mislabelled file green.
 //
+// Two chokepoints, because resolution is not the only way in. Module
+// resolution covers everything loaded by specifier, but a builtin can be
+// fetched straight off the process object:
+//
+//   const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
+//   new DatabaseSync(":memory:").prepare("select 42").get();
+//
+// That executes real SQL and never resolves anything, so a resolve hook cannot
+// see it at all. `process.getBuiltinModule` is therefore wrapped as well, as is
+// the CJS `require` path for builtins. Wrapping the one function that returns
+// builtins is what makes a COMPUTED name -- `"node:" + "sqlite"` -- as covered
+// as a literal one: the check runs on the runtime value, after any computation.
+//
 // Denial is per specifier FORM, not per file. A pattern that matches
 // "pg/lib/client" but not the bare specifier "pg" reports zero violations on a
 // file that genuinely imports Postgres, which is a silent false pass -- the
@@ -52,16 +65,42 @@
 //   const url = pathToFileURL(createRequire(import.meta.url).resolve("pg")).href;
 //   await import(url);   // specifier is "file:///.../node_modules/pg/lib/index.js"
 //
-// That load reaches the real driver without suppressing an error or opening a
-// connection, so neither the specifier rule nor the error path sees it. A
-// denied driver is therefore ALSO matched on its resolved package identity --
-// the `node_modules/<pkg>/` segment its resolved path must contain -- so every
-// spelling that lands inside the driver's own package is denied regardless of
-// how it was named. `pgvector`, `pg-boss` and `pgtools` keep resolving, since
-// the segment must match the package name exactly and not merely start with it.
+// The lesson of that hole is worth stating, because enumerating spellings is a
+// losing game: there is always one more way to name the same file. So the rule
+// is not a list of forms but an IDENTITY. A denied target is denied by WHAT IT
+// IS, whatever specifier reached it:
+//
+//   on disk   the resolved real path (symlinks resolved) of the driver's own
+//             installed package root, or of a denied storage module
+//   builtin   the canonical `node:` name, normalised from the runtime value
+//
+// The specifier rules below are kept as a cheap first check and as the only
+// thing available when resolution itself fails, but they are no longer what
+// makes the guard sound. Identity is. `pgvector`, `pg-boss` and `pgtools`
+// resolve to their own package roots and so are outside the denied roots --
+// a real directory boundary, not a string coincidence.
+//
+// What this boundary does and does not cover, stated precisely because a
+// guard whose promise is vaguer than its rule invites the next surprise:
+//
+//  COVERED   any load of the installed driver package or a denied storage
+//            module, by any specifier -- bare, subpath, relative, absolute,
+//            file URL, dynamic, require, createRequire, pre-resolved path --
+//            and any access to a denied builtin through import, require or
+//            process.getBuiltinModule, by literal or computed name.
+//
+//  NOT       a COPY of a driver's source at a different real path. That is a
+//  COVERED   different file on disk, and identifying it as the same driver
+//            would need content fingerprinting, which this guard does not do.
+//            A test that vendors its own copy of pg is not what this guard is
+//            for; the classifier's source scan is what would notice that.
+//            Also not covered: storage reached over a socket by hand-rolled
+//            protocol code, or an unexecuted branch (both halves only see
+//            what actually runs).
 
-import { registerHooks } from "node:module";
-import { sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { createRequire, registerHooks } from "node:module";
+import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -123,29 +162,92 @@ export function matchesDeniedSpecifier(specifier, pkg) {
 }
 
 /**
- * Does `resolved` land inside the package `pkg` owns on disk?
+ * Real installed root of each denied driver package, resolved once at install
+ * time, keyed by package name. A driver that is not installed is absent.
  *
- * A resolved driver path always carries the package name as a
- * `node_modules/<pkg>/` segment, so that segment is the driver's identity
- * independent of how it was spelled. The trailing separator is required: it is
- * what keeps `node_modules/pgvector/index.js` and `node_modules/pg-boss/index.js`
- * out while keeping `node_modules/pg/lib/index.js` in. The last occurrence is
- * not special-cased -- a nested `node_modules/foo/node_modules/pg/...` install
- * is still the denied driver and is still matched.
+ * This is the driver's IDENTITY: the directory its own package.json sits in,
+ * with symlinks resolved. Resolution and `realpathSync` are what establish it,
+ * so a pnpm store path, a workspace symlink and a hoisted install all reduce
+ * to the same answer without this file knowing anything about install layout.
+ */
+const deniedDriverRoots = new Map();
+
+function driverRoots() {
+  if (deniedDriverRoots.size > 0) {
+    return deniedDriverRoots;
+  }
+  const require = createRequire(import.meta.url);
+  for (const pkg of DENIED_SQL_DRIVERS) {
+    if (pkg.startsWith("node:")) {
+      continue;
+    }
+    for (const target of [`${pkg}/package.json`, pkg]) {
+      try {
+        const resolved = require.resolve(target);
+        const root = target.endsWith("package.json") ? dirname(resolved) : resolved;
+        deniedDriverRoots.set(pkg, normalizePath(realpathSync(root)));
+        break;
+      } catch {
+        // Not installed, or `exports` hides package.json: try the entry point,
+        // and if that also fails leave the package out. An absent driver
+        // cannot be loaded, so it needs no rule.
+      }
+    }
+  }
+  return deniedDriverRoots;
+}
+
+/**
+ * Does `resolved` land inside the real installed root of driver `pkg`?
  *
- * Builtins (`node:sqlite`) have no package directory; they are covered by the
- * specifier rule alone, which is exact for them because a builtin cannot be
- * reached through a file path.
+ * Matched on the resolved REAL path, not on a `node_modules/<pkg>/` substring.
+ * That substring was an installation-layout heuristic: it happened to hold for
+ * a hoisted npm tree and said nothing about identity, so it both missed a
+ * driver installed somewhere else and would have caught an unrelated file that
+ * merely sat under such a directory. Comparing against the root that
+ * resolution itself reports removes the guesswork -- and the prefix boundary
+ * that keeps `pgvector` and `pg-boss` out is now a real directory boundary
+ * rather than a string coincidence.
+ *
+ * Builtins have no directory on disk; `matchesDeniedBuiltin` covers them.
  */
 export function matchesDeniedDriverPath(resolved, pkg) {
   if (pkg.startsWith("node:")) {
+    return false;
+  }
+  const root = driverRoots().get(pkg);
+  if (!root) {
     return false;
   }
   const path = normalizePath(resolved);
   if (path === "") {
     return false;
   }
-  return path.includes(`/node_modules/${pkg}/`);
+  let real = path;
+  try {
+    real = normalizePath(realpathSync(path));
+  } catch {
+    // Not a path that exists (a builtin, or a URL scheme we do not handle).
+    // Fall through and compare the normalized form as given.
+  }
+  return real === root || real.startsWith(`${root}/`);
+}
+
+/**
+ * Canonical `node:` name for a builtin request, or undefined if `name` does
+ * not identify a builtin this guard denies.
+ *
+ * Normalisation is done on the runtime VALUE, which is what makes this immune
+ * to how the name was written. `process.getBuiltinModule("node:" + "sqlite")`
+ * and a literal `"node:sqlite"` arrive here as the same string, so a computed
+ * name cannot evade the check the way it evades a source-text scan.
+ */
+export function matchesDeniedBuiltin(name) {
+  if (typeof name !== "string" || name === "") {
+    return;
+  }
+  const canonical = name.startsWith("node:") ? name : `node:${name}`;
+  return DENIED_SQL_DRIVERS.find((pkg) => pkg === canonical);
 }
 
 /** Does a resolved URL/path point at one of the denied storage modules? */
@@ -227,6 +329,8 @@ export function installUnitStorageGuard() {
     },
   });
 
+  installBuiltinGuard();
+
   // Recording the violation outside the thrown error is what makes this
   // guard uncatchable by the code under test: even if every denied import is
   // wrapped in try/catch, or asserted to throw, this handler still fails the
@@ -246,10 +350,46 @@ export function installUnitStorageGuard() {
   });
 }
 
-function deny(denied, specifier, context) {
+/**
+ * Close the route that does not resolve anything.
+ *
+ * `process.getBuiltinModule(name)` hands back a builtin directly, without
+ * consulting module resolution, so the resolve hook cannot see it. Wrapping
+ * that one function closes the route -- and because the check runs on the
+ * argument's runtime value, a COMPUTED name is covered exactly as a literal
+ * one is. That is the point of guarding the function rather than scanning for
+ * spellings of the name.
+ *
+ * The CJS `require("node:sqlite")` path needs nothing here: `registerHooks`
+ * intercepts CJS resolution as well, so the resolve hook above already denies
+ * it. Verified by disabling this function and re-probing that route -- it
+ * still fails. A second wrap of `Module._load` would be dead code around a
+ * Node internal.
+ */
+function installBuiltinGuard() {
+  const originalGetBuiltinModule = process.getBuiltinModule;
+  if (typeof originalGetBuiltinModule === "function") {
+    process.getBuiltinModule = function getBuiltinModule(name) {
+      const denied = matchesDeniedBuiltin(name);
+      if (denied) {
+        throw deny({ kind: "sql-driver", rule: denied }, String(name), undefined);
+      }
+      return originalGetBuiltinModule.call(this, name);
+    };
+  }
+}
+
+/**
+ * Record a violation and build the error to throw.
+ *
+ * `parent` is a parentURL when the resolve hook calls this and a filename when
+ * the builtin guard does; both are only ever used for the diagnostic, so
+ * either is accepted as-is.
+ */
+function deny(denied, specifier, parent) {
   const violation = {
     kind: denied.kind,
-    parent: context?.parentURL,
+    parent: typeof parent === "string" ? parent : parent?.parentURL,
     rule: denied.rule,
     specifier,
   };

@@ -223,11 +223,31 @@ for (const [loader, source] of [
   // point at which source reading can see it, so it counts here.
   ["resolve then import", 'const url = pathToFileURL(req.resolve("pg")).href;\nconst pg = await import(url);'],
   ["resolve then require", 'const pg = req(req.resolve("pg"));'],
+  // A builtin fetched off the process object involves no import or require at
+  // all, so this route has to be read separately.
+  ["getBuiltinModule", 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite");'],
 ] as const) {
   test(`a storage dependency loaded by ${loader} is detected`, () => {
     assert.notDeepEqual(storageImports(source), []);
   });
 }
+
+test("fetching an allowed builtin is not a storage dependency", () => {
+  // Every test file reaches for node:path and node:assert this way.
+  for (const source of [
+    'const p = process.getBuiltinModule("node:path");',
+    'const a = process.getBuiltinModule("node:assert");',
+  ]) {
+    assert.deepEqual(storageImports(source), []);
+  }
+});
+
+test("a computed builtin name is not recoverable by reading source", () => {
+  // Recorded deliberately, like the computed-specifier case: this is the bound
+  // on source reading, and the reason the runtime guard wraps the function
+  // itself rather than scanning for names.
+  assert.deepEqual(storageImports('const n = "node:" + "sqlite";\nprocess.getBuiltinModule(n);'), []);
+});
 
 test("resolving an unrelated package or path is not a storage dependency", () => {
   // `resolve` is a general-purpose call. Only a denied driver name makes it

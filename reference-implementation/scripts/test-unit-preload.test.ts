@@ -11,15 +11,17 @@
 import { strict as assert } from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   classifyResolution,
   DENIED_SQL_DRIVERS,
   DENIED_STORAGE_MODULES,
+  matchesDeniedBuiltin,
   matchesDeniedDriverPath,
   matchesDeniedSpecifier,
 } from "./test-unit-preload.mjs";
@@ -31,6 +33,8 @@ const GUARD_MESSAGE_RE = /unit storage guard/;
 const ONE_PASS_RE = /pass 1/;
 const LOADED_DRIVER_RE = /LOADED DRIVER/;
 const ALLOWED_OK_RE = /ALLOWED OK/;
+const SQL_RESULT_RE = /SQL RESULT/;
+const PAST_CATCH_RE = /PAST CATCH/;
 
 /**
  * Run `source` as a test file under the guard, through the same
@@ -187,45 +191,63 @@ test("catching the denial does not turn the run green", () => {
 });
 
 // A driver reached through its already-resolved location never spells the
-// package name as a specifier, so the specifier rule alone cannot see it. Each
-// resolved-identity form is asserted on its own, for the same reason the
-// specifier forms are: one unmatched spelling is a silent false pass.
-for (const [form, resolved, pkg] of [
-  ["file URL", "file:///repo/node_modules/pg/lib/index.js", "pg"],
-  ["absolute path", "/repo/node_modules/pg/lib/client.js", "pg"],
-  ["native package file URL", "file:///repo/node_modules/better-sqlite3/lib/index.js", "better-sqlite3"],
-  ["nested install", "/repo/node_modules/foo/node_modules/pg/lib/index.js", "pg"],
+// package name as a specifier, so the specifier rule alone cannot see it. These
+// use the REAL installed drivers rather than synthetic path strings, because
+// the rule is now the driver's real resolved root: a made-up path under a
+// directory named `node_modules/pg` is not the driver and must not be treated
+// as proof that it is.
+const requireHere = createRequire(import.meta.url);
+
+for (const [form, target, pkg] of [
+  ["entry point", "pg", "pg"],
+  ["package subpath file", "pg/lib/client.js", "pg"],
+  ["native package entry", "better-sqlite3", "better-sqlite3"],
 ] as const) {
-  test(`a denied driver reached by ${form} is matched on its resolved identity`, () => {
+  test(`the real installed driver reached by ${form} is matched on its identity`, () => {
+    const resolved = requireHere.resolve(target);
+    const asFileUrl = pathToFileURL(resolved).href;
+
     assert.equal(matchesDeniedDriverPath(resolved, pkg), true);
-    // The specifier is not the package name in any of these -- resolved
-    // identity is the only thing that can catch them.
+    assert.equal(matchesDeniedDriverPath(asFileUrl, pkg), true);
+    // Neither spelling names the package, so identity is the only thing that
+    // can catch them.
     assert.equal(matchesDeniedSpecifier(resolved, pkg), false);
-    assert.equal(classifyResolution(resolved, resolved)?.kind, "sql-driver");
+    assert.equal(classifyResolution(asFileUrl, asFileUrl)?.kind, "sql-driver");
   });
 }
 
-test("a package whose directory merely begins with a denied name resolves", () => {
-  // The `node_modules/<pkg>/` segment must match the package name exactly.
-  // Without the trailing separator these would all be denied, and a guard that
-  // blocks pgvector is a guard somebody switches off.
-  for (const allowed of [
-    "file:///repo/node_modules/pgvector/index.js",
-    "/repo/node_modules/pg-boss/index.js",
-    "/repo/node_modules/pgtools/index.js",
-    "/repo/node_modules/sqlite-vec/index.cjs",
+test("a path that merely contains a denied package name is not the driver", () => {
+  // This is what replaced the old `node_modules/<pkg>/` substring rule. That
+  // rule was an installation-layout guess: it would have called every path
+  // below a directory of that name a driver, and missed a driver installed
+  // anywhere else. Identity is the resolved real root, so these are not
+  // matched -- they do not resolve inside it.
+  for (const notTheDriver of [
+    "/nowhere/node_modules/pg/lib/index.js",
+    "file:///nowhere/node_modules/better-sqlite3/lib/index.js",
+    "/tmp/vendor/pg/lib/client.js",
   ]) {
-    assert.equal(matchesDeniedDriverPath(allowed, "pg"), false);
-    assert.equal(matchesDeniedDriverPath(allowed, "better-sqlite3"), false);
-    assert.equal(classifyResolution(allowed, allowed), undefined);
+    assert.equal(matchesDeniedDriverPath(notTheDriver, "pg"), false);
+    assert.equal(matchesDeniedDriverPath(notTheDriver, "better-sqlite3"), false);
   }
 });
 
-test("a builtin has no package directory and is left to the specifier rule", () => {
+test("a genuinely installed lookalike package is outside the denied roots", () => {
+  // sqlite-vec is really installed, so this compares real root against real
+  // root rather than trusting a string boundary.
+  const lookalike = requireHere.resolve("sqlite-vec");
+
+  assert.equal(matchesDeniedDriverPath(lookalike, "pg"), false);
+  assert.equal(matchesDeniedDriverPath(lookalike, "better-sqlite3"), false);
+  assert.equal(classifyResolution(lookalike, pathToFileURL(lookalike).href), undefined);
+});
+
+test("a builtin has no package directory and is covered by the builtin rule", () => {
   // `node:sqlite` cannot be reached through a file path, so a path rule for it
-  // would be dead weight; the specifier rule is exact for builtins.
+  // would be dead weight.
   assert.equal(matchesDeniedDriverPath("/repo/node_modules/node:sqlite/index.js", "node:sqlite"), false);
   assert.equal(classifyResolution("node:sqlite", "node:sqlite")?.kind, "sql-driver");
+  assert.equal(matchesDeniedBuiltin("node:sqlite"), "node:sqlite");
 });
 
 // The executed half of the resolved-identity rule. These spawn real child
@@ -378,4 +400,139 @@ test("an admissible unit test passes unchanged under the guard", () => {
   assert.equal(unguarded.status, 0, unguarded.output);
   assert.match(guarded.output, ONE_PASS_RE);
   assert.doesNotMatch(guarded.output, GUARD_MESSAGE_RE);
+});
+
+// `process.getBuiltinModule` returns a builtin without resolving anything, so
+// the resolve hook never sees it. Before the builtin guard existed, the first
+// case below printed a real query result and exited 0. Each route is asserted
+// separately, and the computed-name case matters most: it is the one a scan for
+// literal names could never cover, and it is covered here because the check
+// runs on the argument's runtime value.
+test("a builtin fetched through getBuiltinModule fails the run", () => {
+  const result = runGuardedInTree(
+    [
+      'import test from "node:test";',
+      'test("executes real SQL through getBuiltinModule", () => {',
+      '  const { DatabaseSync } = process.getBuiltinModule("node:sqlite");',
+      '  const db = new DatabaseSync(":memory:");',
+      '  console.log("SQL RESULT", db.prepare("select 42 AS answer").get().answer);',
+      "  db.close();",
+      "});",
+    ].join("\n")
+  );
+
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, GUARD_MESSAGE_RE);
+  // No query may have run: denial happens before the module is handed over.
+  assert.doesNotMatch(result.output, SQL_RESULT_RE);
+});
+
+test("a builtin fetched by computed name fails the run", () => {
+  const result = runGuardedInTree(
+    [
+      'import test from "node:test";',
+      'test("computes the builtin name", () => {',
+      '  const name = "node:" + "sqlite";',
+      "  const { DatabaseSync } = process.getBuiltinModule(name);",
+      '  const db = new DatabaseSync(":memory:");',
+      '  console.log("SQL RESULT", db.prepare("select 7 AS answer").get().answer);',
+      "  db.close();",
+      "});",
+    ].join("\n")
+  );
+
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, GUARD_MESSAGE_RE);
+  assert.doesNotMatch(result.output, SQL_RESULT_RE);
+});
+
+test("catching a getBuiltinModule denial does not turn the run green", () => {
+  const result = runGuardedInTree(
+    [
+      'import test from "node:test";',
+      'test("swallows the builtin denial", () => {',
+      "  try {",
+      '    process.getBuiltinModule("node:sqlite");',
+      "  } catch {",
+      "    // deliberately ignored",
+      "  }",
+      '  console.log("PAST CATCH");',
+      "});",
+    ].join("\n")
+  );
+
+  // The body completes and its assertions pass, and the run still fails.
+  assert.match(result.output, PAST_CATCH_RE, result.output);
+  assert.match(result.output, ONE_PASS_RE);
+  assert.notEqual(result.status, 0, "a swallowed builtin violation must still fail the run");
+});
+
+test("a builtin required through createRequire fails the run", () => {
+  // require() of a builtin is served from the builtin table without consulting
+  // the resolve hook, so this needs the CJS side of the builtin guard.
+  const result = runGuardedInTree(
+    [
+      'import test from "node:test";',
+      'import { createRequire } from "node:module";',
+      'test("requires the builtin", () => {',
+      "  const req = createRequire(import.meta.url);",
+      '  const loaded = req("node:sqlite");',
+      '  console.log("LOADED DRIVER", typeof loaded.DatabaseSync);',
+      "});",
+    ].join("\n")
+  );
+
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, GUARD_MESSAGE_RE);
+  assert.doesNotMatch(result.output, LOADED_DRIVER_RE);
+});
+
+// The false-positive side of the builtin rule. Every test file in the
+// repository reaches for node:path and node:fs, so a rule that caught them
+// would break the whole lane rather than guard it.
+for (const [form, source] of [
+  [
+    "getBuiltinModule",
+    'const p = process.getBuiltinModule("node:path");\nconsole.log("ALLOWED OK", p.join("a", "b"));',
+  ],
+  [
+    "createRequire",
+    'import { createRequire } from "node:module";\nconst p = createRequire(import.meta.url)("node:path");\nconsole.log("ALLOWED OK", p.join("a", "b"));',
+  ],
+] as const) {
+  test(`an allowed builtin reached through ${form} still loads`, () => {
+    const result = runGuardedInTree(`import test from "node:test";\n${source}\ntest("uses path", () => {});\n`);
+
+    assert.equal(result.status, 0, result.output);
+    assert.doesNotMatch(result.output, GUARD_MESSAGE_RE);
+    assert.match(result.output, ALLOWED_OK_RE);
+  });
+}
+
+// The name rule itself, on runtime values rather than source text.
+test("a denied builtin is recognised by canonical name, however it is written", () => {
+  assert.equal(matchesDeniedBuiltin("node:sqlite"), "node:sqlite");
+  // The bare name canonicalises to the same builtin.
+  assert.equal(matchesDeniedBuiltin("sqlite"), "node:sqlite");
+  // A computed value is just a string by the time it arrives here.
+  assert.equal(matchesDeniedBuiltin(`node:${"sqlite"}`), "node:sqlite");
+});
+
+test("allowed builtins and non-strings are not denied", () => {
+  for (const allowed of ["node:path", "path", "node:fs", "node:assert", "sqlite-vec", ""]) {
+    assert.equal(matchesDeniedBuiltin(allowed), undefined);
+  }
+  assert.equal(matchesDeniedBuiltin(undefined), undefined);
+  assert.equal(matchesDeniedBuiltin(null), undefined);
+});
+
+test("a driver is denied by its real installed root, not by a path substring", () => {
+  // The rule is identity: the driver's own resolved package root. A file that
+  // merely sits under some directory named like the package is not the driver.
+  const realDriver = createRequire(import.meta.url).resolve("pg");
+
+  assert.equal(classifyResolution(realDriver, realDriver)?.kind, "sql-driver");
+  // A path that contains the package name as a plain substring is not matched
+  // on that basis -- it does not resolve inside the real root.
+  assert.equal(classifyResolution("/somewhere/pg/lib/index.js", "/somewhere/pg/lib/index.js"), undefined);
 });

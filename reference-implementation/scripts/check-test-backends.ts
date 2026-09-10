@@ -124,10 +124,16 @@ const CREATE_REQUIRE_CALL_RE = /\bcreateRequire\s*\([^)]*\)\s*\(\s*["']([^"']+)[
 // here is treated as reaching it: the only reason to resolve a driver is to
 // load it.
 const RESOLVE_CALL_RE = /\.resolve\s*\(\s*["']([^"']+)["']\s*\)/g;
+// `process.getBuiltinModule("node:sqlite")` returns a builtin without any
+// import or require, so it appears in none of the patterns above. The runtime
+// guard covers it by wrapping the function; source reading covers the literal
+// form here so a mislabelled file is caught before it is ever run.
+const GET_BUILTIN_MODULE_RE = /\bgetBuiltinModule\s*\(\s*["']([^"']+)["']\s*\)/g;
 
 /**
  * Literal module specifiers this source uses to reach a module, by any of the
- * loader routes above -- import, require, createRequire, or resolve.
+ * loader routes above -- import, require, createRequire, resolve, or
+ * process.getBuiltinModule.
  *
  * Only literal specifiers are recoverable by reading source. A computed
  * specifier -- `import(base + name)` -- yields no string here, which is
@@ -142,6 +148,7 @@ export function importedSpecifiers(source: string): string[] {
     REQUIRE_RE,
     CREATE_REQUIRE_CALL_RE,
     RESOLVE_CALL_RE,
+    GET_BUILTIN_MODULE_RE,
   ]) {
     pattern.lastIndex = 0;
     for (const [, specifier] of source.matchAll(pattern)) {
