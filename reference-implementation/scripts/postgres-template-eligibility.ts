@@ -170,6 +170,7 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/connector-summary-source-revision.test.ts",
   "test/device-ingest-reservation-migration.test.ts",
   "test/polyfill-manifest-reconcile-invalidation-postgres.test.ts",
+  "test/postgres-blob-publication-conflict.test.ts",
   "test/postgres-boot-migration-resume.test.ts",
   "test/postgres-bootstrap-deadlock-retry.test.ts",
   "test/postgres-derived-index-maintenance.test.ts",
