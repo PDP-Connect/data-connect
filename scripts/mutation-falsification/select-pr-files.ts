@@ -79,7 +79,8 @@ export interface IntentPacket {
   /**
    * How each selected file was scoped, kept beside `mutate` so a reader can see
    * the derivation without re-parsing the entries. `whole_file` appears only for
-   * a newly added file.
+   * a file the diff gave status `A`, and is decided by that status rather than
+   * by an empty range list, so no other shape can fall into it.
    */
   readonly scope: readonly {
     readonly path: string
@@ -250,17 +251,22 @@ export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
  * remaining lines are unchanged, and a range of only the changed lines would
  * silently mutate none of it while still reporting a completed run.
  *
- * Widening goes outward only, and only as far as the *smallest* statement that
- * each end of the range falls inside. Taking every enclosing statement instead
- * would widen a one-line change to its enclosing function, and then to the
- * module -- on `server/index.ts` that turned four changed lines into ranges
- * covering a third of a 10,000-line file, which is the whole-file cost this
- * change exists to remove.
+ * A range is left alone when it cuts no statement -- when every statement is
+ * either wholly inside it or wholly outside it -- however much else encloses it.
+ * That restraint is what keeps this tight: growing out to every enclosing
+ * statement would widen a one-line change to its function and then to the
+ * module, which on `server/index.ts` turned four changed lines into ranges
+ * covering a third of a 10,000-line file, the whole-file cost this change
+ * exists to remove.
  *
- * Only the two ends need this treatment. A statement lying wholly within the
- * range is already covered, and a statement wholly containing the range is
- * deliberately not covered: Stryker will not mutate that outer statement as a
- * unit, which is correct, because the revision did not change it as a unit.
+ * A range that does cut a statement grows outward only, and only as far as the
+ * *smallest* statement containing it whole. Where no statement contains it --
+ * the usual shape at the top level of a module -- each edge grows out to the
+ * smallest statement that edge cuts, and the union covers every statement
+ * between. Both halves matter: a range spanning two adjacent top-level
+ * statements has no single containing statement, and looking only for one left
+ * it slicing both, generating nothing for either while the run still reported
+ * completion.
  *
  * `boundaries` gives, for each statement in the file, its first and last line.
  * Supplying it as data keeps this function a pure interval computation that can
@@ -272,51 +278,105 @@ export function widenToStatements(
   boundaries: readonly LineRange[]
 ): LineRange[] {
   /**
-   * The smallest statement that covers the whole range.
+   * Grow a range out to the smallest statement cut by each of its edges.
    *
-   * "Smallest" is what keeps this tight. Every statement from the innermost one
-   * up to the module body covers the range, and taking all of them would widen
-   * a one-line change to its enclosing function and then to the file -- on
-   * `server/index.ts` that turned four changed lines into ranges covering a
-   * third of a 10,000-line file. The innermost covering statement is the
-   * smallest region Stryker can actually mutate as a unit, so it is the
-   * accurate scope for the change.
+   * A statement is "cut" by an edge when it lies partly inside the range and
+   * partly outside: that is the statement Stryker cannot mutate, because the
+   * range does not contain it whole. Each edge is treated separately and the
+   * results unioned, which is what makes a range spanning several statements
+   * cover all of them -- at the top level of a module there is often no single
+   * statement containing the whole range, and looking only for one left such a
+   * range slicing every statement it touched.
    *
-   * A range already covering whole statements has no smaller covering statement
-   * and is returned unchanged.
+   * "Smallest" is what keeps this tight. A cut line sits inside its own small
+   * statement and inside the function body alike, and following the body out
+   * would restore the whole-file cost this scoping removes -- on
+   * `server/index.ts` the enclosing body spans the file. The innermost one is
+   * the smallest region Stryker can mutate as a unit that holds the cut
+   * statement whole, so growing stops there.
+   *
+   * A statement lying wholly inside the range is already covered, and one
+   * strictly containing a range that cuts nothing is left alone: the revision
+   * did not change it as a unit, and Stryker still mutates the statements
+   * nested within.
    */
-  const smallestCovering = (range: LineRange): LineRange | undefined => {
-    let tightest: LineRange | undefined
+  const smaller = (candidate: LineRange, held: LineRange | undefined): boolean =>
+    held === undefined || candidate.endLine - candidate.startLine < held.endLine - held.startLine
+
+  /** Whether any statement lies partly inside `range` and partly outside it. */
+  const cutsAStatement = (range: LineRange): boolean =>
+    boundaries.some(
+      (statement) =>
+        (statement.startLine < range.startLine && statement.endLine >= range.startLine) ||
+        (statement.endLine > range.endLine && statement.startLine <= range.endLine)
+    )
+
+  const widenOne = (range: LineRange): LineRange => {
+    // A range that cuts nothing is already made of whole statements, whatever
+    // else encloses it. Growing it out to that encloser would reach the
+    // function and then the module -- the whole-file cost this scoping removes
+    // -- and buys nothing, because Stryker mutates the statements inside a
+    // range it contains whole.
+    if (!cutsAStatement(range)) {
+      return range
+    }
+
+    // The smallest statement containing the whole range. Where one exists this
+    // is the multi-line call or block the range splits, and covering it is what
+    // makes Stryker mutate it at all. Smallest is what keeps the result tight.
+    let covering: LineRange | undefined
     for (const statement of boundaries) {
       if (statement.startLine > range.startLine || statement.endLine < range.endLine) {
         continue
       }
-      if (statement.startLine === range.startLine && statement.endLine === range.endLine) {
-        continue
+      if (smaller(statement, covering)) {
+        covering = statement
+      }
+    }
+    if (covering !== undefined) {
+      return { startLine: covering.startLine, endLine: covering.endLine }
+    }
+
+    // Nothing contains the range: it spans several statements, which at the top
+    // level of a module is the usual shape. Each edge grows out to the smallest
+    // statement it cuts, and the union covers every statement between them.
+    // Looking only for a single covering statement left these ranges slicing
+    // every statement they touched, generating nothing for any of them.
+    let atStart: LineRange | undefined
+    let atEnd: LineRange | undefined
+    for (const statement of boundaries) {
+      if (
+        statement.startLine < range.startLine &&
+        statement.endLine >= range.startLine &&
+        smaller(statement, atStart)
+      ) {
+        atStart = statement
       }
       if (
-        tightest === undefined ||
-        statement.endLine - statement.startLine < tightest.endLine - tightest.startLine
+        statement.endLine > range.endLine &&
+        statement.startLine <= range.endLine &&
+        smaller(statement, atEnd)
       ) {
-        tightest = statement
+        atEnd = statement
       }
     }
-    return tightest
+    return {
+      startLine: Math.min(range.startLine, atStart?.startLine ?? range.startLine),
+      endLine: Math.max(range.endLine, atEnd?.endLine ?? range.endLine),
+    }
   }
 
-  const widened = ranges.map((range) => {
-    // Only grow when the range would otherwise cut a statement in half: if both
-    // ends already fall on statement boundaries, Stryker can mutate what is
-    // there and nothing needs to move.
-    const startsCleanly = boundaries.some((statement) => statement.startLine === range.startLine)
-    const endsCleanly = boundaries.some((statement) => statement.endLine === range.endLine)
-    if (startsCleanly && endsCleanly) {
-      return range
-    }
-    const covering = smallestCovering(range)
-    return covering ?? range
-  })
-  return mergeRanges(widened)
+  // Both edges are treated, and treated repeatedly. Asking instead for a single
+  // statement covering the *whole* range failed in three ways, each measured:
+  // at the top level of a module nothing covers a range spanning two adjacent
+  // statements, so it was returned still cutting both; a range whose two ends
+  // happened to touch the boundaries of two *different* statements was taken as
+  // already clean while a third statement straddled it; and growing an edge can
+  // expose a further statement straddling the new edge, which one pass misses.
+  // Each shape yielded zero mutants for genuinely changed code while the run
+  // reported completion -- the silent false evidence this widening exists to
+  // prevent.
+  return mergeRanges(ranges.map(widenOne))
 }
 
 /**
@@ -324,7 +384,8 @@ export function widenToStatements(
  *
  * A file with no ranges yields a bare path -- whole-file scope. That is the
  * correct reading for a newly added file, where every line is part of the
- * change, and it is what the caller passes for one.
+ * change, and an added file is the only thing `freezeIntent` calls this with no
+ * ranges for: every other selected file must carry ranges or be rejected.
  */
 export function toMutateEntries(path: string, ranges: readonly LineRange[]): SelectedFile[] {
   if (ranges.length === 0) {
@@ -518,7 +579,8 @@ export function freezeIntent(input: {
   /**
    * Changed line ranges per repository-relative path, already widened to whole
    * statements by the caller, which is the only place with a parser. A selected
-   * path absent from this map is scoped to the whole file.
+   * path absent from this map, or present with no ranges, is an error unless the
+   * diff gave it status `A`; it is never quietly promoted to whole-file scope.
    */
   readonly hunks?: ReadonlyMap<string, readonly LineRange[]>
 }): IntentPacket {
@@ -537,20 +599,42 @@ export function freezeIntent(input: {
   // whole file is the change, so whole-file scope is the accurate scope for it
   // rather than a concession. Every other selected file is scoped to the ranges
   // the diff attributed to it.
-  const addedPaths = new Set(
-    input.diff.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path)
-  )
+  const statusByPath = new Map(input.diff.map((entry) => [entry.path, entry.status]))
 
   const scope: { path: string; kind: "changed_ranges" | "whole_file"; ranges: LineRange[] }[] = []
   const mutate: SelectedFile[] = []
   for (const path of [...new Set(selectedPaths)].sort()) {
     const relative = toCohortRelative(path, input.cohort.root)
-    const ranges = addedPaths.has(path) ? [] : [...(input.hunks?.get(path) ?? [])]
-    scope.push({
-      path: relative,
-      kind: ranges.length === 0 ? "whole_file" : "changed_ranges",
-      ranges,
-    })
+    const status = statusByPath.get(path) ?? ""
+
+    // Whole-file scope is keyed on the status, never on an empty range list.
+    // Deriving it from "no ranges" instead made it reachable by accident: a
+    // 100%-similarity rename produces no `git diff -U0` hunk at all, and a
+    // modification whose only hunk is a pure deletion contributes no range by
+    // design, so both used to be scoped to the entire file and recorded as
+    // "added in this revision". That is the whole-file cost this scoping exists
+    // to remove, reappearing silently, on a revision that added nothing.
+    if (status.startsWith("A")) {
+      scope.push({ path: relative, kind: "whole_file", ranges: [] })
+      mutate.push(...toMutateEntries(relative, []))
+      continue
+    }
+
+    const ranges = [...(input.hunks?.get(path) ?? [])]
+    if (ranges.length === 0) {
+      // Failing here is the point. The caller selected this file, so the
+      // evidence has to say which of its lines were mutated; there is no
+      // reading of "none" that a completed run could honestly report. A revision
+      // that legitimately changes no line of a selected file -- a pure rename --
+      // must drop it from the diff rather than have it silently mutated whole.
+      throw new Error(
+        `${relative} was selected for mutation (status ${status || "unknown"}) but has no ` +
+          `changed line ranges. Whole-file scope is reserved for added files; a selected file ` +
+          `with no derived ranges cannot be scoped, and silently mutating it in full would ` +
+          `report evidence this revision's diff does not support.`
+      )
+    }
+    scope.push({ path: relative, kind: "changed_ranges", ranges })
     mutate.push(...toMutateEntries(relative, ranges))
   }
   mutate.sort()

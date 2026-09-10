@@ -150,8 +150,11 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/b.ts\0A\0src/a.ts\0D\0src/gone.ts\0M\0src/a.test.ts\0"),
       executionInputs: inputs,
+      // `src/a.ts` is added, so it needs none; a modified file must carry
+      // ranges or freezing rejects it.
+      hunks: new Map([["src/b.ts", [{ startLine: 3, endLine: 4 }]]]),
     })
-    expect(intent.mutate).toEqual(["src/a.ts", "src/b.ts"])
+    expect(intent.mutate).toEqual(["src/a.ts", "src/b.ts:3-4"])
     expect(intent.excluded).toEqual([
       { path: "src/a.test.ts", reason: "test_file" },
       { path: "src/gone.ts", reason: "deleted" },
@@ -176,12 +179,17 @@ describe("freezeIntent", () => {
   })
 
   it("produces the same digest regardless of the order the diff arrived in", () => {
+    const ordered = new Map([
+      ["src/a.ts", [{ startLine: 1, endLine: 1 }]],
+      ["src/b.ts", [{ startLine: 2, endLine: 2 }]],
+    ])
     const forward = freezeIntent({
       cohort: clientCohort,
       baseCommit: "base",
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/a.ts\0M\0src/b.ts\0"),
       executionInputs: inputs,
+      hunks: ordered,
     })
     const reversed = freezeIntent({
       cohort: clientCohort,
@@ -189,6 +197,7 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0src/b.ts\0M\0src/a.ts\0"),
       executionInputs: inputs,
+      hunks: ordered,
     })
     expect(reversed.intentDigest).toBe(forward.intentDigest)
   })
@@ -200,6 +209,7 @@ describe("freezeIntent", () => {
       headCommit: "head",
       diff: parseNameStatusZ("M\0reference-implementation/server/a.ts\0"),
       executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map([["reference-implementation/server/a.ts", [{ startLine: 7, endLine: 7 }]]]),
     })
     expect(verifyIntentDigest(intent)).toBe(true)
     const tampered = { ...intent, mutate: ["server/somewhere-else.ts"] }
@@ -212,6 +222,7 @@ describe("freezeIntent", () => {
       baseCommit: "base",
       diff: parseNameStatusZ("M\0src/a.ts\0"),
       executionInputs: inputs,
+      hunks: new Map([["src/a.ts", [{ startLine: 5, endLine: 5 }]]]),
     }
     const first = freezeIntent({ ...common, headCommit: "head-one" })
     const second = freezeIntent({ ...common, headCommit: "head-two" })

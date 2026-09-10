@@ -115,7 +115,16 @@ const hunks = new Map<string, readonly LineRange[]>()
 for (const file of parseUnifiedZeroHunks(hunkDiff)) {
   const onDisk = file.path
   if (!existsSync(onDisk)) {
-    continue
+    // The widener needs the file's text to find statement boundaries. A path the
+    // diff names but the working tree does not hold means the tree is not the
+    // revision the diff describes, and the ranges derived from it would not
+    // describe what Stryker mutates. Recording no ranges here would hand
+    // `freezeIntent` the shape it now rejects, so say what is wrong instead.
+    throw new Error(
+      `${onDisk} appears in the diff of ${argument("base")}..${argument("head")} but is not ` +
+        `present in the working tree, so its changed lines cannot be widened to statements. ` +
+        `The checked-out tree is not the revision the scope is being derived for.`
+    )
   }
   const widened = widenToStatements(
     file.ranges,
@@ -170,6 +179,8 @@ if (selectedTestsPath !== undefined) {
 // mutated" and "these lines of this revision were mutated", and a reader of the
 // log should not have to open the artifact to tell which one happened.
 for (const entry of intent.scope) {
+  // `whole_file` is now reachable only from a status-`A` file, so the
+  // parenthetical is a fact about the entry rather than an assumption about it.
   const where =
     entry.kind === "whole_file"
       ? "whole file (added in this revision)"

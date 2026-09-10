@@ -81,23 +81,16 @@ export default {
   // from this list: the tests import from it, and Stryker links it into the
   // sandbox rather than copying it.
   //
-  // Sandbox size is a hard operational limit, not housekeeping. Stryker makes
-  // one sandbox per worker, so every megabyte here is multiplied by the
-  // concurrency; a hosted run of this cohort exhausted the runner's disk and
-  // failed with ENOSPC after 91 minutes. Each entry below is excluded because
-  // no test in this cohort reads it -- `quality` is checked-in report output,
-  // and `.git` is history no test consults. `connectors`, `examples` and `docs`
-  // are deliberately NOT excluded: tests do read them.
-  ignorePatterns: [
-    "reports",
-    "fixtures/large",
-    "vendor/*/dist",
-    "docs",
-    "openapi",
-    "quality",
-    ".git",
-    ".stryker-tmp",
-  ],
+  // `quality` is checked-in report output that no test or script in this cohort
+  // reads, so it is copied into every sandbox for nothing. Measured, it is worth
+  // 2.9 MB of a 46 MB sandbox -- real, but small: the disk exhaustion that
+  // failed a hosted run of this cohort after 91 minutes came from the mutant
+  // count, not the copied tree, and is addressed by scoping mutation to the
+  // changed lines rather than by this list. Stated so the next reader does not
+  // over-credit it. `connectors` and `examples` are deliberately NOT excluded:
+  // tests read them. `docs` above is a pre-existing entry, and ~65 cohort files
+  // do reference `docs/` -- worth revisiting separately, not changed here.
+  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "openapi", "quality"],
 
   tempDirName: ".stryker-tmp/reference-implementation",
 }
