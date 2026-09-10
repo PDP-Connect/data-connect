@@ -212,22 +212,11 @@ connector-protocol are removed. Its three in-repo dependencies
 single runtime source. The tarball checksum and root lock integrity bind this exact
 post-pack artifact.
 
-**Update (2026-09-10): temporary PR-head pin at data-connectors commit `f57aa6f5a31df31aa3b389d5866d3a5ef791dbe8`**
-(`fix/local-collector-malformed-line-isolation`, data-connectors#92; not merged main).
-Rebuilt with `scripts/revendor-polyfill-connectors.sh` for the malformed-line
-isolation fix in data-connectors#92. The upstream connector index is regenerated
-before packing; host-provided dependencies and bundled local collector sources
-are updated using the same post-pack procedure above.
-Before merging data-connect#89, rerun the helper with data-connectors#92's actual
-merge commit and record that SHA here. A squash merge produces a different SHA.
-
-**Update (2026-09-10): temporary PR-head pin refreshed to data-connectors commit `f5adf2546ae9a9fea5598dd5bf9da515eb39f6df`.**
-Rebuilt with `scripts/revendor-polyfill-connectors.sh` after the final malformed-source
-isolation changes in data-connectors#92. This remains a PR-head artifact; before merging
-data-connect#89, rerun the helper with #92's actual merge commit and record that SHA.
-
-**Update (2026-09-10): temporary PR-head pin refreshed to data-connectors commit `b173427439bc6f3ec98b7c364221e1da0f8542dc`.**
-Rebuilt with `scripts/revendor-polyfill-connectors.sh` for the malformed-line
-isolation fix in data-connectors#92. The upstream connector index is regenerated
-before packing; host-provided dependencies and bundled local collector sources
-are updated using the same post-pack procedure above.
+**Update (2026-09-10): pin moved to `data-connectors` commit
+`4c4c87fc337158ecfa640af3ebdbcceeafc7a0f3`** (`main`, the merge commit of
+data-connectors#92). Rebuilt with `scripts/revendor-polyfill-connectors.sh` for the
+malformed-line isolation fix and the Codex symlink-gap fix in data-connectors#92. The
+upstream connector index is regenerated before packing; host-provided dependencies and
+bundled local collector sources are updated using the same post-pack procedure above.
+This replaces the three interim PR-head pins recorded while #92 was open
+(`f57aa6f5a`, `f5adf2546`, `b17342743`), which are superseded and no longer current.
