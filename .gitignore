@@ -42,3 +42,8 @@ src-tauri/auth-page/
 connectors/
 .vercel
 pdpp-runtime/.install-stamp
+
+# Mutation testing output: sandboxes and per-run evidence. The evidence is
+# published as a pull request artifact, not committed.
+.stryker-tmp/
+reports/mutation/
