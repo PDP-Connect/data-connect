@@ -260,9 +260,7 @@ async function reviewConsent(asUrl: string, requestUri: string): Promise<string>
     method: "POST",
   });
   assert.equal(response.status, 200, await response.clone().text());
-  const body = (await response.json()) as {
-    approval_review_revision?: unknown;
-  };
+  const body = (await response.json()) as { approval_review_revision?: unknown };
   assert.equal(typeof body.approval_review_revision, "string");
   return body.approval_review_revision as string;
 }
@@ -290,11 +288,7 @@ interface HarnessContext {
   spotifyManifest: SpotifyManifest;
 }
 
-function createDecisionPause(): {
-  paused: Promise<void>;
-  release: () => void;
-  hook: () => Promise<void>;
-} {
+function createDecisionPause(): { paused: Promise<void>; release: () => void; hook: () => Promise<void> } {
   let release: () => void = () => undefined;
   let markPaused: () => void = () => undefined;
   const paused = new Promise<void>((resolve) => {
@@ -378,9 +372,7 @@ test("security: harden consent token handoff", async (t) => {
       });
       const jsonReviewText = await reviewForJson.text();
       assert.equal(reviewForJson.status, 200, jsonReviewText);
-      const jsonReview = JSON.parse(jsonReviewText) as {
-        approval_review_revision: string;
-      };
+      const jsonReview = JSON.parse(jsonReviewText) as { approval_review_revision: string };
       const jsonResp = await fetch(`${asUrl}/consent/approve`, {
         body: JSON.stringify({
           approval_review_revision: jsonReview.approval_review_revision,
