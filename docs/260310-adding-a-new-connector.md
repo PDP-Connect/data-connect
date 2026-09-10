@@ -33,7 +33,7 @@ This is bigger than app submission. Do this checklist.
 
 ### Upstream connector source
 
-Add the connector in `vana-com/data-connectors`:
+Add the connector in `PDP-Connect/data-connectors`:
 
 - add the connector script
 - add the connector metadata JSON
