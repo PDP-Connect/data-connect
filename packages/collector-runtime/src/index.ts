@@ -76,6 +76,20 @@ export {
   transformRecordsToCollectorEnvelopes,
 } from "./collector-runner.ts";
 export {
+  type BlobUploadPayload,
+  type CaptureBlobArtifactInput,
+  type CaptureBlobArtifactResult,
+  captureBlobArtifact,
+  isBlobUploadPayload,
+} from "./local-device-blob-capture.ts";
+export {
+  LocalDeviceBlobSpool,
+  type LocalDeviceBlobSpoolContent,
+  type LocalDeviceBlobSpoolEntry,
+  LocalDeviceBlobSpoolMissingError,
+  type LocalDeviceBlobSpoolOptions,
+} from "./local-device-blob-spool.ts";
+export {
   DEFAULT_LOCAL_DEVICE_REQUEST_TIMEOUT_MS,
   type EnrollmentExchangeRequest,
   type EnrollmentExchangeResponse,

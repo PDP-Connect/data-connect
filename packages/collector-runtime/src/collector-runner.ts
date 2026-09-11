@@ -31,6 +31,8 @@ import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
 import { validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
+import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
+import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
 import {
   type EnrollmentExchangeResponse,
   type HeartbeatLastError,
@@ -2443,6 +2445,13 @@ function sanitizeCollectorGapDetails(value: string): string {
 
 export interface DrainCollectorOutboxInput {
   abortSignal?: AbortSignal;
+  /**
+   * Uploads one spooled artifact body. Supplied together with `spool` to
+   * enable `blob_upload` delivery; when either is absent a claimed
+   * `blob_upload` row dead-letters as unsupported rather than being dropped,
+   * so its spooled bytes stay on disk and visibly unresolved.
+   */
+  blobUpload?: DrainBlobUploadFn;
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>;
   connectorId: string;
@@ -2450,7 +2459,29 @@ export interface DrainCollectorOutboxInput {
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
   sourceInstanceId?: string;
+  /** Content-addressed local store holding the bytes `blob_upload` rows name. */
+  spool?: LocalDeviceBlobSpool;
 }
+
+/**
+ * Uploads one spooled body, streaming it from local disk.
+ *
+ * Returns the server's blob reference on success. The drain treats a thrown
+ * error exactly like any other delivery failure — transient classes retry with
+ * backoff, the rest dead-letter after `maxAttempts` — so a blob upload inherits
+ * the same durability machinery as a record batch.
+ */
+export type DrainBlobUploadFn = (args: {
+  connectorId: string;
+  connectorInstanceId: string | null;
+  content: NodeJS.ReadableStream;
+  jsonPath?: string;
+  mimeType: string;
+  recordKey: string;
+  sha256: string;
+  sizeBytes: number;
+  stream: string;
+}) => Promise<{ sha256: string; size_bytes: number }>;
 
 export interface DrainCollectorOutboxResult {
   deadLettered: number;
@@ -2654,7 +2685,10 @@ async function drainClaimedOutboxItem(
       leaseEpoch: item.lease_epoch,
       leaseMs: input.policy.leaseMs,
     });
-    await sendOutboxItem(input.client, current);
+    await sendOutboxItem(input.client, current, {
+      ...(input.blobUpload ? { blobUpload: input.blobUpload } : {}),
+      ...(input.spool ? { spool: input.spool } : {}),
+    });
     input.outbox.acknowledge({
       holder: input.holderId,
       id: current.id,
@@ -2693,6 +2727,10 @@ function failOutboxItem(
         error instanceof LocalDeviceReceiptValidationError);
     const isTerminal =
       error instanceof OutboxPayloadShapeError ||
+      // The spooled bytes are gone. No retry can reproduce them, so fail fast
+      // to a dead-letter where the loss is visible and attributable rather
+      // than burning attempts against an absent path.
+      error instanceof LocalDeviceBlobSpoolMissingError ||
       isTerminalCommitRejection ||
       (!isExplicitTransient && item.attempt_count + 1 >= input.policy.maxAttempts);
     if (isTerminal) {
@@ -2747,10 +2785,16 @@ class OutboxPayloadShapeError extends Error {
  */
 const DEFAULT_GAP_RETRY_BACKOFF_MS = 15 * 60_000;
 
+interface SendOutboxItemDeps {
+  blobUpload?: DrainBlobUploadFn;
+  spool?: LocalDeviceBlobSpool;
+}
+
 async function sendOutboxItem(
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>,
-  item: LocalDeviceOutboxItem
+  item: LocalDeviceOutboxItem,
+  deps: SendOutboxItemDeps = {}
 ): Promise<void> {
   if (item.kind === "record_batch") {
     const payload = assertRecordBatchPayload(item.payload, item.id);
@@ -2803,7 +2847,58 @@ async function sendOutboxItem(
     });
     return;
   }
+  if (item.kind === "blob_upload") {
+    await sendBlobUploadItem(item, deps);
+    return;
+  }
   throw new OutboxPayloadShapeError(`unsupported outbox kind ${item.kind} for id ${item.id}`);
+}
+
+/**
+ * Deliver one spooled artifact body, then release its local copy.
+ *
+ * The release happens only after the server has acknowledged the upload AND
+ * the returned digest matches the one computed at spool time. Any earlier
+ * release would re-open the hazard this whole mechanism exists to close: bytes
+ * deleted locally while the remote copy is unconfirmed.
+ *
+ * A digest or size mismatch is raised as a plain error, not an
+ * `OutboxPayloadShapeError`, so it retries before dead-lettering — a truncated
+ * transfer is usually transport damage, and the authoritative bytes are still
+ * on local disk to try again from.
+ */
+async function sendBlobUploadItem(item: LocalDeviceOutboxItem, deps: SendOutboxItemDeps): Promise<void> {
+  const payload = assertBlobUploadPayload(item.payload, item.id);
+  if (!(deps.blobUpload && deps.spool)) {
+    throw new OutboxPayloadShapeError(
+      `collector drain has no blob upload transport for ${item.id}; spooled bytes retained`
+    );
+  }
+  // Throws LocalDeviceBlobSpoolMissingError when the body is gone — mapped to
+  // a dead-letter by failOutboxItem, since no retry can conjure the bytes.
+  const content = deps.spool.openRead(payload.sha256);
+  const uploaded = await deps.blobUpload({
+    connectorId: payload.connectorId,
+    connectorInstanceId: payload.connectorInstanceId,
+    content,
+    mimeType: payload.mimeType,
+    recordKey: payload.recordKey,
+    sha256: payload.sha256,
+    sizeBytes: payload.sizeBytes,
+    stream: payload.stream,
+    ...(payload.jsonPath ? { jsonPath: payload.jsonPath } : {}),
+  });
+  if (uploaded.sha256 !== payload.sha256 || uploaded.size_bytes !== payload.sizeBytes) {
+    throw new Error(`blob upload integrity mismatch for ${item.id}`);
+  }
+  deps.spool.release(payload.sha256);
+}
+
+function assertBlobUploadPayload(payload: unknown, id: string): BlobUploadPayload {
+  if (!isBlobUploadPayload(payload)) {
+    throw new OutboxPayloadShapeError(`malformed blob_upload payload: ${id}`);
+  }
+  return payload;
 }
 
 function assertRecordBatchPayload(payload: unknown, id: string): RecordBatchPayload {
