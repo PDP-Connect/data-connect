@@ -1,15 +1,14 @@
 name: reference-implementation
 
-# Move-B groundwork (2026-08-27): this workflow is authored ahead of the actual
-# reference-implementation/server code landing in this repo, so the CI gate is ready
-# the moment Move B's filter-repo import lands rather than being written under time
-# pressure then. The receiving-dock placeholder (reference-implementation/README.md,
-# see the same PR that added this workflow) itself matches this workflow's own
-# reference-impacting path list, so `classify` alone isn't enough to keep the suite
-# jobs skipped pre-Move-B -- they also gate on `has_content`, which checks for
-# reference-implementation/package.json. Until Move B lands real content there, the
-# suite jobs skip regardless of what changed; this workflow is a structural no-op
-# today, not yet load-bearing.
+# Originally authored (2026-08-27) as Move-B groundwork, ahead of the actual
+# reference-implementation/server code landing in this repo. Move B has since landed:
+# reference-implementation/package.json exists, so `has_content` is true and this
+# workflow is load-bearing, not the structural no-op it was written as.
+#
+# `has_content` is retained because it is what distinguishes a real tree from the
+# receiving-dock placeholder (reference-implementation/README.md) that shipped in the
+# same PR as this workflow -- that placeholder matches the reference-impacting path
+# list below, so `classify` alone would not have kept the suite jobs skipped pre-Move-B.
 #
 # Mirrors PDP-Connect/pdpp's .github/workflows/reference-implementation.yml gate shape
 # (same job names, same classify -> per-suite -> aggregate pattern) so the required-check
@@ -27,11 +26,19 @@ name: reference-implementation
 on:
   pull_request: {}
   merge_group: {}
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 concurrency:
+  # Keyed by ref, so a branch's runs supersede each other but never a sibling's.
+  # main is excluded from cancel-in-progress: every merge commit needs its own
+  # pass/fail record, and cancelling the previous merge's run to start the next
+  # one leaves that commit permanently unjudged -- the same blind spot as having
+  # no push trigger at all. Merge traffic on main is low enough that the queued
+  # runs drain without piling up.
   group: reference-implementation-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   classify:
@@ -62,10 +69,24 @@ jobs:
       - name: Classify reference-impacting changes
         id: changes
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: |
           set -euo pipefail
+
+          # Changed-file classification is a pull-request optimization: it keeps a
+          # docs-only PR from paying for a 20-minute suite. It is deliberately NOT
+          # applied to push, because a branch build answers a different question --
+          # "is main green at this commit" -- and that answer must not depend on
+          # which files the merge happened to touch. Path-filtering pushes would let
+          # main go unjudged after any unrelated merge, which is the blind spot this
+          # trigger exists to close.
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            echo "reference_impacting=true" >> "$GITHUB_OUTPUT"
+            echo "push to ${GITHUB_REF}: running full reference suite unconditionally."
+            exit 0
+          fi
 
           if [[ -z "${BASE_SHA}" ]]; then
             echo "reference_impacting=true" >> "$GITHUB_OUTPUT"
