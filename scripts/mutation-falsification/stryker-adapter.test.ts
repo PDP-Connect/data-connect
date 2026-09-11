@@ -338,6 +338,7 @@ describe("buildAttemptReceipt", () => {
     expect(rejected.attempt).toEqual({
       engineExit: "1",
       reportPresent: false,
+      reportValidity: "absent",
       baselineComplete: false,
       status: "no_evidence",
     })
@@ -355,6 +356,7 @@ describe("buildAttemptReceipt", () => {
     expect(receipt.attempt).toEqual({
       engineExit: "0",
       reportPresent: true,
+      reportValidity: "valid",
       baselineComplete: true,
       status: "evidence",
     })

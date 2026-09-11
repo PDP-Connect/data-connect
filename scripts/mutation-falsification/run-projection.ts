@@ -8,8 +8,38 @@
 // computes the verdict itself; no status is copied through.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
-import { buildAttemptReceipt, readObservations } from "./stryker-adapter.ts"
+import {
+  buildAttemptReceipt,
+  classifyReport,
+  readObservations,
+  type ReportValidity,
+} from "./stryker-adapter.ts"
 import { type IntentPacket, verifyIntentDigest } from "./select-pr-files.ts"
+
+/**
+ * Say what was wrong with the report, in terms of the artifact rather than of
+ * this program's internals. A reader who sees this check fail has not opened the
+ * report, so the message is the only place the cause is stated.
+ */
+function reportUnusableReason(validity: ReportValidity): string {
+  switch (validity.kind) {
+    case "valid":
+      throw new Error("reportUnusableReason called for a valid report")
+    case "absent":
+      return "the engine wrote no report, so this attempt produced no evidence"
+    case "empty":
+      return "the report file exists but is empty, so the engine wrote nothing to read"
+    case "unparseable":
+      return `the report is not valid JSON (${validity.detail}), so nothing can be read from it`
+    case "unrecognised":
+      return `the report is not a recognisable Stryker report: ${validity.detail}`
+    case "out_of_scope":
+      return (
+        `the report is not about the code this attempt selected: ${validity.detail}. ` +
+        "An empty result for other files establishes nothing about these lines"
+      )
+  }
+}
 
 function argument(name: string): string {
   const index = process.argv.indexOf(`--${name}`)
@@ -41,10 +71,21 @@ const rawReportBytes = reportPresent ? readFileSync(reportPath, "utf8") : ""
 // established "the suite passes on unmutated code" to compare against.
 const baselineComplete = strykerExit === "0"
 
+// Whether the engine SPOKE, decided separately from what it said. File
+// existence is not this fact: a zero-byte file, a `null`, or an object without
+// `files` all exist and all read as zero observations, which is the same shape a
+// clean run over non-mutable code produces. Only a structurally valid report
+// covering the selected scope licenses the zero-mutant exception below.
+const reportValidity = classifyReport({
+  reportPresent,
+  rawReportBytes,
+  selectedPaths: intent.mutate,
+})
+
 const observations =
-  rawReportBytes.length === 0
-    ? []
-    : readObservations(JSON.parse(rawReportBytes), { baselineComplete })
+  reportValidity.kind === "valid"
+    ? readObservations(JSON.parse(rawReportBytes), { baselineComplete })
+    : []
 
 const receipt = buildAttemptReceipt({
   intent,
@@ -52,6 +93,8 @@ const receipt = buildAttemptReceipt({
   observations,
   engineExit: strykerExit,
   reportPresent,
+  reportValidity: reportValidity.kind,
+  baselineComplete,
 })
 
 writeFileSync(argument("out"), `${JSON.stringify(receipt, null, 2)}\n`)
@@ -91,8 +134,19 @@ process.stdout.write(
 // workflow reports a non-applicable cohort: neither a pass nor a failure. It is
 // only absent evidence when the engine did not get to speak -- no report at all,
 // or a rejected baseline.
+//
+// "The engine got to speak" is a claim about the REPORT, and an earlier revision
+// of this exception tested `reportPresent` for it. That is file existence, which
+// a zero-byte file, a `null`, an object with no `files`, a `files` of the wrong
+// type, an entry missing its `mutants` array, and a report about entirely
+// different files all satisfy. Every one of those also yields zero projections,
+// so the exception swallowed them: six malformed inputs exited 0 while printing
+// that the engine found no mutable code. A gate that reports success on a broken
+// run is worse than no gate, because it is also a claim that the run was fine.
+// The exception now requires a report this program could actually read as a
+// report about the lines this attempt selected.
 const engineRanAndFoundNothingToMutate =
-  reportPresent && baselineComplete && receipt.projections.length === 0
+  reportValidity.kind === "valid" && baselineComplete && receipt.projections.length === 0
 
 const failures: string[] = []
 if (!baselineComplete) {
@@ -101,8 +155,11 @@ if (!baselineComplete) {
       "batch is inconclusive and the run established nothing about the suite"
   )
 }
+if (reportValidity.kind !== "valid") {
+  failures.push(reportUnusableReason(reportValidity))
+}
 if (receipt.projections.length === 0) {
-  if (!engineRanAndFoundNothingToMutate) {
+  if (!engineRanAndFoundNothingToMutate && reportValidity.kind === "valid") {
     failures.push("no mutant trials were recorded, so this attempt produced no evidence")
   }
 } else if (validDenominator === 0) {

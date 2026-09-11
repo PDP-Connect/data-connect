@@ -18,7 +18,7 @@
 // meant no mutant EXISTS.
 
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -146,7 +146,7 @@ describe("run-projection exit surface", () => {
     })
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain("no mutant trials were recorded")
+    expect(result.stderr).toContain("the engine wrote no report")
   })
 
   it("fails an applicable attempt whose baseline was rejected", () => {
@@ -169,5 +169,140 @@ describe("run-projection exit surface", () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain("the baseline was rejected")
+  })
+})
+
+// Negative controls for the zero-mutant exception above.
+//
+// Every input here has the same two surface properties as the legitimate
+// zero-mutant run: the report file exists, and the engine exited 0. Each also
+// yields zero projections, because the raw-report reader is deliberately
+// permissive and maps an unreadable structure to an empty observation list. So
+// the projection count alone cannot tell them apart from a clean run over
+// non-mutable code, and an exception keyed on file existence accepted all six.
+//
+// Each case is a broken mutation run reporting success -- the gate claiming the
+// run was fine when it was not. They are asserted against the shipped script's
+// real exit status for the same reason the positive control is: the surface is
+// what a reader sees, and a receipt that records the failure honestly does not
+// undo a green check printed over it.
+describe("run-projection rejects reports it cannot read as evidence", () => {
+  const unusable: readonly { readonly name: string; readonly bytes: string; readonly says: string }[] =
+    [
+      {
+        name: "an existing zero-byte report",
+        bytes: "",
+        says: "exists but is empty",
+      },
+      {
+        name: "a report that is JSON null",
+        bytes: "null",
+        says: "not a recognisable Stryker report",
+      },
+      {
+        name: "a report with no `files` key",
+        bytes: JSON.stringify({ schemaVersion: "1" }),
+        says: "`files` is absent",
+      },
+      {
+        name: "a report whose `files` is the wrong type",
+        bytes: JSON.stringify({ schemaVersion: "1", files: "src/available-sources-list.tsx" }),
+        says: "`files` is a string",
+      },
+      {
+        name: "a file entry that omits its `mutants` array",
+        bytes: JSON.stringify({
+          schemaVersion: "1",
+          files: { "src/available-sources-list.tsx": {} },
+        }),
+        says: "has no `mutants` array",
+      },
+      {
+        name: "an empty-mutant report about a file this attempt did not select",
+        bytes: JSON.stringify({
+          schemaVersion: "1",
+          files: { "src/pages/home/index.tsx": { mutants: [] } },
+        }),
+        says: "not about the code this attempt selected",
+      },
+    ]
+
+  for (const { name, bytes, says } of unusable) {
+    it(`fails on ${name}, despite a clean engine exit`, () => {
+      const report = join(workdir, "mutation.json")
+      writeFileSync(report, bytes)
+
+      const result = runProjection({
+        intent: applicableIntentPath(),
+        report,
+        strykerExit: "0",
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain(says)
+      // The specific wrong outcome this guards: the neutral zero-mutant message
+      // printed over an unusable report is the gate asserting the run was fine.
+      expect(result.stdout).not.toContain("found no mutable code")
+    })
+  }
+
+  it("still fails a syntactically invalid report", () => {
+    // A control on the control: this case failed before the exception existed
+    // and must keep failing, now with a reason rather than an uncaught throw.
+    const report = join(workdir, "mutation.json")
+    writeFileSync(report, "{ not json")
+
+    const result = runProjection({
+      intent: applicableIntentPath(),
+      report,
+      strykerExit: "0",
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("not valid JSON")
+  })
+
+  it("records why the report was unusable in the retained receipt", () => {
+    // The check that fails is not enough: the receipt outlives the run, and a
+    // reader of the artifact must be able to tell an unusable report from a run
+    // that found nothing. Both record zero trials, so the cause is its own field.
+    const report = join(workdir, "mutation.json")
+    writeFileSync(report, "")
+
+    const receiptPath = join(workdir, "receipt.json")
+    runProjection({ intent: applicableIntentPath(), report, strykerExit: "0" })
+
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as {
+      attempt: { reportPresent: boolean; reportValidity: string; baselineComplete: boolean }
+    }
+    expect(receipt.attempt.reportPresent).toBe(true)
+    expect(receipt.attempt.reportValidity).toBe("empty")
+  })
+
+  it("records a clean zero-mutant run as a completed baseline over a valid report", () => {
+    // The receipt inconsistency the exception shipped with: the accepted run
+    // wrote `baselineComplete: false` while the check beside it required the
+    // baseline to be complete. Baseline completion is a fact about the engine's
+    // run, not about how many mutants it happened to find.
+    const report = join(workdir, "mutation.json")
+    writeFileSync(
+      report,
+      `${JSON.stringify({
+        schemaVersion: "1",
+        files: { "src/available-sources-list.tsx": { mutants: [] } },
+      })}\n`
+    )
+
+    const receiptPath = join(workdir, "receipt.json")
+    const result = runProjection({ intent: applicableIntentPath(), report, strykerExit: "0" })
+
+    expect(result.status).toBe(0)
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as {
+      attempt: { reportValidity: string; baselineComplete: boolean; status: string }
+    }
+    expect(receipt.attempt.reportValidity).toBe("valid")
+    expect(receipt.attempt.baselineComplete).toBe(true)
+    // Still no evidence -- accepting the run is not claiming it proved anything.
+    expect(receipt.attempt.status).toBe("no_evidence")
   })
 })
