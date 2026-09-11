@@ -28,12 +28,12 @@ This works pre-merge because Vite loads local submission markdown files directly
 
 ## Preferred GitHub flow
 
-1. Open the [one-click submission editor](https://github.com/vana-com/data-connect/new/main?filename=ecosystem%2Fapp-submissions%2Fyour-app-slug.md&value=---%0Aid%3A%20your-app-slug%0Aname%3A%20Your%20App%20Name%0Astatus%3A%20live%0AexternalUrl%3A%20https%3A%2F%2Fexample.com%0Aicon%3A%20Y%0Adescription%3A%20One-line%20description%20for%20the%20app%20card.%0Acategory%3A%20Assistant%0Ascopes%3A%0A%20%20-%20chatgpt.conversations%0A---%0A%0A##%20Builder%0A%0A-%20Name%3A%0A-%20Contact%3A%0A-%20Repo%3A%0A%0A##%20Demo%0A%0A-%20Demo%20URL%3A%0A-%20Screenshots%3A%0A%0A##%20Notes%0A%0A-%20Anything%20reviewers%20should%20know%3A%0A).
+1. Open the [one-click submission editor](https://github.com/PDP-Connect/data-connect/new/main?filename=ecosystem%2Fapp-submissions%2Fyour-app-slug.md&value=---%0Aid%3A%20your-app-slug%0Aname%3A%20Your%20App%20Name%0Astatus%3A%20live%0AexternalUrl%3A%20https%3A%2F%2Fexample.com%0Aicon%3A%20Y%0Adescription%3A%20One-line%20description%20for%20the%20app%20card.%0Acategory%3A%20Assistant%0Ascopes%3A%0A%20%20-%20chatgpt.conversations%0A---%0A%0A##%20Builder%0A%0A-%20Name%3A%0A-%20Contact%3A%0A-%20Repo%3A%0A%0A##%20Demo%0A%0A-%20Demo%20URL%3A%0A-%20Screenshots%3A%0A%0A##%20Notes%0A%0A-%20Anything%20reviewers%20should%20know%3A%0A).
 2. If GitHub asks you to fork the repo first, do that.
 3. Fill out the frontmatter.
 4. If you want, add optional reviewer notes below the closing `---`.
 5. Commit the new file.
-6. Open a pull request back to `vana-com/data-connect`.
+6. Open a pull request back to `PDP-Connect/data-connect`.
 7. Use the `data-app-submission.md` PR template if GitHub asks you to choose a template.
 
 ## Manual flow
@@ -82,13 +82,13 @@ If you omit it, DataConnect tries `/icon.svg`, `/icon.png`, `/favicon.ico`, and 
 
 You have probably already seen this while building the app, usually via the starter and connector metadata. This is just the refresh.
 
-- Repo: [vana-com/data-connectors](https://github.com/vana-com/data-connectors)
+- Repo: [PDP-Connect/data-connectors](https://github.com/PDP-Connect/data-connectors)
 - Connector metadata: `connectors/<company>/<connector-id>.json`
-- Published index: [vana-com/data-connectors signed `connector-index.json`](https://github.com/vana-com/data-connectors/releases/download/connectors-latest/connector-index.json)
+- Published index: [PDP-Connect/data-connectors signed `connector-index.json`](https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json)
 
 Here's how to get the exact scopes you used in your app:
 
-1. Open the `vana-com/data-connectors` repo.
+1. Open the `PDP-Connect/data-connectors` repo.
 2. Search for the connector id you use.
 3. Open its metadata JSON under `connectors/<company>/<connector-id>.json`.
 4. Copy the scope names from that connector manifest into your submission.
