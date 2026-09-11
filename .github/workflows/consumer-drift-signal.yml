@@ -109,20 +109,69 @@ jobs:
           echo "from collector-definitions.generated.ts."
 
       - name: Fetch data-connectors' pin file and compare
-        env:
-          GUARDED_PATHS: >-
+        run: |
+          set -euo pipefail
+
+          # Guarded paths as a bash ARRAY, not a whitespace-joined string.
+          #
+          # This was previously a single `GUARDED_PATHS` env string expanded unquoted as
+          # `git diff ... -- $GUARDED_PATHS`, relying on word splitting to become ten
+          # pathspecs. That works in bash (this job's shell) but NOT in zsh, which does not
+          # word-split unquoted parameters: the whole ten-path string arrives as ONE literal
+          # pathspec, matches no file, and `git diff --quiet` reports CLEAN. Anyone
+          # reproducing this check locally in zsh therefore saw "zero files changed" for a
+          # tree that genuinely drifts, and concluded the gate was firing spuriously. An
+          # array expands to exactly one argument per element in any POSIX-ish shell, so the
+          # local reproduction and CI agree.
+          #
+          # SCOPE: exactly the paths whose BYTES are copied or packed into data-connectors,
+          # not every file in these packages. The packed-input set is defined in code by
+          # packages/{connector-protocol,collector-runtime}/scripts/package-artifact.mjs:
+          #   FIXED_INPUTS = README.md, package.json, scripts/build.ts, tsconfig.build.json
+          #   plus every src/**/*.ts EXCEPT *.test.ts
+          # and each package.json ships `files: ["dist/"]`, i.e. the compiled output of those
+          # sources. data-connectors' check-tarball-digest-drift.sh runs `npm run build &&
+          # npm pack` and compares a per-file sha256 manifest of the extracted tarball, so a
+          # change to any packed input changes what it compares. artifact.json is the
+          # committed receipt of that packing and is guarded in its own right.
+          #
+          # The excludes below are files a wholesale package guard swept in that CANNOT
+          # change a vendored byte: *.test.ts / *.test.mjs (explicitly excluded from
+          # FIXED_INPUTS and absent from dist/), biome.jsonc and tsconfig.json (lint/editor
+          # config, not build inputs — tsconfig.BUILD.json IS a build input and stays
+          # guarded), and the scripts/ files that are not scripts/build.ts. A test-only or
+          # lint-config-only edit no longer blocks merges; a change to any packed source,
+          # artifact.json, or a vendored connector tree still fails the gate.
+          #
+          # Every exclude here names a FILE or a leaf glob, never a directory that contains a
+          # packed input. Git pathspec exclusion is not order-sensitive and a later positive
+          # pathspec does NOT re-include an excluded path (verified by execution), so
+          # `:(exclude,glob)scripts/**` plus a positive `scripts/build.ts` would silently drop
+          # build.ts from the guard. The non-build scripts are therefore listed individually.
+          guarded_paths=(
             packages/collector-runtime
             packages/connector-protocol
+            ':(exclude,glob)packages/*/src/**/*.test.ts'
+            ':(exclude,glob)packages/*/src/**/*.test.mjs'
+            ':(exclude)packages/collector-runtime/biome.jsonc'
+            ':(exclude)packages/collector-runtime/tsconfig.json'
+            ':(exclude)packages/connector-protocol/biome.jsonc'
+            ':(exclude)packages/connector-protocol/tsconfig.json'
+            ':(exclude)packages/collector-runtime/scripts/check-no-unnecessary-conditions-expiry.ts'
+            ':(exclude)packages/collector-runtime/scripts/package-artifact.mjs'
+            ':(exclude)packages/collector-runtime/scripts/package-artifact.test.mjs'
+            ':(exclude)packages/connector-protocol/scripts/package-artifact.mjs'
+            ':(exclude)packages/connector-protocol/scripts/package-artifact.test.mjs'
             packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
             packages/local-collector/src/generated/collector-definitions.generated.ts
+            packages/local-collector/tsconfig.build.json
             packages/polyfill-connectors/connectors/claude_code
             packages/polyfill-connectors/connectors/codex
             packages/polyfill-connectors/connectors/google_takeout
             packages/polyfill-connectors/connectors/imessage
             packages/polyfill-connectors/connectors/apple_photos
             packages/polyfill-connectors/connectors/google_messages
-        run: |
-          set -euo pipefail
+          )
 
           consumer_pin_required="$(node -p 'require("./.github/consumer-drift-signal-config.json").consumer_pin_required === true')"
           echo "Fail-closed activation (.github/consumer-drift-signal-config.json consumer_pin_required): $consumer_pin_required"
@@ -174,17 +223,17 @@ jobs:
             exit 1
           fi
 
-          if git diff --quiet "$pinned_sha" HEAD -- $GUARDED_PATHS; then
-            echo "OK: no change under \$GUARDED_PATHS since the consumer's pinned SHA ($pinned_sha)."
+          if git diff --quiet "$pinned_sha" HEAD -- "${guarded_paths[@]}"; then
+            echo "OK: no change under the guarded (copied/packed) paths since the consumer's pinned SHA ($pinned_sha)."
             exit 0
           fi
 
           echo "FAIL: one or more guarded paths changed since PDP-Connect/data-connectors last pinned this repo"
           echo "at $pinned_sha:"
-          echo "  $GUARDED_PATHS"
+          printf '  %s\n' "${guarded_paths[@]}"
           echo
           echo "Changed paths:"
-          git diff --name-only "$pinned_sha" HEAD -- $GUARDED_PATHS
+          git diff --name-only "$pinned_sha" HEAD -- "${guarded_paths[@]}"
           echo
           echo "This means data-connectors' vendored tarballs and/or connector-source copies"
           echo "(packages/polyfill-connectors/vendor/, packages/polyfill-connectors/connectors/<id>/,"
