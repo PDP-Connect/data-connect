@@ -319,9 +319,19 @@ jobs:
       id-token: write # OIDC trusted publishing — no NPM_TOKEN
 
     steps:
-      - name: Checkout
+      # Checks out THE TAG, not the push head. A tag records a commit as well
+      # as a version, and the packages this job publishes must be built from
+      # the tree that tag names — the same tree the ordinary release would
+      # have published had it not crashed partway. Building from the push head
+      # would ship code the tag never covered under the tag's immutable
+      # version: @pdpp/local-collector vendors connector-protocol's built
+      # dist/ into its own tarball, so a head-built local-collector@X can
+      # embed protocol code that the already-published connector-protocol@X
+      # does not contain.
+      - name: Checkout the tag being converged
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.resolve-version.outputs.converge-tag }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -331,6 +341,9 @@ jobs:
           node-version: "22.23.1"
           cache: npm
 
+      # Also provides node_modules/.bin/npm — the npm 11 that
+      # converge-release.ts publishes through. The runner's ambient npm is 10,
+      # which has no OIDC trusted-publishing support at all.
       - name: Install dependencies
         run: npm ci
 

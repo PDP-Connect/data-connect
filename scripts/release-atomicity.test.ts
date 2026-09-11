@@ -15,7 +15,7 @@
 // Nothing here contacts the network, and nothing here publishes.
 
 import { execFileSync } from "node:child_process"
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { load } from "js-yaml"
@@ -39,10 +39,17 @@ interface StubSpec {
 
 // Builds a directory containing an `npm` shim that answers `view` from a
 // fixture and records every `publish` invocation to a log file.
-function makeStubNpm(spec: StubSpec): { dir: string; publishLog: string; cleanup: () => void } {
+function makeStubNpm(spec: StubSpec): {
+  dir: string
+  publishLog: string
+  manifestLog: string
+  cleanup: () => void
+} {
   const dir = mkdtempSync(join(tmpdir(), "atomic-npm-"))
   const publishLog = join(dir, "publish.log")
+  const manifestLog = join(dir, "manifest.log")
   writeFileSync(publishLog, "")
+  writeFileSync(manifestLog, "")
   writeFileSync(join(dir, "spec.json"), JSON.stringify(spec))
 
   const shim = `#!/usr/bin/env node
@@ -70,6 +77,20 @@ if (argv[0] === "view") {
 if (argv[0] === "publish") {
   const pkgRoot = argv[1]
   appendFileSync(${JSON.stringify(publishLog)}, pkgRoot + "\\n")
+  // Records the manifest EXACTLY as it stands when publish is invoked —
+  // which is what npm would pack. This is how the suite sees the
+  // prepare-pipeline edits (version, dependency pin) rather than trusting
+  // that they were made.
+  try {
+    const manifest = JSON.parse(readFileSync(process.cwd() + "/" + pkgRoot + "/package.json", "utf8"))
+    appendFileSync(${JSON.stringify(manifestLog)}, JSON.stringify({
+      name: manifest.name,
+      version: manifest.version,
+      dependencies: manifest.dependencies || {},
+    }) + "\\n")
+  } catch (e) {
+    appendFileSync(${JSON.stringify(manifestLog)}, JSON.stringify({ error: String(e) }) + "\\n")
+  }
   const failures = spec.publishFails || {}
   for (const key of Object.keys(failures)) {
     if (pkgRoot.includes(key)) {
@@ -88,15 +109,39 @@ process.exit(2)
   writeFileSync(npmPath, shim)
   chmodSync(npmPath, 0o755)
 
+  // converge-release.ts publishes through node_modules/.bin/npm, never the
+  // ambient one (see resolveNpmBin — the runner's npm 10 cannot authenticate
+  // via OIDC). So the stub has to be reachable at that path for the suite to
+  // exercise the real code path. `nodeModulesBin` below is placed on the
+  // synthetic cwd each run uses.
+  const binDir = join(dir, "node_modules", ".bin")
+  mkdirSync(binDir, { recursive: true })
+
   return {
     dir,
     publishLog,
+    manifestLog,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
 
 function readPublishLog(path: string): string[] {
   return readFileSync(path, "utf8").split("\n").map(l => l.trim()).filter(Boolean)
+}
+
+interface PublishedManifest {
+  name: string
+  version: string
+  dependencies: Record<string, string>
+}
+
+// The manifests as handed to `npm publish`, in publish order.
+function readManifestLog(path: string): PublishedManifest[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(l => JSON.parse(l) as PublishedManifest)
 }
 
 // Runs converge-release.ts with a stubbed npm, returning its outcome rather
@@ -110,24 +155,70 @@ function runConverge(
   // complete in every environment).
   const tsxEntry = require.resolve("tsx")
 
+  // converge-release.ts resolves npm at <cwd>/node_modules/.bin/npm and edits
+  // manifests under <cwd>/packages. Running it against REPO_ROOT would mean
+  // rewriting the real working tree on every publishing test. So each run gets
+  // a scratch cwd holding a copy of packages/ and the stub npm at the path
+  // resolveNpmBin looks for — the same code path CI takes, without the
+  // collateral damage.
+  const cwd = mkdtempSync(join(tmpdir(), "atomic-cwd-"))
   try {
-    const stdout = execFileSync(
-      process.execPath,
-      ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
-      {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PATH: `${stubDir}:${process.env.PATH ?? ""}`,
-          ...env,
-        },
-      }
-    )
-    return { status: 0, stdout, stderr: "" }
-  } catch (error) {
-    const e = error as { status?: number; stdout?: string; stderr?: string }
-    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
+    mkdirSync(join(cwd, "node_modules", ".bin"), { recursive: true })
+    cpSync(join(stubDir, "npm"), join(cwd, "node_modules", ".bin", "npm"))
+    chmodSync(join(cwd, "node_modules", ".bin", "npm"), 0o755)
+
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
+        {
+          cwd,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${stubDir}:${process.env.PATH ?? ""}`,
+            ...env,
+          },
+        }
+      )
+      return { status: 0, stdout, stderr: "" }
+    } catch (error) {
+      const e = error as { status?: number; stdout?: string; stderr?: string }
+      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
+// A converge run whose cwd deliberately has NO node_modules/.bin/npm, to
+// exercise the refusal in resolveNpmBin.
+function runConvergeWithoutLocalNpm(
+  stubDir: string,
+  env: Record<string, string | undefined>
+): { status: number; stdout: string; stderr: string } {
+  const tsxEntry = require.resolve("tsx")
+  const cwd = mkdtempSync(join(tmpdir(), "atomic-nonpm-"))
+  try {
+    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
+        {
+          cwd,
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, ...env },
+        }
+      )
+      return { status: 0, stdout, stderr: "" }
+    } catch (error) {
+      const e = error as { status?: number; stdout?: string; stderr?: string }
+      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
   }
 }
 
@@ -393,7 +484,12 @@ describe("converge refusals", () => {
 // --- manifest editing -----------------------------------------------------
 
 describe("manifest version rewriting", () => {
-  it("changes the version and nothing else", async () => {
+  // Scoped to THIS helper: replaceManifestVersion is the version edit alone.
+  // It is not the whole prepare pipeline, and must not be read as a statement
+  // that a converge changes only the version — the dependency pin below is
+  // the other edit publishing requires. Stating it that way is what let the
+  // unpinned-manifest defect sit under a green suite.
+  it("changes the version and nothing else in the manifest it is given", async () => {
     const { replaceManifestVersion } = await import("./converge-release.js")
     const raw = '{\n  "name": "@pdpp/x",\n  "version": "0.0.1",\n  "private": false\n}\n'
     expect(replaceManifestVersion(raw, "2.2.1")).toBe(
@@ -416,6 +512,176 @@ describe("manifest version rewriting", () => {
   it("refuses a manifest with no version field rather than writing a broken one", async () => {
     const { replaceManifestVersion } = await import("./converge-release.js")
     expect(() => replaceManifestVersion('{\n  "name": "x"\n}\n', "2.2.1")).toThrow(/no top-level/)
+  })
+})
+
+// --- the prepare pipeline converge must reproduce -------------------------
+
+// The ordinary release runs a `prepare` lifecycle before publishing; a
+// converge that skips it publishes a DIFFERENT artifact under the same
+// version, and npm immutability makes that permanent. These tests assert the
+// published manifest, not the intermediate steps, because the manifest is
+// what actually ships.
+describe("the manifest handed to npm publish", () => {
+  it("pins the sibling dependency at the release version, not the committed placeholder", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+
+      const manifests = readManifestLog(stub.manifestLog)
+      const runtime = manifests.find(m => m.name === "@pdpp/collector-runtime")
+      expect(runtime).toBeDefined()
+
+      // The whole point. Left unpinned this reads "0.0.1", which EXISTS on the
+      // registry — so the package would install cleanly against an ancient
+      // protocol version, and the lockstep invariant would read true while
+      // being false, permanently.
+      expect(runtime?.dependencies["@pdpp/connector-protocol"]).toBe(V)
+      expect(runtime?.version).toBe(V)
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("carries the release version into every package it publishes", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      runConverge(stub.dir, MAIN_ENV)
+      const manifests = readManifestLog(stub.manifestLog)
+      expect(manifests.map(m => m.name)).toEqual([
+        "@pdpp/collector-runtime",
+        "@pdpp/local-collector",
+      ])
+      for (const m of manifests) expect(m.version).toBe(V)
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The pin is an exact version, never a range: collector-runtime and
+  // connector-protocol are lockstep-versioned, and a caret would let an
+  // install resolve a protocol version this runtime was never built against.
+  it("pins the sibling exactly, with no range operator", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      runConverge(stub.dir, MAIN_ENV)
+      const runtime = readManifestLog(stub.manifestLog).find(
+        m => m.name === "@pdpp/collector-runtime"
+      )
+      expect(runtime?.dependencies["@pdpp/connector-protocol"]).toMatch(/^\d+\.\d+\.\d+$/)
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("applies the same edit the ordinary prepare step makes", async () => {
+    // Not a second implementation of the rule: the converge helper and
+    // pin-collector-runtime-protocol-dependency.ts must agree on the result,
+    // or the two publishing paths ship different manifests.
+    const { replaceDependencyVersion } = await import("./converge-release.js")
+    const raw = readFileSync(join(REPO_ROOT, "packages/collector-runtime/package.json"), "utf8")
+    const converged = JSON.parse(replaceDependencyVersion(raw, "@pdpp/connector-protocol", V)) as {
+      dependencies: Record<string, string>
+    }
+    const prepared = JSON.parse(raw) as { dependencies: Record<string, string> }
+    prepared.dependencies["@pdpp/connector-protocol"] = V
+    expect(converged.dependencies).toEqual(prepared.dependencies)
+  })
+
+  it("preserves non-ASCII escapes when pinning, like the version edit does", async () => {
+    const { replaceDependencyVersion } = await import("./converge-release.js")
+    const raw =
+      '{\n  "description": "Runtime \\u2014 nothing else.",\n  "dependencies": { "@pdpp/connector-protocol": "0.0.1" }\n}\n'
+    const out = replaceDependencyVersion(raw, "@pdpp/connector-protocol", V)
+    expect(out).toContain("\\u2014")
+    expect(out).not.toContain("—")
+    expect(out).toContain(`"@pdpp/connector-protocol": "${V}"`)
+  })
+
+  it("refuses a manifest with no such dependency rather than silently publishing unpinned", async () => {
+    const { replaceDependencyVersion } = await import("./converge-release.js")
+    expect(() => replaceDependencyVersion('{\n  "name": "x"\n}\n', "@pdpp/connector-protocol", V)).toThrow(
+      /no "@pdpp\/connector-protocol" dependency/
+    )
+  })
+})
+
+// --- which npm runs the publish -------------------------------------------
+
+// OIDC trusted publishing needs npm >= 11.5.1. The runner's ambient npm is
+// 10, which has no trusted-publishing code at all, so a converge that shells
+// out to bare "npm" cannot authenticate and the release cannot finish.
+describe("the npm converge publishes through", () => {
+  it("uses node_modules/.bin/npm rather than whatever npm is on PATH", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      // runConverge places the stub ONLY at <cwd>/node_modules/.bin/npm and
+      // puts a different copy on PATH. Publishes recorded in this run's log
+      // therefore prove the local binary was the one invoked.
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+      expect(readPublishLog(stub.publishLog)).toEqual([
+        "packages/collector-runtime",
+        "packages/local-collector",
+      ])
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("refuses to publish at all when the OIDC-capable npm is absent", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConvergeWithoutLocalNpm(stub.dir, MAIN_ENV)
+      // Fails closed, loudly, BEFORE any publish — not deep inside one with
+      // an opaque auth error.
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/node_modules\/\.bin\/npm is not present/)
+      expect(result.stderr).toMatch(/OIDC/)
+      expect(readPublishLog(stub.publishLog)).toEqual([])
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("resolves the local npm path from the working directory", async () => {
+    const { resolveNpmBin } = await import("./converge-release.js")
+    const dir = mkdtempSync(join(tmpdir(), "atomic-npmbin-"))
+    try {
+      mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", ".bin", "npm"), "#!/bin/sh\n")
+      expect(resolveNpmBin(dir)).toBe(join(dir, "node_modules", ".bin", "npm"))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // package-lock.json hoists npm at node_modules/npm because
+  // @semantic-release/npm depends on ^11.6.2. That is what makes
+  // node_modules/.bin/npm an OIDC-capable npm rather than a link to the
+  // ambient one, so the constraint is asserted rather than assumed.
+  it("is backed by a lockfile pin at npm 11 or newer", () => {
+    const lock = JSON.parse(readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8")) as {
+      packages: Record<string, { version?: string }>
+    }
+    const npmEntry = lock.packages["node_modules/npm"]
+    expect(npmEntry).toBeDefined()
+    const major = Number((npmEntry?.version ?? "0").split(".")[0])
+    const minor = Number((npmEntry?.version ?? "0.0").split(".")[1])
+    // npm 11.5.1 is where OIDC trusted-publishing auth landed.
+    expect(major).toBeGreaterThanOrEqual(11)
+    if (major === 11) expect(minor).toBeGreaterThanOrEqual(5)
   })
 })
 
@@ -482,9 +748,16 @@ describe("release pipeline wiring", () => {
   const releaserc = readFileSync(join(REPO_ROOT, ".releaserc.yaml"), "utf8")
   const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/npm-release.yml"), "utf8")
 
+  interface WorkflowStep {
+    uses?: string
+    run?: string
+    with?: Record<string, string>
+  }
   interface WorkflowJob {
     needs?: string | string[]
     permissions?: Record<string, string>
+    if?: string
+    steps?: WorkflowStep[]
   }
   const parsedWorkflow = load(workflow) as { jobs: Record<string, WorkflowJob> }
 
@@ -507,8 +780,50 @@ describe("release pipeline wiring", () => {
 
   it("gates the converge job on main and on the converge decision", () => {
     expect(workflow).toMatch(/scripts\/converge-release\.ts/)
-    expect(workflow).toMatch(/mode == 'converge'/)
-    expect(workflow).toMatch(/github\.ref == 'refs\/heads\/main'/)
+    // Asserted against the CONVERGE JOB'S OWN `if`, not the workflow text.
+    // A file-wide substring match passes on the identical clause in
+    // resolve-version, so deleting the converge job's gate left the suite
+    // green — the script-level refusal still held, but the workflow-level one
+    // was unpinned.
+    const convergeIf = String(parsedWorkflow.jobs.converge.if ?? "")
+    expect(convergeIf).toMatch(/mode == 'converge'/)
+    expect(convergeIf).toMatch(/github\.ref == 'refs\/heads\/main'/)
+  })
+
+  // A converge builds the tarballs it publishes, so it must build them from
+  // the tree the tag names — not from the push head that happened to trigger
+  // the run. local-collector vendors connector-protocol's built dist/ into its
+  // own tarball, so a head-built local-collector@X can embed protocol code
+  // that the already-published connector-protocol@X does not have.
+  it("checks out the tag being converged, not the push head", () => {
+    const steps = parsedWorkflow.jobs.converge.steps ?? []
+    const checkout = steps.find(s => String(s.uses ?? "").startsWith("actions/checkout"))
+    expect(checkout).toBeDefined()
+    expect(checkout?.with?.ref).toBe("${{ needs.resolve-version.outputs.converge-tag }}")
+  })
+
+  // The converge job shells out to node_modules/.bin/npm, which only exists
+  // after an install. Without this step the job would hit the refusal in
+  // resolveNpmBin and the release could never finish.
+  it("installs dependencies before converging, so the OIDC-capable npm exists", () => {
+    const steps = parsedWorkflow.jobs.converge.steps ?? []
+    const installIndex = steps.findIndex(s => String(s.run ?? "").includes("npm ci"))
+    const convergeIndex = steps.findIndex(s => String(s.run ?? "").includes("converge-release.ts"))
+    expect(installIndex).toBeGreaterThanOrEqual(0)
+    expect(convergeIndex).toBeGreaterThan(installIndex)
+  })
+
+  // The barrier between connector-protocol's publish and collector-runtime's
+  // is the step that actually failed v2.2.1: a single un-retried `npm view`
+  // asked once, immediately after a publish, and read propagation lag as
+  // "not published".
+  it("gives the publish-ordering barrier a propagation budget", () => {
+    expect(releaserc).toContain("scripts/verify-connector-protocol-published.ts")
+    const barrier = readFileSync(join(REPO_ROOT, "scripts/verify-connector-protocol-published.ts"), "utf8")
+    // Routed through the shared retry primitive rather than a third hand-rolled
+    // registry client.
+    expect(barrier).toMatch(/awaitPublished/)
+    expect(barrier).not.toMatch(/JSON\.parse\(stdout/)
   })
 
   it("runs the quality job before either publishing path", () => {
@@ -543,5 +858,195 @@ describe("release pipeline wiring", () => {
       (p: unknown) => Array.isArray(p) && String(p[0]).includes("idempotent-npm-publish")
     )
     expect(idempotent).toHaveLength(3)
+  })
+})
+
+// --- the resolver's decision ----------------------------------------------
+
+// decide() is the function that routes a run down the converge path or the
+// ordinary one. It had no test at all: the suite only checked that the
+// workflow MENTIONED the file, so sabotaging the decision itself — routing a
+// zero-published tag to converge, or swallowing an UNKNOWN answer and
+// reporting `release` — left the suite green.
+describe("resolve-release-version decide()", () => {
+  // decide() reads real git tags and the real registry, so it gets a scratch
+  // repository and a stubbed npm rather than a mocked module: the thing under
+  // test is how it reconciles those two sources.
+  function makeTaggedRepo(tags: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), "atomic-git-"))
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.com",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.com",
+        },
+      })
+    git("init", "-q", "-b", "main")
+    writeFileSync(join(dir, "f"), "x")
+    git("add", "f")
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "c")
+    for (const tag of tags) git("tag", tag)
+    return dir
+  }
+
+  // Runs decide() in a child process so the stubbed npm is a real PATH
+  // resolution, the same way the script resolves it in CI.
+  function runDecide(
+    repo: string,
+    stubDir: string
+  ): { status: number; stdout: string; stderr: string } {
+    const tsxEntry = require.resolve("tsx")
+    const script = `
+      import { decide } from ${JSON.stringify(join(REPO_ROOT, "scripts/resolve-release-version.ts"))}
+      const d = await decide(process.argv[2])
+      process.stdout.write(JSON.stringify(d))
+    `
+    const entry = join(stubDir, "decide-entry.mts")
+    writeFileSync(entry, script)
+    try {
+      const stdout = execFileSync(process.execPath, ["--import", tsxEntry, entry, repo], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}` },
+      })
+      return { status: 0, stdout, stderr: "" }
+    } catch (error) {
+      const e = error as { status?: number; stdout?: string; stderr?: string }
+      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+    }
+  }
+
+  it("routes a fully published tag to an ordinary release", () => {
+    const repo = makeTaggedRepo([`v${V}`])
+    const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "published", [LC]: "published" } })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      const decision = JSON.parse(result.stdout) as { mode: string; reason: string }
+      expect(decision.mode).toBe("release")
+      expect(decision.reason).toMatch(/fully published/)
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("routes a partially published tag to converge, naming only what is missing", () => {
+    const repo = makeTaggedRepo([`v${V}`])
+    const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "missing", [LC]: "missing" } })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      const decision = JSON.parse(result.stdout) as { mode: string; missing: string[]; version: string }
+      expect(decision.mode).toBe("converge")
+      expect(decision.version).toBe(V)
+      expect(decision.missing).toEqual(["@pdpp/collector-runtime", "@pdpp/local-collector"])
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  // A tag with NOTHING published is not a partial release — converging on it
+  // would publish a version from a commit that never got past its first
+  // publish. Routing it to converge instead of release is a real behaviour
+  // change that the suite previously could not see.
+  it("routes a zero-published tag to an ordinary release, not to converge", () => {
+    const repo = makeTaggedRepo([`v${V}`])
+    const stub = makeStubNpm({ view: { [CP]: "missing", [CR]: "missing", [LC]: "missing" } })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      const decision = JSON.parse(result.stdout) as { mode: string; reason: string }
+      expect(decision.mode).toBe("release")
+      expect(decision.reason).toMatch(/no published packages/)
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("treats a repository with no release tag as an ordinary release", () => {
+    const repo = makeTaggedRepo([])
+    const stub = makeStubNpm({ view: {} })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      expect((JSON.parse(result.stdout) as { mode: string }).mode).toBe("release")
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  // The property the file's header calls SAFETY. A registry outage must not be
+  // able to make a COMPLETE release look partial and pull the pipeline into
+  // re-publishing something that already shipped.
+  it("throws rather than deciding anything when the registry will not answer", () => {
+    const repo = makeTaggedRepo([`v${V}`])
+    const stub = makeStubNpm({
+      view: {
+        [CP]: "published",
+        [CR]: { error: "npm error code E500\nnpm error 500 Internal Server Error" },
+        [LC]: "missing",
+      },
+    })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/UNKNOWN/)
+      // Decisively: no decision was emitted at all.
+      expect(result.stdout).toBe("")
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  // The exact misclassification the #100 review found: an E500 whose body
+  // happens to quote E404 must stay UNKNOWN, not degrade to "not published".
+  it("does not let an E500 quoting E404 masquerade as a missing package", () => {
+    const repo = makeTaggedRepo([`v${V}`])
+    const stub = makeStubNpm({
+      view: {
+        [CP]: "published",
+        [CR]: { error: "npm error code E500 trace E404" },
+        [LC]: "published",
+      },
+    })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/UNKNOWN/)
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("picks the newest tag by version order, not lexically", () => {
+    const repo = makeTaggedRepo(["v2.9.0", "v2.10.0"])
+    const stub = makeStubNpm({
+      view: {
+        "@pdpp/connector-protocol@2.10.0": "published",
+        "@pdpp/collector-runtime@2.10.0": "missing",
+        "@pdpp/local-collector@2.10.0": "missing",
+      },
+    })
+    try {
+      const result = runDecide(repo, stub.dir)
+      expect(result.status).toBe(0)
+      const decision = JSON.parse(result.stdout) as { mode: string; version: string }
+      expect(decision.mode).toBe("converge")
+      // Lexically "v2.9.0" sorts above "v2.10.0"; semantically it does not.
+      expect(decision.version).toBe("2.10.0")
+    } finally {
+      stub.cleanup()
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })

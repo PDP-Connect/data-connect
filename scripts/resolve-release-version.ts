@@ -32,11 +32,12 @@
 // This script reconciles the two sources of truth and emits a decision:
 //
 //   converge  the newest tag's version is NOT fully published. The release
-//             to run is that tag's version — not a new one. The workflow
-//             checks the tag out and lets the idempotent publish plugin fill
-//             in only the missing packages. Nothing is republished, no
-//             version is burned, and the lockstep invariant ("all three
-//             share a version") ends up TRUE rather than abandoned.
+//             to run is that tag's version — not a new one. The workflow's
+//             `converge` job checks THAT TAG out and runs
+//             scripts/converge-release.ts, which publishes only the missing
+//             packages at that version. Nothing is republished, no version is
+//             burned, and the lockstep invariant ("all three share a
+//             version") ends up TRUE rather than abandoned.
 //
 //   release   the newest tag is fully published (or there is no tag). This
 //             is an ordinary release; semantic-release computes the next

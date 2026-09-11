@@ -18,11 +18,40 @@
 // between the two publishes (or a future reordering bug) could resolve
 // collector-runtime against a connector-protocol version that doesn't
 // exist yet, or against a stale one, on the registry.
+//
+// THIS IS THE STEP THAT FAILED v2.2.1.
+//
+// `npm publish` returning success does not mean every read replica can
+// resolve the version yet — this repo has measured ~3 minutes of propagation
+// lag. A prior revision of this script was a single un-retried `npm view`, so
+// it asked once, immediately after the publish it was gating, and a lag it
+// had no budget for read as "not published". It aborted the run between
+// connector-protocol's publish and collector-runtime's, which is precisely
+// how the registry ended up holding one third of v2.2.1 under a tag claiming
+// all of it.
+//
+// So the read is routed through the same two primitives the rest of the
+// pipeline uses rather than hand-rolling a third registry client here:
+//
+//   - registryStateFor (via awaitPublished) classifies the answer into
+//     PUBLISHED / MISSING / UNKNOWN and parses npm's actual `--json` output
+//     shape. The old inline `JSON.parse(...) !== version` comparison could
+//     not: `npm view <spec> version --json` answers with an ARRAY (["2.2.1"])
+//     on npm 11+, so that comparison fails a live version outright. That bug
+//     was latent only because the runner still ships npm 10, which answers
+//     with a bare string.
+//
+//   - awaitPublished retries a MISSING answer across the propagation budget
+//     before believing it, and rethrows UNKNOWN immediately — waiting cannot
+//     turn "I could not tell" into an answer, and a registry outage must not
+//     be able to stall a release for three minutes and then mislabel it.
+//
+// The barrier still fails closed. What changed is that it now fails only when
+// connector-protocol is genuinely not there, not when it is merely not there
+// YET.
 
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
-
-const run = promisify(execFile)
+import { awaitPublished } from "./verify-release-complete.js"
+import { RegistryUnknownError } from "./release-registry-state.js"
 
 const PACKAGE_NAME = "@pdpp/connector-protocol"
 
@@ -39,23 +68,23 @@ async function main() {
 
   const spec = `${PACKAGE_NAME}@${version}`
 
-  let stdout: string
   try {
-    // Inherits process.env, including NPM_CONFIG_USERCONFIG/NPM_CONFIG_REGISTRY
-    // if set — same registry resolution npm itself uses for the sibling
-    // `npm publish`/`npm view` calls in this pipeline. No hardcoded URL.
-    ;({ stdout } = await run("npm", ["view", spec, "version", "--json"]))
+    await awaitPublished(PACKAGE_NAME, version)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
+    // An unanswerable registry and a genuinely absent package are different
+    // failures, and the operator reading this log needs to know which one
+    // stopped the release.
+    if (error instanceof RegistryUnknownError) {
+      fail(
+        `could not determine whether ${spec} is live — refusing to publish collector-runtime ` +
+          `against a connector-protocol release whose state is UNKNOWN.\n${detail}`
+      )
+    }
     fail(
       `${spec} is not resolvable from the registry — refusing to publish collector-runtime against ` +
         `a connector-protocol release that isn't live yet.\n${detail}`
     )
-  }
-
-  const resolved = JSON.parse(stdout.trim()) as unknown
-  if (resolved !== version) {
-    fail(`${spec} resolved version "${String(resolved)}" does not match expected "${version}"`)
   }
 
   process.stdout.write(`[verify-connector-protocol-published] confirmed ${spec} is live on the registry\n`)
