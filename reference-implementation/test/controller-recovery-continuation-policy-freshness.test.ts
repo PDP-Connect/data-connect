@@ -421,6 +421,11 @@ test("the continuation executes the manifest its admission was decided against",
     registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
   });
 
+  assert.equal(
+    result.generationAfter,
+    result.generationBefore + 1,
+    "premise: the mid-run registration must advance the manifest generation",
+  );
   assert.equal(result.calls.length, 2, "premise: an automatic policy must still self-chain");
   const continuation = result.calls[1];
   assert.ok(continuation);
