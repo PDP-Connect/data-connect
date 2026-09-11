@@ -213,12 +213,6 @@ jobs:
       - name: Verify local-collector package
         run: npm run --workspace packages/local-collector verify
 
-      - name: Test commit-analyzer scope gate
-        run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
-
-      - name: Test attestation signer-workflow binding
-        run: npx vitest run scripts/npm-release-signer-workflow.test.ts
-
   # Tests the release pipeline's own configuration, as opposed to `quality`,
   # which tests the artifacts being published. The distinction decides the
   # checkout: `quality` follows the tree being released (the tag on a
@@ -258,6 +252,12 @@ jobs:
       # gate in front of an immutable publish goes quietly out of alignment.
       - name: Test quality job verifies the released tree
         run: npx vitest run scripts/npm-release-quality-checkout.test.ts
+
+      - name: Test commit-analyzer scope gate
+        run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
+
+      - name: Test attestation signer-workflow binding
+        run: npx vitest run scripts/npm-release-signer-workflow.test.ts
 
   release:
     name: publish to npm and GitHub

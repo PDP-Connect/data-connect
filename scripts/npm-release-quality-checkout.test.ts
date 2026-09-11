@@ -116,4 +116,32 @@ describe("npm-release quality job checks out the tree it gates", () => {
     const asArray = Array.isArray(needs) ? needs : [needs]
     expect(asArray).toContain("quality")
   })
+
+  // A gate that exists but is not wired into `needs` is indistinguishable from
+  // no gate: the job runs, goes green or red, and the publish proceeds anyway.
+  // Both publishing jobs must depend on BOTH gates, or an unverified tarball
+  // reaches npm — where it is immutable.
+  it("wires both gates into both publishing jobs", () => {
+    const workflow = load(
+      readFileSync(resolve(process.cwd(), ".github/workflows/npm-release.yml"), "utf8")
+    ) as { jobs: Record<string, { needs?: string | string[] }> }
+
+    for (const job of ["release", "converge"]) {
+      const needs = workflow.jobs[job]?.needs
+      expect(needs, `'${job}' job must declare needs`).toBeTruthy()
+      const asArray = Array.isArray(needs) ? needs : [needs]
+      expect(asArray, `'${job}' must not publish without the artifact gate`).toContain("quality")
+      expect(asArray, `'${job}' must not publish without the policy gate`).toContain("release-policy")
+    }
+  })
+
+  // The policy tests assert what the release rules ARE, so they only mean
+  // something if the job running them reads THIS repository's current
+  // workflow. If `release-policy` ever gained the tag-following `ref` that
+  // `quality` correctly uses, a converge would test the copy of the rules
+  // committed at the tag and any rule added since would silently not run.
+  it("runs policy tests against the current rules, not the tag's copy", () => {
+    const ref = checkoutStepOf("release-policy").with?.ref
+    expect(ref, "release-policy must check out the default ref, not the tag").toBeFalsy()
+  })
 })
