@@ -249,9 +249,15 @@ describe("the ordinary path keeps refusing unscoped commits", () => {
       config.plugins.map(plugin => (Array.isArray(plugin) ? plugin[0] : plugin))
     expect(names(forced)).toEqual(names(gated))
 
+    // The three packages publish through ./scripts/idempotent-npm-publish.mjs
+    // rather than "@semantic-release/npm" directly — a wrapper that skips a
+    // version already live on the registry instead of failing with E403, so a
+    // partially-published release converges on a re-run. A forced release must
+    // keep that wrapper, or forcing would be the one path that can still
+    // hard-fail on a live package.
     const pkgRoots = forced.plugins
       .filter((plugin): plugin is [string, Record<string, unknown>] =>
-        Array.isArray(plugin) && plugin[0] === "@semantic-release/npm"
+        Array.isArray(plugin) && String(plugin[0]).includes("idempotent-npm-publish")
       )
       .map(([, options]) => options.pkgRoot)
     expect(pkgRoots).toEqual([
@@ -363,7 +369,13 @@ describe("npm-release workflow wiring", () => {
   // the quality job at all. Asserting the dependency edge itself is what
   // makes "quality gates release" a claim this test can actually falsify.
   it("keeps quality gating release on both paths", () => {
-    expect(workflow.jobs.quality?.if).toBe(
+    // `quality` also gates the converge path (a partially-published release
+    // being finished), which publishes real tarballs and so must clear the
+    // same bar. Asserted as "contains the version condition" rather than as
+    // an exact string, so widening the gate to cover another publishing path
+    // does not read as removing it — while narrowing it to drop the version
+    // condition still fails here.
+    expect(workflow.jobs.quality?.if).toContain(
       "needs.resolve-version.outputs.new-release-published == 'true'"
     )
     expect(workflow.jobs.release?.if).toBe(
