@@ -7708,6 +7708,67 @@ const postgresGrantPackageStore: GrantPackageStore = {
   },
 };
 
+/**
+ * Rows per SQLite page for the per-package member reads. Must match the
+ * `LIMIT` in `list-all-by-package.sql` and `list-active-by-package.sql` and
+ * those files' `@max_rows`: the artifact bounds ONE page, and the loop below
+ * asks for another whenever a full one comes back.
+ */
+const GRANT_PACKAGE_MEMBER_PAGE_SIZE = 256;
+
+/**
+ * Reads every member row of one package by walking keyset pages.
+ *
+ * Membership has NO enforced ceiling: `createHostedMcpGrantPackage` writes one
+ * member per approved authorization detail and never counts them. Reading the
+ * whole set in one statement therefore overflowed the artifact's declared
+ * `@max_rows: 256` on a 257-member package and threw
+ * SmallEnumerationOverflowError, failing the owner's detail route and the MCP
+ * token fan-out. Paging makes the declared bound describe one page -- a real
+ * `LIMIT` the SQL guarantees -- instead of an assumption about the data.
+ *
+ * The keyset is the composite `(added_at, grant_id)`, matching each query's
+ * ORDER BY exactly. Both parts are required. Paging on `added_at` alone would
+ * be unsafe because nothing makes it unique: it is a per-member `nowIso()`
+ * (millisecond precision), so two members can share a timestamp whenever a
+ * machine issues them inside the same millisecond, and a same-timestamp pair
+ * straddling a page boundary would be skipped or repeated. `grant_id` breaks
+ * that tie -- it is the membership primary key within a package
+ * (`PRIMARY KEY(package_id, grant_id)`) and is never rewritten -- so the pair
+ * is total and stable regardless of timestamp collisions.
+ *
+ * Keying on `(added_at, grant_id)` rather than `grant_id` alone is also what
+ * preserves behavior: `getGrantPackageForOwner` returns `children` in this
+ * order and the route passes it through unchanged, so a `grant_id`-only
+ * keyset would have reordered an owner-visible payload.
+ *
+ * Both queries take the keyset as `(package_id, added_at, added_at, grant_id)`;
+ * '' sorts before every real value, so the first page starts at the beginning.
+ */
+function readAllMemberPages(
+  query: Parameters<typeof allowUnboundedReadAcknowledged>[0],
+  packageId: string
+): readonly GrantPackageMemberRow[] {
+  const all: GrantPackageMemberRow[] = [];
+  let afterAddedAt = "";
+  let afterGrantId = "";
+  for (;;) {
+    const page = allowUnboundedReadAcknowledged<GrantPackageMemberRow>(query, [
+      packageId,
+      afterAddedAt,
+      afterAddedAt,
+      afterGrantId,
+    ]);
+    all.push(...page);
+    const last = page.at(-1);
+    if (page.length < GRANT_PACKAGE_MEMBER_PAGE_SIZE || !last) {
+      return all;
+    }
+    afterAddedAt = last.added_at;
+    afterGrantId = last.grant_id;
+  }
+}
+
 const sqliteGrantPackageStore: GrantPackageStore = {
   getPackageById: (packageId) => getOne(referenceQueries.authGrantPackagesGetById, [packageId]),
   getPackageIdForGrant: (grantId) => getOne(referenceQueries.authGrantPackageMembersGetPackageIdByGrant, [grantId]),
@@ -7762,13 +7823,9 @@ const sqliteGrantPackageStore: GrantPackageStore = {
   insertPackageToken: ({ tokenId, packageId, subjectId, clientId, expiresAt }) =>
     exec(referenceQueries.authTokensInsertMcpPackage, [tokenId, packageId, subjectId, clientId, expiresAt]),
   listActiveMembers: (packageId) =>
-    allowUnboundedReadAcknowledged<GrantPackageMemberRow>(referenceQueries.authGrantPackageMembersListActiveByPackage, [
-      packageId,
-    ]),
+    readAllMemberPages(referenceQueries.authGrantPackageMembersListActiveByPackage, packageId),
   listAllMembers: (packageId) =>
-    allowUnboundedReadAcknowledged<GrantPackageMemberRow>(referenceQueries.authGrantPackageMembersListAllByPackage, [
-      packageId,
-    ]),
+    readAllMemberPages(referenceQueries.authGrantPackageMembersListAllByPackage, packageId),
   markMemberRevoked: ({ packageId, grantId, revokedAt }) =>
     exec(referenceQueries.authGrantPackageMembersMarkRevokedByGrant, [revokedAt, packageId, grantId]),
   markPackageRevokedCascade: ({ packageId, revokedAt }) => {
@@ -9966,10 +10023,11 @@ function issueSqliteRefreshPackageAccessToken(
     getOne<GrantPackageListRow>(referenceQueries.authGrantPackagesGetById, [packageId]),
     row
   );
-  const members = allowUnboundedReadAcknowledged<GrantPackageMemberRow>(
-    referenceQueries.authGrantPackageMembersListAllByPackage,
-    [packageId]
-  );
+  // Paged, like every other per-package member read: membership has no
+  // enforced ceiling, so reading the whole set in one statement overflowed the
+  // declared bound and made an oversized package unable to refresh its access
+  // token at all. See readAllMemberPages.
+  const members = readAllMemberPages(referenceQueries.authGrantPackageMembersListAllByPackage, packageId);
   if (members.length === 0 || members.some((member) => member.grant_access_mode !== "continuous")) {
     throw refreshGrantUnavailable("Refresh token package contains a non-continuous grant");
   }
