@@ -280,7 +280,7 @@ const Header = () => {
       </Text>
       <Text as="p" intent="small" muted>
         <OpenExternalLink
-          href="https://github.com/PDP-Connect/data-connectors?tab=readme-ov-file#contributing"
+          href="https://github.com/PDP-Connect/data-connectors/blob/main/AUTHORING.md"
           intent="small"
           withIcon
         >
