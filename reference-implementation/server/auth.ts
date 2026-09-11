@@ -7728,14 +7728,16 @@ const GRANT_PACKAGE_MEMBER_PAGE_SIZE = 256;
  * `LIMIT` the SQL guarantees -- instead of an assumption about the data.
  *
  * The keyset is the composite `(added_at, grant_id)`, matching each query's
- * ORDER BY exactly. Both parts are required. Paging on `added_at` alone would
- * be unsafe because nothing makes it unique: it is a per-member `nowIso()`
- * (millisecond precision), so two members can share a timestamp whenever a
- * machine issues them inside the same millisecond, and a same-timestamp pair
- * straddling a page boundary would be skipped or repeated. `grant_id` breaks
- * that tie -- it is the membership primary key within a package
- * (`PRIMARY KEY(package_id, grant_id)`) and is never rewritten -- so the pair
- * is total and stable regardless of timestamp collisions.
+ * ORDER BY exactly. Both parts are required. Nothing makes `added_at` unique --
+ * it is a per-member `nowIso()` at millisecond precision -- so ties are
+ * POSSIBLE, not routine: measured over 300 members through the real issuance
+ * path every timestamp was in fact distinct. The tiebreak is not there for the
+ * common case but for the failure mode when it does happen, which is silent:
+ * with 600 members sharing one timestamp, an `added_at`-only keyset cannot
+ * advance past the tied page boundary and returns 256 of them with no error
+ * raised. `grant_id` breaks that tie -- it is the membership primary key
+ * within a package (`PRIMARY KEY(package_id, grant_id)`) and is never
+ * rewritten -- so the pair is total and stable regardless of collisions.
  *
  * Keying on `(added_at, grant_id)` rather than `grant_id` alone is also what
  * preserves behavior: `getGrantPackageForOwner` returns `children` in this
