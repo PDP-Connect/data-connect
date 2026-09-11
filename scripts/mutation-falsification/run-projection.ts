@@ -73,8 +73,27 @@ process.stdout.write(
 // trials at all.
 //
 // This is not a mutation-score gate. Survivors do not fail the job; only the
-// absence of any evidence does. A revision that mutates nothing never reaches
-// here, because the workflow reports it as not_applicable instead.
+// absence of any evidence does.
+//
+// One case that looks like absent evidence is not: a clean engine run that found
+// nothing to mutate. Applicability is decided from the diff's changed line
+// ranges before the engine runs, so a revision whose only production change is a
+// non-mutable line -- a URL or message string, a comment, an import -- is
+// reported `applicable` and then instruments zero mutants. An earlier revision
+// of this file assumed "a revision that mutates nothing never reaches here,
+// because the workflow reports it as not_applicable instead". That is false:
+// `not_applicable` means no file was SELECTED, not that no mutant EXISTS. A
+// one-line link change in a .tsx file failed this gate with `stryker_exit=0` and
+// `Instrumented 1 source file(s) with 0 mutant(s)`, which no amount of work on
+// the revision could have cleared.
+//
+// Zero mutants after a complete baseline is therefore reported the same way the
+// workflow reports a non-applicable cohort: neither a pass nor a failure. It is
+// only absent evidence when the engine did not get to speak -- no report at all,
+// or a rejected baseline.
+const engineRanAndFoundNothingToMutate =
+  reportPresent && baselineComplete && receipt.projections.length === 0
+
 const failures: string[] = []
 if (!baselineComplete) {
   failures.push(
@@ -83,11 +102,21 @@ if (!baselineComplete) {
   )
 }
 if (receipt.projections.length === 0) {
-  failures.push("no mutant trials were recorded, so this attempt produced no evidence")
+  if (!engineRanAndFoundNothingToMutate) {
+    failures.push("no mutant trials were recorded, so this attempt produced no evidence")
+  }
 } else if (validDenominator === 0) {
   failures.push(
     `all ${inconclusive} trial(s) were inconclusive, so no fault was shown to be ` +
       "either detected or missed"
+  )
+}
+
+if (engineRanAndFoundNothingToMutate && failures.length === 0) {
+  process.stdout.write(
+    "The engine completed and found no mutable code in this revision's changed lines, so no\n" +
+      "mutation evidence exists for it. This is not a pass and not a failure. The receipt and\n" +
+      "the raw report are still published and record the empty trial set accurately.\n"
   )
 }
 
