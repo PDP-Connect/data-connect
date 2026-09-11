@@ -3614,7 +3614,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
   async function maybeContinueRecoveryAfterProgress(input: {
     readonly connectorId: string;
     readonly connectorInstanceId: string;
-    readonly manifest: ConnectorManifest;
+    // Deliberately NO `manifest`. The continuation resolves the registered
+    // manifest itself at admission; accepting the parent run's pinned object
+    // here is what made the permission decision stale, so the field is gone
+    // rather than merely unread.
     readonly options: RunNowOptions;
     readonly ownerSubjectId: string;
     readonly ownerToken: string;
@@ -4340,7 +4343,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
         const continuationInput: {
           connectorId: string;
           connectorInstanceId: string;
-          manifest: ConnectorManifest;
           options: RunNowOptions;
           ownerSubjectId: string;
           ownerToken: string;
@@ -4349,7 +4351,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
         } = {
           connectorId,
           connectorInstanceId,
-          manifest,
           options,
           ownerSubjectId: runOwnerSubjectId,
           ownerToken,
