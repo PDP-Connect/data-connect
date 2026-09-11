@@ -92,7 +92,7 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
-    expect(workflow).toContain('node-version: "22.23.1"')
+    expect(workflow).toContain('node-version: "24.14.1"')
     expect(workflow).toContain("Stage Node.js runtime sidecar")
     expect(workflow).toContain(
       'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'

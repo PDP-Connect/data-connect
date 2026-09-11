@@ -6,8 +6,8 @@ name: client-tests
 # nothing ran `vitest` over src/, src-tauri/, scripts/ or playwright-runner/, so the
 # 88 client test files in vite.config.ts's `test.include` were only ever run locally.
 #
-# Node is pinned to 22.23.1 to match every other workflow in this directory and to
-# stay inside the root package.json `engines` range (>=22.14.0 <24).
+# Node is pinned to 24.14.1 to match every other workflow in this directory and to
+# stay inside the root package.json `engines` range (>=24.14.0).
 #
 # Two jobs, not one: the root `npm test` script is `npm run typecheck && vitest run`,
 # which short-circuits -- a typecheck error means the suite never runs and CI reports
@@ -52,7 +52,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.14.1"
           cache: npm
 
       - name: Install dependencies
@@ -74,7 +74,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.14.1"
           cache: npm
 
       - name: Check vendored build serialization
