@@ -11,10 +11,12 @@ name: reference-implementation
 # list below, so `classify` alone would not have kept the suite jobs skipped pre-Move-B.
 #
 # Mirrors PDP-Connect/pdpp's .github/workflows/reference-implementation.yml gate shape
-# (same job names, same classify -> per-suite -> aggregate pattern) so the required-check
-# discipline pdpp already has for this code carries over unchanged. Adapted for this
-# repo's package manager (npm workspaces, not pnpm) and Node floor (>=22.14.0 <24, this
-# repo's package.json engines field, vs. pdpp's node-version 24).
+# (same job names, same classify -> per-suite -> aggregate pattern), so the single
+# `reference-implementation gate` context stays the one thing to promote if this is ever
+# made a required check here -- as of 2026-09-11 it is not; DCO is main's only required
+# status check. Adapted for this repo's package manager (npm workspaces, not pnpm) and
+# Node floor (>=22.14.0 <24, this repo's package.json engines field, vs. pdpp's
+# node-version 24).
 #
 # pdpp's version also gates apps/console and several owner-journey/stream-audit scripts
 # that are pdpp-specific (openspec-driven authoring surfaces not part of this repo's
@@ -31,14 +33,19 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  # Keyed by ref, so a branch's runs supersede each other but never a sibling's.
-  # main is excluded from cancel-in-progress: every merge commit needs its own
-  # pass/fail record, and cancelling the previous merge's run to start the next
-  # one leaves that commit permanently unjudged -- the same blind spot as having
-  # no push trigger at all. Merge traffic on main is low enough that the queued
-  # runs drain without piling up.
-  group: reference-implementation-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Keyed by ref for PRs and branches, so a ref's runs supersede each other but
+  # never a sibling's. main is keyed by sha instead, which is what actually gives
+  # every merge commit its own pass/fail record: a group holds at most one pending
+  # run, so a per-ref main group would have GitHub cancel the waiting run when the
+  # next merge arrives, leaving that commit permanently unjudged -- the same blind
+  # spot as having no push trigger at all. Merge traffic is high enough for that to
+  # bite: over the 30 days to 2026-09-11 main took 48 first-parent commits (26 in
+  # the last 7), with 11 gaps under 25 minutes and 3 runs of three commits inside
+  # 22 minutes, against a suite that takes about 21. Per-sha groups each hold one
+  # run, so main's runs proceed in parallel rather than queueing; at that rate it is
+  # at most 3 concurrent.
+  group: reference-implementation-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   classify:
