@@ -60,15 +60,27 @@ const MANUAL_ONLY_REFRESH_POLICY = {
 const AUTOMATIC_REFRESH_POLICY = {
   background_safe: true,
   interaction_posture: "none",
+  rationale: "Read-only order history over a durable session; safe to refresh unattended.",
   recommended_mode: "automatic",
 };
 
+/**
+ * A manifest that the REAL registration path accepts.
+ *
+ * `streams` must be a non-empty array of valid stream shapes and a declared
+ * `refresh_policy` must carry a `rationale` -- `validateConnectorManifest`
+ * enforces both. An earlier revision of this fixture used `streams: []` and
+ * seeded the `connectors` row with raw SQL, which bypassed validation. That
+ * made the fixture unrepresentative: the controller now resolves current
+ * policy by reading the registry back, and a manifest that real registration
+ * would have refused cannot stand in for one an owner actually registered.
+ */
 function manifestWithRefreshPolicy(refreshPolicy: Record<string, unknown> | null) {
   return {
     connector_id: CONNECTOR,
     name: "Amazon",
     runtime_requirements: { bindings: { browser: { required: true } } },
-    streams: [],
+    streams: [{ name: "orders", primary_key: ["id"], schema: { properties: { id: { type: "string" } } } }],
     version: "1.0.0",
     ...(refreshPolicy ? { capabilities: { refresh_policy: refreshPolicy } } : {}),
   };
@@ -310,7 +322,7 @@ test("a connector with no declared refresh policy still self-chains", async (t) 
 test("a paused connector does not self-chain a recovery continuation", async (t) => {
   freshDb(t);
 
-  const calls = await runRootWithDurableProgress(manifestWithRefreshPolicy({ recommended_mode: "paused" }));
+  const calls = await runRootWithDurableProgress(manifestWithRefreshPolicy({ rationale: "Owner paused refresh.", recommended_mode: "paused" }));
 
   assert.equal(calls.length, 1, "paused connector must not launch an unattended recovery continuation");
   assert.equal(isNeedsHumanAttention(CONNECTOR, { connectorInstanceId: CONNECTION }), false);
@@ -323,7 +335,11 @@ test("recommended_mode manual with an explicit background_safe opt-in still self
   // only "until background_safe=true is declared". A manifest that declares it
   // has made the unattended-refresh call explicitly, so the gate defers to it.
   const calls = await runRootWithDurableProgress(
-    manifestWithRefreshPolicy({ background_safe: true, recommended_mode: "manual" })
+    manifestWithRefreshPolicy({
+      background_safe: true,
+      rationale: "Owner prefers manual runs but allows background refresh.",
+      recommended_mode: "manual",
+    })
   );
 
   assert.equal(calls.length, 2, "an explicit background_safe:true opt-in must be honored");

@@ -3666,7 +3666,59 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // `interaction_posture: "otp_likely"`. Self-chaining there can cost the
     // owner an unprompted interactive sign-in per envelope, for a session they
     // never asked to start.
-    const automationIneligibility = getScheduleIneligibilityReason(readManifestRefreshPolicy(input.manifest));
+    //
+    // The policy is resolved from the REGISTRY AT THIS MOMENT, not from
+    // `input.manifest`. Those are two different questions and pinning one
+    // object to answer both is a TOCTOU:
+    //
+    //   - "how do I run?"    -> execution identity: the connector path and
+    //                           stream shapes this envelope runs against.
+    //   - "may I run at all?" -> the CURRENT registered policy. Registration is
+    //                           mutable for the whole life of the process:
+    //                           `registerConnector` -> `persistManifestAndAdvance-
+    //                           Generations` overwrites `connectors.manifest`
+    //                           and bumps `connector_instances.manifest_generation`.
+    //                           A chain can run for many minutes across up to
+    //                           twelve envelopes, so an owner who pauses a
+    //                           connector, or an update that sets
+    //                           `background_safe: false`, lands mid-chain.
+    //
+    // Reading the pinned object answered the second question with a snapshot
+    // taken before the owner acted, so a committed pause kept self-chaining
+    // against a decision it had already revoked.
+    //
+    // Both are then answered by the SAME object: the manifest read here is the
+    // one the continuation is launched with (see `continuationOptions` below),
+    // so the run can never execute a manifest other than the one it was just
+    // admitted against.
+    //
+    // Fail CLOSED. If the registry read throws (the stored manifest is absent,
+    // unparseable, or the row is gone because the connector was deregistered)
+    // there is no current permission to rely on, and the safe reading of "I
+    // cannot tell whether I am allowed" is to stop. Nothing is lost: gaps stay
+    // durable and an owner-initiated run still drains them.
+    let admittedManifest: ConnectorManifest;
+    try {
+      const registeredManifest = await getConnectorManifest(input.connectorId);
+      if (!registeredManifest) {
+        log.warn?.(
+          `[controller] recovery continuation withheld for ${input.connectorId} ` +
+            `(connection=${input.connectorInstanceId}): the connector is no longer registered. ` +
+            "Pending recovery work needs an owner-initiated run."
+        );
+        return;
+      }
+      admittedManifest = registeredManifest as ConnectorManifest;
+    } catch (err: unknown) {
+      log.warn?.(
+        `[controller] recovery continuation withheld for ${input.connectorId} ` +
+          `(connection=${input.connectorInstanceId}): the registered manifest could not be read ` +
+          `(${err instanceof Error ? err.message : String(err)}). ` +
+          "Pending recovery work needs an owner-initiated run."
+      );
+      return;
+    }
+    const automationIneligibility = getScheduleIneligibilityReason(readManifestRefreshPolicy(admittedManifest));
     if (automationIneligibility) {
       log.warn?.(
         `[controller] recovery continuation withheld for ${input.connectorId} ` +
@@ -3692,7 +3744,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     try {
       const continuationOptions: RunNowOptions = {
         connectorInstanceId: input.connectorInstanceId,
-        manifest: input.manifest,
+        // The manifest the admission decision above was made AGAINST, not the
+        // one the parent run started with. Binding execution to the same
+        // object the gate judged is what makes the decision and the run
+        // inseparable: passing `input.manifest` here would have let a
+        // continuation be admitted on current policy and then execute an
+        // obsolete manifest -- a different connector path or stream shape than
+        // the one just permitted. `validateRunNowPreconditions` gives
+        // `options.manifest` precedence over its own registry read, so
+        // whatever is put here is final for this envelope.
+        manifest: admittedManifest,
         ownerSubjectId: input.ownerSubjectId,
         ownerToken: input.ownerToken,
         recoveryContinuationDepth: depth + 1,
