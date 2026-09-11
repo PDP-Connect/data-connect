@@ -80,13 +80,48 @@ describe("a selected file with no derived ranges is an error, not whole-file sco
     )
   })
 
-  it("rejects a modified file whose only hunk was a pure deletion", () => {
+  it("excludes a modified file whose only hunk was a pure deletion", () => {
     // A `+N,0` hunk contributes no range by design -- deleted content cannot
     // carry a fault into head -- so a file whose every hunk is a deletion
     // reaches this point with an empty range list from a legitimate derivation.
-    expect(() =>
-      freeze("M\0reference-implementation/server/index.ts\0", new Map([["reference-implementation/server/index.ts", []]]))
-    ).toThrow(/no changed line ranges/)
+    // There is no line left in head to mutate, so the file is excluded with a
+    // recorded reason. Failing the run instead would make an ordinary revision
+    // -- one that only removes a line -- unable to produce evidence at all.
+    const intent = freeze(
+      "M\0reference-implementation/server/index.ts\0",
+      new Map([["reference-implementation/server/index.ts", []]])
+    )
+    expect(intent.mutate).toEqual([])
+    expect(intent.scope).toEqual([])
+    expect(intent.excluded).toContainEqual({
+      path: "reference-implementation/server/index.ts",
+      reason: "no_mutable_lines",
+    })
+  })
+
+  it("reports not_applicable when a deletion-only change is all the revision touched", () => {
+    // The cohort changed no mutable line, which is the same standing as a
+    // test-only revision: no evidence exists, and that is neither a pass nor a
+    // failure. The mutation job reads this to decide it has nothing to run.
+    const intent = freeze(
+      "M\0reference-implementation/server/index.ts\0",
+      new Map([["reference-implementation/server/index.ts", []]])
+    )
+    expect(intent.applicability).toBe("not_applicable")
+  })
+
+  it("still mutates the added lines of a file that both added and deleted lines", () => {
+    // Only a file with no surviving added range is excluded. A modification
+    // that deletes in one hunk and adds in another is still scoped to what it
+    // added, so the exclusion cannot swallow a real change.
+    const intent = freeze(
+      "M\0reference-implementation/server/index.ts\0",
+      new Map([["reference-implementation/server/index.ts", [{ startLine: 12, endLine: 14 }]]])
+    )
+    expect(intent.mutate).toEqual(["server/index.ts:12-14"])
+    expect(intent.excluded).not.toContainEqual(
+      expect.objectContaining({ reason: "no_mutable_lines" })
+    )
   })
 
   it("still scopes a genuinely added file to the whole file", () => {

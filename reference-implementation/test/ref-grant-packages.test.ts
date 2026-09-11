@@ -39,6 +39,10 @@ import { fileURLToPath } from "node:url";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
+import {
+  computeHostedMcpDecisionDigest,
+  type HostedMcpConsentChallengeModel,
+} from "../server/routes/as-consent-ui-helpers.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -219,26 +223,6 @@ function assertNoSecretMaterial(value: unknown, path = "$"): void {
   }
 }
 
-function renderedHostedMcpStreamValues(html: string): string[] {
-  return [
-    ...html.matchAll(/<input[^>]*name="stream"[^>]*value="([^"]+)"[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g),
-  ].map((match) => {
-    const [, value] = match;
-    assert.ok(value, "stream checkbox input must carry a value attribute");
-    return value;
-  });
-}
-
-function renderedHostedMcpSourceValues(html: string): string[] {
-  return [
-    ...html.matchAll(/<input[^>]*name="selection"[^>]*value="([^"]+)"[^>]*data-hosted-mcp-source-checkbox[^>]*>/g),
-  ].map((match) => {
-    const [, value] = match;
-    assert.ok(value, "source checkbox input must carry a value attribute");
-    return value;
-  });
-}
-
 async function closeServer(server: TestServerHandle): Promise<void> {
   server.asServer.closeAllConnections();
   server.rsServer.closeAllConnections();
@@ -339,40 +323,45 @@ async function completeMultiSourcePackageFlow({
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
   const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-  assert.equal(pickerResp.status, 200);
-  const pickerHtml = await pickerResp.text();
-
-  const params = new URLSearchParams();
-  params.append("client_id", client.client_id);
-  params.append("redirect_uri", "https://client.example/callback");
-  params.append("response_type", "code");
-  params.append("state", state);
-  params.append("code_challenge", challenge);
-  params.append("code_challenge_method", "S256");
+  assert.equal(pickerResp.status, 302, "picker authorization hands off to the console");
+  const location = pickerResp.headers.get("location");
+  assert.ok(location, "picker handoff must carry a redirect location");
+  const consentChallenge = new URL(location).searchParams.get("challenge");
+  assert.ok(consentChallenge, "picker handoff must name a consent challenge");
+  const modelResponse = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${consentChallenge}`);
+  assert.equal(modelResponse.status, 200);
+  const model = modelResponse.body as HostedMcpConsentChallengeModel;
   const selectedConnectorIds = new Set(connectorIds);
-  for (const sourceValue of renderedHostedMcpSourceValues(pickerHtml)) {
-    const decoded = JSON.parse(Buffer.from(sourceValue, "base64url").toString("utf8")) as { connector_id?: string };
-    if (decoded.connector_id && selectedConnectorIds.has(decoded.connector_id)) {
-      params.append("selection", sourceValue);
-    }
-  }
-  // Mirror explicit whole-source approval: submit every stream value for the
-  // selected sources. Narrowing cases construct their own form submissions.
-  for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
-    params.append("stream", streamValue);
-  }
+  const chosen = model.sources.filter((source) => selectedConnectorIds.has(source.connectorId));
+  assert.equal(chosen.length, connectorIds.length, "every requested connector must be available for approval");
 
-  const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
-    body: params.toString(),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  // Submit the same reviewed, whole-source decision as the console. Keep both
+  // review and decision bindings so this helper exercises the security gates.
+  const approve = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${consentChallenge}/accept`, {
+    body: JSON.stringify({
+      access_mode: "continuous",
+      decision_digest: computeHostedMcpDecisionDigest({
+        accessMode: "continuous",
+        clientId: client.client_id,
+        sources: chosen.map((source) => ({
+          sourceKey: source.id,
+          streamNames: source.streams.map((stream) => stream.name).sort(),
+        })),
+      }),
+      grant_expiry: model.grantExpiry.defaultId,
+      review_digest: model.reviewDigest,
+      source_id: chosen.map((source) => source.id),
+      stream: chosen.flatMap((source) => source.streams.map((stream) => stream.id)),
+    }),
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
     method: "POST",
-    redirect: "manual",
   });
-  const approveBody = await approveResp.clone().text();
-  assert.equal(approveResp.status, 302, approveBody);
-  const location = approveResp.headers.get("location");
-  assert.ok(location, "approve response must carry a redirect location");
-  const callback = new URL(location);
+  assert.equal(approve.status, 200, JSON.stringify(approve.body));
+  const redirectUrl = (approve.body as { redirect_url?: string }).redirect_url;
+  assert.ok(redirectUrl, "approval must carry a callback URL");
+  const callback = new URL(redirectUrl);
+  assert.equal(callback.origin, "https://client.example");
+  assert.equal(callback.searchParams.get("state"), state);
   const code = callback.searchParams.get("code");
   assert.ok(code);
 

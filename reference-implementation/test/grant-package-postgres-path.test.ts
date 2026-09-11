@@ -53,11 +53,15 @@ import {
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb } from "../server/db.ts";
-import { encodeHostedMcpSelection } from "../server/hosted-mcp-selection.ts";
 import { startServer } from "../server/index.ts";
 import { basicIntrospectionAuthorization } from "../server/introspection-http.ts";
 import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  computeHostedMcpDecisionDigest,
+  type HostedMcpConsentChallengeModel,
+} from "../server/routes/as-consent-ui-helpers.ts";
 import { createPostgresConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { bindHostedMcpConsentChallenge } from "./helpers/hosted-mcp-consent-challenge.ts";
 import { TEST_RS_INTROSPECTION_CREDENTIALS } from "./helpers/introspection-test-credentials.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -91,12 +95,6 @@ function assertNoSecretMaterial(value: unknown, path = "$"): void {
     assert.ok(!SECRET_KEYS.has(key), `secret-shaped field "${key}" surfaced at ${path}.${key}`);
     assertNoSecretMaterial(v, `${path}.${key}`);
   }
-}
-
-function renderedHostedMcpStreamValues(html: string): string[] {
-  return [...html.matchAll(/<input[^>]*name="stream"[^>]*value="([^"]+)"[^>]*data-hosted-mcp-stream-checkbox[^>]*>/g)]
-    .map((match) => match[1])
-    .filter((value): value is string => value !== undefined);
 }
 
 // startServer is imported from checkJs:false JS; TS's structural inference
@@ -336,18 +334,6 @@ async function completeMultiSourcePackageFlow({
   const state = "pkg-pg-test-state";
   const challenge = pkceChallenge(verifier);
 
-  const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
-  authorizeUrl.searchParams.set("client_id", client.client_id);
-  authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
-  authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("state", state);
-  authorizeUrl.searchParams.set("code_challenge", challenge);
-  authorizeUrl.searchParams.set("code_challenge_method", "S256");
-
-  const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-  assert.equal(pickerResp.status, 200);
-  const pickerHtml = await pickerResp.text();
-
   const params = new URLSearchParams();
   params.append("client_id", client.client_id);
   params.append("redirect_uri", "https://client.example/callback");
@@ -355,11 +341,31 @@ async function completeMultiSourcePackageFlow({
   params.append("state", state);
   params.append("code_challenge", challenge);
   params.append("code_challenge_method", "S256");
-  for (const id of connectorIds) {
-    params.append("selection", encodeHostedMcpSelection({ connectionId: packageInstanceId(id), connectorId: id }));
-  }
-  for (const streamValue of renderedHostedMcpStreamValues(pickerHtml)) {
-    params.append("stream", streamValue);
+  await bindHostedMcpConsentChallenge(asUrl, params);
+  const modelResponse = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${params.get("consent_challenge")}`);
+  assert.equal(modelResponse.status, 200);
+  const model = modelResponse.body as HostedMcpConsentChallengeModel;
+  const sources = model.sources.filter((source) => connectorIds.includes(source.connectorId));
+  assert.equal(sources.length, connectorIds.length);
+  params.set("access_mode", "continuous");
+  params.set("grant_expiry", model.grantExpiry.defaultId);
+  params.set("review_digest", model.reviewDigest);
+  params.set(
+    "decision_digest",
+    computeHostedMcpDecisionDigest({
+      accessMode: "continuous",
+      clientId: client.client_id,
+      sources: sources.map((source) => ({
+        sourceKey: source.id,
+        streamNames: source.streams.map((stream) => stream.name).sort(),
+      })),
+    })
+  );
+  for (const source of sources) {
+    params.append("selection", source.selectionValue);
+    for (const stream of source.streams) {
+      params.append("stream", stream.selectionValue);
+    }
   }
 
   const approveResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {

@@ -8293,6 +8293,7 @@ async function persistChildGrantForPackage({
   resolvedStreams,
   traceContext,
   reviewDigest = null,
+  grantExpiresAt = null,
 }: {
   request: PendingRequest;
   registeredClient: RegisteredClient;
@@ -8300,6 +8301,16 @@ async function persistChildGrantForPackage({
   storageBinding: StorageBinding;
   resolvedStreams: ResolvedGrantStream[];
   traceContext: TraceContext;
+  /**
+   * Owner-chosen grant expiry (Grant fields: `expires_at`) from the hosted-MCP
+   * picker, as an ISO instant. `null` means the owner chose no scheduled end
+   * date, or the surface offered no choice — both resolve to a grant with no
+   * expiry, which is the pre-existing behavior for `continuous`.
+   *
+   * Only consulted for `continuous`: a `single_use` grant is consumed at first
+   * token issuance (spec-core.md:920), and keeps its existing 24h backstop.
+   */
+  grantExpiresAt?: string | null;
   /**
    * Digest binding the hosted-MCP picker's resolved decision (grant:873-877,
    * AS-conformance #15) — computed server-side over the exact
@@ -8322,8 +8333,15 @@ async function persistChildGrantForPackage({
 
   const grantId = generateId("grt");
   const issuedAt = nowIso();
+  // single_use keeps its 24h backstop: the grant is consumed at first token
+  // issuance (spec-core.md:920), so a longer window would only widen the
+  // period in which an unused code stays live. continuous now honors the
+  // owner's choice, defaulting to no expiry when none was made — which is
+  // what this flow always did before the control existed.
   const expiresAt =
-    selection.access_mode === "single_use" ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null;
+    selection.access_mode === "single_use"
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      : grantExpiresAt;
 
   const persistedStorageBinding = normalizeStorageBinding(storageBinding);
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
@@ -8435,6 +8453,12 @@ export async function createHostedMcpGrantPackage({
      * every child grant's `grant.issued` spine event.
      */
     reviewDigest?: string | null;
+    /**
+     * Owner-chosen grant expiry (`expires_at`) as an ISO instant, applied to
+     * every `continuous` child grant in the package. `null`/absent means no
+     * scheduled end date.
+     */
+    grantExpiresAt?: string | null;
   };
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(clientId)) {
@@ -8465,6 +8489,36 @@ export async function createHostedMcpGrantPackage({
     version: CURRENT_GRANT_PACKAGE_VERSION,
   };
 
+  // Resolve and check every source BEFORE writing anything. Normalization,
+  // declaration retention, and eligibility all reject — a source revoked since
+  // the owner approved, a manifest that no longer matches — and inserting the
+  // package first meant a rejection on the second source left an approved
+  // package row with no child grants behind it. Nothing here writes; the
+  // failures surface with no package to clean up.
+  const resolvedSources: Array<{
+    childRegisteredClient: Awaited<ReturnType<typeof requirePendingRequestClientRegistration>>;
+    request: PendingRequest;
+    resolvedStreams: Awaited<ReturnType<typeof resolvePendingRequestForApproval>>;
+    storageBinding: StorageBinding;
+  }> = [];
+  await forEachSequential(authorizationDetails, async (detail, index) => {
+    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
+    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
+    if (selectedStorageBinding) {
+      request.storage_binding = selectedStorageBinding;
+    }
+    requireStructuredPendingRequestShape(request);
+    request.trace_context = traceContext;
+    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
+    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
+    request.source_binding = describeSourceBinding(sourceBinding);
+    request.storage_binding = normalizeStorageBinding(storageBinding);
+    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
+    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
+    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+    resolvedSources.push({ childRegisteredClient, request, resolvedStreams, storageBinding });
+  });
+
   await getGrantPackageStore().insertPackage({
     approvedAt: createdAt,
     clientId,
@@ -8483,22 +8537,10 @@ export async function createHostedMcpGrantPackage({
     source: Record<string, unknown> | null;
     token: string;
   }[] = [];
-  await forEachSequential(authorizationDetails, async (detail, index) => {
-    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
-    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
-    if (selectedStorageBinding) {
-      request.storage_binding = selectedStorageBinding;
-    }
-    requireStructuredPendingRequestShape(request);
-    request.trace_context = traceContext;
-    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
-    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
-    request.source_binding = describeSourceBinding(sourceBinding);
-    request.storage_binding = normalizeStorageBinding(storageBinding);
-    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
-    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
-    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+  await forEachSequential(resolvedSources, async (resolved, index) => {
+    const { childRegisteredClient, request, resolvedStreams, storageBinding } = resolved;
     const { grant, token } = await persistChildGrantForPackage({
+      grantExpiresAt: opts.grantExpiresAt ?? null,
       registeredClient: childRegisteredClient,
       request,
       resolvedStreams,

@@ -166,9 +166,22 @@ tail:
 
 ## Scope counts and comparison baseline
 
-`scripts/run-tests.ts` discovers 1,034 profile files. The template equivalence
-registry is a different measure: 123 eligible plus 26 cold-required files,
-for **149** total. No current tracked source contains a 170-file claim.
+`scripts/run-tests.ts` discovers 1,034 profile files. The current template
+equivalence registry is a different measure. Run this command from the repository
+root to derive its counts from the registry:
+
+```sh
+node --import tsx --input-type=module <<'POSTGRES_TEMPLATE_SCOPE_COUNTS'
+import {
+  POSTGRES_TEMPLATE_COLD_REQUIRED_FILES,
+  POSTGRES_TEMPLATE_ELIGIBLE_FILES,
+} from "./reference-implementation/scripts/postgres-template-eligibility.ts";
+
+const eligible = POSTGRES_TEMPLATE_ELIGIBLE_FILES.length;
+const coldRequired = POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length;
+console.log(`${eligible} eligible plus ${coldRequired} cold-required files, ${eligible + coldRequired} total`);
+POSTGRES_TEMPLATE_SCOPE_COUNTS
+```
 
 The sibling report supplies only a memory-default cap-2 baseline (10,252
 assertions, 9,690 passed, 209 failed, 353 skipped; about 10 minutes). It is not
