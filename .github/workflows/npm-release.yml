@@ -150,9 +150,28 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
+      # Checks out whatever tree this run will actually publish: THE TAG on a
+      # converge, the push head on an ordinary release. Same conditional-ref
+      # shape as .github/workflows/release.yml's checkout, terminating in an
+      # explicit `github.sha` rather than an empty string so the ordinary path
+      # pins the exact commit that triggered the run instead of re-resolving a
+      # branch name that may have moved.
+      #
+      # Verifying the push head on a converge checks the wrong tree. The
+      # converge job below deliberately builds the tag (see its checkout step),
+      # so a head-checked-out `quality` gates code that will never be published
+      # while the code that WILL be published goes unverified — in both
+      # directions. That is not hypothetical: it is what failed run
+      # 34654643962. The artifact receipts in packages/*/artifact.json are
+      # per-tree by construction, and main had moved past v2.2.1 (a change to
+      # connector-protocol's auth.ts regenerated that package's receipt), so
+      # `artifact:verify` compared main's connector-protocol sources against
+      # the tag's collector-runtime receipt and exited 1 on a release whose own
+      # tree is internally consistent.
+      - name: Checkout the tree being released
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ (needs.resolve-version.outputs.mode == 'converge' && needs.resolve-version.outputs.converge-tag) || github.sha }}
           persist-credentials: false
 
       - name: Setup Node.js
@@ -200,9 +219,49 @@ jobs:
       - name: Test attestation signer-workflow binding
         run: npx vitest run scripts/npm-release-signer-workflow.test.ts
 
+  # Tests the release pipeline's own configuration, as opposed to `quality`,
+  # which tests the artifacts being published. The distinction decides the
+  # checkout: `quality` follows the tree being released (the tag on a
+  # converge), but a policy test has to run against THIS repository's current
+  # workflow file — the one that will actually execute — not against whatever
+  # config was committed at a tag cut days earlier. Running these inside
+  # `quality` would mean a converge silently tested an old copy of the rules,
+  # and any rule added after the tag would not run at all.
+  release-policy:
+    name: release pipeline policy checks
+    needs: resolve-version
+    if: >-
+      needs.resolve-version.outputs.new-release-published == 'true' ||
+      needs.resolve-version.outputs.mode == 'converge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Asserts `quality` verifies the same tree the publishing job builds.
+      # Without this, the two checkouts can drift apart again and the only
+      # gate in front of an immutable publish goes quietly out of alignment.
+      - name: Test quality job verifies the released tree
+        run: npx vitest run scripts/npm-release-quality-checkout.test.ts
+
   release:
     name: publish to npm and GitHub
-    needs: [resolve-version, quality]
+    needs: [resolve-version, quality, release-policy]
     if: needs.resolve-version.outputs.new-release-published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -305,7 +364,7 @@ jobs:
   # thing actually left outstanding: the publishing.
   converge:
     name: converge a partially-published release
-    needs: [resolve-version, quality]
+    needs: [resolve-version, quality, release-policy]
     if: >-
       needs.resolve-version.outputs.mode == 'converge' &&
       github.ref == 'refs/heads/main'
