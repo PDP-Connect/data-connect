@@ -38,6 +38,12 @@ name: Consumer drift signal
 # switch, see the job below) are also guarded paths in their own right, per the reviewer's
 # "Producer workflows should include their own control files in triggers" hardening finding:
 # a PR that only edits either of them would otherwise not trigger this signal at all.
+#
+# The `on.paths` filters below are deliberately BROADER than the guarded-path allow-list the
+# job compares (see `guarded_paths` in the compare step). They are triggers, not the gate:
+# running on a package-wide path and then finding no guarded drift costs one green job, while
+# a trigger too narrow to fire on a real input change would silently skip the gate entirely.
+# Keep triggers wide and the comparison narrow — never the other way round.
 
 on:
   push:
@@ -124,44 +130,68 @@ jobs:
           # array expands to exactly one argument per element in any POSIX-ish shell, so the
           # local reproduction and CI agree.
           #
-          # SCOPE: exactly the paths whose BYTES are copied or packed into data-connectors,
-          # not every file in these packages. The packed-input set is defined in code by
-          # packages/{connector-protocol,collector-runtime}/scripts/package-artifact.mjs:
+          # SCOPE: an ALLOW-LIST of exactly the paths whose BYTES cross the repo boundary,
+          # enumerated positively. It is NOT "these packages, minus the files we have so far
+          # noticed are harmless".
+          #
+          # That deny-list shape is what this list used to be, and it was wrong by
+          # construction: guarding `packages/collector-runtime` wholesale makes EVERY file in
+          # the package guarded by default, so each non-input file has to be discovered and
+          # excluded one at a time, and each discovery arrives as a spurious red X on an
+          # unrelated PR. 295477f44 paid that cost once (test files, biome.jsonc,
+          # tsconfig.json, the non-build scripts/ files — six excludes). artifact.json was the
+          # next miss, blocking a PR whose published tarball bytes were provably identical.
+          # There is no reason to believe it would have been the last. An allow-list has the
+          # opposite default: a new file in these packages is unguarded until someone shows it
+          # is an input, and the failure mode of a miss is a stale pin caught by
+          # data-connectors' own from-source rebuild rather than a blocked unrelated PR.
+          #
+          # The allow-list is not invented here; it mirrors the packed-input set that
+          # packages/{connector-protocol,collector-runtime}/scripts/package-artifact.mjs
+          # defines in code:
           #   FIXED_INPUTS = README.md, package.json, scripts/build.ts, tsconfig.build.json
           #   plus every src/**/*.ts EXCEPT *.test.ts
-          # and each package.json ships `files: ["dist/"]`, i.e. the compiled output of those
-          # sources. data-connectors' check-tarball-digest-drift.sh runs `npm run build &&
-          # npm pack` and compares a per-file sha256 manifest of the extracted tarball, so a
-          # change to any packed input changes what it compares. artifact.json is the
-          # committed receipt of that packing and is guarded in its own right.
+          # Each package.json ships `files: ["dist/"]`, i.e. the compiled output of exactly
+          # those sources. data-connectors' .github/scripts/cross-repo-integrity/
+          # check-tarball-digest-drift.sh clones this repo at the pinned SHA, runs
+          # `npm install && npm run build && npm pack`, and compares a per-file sha256
+          # manifest of the EXTRACTED tarball against its committed vendored .tgz. So the
+          # things that can make data-connectors stale are the build inputs — nothing else in
+          # the package tree is read across the boundary.
           #
-          # The excludes below are files a wholesale package guard swept in that CANNOT
-          # change a vendored byte: *.test.ts / *.test.mjs (explicitly excluded from
-          # FIXED_INPUTS and absent from dist/), biome.jsonc and tsconfig.json (lint/editor
-          # config, not build inputs — tsconfig.BUILD.json IS a build input and stays
-          # guarded), and the scripts/ files that are not scripts/build.ts. A test-only or
-          # lint-config-only edit no longer blocks merges; a change to any packed source,
-          # artifact.json, or a vendored connector tree still fails the gate.
+          # artifact.json is deliberately NOT guarded. It is a reproducibility receipt: a
+          # committed record of digests COMPUTED FROM the inputs above, written by
+          # package-artifact.mjs. It is downstream of source, not part of it, and
+          # `files: ["dist/"]` keeps it out of the published tarball entirely. Verified by
+          # grep across data-connectors: neither packages/collector-runtime/artifact.json nor
+          # packages/connector-protocol/artifact.json is read, fetched, vendored or compared
+          # anywhere in that repo — its drift jobs rebuild from source and diff extracted
+          # tarball bytes. A receipt refresh whose artifact_sha1/sha256/sha512 are unchanged
+          # therefore cannot invalidate a vendored tarball, a connector-source copy or the
+          # generated definitions snapshot, and must not demand a coordinated repin PR. If
+          # the receipt ever does go stale against its own sources, that is caught in this
+          # repo by `artifact:verify`, which is the check that owns that invariant.
           #
-          # Every exclude here names a FILE or a leaf glob, never a directory that contains a
-          # packed input. Git pathspec exclusion is not order-sensitive and a later positive
-          # pathspec does NOT re-include an excluded path (verified by execution), so
-          # `:(exclude,glob)scripts/**` plus a positive `scripts/build.ts` would silently drop
-          # build.ts from the guard. The non-build scripts are therefore listed individually.
+          # src/**/*.ts is spelled as a positive glob plus a test exclude rather than as a
+          # bare `src` directory, so a non-.ts file dropped into src/ (a fixture, a .json, a
+          # snapshot) does not silently become a guarded path and reintroduce the defect this
+          # list was rewritten to remove. The exclude is safe here because it narrows a glob
+          # that is itself positive; git pathspec exclusion is not order-sensitive and a later
+          # positive pathspec does NOT re-include an excluded path, so an exclude must never
+          # be used to carve a hole in a directory that contains an input.
           guarded_paths=(
-            packages/collector-runtime
-            packages/connector-protocol
-            ':(exclude,glob)packages/*/src/**/*.test.ts'
-            ':(exclude,glob)packages/*/src/**/*.test.mjs'
-            ':(exclude)packages/collector-runtime/biome.jsonc'
-            ':(exclude)packages/collector-runtime/tsconfig.json'
-            ':(exclude)packages/connector-protocol/biome.jsonc'
-            ':(exclude)packages/connector-protocol/tsconfig.json'
-            ':(exclude)packages/collector-runtime/scripts/check-no-unnecessary-conditions-expiry.ts'
-            ':(exclude)packages/collector-runtime/scripts/package-artifact.mjs'
-            ':(exclude)packages/collector-runtime/scripts/package-artifact.test.mjs'
-            ':(exclude)packages/connector-protocol/scripts/package-artifact.mjs'
-            ':(exclude)packages/connector-protocol/scripts/package-artifact.test.mjs'
+            ':(glob)packages/collector-runtime/src/**/*.ts'
+            ':(exclude,glob)packages/collector-runtime/src/**/*.test.ts'
+            packages/collector-runtime/README.md
+            packages/collector-runtime/package.json
+            packages/collector-runtime/scripts/build.ts
+            packages/collector-runtime/tsconfig.build.json
+            ':(glob)packages/connector-protocol/src/**/*.ts'
+            ':(exclude,glob)packages/connector-protocol/src/**/*.test.ts'
+            packages/connector-protocol/README.md
+            packages/connector-protocol/package.json
+            packages/connector-protocol/scripts/build.ts
+            packages/connector-protocol/tsconfig.build.json
             packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
             packages/local-collector/src/generated/collector-definitions.generated.ts
             packages/local-collector/tsconfig.build.json

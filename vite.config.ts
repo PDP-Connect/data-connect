@@ -27,6 +27,7 @@ export default defineConfig({
       "scripts/ensure-pdpp-runtime.test.mjs",
       "scripts/release-github.test.mjs",
       "scripts/release-workflow.test.ts",
+      "scripts/consumer-drift-signal-workflow.test.ts",
       "scripts/mutation-falsification/*.test.ts",
       "scripts/npm-release-commit-analyzer.test.ts",
       "scripts/npm-release-signer-workflow.test.ts",
