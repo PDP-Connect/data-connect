@@ -128,7 +128,25 @@ plugins:
   # collector-runtime depends on.
   - - "@semantic-release/exec"
     - prepareCmd: "node --import tsx scripts/pin-collector-runtime-protocol-dependency.ts ${nextRelease.version}"
-  - - "@semantic-release/npm"
+  # Each of the three packages publishes through ./scripts/idempotent-npm-publish.mjs
+  # rather than "@semantic-release/npm" directly. That wrapper re-exports the
+  # real plugin's verifyConditions and prepare UNCHANGED and wraps only
+  # publish, so that publishing a version already live on the registry is a
+  # SKIP rather than an E403.
+  #
+  # This is what makes a re-run converge instead of crash. semantic-release
+  # pushes the git tag BEFORE it publishes anything (index.js tags and pushes,
+  # then calls plugins.publish), so a crash mid-publish leaves a tag claiming
+  # a release the registry only partly holds. The tag is not the defect — it
+  # is the durable record of which version this release meant to produce, and
+  # deleting it would strand the packages that did publish. The defect was
+  # that the publish step could not be run twice: npm versions are immutable,
+  # and the stock plugin's `npm publish` is unconditional.
+  #
+  # With all three routed through the wrapper, running the release again
+  # always moves the registry toward the tag's version and never away from it,
+  # regardless of where the previous run stopped.
+  - - "./scripts/idempotent-npm-publish.mjs"
     - pkgRoot: "packages/connector-protocol"
   # Explicit publish-ordering barrier, not an implicit reliance on
   # plugins-array position: semantic-release's publish lifecycle already
@@ -142,7 +160,7 @@ plugins:
   # before collector-runtime is published if it isn't there.
   - - "@semantic-release/exec"
     - publishCmd: "node --import tsx scripts/verify-connector-protocol-published.ts ${nextRelease.version}"
-  - - "@semantic-release/npm"
+  - - "./scripts/idempotent-npm-publish.mjs"
     - pkgRoot: "packages/collector-runtime"
   # @pdpp/local-collector publishes last in this lockstep stream. It is the
   # only one of the three that is an end-user CLI (`npx @pdpp/local-collector`)
@@ -157,9 +175,9 @@ plugins:
   # the version from this repo's `v${version}` git tags, whose highest is
   # already v2.1.0 (= the published @pdpp/connector-protocol@2.1.0), so the
   # next release is >= 2.1.1 and strictly greater than 1.5.4. The version
-  # field in each package.json stays a placeholder; @semantic-release/npm
+  # field in each package.json stays a placeholder; the npm publish plugin
   # sets the real version at publish time.
-  - - "@semantic-release/npm"
+  - - "./scripts/idempotent-npm-publish.mjs"
     - pkgRoot: "packages/local-collector"
   - - "@semantic-release/github"
     - successComment: false
