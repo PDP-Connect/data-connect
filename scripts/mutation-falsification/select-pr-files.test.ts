@@ -13,6 +13,7 @@ import {
   mergeRanges,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
+  readsMutatedSource,
   selectCohortTests,
   toCohortRelative,
   toMutateEntries,
@@ -572,5 +573,68 @@ const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-impleme
   it("keeps a test that reads no relative path at all", () => {
     const source = `import assert from "node:assert/strict"\ntest("x", () => assert.ok(true))`
     expect(escapesCohortRoot("test/plain.test.ts", source)).toBe(false)
+  })
+})
+
+describe("readsMutatedSource", () => {
+  it("detects the instrumented-source read that rejected PR #64's baseline", () => {
+    // Verbatim from reference-implementation/test/web-push-notifications.test.ts.
+    // The revision changed `runtime/controller.ts`, so Stryker instrumented it
+    // and this regex met a `stryNS_`-prefixed, `@ts-nocheck` copy instead of the
+    // authored source. The mismatch failed the initial test run and left the
+    // attempt with no evidence.
+    const source = `const src = await readFile(new URL("../runtime/controller.ts", import.meta.url), "utf8");
+assert.match(src, /detachControllerTask\\(\\s*fireAssistanceWebPush\\(\\{/);`
+    expect(readsMutatedSource(source, ["runtime/controller.ts:2466-4597"])).toBe(true)
+  })
+
+  it("keeps the same test when the batch mutates nothing it reads", () => {
+    // The decisive difference from escapesCohortRoot: this test is sound in a
+    // batch that leaves controller.ts alone, so it must not be withheld there.
+    const source = `const src = await readFile(new URL("../runtime/controller.ts", import.meta.url), "utf8");`
+    expect(readsMutatedSource(source, ["server/auth.ts:53-57"])).toBe(false)
+  })
+
+  it("matches a whole-file mutate entry as well as a line-ranged one", () => {
+    const source = `readFileSync(new URL("../server/grant-lifecycle.ts", import.meta.url), "utf8")`
+    expect(readsMutatedSource(source, ["server/grant-lifecycle.ts"])).toBe(true)
+  })
+
+  it("does not match a file whose name merely ends with a mutated one", () => {
+    // `controller.ts` must not match `other-controller.ts`: the suffix
+    // comparison is on a path-segment boundary.
+    const source = `readFileSync(new URL("../runtime/other-controller.ts", import.meta.url), "utf8")`
+    expect(readsMutatedSource(source, ["runtime/controller.ts:1-10"])).toBe(false)
+  })
+
+  it("withholds nothing when the batch mutates nothing", () => {
+    const source = `readFileSync(new URL("../runtime/controller.ts", import.meta.url), "utf8")`
+    expect(readsMutatedSource(source, [])).toBe(false)
+  })
+
+  it("keeps a test that imports a mutated module instead of reading its text", () => {
+    // The one outcome that must never happen. Executing the mutated module is
+    // what the baseline measures, so withholding an importing test would report
+    // survivors for mutants nothing ran -- false evidence, which is worse than
+    // the rejected baseline this predicate exists to prevent. Matching every
+    // string literal rather than only file-reading calls did exactly that.
+    const source = `import { createController } from "../runtime/controller.ts"\ntest("x", () => createController())`
+    expect(readsMutatedSource(source, ["runtime/controller.ts:2466-4597"])).toBe(false)
+  })
+
+  it("recognises the read however it is spelled", () => {
+    // The three forms in this repo: a `new URL` read, a member-call read, and a
+    // `join(__dirname, ...)` read.
+    expect(
+      readsMutatedSource(
+        `const s = fs.readFileSync(new URL("../server/explore-timeline-substrate.ts", import.meta.url), "utf8")`,
+        ["server/explore-timeline-substrate.ts:10-20"]
+      )
+    ).toBe(true)
+    expect(
+      readsMutatedSource(`const s = readFileSync(join(__dirname, "../operations/x/index.ts"), "utf8")`, [
+        "operations/x/index.ts",
+      ])
+    ).toBe(true)
   })
 })

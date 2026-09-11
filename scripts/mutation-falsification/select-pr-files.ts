@@ -606,6 +606,85 @@ export function escapesCohortRoot(testPath: SelectedFile, testSource: string): b
   return false
 }
 
+/**
+ * Whether a test reads, as TEXT, a production source file this batch mutates.
+ *
+ * Some tests assert against the source of a production file rather than its
+ * behaviour -- `readFile(new URL("../runtime/controller.ts", ...), "utf8")`
+ * followed by a regex. Stryker instruments the files it mutates, rewriting them
+ * in the sandbox with a `stryNS_` namespace, mutant switches, and a
+ * `// @ts-nocheck` header. A test reading one of those files therefore sees
+ * instrumented text, not the authored source its assertion describes, and fails
+ * for a reason the revision did not cause.
+ *
+ * That failure is not a survivor signal. It fails Stryker's initial test run,
+ * which rejects the baseline and makes every mutant in the batch inconclusive,
+ * so one such test costs the whole attempt its evidence -- the same cost
+ * `escapesCohortRoot` exists to prevent, reached by a different route.
+ *
+ * Unlike `escapesCohortRoot`, this depends on what the batch mutates: the same
+ * test is perfectly sound in a batch that mutates nothing it reads. So the
+ * mutate list is an input, and a test is withheld only when the two intersect.
+ *
+ * Withholding is not skipping. The test still runs, and still fails if broken,
+ * in the cohort's own suite. It is held out only of a baseline whose
+ * instrumentation is precisely what it cannot read.
+ *
+ * `mutateEntries` are cohort-relative Stryker entries, either `path` or
+ * `path:start-end`; only the path part identifies the file.
+ */
+export function readsMutatedSource(
+  testSource: string,
+  mutateEntries: readonly SelectedFile[]
+): boolean {
+  const mutatedPaths = new Set(mutateEntries.map((entry) => entry.split(":")[0]))
+  if (mutatedPaths.size === 0) {
+    return false
+  }
+
+  // Only a path named inside a FILE-READING call counts. Matching every string
+  // literal instead would catch `import ... from "../runtime/controller.ts"`,
+  // and withholding an importing test is the one outcome that must never
+  // happen: executing the mutated module is what the baseline measures, so
+  // dropping those tests would report survivors for mutants nothing ran. The
+  // read may be spelled `readFile(new URL(p, import.meta.url))`,
+  // `readFileSync(join(__dirname, p))`, or `fs.readFileSync(p)`, so the anchor
+  // is the `readFile`/`readFileSync` callee and the literal is taken from the
+  // argument text that follows it.
+  const READ_CALL = /\breadFile(?:Sync)?\s*\(([^;\n]*)/g
+  for (const [, argumentText] of testSource.matchAll(READ_CALL)) {
+    for (const [, literal] of argumentText.matchAll(/["'`]([^"'`\n]*\.[cm]?tsx?)["'`]/g)) {
+      if (matchesMutatedPath(literal, mutatedPaths)) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Whether a path literal written in a test names one of the mutated files.
+ *
+ * The literal is relative to the test file (`../runtime/controller.ts`) while a
+ * mutate entry is relative to the cohort root (`runtime/controller.ts`), so the
+ * comparison is on the literal's tail after its `./` and `../` segments are
+ * dropped. Suffix matching is anchored to a `/` boundary so `controller.ts`
+ * does not match `other-controller.ts`.
+ */
+function matchesMutatedPath(literal: string, mutatedPaths: ReadonlySet<string>): boolean {
+  const segments = literal.split("/").filter((segment) => segment !== "." && segment !== "..")
+  if (segments.length === 0) {
+    return false
+  }
+  const tail = segments.join("/")
+  for (const mutated of mutatedPaths) {
+    if (mutated === tail || mutated.endsWith(`/${tail}`) || tail.endsWith(`/${mutated}`)) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Make a repository-relative path cohort-relative, so it can be a `mutate` glob. */
 export function toCohortRelative(path: string, cohortRoot: string): string {
   if (cohortRoot === ".") {
