@@ -43,6 +43,16 @@ on:
         description: "Why this release is being forced (recorded in the run log and job summary). Required when release_type is set."
         required: false
         type: string
+      resume:
+        description: >-
+          Finish a lockstep release a previous run left half-published:
+          publish only the packages missing at the already-pushed tag's
+          version, creating no tag and no GitHub release (the failed run
+          already created both). Refuses if nothing is missing, if nothing
+          was published at all (that is not a partial release), or if the
+          registry cannot say. See scripts/resume-release.ts.
+        type: boolean
+        default: false
 
 concurrency:
   group: npm-release-${{ github.ref }}
@@ -52,9 +62,14 @@ permissions:
   contents: read
 
 jobs:
+  # Skipped entirely for a resume. A resume's version comes from the tag the
+  # failed run already pushed, and semantic-release would resolve no version
+  # at all here — it reads git tags, finds the pushed tag with zero commits
+  # after it, and correctly concludes there is nothing to release. That is
+  # the resolution failure a resume exists to route around, not one to retry.
   resolve-version:
     name: resolve next version
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.resume != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -105,10 +120,25 @@ jobs:
           fi
           node --import tsx scripts/semantic-release-github-output.ts dry-run "$RUNNER_TEMP/semantic-release-dry-run.log"
 
+  # Runs on BOTH paths. A resume publishes real tarballs to the real
+  # registry, so it gets the same gate an ordinary release does — resuming is
+  # a reason to skip re-tagging, not a reason to skip verification.
+  #
+  # `always()` is required because resolve-version is skipped on a resume,
+  # and a skipped `needs` would otherwise skip this job too. It is immediately
+  # narrowed: a resume must have resolve-version skipped, and an ordinary
+  # release must have it succeed AND have found a version. Neither path can
+  # reach a publish job without this job passing.
   quality:
     name: release quality checks
     needs: resolve-version
-    if: needs.resolve-version.outputs.new-release-published == 'true'
+    if: >-
+      always() &&
+      (
+        (inputs.resume == true && needs.resolve-version.result == 'skipped') ||
+        (needs.resolve-version.result == 'success' &&
+         needs.resolve-version.outputs.new-release-published == 'true')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -164,6 +194,9 @@ jobs:
 
       - name: Test attestation signer-workflow binding
         run: npx vitest run scripts/npm-release-signer-workflow.test.ts
+
+      - name: Test resume refusals and registry propagation retry
+        run: npx vitest run scripts/resume-release.test.ts scripts/npm-propagation-retry.test.ts
 
   release:
     name: publish to npm and GitHub
@@ -253,3 +286,69 @@ jobs:
         if: needs.resolve-version.outputs.new-release-published == 'true'
         run: |
           node scripts/verify-packed-install-capability-exports.mjs "${{ needs.resolve-version.outputs.new-release-version }}"
+
+  # The recovery path for a release semantic-release left half-published.
+  # It never runs on push — only on an explicit `resume: true` dispatch — and
+  # it is mutually exclusive with the `release` job above, which cannot run
+  # here because resolve-version is skipped on this path and so publishes no
+  # new-release-published output.
+  #
+  # `contents: read` is deliberate, and is the difference between this job and
+  # `release`. A resume must NOT write to the repository: the failed run
+  # already pushed the tag and created the GitHub release. `id-token: write`
+  # is the same OIDC trusted publishing an ordinary release uses — no
+  # NPM_TOKEN on either path.
+  resume:
+    name: resume partially-completed release
+    needs: quality
+    if: inputs.resume == true && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # OIDC trusted publishing — no NPM_TOKEN
+
+    steps:
+      # fetch-depth: 0 and fetch-tags are both required: the resumed version
+      # is read from the tag pointing at HEAD, and a shallow tagless checkout
+      # would leave the script with nothing to read it from.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resume release
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: node --import tsx scripts/resume-release.ts
+
+      # Same provenance and packed-install verification an ordinary release
+      # runs, against the version the tag named. Both scripts already retry
+      # through registry propagation lag.
+      - name: Resolve resumed version
+        id: resumed
+        run: echo "version=$(git describe --tags --exact-match HEAD | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+
+      - name: Verify npm provenance attestation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --import tsx scripts/verify-npm-provenance.ts \
+            "${{ steps.resumed.outputs.version }}" \
+            "$GITHUB_SHA" \
+            "@pdpp/connector-protocol" "@pdpp/collector-runtime" "@pdpp/local-collector"
+
+      - name: Verify packed install exposes required capability exports
+        run: |
+          node scripts/verify-packed-install-capability-exports.mjs "${{ steps.resumed.outputs.version }}"

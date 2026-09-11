@@ -31,6 +31,8 @@ export default defineConfig({
       "scripts/npm-release-commit-analyzer.test.ts",
       "scripts/npm-release-signer-workflow.test.ts",
       "scripts/forced-release.test.ts",
+      "scripts/npm-propagation-retry.test.ts",
+      "scripts/resume-release.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",

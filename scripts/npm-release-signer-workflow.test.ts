@@ -74,10 +74,23 @@ describe("npm-release.yml attestation verification", () => {
     expect(script).toMatch(/dist\.attestations\.url|attestationsUrl/)
   })
 
+  // The retry budget itself moved to scripts/npm-propagation-retry.ts, which
+  // is now the single policy this script and the publish-ordering barrier
+  // both use — they used to carry separate copies, and the barrier's copy
+  // was a single unretried lookup, which is what aborted the v2.2.1 release.
+  // What this test still owns is that THIS script goes through that policy;
+  // npm-propagation-retry.test.ts owns the budget's size and behaviour.
   it("retries registry propagation lag instead of failing on the first lookup", () => {
     const script = readVerifyScript()
 
-    expect(script).toContain("E404")
-    expect(script).toMatch(/PROPAGATION_RETRY_ATTEMPTS/)
+    expect(script).toContain("withPropagationRetry")
+    expect(script).toMatch(/from "\.\/npm-propagation-retry\.ts"/)
+
+    const policy = readFileSync(
+      resolve(process.cwd(), "scripts/npm-propagation-retry.ts"),
+      "utf8"
+    )
+    expect(policy).toContain("E404")
+    expect(policy).toMatch(/PROPAGATION_RETRY_ATTEMPTS/)
   })
 })

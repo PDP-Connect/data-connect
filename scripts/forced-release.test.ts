@@ -350,8 +350,12 @@ describe("npm-release workflow wiring", () => {
     }
   )
 
+  // The resume path added `&& inputs.resume != true` here (a resume skips
+  // version resolution entirely), so this asserts the main-only clause rather
+  // than the whole string — the claim this test owns is the ref gate, and an
+  // exact-string match would break on any unrelated condition added beside it.
   it("still refuses to run from any ref other than main", () => {
-    expect(workflow.jobs["resolve-version"]?.if).toBe("github.ref == 'refs/heads/main'")
+    expect(workflow.jobs["resolve-version"]?.if).toContain("github.ref == 'refs/heads/main'")
   })
 
   // A forced release must not skip the checks. `quality` still gates
@@ -363,7 +367,12 @@ describe("npm-release workflow wiring", () => {
   // the quality job at all. Asserting the dependency edge itself is what
   // makes "quality gates release" a claim this test can actually falsify.
   it("keeps quality gating release on both paths", () => {
-    expect(workflow.jobs.quality?.if).toBe(
+    // `quality` now also runs on the resume path, where resolve-version is
+    // skipped, so its condition is a disjunction rather than one string. What
+    // this test still owns is that the ORDINARY (and forced) path cannot
+    // reach quality without a resolved version — asserted as a clause here,
+    // and exactly as before for `release`, which the resume path never uses.
+    expect(workflow.jobs.quality?.if).toContain(
       "needs.resolve-version.outputs.new-release-published == 'true'"
     )
     expect(workflow.jobs.release?.if).toBe(

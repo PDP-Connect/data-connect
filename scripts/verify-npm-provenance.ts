@@ -38,14 +38,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
+import { withPropagationRetry as retryWhileMissing } from "./npm-propagation-retry.ts"
 
 const run = promisify(execFile)
 
 const EXPECTED_REPO = "PDP-Connect/data-connect"
 const EXPECTED_SIGNER_WORKFLOW = "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
-
-const PROPAGATION_RETRY_ATTEMPTS = 6
-const PROPAGATION_RETRY_DELAY_MS = 30_000
 
 function fail(message: string): never {
   process.stderr.write(`[verify-npm-provenance] ${message}\n`)
@@ -56,33 +54,22 @@ function log(message: string): void {
   process.stdout.write(`[verify-npm-provenance] ${message}\n`)
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 async function npmViewJson(spec: string, field: string): Promise<unknown> {
   const { stdout } = await run("npm", ["view", spec, field, "--json"])
   return JSON.parse(stdout.trim())
 }
 
 // Retries while the registry hasn't caught up yet (E404 on a version that
-// was just published). Any other failure is not a propagation issue and
-// should fail immediately rather than burn the retry budget.
+// was just published), using the one shared propagation policy — see
+// scripts/npm-propagation-retry.ts for the measured lag and the budget. Any
+// other failure is not a propagation issue and fails immediately rather than
+// burning the retry budget.
 async function withPropagationRetry<T>(spec: string, attempt: () => Promise<T>): Promise<T> {
-  for (let i = 1; i <= PROPAGATION_RETRY_ATTEMPTS; i++) {
-    try {
-      return await attempt()
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      const isMissing = detail.includes("E404")
-      if (!isMissing || i === PROPAGATION_RETRY_ATTEMPTS) {
-        fail(`giving up resolving ${spec} after ${i} attempt(s): ${detail}`)
-      }
-      log(`${spec} not yet resolvable on the registry (attempt ${i}/${PROPAGATION_RETRY_ATTEMPTS}), retrying...`)
-      await sleep(PROPAGATION_RETRY_DELAY_MS)
-    }
+  try {
+    return await retryWhileMissing(spec, attempt, { log })
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
   }
-  throw new Error("unreachable")
 }
 
 interface AttestationEntry {
