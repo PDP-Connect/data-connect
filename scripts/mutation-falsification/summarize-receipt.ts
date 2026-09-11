@@ -31,8 +31,11 @@ const lines: string[] = [
     .sort(([left], [right]) => (left < right ? -1 : 1))
     .map(([status, count]) => `| ${status} | ${count} |`),
   "",
-  `Engine exit: \`${receipt.attempt.engineExit}\` · report written: ${receipt.attempt.reportPresent} · ` +
-    `baseline established: ${receipt.attempt.baselineComplete}`,
+  // `report written` is file existence, which a zero-byte or unparseable report
+  // also satisfies. Rendering it alone told a reader the engine had spoken when
+  // it had not, so the classification is shown beside it.
+  `Engine exit: \`${receipt.attempt.engineExit}\` · report written: ${receipt.attempt.reportPresent} ` +
+    `(${receipt.attempt.reportValidity}) · baseline established: ${receipt.attempt.baselineComplete}`,
   "",
   `Intent: \`${receipt.intentDigest}\``,
   `Raw report: \`${receipt.rawReportDigest}\``,

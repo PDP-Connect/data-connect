@@ -297,6 +297,107 @@ export function readObservations(
   return observations
 }
 
+/**
+ * Why a raw report could not be accepted as evidence, or that it was.
+ *
+ * `readObservations` is deliberately permissive -- it maps an unreadable mutant
+ * record to `Pending` rather than throwing, so nothing disappears. That
+ * permissiveness is correct for extracting facts and wrong for deciding whether
+ * facts exist at all: every malformed shape below also produces zero
+ * observations, which is byte-identical to a clean run that found no mutable
+ * code. This classification is what separates the two, and it is the only place
+ * that judgement is made.
+ */
+export type ReportValidity =
+  | { readonly kind: "valid" }
+  | { readonly kind: "absent" }
+  | { readonly kind: "empty" }
+  | { readonly kind: "unparseable"; readonly detail: string }
+  | { readonly kind: "unrecognised"; readonly detail: string }
+  | { readonly kind: "out_of_scope"; readonly detail: string }
+
+/**
+ * Decide whether raw report bytes are a structurally valid Stryker report that
+ * covers the scope the intent packet froze before the run.
+ *
+ * The scope check is not decoration. A report is only evidence about the code it
+ * names: an empty-mutant report for some other file proves nothing about the
+ * lines this attempt selected, and without this check it is indistinguishable
+ * from a clean run over the right ones. `mutate` entries are either
+ * `path:start-end` or a bare path, so the path is taken up to the first colon.
+ *
+ * The engine may legitimately omit a selected file from `files` -- a file it
+ * declined to instrument produces no entry. So the requirement is that every
+ * file the report DOES name is one the intent selected, not that every selected
+ * file appears. That rejects the unrelated-report case without rejecting a
+ * narrower-than-requested clean run.
+ */
+export function classifyReport(input: {
+  readonly reportPresent: boolean
+  readonly rawReportBytes: string
+  readonly selectedPaths: readonly string[]
+}): ReportValidity {
+  if (!input.reportPresent) {
+    return { kind: "absent" }
+  }
+  if (input.rawReportBytes.trim().length === 0) {
+    return { kind: "empty" }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input.rawReportBytes)
+  } catch (error) {
+    return { kind: "unparseable", detail: (error as Error).message }
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "unrecognised", detail: `top level is ${describeType(parsed)}, not an object` }
+  }
+  const files = (parsed as StrykerReport).files
+  if (files === undefined || files === null || typeof files !== "object" || Array.isArray(files)) {
+    return {
+      kind: "unrecognised",
+      detail: `\`files\` is ${describeType(files)}, not an object`,
+    }
+  }
+  const entries = Object.entries(files as Record<string, unknown>)
+  for (const [file, entry] of entries) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return {
+        kind: "unrecognised",
+        detail: `entry for ${file} is ${describeType(entry)}, not an object`,
+      }
+    }
+    const mutants = (entry as { readonly mutants?: unknown }).mutants
+    if (!Array.isArray(mutants)) {
+      return {
+        kind: "unrecognised",
+        detail: `entry for ${file} has no \`mutants\` array (found ${describeType(mutants)})`,
+      }
+    }
+  }
+  const selected = new Set(input.selectedPaths.map((entry) => entry.split(":")[0] ?? entry))
+  const unexpected = entries
+    .map(([file]) => file)
+    .filter((file) => !selected.has(file) && !selected.has(file.replace(/^\.\//, "")))
+  if (unexpected.length > 0) {
+    return {
+      kind: "out_of_scope",
+      detail: `report names ${unexpected.join(", ")}, which this attempt did not select`,
+    }
+  }
+  return { kind: "valid" }
+}
+
+function describeType(value: unknown): string {
+  if (value === null) {
+    return "null"
+  }
+  if (Array.isArray(value)) {
+    return "an array"
+  }
+  return typeof value === "undefined" ? "absent" : `a ${typeof value}`
+}
+
 function isStrykerStatus(value: unknown): value is StrykerStatus {
   return (
     value === "Killed" ||
@@ -335,7 +436,26 @@ export interface AttemptReceipt {
     readonly engineExit: string
     /** Whether the engine wrote a report for this attempt at all. */
     readonly reportPresent: boolean
-    /** Whether a baseline established that the tests pass on unmutated code. */
+    /**
+     * Whether that report was readable as a Stryker report about the selected
+     * code, recorded separately from its existence.
+     *
+     * `reportPresent` alone cannot carry this: a zero-byte file and a report of
+     * a thousand trials are both "present". Without this field a reader of the
+     * artifact cannot tell a run that found nothing to mutate from one whose
+     * report was unusable, because both record zero trials.
+     */
+    readonly reportValidity: ReportValidity["kind"]
+    /**
+     * Whether a baseline established that the tests pass on unmutated code.
+     *
+     * This is a fact about the ENGINE's run, not about its mutants: a clean
+     * engine exit over code with nothing to mutate completed its baseline and
+     * recorded no trials. Deriving it from the observations, as an earlier
+     * revision did, made every zero-trial attempt report `false` -- including
+     * the legitimate one the exit surface accepts -- so the receipt contradicted
+     * the check written beside it.
+     */
     readonly baselineComplete: boolean
     /**
      * `evidence` only when this attempt produced at least one killed or
@@ -367,6 +487,14 @@ export function buildAttemptReceipt(input: {
   readonly engineExit: string
   /** Whether the engine wrote a report for this attempt at all. */
   readonly reportPresent: boolean
+  /** How that report classified. Defaults to the shape implied by presence. */
+  readonly reportValidity?: ReportValidity["kind"]
+  /**
+   * Whether the engine established a baseline. Supplied by the caller, which
+   * knows the engine's exit status; falling back to the observations reproduces
+   * the contradiction described on the field.
+   */
+  readonly baselineComplete?: boolean
 }): AttemptReceipt {
   const byId = new Map<string, Projection[]>()
   for (const observation of input.observations) {
@@ -380,9 +508,9 @@ export function buildAttemptReceipt(input: {
   }
   const projections = [...byId.values()].map((group) => aggregateTrial(group))
   const summary = summarize(projections)
-  const baselineComplete = input.observations.every(
-    (observation) => observation.baselineComplete
-  )
+  const observedBaselineComplete =
+    input.observations.length > 0 &&
+    input.observations.every((observation) => observation.baselineComplete)
 
   const body = {
     schema: "pdpp.mutation.receipt.v1" as const,
@@ -391,7 +519,8 @@ export function buildAttemptReceipt(input: {
     attempt: {
       engineExit: input.engineExit,
       reportPresent: input.reportPresent,
-      baselineComplete: input.observations.length > 0 && baselineComplete,
+      reportValidity: input.reportValidity ?? (input.reportPresent ? "valid" : "absent"),
+      baselineComplete: input.baselineComplete ?? observedBaselineComplete,
       status: (summary.validDenominator > 0 ? "evidence" : "no_evidence") as
         | "evidence"
         | "no_evidence",
