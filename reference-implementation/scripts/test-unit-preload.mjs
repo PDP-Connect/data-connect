@@ -174,10 +174,44 @@ export function matchesDeniedSpecifier(specifier, pkg) {
  */
 const deniedDriverRoots = new Map();
 
+/**
+ * Has the map been computed? Distinct from `deniedDriverRoots.size > 0`, which
+ * cannot serve as the latch: the map is empty until the resolves below finish,
+ * and those resolves RE-ENTER this function (see `resolving` for why). Size is
+ * also a wrong answer on its own terms -- a tree with no driver installed
+ * computes an empty map, and testing size would recompute it on every call.
+ */
+let rootsComputed = false;
+
+/**
+ * Re-entrancy latch. `require.resolve` runs through `module.registerHooks()`
+ * from Node 24.15.0 (nodejs/node#62028); before that it bypassed sync hooks.
+ * So the resolves below now re-enter the guard's own resolve hook, which calls
+ * `matchesDeniedDriverPath` -> `driverRoots()` again. Without a latch that is
+ * set BEFORE the resolves, that recursion is unbounded: it never reaches the
+ * assignment that would terminate it, and the process spins until the test
+ * runner's timeout. Returning the partially built map during a nested call is
+ * correct rather than a compromise -- resolving a driver's own package.json is
+ * not a load a unit test performs, and the outer call completes the map before
+ * any classification the hook is actually there to judge.
+ */
+let resolving = false;
+
 function driverRoots() {
-  if (deniedDriverRoots.size > 0) {
+  if (rootsComputed || resolving) {
     return deniedDriverRoots;
   }
+  resolving = true;
+  try {
+    computeDriverRoots();
+  } finally {
+    resolving = false;
+    rootsComputed = true;
+  }
+  return deniedDriverRoots;
+}
+
+function computeDriverRoots() {
   const require = createRequire(import.meta.url);
   for (const pkg of DENIED_SQL_DRIVERS) {
     if (pkg.startsWith("node:")) {
@@ -196,7 +230,6 @@ function driverRoots() {
       }
     }
   }
-  return deniedDriverRoots;
 }
 
 /**
@@ -306,6 +339,14 @@ export function installUnitStorageGuard() {
     return;
   }
   installed = true;
+
+  // Establish driver identities BEFORE the hook is registered, so the resolves
+  // that establish them are not themselves subject to it. The latch in
+  // `driverRoots` is what makes the guard correct if a first call ever happens
+  // later anyway; priming here is what keeps the hot path from depending on
+  // that latch at all, and it resolves each driver exactly once per process
+  // instead of once per hook re-entry.
+  driverRoots();
 
   registerHooks({
     resolve(specifier, context, nextResolve) {
