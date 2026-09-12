@@ -228,10 +228,23 @@ function buildFixture(
   };
 }
 
-function withRoots<T>(body: (installRoot: string, durableRoot: string) => T): T {
+/**
+ * Run `body` against a fresh pair of sibling roots and remove them afterwards.
+ *
+ * `async` and `await`ing deliberately. A synchronous `try { return body(...) }
+ * finally { rmSync(...) }` type-checks for an `async` callback — `T` binds to
+ * the returned promise — but `finally` then runs the moment the callback first
+ * suspends, so the roots are deleted while the operation under test is still
+ * running. Most tests here `await obtain(...)` as their first statement, and
+ * the two containment tests stage a file the escape is supposed to reach; a
+ * cleanup that fires early turns every escape into a file that merely is not
+ * there, which is the wrong reason to refuse and would pass whether the
+ * containment check existed or not.
+ */
+async function withRoots<T>(body: (installRoot: string, durableRoot: string) => T | Promise<T>): Promise<T> {
   const base = mkdtempSync(join(tmpdir(), "managed-connectors-"));
   try {
-    return body(join(base, "connector-releases"), join(base, "connector-artifacts"));
+    return await body(join(base, "connector-releases"), join(base, "connector-artifacts"));
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -444,14 +457,31 @@ test("an artifact whose entrypoint climbs out of the release directory is refuse
   // outside the digest-named release directory and the runner is handed a path
   // the host never unpacked or verified.
   //
-  // The target file is created first, so the refusal cannot be the "absent
-  // after unpack" check passing for the wrong reason: this entrypoint escapes
-  // to a file that really is there.
-  const fixture = buildFixture({ config: { entrypoint: "../../../../connector-artifacts/evil.mjs" } });
+  // The target file is created first and — because `withRoots` awaits — is
+  // still there when installation resumes, so the refusal cannot be the
+  // "absent after unpack" check passing for the wrong reason. That distinction
+  // is the whole value of this test: with the old `join`, the four `..`
+  // segments climb staging → connectors → install root → base and land exactly
+  // on `connector-artifacts/evil.mjs`, which exists, so the old code accepts
+  // the escape and installs. The negative control therefore breaks behaviour,
+  // not a string.
+  const entrypoint = "../../../../connector-artifacts/evil.mjs";
+  const fixture = buildFixture({ config: { entrypoint } });
   await withRoots(async (installRoot, durableRoot) => {
     mkdirSync(durableRoot, { recursive: true });
-    writeFileSync(join(durableRoot, "evil.mjs"), "export const collectOura = () => {};\n");
-    assert.ok(existsSync(join(durableRoot, "evil.mjs")), "the escape target must exist for this to discriminate");
+    const target = join(durableRoot, "evil.mjs");
+    writeFileSync(target, "export const collectOura = () => {};\n");
+    assert.ok(existsSync(target), "the escape target must exist for this to discriminate");
+
+    // Pin the arithmetic the vulnerable `join` would do, so this test fails
+    // loudly if the staging layout ever moves and the escape stops reaching a
+    // real file — which would silently make the case non-discriminating again.
+    const releaseDir = join(installRoot, "connectors", CONNECTOR_KEY, fixture.digest.replace(":", "-"));
+    assert.equal(
+      join(releaseDir, entrypoint),
+      target,
+      "the escape must resolve onto the staged target, or this test proves nothing"
+    );
 
     // Either refusal is correct — the `..` rule and the realpath comparison are
     // independent gates on the same escape, and the test asserts the refusal,
@@ -460,6 +490,10 @@ test("an artifact whose entrypoint climbs out of the release directory is refuse
       obtain(fixture, installRoot, durableRoot),
       /entrypoint escapes the release directory|outside the release directory/
     );
+
+    // Nothing was installed and the escape target was not consumed as code.
+    assert.equal(existsSync(releaseDir), false, "a refused escape must not leave a release behind");
+    assert.ok(existsSync(target), "the refusal must not have touched the file outside the store");
   });
 });
 
@@ -467,20 +501,33 @@ test("an artifact declaring an absolute entrypoint is refused", async () => {
   // `join()` silently drops a leading separator, so an absolute entrypoint is
   // contained by accident rather than by a check. Refusing it by name means the
   // containment does not depend on that accident.
-  const fixture = buildFixture({ config: { entrypoint: "/etc/passwd" } });
+  //
+  // The path is deliberately one the archive really unpacks, so the old `join`
+  // strips the separator, lands on a file that exists, and *succeeds*. An
+  // absolute path with no unpacked counterpart — `/etc/passwd`, say — would be
+  // refused by the later "absent after unpack" check whether or not the
+  // absolute-path rule existed, which would make this test agree with a
+  // vulnerable implementation. Here, restoring `join` installs the release,
+  // so the negative control fails on behaviour.
+  const entrypoint = "/code/collection-profile.mjs";
+  const fixture = buildFixture({ config: { entrypoint } });
   await withRoots(async (installRoot, durableRoot) => {
     await assert.rejects(obtain(fixture, installRoot, durableRoot), /absolute entrypoint/);
+
+    // The refusal must come before anything is published, not after.
+    const releaseDir = join(installRoot, "connectors", CONNECTOR_KEY, fixture.digest.replace(":", "-"));
+    assert.equal(existsSync(releaseDir), false, "a refused absolute entrypoint must not leave a release behind");
   });
 });
 
-test("an entrypoint that resolves outside the release through a symlink is refused", () => {
+test("an entrypoint that resolves outside the release through a symlink is refused", async () => {
   // The case no string rule catches. `escape/evil.mjs` is relative, has no
   // `..`, no backslash and no NUL; `join(release, entrypoint)` is a string
   // prefixed by `release`, so a prefix check passes it too. Only comparing
   // realpaths after resolution shows that it leaves the release directory —
   // which is why `assertContainedEntrypoint` resolves rather than compares
   // strings, for the same reason `assertRootsDisjoint` does.
-  withRoots((installRoot) => {
+  await withRoots((installRoot) => {
     const release = join(installRoot, "release");
     const outside = join(installRoot, "outside");
     mkdirSync(release, { recursive: true });
@@ -536,8 +583,8 @@ test("the tar reader round-trips the shape the publisher emits", () => {
   assert.equal(Buffer.from(members[0]!.bytes).toString("utf8"), "hello\n");
 });
 
-test("the install store and the durable root may not contain one another", () => {
-  withRoots((installRoot, durableRoot) => {
+test("the install store and the durable root may not contain one another", async () => {
+  await withRoots((installRoot, durableRoot) => {
     // Siblings are the supported arrangement.
     assert.doesNotThrow(() => assertRootsDisjoint(installRoot, durableRoot));
     // Nesting either way is refused: an uninstall would delete collected data.
