@@ -50,6 +50,18 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 
 const NOW = "2026-07-17T00:00:00.000Z";
 
+/**
+ * The expiring round's budget, sized against the 80ms-per-candidate repair
+ * delay this test installs: comfortably longer than the sweep's own startup
+ * reads, so page one is always admitted and its first repair always begins,
+ * and comfortably shorter than one 80ms repair unit, so the round expires
+ * DURING the page's repairs rather than after all 25 of them finish.
+ *
+ * The admission gate below turns a miss on the low side into a failure instead
+ * of a vacuous pass, and `evidenceRowCount() <= 1` catches the high side.
+ */
+const ROUND_BUDGET_MS = 40;
+
 function withTempDb(fn: () => Promise<void>) {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), "pdpp-bounded-sweep-"));
@@ -393,7 +405,7 @@ test(
 );
 
 test(
-  "SQLite mutation: a 1ms cold page starts at most one slow repair, invents no fold budget, and later converges",
+  "SQLite mutation: an expiring cold page starts at most one slow repair, invents no fold budget, and later converges",
   withTempDb(async () => {
     const ids = seedConnections(25);
     seedTerminalEvents(ids[0] as string, 1);
@@ -401,20 +413,61 @@ test(
     setConnectorSummaryReconcileObservationSink((observation) => observations.push(observation));
     process.env.PDPP_TEST_REPAIR_CANDIDATE_SQLITE_DELAY_MS = "80";
     try {
+      // The budget must be big enough that page one is ADMITTED and its first
+      // repair BEGINS, and small enough that the round expires during those
+      // repairs rather than after all 25 finish. That window is what the
+      // 80ms-per-candidate delay above creates: one repair unit overruns a
+      // budget of this size, so the page starts, one candidate is repaired,
+      // and the deadline defers the rest.
+      //
+      // The previous form used maxDurationMs: 1, which does not land in that
+      // window at all. `deadline = sweepNow() + maxDurationMs` is computed
+      // before the awaited backlog read that follows it, so a 1ms budget was
+      // routinely spent by the walk's first admission check: measured on this
+      // host, 10 of 10 runs admitted ZERO pages and repaired nothing, 9 of
+      // those recorded zero observations, and all 10 still passed.
       const startedAt = Date.now();
-      const first = await runBoundedSummaryEvidenceSweep({ maxDurationMs: 1, pageSize: 25 });
+      const first = await runBoundedSummaryEvidenceSweep({
+        maxDurationMs: ROUND_BUDGET_MS,
+        pageSize: 25,
+      });
       const elapsedMs = Date.now() - startedAt;
       assert.equal(first.incomplete, true, "the expired cold page retains its durable cursor-before-page");
       assert.equal(first.resumeAfterId, null, "the first page is retried rather than skipped");
+
+      // ADMISSION GATE. Everything below is a statement ABOUT a page that was
+      // admitted and then bounded, so the page has to be required before it is
+      // described. Left ungated, each assertion is satisfied by nothing having
+      // happened: `evidenceRowCount() <= 1` is satisfied by 0; an `elapsedMs`
+      // bound by an immediate return; and both receipt assertions read
+      // `observations.at(-1)`, which is `undefined` when no observe ran — so
+      // `"terminalFoldBudgetMs" in {}` is false and `(undefined ?? 0) <= 500`
+      // is true, and neither rejects anything.
+      //
+      // That was not hypothetical. Measured on this host against the previous
+      // 1ms wall-clock form: 10 of 10 runs admitted zero pages and repaired
+      // nothing, 9 of those recorded zero observations, and all 10 passed.
+      //
+      // A vacuous run must now FAIL here rather than report a green bound on
+      // work that never ran.
+      const receipt = observations.at(-1);
+      assert.ok(
+        receipt,
+        "a page was actually admitted and observed — without one, the bounds below assert nothing"
+      );
+      assert.ok(
+        evidenceRowCount() >= 1,
+        "the admitted page started a real 80ms writer-fenced repair, so 'at most one' is a bound and not an absence"
+      );
+
       assert.ok(evidenceRowCount() <= 1, "at most one 80ms writer-fenced cold repair started before expiry");
       assert.ok(elapsedMs < 250, "overshoot is bounded by one configured repair unit, never 25 repairs");
-      const receipt = observations.at(-1);
       assert.equal(
-        "terminalFoldBudgetMs" in (receipt ?? {}),
+        "terminalFoldBudgetMs" in receipt,
         false,
         "no positive fold timeout is invented after expiry"
       );
-      assert.ok((receipt?.terminalFoldEventsRead ?? 0) <= 500, "a started fold cannot exceed its finite event cap");
+      assert.ok((receipt.terminalFoldEventsRead ?? 0) <= 500, "a started fold cannot exceed its finite event cap");
     } finally {
       delete process.env.PDPP_TEST_REPAIR_CANDIDATE_SQLITE_DELAY_MS;
       setConnectorSummaryReconcileObservationSink(null);
