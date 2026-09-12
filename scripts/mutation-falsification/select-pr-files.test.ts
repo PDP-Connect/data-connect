@@ -131,6 +131,47 @@ describe("classifyForCohort", () => {
       reason: "not_production_source",
     })
   })
+
+  // The scripts cohort's production prefix is a directory, so it selects
+  // everything beneath it -- including this pipeline's own machinery. Mutating
+  // the code that decides what counts as killed, survived, or inconclusive to
+  // ask whether that same code notices is circular, so it is carved back out.
+  const scriptsCohort = {
+    name: "scripts" as const,
+    root: ".",
+    productionPrefixes: ["scripts/"],
+    excludedPrefixes: ["scripts/mutation-falsification/"],
+  }
+
+  it("selects release machinery under the scripts prefix", () => {
+    expect(
+      classifyForCohort({ status: "M", path: "scripts/verify-npm-provenance.ts" }, scriptsCohort)
+    ).toEqual({ selected: true })
+    expect(
+      classifyForCohort({ status: "M", path: "scripts/converge-release.ts" }, scriptsCohort)
+    ).toEqual({ selected: true })
+  })
+
+  it("carves the mutation harness back out of its own cohort", () => {
+    // `excluded_tooling` rather than `outside_cohort`: the file is inside the
+    // cohort and deliberately held out of it, which is a different fact from a
+    // file that was never in the cohort at all. The receipt is supposed to say
+    // which.
+    expect(
+      classifyForCohort(
+        { status: "M", path: "scripts/mutation-falsification/select-pr-files.ts" },
+        scriptsCohort
+      )
+    ).toEqual({ selected: false, reason: "excluded_tooling" })
+  })
+
+  it("leaves the existing cohorts unaffected by an absent exclusion list", () => {
+    // The client cohort declares no `excludedPrefixes`; a file under its
+    // production prefix must still be selected.
+    expect(classifyForCohort({ status: "M", path: "src/apps/registry.ts" }, clientCohort)).toEqual({
+      selected: true,
+    })
+  })
 })
 
 describe("toCohortRelative", () => {
