@@ -51,9 +51,20 @@ const cohort: CohortDefinition = {
   productionPrefixes: argument("prefixes")
     .split(/\s+/)
     .filter((prefix) => prefix.length > 0),
+  excludedPrefixes: (optionalArgument("excluded-prefixes") ?? "")
+    .split(/\s+/)
+    .filter((prefix) => prefix.length > 0),
 }
 
-const configPath = cohortRoot === "." ? "stryker.config.mjs" : `${cohortRoot}/stryker.config.mjs`
+// Which Stryker configuration this attempt runs, recorded so the receipt names
+// the configuration that actually produced the evidence. Deriving it from the
+// cohort root alone is not sufficient any more: two cohorts now share the
+// repository root and run different configurations, so a root-derived path
+// would have the scripts cohort record the client cohort's digest and claim its
+// evidence came from a configuration it never ran.
+const configPath =
+  optionalArgument("config") ??
+  (cohortRoot === "." ? "stryker.config.mjs" : `${cohortRoot}/stryker.config.mjs`)
 
 // Every input the run depends on, named so a later run can tell whether it is
 // looking at the same thing. The lockfile is in here because Stryker's own

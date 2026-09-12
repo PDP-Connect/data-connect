@@ -51,12 +51,45 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `config` is repository-relative: it is the path whose digest the
+          # intent packet records. `config-relative` is the same file as Stryker
+          # sees it, from the cohort root it runs in. They differ only for a
+          # cohort whose root is not the repository root.
           - cohort: client
             root: "."
+            config: stryker.config.mjs
+            config-relative: stryker.config.mjs
             prefixes: "src/"
           - cohort: reference-implementation
             root: reference-implementation
+            config: reference-implementation/stryker.config.mjs
+            config-relative: stryker.config.mjs
             prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
+          # The release and supply-chain provenance machinery. Neither cohort
+          # above reaches it -- `client` selects `src/`, and the reference
+          # implementation selects its own subtree -- so until this row existed a
+          # test asserting on a release script's source text rather than its
+          # behaviour was never challenged by a mutant.
+          #
+          # The root is the repository root, not `scripts/`. These tests resolve
+          # their fixtures from `process.cwd()` and several read repository-root
+          # paths outside `scripts/`, so a cohort rooted at `scripts/` would
+          # sandbox away the files its own tests read.
+          #
+          # `scripts/mutation-falsification/` is carved back out. It is this
+          # pipeline's own machinery, and mutating the code that decides what
+          # counts as killed, survived, or inconclusive to ask whether that same
+          # code notices is circular: the projection under test would be the
+          # projection producing the verdict. It is covered by its own unit tests
+          # instead. The carve-out is an explicit excluded prefix rather than a
+          # comment, because `scripts/` as a prefix does select everything
+          # beneath it, and it is recorded in the receipt with its own reason.
+          - cohort: scripts
+            root: "."
+            config: stryker.scripts.config.mjs
+            config-relative: stryker.scripts.config.mjs
+            prefixes: "scripts/"
+            excluded-prefixes: "scripts/mutation-falsification/"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,6 +131,8 @@ jobs:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
           COHORT_PREFIXES: ${{ matrix.prefixes }}
+          COHORT_EXCLUDED_PREFIXES: ${{ matrix.excluded-prefixes }}
+          COHORT_CONFIG: ${{ matrix.config }}
         run: |
           set -euo pipefail
           mkdir -p "reports/mutation/${COHORT}"
@@ -121,7 +156,9 @@ jobs:
           node --experimental-strip-types scripts/mutation-falsification/run-intent.ts \
             --cohort "${COHORT}" \
             --cohort-root "${COHORT_ROOT}" \
+            --config "${COHORT_CONFIG}" \
             --prefixes "${COHORT_PREFIXES}" \
+            --excluded-prefixes "${COHORT_EXCLUDED_PREFIXES:-}" \
             --base "${base_commit}" \
             --head "${HEAD_REF}" \
             --diff "reports/mutation/${COHORT}/diff.nul" \
@@ -168,6 +205,7 @@ jobs:
         env:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
+          COHORT_CONFIG_RELATIVE: ${{ matrix.config-relative }}
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           PDPP_TEST_PROFILE: "memory-default"
         run: |
@@ -197,9 +235,13 @@ jobs:
           # and records the engine exit as `unknown`. A command on the left of
           # `||` is exempt from `-e`, so this form records a real status on
           # every path.
+          # The configuration path is cohort-relative, matching the directory
+          # this runs from. Two cohorts now share the repository root and run
+          # different configurations, so the config can no longer be assumed from
+          # the root.
           cd "${COHORT_ROOT}" || exit 1
           stryker_exit=0
-          npx stryker run stryker.config.mjs --mutate "$(IFS=,; echo "${mutate[*]}")" || stryker_exit=$?
+          npx stryker run "${COHORT_CONFIG_RELATIVE}" --mutate "$(IFS=,; echo "${mutate[*]}")" || stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
           exit "${stryker_exit}"
 
