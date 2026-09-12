@@ -414,6 +414,62 @@ async function buildLiveSiblings(
   }
 }
 
+// THE ACCEPTANCE ESCAPE HATCH, and the fence around it.
+//
+// The acceptance test (scripts/converge-release-acceptance.mjs) drives this
+// driver's REAL publish path — real manifest edits, real prepack, real pack —
+// and redirects only the destination, to a local registry whose stored tarball
+// it then inspects. That is the one external side effect a test must not
+// perform for real, because npm versions are immutable.
+//
+// One production behaviour cannot survive that redirect: PROVENANCE. The
+// packages' own `publishConfig.provenance: true` beats every config-file and
+// environment override (verified by execution: only an explicit CLI flag
+// wins), and npm then refuses with EUSAGE "not supported for provider: null"
+// because there is no CI OIDC provider off a runner. So the flag has to come
+// from this argv, or the real publish path cannot be exercised at all.
+//
+// Rather than let a test reach into the command, the hatch is explicit, named,
+// and FENCED so it cannot weaken a real release:
+//
+//   - It requires CONVERGE_ACCEPTANCE_LOCAL_REGISTRY to be a 127.0.0.1 or
+//     localhost URL. Any other value is a refusal, not a fallback — a hatch
+//     that silently accepted a public registry would be a way to publish
+//     without provenance.
+//   - It refuses outright when GITHUB_ACTIONS is set. A real release runs
+//     there and must always attach provenance, so the hatch is unreachable on
+//     the only machine where disabling it would matter.
+//
+// The alternative — having the test pack separately and inspect that — is
+// exactly the substitution this is meant to avoid: it would assert on an
+// artifact the driver never produced.
+function acceptanceLocalRegistry(): string | null {
+  const raw = process.env.CONVERGE_ACCEPTANCE_LOCAL_REGISTRY
+  if (!raw || !raw.trim()) return null
+
+  if (process.env.GITHUB_ACTIONS) {
+    fail(
+      "CONVERGE_ACCEPTANCE_LOCAL_REGISTRY is set inside GitHub Actions. That variable exists only for " +
+        "local acceptance testing against a loopback registry, and honouring it here would publish a " +
+        "real release without provenance. Refusing."
+    )
+  }
+
+  let url: URL
+  try {
+    url = new URL(raw.trim())
+  } catch {
+    fail(`CONVERGE_ACCEPTANCE_LOCAL_REGISTRY is not a URL: ${raw}`)
+  }
+  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)) {
+    fail(
+      `CONVERGE_ACCEPTANCE_LOCAL_REGISTRY must point at a loopback address, got ${url.hostname}. It ` +
+        `disables provenance, so it is restricted to a registry running on this machine.`
+    )
+  }
+  return url.toString()
+}
+
 async function publishPackage(
   packageSource: string,
   name: LockstepPackage,
@@ -463,7 +519,14 @@ async function publishPackage(
   // resolves --dry-run inside its own publish implementation, after prepack and
   // after packing, and performs no registry write — so this executes everything
   // up to the write and nothing past it.
-  const args = ["publish", absolutePkgRoot, "--tag", "latest", ...(dryRun ? ["--dry-run"] : [])]
+  const args = [
+    "publish",
+    absolutePkgRoot,
+    "--tag",
+    "latest",
+    ...(dryRun ? ["--dry-run"] : []),
+    ...(acceptanceLocalRegistry() ? ["--provenance=false"] : []),
+  ]
   log(`${dryRun ? "[dry-run] publishing" : "publishing"} ${name}@${version} from ${absolutePkgRoot}`)
   const { stdout, stderr } = await run(npmBin, args, {
     cwd: packageSource,
@@ -533,6 +596,12 @@ async function main(): Promise<void> {
   log(`converging lockstep release ${version} (tag ${tag})`)
   log(`  release tooling: ${TOOLING_ROOT}`)
   log(`  package source:  ${packageSource}`)
+  // Announced loudly. A run in acceptance mode publishes without provenance,
+  // so it must never be mistakable for a real one in a log.
+  const localRegistry = acceptanceLocalRegistry()
+  if (localRegistry) {
+    log(`  ACCEPTANCE MODE: publishing to the loopback registry ${localRegistry}, provenance disabled`)
+  }
   log(`  already live: ${state.published.join(", ")}`)
   log(`  to publish:   ${state.missing.join(", ")}`)
 

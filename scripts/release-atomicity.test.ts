@@ -45,21 +45,27 @@ function makeStubNpm(spec: StubSpec): {
   manifestLog: string
   buildLog: string
   dryRunLog: string
+  argvLog: string
   cleanup: () => void
 } {
   const dir = mkdtempSync(join(tmpdir(), "atomic-npm-"))
   const publishLog = join(dir, "publish.log")
   const manifestLog = join(dir, "manifest.log")
   const buildLog = join(dir, "build.log")
+  const argvLog = join(dir, "argv.log")
   writeFileSync(publishLog, "")
   writeFileSync(manifestLog, "")
   writeFileSync(buildLog, "")
+  writeFileSync(argvLog, "")
   writeFileSync(join(dir, "spec.json"), JSON.stringify(spec))
 
   const shim = `#!/usr/bin/env node
 const { appendFileSync, readFileSync } = require("node:fs")
 const spec = JSON.parse(readFileSync(${JSON.stringify(join(dir, "spec.json"))}, "utf8"))
 const argv = process.argv.slice(2)
+// Every invocation's full argv, so a test can assert on the flags the driver
+// passed rather than inferring them from behaviour.
+appendFileSync(${JSON.stringify(argvLog)}, argv.join(" ") + "\\n")
 
 if (argv[0] === "view") {
   const target = argv[1]
@@ -162,8 +168,14 @@ process.exit(2)
     manifestLog,
     buildLog,
     dryRunLog: join(dir, "dry-run.log"),
+    argvLog,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
+}
+
+// Full argv of each stub npm invocation, in order.
+function readArgvLog(path: string): string[] {
+  return readFileSync(path, "utf8").split("\n").map(l => l.trim()).filter(Boolean)
 }
 
 function readPublishLog(path: string): string[] {
@@ -816,6 +828,70 @@ describe("the npm converge publishes through", () => {
     } finally {
       stub.cleanup()
     }
+  })
+
+  // THE ACCEPTANCE ESCAPE HATCH'S FENCE.
+  //
+  // scripts/converge-release-acceptance.mjs needs the driver to pass
+  // `--provenance=false`, because the packages' own publishConfig forces
+  // provenance on and npm then refuses off a CI runner — so the real publish
+  // path could not be exercised at all. That hatch disables a real security
+  // property, so the fence around it is asserted here rather than trusted.
+  describe("the acceptance-mode registry override", () => {
+    const LOOPBACK = "http://127.0.0.1:9999/"
+
+    it("refuses a non-loopback registry rather than falling back", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: "https://registry.npmjs.org/",
+        })
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toMatch(/must point at a loopback address/)
+        // Fails closed: nothing was published on the way to the refusal.
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+      } finally {
+        stub.cleanup()
+      }
+    })
+
+    // The one machine where honouring it would matter is the one that does
+    // real releases, so there it is unreachable.
+    it("refuses outright inside GitHub Actions", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: LOOPBACK,
+          GITHUB_ACTIONS: "true",
+        })
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toMatch(/set inside GitHub Actions/)
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+      } finally {
+        stub.cleanup()
+      }
+    })
+
+    // And an ordinary release must never carry the flag, or provenance would
+    // be silently off on the real publishing path.
+    it("passes no provenance override when unset", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, MAIN_ENV)
+        expect(result.status).toBe(0)
+        expect(readArgvLog(stub.argvLog).join("\n")).not.toMatch(/--provenance/)
+      } finally {
+        stub.cleanup()
+      }
+    })
   })
 
   it("resolves the local npm path from the working directory", async () => {

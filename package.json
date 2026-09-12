@@ -45,6 +45,8 @@
     "release:versions": "node scripts/release-github.mjs --show-versions",
     "release:npm": "semantic-release",
     "release:npm:dry-run": "semantic-release --dry-run --no-ci",
+    "release:converge:rehearse": "node scripts/converge-release-rehearsal.mjs",
+    "release:converge:accept": "node scripts/converge-release-acceptance.mjs",
     "skills:sync": "node scripts/sync-skills.js",
     "skills:watch": "node scripts/watch-skills.js",
     "postinstall": "node scripts/sync-skills.js && node scripts/fetch-connectors.js",
