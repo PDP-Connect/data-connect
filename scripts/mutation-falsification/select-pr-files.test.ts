@@ -585,31 +585,39 @@ describe("readsMutatedSource", () => {
     // attempt with no evidence.
     const source = `const src = await readFile(new URL("../runtime/controller.ts", import.meta.url), "utf8");
 assert.match(src, /detachControllerTask\\(\\s*fireAssistanceWebPush\\(\\{/);`
-    expect(readsMutatedSource(source, ["runtime/controller.ts:2466-4597"])).toBe(true)
+    expect(
+      readsMutatedSource("test/web-push-notifications.test.ts", source, [
+        "runtime/controller.ts:2466-4597",
+      ])
+    ).toBe(true)
   })
 
   it("keeps the same test when the batch mutates nothing it reads", () => {
     // The decisive difference from escapesCohortRoot: this test is sound in a
     // batch that leaves controller.ts alone, so it must not be withheld there.
     const source = `const src = await readFile(new URL("../runtime/controller.ts", import.meta.url), "utf8");`
-    expect(readsMutatedSource(source, ["server/auth.ts:53-57"])).toBe(false)
+    expect(
+      readsMutatedSource("test/web-push-notifications.test.ts", source, ["server/auth.ts:53-57"])
+    ).toBe(false)
   })
 
   it("matches a whole-file mutate entry as well as a line-ranged one", () => {
     const source = `readFileSync(new URL("../server/grant-lifecycle.ts", import.meta.url), "utf8")`
-    expect(readsMutatedSource(source, ["server/grant-lifecycle.ts"])).toBe(true)
+    expect(
+      readsMutatedSource("test/grant-lifecycle.test.ts", source, ["server/grant-lifecycle.ts"])
+    ).toBe(true)
   })
 
   it("does not match a file whose name merely ends with a mutated one", () => {
-    // `controller.ts` must not match `other-controller.ts`: the suffix
-    // comparison is on a path-segment boundary.
+    // `controller.ts` must not match `other-controller.ts`: resolution produces
+    // a whole file identity, and these two identities differ.
     const source = `readFileSync(new URL("../runtime/other-controller.ts", import.meta.url), "utf8")`
-    expect(readsMutatedSource(source, ["runtime/controller.ts:1-10"])).toBe(false)
+    expect(readsMutatedSource("test/x.test.ts", source, ["runtime/controller.ts:1-10"])).toBe(false)
   })
 
   it("withholds nothing when the batch mutates nothing", () => {
     const source = `readFileSync(new URL("../runtime/controller.ts", import.meta.url), "utf8")`
-    expect(readsMutatedSource(source, [])).toBe(false)
+    expect(readsMutatedSource("test/x.test.ts", source, [])).toBe(false)
   })
 
   it("keeps a test that imports a mutated module instead of reading its text", () => {
@@ -619,7 +627,9 @@ assert.match(src, /detachControllerTask\\(\\s*fireAssistanceWebPush\\(\\{/);`
     // the rejected baseline this predicate exists to prevent. Matching every
     // string literal rather than only file-reading calls did exactly that.
     const source = `import { createController } from "../runtime/controller.ts"\ntest("x", () => createController())`
-    expect(readsMutatedSource(source, ["runtime/controller.ts:2466-4597"])).toBe(false)
+    expect(
+      readsMutatedSource("test/x.test.ts", source, ["runtime/controller.ts:2466-4597"])
+    ).toBe(false)
   })
 
   it("recognises the read however it is spelled", () => {
@@ -627,14 +637,62 @@ assert.match(src, /detachControllerTask\\(\\s*fireAssistanceWebPush\\(\\{/);`
     // `join(__dirname, ...)` read.
     expect(
       readsMutatedSource(
+        "test/explore-timeline.test.ts",
         `const s = fs.readFileSync(new URL("../server/explore-timeline-substrate.ts", import.meta.url), "utf8")`,
         ["server/explore-timeline-substrate.ts:10-20"]
       )
     ).toBe(true)
     expect(
-      readsMutatedSource(`const s = readFileSync(join(__dirname, "../operations/x/index.ts"), "utf8")`, [
-        "operations/x/index.ts",
-      ])
+      readsMutatedSource(
+        "test/operations.test.ts",
+        `const s = readFileSync(join(__dirname, "../operations/x/index.ts"), "utf8")`,
+        ["operations/x/index.ts"]
+      )
     ).toBe(true)
+  })
+
+  it("keeps a test that reads a fixture whose path merely ends like the mutated file", () => {
+    // The false exclusion this predicate was repaired for. The batch mutates
+    // `src/target.ts`. This test EXECUTES that implementation and separately
+    // reads `test/fixtures/src/target.ts` -- a different real file, checked in
+    // beside the test. Comparing on a `../`-stripped suffix made the fixture
+    // look like the implementation and withheld the whole test, taking its
+    // behavioural coverage out of the baseline: a mutant in `compute` would
+    // then be reported as surviving with nothing having run it.
+    const source = `import { compute } from "../../src/target.ts"
+const golden = await readFile(new URL("./fixtures/src/target.ts", import.meta.url), "utf8")
+test("computes", () => assert.equal(compute(2), 4))`
+    expect(readsMutatedSource("test/unit/compute.test.ts", source, ["src/target.ts:1-5"])).toBe(
+      false
+    )
+  })
+
+  it("keeps a test whose dynamic import follows an unrelated read on the same line", () => {
+    // The second false exclusion. Taking a read's arguments as "text up to a
+    // semicolon or newline" overran the call's closing paren; this repo writes
+    // no semicolons, so the span ran to end of line and swallowed the
+    // `import(...)` that followed. The import EXECUTES the mutated module,
+    // which is the one thing that must never cause a withholding.
+    const source = `const cfg = await readFile(configPath, "utf8"), mod = await import("../src/target.ts")`
+    expect(readsMutatedSource("test/unit/dynamic.test.ts", source, ["src/target.ts:1-5"])).toBe(
+      false
+    )
+  })
+
+  it("keeps a test whose read path is assembled at runtime", () => {
+    // Not statically knowable, so not resolvable to a file identity. The bias on
+    // an unresolvable read is to retain: a wrongly retained test costs one
+    // attempt its evidence and says so in the log, while a wrongly withheld one
+    // silently removes the coverage that would have killed a mutant.
+    const source = "const s = await readFile(join(base, `${name}.ts`), \"utf8\")"
+    expect(readsMutatedSource("test/x.test.ts", source, ["src/target.ts:1-5"])).toBe(false)
+  })
+
+  it("resolves the read against the reading test's own directory", () => {
+    // The same literal names different files from different directories. From
+    // `test/` it is the mutated implementation; from `test/unit/` it is not.
+    const literal = `const s = await readFile(new URL("../src/target.ts", import.meta.url), "utf8")`
+    expect(readsMutatedSource("test/shallow.test.ts", literal, ["src/target.ts"])).toBe(true)
+    expect(readsMutatedSource("test/unit/deep.test.ts", literal, ["src/target.ts"])).toBe(false)
   })
 })

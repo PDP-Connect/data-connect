@@ -176,7 +176,7 @@ if (selectedTestsPath !== undefined) {
     // a reason the revision did not cause -- rejecting the baseline exactly as
     // an unreachable path does. Withheld on the same terms, and for the same
     // reason: it can inform no mutant whose instrumentation it cannot read.
-    if (readsMutatedSource(testSource, intent.mutate)) {
+    if (readsMutatedSource(test, testSource, intent.mutate)) {
       withheldReadingMutated.push(test)
       return false
     }
