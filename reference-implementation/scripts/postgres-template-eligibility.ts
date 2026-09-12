@@ -81,6 +81,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/device-ingest-conformance.test.ts",
   "test/error-code-query-not-found.test.ts",
   "test/forward-evidence-debt-wired-probe.test.ts",
+  "test/grant-lifecycle-expired-reporting.test.ts",
   "test/grant-scoped-state-postgres-routing.test.ts",
   "test/ingest-dirty-terminal-postgres-parity.test.ts",
   "test/introspection-manifest-fail-closed.test.ts",

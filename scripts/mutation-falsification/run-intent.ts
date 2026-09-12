@@ -21,6 +21,7 @@ import {
   type LineRange,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
+  readsMutatedSource,
   selectCohortTests,
   widenToStatements,
 } from "./select-pr-files.ts"
@@ -159,17 +160,36 @@ if (selectedTestsPath !== undefined) {
   // mutates. The names are printed so the narrowing is visible in the log
   // rather than applied silently.
   const withheld: string[] = []
+  const withheldReadingMutated: string[] = []
   const tests = selectCohortTests(diff, cohort).filter((test) => {
     const onDisk = cohort.root === "." ? test : join(cohort.root, test)
-    if (!existsSync(onDisk) || !escapesCohortRoot(test, readFileSync(onDisk, "utf8"))) {
+    if (!existsSync(onDisk)) {
       return true
     }
-    withheld.push(test)
-    return false
+    const testSource = readFileSync(onDisk, "utf8")
+    if (escapesCohortRoot(test, testSource)) {
+      withheld.push(test)
+      return false
+    }
+    // A test that asserts on the TEXT of a file this batch mutates reads
+    // Stryker's instrumented copy instead of the authored source, and fails for
+    // a reason the revision did not cause -- rejecting the baseline exactly as
+    // an unreachable path does. Withheld on the same terms, and for the same
+    // reason: it can inform no mutant whose instrumentation it cannot read.
+    if (readsMutatedSource(test, testSource, intent.mutate)) {
+      withheldReadingMutated.push(test)
+      return false
+    }
+    return true
   })
   if (withheld.length > 0) {
     process.stdout.write(
       `withheld from the mutation baseline, reads above the cohort root: ${withheld.join(", ")}\n`
+    )
+  }
+  if (withheldReadingMutated.length > 0) {
+    process.stdout.write(
+      `withheld from the mutation baseline, asserts on the source text of a mutated file: ${withheldReadingMutated.join(", ")}\n`
     )
   }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)

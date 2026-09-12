@@ -3315,8 +3315,18 @@ export interface GrantPackageDetail {
   object: "grant_package";
   package_id: string;
   parent_package_id: string | null;
+  /**
+   * The raw `grant_packages.status` column, as distinct from the derived
+   * `status` below (active / expired / revoked). Use this — never `status` —
+   * to decide whether to OFFER revocation: an expired package has not been
+   * revoked and is still revokable. Optional because an older reference
+   * server does not send it; callers should treat its absence as "fall back
+   * to `status`".
+   */
+  persisted_status?: string;
   revoked_at: string | null;
   scenario_id: string | null;
+  /** Derived lifecycle for DISPLAY: active / expired / revoked. */
   status: string;
   subject_id: string;
   trace_id: string | null;

@@ -26,6 +26,7 @@
 // could have introduced.
 
 import { createHash } from "node:crypto"
+import ts from "typescript"
 
 /**
  * A production source entry selected for mutation, relative to the cohort root.
@@ -604,6 +605,176 @@ export function escapesCohortRoot(testPath: SelectedFile, testSource: string): b
     }
   }
   return false
+}
+
+/**
+ * Whether a test reads, as TEXT, a production source file this batch mutates.
+ *
+ * Some tests assert against the source of a production file rather than its
+ * behaviour -- `readFile(new URL("../runtime/controller.ts", ...), "utf8")`
+ * followed by a regex. Stryker instruments the files it mutates, rewriting them
+ * in the sandbox with a `stryNS_` namespace, mutant switches, and a
+ * `// @ts-nocheck` header. A test reading one of those files therefore sees
+ * instrumented text, not the authored source its assertion describes, and fails
+ * for a reason the revision did not cause.
+ *
+ * That failure is not a survivor signal. It fails Stryker's initial test run,
+ * which rejects the baseline and makes every mutant in the batch inconclusive,
+ * so one such test costs the whole attempt its evidence -- the same cost
+ * `escapesCohortRoot` exists to prevent, reached by a different route.
+ *
+ * Unlike `escapesCohortRoot`, this depends on what the batch mutates: the same
+ * test is perfectly sound in a batch that mutates nothing it reads. So the
+ * mutate list is an input, and a test is withheld only when the two intersect.
+ *
+ * Withholding is not skipping. The test still runs, and still fails if broken,
+ * in the cohort's own suite. It is held out only of a baseline whose
+ * instrumentation is precisely what it cannot read.
+ *
+ * A wrongly withheld test is the expensive error, not the cheap one. Leaving a
+ * source-reading test in costs one attempt its evidence, and the log says so.
+ * Withholding a behavioural test removes the coverage that would have killed a
+ * mutant, and the run still reports a completed baseline -- a survivor for a
+ * fault nothing tested. So every judgement here is biased toward RETAINING:
+ * only a read whose target this function can resolve to an exact file identity,
+ * and which is exactly a mutated file, withholds anything. A read built from a
+ * variable, a template with a substitution, or any shape not statically
+ * resolvable leaves the test in.
+ *
+ * `testPath` is the test's own cohort-relative path; it is what the literals are
+ * resolved against, since a literal in a test is relative to that test's
+ * directory while a mutate entry is relative to the cohort root. Comparing
+ * without it -- on a `./`- and `../`-stripped suffix -- treated a fixture at
+ * `test/fixtures/src/target.ts` as the mutated `src/target.ts`. Those are
+ * different real files, and the test reading the fixture while EXECUTING the
+ * implementation was the exact behavioural coverage that must not be dropped.
+ *
+ * `mutateEntries` are cohort-relative Stryker entries, either `path` or
+ * `path:start-end`; only the path part identifies the file.
+ */
+export function readsMutatedSource(
+  testPath: SelectedFile,
+  testSource: string,
+  mutateEntries: readonly SelectedFile[]
+): boolean {
+  const mutatedPaths = new Set(mutateEntries.map((entry) => entry.split(":")[0]))
+  if (mutatedPaths.size === 0) {
+    return false
+  }
+  const testDirectory = testPath.includes("/") ? testPath.slice(0, testPath.lastIndexOf("/")) : ""
+  for (const literal of readArgumentPathLiterals(testSource)) {
+    const resolved = resolveCohortRelative(testDirectory, literal)
+    if (resolved !== undefined && mutatedPaths.has(resolved)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * The string literals appearing inside the ARGUMENTS of a file-reading call.
+ *
+ * Parsing rather than scanning is the whole point. The anchor is the
+ * `readFile`/`readFileSync` callee -- plain or as a member call -- and what
+ * counts is the literals within that call's argument list, at any nesting depth,
+ * so the three spellings in this repo all work: `readFile(new URL(p,
+ * import.meta.url))`, `readFileSync(join(__dirname, p))`, and `fs.readFileSync(p)`.
+ *
+ * Taking the argument text as "everything up to a semicolon or newline" instead
+ * read past the call's closing paren. This repo writes no semicolons, so that
+ * span ran to the end of the line and swept in whatever followed -- including a
+ * dynamic `import("../src/target.ts")` after an unrelated `readFile`, which was
+ * then treated as a read of the mutated file and withheld the test. An argument
+ * list has an exact end, and the parser knows where it is.
+ *
+ * Only literals with no substitutions are returned. A template holding `${...}`
+ * names no single statically knowable file, and guessing at one would withhold a
+ * test on a path that was never read.
+ */
+function readArgumentPathLiterals(testSource: string): string[] {
+  const sourceFile = ts.createSourceFile(
+    "test.ts",
+    testSource,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true
+  )
+  const literals: string[] = []
+
+  const isReadCallee = (expression: ts.Expression): boolean => {
+    const name = ts.isPropertyAccessExpression(expression)
+      ? expression.name.text
+      : ts.isIdentifier(expression)
+        ? expression.text
+        : undefined
+    return name === "readFile" || name === "readFileSync"
+  }
+
+  /** Every substitution-free string literal inside one subtree. */
+  const collectLiterals = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      literals.push(node.text)
+    }
+    ts.forEachChild(node, collectLiterals)
+  }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && isReadCallee(node.expression)) {
+      // The arguments only. The callee subtree is deliberately skipped: a
+      // member-call receiver is not something the call reads.
+      for (const argument of node.arguments) {
+        collectLiterals(argument)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(sourceFile, visit)
+  return literals
+}
+
+/**
+ * Resolve a path literal read by a test into a cohort-relative file identity,
+ * or `undefined` when it names no statically knowable file inside the cohort.
+ *
+ * `directory` is the reading test's own cohort-relative directory, so
+ * `../runtime/controller.ts` read from `test/web-push.test.ts` resolves to
+ * `runtime/controller.ts` -- the form a mutate entry takes -- while
+ * `./fixtures/src/target.ts` read from the same place resolves to
+ * `test/fixtures/src/target.ts` and matches no mutate entry, because it is a
+ * different file.
+ *
+ * `undefined` is returned for anything not a plain relative path: an absolute
+ * path, a bare specifier, a URL, or a literal that climbs above the cohort root.
+ * None of those can be compared to a cohort-relative mutate entry, and the bias
+ * on an unresolvable read is to retain the test.
+ */
+function resolveCohortRelative(directory: string, literal: string): string | undefined {
+  if (literal.startsWith("/") || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(literal)) {
+    return undefined
+  }
+  if (!literal.startsWith("./") && !literal.startsWith("../")) {
+    // A bare specifier like `node:fs` or a package name names no file in the
+    // cohort tree. A literal that is already cohort-relative is not a shape any
+    // read in this repo writes, and reading it as one would resurrect the
+    // context-free comparison this function replaces.
+    return undefined
+  }
+  const segments = directory === "" ? [] : directory.split("/")
+  for (const segment of literal.split("/")) {
+    if (segment === "" || segment === ".") {
+      continue
+    }
+    if (segment === "..") {
+      if (segments.length === 0) {
+        // Climbs above the cohort root. `escapesCohortRoot` is what handles
+        // that case; it is not a read of a file this batch mutates.
+        return undefined
+      }
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  return segments.length === 0 ? undefined : segments.join("/")
 }
 
 /** Make a repository-relative path cohort-relative, so it can be a `mutate` glob. */

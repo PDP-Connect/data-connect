@@ -3580,9 +3580,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // A caller that already made an explicit `recoveryOnly` choice (e.g. the
   // controller-started recovery continuation fired automatically after
   // durable progress — see `maybeContinueRecoveryAfterProgress`, not an owner
-  // gesture) or that requested specific `resources`/streams (forward work
-  // intent by construction) is never second-guessed, and the durable probe is
-  // skipped entirely in that case.
+  // gesture, and gated there on the manifest automation policy so a
+  // manual-only connector never self-chains) or that requested specific
+  // `resources`/streams (forward work intent by construction) is never
+  // second-guessed, and the durable probe is skipped entirely in that case.
   async function resolveEffectiveRecoveryOnly(
     connectorId: string,
     connectorInstanceId: string,
@@ -3613,7 +3614,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
   async function maybeContinueRecoveryAfterProgress(input: {
     readonly connectorId: string;
     readonly connectorInstanceId: string;
-    readonly manifest: ConnectorManifest;
+    // Deliberately NO `manifest`. The continuation resolves the registered
+    // manifest itself at admission; accepting the parent run's pinned object
+    // here is what made the permission decision stale, so the field is gone
+    // rather than merely unread.
     readonly options: RunNowOptions;
     readonly ownerSubjectId: string;
     readonly ownerToken: string;
@@ -3637,6 +3641,95 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
       return;
     }
+    // Manifest automation policy gate. A recovery continuation is started BY
+    // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
+    // run wearing `triggerKind: "manual"` (that tag exists so the continuation
+    // inherits manual-run admission, not because a human pressed anything).
+    // So it must clear the same policy bar as a scheduled run.
+    //
+    // `getScheduleIneligibilityReason` is the one predicate the schedule API
+    // (`scheduleToApi`, `upsertSchedule`, `setScheduleEnabled`) and the
+    // scheduler's runnable-set filter already use to decide "this connector's
+    // manifest forbids automatic runs". Reusing it here — rather than
+    // re-reading `recommended_mode` locally — keeps one definition of the
+    // policy: `recommended_mode: "paused"`, `background_safe: false`, or
+    // `recommended_mode: "manual"` without an explicit `background_safe: true`.
+    //
+    // What happens instead of self-chaining: nothing further starts on its own.
+    // The run that just finished stands as the last run, and the withheld
+    // continuation is logged. Remaining gaps stay durable in the detail-gap
+    // store, so no recovery work is lost — an owner-initiated run is admitted
+    // (`triggerKind: "manual"` from a real gesture is not blocked by this gate,
+    // which only guards the controller's own self-chaining) and picks up the
+    // same pending work. That run's OWN post-success continuation is checked
+    // here again, so a manual gesture drains one envelope, not the backlog.
+    //
+    // The motivating case is a bank connector such as `chase`, whose manifest
+    // declares `recommended_mode: "manual"`, `background_safe: false` and
+    // `interaction_posture: "otp_likely"`. Self-chaining there can cost the
+    // owner an unprompted interactive sign-in per envelope, for a session they
+    // never asked to start.
+    //
+    // The policy is resolved from the REGISTRY AT THIS MOMENT, not from
+    // `input.manifest`. Those are two different questions and pinning one
+    // object to answer both is a TOCTOU:
+    //
+    //   - "how do I run?"    -> execution identity: the connector path and
+    //                           stream shapes this envelope runs against.
+    //   - "may I run at all?" -> the CURRENT registered policy. Registration is
+    //                           mutable for the whole life of the process:
+    //                           `registerConnector` -> `persistManifestAndAdvance-
+    //                           Generations` overwrites `connectors.manifest`
+    //                           and bumps `connector_instances.manifest_generation`.
+    //                           A chain can run for many minutes across up to
+    //                           twelve envelopes, so an owner who pauses a
+    //                           connector, or an update that sets
+    //                           `background_safe: false`, lands mid-chain.
+    //
+    // Reading the pinned object answered the second question with a snapshot
+    // taken before the owner acted, so a committed pause kept self-chaining
+    // against a decision it had already revoked.
+    //
+    // Both are then answered by the SAME object: the manifest read here is the
+    // one the continuation is launched with (see `continuationOptions` below),
+    // so the run can never execute a manifest other than the one it was just
+    // admitted against.
+    //
+    // Fail CLOSED. If the registry read throws (the stored manifest is absent,
+    // unparseable, or the row is gone because the connector was deregistered)
+    // there is no current permission to rely on, and the safe reading of "I
+    // cannot tell whether I am allowed" is to stop. Nothing is lost: gaps stay
+    // durable and an owner-initiated run still drains them.
+    let admittedManifest: ConnectorManifest;
+    try {
+      const registeredManifest = await getConnectorManifest(input.connectorId);
+      if (!registeredManifest) {
+        log.warn?.(
+          `[controller] recovery continuation withheld for ${input.connectorId} ` +
+            `(connection=${input.connectorInstanceId}): the connector is no longer registered. ` +
+            "Pending recovery work needs an owner-initiated run."
+        );
+        return;
+      }
+      admittedManifest = registeredManifest as ConnectorManifest;
+    } catch (err: unknown) {
+      log.warn?.(
+        `[controller] recovery continuation withheld for ${input.connectorId} ` +
+          `(connection=${input.connectorInstanceId}): the registered manifest could not be read ` +
+          `(${err instanceof Error ? err.message : String(err)}). ` +
+          "Pending recovery work needs an owner-initiated run."
+      );
+      return;
+    }
+    const automationIneligibility = getScheduleIneligibilityReason(readManifestRefreshPolicy(admittedManifest));
+    if (automationIneligibility) {
+      log.warn?.(
+        `[controller] recovery continuation withheld for ${input.connectorId} ` +
+          `(connection=${input.connectorInstanceId}): ${automationIneligibility} ` +
+          "Pending recovery work needs an owner-initiated run."
+      );
+      return;
+    }
     // Space continuations apart. Without this the next envelope starts within
     // ~200ms of the previous run completing, so a connection with pending gaps
     // can burn the whole depth budget back-to-back. For a connector whose
@@ -3654,7 +3747,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     try {
       const continuationOptions: RunNowOptions = {
         connectorInstanceId: input.connectorInstanceId,
-        manifest: input.manifest,
+        // The manifest the admission decision above was made AGAINST, not the
+        // one the parent run started with. Binding execution to the same
+        // object the gate judged is what makes the decision and the run
+        // inseparable: passing `input.manifest` here would have let a
+        // continuation be admitted on current policy and then execute an
+        // obsolete manifest -- a different connector path or stream shape than
+        // the one just permitted. `validateRunNowPreconditions` gives
+        // `options.manifest` precedence over its own registry read, so
+        // whatever is put here is final for this envelope.
+        manifest: admittedManifest,
         ownerSubjectId: input.ownerSubjectId,
         ownerToken: input.ownerToken,
         recoveryContinuationDepth: depth + 1,
@@ -4241,7 +4343,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
         const continuationInput: {
           connectorId: string;
           connectorInstanceId: string;
-          manifest: ConnectorManifest;
           options: RunNowOptions;
           ownerSubjectId: string;
           ownerToken: string;
@@ -4250,7 +4351,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
         } = {
           connectorId,
           connectorInstanceId,
-          manifest,
           options,
           ownerSubjectId: runOwnerSubjectId,
           ownerToken,
