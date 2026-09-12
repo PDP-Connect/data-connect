@@ -206,10 +206,17 @@ test("a concurrent /v1/ingest batch must not block a lightweight GET / beyond an
     // (INGEST_BATCH_YIELD_BUDGET_MS in server/records.ts) stalls a probe for
     // a large fraction of the batch's synchronous run — >2000ms at this
     // record count per that constant's own benchmark, and this batch has
-    // measured up to ~9.2s wall on a loaded CI runner. So any budget well
-    // under a second still fails on a reverted yield, and the gap between
+    // measured up to ~9.2s wall on a loaded CI runner. The gap between
     // "yield present" (single/double-digit ms) and "yield absent" (seconds)
     // is wide enough that nothing discriminating is bought by tightening it.
+    //
+    // Measured, with the yield forced off in shouldYieldBeforeNextIngestRecord
+    // (7999/8000 would-be yields suppressed, verified per run), 10 runs per
+    // Node at the default record count: when a probe does land in the
+    // synchronous write loop it measures 2288-2717ms, and the yield-present
+    // arm tops out at 152.9ms across 14 runs. 1000ms sits in that gap with
+    // 6.5x headroom above the worst healthy probe and 2.3x below the
+    // smallest stall.
     //
     // What a tight budget does buy is false failures. At 300ms this test
     // failed CI on one probe of ten measuring 391ms while the other nine
@@ -219,9 +226,27 @@ test("a concurrent /v1/ingest batch must not block a lightweight GET / beyond an
     // siblings) reproduces locally on both Node 22 and Node 24, so it is
     // ordinary tail latency, not a regression in the code under test.
     //
-    // 1000ms keeps every bit of the discriminating power and stops encoding
-    // an assumption about how fast and how quiet the host machine is. The
-    // yield POLICY is pinned separately and deterministically, with no
+    // 1000ms stops encoding an assumption about how fast and how quiet the
+    // host machine is, and costs no detection: the runs that miss a reverted
+    // yield miss it by two orders of magnitude (worst probe 10-19ms), so
+    // 300ms would not have caught them either.
+    //
+    // What those runs miss it by is WHEN they sample, not the threshold. The
+    // ten probes fire in a burst starting 20ms in; when each returns in ~2ms
+    // the burst is over ~50ms into a ~2700ms batch, and since the NDJSON body
+    // is buffered whole and split synchronously before the write loop starts
+    // (transport.ts's "application/x-ndjson" parser uses parseAs: "buffer"),
+    // an early burst samples parse/setup rather than the blocking stretch.
+    // The probesStartedWhileActive guard below does not catch this: in the
+    // missing runs all 10/10 probes start while the ingest promise is
+    // unsettled, because the request IS in flight, just not yet blocking.
+    // Measured detection with the yield off: 2/10 runs on Node 22.23.2,
+    // 8/10 on 24.21.0. Making this deterministic means probing until
+    // ingestSettled instead of a fixed ten, and failing when the burst spans
+    // too little of the ingest wall time to mean anything — a change to this
+    // oracle's own behavior, not to the budget.
+    //
+    // The yield POLICY is pinned separately and deterministically, with no
     // timing dependency, by test/ingest-batch-yield-decision.test.ts; this
     // test's own job is the end-to-end one those unit tests cannot do —
     // proving the yield is actually wired into the live ingest path.
