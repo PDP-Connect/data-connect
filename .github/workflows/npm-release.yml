@@ -285,6 +285,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # THE SAME HAZARD THE CONVERGE PATH HAS, on this path.
+      #
+      # Each package's prepack builds it during its own `npm publish`, and the
+      # dependents typecheck against their siblings' BUILT dist/ (their
+      # manifests' exports resolve to ./dist/*.d.ts). On a FIRST run that is
+      # self-sufficient: all three publish, in dependency order, so each
+      # sibling's dist/ exists by the time a dependent packs.
+      #
+      # On a RE-RUN it is not. scripts/idempotent-npm-publish.mjs SKIPs a
+      # package that is already live — which is the property that makes a
+      # partially-published release re-runnable — and a skipped publish runs no
+      # prepack, so that sibling's dist/ never appears. @semantic-release/npm's
+      # `prepare` does not fill the gap: with no `tarballDir` configured it
+      # only writes the version field, it does not pack. So the exact state
+      # this pipeline exists to recover from (connector-protocol live, the
+      # other two missing) would fail here in collector-runtime's prepack with
+      # TS2307, the same way it does on the converge path.
+      #
+      # Building all three up front removes the dependence on publish order
+      # entirely: every prepack re-runs its own build anyway, and finds its
+      # siblings' dist/ already there whether their publishes ran or were
+      # skipped. Cheap and unconditional, rather than conditional on a registry
+      # state this job would otherwise have to re-derive.
+      - name: Build the lockstep packages so every prepack finds its siblings
+        run: |
+          npm run build --workspace packages/connector-protocol
+          npm run build --workspace packages/collector-runtime
+          npm run build --workspace packages/local-collector
+
       # Publishes through the same plugin chain either way. The forced path
       # must re-apply the forced rules here: this job runs a fresh
       # semantic-release, so running the gated config would re-analyze the
@@ -396,9 +425,17 @@ jobs:
       # arrived in the opposite order: the tag is what revealed the need for
       # the driver. Running `node --import tsx scripts/converge-release.ts`
       # inside the tag's checkout therefore does not run a stale driver, it
-      # runs no driver at all. The same applies to the npm 11 the publish
-      # authenticates through and to tsx itself: the tag's lockfile predates
-      # both, so `npm ci` there installs a toolchain that cannot publish.
+      # runs no driver at all.
+      #
+      # The npm the publish authenticates through comes from the tooling
+      # checkout too, for a DIFFERENT reason — not because the tag's toolchain
+      # is too old. At v2.2.1 it is not: that tag's own lockfile pins
+      # node_modules/npm at 11.19.0 and its install provides tsx and tsc
+      # (verified by execution at 07173d030). The reason is that a converge is
+      # aimed at a historical tree by definition, and any tag old enough to
+      # need one may predate the OIDC requirement it is being converged under.
+      # Taking the publishing npm from current tooling makes that a property of
+      # the pipeline rather than a coincidence of whatever the tag pinned.
       #
       # Collapsing the two is not available in either direction. One checkout
       # at the tag has no executor; one at the head publishes main's sources
@@ -443,8 +480,10 @@ jobs:
       # The driver's own dependencies, resolved from the CURRENT lockfile:
       # tsx, which runs the TypeScript entrypoint, and node_modules/.bin/npm —
       # the npm 11 converge-release.ts publishes through. The runner's ambient
-      # npm is 10, which has no OIDC trusted-publishing support at all, and
-      # neither does whatever the tag's lockfile pins.
+      # npm is 10, which has no OIDC trusted-publishing support at all. The
+      # tag's install may or may not also provide an npm 11 — v2.2.1's does —
+      # but the converge must not depend on what an arbitrary historical
+      # lockfile happens to pin, so the publishing npm always comes from here.
       - name: Install the release tooling's dependencies
         working-directory: release-tooling
         run: npm ci

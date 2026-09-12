@@ -43,13 +43,17 @@ function makeStubNpm(spec: StubSpec): {
   dir: string
   publishLog: string
   manifestLog: string
+  buildLog: string
+  dryRunLog: string
   cleanup: () => void
 } {
   const dir = mkdtempSync(join(tmpdir(), "atomic-npm-"))
   const publishLog = join(dir, "publish.log")
   const manifestLog = join(dir, "manifest.log")
+  const buildLog = join(dir, "build.log")
   writeFileSync(publishLog, "")
   writeFileSync(manifestLog, "")
+  writeFileSync(buildLog, "")
   writeFileSync(join(dir, "spec.json"), JSON.stringify(spec))
 
   const shim = `#!/usr/bin/env node
@@ -74,6 +78,24 @@ if (argv[0] === "view") {
   process.exit(1)
 }
 
+// The already-live siblings' builds. A converge skips the live packages, so
+// their prepacks never run and their dist/ never appears — the dependent's
+// own prepack then fails on the missing type declarations. The driver builds
+// them itself; this records which ones, and creates the dist/ the driver
+// then asserts on, so the suite can check both the WHICH and the ordering
+// without running a real tsc.
+if (argv[0] === "run" && argv[1] === "build" && argv[2] === "--workspace") {
+  const { mkdirSync, writeFileSync } = require("node:fs")
+  const { resolve } = require("node:path")
+  const workspace = argv[3]
+  appendFileSync(${JSON.stringify(buildLog)}, workspace + "\\n")
+  const dist = resolve(process.cwd(), workspace, "dist")
+  mkdirSync(dist, { recursive: true })
+  writeFileSync(resolve(dist, "index.d.ts"), "")
+  process.stdout.write("stub npm: built " + workspace + "\\n")
+  process.exit(0)
+}
+
 if (argv[0] === "publish") {
   // Real npm takes either a relative or an ABSOLUTE directory here, and the
   // converge driver passes an absolute one: its package root is the tagged
@@ -83,7 +105,17 @@ if (argv[0] === "publish") {
   const { resolve, relative } = require("node:path")
   const absolute = resolve(process.cwd(), argv[1])
   const pkgRoot = relative(process.cwd(), absolute) || argv[1]
-  appendFileSync(${JSON.stringify(publishLog)}, pkgRoot + "\\n")
+  // A dry run reaches this command too — that is the point of it, since
+  // prepack is where the converge used to die — but it writes nothing to the
+  // registry, so it must not be recorded as a publish. Logged separately so
+  // "published nothing" assertions stay meaningful while still proving the
+  // pack path executed.
+  const isDryRun = argv.includes("--dry-run")
+  appendFileSync(isDryRun ? ${JSON.stringify(join(dir, "dry-run.log"))} : ${JSON.stringify(publishLog)}, pkgRoot + "\\n")
+  if (isDryRun) {
+    process.stdout.write("+ dry-run " + pkgRoot + "\\n")
+    process.exit(0)
+  }
   // Records the manifest EXACTLY as it stands when publish is invoked —
   // which is what npm would pack. This is how the suite sees the
   // prepare-pipeline edits (version, dependency pin) rather than trusting
@@ -128,6 +160,8 @@ process.exit(2)
     dir,
     publishLog,
     manifestLog,
+    buildLog,
+    dryRunLog: join(dir, "dry-run.log"),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
@@ -345,6 +379,93 @@ describe("the half-published v2.2.1 release currently in the repository", () => 
       expect(published).not.toContain("packages/connector-protocol")
       expect(published).toEqual(["packages/collector-runtime", "packages/local-collector"])
       expect(result.stdout).toContain("skipping @pdpp/connector-protocol")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The defect that made the previous head unrunnable. A converge skips the
+  // live siblings, so nothing builds their dist/, so the dependent's prepack
+  // fails with TS2307 before packing. Reproduced at v2.2.1 against the real
+  // tree; asserted here on the driver's behaviour.
+  it("builds the already-live sibling the dependents typecheck against", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+
+      const built = readPublishLog(stub.buildLog)
+      expect(
+        built,
+        "connector-protocol is live, so its own prepack never runs — the converge must build it, or " +
+          "collector-runtime's prepack fails on the missing dist/"
+      ).toContain("packages/connector-protocol")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // Builds every live sibling a selected package declares, not just the one
+  // v2.2.1 happens to need: local-collector declares both, so with both live
+  // both are built. Read from the manifests rather than hardcoded, so a tag
+  // with different edges is handled by the same code.
+  it("builds every already-live sibling the selected package declares", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "published", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+      const built = readPublishLog(stub.buildLog)
+      expect(built).toContain("packages/connector-protocol")
+      expect(built).toContain("packages/collector-runtime")
+      expect(readPublishLog(stub.publishLog)).toEqual(["packages/local-collector"])
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // Only the SKIPPED siblings. One that is itself being published builds
+  // during its own prepack, earlier in publish order, and pre-building it here
+  // would run its build before this run's manifest edits.
+  it("does not pre-build a sibling that is itself being published", () => {
+    const stub = makeStubNpm({
+      // connector-protocol live; collector-runtime and local-collector both
+      // selected. local-collector declares collector-runtime, which is in the
+      // publish set — so it must NOT be pre-built for local-collector.
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+      expect(readPublishLog(stub.buildLog)).not.toContain("packages/collector-runtime")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The dry run has to reach prepack, because prepack is where this job died.
+  // A dry run that returns before `npm publish` is a rehearsal of the part
+  // that already worked — that is precisely how the previous head went green
+  // while being unrunnable.
+  it("reaches npm publish on the dry-run path, writing nothing", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, { ...MAIN_ENV, CONVERGE_RELEASE_DRY_RUN: "true" })
+      expect(result.status).toBe(0)
+      // It invoked the real publish command, with --dry-run...
+      expect(readPublishLog(stub.dryRunLog)).toEqual([
+        "packages/collector-runtime",
+        "packages/local-collector",
+      ])
+      // ...and never a publish that would have written.
+      expect(readPublishLog(stub.publishLog)).toEqual([])
+      // And it built the live sibling first, or the real prepack would fail.
+      expect(readPublishLog(stub.buildLog)).toContain("packages/connector-protocol")
     } finally {
       stub.cleanup()
     }

@@ -63,20 +63,21 @@ function checkoutStepsOf(job: string): WorkflowStep[] {
 }
 
 // The checkout that supplies the tree being RELEASED. On a job with several
-// checkouts that is the one following the converge tag; the others supply
-// tooling. Selected by its ref rather than its position so reordering the
-// steps does not silently change which one the assertions read.
+// checkouts that is the historical one; the others supply tooling. Selected by
+// where its ref RESOLVES rather than by its position or by which output its
+// expression mentions — see resolvesToCurrentRevision for why the substring
+// test it used to do was not enough.
 function checkoutStepOf(job: string): WorkflowStep {
   const steps = checkoutStepsOf(job)
   if (steps.length === 1) return steps[0] as WorkflowStep
-  const tagged = steps.filter(s => (s.with?.ref ?? "").includes("converge-tag"))
-  if (tagged.length !== 1) {
+  const historical = steps.filter(s => !resolvesToCurrentRevision(s))
+  if (historical.length !== 1) {
     throw new Error(
-      `'${job}' has ${steps.length} checkouts and ${tagged.length} follow the converge tag; ` +
-        `expected exactly one tag checkout`
+      `'${job}' has ${steps.length} checkouts and ${historical.length} resolve to something other ` +
+        `than the current revision; expected exactly one historical checkout`
     )
   }
-  return tagged[0] as WorkflowStep
+  return historical[0] as WorkflowStep
 }
 
 /**
@@ -104,6 +105,39 @@ function evaluateRef(
   }
   const fallback = /github\.sha/.test(normalized) ? headSha : ""
   return (mode === "converge" && convergeTag) || fallback
+}
+
+/**
+ * Whether a checkout step lands on the CURRENT revision when the run is a
+ * converge — the only trees that can supply current tooling.
+ *
+ * Substring matching on the ref ("does it mention converge-tag") is not enough
+ * and was the previous weakness: it classified as "tooling" every checkout that
+ * did not happen to name that output, so pinning the tooling checkout at
+ * `refs/tags/v2.2.1` — a tree with no driver in it — passed every test. The
+ * question is not which output an expression mentions, it is which TREE the ref
+ * resolves to.
+ *
+ * So this evaluates the ref and compares the result against the revision the
+ * job needs. It is deliberately a whitelist that DENIES BY DEFAULT: only two
+ * shapes are current-revision (no `ref` at all, which is actions/checkout's
+ * default of the triggering ref, and an explicit `github.sha`). Any other
+ * value — a tag output, a literal tag, a `format()` of a version, a branch
+ * name, an expression this function cannot evaluate — is treated as
+ * historical, so a new way of writing "the tag" cannot slip past by being
+ * unrecognised. The cost of the default is a loud, specific failure on an
+ * unfamiliar-but-legitimate ref, which is the direction a release gate should
+ * fail in.
+ */
+function resolvesToCurrentRevision(step: WorkflowStep): boolean {
+  const ref = step.with?.ref
+  // actions/checkout's default: the ref that triggered the run. On a converge
+  // that is refs/heads/main — current, and where the tooling lives.
+  if (ref === undefined || ref === null || String(ref).trim() === "") return true
+  const body = String(ref).trim().replace(/^\$\{\{/, "").replace(/\}\}$/, "").trim()
+  // An explicit pin to the triggering commit. `github.sha` alone (no `&&`/`||`
+  // branching) is the only expression form that cannot resolve anywhere else.
+  return /^github\.sha$/.test(body)
 }
 
 describe("npm-release quality job checks out the tree it gates", () => {
@@ -235,8 +269,6 @@ describe("npm-release converge job can execute what it is told to run", () => {
       for (const file of repoFilesExecutedBy(step.run as string)) {
         executedFiles += 1
         const checkout = checkoutForStep(job, step)
-        const ref = checkout?.with?.ref ?? ""
-        const followsTag = ref.includes("converge-tag")
 
         if (!checkout) {
           throw new Error(
@@ -246,13 +278,18 @@ describe("npm-release converge job can execute what it is told to run", () => {
           )
         }
 
-        // The whole finding, as an assertion: a command whose working
-        // directory is the tag's checkout can only run if the tag's tree
-        // contains it — and for this driver it provably does not.
-        if (followsTag) {
+        // The whole finding, as an assertion: a command running from any
+        // checkout that is NOT the current revision can only work if that
+        // tree contains the file — and for this driver it provably does not.
+        //
+        // Keyed on where the ref RESOLVES, not on which output it names, so
+        // pinning this checkout at the tag by some other spelling is caught
+        // too (see resolvesToCurrentRevision).
+        if (!resolvesToCurrentRevision(checkout)) {
           expect(
             existsAtTag(file),
-            `step '${step.name}' runs ${file} from the tag's checkout, but ${file} does not exist at ` +
+            `step '${step.name}' runs ${file} from a checkout that is not the current revision ` +
+              `(ref: ${JSON.stringify(checkout.with?.ref)}), but ${file} does not exist at ` +
               `${TAG_WITHOUT_THE_DRIVER}. The converge job would exit ERR_MODULE_NOT_FOUND before ` +
               `publishing anything. Run current tooling from a current checkout instead.`
           ).toBe(true)
@@ -278,11 +315,12 @@ describe("npm-release converge job can execute what it is told to run", () => {
 
     const checkout = checkoutForStep("converge", step as WorkflowStep)
     expect(checkout, "the driver's step must name the checkout it runs in").toBeTruthy()
-    const ref = (checkout as WorkflowStep).with?.ref ?? ""
     expect(
-      ref.includes("converge-tag"),
-      "the driver must NOT run from the tag's checkout — the tag has no driver"
-    ).toBe(false)
+      resolvesToCurrentRevision(checkout as WorkflowStep),
+      `the driver's checkout (ref: ${JSON.stringify((checkout as WorkflowStep).with?.ref)}) does not ` +
+        `resolve to the current revision. The driver exists only at current tooling; any historical ` +
+        `tree — the tag by any spelling — has no driver to run.`
+    ).toBe(true)
   })
 
   // Separating the two checkouts only helps if the driver is then TOLD which
@@ -295,13 +333,61 @@ describe("npm-release converge job can execute what it is told to run", () => {
     const source = (step as WorkflowStep).env?.CONVERGE_PACKAGE_SOURCE
     expect(source, "the driver must be given an explicit package source").toBeTruthy()
 
-    const taggedPath = checkoutStepsOf("converge").find(c => (c.with?.ref ?? "").includes("converge-tag"))
-      ?.with?.path
+    // The package source is the HISTORICAL checkout, identified by where its
+    // ref resolves rather than by which output it mentions. Exactly one is
+    // required: with none, nothing supplies the tag's packages; with several,
+    // "the tagged checkout" is ambiguous and this assertion would silently
+    // pick one.
+    const historical = checkoutStepsOf("converge").filter(c => !resolvesToCurrentRevision(c))
+    expect(
+      historical.length,
+      `converge must have exactly one checkout that is not the current revision (the package source), ` +
+        `found ${historical.length}`
+    ).toBe(1)
+    const taggedPath = (historical[0] as WorkflowStep).with?.path
     expect(taggedPath, "the tag's checkout must declare a path so it can be referenced").toBeTruthy()
     expect(
       source,
       `CONVERGE_PACKAGE_SOURCE must point at the tag's checkout (${taggedPath})`
     ).toContain(taggedPath as string)
+  })
+
+  // The same prepack hazard on the ORDINARY path, which is #103's code and
+  // not this PR's subject — but it is the identical defect, and a fix that
+  // covered only the converge would leave the re-run this pipeline exists to
+  // support broken in exactly the same way.
+  //
+  // On a re-run, idempotent-npm-publish.mjs SKIPs a live package, a skipped
+  // publish runs no prepack, and @semantic-release/npm's `prepare` writes the
+  // version without packing (no `tarballDir` in .releaserc.yaml). So nothing
+  // builds the live sibling and the dependent's prepack fails with TS2307.
+  // The release job therefore builds all three before semantic-release runs.
+  it("builds every lockstep package before the ordinary release publishes", () => {
+    const built = stepsOf("release")
+      .filter(s => typeof s.run === "string")
+      .flatMap(s => [...(s.run as string).matchAll(/npm run build --workspace (packages\/[\w-]+)/g)])
+      .map(m => m[1] as string)
+
+    for (const pkg of [
+      "packages/connector-protocol",
+      "packages/collector-runtime",
+      "packages/local-collector",
+    ]) {
+      expect(
+        built,
+        `${pkg} is never built in the release job. On a re-run its publish is SKIPped (already live), ` +
+          `so its prepack never runs, so its dist/ never appears and a dependent's prepack fails with ` +
+          `TS2307 — the same defect the converge path hit at v2.2.1.`
+      ).toContain(pkg)
+    }
+
+    // Before the publish, or it is decoration.
+    const runSteps = stepsOf("release").filter(s => typeof s.run === "string")
+    const buildAt = runSteps.findIndex(s => (s.run as string).includes("npm run build --workspace"))
+    const publishAt = runSteps.findIndex(s => /semantic-release|forced-release\.ts/.test(s.run as string))
+    expect(buildAt, "the release job must build the packages").toBeGreaterThanOrEqual(0)
+    expect(publishAt, "the release job must still publish").toBeGreaterThanOrEqual(0)
+    expect(buildAt, "the builds must precede the publish").toBeLessThan(publishAt)
   })
 
   // Both checkouts have to install their own dependencies. The tagged tree's

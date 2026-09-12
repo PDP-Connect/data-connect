@@ -26,7 +26,30 @@
 //
 // The driver loaded all its dependencies, read the live registry, selected the
 // packages that are genuinely missing at that version, resolved each one to a
-// path INSIDE the tagged checkout, and stopped before any write.
+// path INSIDE the tagged checkout, BUILT the already-live siblings it needs,
+// ran each selected package's real prepack, and produced a tarball — without
+// one byte reaching the registry.
+//
+// WHY IT HAS TO REACH PREPACK
+//
+// The first version of this rehearsal returned from publishPackage before
+// `npm publish`, so everything past the selection point was unexercised. It
+// went green on a converge that could not run: connector-protocol is live, so
+// a converge skips it, so its dist/ is never built, so collector-runtime's
+// prepack dies with TS2307 before packing. A rehearsal that stops one step
+// short of the failure is a rehearsal of the part that worked.
+//
+// So the driver's dry run now runs the real `npm publish --dry-run`, which
+// executes prepack and packs, and npm performs no registry write. Two
+// consequences this script is responsible for:
+//
+//   - The version must be rewritten first, or npm refuses with "cannot
+//     publish over the previously published versions: 0.0.1" before packing.
+//     The driver does that rewrite on both paths.
+//   - Those rewrites and the builds are real writes, so they must not land on
+//     a tree anything else reads. This runs them against a THROWAWAY COPY of
+//     the tagged checkout, deleted afterwards, never the checkout the earlier
+//     phases assert against.
 //
 // WHAT WOULD MAKE IT MEANINGLESS
 //
@@ -43,7 +66,7 @@
 // completed publish.
 
 import { execFile, execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync, symlinkSync, existsSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -63,9 +86,16 @@ function log(message) {
   process.stdout.write(`[rehearsal] ${message}\n`)
 }
 
+// Throws rather than calling process.exit, so main()'s `finally` still
+// deletes the workdir. The previous version exited directly, which bypassed
+// cleanup and left a scratch clone behind on every failing run — and this
+// version's workdir holds three checkouts plus two full copies of an installed
+// one, so a leak is on the order of a gigabyte per failure. main() converts
+// the throw back into exit 1.
+class RehearsalFailure extends Error {}
+
 function fail(message) {
-  process.stderr.write(`[rehearsal] FAIL: ${message}\n`)
-  process.exit(1)
+  throw new RehearsalFailure(message)
 }
 
 // A rehearsal must not be able to publish even if something below is wrong.
@@ -93,15 +123,48 @@ function checkoutAt(parent, name, ref) {
 }
 
 // node_modules is linked rather than installed: `npm ci` twice would dominate
-// the runtime, and what the rehearsal is testing is which ROOT each resolution
-// comes from, not whether npm can install. The link makes the tooling root's
-// dependencies real to the subprocess, which is the property under test.
+// the runtime, and what the selection phases test is which ROOT each
+// resolution comes from, not whether npm can install. The link makes the
+// tooling root's dependencies real to the subprocess, which is the property
+// under test.
+//
+// LIMIT, and the reason the build-and-pack phase cannot use this. The
+// workspace links inside node_modules/@pdpp are RELATIVE
+// (`../../packages/connector-protocol`), so they resolve against the link's
+// real path, not the tree it was linked into: a tagged checkout given this
+// repo's node_modules resolves @pdpp/connector-protocol to CURRENT MAIN's
+// package directory. Verified by `readlink -f`. Harmless while nothing builds
+// — and disqualifying for a phase whose whole claim is that the tag's own
+// sources are what get packed. That phase installs instead.
 function linkDependencies(path) {
   const source = join(REPO_ROOT, "node_modules")
   if (!existsSync(source)) {
     fail(`${source} does not exist — run \`npm ci\` before rehearsing`)
   }
   symlinkSync(source, join(path, "node_modules"))
+}
+
+// A tagged checkout with its OWN `npm ci`, so every workspace link resolves
+// inside it. Slow (~35 s at v2.2.1) and unavoidable for the build-and-pack
+// phase: that phase's claim is that the tag's sources build and pack, which a
+// tree whose @pdpp links point at main cannot support.
+function installTaggedCheckout(path) {
+  log(`installing the tagged checkout's own dependencies (needed so its @pdpp workspace links stay inside it)`)
+  execFileSync("npm", ["ci"], { cwd: path, stdio: "inherit" })
+  const link = join(path, "node_modules/@pdpp/connector-protocol")
+  if (!existsSync(link)) {
+    fail(`${link} is absent after npm ci — the tagged checkout has no workspace link to build against`)
+  }
+  // The assertion that makes the phase mean what it says: the sibling the
+  // dependent typechecks against must be the TAG's copy, not another tree's.
+  const resolved = execFileSync("readlink", ["-f", link], { encoding: "utf8" }).trim()
+  const expected = join(path, "packages/connector-protocol")
+  if (resolved !== expected) {
+    fail(
+      `@pdpp/connector-protocol in the tagged checkout resolves to ${resolved}, not ${expected} — the ` +
+        `build would typecheck against a tree the tag does not name`
+    )
+  }
 }
 
 async function main() {
@@ -128,7 +191,7 @@ async function main() {
     }
 
     linkDependencies(tooling)
-    linkDependencies(tagged)
+    installTaggedCheckout(tagged)
 
     // THE PREMISE. Everything below is only interesting because this holds:
     // the tagged tree has package sources and no driver to publish them with.
@@ -141,19 +204,43 @@ async function main() {
     }
     log(`premise holds: ${TAG} (${TAG_COMMIT}) has packages/* and no converge-release.ts`)
 
+    // The dry run now BUILDS and PACKS, which means it writes: sibling dist/
+    // directories, and the version and dependency-pin edits every pack needs.
+    // Those writes go to a copy that exists only for this phase, so the
+    // pristine tagged checkout the discriminating cases below use is never
+    // touched, and nothing this phase does can outlive the workdir.
+    //
+    // Copied rather than re-cloned-and-reinstalled: `cp -a` preserves
+    // node_modules including the relative @pdpp workspace links, which then
+    // resolve inside the COPY (checked below) — a second `npm ci` would buy
+    // nothing but 35 seconds.
+    const packSource = join(workdir, "tagged-package-source-packing")
+    execFileSync("cp", ["-a", tagged, packSource])
+    const copiedLink = execFileSync("readlink", ["-f", join(packSource, "node_modules/@pdpp/connector-protocol")], {
+      encoding: "utf8",
+    }).trim()
+    if (copiedLink !== join(packSource, "packages/connector-protocol")) {
+      fail(
+        `the packing copy's @pdpp/connector-protocol resolves to ${copiedLink}, outside the copy — the ` +
+          `pack would not be of the tag's own sources`
+      )
+    }
+    log(`packing copy at ${packSource}, workspace links resolve inside it`)
+
     const env = {
       ...process.env,
       GITHUB_REF: "refs/heads/main",
       CONVERGE_RELEASE_TAG: TAG,
       CONVERGE_RELEASE_DRY_RUN: "true",
-      CONVERGE_PACKAGE_SOURCE: tagged,
+      CONVERGE_PACKAGE_SOURCE: packSource,
     }
 
     // ---- THE REHEARSAL ----------------------------------------------------
     log(`running the real driver from ${tooling}`)
     let stdout
+    let stderr
     try {
-      ;({ stdout } = await run("node", ["--import", "tsx", "scripts/converge-release.ts"], {
+      ;({ stdout, stderr } = await run("node", ["--import", "tsx", "scripts/converge-release.ts"], {
         cwd: tooling,
         env,
         maxBuffer: 32 * 1024 * 1024,
@@ -162,6 +249,11 @@ async function main() {
       fail(`the driver did not complete from the tooling checkout:\n${error.stdout ?? ""}${error.stderr ?? error}`)
     }
     process.stdout.write(stdout)
+    if (stderr.trim()) process.stderr.write(stderr)
+    // npm splits its publish output across both streams — the prepack banners
+    // and the packed spec go to stdout, the "Publishing to ... (dry-run)"
+    // notice to stderr — so the no-write assertion has to read both.
+    const output = stdout + stderr
 
     // It reached the point of deciding what to publish. A run that refused on
     // a bad root, or that found nothing missing, has not exercised the join.
@@ -169,15 +261,15 @@ async function main() {
       fail("the driver never reached a publish decision, so nothing was rehearsed")
     }
 
-    // Every package it selected must resolve INSIDE the tagged checkout. This
-    // is the assertion the old YAML test could not make: not "the checkout ref
-    // is the tag", but "the thing about to be published came from the tag".
-    const selected = [...stdout.matchAll(/\[dry-run\] would publish (\S+)@(\S+) from (\S+)/g)]
+    // Every package it packed must resolve INSIDE the tagged tree. This is the
+    // assertion the old YAML test could not make: not "the checkout ref is the
+    // tag", but "the thing that got packed came from the tag".
+    const selected = [...stdout.matchAll(/\[dry-run\] publishing (\S+)@(\S+) from (\S+)/g)]
     if (selected.length === 0) {
       fail("no package was selected for publication — the rehearsal exercised no package root")
     }
     for (const [, name, version, root] of selected) {
-      if (!root.startsWith(tagged + "/")) {
+      if (!root.startsWith(packSource + "/")) {
         fail(`${name}@${version} would be published from ${root}, which is outside the tagged checkout`)
       }
       if (!existsSync(join(root, "package.json"))) {
@@ -186,9 +278,58 @@ async function main() {
       log(`selected ${name}@${version} from the tagged tree`)
     }
 
+    // ---- PREPACK ACTUALLY RAN ---------------------------------------------
+    // The whole point of the extension. Each selected package must have got
+    // past its own prepack and produced a tarball, which is where this job
+    // died before: connector-protocol is live, so it is skipped, so its dist/
+    // was never built, so collector-runtime's prepack failed on TS2307.
+    //
+    // Asserted from npm's OWN output and the package's OWN prepack banner, not
+    // from the driver's logging. The driver saying "packed" proves only that
+    // the command exited 0; `> <pkg>@<version> prepack` is npm-run-script
+    // announcing it is running that package's prepack, and `+ <pkg>@<version>`
+    // is npm reporting the spec it packed. A run that returned before
+    // `npm publish` — the previous behaviour — can emit neither.
+    for (const [, name, version] of selected) {
+      const literal = `${name}@${version}`.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")
+      if (!new RegExp(`^> ${literal} prepack$`, "m").test(output)) {
+        fail(
+          `${name}@${version} never ran its prepack. The build-and-pack path did not execute, so this ` +
+            `rehearsal is back to proving only the selection.`
+        )
+      }
+      if (!new RegExp(`^\\+ ${literal}$`, "m").test(output)) {
+        fail(`${name}@${version} ran prepack but npm never reported a packed package`)
+      }
+      if (!new RegExp(`\\[dry-run\\] packed ${literal}`).test(output)) {
+        fail(`${name}@${version} did not complete its pack step`)
+      }
+      log(`packed ${name}@${version} — prepack ran in the tagged tree`)
+    }
+
+    // The live sibling was built here rather than by its own (skipped) publish.
+    if (!/building already-live @pdpp\/connector-protocol in the tagged checkout/.test(output)) {
+      fail(
+        "the driver never built the already-live sibling. If a pack still succeeded, the tagged tree had " +
+          "a dist/ from somewhere this rehearsal did not put there, and it is no longer testing the " +
+          "converge's actual starting state."
+      )
+    }
+
     // No-publish, checked against the output rather than assumed from the flag.
-    if (/^\[converge-release\] published /m.test(stdout)) {
+    if (/^\[converge-release\] published /m.test(output)) {
       fail("the rehearsal reported a completed publish — it was supposed to stop before any write")
+    }
+    // npm's own account of what it did, per selected package. The driver's
+    // `--dry-run` flag is a claim; this is npm confirming it took the no-write
+    // path, and it is the assertion that keeps "the pack executed" from ever
+    // meaning "something was published".
+    const dryRunNotices = (output.match(/Publishing to \S+ with tag \S+ and public access \(dry-run\)/g) ?? []).length
+    if (dryRunNotices < selected.length) {
+      fail(
+        `npm reported ${dryRunNotices} dry-run publishes for ${selected.length} packed packages — ` +
+          `refusing to treat this as a no-write rehearsal`
+      )
     }
 
     // ---- THE DISCRIMINATING CASE ------------------------------------------
@@ -256,11 +397,68 @@ async function main() {
     }
     log("discrimination holds: refuses to infer a package source from its own checkout")
 
-    log("PASS — current tooling converges the old tag's packages, cannot run from the tag alone, and")
-    log("       will not substitute its own tree when the tagged source is not named")
+    // ---- THE THIRD DISCRIMINATING CASE ------------------------------------
+    // The pack above only means something if a pack WITHOUT the sibling build
+    // fails. Otherwise the build step could be dead code and every assertion
+    // would stay green — which is precisely how the previous head passed while
+    // being unrunnable.
+    //
+    // So: a second fresh copy, the sibling build deliberately NOT performed,
+    // the driver's exact publish command otherwise. It must fail, and it must
+    // fail with TS2307 on the unbuilt sibling — not with some other error that
+    // happens to be non-zero.
+    log("discrimination: packing the dependent without the already-live sibling's build")
+    const unbuilt = join(workdir, "tagged-package-source-unbuilt")
+    execFileSync("cp", ["-a", tagged, unbuilt])
+    rmSync(join(unbuilt, "packages/connector-protocol/dist"), { recursive: true, force: true })
+    // Same version rewrite the driver applies, so the failure cannot be npm
+    // refusing the placeholder version before it ever reaches prepack.
+    const manifestPath = join(unbuilt, "packages/collector-runtime/package.json")
+    writeFileSync(
+      manifestPath,
+      readFileSync(manifestPath, "utf8").replace(/^(\s*"version"\s*:\s*)"[^"]*"/m, `$1"${TAG.slice(1)}"`)
+    )
+    let packFailed = false
+    let packDetail = ""
+    try {
+      await run(join(tooling, "node_modules/.bin/npm"), [
+        "publish",
+        join(unbuilt, "packages/collector-runtime"),
+        "--tag",
+        "latest",
+        "--dry-run",
+      ], { cwd: unbuilt, env: process.env, maxBuffer: 32 * 1024 * 1024 })
+    } catch (error) {
+      packFailed = true
+      packDetail = String(error.stdout ?? "") + String(error.stderr ?? error)
+    }
+    if (!packFailed) {
+      fail(
+        "@pdpp/collector-runtime packed with the already-live sibling UNBUILT. The sibling build this " +
+          "rehearsal claims to verify is therefore not what makes the pack succeed, and the pass above " +
+          "does not establish that a converge can publish."
+      )
+    }
+    if (!/TS2307/.test(packDetail)) {
+      fail(`the unbuilt-sibling pack failed, but not on the missing type declarations:\n${packDetail}`)
+    }
+    log("discrimination holds: TS2307 without the sibling build, packs with it")
+
+    log("PASS — current tooling builds the old tag's live siblings, packs its missing packages through")
+    log("       their real prepacks, cannot run from the tag alone, will not substitute its own tree,")
+    log("       and fails loudly if the sibling build is removed")
   } finally {
     rmSync(workdir, { recursive: true, force: true })
   }
 }
 
-await main()
+try {
+  await main()
+} catch (error) {
+  if (error instanceof RehearsalFailure) {
+    process.stderr.write(`[rehearsal] FAIL: ${error.message}\n`)
+  } else {
+    process.stderr.write(`[rehearsal] FAIL: ${error?.stack ?? error}\n`)
+  }
+  process.exitCode = 1
+}
