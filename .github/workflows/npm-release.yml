@@ -79,7 +79,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -158,7 +158,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -220,7 +220,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -338,12 +338,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
-      # Also provides node_modules/.bin/npm — the npm 11 that
-      # converge-release.ts publishes through. The runner's ambient npm is 10,
-      # which has no OIDC trusted-publishing support at all.
+      # Also provides node_modules/.bin/npm, which converge-release.ts
+      # publishes through. That indirection predates this pin: it was added
+      # when this job ran Node 22, whose bundled npm 10 has no OIDC
+      # trusted-publishing support at all. Node 24.21.0 bundles npm 11.19.0,
+      # so the ambient npm now supports it too; the dependency is kept
+      # because converge-release.ts resolves that path explicitly.
       - name: Install dependencies
         run: npm ci
 
@@ -385,7 +388,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies

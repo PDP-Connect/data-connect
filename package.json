@@ -10,7 +10,7 @@
     "reference-implementation/vendor/*"
   ],
   "engines": {
-    "node": ">=24.14.0"
+    "node": ">=24.15.0"
   },
   "scripts": {
     "dev": "vite",

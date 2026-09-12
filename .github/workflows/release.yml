@@ -65,7 +65,7 @@ jobs:
           # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
           # during `npm ci`, ignoring that config (npm/cli#2839).
           #
-          # The npm side of that blocker is now gone: this workflow runs Node 24.14.1,
+          # The npm side of that blocker is now gone: this workflow runs Node 24.21.0,
           # which bundles npm 11.11.0 and node-gyp 12.2.0 — past the node-gyp 12.1.0 that
           # added VS2026 detection. (The old note here said to wait for Node 22 LTS to
           # bundle npm>=11.6.3; that will not happen, because a Node line does not take a
@@ -105,7 +105,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Setup Rust

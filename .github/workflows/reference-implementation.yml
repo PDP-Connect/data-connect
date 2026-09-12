@@ -15,7 +15,7 @@ name: reference-implementation
 # `reference-implementation gate` context stays the one thing to promote if this is ever
 # made a required check here -- as of 2026-09-11 it is not; DCO is main's only required
 # status check. Adapted for this repo's package manager (npm workspaces, not pnpm) and
-# Node floor (>=24.14.0, this repo's package.json engines field, matching pdpp's
+# Node floor (>=24.15.0, this repo's package.json engines field, matching pdpp's
 # node-version 24).
 #
 # pdpp's version also gates apps/console and several owner-journey/stream-audit scripts
@@ -139,7 +139,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -176,7 +176,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.14.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
