@@ -150,9 +150,28 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
+      # Checks out whatever tree this run will actually publish: THE TAG on a
+      # converge, the push head on an ordinary release. Same conditional-ref
+      # shape as .github/workflows/release.yml's checkout, terminating in an
+      # explicit `github.sha` rather than an empty string so the ordinary path
+      # pins the exact commit that triggered the run instead of re-resolving a
+      # branch name that may have moved.
+      #
+      # Verifying the push head on a converge checks the wrong tree. The
+      # converge job below deliberately builds the tag (see its checkout step),
+      # so a head-checked-out `quality` gates code that will never be published
+      # while the code that WILL be published goes unverified — in both
+      # directions. That is not hypothetical: it is what failed run
+      # 34654643962. The artifact receipts in packages/*/artifact.json are
+      # per-tree by construction, and main had moved past v2.2.1 (a change to
+      # connector-protocol's auth.ts regenerated that package's receipt), so
+      # `artifact:verify` compared main's connector-protocol sources against
+      # the tag's collector-runtime receipt and exited 1 on a release whose own
+      # tree is internally consistent.
+      - name: Checkout the tree being released
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ (needs.resolve-version.outputs.mode == 'converge' && needs.resolve-version.outputs.converge-tag) || github.sha }}
           persist-credentials: false
 
       - name: Setup Node.js
@@ -194,6 +213,46 @@ jobs:
       - name: Verify local-collector package
         run: npm run --workspace packages/local-collector verify
 
+  # Tests the release pipeline's own configuration, as opposed to `quality`,
+  # which tests the artifacts being published. The distinction decides the
+  # checkout: `quality` follows the tree being released (the tag on a
+  # converge), but a policy test has to run against THIS repository's current
+  # workflow file — the one that will actually execute — not against whatever
+  # config was committed at a tag cut days earlier. Running these inside
+  # `quality` would mean a converge silently tested an old copy of the rules,
+  # and any rule added after the tag would not run at all.
+  release-policy:
+    name: release pipeline policy checks
+    needs: resolve-version
+    if: >-
+      needs.resolve-version.outputs.new-release-published == 'true' ||
+      needs.resolve-version.outputs.mode == 'converge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Asserts `quality` verifies the same tree the publishing job builds.
+      # Without this, the two checkouts can drift apart again and the only
+      # gate in front of an immutable publish goes quietly out of alignment.
+      - name: Test quality job verifies the released tree
+        run: npx vitest run scripts/npm-release-quality-checkout.test.ts
+
       - name: Test commit-analyzer scope gate
         run: npx vitest run scripts/npm-release-commit-analyzer.test.ts
 
@@ -202,7 +261,7 @@ jobs:
 
   release:
     name: publish to npm and GitHub
-    needs: [resolve-version, quality]
+    needs: [resolve-version, quality, release-policy]
     if: needs.resolve-version.outputs.new-release-published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -225,6 +284,35 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # THE SAME HAZARD THE CONVERGE PATH HAS, on this path.
+      #
+      # Each package's prepack builds it during its own `npm publish`, and the
+      # dependents typecheck against their siblings' BUILT dist/ (their
+      # manifests' exports resolve to ./dist/*.d.ts). On a FIRST run that is
+      # self-sufficient: all three publish, in dependency order, so each
+      # sibling's dist/ exists by the time a dependent packs.
+      #
+      # On a RE-RUN it is not. scripts/idempotent-npm-publish.mjs SKIPs a
+      # package that is already live — which is the property that makes a
+      # partially-published release re-runnable — and a skipped publish runs no
+      # prepack, so that sibling's dist/ never appears. @semantic-release/npm's
+      # `prepare` does not fill the gap: with no `tarballDir` configured it
+      # only writes the version field, it does not pack. So the exact state
+      # this pipeline exists to recover from (connector-protocol live, the
+      # other two missing) would fail here in collector-runtime's prepack with
+      # TS2307, the same way it does on the converge path.
+      #
+      # Building all three up front removes the dependence on publish order
+      # entirely: every prepack re-runs its own build anyway, and finds its
+      # siblings' dist/ already there whether their publishes ran or were
+      # skipped. Cheap and unconditional, rather than conditional on a registry
+      # state this job would otherwise have to re-derive.
+      - name: Build the lockstep packages so every prepack finds its siblings
+        run: |
+          npm run build --workspace packages/connector-protocol
+          npm run build --workspace packages/collector-runtime
+          npm run build --workspace packages/local-collector
 
       # Publishes through the same plugin chain either way. The forced path
       # must re-apply the forced rules here: this job runs a fresh
@@ -305,7 +393,7 @@ jobs:
   # thing actually left outstanding: the publishing.
   converge:
     name: converge a partially-published release
-    needs: [resolve-version, quality]
+    needs: [resolve-version, quality, release-policy]
     if: >-
       needs.resolve-version.outputs.mode == 'converge' &&
       github.ref == 'refs/heads/main'
@@ -319,37 +407,96 @@ jobs:
       id-token: write # OIDC trusted publishing — no NPM_TOKEN
 
     steps:
-      # Checks out THE TAG, not the push head. A tag records a commit as well
-      # as a version, and the packages this job publishes must be built from
-      # the tree that tag names — the same tree the ordinary release would
-      # have published had it not crashed partway. Building from the push head
-      # would ship code the tag never covered under the tag's immutable
-      # version: @pdpp/local-collector vendors connector-protocol's built
-      # dist/ into its own tarball, so a head-built local-collector@X can
-      # embed protocol code that the already-published connector-protocol@X
-      # does not contain.
-      - name: Checkout the tag being converged
+      # TWO CHECKOUTS, because a converge needs two things that live at two
+      # different commits, and no single ref supplies both.
+      #
+      # The PACKAGE SOURCE must be the tag's. A tag records a commit as well as
+      # a version, and the packages this job publishes must be built from the
+      # tree that tag names — the same tree the ordinary release would have
+      # published had it not crashed partway. Building from the push head would
+      # ship code the tag never covered under the tag's immutable version:
+      # @pdpp/local-collector vendors connector-protocol's built dist/ into its
+      # own tarball, so a head-built local-collector@X can embed protocol code
+      # that the already-published connector-protocol@X does not contain.
+      #
+      # The RELEASE TOOLING must be current. scripts/converge-release.ts did
+      # not exist when v2.2.1 was cut — `scripts/` at 07173d030 contains no
+      # converge-release.ts — because the driver and the tag it has to converge
+      # arrived in the opposite order: the tag is what revealed the need for
+      # the driver. Running `node --import tsx scripts/converge-release.ts`
+      # inside the tag's checkout therefore does not run a stale driver, it
+      # runs no driver at all.
+      #
+      # The npm the publish authenticates through comes from the tooling
+      # checkout too, for a DIFFERENT reason — not because the tag's toolchain
+      # is too old. At v2.2.1 it is not: that tag's own lockfile pins
+      # node_modules/npm at 11.19.0 and its install provides tsx and tsc
+      # (verified by execution at 07173d030). The reason is that a converge is
+      # aimed at a historical tree by definition, and any tag old enough to
+      # need one may predate the OIDC requirement it is being converged under.
+      # Taking the publishing npm from current tooling makes that a property of
+      # the pipeline rather than a coincidence of whatever the tag pinned.
+      #
+      # Collapsing the two is not available in either direction. One checkout
+      # at the tag has no executor; one at the head publishes main's sources
+      # under the tag's version, which npm immutability makes permanent. So
+      # they are separate directories, and the driver is handed the package
+      # source explicitly rather than inferring it from its own cwd.
+      - name: Checkout the tag being converged (package source)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-version.outputs.converge-tag }}
           fetch-depth: 0
           persist-credentials: false
+          path: tagged-package-source
 
+      - name: Checkout the current release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: release-tooling
+
+      # cache-dependency-path is explicit because this job now has TWO
+      # lockfiles. setup-node's default glob assumes one at the workspace root
+      # and finds none here, which disables the cache silently; naming both
+      # keys it on the pair, so a change to either invalidates it.
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
           cache: npm
+          cache-dependency-path: |
+            tagged-package-source/package-lock.json
+            release-tooling/package-lock.json
 
-      # Also provides node_modules/.bin/npm — the npm 11 that
-      # converge-release.ts publishes through. The runner's ambient npm is 10,
-      # which has no OIDC trusted-publishing support at all.
-      - name: Install dependencies
+      # The tag's own dependency graph, installed from the tag's own lockfile.
+      # This is what each package's prepack builds against when `npm publish`
+      # packs it, so it must be the tree the tag committed to and not a
+      # resolution from current main.
+      - name: Install the tagged package source's dependencies
+        working-directory: tagged-package-source
         run: npm ci
 
+      # The driver's own dependencies, resolved from the CURRENT lockfile:
+      # tsx, which runs the TypeScript entrypoint, and node_modules/.bin/npm —
+      # the npm 11 converge-release.ts publishes through. The runner's ambient
+      # npm is 10, which has no OIDC trusted-publishing support at all. The
+      # tag's install may or may not also provide an npm 11 — v2.2.1's does —
+      # but the converge must not depend on what an arbitrary historical
+      # lockfile happens to pin, so the publishing npm always comes from here.
+      - name: Install the release tooling's dependencies
+        working-directory: release-tooling
+        run: npm ci
+
+      # Run from the tooling checkout, pointed at the tagged one. Both roles
+      # are named: the driver resolves its own location for tooling and takes
+      # CONVERGE_PACKAGE_SOURCE for everything it publishes. It refuses rather
+      # than defaulting if that variable is absent.
       - name: Publish the missing packages
+        working-directory: release-tooling
         env:
           CONVERGE_RELEASE_TAG: ${{ needs.resolve-version.outputs.converge-tag }}
+          CONVERGE_PACKAGE_SOURCE: ${{ github.workspace }}/tagged-package-source
         run: node --import tsx scripts/converge-release.ts
 
   # The postcondition of the whole pipeline, on BOTH paths: all three lockstep

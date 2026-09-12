@@ -43,19 +43,29 @@ function makeStubNpm(spec: StubSpec): {
   dir: string
   publishLog: string
   manifestLog: string
+  buildLog: string
+  dryRunLog: string
+  argvLog: string
   cleanup: () => void
 } {
   const dir = mkdtempSync(join(tmpdir(), "atomic-npm-"))
   const publishLog = join(dir, "publish.log")
   const manifestLog = join(dir, "manifest.log")
+  const buildLog = join(dir, "build.log")
+  const argvLog = join(dir, "argv.log")
   writeFileSync(publishLog, "")
   writeFileSync(manifestLog, "")
+  writeFileSync(buildLog, "")
+  writeFileSync(argvLog, "")
   writeFileSync(join(dir, "spec.json"), JSON.stringify(spec))
 
   const shim = `#!/usr/bin/env node
 const { appendFileSync, readFileSync } = require("node:fs")
 const spec = JSON.parse(readFileSync(${JSON.stringify(join(dir, "spec.json"))}, "utf8"))
 const argv = process.argv.slice(2)
+// Every invocation's full argv, so a test can assert on the flags the driver
+// passed rather than inferring them from behaviour.
+appendFileSync(${JSON.stringify(argvLog)}, argv.join(" ") + "\\n")
 
 if (argv[0] === "view") {
   const target = argv[1]
@@ -74,15 +84,50 @@ if (argv[0] === "view") {
   process.exit(1)
 }
 
+// The already-live siblings' builds. A converge skips the live packages, so
+// their prepacks never run and their dist/ never appears — the dependent's
+// own prepack then fails on the missing type declarations. The driver builds
+// them itself; this records which ones, and creates the dist/ the driver
+// then asserts on, so the suite can check both the WHICH and the ordering
+// without running a real tsc.
+if (argv[0] === "run" && argv[1] === "build" && argv[2] === "--workspace") {
+  const { mkdirSync, writeFileSync } = require("node:fs")
+  const { resolve } = require("node:path")
+  const workspace = argv[3]
+  appendFileSync(${JSON.stringify(buildLog)}, workspace + "\\n")
+  const dist = resolve(process.cwd(), workspace, "dist")
+  mkdirSync(dist, { recursive: true })
+  writeFileSync(resolve(dist, "index.d.ts"), "")
+  process.stdout.write("stub npm: built " + workspace + "\\n")
+  process.exit(0)
+}
+
 if (argv[0] === "publish") {
-  const pkgRoot = argv[1]
-  appendFileSync(${JSON.stringify(publishLog)}, pkgRoot + "\\n")
+  // Real npm takes either a relative or an ABSOLUTE directory here, and the
+  // converge driver passes an absolute one: its package root is the tagged
+  // checkout, which is not under its cwd. Resolved the way npm resolves it,
+  // then logged RELATIVE to cwd so the assertions keep naming packages rather
+  // than temp-directory paths.
+  const { resolve, relative } = require("node:path")
+  const absolute = resolve(process.cwd(), argv[1])
+  const pkgRoot = relative(process.cwd(), absolute) || argv[1]
+  // A dry run reaches this command too — that is the point of it, since
+  // prepack is where the converge used to die — but it writes nothing to the
+  // registry, so it must not be recorded as a publish. Logged separately so
+  // "published nothing" assertions stay meaningful while still proving the
+  // pack path executed.
+  const isDryRun = argv.includes("--dry-run")
+  appendFileSync(isDryRun ? ${JSON.stringify(join(dir, "dry-run.log"))} : ${JSON.stringify(publishLog)}, pkgRoot + "\\n")
+  if (isDryRun) {
+    process.stdout.write("+ dry-run " + pkgRoot + "\\n")
+    process.exit(0)
+  }
   // Records the manifest EXACTLY as it stands when publish is invoked —
   // which is what npm would pack. This is how the suite sees the
   // prepare-pipeline edits (version, dependency pin) rather than trusting
   // that they were made.
   try {
-    const manifest = JSON.parse(readFileSync(process.cwd() + "/" + pkgRoot + "/package.json", "utf8"))
+    const manifest = JSON.parse(readFileSync(absolute + "/package.json", "utf8"))
     appendFileSync(${JSON.stringify(manifestLog)}, JSON.stringify({
       name: manifest.name,
       version: manifest.version,
@@ -121,8 +166,16 @@ process.exit(2)
     dir,
     publishLog,
     manifestLog,
+    buildLog,
+    dryRunLog: join(dir, "dry-run.log"),
+    argvLog,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
+}
+
+// Full argv of each stub npm invocation, in order.
+function readArgvLog(path: string): string[] {
+  return readFileSync(path, "utf8").split("\n").map(l => l.trim()).filter(Boolean)
 }
 
 function readPublishLog(path: string): string[] {
@@ -144,9 +197,64 @@ function readManifestLog(path: string): PublishedManifest[] {
     .map(l => JSON.parse(l) as PublishedManifest)
 }
 
-// Runs converge-release.ts with a stubbed npm, returning its outcome rather
-// than throwing, so a refusal can be asserted on.
-function runConverge(
+// The converge path's two roots, staged as two separate real directories.
+//
+// They are separate in production because they are separate in time: the
+// PACKAGE SOURCE is a checkout of the tag being converged, and the TOOLING is
+// a checkout of the current revision that supplies the driver and the npm it
+// publishes through. Collapsing them here would make this suite pass on an
+// arrangement CI cannot run — which is exactly what happened before: every
+// test below was green while the real job could not resolve its own
+// entrypoint, because the harness handed the driver a cwd that had everything.
+//
+// So the driver is COPIED into the tooling root and executed from there. Its
+// TOOLING_ROOT comes from import.meta.url, so running the copy is what makes
+// resolveNpmBin look in the tooling root — the same resolution CI performs.
+function stageConverge(
+  stubDir: string | null
+): { toolingRoot: string; packageSource: string; driver: string; cleanup: () => void } {
+  const toolingRoot = mkdtempSync(join(tmpdir(), "atomic-tooling-"))
+  const packageSource = mkdtempSync(join(tmpdir(), "atomic-pkgsrc-"))
+
+  // Only packages/ — deliberately no scripts/, mirroring the tag, whose tree
+  // has package sources and no converge-release.ts.
+  cpSync(join(REPO_ROOT, "packages"), join(packageSource, "packages"), { recursive: true })
+
+  mkdirSync(join(toolingRoot, "scripts"), { recursive: true })
+  for (const file of ["converge-release.ts", "release-registry-state.ts"]) {
+    cpSync(join(REPO_ROOT, "scripts", file), join(toolingRoot, "scripts", file))
+  }
+  // The driver is ESM and uses top-level await, so the tooling root needs the
+  // `"type": "module"` its real checkout carries — without it tsx transforms
+  // the entrypoint as CJS and it fails to parse. A real converge checkout has
+  // this by construction; the stage has to supply it deliberately.
+  writeFileSync(
+    join(toolingRoot, "package.json"),
+    JSON.stringify({ name: "converge-tooling-stage", private: true, type: "module" })
+  )
+
+  // `null` stages a tooling root with no local npm, to exercise the refusal in
+  // resolveNpmBin.
+  if (stubDir) {
+    const binDir = join(toolingRoot, "node_modules", ".bin")
+    mkdirSync(binDir, { recursive: true })
+    cpSync(join(stubDir, "npm"), join(binDir, "npm"))
+    chmodSync(join(binDir, "npm"), 0o755)
+  }
+
+  return {
+    toolingRoot,
+    packageSource,
+    driver: join(toolingRoot, "scripts", "converge-release.ts"),
+    cleanup: () => {
+      rmSync(toolingRoot, { recursive: true, force: true })
+      rmSync(packageSource, { recursive: true, force: true })
+    },
+  }
+}
+
+function execConverge(
+  stage: { toolingRoot: string; packageSource: string; driver: string },
   stubDir: string,
   env: Record<string, string | undefined>
 ): { status: number; stdout: string; stderr: string } {
@@ -154,71 +262,59 @@ function runConverge(
   // own install and against an isolated toolchain (this repo's `npm ci` cannot
   // complete in every environment).
   const tsxEntry = require.resolve("tsx")
-
-  // converge-release.ts resolves npm at <cwd>/node_modules/.bin/npm and edits
-  // manifests under <cwd>/packages. Running it against REPO_ROOT would mean
-  // rewriting the real working tree on every publishing test. So each run gets
-  // a scratch cwd holding a copy of packages/ and the stub npm at the path
-  // resolveNpmBin looks for — the same code path CI takes, without the
-  // collateral damage.
-  const cwd = mkdtempSync(join(tmpdir(), "atomic-cwd-"))
   try {
-    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
-    mkdirSync(join(cwd, "node_modules", ".bin"), { recursive: true })
-    cpSync(join(stubDir, "npm"), join(cwd, "node_modules", ".bin", "npm"))
-    chmodSync(join(cwd, "node_modules", ".bin", "npm"), 0o755)
-
-    try {
-      const stdout = execFileSync(
-        process.execPath,
-        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
-        {
-          cwd,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${stubDir}:${process.env.PATH ?? ""}`,
-            ...env,
-          },
-        }
-      )
-      return { status: 0, stdout, stderr: "" }
-    } catch (error) {
-      const e = error as { status?: number; stdout?: string; stderr?: string }
-      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
-    }
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
+    const stdout = execFileSync(process.execPath, ["--import", tsxEntry, stage.driver], {
+      cwd: stage.toolingRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        // The driver branches on GITHUB_ACTIONS, and the suite itself runs
+        // inside GitHub Actions, so inheriting it silently rewrites the
+        // scenario under test: the non-loopback case hit the
+        // running-in-Actions refusal instead of the loopback guard, passing
+        // locally and failing in CI. Cleared here so a test that cares about
+        // that branch has to say so (see the GITHUB_ACTIONS case below), and
+        // so a test that does not is exercising the same guard everywhere.
+        GITHUB_ACTIONS: undefined,
+        PATH: `${stubDir}:${process.env.PATH ?? ""}`,
+        CONVERGE_PACKAGE_SOURCE: stage.packageSource,
+        ...env,
+      },
+    })
+    return { status: 0, stdout, stderr: "" }
+  } catch (error) {
+    const e = error as { status?: number; stdout?: string; stderr?: string }
+    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
   }
 }
 
-// A converge run whose cwd deliberately has NO node_modules/.bin/npm, to
-// exercise the refusal in resolveNpmBin.
+// Runs converge-release.ts with a stubbed npm, returning its outcome rather
+// than throwing, so a refusal can be asserted on.
+function runConverge(
+  stubDir: string,
+  env: Record<string, string | undefined>
+): { status: number; stdout: string; stderr: string } {
+  const stage = stageConverge(stubDir)
+  try {
+    return execConverge(stage, stubDir, env)
+  } finally {
+    stage.cleanup()
+  }
+}
+
+// A converge run whose TOOLING root deliberately has no node_modules/.bin/npm,
+// to exercise the refusal in resolveNpmBin. The package source is unaffected:
+// the npm that matters is the tooling checkout's, because the tag's own
+// lockfile predates the npm 11 that OIDC publishing requires.
 function runConvergeWithoutLocalNpm(
   stubDir: string,
   env: Record<string, string | undefined>
 ): { status: number; stdout: string; stderr: string } {
-  const tsxEntry = require.resolve("tsx")
-  const cwd = mkdtempSync(join(tmpdir(), "atomic-nonpm-"))
+  const stage = stageConverge(null)
   try {
-    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
-    try {
-      const stdout = execFileSync(
-        process.execPath,
-        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
-        {
-          cwd,
-          encoding: "utf8",
-          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, ...env },
-        }
-      )
-      return { status: 0, stdout, stderr: "" }
-    } catch (error) {
-      const e = error as { status?: number; stdout?: string; stderr?: string }
-      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
-    }
+    return execConverge(stage, stubDir, env)
   } finally {
-    rmSync(cwd, { recursive: true, force: true })
+    stage.cleanup()
   }
 }
 
@@ -303,6 +399,93 @@ describe("the half-published v2.2.1 release currently in the repository", () => 
       expect(published).not.toContain("packages/connector-protocol")
       expect(published).toEqual(["packages/collector-runtime", "packages/local-collector"])
       expect(result.stdout).toContain("skipping @pdpp/connector-protocol")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The defect that made the previous head unrunnable. A converge skips the
+  // live siblings, so nothing builds their dist/, so the dependent's prepack
+  // fails with TS2307 before packing. Reproduced at v2.2.1 against the real
+  // tree; asserted here on the driver's behaviour.
+  it("builds the already-live sibling the dependents typecheck against", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+
+      const built = readPublishLog(stub.buildLog)
+      expect(
+        built,
+        "connector-protocol is live, so its own prepack never runs — the converge must build it, or " +
+          "collector-runtime's prepack fails on the missing dist/"
+      ).toContain("packages/connector-protocol")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // Builds every live sibling a selected package declares, not just the one
+  // v2.2.1 happens to need: local-collector declares both, so with both live
+  // both are built. Read from the manifests rather than hardcoded, so a tag
+  // with different edges is handled by the same code.
+  it("builds every already-live sibling the selected package declares", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "published", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+      const built = readPublishLog(stub.buildLog)
+      expect(built).toContain("packages/connector-protocol")
+      expect(built).toContain("packages/collector-runtime")
+      expect(readPublishLog(stub.publishLog)).toEqual(["packages/local-collector"])
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // Only the SKIPPED siblings. One that is itself being published builds
+  // during its own prepack, earlier in publish order, and pre-building it here
+  // would run its build before this run's manifest edits.
+  it("does not pre-build a sibling that is itself being published", () => {
+    const stub = makeStubNpm({
+      // connector-protocol live; collector-runtime and local-collector both
+      // selected. local-collector declares collector-runtime, which is in the
+      // publish set — so it must NOT be pre-built for local-collector.
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, MAIN_ENV)
+      expect(result.status).toBe(0)
+      expect(readPublishLog(stub.buildLog)).not.toContain("packages/collector-runtime")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The dry run has to reach prepack, because prepack is where this job died.
+  // A dry run that returns before `npm publish` is a rehearsal of the part
+  // that already worked — that is precisely how the previous head went green
+  // while being unrunnable.
+  it("reaches npm publish on the dry-run path, writing nothing", () => {
+    const stub = makeStubNpm({
+      view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+    })
+    try {
+      const result = runConverge(stub.dir, { ...MAIN_ENV, CONVERGE_RELEASE_DRY_RUN: "true" })
+      expect(result.status).toBe(0)
+      // It invoked the real publish command, with --dry-run...
+      expect(readPublishLog(stub.dryRunLog)).toEqual([
+        "packages/collector-runtime",
+        "packages/local-collector",
+      ])
+      // ...and never a publish that would have written.
+      expect(readPublishLog(stub.publishLog)).toEqual([])
+      // And it built the live sibling first, or the real prepack would fail.
+      expect(readPublishLog(stub.buildLog)).toContain("packages/connector-protocol")
     } finally {
       stub.cleanup()
     }
@@ -653,6 +836,153 @@ describe("the npm converge publishes through", () => {
     } finally {
       stub.cleanup()
     }
+  })
+
+  // THE ACCEPTANCE ESCAPE HATCH'S FENCE.
+  //
+  // scripts/converge-release-acceptance.mjs needs the driver to pass
+  // `--provenance=false`, because the packages' own publishConfig forces
+  // provenance on and npm then refuses off a CI runner — so the real publish
+  // path could not be exercised at all. That hatch disables a real security
+  // property, so the fence around it is asserted here rather than trusted.
+  describe("the acceptance-mode registry override", () => {
+    const LOOPBACK = "http://127.0.0.1:9999/"
+
+    // Every non-loopback shape a plausible misconfiguration takes, including
+    // ones that merely CONTAIN a loopback spelling. A substring check would
+    // accept the last three, and each of them resolves off this machine.
+    it.each([
+      "https://registry.npmjs.org/",
+      "http://registry.internal.example.com/",
+      "http://127.0.0.1.example.com/",
+      "http://localhost.example.com/",
+      "http://evil.example.com/?h=127.0.0.1",
+    ])("refuses the non-loopback registry %s rather than falling back", registry => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: registry,
+        })
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toMatch(/must point at a loopback address/)
+        // Fails closed: nothing was published on the way to the refusal.
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+        // And the refusal beat every network call. The stub records EVERY
+        // invocation's argv, including the `npm view` registry reads, so an
+        // empty log is positive evidence that the driver refused before it
+        // could contact anything — not merely that it published nothing.
+        // This is the assertion the guard's original position failed: it
+        // validated the value only after lockstepRegistryState() had already
+        // run three `npm view` calls against a real registry.
+        expect(readArgvLog(stub.argvLog)).toEqual([])
+      } finally {
+        stub.cleanup()
+      }
+    })
+
+    // The other direction, without which the refusals above could be produced
+    // by a guard that rejects everything. A loopback value is ACCEPTED: the
+    // run completes, publishes the two missing packages, and carries the
+    // provenance override that is the whole reason the hatch exists.
+    it.each(["http://127.0.0.1:9999/", "http://localhost:9999/", "http://[::1]:9999/"])(
+      "accepts the loopback registry %s and publishes through it",
+      registry => {
+        const stub = makeStubNpm({
+          view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+        })
+        try {
+          const result = runConverge(stub.dir, {
+            ...MAIN_ENV,
+            CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: registry,
+          })
+          expect(result.status).toBe(0)
+          expect(result.stderr).not.toMatch(/must point at a loopback address/)
+          expect(readPublishLog(stub.publishLog)).toEqual([
+            "packages/collector-runtime",
+            "packages/local-collector",
+          ])
+          expect(readArgvLog(stub.argvLog).join("\n")).toMatch(/--provenance=false/)
+        } finally {
+          stub.cleanup()
+        }
+      }
+    )
+
+    // The one machine where honouring it would matter is the one that does
+    // real releases, so there it is unreachable. GITHUB_ACTIONS is set
+    // explicitly rather than inherited: execConverge clears it, because this
+    // suite itself runs inside Actions and the inherited value was silently
+    // turning the non-loopback case above into a second copy of this one.
+    it("refuses outright inside GitHub Actions", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: LOOPBACK,
+          GITHUB_ACTIONS: "true",
+        })
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toMatch(/set inside GitHub Actions/)
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+      } finally {
+        stub.cleanup()
+      }
+    })
+
+    // THE DEFECT THAT HID THE LOOPBACK GUARD FROM CI, asserted directly.
+    //
+    // The suite runs inside GitHub Actions, so before execConverge cleared
+    // GITHUB_ACTIONS every case in this describe block inherited it and hit
+    // the running-in-Actions refusal. The non-loopback case failed visibly,
+    // which is how this was found — but the more dangerous reading is that
+    // the loopback guard had NO CI coverage at all: whichever message the
+    // assertion expected, the guard under test was never the one that ran.
+    //
+    // So this pins the harness rather than the driver: with GITHUB_ACTIONS
+    // present in the parent process, a run that does not ask for it must
+    // still reach the loopback guard.
+    it("reaches the loopback guard even when the suite itself runs in Actions", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      const inherited = process.env.GITHUB_ACTIONS
+      process.env.GITHUB_ACTIONS = "true"
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: "https://registry.npmjs.org/",
+        })
+        expect(result.status).not.toBe(0)
+        // The loopback guard's diagnosis, NOT the Actions one.
+        expect(result.stderr).toMatch(/must point at a loopback address/)
+        expect(result.stderr).not.toMatch(/set inside GitHub Actions/)
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+      } finally {
+        if (inherited === undefined) delete process.env.GITHUB_ACTIONS
+        else process.env.GITHUB_ACTIONS = inherited
+        stub.cleanup()
+      }
+    })
+
+    // And an ordinary release must never carry the flag, or provenance would
+    // be silently off on the real publishing path.
+    it("passes no provenance override when unset", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      try {
+        const result = runConverge(stub.dir, MAIN_ENV)
+        expect(result.status).toBe(0)
+        expect(readArgvLog(stub.argvLog).join("\n")).not.toMatch(/--provenance/)
+      } finally {
+        stub.cleanup()
+      }
+    })
   })
 
   it("resolves the local npm path from the working directory", async () => {
