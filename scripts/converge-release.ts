@@ -100,10 +100,44 @@
 // node_modules/.bin is NOT on its PATH and bare "npm" would resolve to the
 // ambient one. resolveNpmBin below makes that explicit rather than
 // accidental.
+//
+// WHY THE TOOLING ROOT AND THE PACKAGE SOURCE ARE TWO DIFFERENT PLACES
+//
+// A converge runs CURRENT tooling against a HISTORICAL tree, and those two
+// requirements point at different commits:
+//
+//   - The package source must be the tag's, exactly. That is the tree the tag
+//     committed to and the only one whose tarballs may carry that version.
+//   - The driver must be the current one. This script did not exist at
+//     v2.2.1 (`scripts/` at 07173d030 has no converge-release.ts at all), and
+//     neither did the npm 11 the publish authenticates through, because both
+//     arrived with the converge path itself.
+//
+// Resolving both from one `process.cwd()` cannot satisfy both. Checking out
+// the tag and running `scripts/converge-release.ts` from it fails with MODULE
+// NOT FOUND — no driver in that tree. The inverse — running from the current
+// checkout so the driver exists — publishes main's package source under the
+// tag's version, which is the immutability violation the tag checkout was
+// added to prevent.
+//
+// So the two are separate inputs, each named explicitly:
+//
+//   TOOLING ROOT   this file's own repository root. Supplies the driver, its
+//                  resolved dependencies, and the npm that can authenticate.
+//                  Derived from import.meta.url, so it is wherever this
+//                  script actually lives — never assumed to be cwd.
+//   PACKAGE SOURCE CONVERGE_PACKAGE_SOURCE: the checkout of the tag. Supplies
+//                  packages/*, and every manifest edit and `npm publish`
+//                  target is resolved beneath it.
+//
+// Neither is allowed to default to the other. Silently falling back would
+// reintroduce exactly one of the two failures above, and npm immutability
+// means the second one cannot be undone.
 
 import { execFile } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import {
   LOCKSTEP_PACKAGES,
@@ -113,13 +147,21 @@ import {
 
 const run = promisify(execFile)
 
-// pkgRoot per package, mirroring .releaserc.yaml's @semantic-release/npm
-// entries. Publish order is this array's order.
+// pkgRoot per package, RELATIVE TO THE PACKAGE SOURCE, mirroring
+// .releaserc.yaml's @semantic-release/npm entries. Publish order is this
+// array's order.
 const PACKAGE_ROOTS: Record<LockstepPackage, string> = {
   "@pdpp/connector-protocol": "packages/connector-protocol",
   "@pdpp/collector-runtime": "packages/collector-runtime",
   "@pdpp/local-collector": "packages/local-collector",
 }
+
+// The repository this script was loaded from — scripts/ is one level under
+// the root. Deliberately derived from the module's own location rather than
+// cwd: the whole point of the split is that the driver runs from somewhere
+// other than the tree it operates on, so cwd is not evidence of where the
+// tooling is.
+export const TOOLING_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 const TAG_PATTERN = /^v(\d+\.\d+\.\d+)$/
 
@@ -168,8 +210,8 @@ export function replaceManifestVersion(raw: string, version: string): string {
   return raw.replace(pattern, `$1${JSON.stringify(version)}`)
 }
 
-function writeManifestVersion(pkgRoot: string, version: string): void {
-  const manifestPath = resolve(process.cwd(), pkgRoot, "package.json")
+function writeManifestVersion(packageSource: string, pkgRoot: string, version: string): void {
+  const manifestPath = resolve(packageSource, pkgRoot, "package.json")
   const raw = readFileSync(manifestPath, "utf8")
   writeFileSync(manifestPath, replaceManifestVersion(raw, version))
 }
@@ -197,10 +239,15 @@ export function replaceDependencyVersion(raw: string, dependency: string, versio
 // Reproduces pin-collector-runtime-protocol-dependency.ts's effect for the
 // converge path. Called for every package published here, and a no-op for the
 // two that do not declare the dependency.
-function pinSiblingDependency(name: LockstepPackage, pkgRoot: string, version: string): void {
+function pinSiblingDependency(
+  packageSource: string,
+  name: LockstepPackage,
+  pkgRoot: string,
+  version: string
+): void {
   if (name !== PINNED_DEPENDENT) return
 
-  const manifestPath = resolve(process.cwd(), pkgRoot, "package.json")
+  const manifestPath = resolve(packageSource, pkgRoot, "package.json")
   const raw = readFileSync(manifestPath, "utf8")
   writeFileSync(manifestPath, replaceDependencyVersion(raw, PINNED_DEPENDENCY, version))
   log(`pinned ${PINNED_DEPENDENCY} to ${version} in ${pkgRoot}/package.json`)
@@ -212,47 +259,90 @@ function pinSiblingDependency(name: LockstepPackage, pkgRoot: string, version: s
 // trusted-publishing support, so this prefers the npm 11 that
 // @semantic-release/npm depends on and package-lock.json hoists.
 //
+// Takes the TOOLING root, not the package source. The tag's own lockfile
+// predates the npm 11 dependency, so `npm ci` in the tagged checkout installs
+// an npm that cannot authenticate — resolving the binary there would put the
+// converge back on an npm 10 it has no way to publish through.
+//
 // Refuses rather than silently falling back: a converge that quietly used the
 // wrong npm would fail deep inside a publish with an opaque auth error, and
 // the whole point of this path is that it either finishes the release or says
 // clearly why it cannot.
-export function resolveNpmBin(cwd: string): string {
-  const local = resolve(cwd, "node_modules/.bin/npm")
+export function resolveNpmBin(toolingRoot: string): string {
+  const local = resolve(toolingRoot, "node_modules/.bin/npm")
   if (existsSync(local)) return local
   fail(
-    `node_modules/.bin/npm is not present — refusing to publish with the ambient npm, which cannot ` +
-      `authenticate via OIDC trusted publishing (that needs npm >= 11.5.1; runners ship npm 10). ` +
-      `Run \`npm ci\` before converging.`
+    `node_modules/.bin/npm is not present under the release tooling root ${toolingRoot} — refusing ` +
+      `to publish with the ambient npm, which cannot authenticate via OIDC trusted publishing (that ` +
+      `needs npm >= 11.5.1; runners ship npm 10). Run \`npm ci\` in the tooling checkout before converging.`
   )
 }
 
+// The tag's checkout, supplied explicitly. Verified to be a real tree holding
+// all three package roots BEFORE any registry read, so a misconfigured
+// checkout is a refusal at the top rather than an ENOENT discovered partway
+// through a publish set — by which point earlier packages are already live
+// and immutable.
+//
+// There is deliberately NO default. Falling back to cwd is the failure this
+// separation exists to prevent: it would publish whatever tree the driver
+// happens to be sitting in under the tag's version.
+export function resolvePackageSource(raw: string | undefined): string {
+  if (!raw || !raw.trim()) {
+    fail(
+      "CONVERGE_PACKAGE_SOURCE is not set — the converge path requires an explicit checkout of the " +
+        "tag to publish from, and will not fall back to the tooling checkout's own package source."
+    )
+  }
+  const root = resolve(raw.trim())
+  for (const pkgRoot of Object.values(PACKAGE_ROOTS)) {
+    const manifest = resolve(root, pkgRoot, "package.json")
+    if (!existsSync(manifest)) {
+      fail(
+        `CONVERGE_PACKAGE_SOURCE ${root} is not a checkout of this repository — expected a manifest ` +
+          `at ${pkgRoot}/package.json and found none.`
+      )
+    }
+  }
+  return root
+}
+
 async function publishPackage(
+  packageSource: string,
   name: LockstepPackage,
   version: string,
   dryRun: boolean,
   npmBin: string
 ): Promise<void> {
   const pkgRoot = PACKAGE_ROOTS[name]
+  const absolutePkgRoot = resolve(packageSource, pkgRoot)
 
   if (dryRun) {
-    log(`[dry-run] would publish ${name}@${version} from ${pkgRoot}`)
+    // Names the resolved absolute root, not the relative one. A dry run whose
+    // whole purpose is to prove the driver targets the TAG's tree has to show
+    // which tree that was, or it proves nothing.
+    log(`[dry-run] would publish ${name}@${version} from ${absolutePkgRoot}`)
     return
   }
 
   // Both prepare-pipeline edits, applied before the tarball is built. Order
   // does not matter (they touch different fields), but both must precede
   // `npm publish`, which runs prepack and packs from the tree as it is then.
-  writeManifestVersion(pkgRoot, version)
-  pinSiblingDependency(name, pkgRoot, version)
+  writeManifestVersion(packageSource, pkgRoot, version)
+  pinSiblingDependency(packageSource, name, pkgRoot, version)
 
   // `npm publish` runs the package's own prepack (which builds it) and, with
   // OIDC trusted publishing configured on the workflow, attaches provenance.
   // --provenance is not passed explicitly: npm infers it from the OIDC
   // context, matching how @semantic-release/npm publishes these same packages
   // on the ordinary path.
-  log(`publishing ${name}@${version} from ${pkgRoot}`)
-  const { stdout, stderr } = await run(npmBin, ["publish", pkgRoot, "--tag", "latest"], {
-    cwd: process.cwd(),
+  // cwd is the PACKAGE SOURCE, not the tooling root: `npm publish <dir>` runs
+  // that package's prepack, which builds it, and the build has to resolve the
+  // tag's own installed dependencies and workspace links. The npm BINARY still
+  // comes from the tooling root — an npm 11 driving a build in the tag's tree.
+  log(`publishing ${name}@${version} from ${absolutePkgRoot}`)
+  const { stdout, stderr } = await run(npmBin, ["publish", absolutePkgRoot, "--tag", "latest"], {
+    cwd: packageSource,
     env: process.env,
     maxBuffer: 32 * 1024 * 1024,
   })
@@ -265,6 +355,11 @@ async function main(): Promise<void> {
   assertReleaseRef(process.env.GITHUB_REF)
 
   const dryRun = process.env.CONVERGE_RELEASE_DRY_RUN === "true"
+
+  // Resolved before the registry is touched: a bad package source is a
+  // configuration error, and configuration errors must surface before the run
+  // has done anything a later failure would leave half-done.
+  const packageSource = resolvePackageSource(process.env.CONVERGE_PACKAGE_SOURCE)
 
   const tag = process.env.CONVERGE_RELEASE_TAG
   if (!tag) {
@@ -299,9 +394,18 @@ async function main(): Promise<void> {
 
   // Resolved before the first publish so a missing npm 11 is a refusal at the
   // top rather than a failure partway through the set.
-  const npmBin = dryRun ? "npm" : resolveNpmBin(process.cwd())
+  //
+  // Resolved on the DRY-RUN path too. A dry run exists to rehearse this exact
+  // integration, and the publishing npm living in a different checkout from
+  // the package source is the part most likely to be misconfigured. A rehearsal
+  // that skipped the lookup would go green on a tooling checkout that has no
+  // npm 11 in it at all — which is precisely the arrangement whose absence the
+  // rehearsal is supposed to detect.
+  const npmBin = resolveNpmBin(TOOLING_ROOT)
 
   log(`converging lockstep release ${version} (tag ${tag})`)
+  log(`  release tooling: ${TOOLING_ROOT}`)
+  log(`  package source:  ${packageSource}`)
   log(`  already live: ${state.published.join(", ")}`)
   log(`  to publish:   ${state.missing.join(", ")}`)
 
@@ -312,7 +416,7 @@ async function main(): Promise<void> {
       log(`skipping ${name} — already live at ${version}`)
       continue
     }
-    await publishPackage(name, version, dryRun, npmBin)
+    await publishPackage(packageSource, name, version, dryRun, npmBin)
   }
 
   log(`converged ${version}`)

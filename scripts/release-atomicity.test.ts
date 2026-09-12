@@ -75,14 +75,21 @@ if (argv[0] === "view") {
 }
 
 if (argv[0] === "publish") {
-  const pkgRoot = argv[1]
+  // Real npm takes either a relative or an ABSOLUTE directory here, and the
+  // converge driver passes an absolute one: its package root is the tagged
+  // checkout, which is not under its cwd. Resolved the way npm resolves it,
+  // then logged RELATIVE to cwd so the assertions keep naming packages rather
+  // than temp-directory paths.
+  const { resolve, relative } = require("node:path")
+  const absolute = resolve(process.cwd(), argv[1])
+  const pkgRoot = relative(process.cwd(), absolute) || argv[1]
   appendFileSync(${JSON.stringify(publishLog)}, pkgRoot + "\\n")
   // Records the manifest EXACTLY as it stands when publish is invoked —
   // which is what npm would pack. This is how the suite sees the
   // prepare-pipeline edits (version, dependency pin) rather than trusting
   // that they were made.
   try {
-    const manifest = JSON.parse(readFileSync(process.cwd() + "/" + pkgRoot + "/package.json", "utf8"))
+    const manifest = JSON.parse(readFileSync(absolute + "/package.json", "utf8"))
     appendFileSync(${JSON.stringify(manifestLog)}, JSON.stringify({
       name: manifest.name,
       version: manifest.version,
@@ -144,9 +151,64 @@ function readManifestLog(path: string): PublishedManifest[] {
     .map(l => JSON.parse(l) as PublishedManifest)
 }
 
-// Runs converge-release.ts with a stubbed npm, returning its outcome rather
-// than throwing, so a refusal can be asserted on.
-function runConverge(
+// The converge path's two roots, staged as two separate real directories.
+//
+// They are separate in production because they are separate in time: the
+// PACKAGE SOURCE is a checkout of the tag being converged, and the TOOLING is
+// a checkout of the current revision that supplies the driver and the npm it
+// publishes through. Collapsing them here would make this suite pass on an
+// arrangement CI cannot run — which is exactly what happened before: every
+// test below was green while the real job could not resolve its own
+// entrypoint, because the harness handed the driver a cwd that had everything.
+//
+// So the driver is COPIED into the tooling root and executed from there. Its
+// TOOLING_ROOT comes from import.meta.url, so running the copy is what makes
+// resolveNpmBin look in the tooling root — the same resolution CI performs.
+function stageConverge(
+  stubDir: string | null
+): { toolingRoot: string; packageSource: string; driver: string; cleanup: () => void } {
+  const toolingRoot = mkdtempSync(join(tmpdir(), "atomic-tooling-"))
+  const packageSource = mkdtempSync(join(tmpdir(), "atomic-pkgsrc-"))
+
+  // Only packages/ — deliberately no scripts/, mirroring the tag, whose tree
+  // has package sources and no converge-release.ts.
+  cpSync(join(REPO_ROOT, "packages"), join(packageSource, "packages"), { recursive: true })
+
+  mkdirSync(join(toolingRoot, "scripts"), { recursive: true })
+  for (const file of ["converge-release.ts", "release-registry-state.ts"]) {
+    cpSync(join(REPO_ROOT, "scripts", file), join(toolingRoot, "scripts", file))
+  }
+  // The driver is ESM and uses top-level await, so the tooling root needs the
+  // `"type": "module"` its real checkout carries — without it tsx transforms
+  // the entrypoint as CJS and it fails to parse. A real converge checkout has
+  // this by construction; the stage has to supply it deliberately.
+  writeFileSync(
+    join(toolingRoot, "package.json"),
+    JSON.stringify({ name: "converge-tooling-stage", private: true, type: "module" })
+  )
+
+  // `null` stages a tooling root with no local npm, to exercise the refusal in
+  // resolveNpmBin.
+  if (stubDir) {
+    const binDir = join(toolingRoot, "node_modules", ".bin")
+    mkdirSync(binDir, { recursive: true })
+    cpSync(join(stubDir, "npm"), join(binDir, "npm"))
+    chmodSync(join(binDir, "npm"), 0o755)
+  }
+
+  return {
+    toolingRoot,
+    packageSource,
+    driver: join(toolingRoot, "scripts", "converge-release.ts"),
+    cleanup: () => {
+      rmSync(toolingRoot, { recursive: true, force: true })
+      rmSync(packageSource, { recursive: true, force: true })
+    },
+  }
+}
+
+function execConverge(
+  stage: { toolingRoot: string; packageSource: string; driver: string },
   stubDir: string,
   env: Record<string, string | undefined>
 ): { status: number; stdout: string; stderr: string } {
@@ -154,71 +216,51 @@ function runConverge(
   // own install and against an isolated toolchain (this repo's `npm ci` cannot
   // complete in every environment).
   const tsxEntry = require.resolve("tsx")
-
-  // converge-release.ts resolves npm at <cwd>/node_modules/.bin/npm and edits
-  // manifests under <cwd>/packages. Running it against REPO_ROOT would mean
-  // rewriting the real working tree on every publishing test. So each run gets
-  // a scratch cwd holding a copy of packages/ and the stub npm at the path
-  // resolveNpmBin looks for — the same code path CI takes, without the
-  // collateral damage.
-  const cwd = mkdtempSync(join(tmpdir(), "atomic-cwd-"))
   try {
-    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
-    mkdirSync(join(cwd, "node_modules", ".bin"), { recursive: true })
-    cpSync(join(stubDir, "npm"), join(cwd, "node_modules", ".bin", "npm"))
-    chmodSync(join(cwd, "node_modules", ".bin", "npm"), 0o755)
-
-    try {
-      const stdout = execFileSync(
-        process.execPath,
-        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
-        {
-          cwd,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: `${stubDir}:${process.env.PATH ?? ""}`,
-            ...env,
-          },
-        }
-      )
-      return { status: 0, stdout, stderr: "" }
-    } catch (error) {
-      const e = error as { status?: number; stdout?: string; stderr?: string }
-      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
-    }
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
+    const stdout = execFileSync(process.execPath, ["--import", tsxEntry, stage.driver], {
+      cwd: stage.toolingRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${stubDir}:${process.env.PATH ?? ""}`,
+        CONVERGE_PACKAGE_SOURCE: stage.packageSource,
+        ...env,
+      },
+    })
+    return { status: 0, stdout, stderr: "" }
+  } catch (error) {
+    const e = error as { status?: number; stdout?: string; stderr?: string }
+    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
   }
 }
 
-// A converge run whose cwd deliberately has NO node_modules/.bin/npm, to
-// exercise the refusal in resolveNpmBin.
+// Runs converge-release.ts with a stubbed npm, returning its outcome rather
+// than throwing, so a refusal can be asserted on.
+function runConverge(
+  stubDir: string,
+  env: Record<string, string | undefined>
+): { status: number; stdout: string; stderr: string } {
+  const stage = stageConverge(stubDir)
+  try {
+    return execConverge(stage, stubDir, env)
+  } finally {
+    stage.cleanup()
+  }
+}
+
+// A converge run whose TOOLING root deliberately has no node_modules/.bin/npm,
+// to exercise the refusal in resolveNpmBin. The package source is unaffected:
+// the npm that matters is the tooling checkout's, because the tag's own
+// lockfile predates the npm 11 that OIDC publishing requires.
 function runConvergeWithoutLocalNpm(
   stubDir: string,
   env: Record<string, string | undefined>
 ): { status: number; stdout: string; stderr: string } {
-  const tsxEntry = require.resolve("tsx")
-  const cwd = mkdtempSync(join(tmpdir(), "atomic-nonpm-"))
+  const stage = stageConverge(null)
   try {
-    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
-    try {
-      const stdout = execFileSync(
-        process.execPath,
-        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
-        {
-          cwd,
-          encoding: "utf8",
-          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, ...env },
-        }
-      )
-      return { status: 0, stdout, stderr: "" }
-    } catch (error) {
-      const e = error as { status?: number; stdout?: string; stderr?: string }
-      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
-    }
+    return execConverge(stage, stubDir, env)
   } finally {
-    rmSync(cwd, { recursive: true, force: true })
+    stage.cleanup()
   }
 }
 

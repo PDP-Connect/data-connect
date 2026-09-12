@@ -378,37 +378,86 @@ jobs:
       id-token: write # OIDC trusted publishing — no NPM_TOKEN
 
     steps:
-      # Checks out THE TAG, not the push head. A tag records a commit as well
-      # as a version, and the packages this job publishes must be built from
-      # the tree that tag names — the same tree the ordinary release would
-      # have published had it not crashed partway. Building from the push head
-      # would ship code the tag never covered under the tag's immutable
-      # version: @pdpp/local-collector vendors connector-protocol's built
-      # dist/ into its own tarball, so a head-built local-collector@X can
-      # embed protocol code that the already-published connector-protocol@X
-      # does not contain.
-      - name: Checkout the tag being converged
+      # TWO CHECKOUTS, because a converge needs two things that live at two
+      # different commits, and no single ref supplies both.
+      #
+      # The PACKAGE SOURCE must be the tag's. A tag records a commit as well as
+      # a version, and the packages this job publishes must be built from the
+      # tree that tag names — the same tree the ordinary release would have
+      # published had it not crashed partway. Building from the push head would
+      # ship code the tag never covered under the tag's immutable version:
+      # @pdpp/local-collector vendors connector-protocol's built dist/ into its
+      # own tarball, so a head-built local-collector@X can embed protocol code
+      # that the already-published connector-protocol@X does not contain.
+      #
+      # The RELEASE TOOLING must be current. scripts/converge-release.ts did
+      # not exist when v2.2.1 was cut — `scripts/` at 07173d030 contains no
+      # converge-release.ts — because the driver and the tag it has to converge
+      # arrived in the opposite order: the tag is what revealed the need for
+      # the driver. Running `node --import tsx scripts/converge-release.ts`
+      # inside the tag's checkout therefore does not run a stale driver, it
+      # runs no driver at all. The same applies to the npm 11 the publish
+      # authenticates through and to tsx itself: the tag's lockfile predates
+      # both, so `npm ci` there installs a toolchain that cannot publish.
+      #
+      # Collapsing the two is not available in either direction. One checkout
+      # at the tag has no executor; one at the head publishes main's sources
+      # under the tag's version, which npm immutability makes permanent. So
+      # they are separate directories, and the driver is handed the package
+      # source explicitly rather than inferring it from its own cwd.
+      - name: Checkout the tag being converged (package source)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-version.outputs.converge-tag }}
           fetch-depth: 0
           persist-credentials: false
+          path: tagged-package-source
 
+      - name: Checkout the current release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: release-tooling
+
+      # cache-dependency-path is explicit because this job now has TWO
+      # lockfiles. setup-node's default glob assumes one at the workspace root
+      # and finds none here, which disables the cache silently; naming both
+      # keys it on the pair, so a change to either invalidates it.
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
           cache: npm
+          cache-dependency-path: |
+            tagged-package-source/package-lock.json
+            release-tooling/package-lock.json
 
-      # Also provides node_modules/.bin/npm — the npm 11 that
-      # converge-release.ts publishes through. The runner's ambient npm is 10,
-      # which has no OIDC trusted-publishing support at all.
-      - name: Install dependencies
+      # The tag's own dependency graph, installed from the tag's own lockfile.
+      # This is what each package's prepack builds against when `npm publish`
+      # packs it, so it must be the tree the tag committed to and not a
+      # resolution from current main.
+      - name: Install the tagged package source's dependencies
+        working-directory: tagged-package-source
         run: npm ci
 
+      # The driver's own dependencies, resolved from the CURRENT lockfile:
+      # tsx, which runs the TypeScript entrypoint, and node_modules/.bin/npm —
+      # the npm 11 converge-release.ts publishes through. The runner's ambient
+      # npm is 10, which has no OIDC trusted-publishing support at all, and
+      # neither does whatever the tag's lockfile pins.
+      - name: Install the release tooling's dependencies
+        working-directory: release-tooling
+        run: npm ci
+
+      # Run from the tooling checkout, pointed at the tagged one. Both roles
+      # are named: the driver resolves its own location for tooling and takes
+      # CONVERGE_PACKAGE_SOURCE for everything it publishes. It refuses rather
+      # than defaulting if that variable is absent.
       - name: Publish the missing packages
+        working-directory: release-tooling
         env:
           CONVERGE_RELEASE_TAG: ${{ needs.resolve-version.outputs.converge-tag }}
+          CONVERGE_PACKAGE_SOURCE: ${{ github.workspace }}/tagged-package-source
         run: node --import tsx scripts/converge-release.ts
 
   # The postcondition of the whole pipeline, on BOTH paths: all three lockstep
