@@ -192,6 +192,94 @@ function runConverge(
   }
 }
 
+// Same arrangement as runConverge, but the scratch cwd is a real git
+// repository with packages/ committed, and it is NOT deleted on the way out.
+//
+// This exists because the crash-cleanup property cannot be observed from
+// REPO_ROOT. converge-release.ts resolves every manifest write against
+// `process.cwd()` (writeManifestVersion, pinSiblingDependency), which is the
+// scratch cwd — so REPO_ROOT is dirty-free no matter how badly a converge
+// behaves, and `git status` there answers a question nobody asked. The tree
+// that is written has to be the tree that is observed.
+function runConvergeInGitTree(
+  stubDir: string,
+  env: Record<string, string | undefined>
+): {
+  status: number
+  stdout: string
+  stderr: string
+  statusBefore: string
+  statusAfter: string
+  commitsBefore: string
+  commitsAfter: string
+  headBefore: string
+  headAfter: string
+  tagsAfter: string[]
+} {
+  const tsxEntry = require.resolve("tsx")
+  const cwd = mkdtempSync(join(tmpdir(), "atomic-git-"))
+  try {
+    cpSync(join(REPO_ROOT, "packages"), join(cwd, "packages"), { recursive: true })
+    mkdirSync(join(cwd, "node_modules", ".bin"), { recursive: true })
+    cpSync(join(stubDir, "npm"), join(cwd, "node_modules", ".bin", "npm"))
+    chmodSync(join(cwd, "node_modules", ".bin", "npm"), 0o755)
+    // node_modules must not register as untracked, or every run reads dirty
+    // for a reason that has nothing to do with the release path.
+    writeFileSync(join(cwd, ".gitignore"), "node_modules/\n")
+
+    const git = (args: string[]): string =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+      })
+    git(["init", "-q"])
+    git(["add", "packages", ".gitignore"])
+    git(["commit", "-q", "-m", "packages at the tagged release"])
+
+    const statusBefore = git(["status", "--porcelain"])
+    const commitsBefore = git(["rev-list", "--count", "HEAD"]).trim()
+    const headBefore = git(["rev-parse", "HEAD"]).trim()
+    let status = 0
+    let stdout = ""
+    let stderr = ""
+    try {
+      stdout = execFileSync(
+        process.execPath,
+        ["--import", tsxEntry, join(REPO_ROOT, "scripts/converge-release.ts")],
+        {
+          cwd,
+          encoding: "utf8",
+          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}`, ...env },
+        }
+      )
+    } catch (error) {
+      const e = error as { status?: number; stdout?: string; stderr?: string }
+      status = e.status ?? 1
+      stdout = e.stdout ?? ""
+      stderr = e.stderr ?? ""
+    }
+    const statusAfter = git(["status", "--porcelain"])
+    const commitsAfter = git(["rev-list", "--count", "HEAD"]).trim()
+    const headAfter = git(["rev-parse", "HEAD"]).trim()
+    const tagsAfter = git(["tag", "--list"]).split("\n").map(l => l.trim()).filter(Boolean)
+    return {
+      status,
+      stdout,
+      stderr,
+      statusBefore,
+      statusAfter,
+      commitsBefore,
+      commitsAfter,
+      headBefore,
+      headAfter,
+      tagsAfter,
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
 // A converge run whose cwd deliberately has NO node_modules/.bin/npm, to
 // exercise the refusal in resolveNpmBin.
 function runConvergeWithoutLocalNpm(
@@ -359,19 +447,65 @@ describe("crash point: killed between publish one and publish two", () => {
     }
   })
 
-  it("never leaves the working tree dirty, so a crashed run needs no cleanup", () => {
-    const before = execFileSync("git", ["status", "--porcelain"], { cwd: REPO_ROOT, encoding: "utf8" })
+  // The crash-recovery property, stated as the script actually guarantees it
+  // (converge-release.ts header, "WHAT IT GUARANTEES"): "there is no state to
+  // clean up because there is no state — the registry is the state, and every
+  // write to it is additive."
+  //
+  // The manifest edits are NOT the counterexample to that. A converge rewrites
+  // `version` and the sibling pin exactly as @semantic-release/npm's prepare
+  // step does, in an ephemeral checkout that is thrown away. What must hold is
+  // that a crashed run leaves those edits CONFINED: no commit, no tag, no
+  // moved ref — nothing that outlives the checkout and nothing a later run
+  // must undo. The converge job is granted `contents: read` precisely so that
+  // is structural (npm-release.yml).
+  //
+  // This run is NOT a dry run. The dry-run branch returns from publishPackage
+  // before writeManifestVersion and pinSiblingDependency execute, so it cannot
+  // produce the state whose confinement is the point.
+  it("a crashed run leaves its manifest edits confined to the throwaway checkout, with no ref to undo", () => {
     const stub = makeStubNpm({
       view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      // collector-runtime publishes; local-collector dies at the registry.
+      // That is the mid-publish crash, and it is a real stub-npm exit rather
+      // than a fixture no code reads.
       publishFails: { "packages/local-collector": "npm error code E500" },
     })
     try {
-      runConverge(stub.dir, { ...MAIN_ENV, CONVERGE_RELEASE_DRY_RUN: "true" })
+      const result = runConvergeInGitTree(stub.dir, MAIN_ENV)
+
+      // The crash has to be real, or every assertion below is about a run
+      // that never got started.
+      expect(result.status).not.toBe(0)
+      const published = readPublishLog(stub.publishLog)
+      expect(published).toContain("packages/collector-runtime")
+      expect(published).toContain("packages/local-collector")
+
+      // The prepare-pipeline edits have to have actually happened in THIS
+      // tree, or "confined" is vacuous. The manifests npm was handed carry the
+      // release version, which is only true if writeManifestVersion resolved
+      // against this cwd.
+      const manifests = readManifestLog(stub.manifestLog)
+      expect(manifests.length).toBeGreaterThan(0)
+      for (const manifest of manifests) {
+        expect(manifest.version).toBe(V)
+      }
+      // And the edits are visible as working-tree modifications here — the
+      // observation channel is the tree the writes landed in, not REPO_ROOT,
+      // which converge never touches and where this would read clean no
+      // matter how the script behaved.
+      expect(result.statusBefore).toBe("")
+      expect(result.statusAfter).toContain("packages/collector-runtime/package.json")
+
+      // The actual postcondition: nothing escaped the checkout. A crashed
+      // converge that committed, tagged, or moved HEAD would leave work for a
+      // later run to undo — the thing the design says does not exist.
+      expect(result.commitsAfter).toBe(result.commitsBefore)
+      expect(result.headAfter).toBe(result.headBefore)
+      expect(result.tagsAfter).toEqual([])
     } finally {
       stub.cleanup()
     }
-    const after = execFileSync("git", ["status", "--porcelain"], { cwd: REPO_ROOT, encoding: "utf8" })
-    expect(after).toBe(before)
   })
 })
 
