@@ -39,6 +39,23 @@ const isoDateTimeSchema = z
 const stringMaxSchema = (max: number) => pdppSafeText.max(max).nullable();
 const pathSchema = pdppSafeText.max(2048).nullable();
 
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Server-issued reference to a complete artifact body in blob storage.
+ *
+ * Typed rather than `z.any()` (the shape gmail's schema uses) because these
+ * four fields are the whole basis for claiming an artifact was durably
+ * captured: without a verifiable digest and size, `blob_ref` would be an
+ * unfalsifiable assertion that the bytes exist somewhere.
+ */
+const blobRefSchema = z.object({
+	blob_id: pdppSafeText.min(1).max(256),
+	mime_type: pdppSafeText.max(256),
+	sha256: z.string().regex(SHA256_HEX_RE, "must be lowercase hex sha256"),
+	size_bytes: z.number().int().min(0),
+});
+
 export const sessionsSchema = z.object({
 	id: uuidSchema,
 	project_path: pdppSafeText,
@@ -93,6 +110,26 @@ export const attachmentsSchema = z.object({
 	content_binary_reason: pdppSafeText.max(200).nullable().optional(),
 	content_bytes: z.number().int().min(0).nullable(),
 	timestamp: isoDateTimeSchema,
+	// Reference to the complete artifact body in blob storage. `content_preview`
+	// above stays exactly as it was — a bounded SEARCH PROJECTION, not the
+	// authoritative content. This field is what makes the record reconstructable:
+	// the preview is what makes it searchable. `.optional()` so records emitted
+	// before artifact capture existed still validate.
+	blob_ref: blobRefSchema.nullable().optional(),
+	// Whether the complete body was durably captured. `failed`/`unavailable`
+	// make an uncaptured body VISIBLE on the record rather than leaving its
+	// absence indistinguishable from an artifact that had no body at all.
+	artifact_capture: z
+		.enum(["captured", "failed", "unavailable"])
+		.nullable()
+		.optional(),
+	// Content digest computed during local spooling, so it is known even before
+	// the upload completes — and is what a later delivery is verified against.
+	artifact_sha256: z
+		.string()
+		.regex(SHA256_HEX_RE, "must be lowercase hex sha256")
+		.nullable()
+		.optional(),
 });
 
 export const skillsSchema = z.object({
