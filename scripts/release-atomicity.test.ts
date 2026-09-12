@@ -179,35 +179,90 @@ process.exit(1)
   }
 }
 
-// Runs the publish-ordering barrier as the program `.releaserc.yaml` invokes
-// it, so the assertion lands on the script's own behaviour rather than on the
-// retry primitive it happens to call. The propagation delay is overridden
-// because a child process offers no seam to inject a sleep function through;
-// the attempt COUNT is left at its real value, so the budget is still spent.
-function runBarrierScript(
+// Drives the publish-ordering barrier through its REAL entrypoint — the
+// exported `main` that `.releaserc.yaml`'s invocation runs — so the assertion
+// lands on the script's own behaviour (argv handling, the registry read, the
+// failure path) rather than on the retry primitive it happens to call, or on a
+// stub standing in for it.
+//
+// The wait is passed as a PARAMETER, which is the only reason this can run
+// in-process. There is deliberately no environment override and no test-mode
+// branch in the script: the delay a release run uses is this function's default,
+// and a test that wants a faster retry overrides the VALUE, not the code path.
+// The attempt COUNT is left at its real value, so the budget is still spent.
+//
+// `main` reports through `process.exit`/stdout/stderr because it is a CLI, so
+// those three are captured here and restored in `finally`.
+async function runBarrier(
   stubDir: string,
-  version: string
-): { status: number; stdout: string; stderr: string } {
-  const tsxEntry = require.resolve("tsx")
-  try {
-    const stdout = execFileSync(
-      process.execPath,
-      ["--import", tsxEntry, join(REPO_ROOT, "scripts/verify-connector-protocol-published.ts"), version],
-      {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PATH: `${stubDir}:${process.env.PATH ?? ""}`,
-          PDPP_PROPAGATION_DELAY_MS: "10",
-        },
-      }
-    )
-    return { status: 0, stdout, stderr: "" }
-  } catch (error) {
-    const e = error as { status?: number; stdout?: string; stderr?: string }
-    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+  version: string,
+  wait: { delayMs?: number } = {}
+): Promise<{ status: number; stdout: string; stderr: string; sleeps: number[] }> {
+  const { main } = await import("./verify-connector-protocol-published.js")
+
+  const previousPath = process.env.PATH
+  const previousArgv = process.argv
+  const realExit = process.exit
+  const realOut = process.stdout.write
+  const realErr = process.stderr.write
+
+  let stdout = ""
+  let stderr = ""
+  let status = 0
+  // Every delay the barrier actually asked to wait. Recorded rather than
+  // swallowed so a caller can assert WHICH delay the script used — including
+  // the real default, when nothing is injected.
+  const sleeps: number[] = []
+
+  class ExitSignal extends Error {
+    constructor(readonly code: number) {
+      super(`process.exit(${code})`)
+    }
   }
+
+  process.env.PATH = `${stubDir}:${previousPath ?? ""}`
+  process.argv = [process.argv[0]!, join(REPO_ROOT, "scripts/verify-connector-protocol-published.ts"), version]
+  process.exit = ((code?: number) => {
+    throw new ExitSignal(code ?? 0)
+  }) as typeof process.exit
+  process.stdout.write = ((chunk: string) => {
+    stdout += chunk
+    return true
+  }) as typeof process.stdout.write
+  process.stderr.write = ((chunk: string) => {
+    stderr += chunk
+    return true
+  }) as typeof process.stderr.write
+
+  try {
+    // `delayMs` is forwarded only when the caller set it, so omitting it
+    // exercises the script's REAL default. `sleepFn` records instead of
+    // waiting, which is what keeps a default-delay assertion fast: the value
+    // under test is the number the script chose, not time actually burned.
+    await main({
+      ...(wait.delayMs === undefined ? {} : { delayMs: wait.delayMs }),
+      sleepFn: async ms => {
+        sleeps.push(ms)
+      },
+    })
+  } catch (error) {
+    if (error instanceof ExitSignal) {
+      status = error.code
+    } else {
+      // A real fault, not the CLI's own exit. Restore first, then surface it.
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+      throw error
+    }
+  } finally {
+    process.env.PATH = previousPath
+    process.argv = previousArgv
+    process.exit = realExit
+    process.stdout.write = realOut
+    process.stderr.write = realErr
+  }
+
+  return { status, stdout, stderr, sleeps }
 }
 
 function readPublishLog(path: string): string[] {
@@ -1051,8 +1106,11 @@ describe("release pipeline wiring", () => {
     process.env.PATH = `${stub.dir}:${previousPath}`
     let viewCount: number
     try {
-      await awaitPublished("@pdpp/connector-protocol", "9.9.9", async ms => {
-        sleeps.push(ms)
+      await awaitPublished("@pdpp/connector-protocol", "9.9.9", {
+        delayMs: 10,
+        sleepFn: async ms => {
+          sleeps.push(ms)
+        },
       })
       viewCount = stub.viewCount()
     } finally {
@@ -1064,7 +1122,8 @@ describe("release pipeline wiring", () => {
     // propagation lag as "not published".
     expect(viewCount).toBe(2)
     expect(sleeps.length).toBe(1)
-    expect(sleeps[0]).toBeGreaterThan(0)
+    // The injected value, not a default: the primitive waits what it is told.
+    expect(sleeps).toEqual([10])
   })
 
   it("tells an unanswerable registry apart from a genuinely absent package", () => {
@@ -1097,7 +1156,7 @@ describe("release pipeline wiring", () => {
     let raised: unknown
     let viewCount: number
     try {
-      await awaitPublished("@pdpp/connector-protocol", "9.9.9", async () => {})
+      await awaitPublished("@pdpp/connector-protocol", "9.9.9", { delayMs: 10, sleepFn: async () => {} })
     } catch (error) {
       raised = error
     } finally {
@@ -1117,14 +1176,18 @@ describe("release pipeline wiring", () => {
   // script, not a collapsed loop inside the primitive. Restoring that script
   // body passes every assertion above. So the barrier is also exercised as
   // the program `.releaserc.yaml` runs, with the stub registry on PATH.
-  it("routes the barrier script's own registry read through the retry budget", () => {
+  it("routes the barrier script's own registry read through the retry budget", async () => {
     const stub = makeSequencedViewNpm(["missing", "published"])
     try {
-      const result = runBarrierScript(stub.dir, "9.9.9")
+      const result = await runBarrier(stub.dir, "9.9.9", { delayMs: 10 })
 
       // Asked twice and then succeeded: the script itself waited out the
-      // propagation miss rather than reading lag as "not published".
+      // propagation miss rather than reading lag as "not published". This is a
+      // genuine MISSING-then-PUBLISHED transition through the real barrier
+      // entrypoint against a stub registry — collapse the retry so the script
+      // asks once and this goes red.
       expect(stub.viewCount()).toBe(2)
+      expect(result.sleeps).toEqual([10])
       expect(result.status).toBe(0)
       expect(result.stdout).toContain("confirmed @pdpp/connector-protocol@9.9.9 is live")
     } finally {
@@ -1132,14 +1195,87 @@ describe("release pipeline wiring", () => {
     }
   })
 
-  it("accepts a live version from the array shape npm 11 answers with", () => {
+  // The injected wait exists so a test need not burn a real propagation budget.
+  // That convenience is also a hazard: an edit could set the default to a test-
+  // sized delay and every other test here would still pass, because they all
+  // pass their own. So the DEFAULT itself is asserted — against the barrier
+  // entrypoint, with nothing injected — and it must be the real 30 seconds.
+  it("waits the real 30 seconds by default, with nothing injected", async () => {
+    const stub = makeSequencedViewNpm(["missing", "published"])
+    try {
+      const result = await runBarrier(stub.dir, "9.9.9")
+
+      // The script chose 30_000 on its own. Recorded rather than waited, so
+      // asserting the real delay costs no real time.
+      expect(result.sleeps).toEqual([30_000])
+      expect(result.status).toBe(0)
+      expect(stub.viewCount()).toBe(2)
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  // The same default, read at the primitive and as the derived budget, so a
+  // change to either the delay or the attempt count has to come here and say so.
+  it("derives the propagation budget from the real delay and attempt count", async () => {
+    const { PROPAGATION_DELAY_MS, PROPAGATION_BUDGET_MS } = await import("./verify-release-complete.js")
+
+    expect(PROPAGATION_DELAY_MS).toBe(30_000)
+    // 8 attempts sleep 7 times = 210s, above the ~180s lag measured for these
+    // packages. A budget at or below that lag would fail healthy releases.
+    expect(PROPAGATION_BUDGET_MS).toBe(210_000)
+    expect(PROPAGATION_BUDGET_MS).toBeGreaterThan(180_000)
+  })
+
+  // No environment variable may influence the wait. The previous revision of
+  // this step read `PDPP_PROPAGATION_DELAY_MS`, which put a test-only code path
+  // in a production script — the same "trust the pipeline's own report" defect
+  // class this whole step exists to catch. This test is what keeps it out.
+  //
+  // This one DOES need a child process, and for a specific reason: an override
+  // of this shape is read at module scope, so by the time a test body could set
+  // the variable, the read has already happened and an in-process assertion
+  // passes no matter what the module does. Verified: re-introducing the override
+  // and setting the variable in-test was NOT detected, while the child below
+  // fails. The variable must therefore be in the environment BEFORE the module
+  // is imported, which only a fresh process can arrange.
+  it("ignores the environment when choosing how long to wait", () => {
+    const tsxEntry = require.resolve("tsx")
+    const probe = `
+      import { PROPAGATION_DELAY_MS, PROPAGATION_BUDGET_MS } from ${JSON.stringify(
+        join(REPO_ROOT, "scripts/verify-release-complete.ts")
+      )}
+      process.stdout.write(JSON.stringify({ PROPAGATION_DELAY_MS, PROPAGATION_BUDGET_MS }))
+    `
+    const dir = mkdtempSync(join(tmpdir(), "propagation-env-"))
+    const probePath = join(dir, "probe.mts")
+    writeFileSync(probePath, probe)
+    try {
+      const stdout = execFileSync(process.execPath, ["--import", tsxEntry, probePath], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        // Set before the module is imported — the only timing at which a
+        // module-scope override could take effect.
+        env: { ...process.env, PDPP_PROPAGATION_DELAY_MS: "7" },
+      })
+      const seen = JSON.parse(stdout) as { PROPAGATION_DELAY_MS: number; PROPAGATION_BUDGET_MS: number }
+
+      // Still the real values: the variable is dead, not merely unread here.
+      expect(seen.PROPAGATION_DELAY_MS).toBe(30_000)
+      expect(seen.PROPAGATION_BUDGET_MS).toBe(210_000)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("accepts a live version from the array shape npm 11 answers with", async () => {
     // `npm view <spec> version --json` answers `["9.9.9"]`, not "9.9.9". The
     // barrier's pre-fix body compared that array to the version string and
     // so rejected a version that was genuinely live — reported, absurdly, as
     // `resolved version "9.9.9" does not match expected "9.9.9"`.
     const stub = makeSequencedViewNpm(["published"])
     try {
-      const result = runBarrierScript(stub.dir, "9.9.9")
+      const result = await runBarrier(stub.dir, "9.9.9", { delayMs: 10 })
 
       expect(stub.viewCount()).toBe(1)
       expect(result.status).toBe(0)
@@ -1149,12 +1285,12 @@ describe("release pipeline wiring", () => {
     }
   })
 
-  it("stops the release from the barrier script when the package never appears", () => {
+  it("stops the release from the barrier script when the package never appears", async () => {
     // Fails closed, as the program and not just as the primitive, naming the
     // package rather than reporting an unanswerable registry.
     const stub = makeSequencedViewNpm(["missing"], { repeatLast: true })
     try {
-      const result = runBarrierScript(stub.dir, "9.9.9")
+      const result = await runBarrier(stub.dir, "9.9.9", { delayMs: 10 })
 
       expect(result.status).not.toBe(0)
       expect(result.stderr).toContain("@pdpp/connector-protocol@9.9.9")

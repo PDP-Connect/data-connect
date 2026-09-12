@@ -50,7 +50,7 @@
 // connector-protocol is genuinely not there, not when it is merely not there
 // YET.
 
-import { awaitPublished } from "./verify-release-complete.js"
+import { awaitPublished, type PropagationWait } from "./verify-release-complete.js"
 import { RegistryUnknownError } from "./release-registry-state.js"
 import { isMainModule } from "./is-main-module.js"
 
@@ -80,7 +80,14 @@ export function barrierFailureMessage(spec: string, error: unknown): string {
   )
 }
 
-async function main() {
+// Exported, and taking the propagation wait as a PARAMETER that defaults to the
+// real 30s, so a test can drive this entrypoint — the thing `.releaserc.yaml`
+// actually runs, including its argv handling and its failure path — without
+// waiting out a real budget and without the script behaving differently under
+// test than in a release. The v2.2.1 defect lived in THIS function's body, so
+// this is the seam that has to be observable; asserting against a substitute
+// for it would re-open exactly the hole that incident came through.
+export async function main(wait: PropagationWait = {}) {
   const version = process.argv[2]
   if (!version) {
     fail("Usage: verify-connector-protocol-published.ts <version>")
@@ -89,7 +96,7 @@ async function main() {
   const spec = `${PACKAGE_NAME}@${version}`
 
   try {
-    await awaitPublished(PACKAGE_NAME, version)
+    await awaitPublished(PACKAGE_NAME, version, wait)
   } catch (error) {
     fail(barrierFailureMessage(spec, error))
   }
