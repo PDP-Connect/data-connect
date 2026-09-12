@@ -39,10 +39,45 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 
+import { isMainModule } from "./is-main-module.js"
+
 const run = promisify(execFile)
 
-const EXPECTED_REPO = "PDP-Connect/data-connect"
-const EXPECTED_SIGNER_WORKFLOW = "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
+export const EXPECTED_REPO = "PDP-Connect/data-connect"
+export const EXPECTED_SIGNER_WORKFLOW =
+  "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
+
+// npm's provenance subject digest is sha512; `gh attestation verify`
+// defaults to sha256, so the algorithm must be stated explicitly or the
+// tarball is hashed wrong (see the header note above).
+export const SUBJECT_DIGEST_ALG = "sha512"
+
+// Builds the exact `gh attestation verify` argument vector. Kept pure and
+// separate from the call so the flags that carry the security properties —
+// the sha512 subject digest, the commit-SHA source binding, and the
+// repo/workflow signer identity — are directly observable under test
+// without executing `gh`.
+export function buildAttestationVerifyArgs(input: {
+  tarballPath: string
+  bundlePath: string
+  sourceDigest: string
+}): string[] {
+  return [
+    "attestation",
+    "verify",
+    input.tarballPath,
+    "--bundle",
+    input.bundlePath,
+    "--digest-alg",
+    SUBJECT_DIGEST_ALG,
+    "--repo",
+    EXPECTED_REPO,
+    "--signer-workflow",
+    EXPECTED_SIGNER_WORKFLOW,
+    "--source-digest",
+    input.sourceDigest,
+  ]
+}
 
 const PROPAGATION_RETRY_ATTEMPTS = 6
 const PROPAGATION_RETRY_DELAY_MS = 30_000
@@ -129,21 +164,7 @@ async function verifyPackage(pkg: string, version: string, sourceDigest: string)
 
     log(`verifying provenance signature, digest, and signer identity for ${spec}...`)
     try {
-      await run("gh", [
-        "attestation",
-        "verify",
-        tarballPath,
-        "--bundle",
-        bundlePath,
-        "--digest-alg",
-        "sha512",
-        "--repo",
-        EXPECTED_REPO,
-        "--signer-workflow",
-        EXPECTED_SIGNER_WORKFLOW,
-        "--source-digest",
-        sourceDigest,
-      ])
+      await run("gh", buildAttestationVerifyArgs({ tarballPath, bundlePath, sourceDigest }))
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       fail(`provenance verification failed for ${spec}: ${detail}`)
@@ -167,4 +188,11 @@ async function main() {
   }
 }
 
-await main()
+// Only run when invoked as a program. Importing this module (as the test
+// does, to inspect the argv it builds) must not start verifying packages.
+// That import edge is also what lets the mutation gate discover a covering
+// test for this file, which `vitest --related` resolves through the module
+// graph rather than the filename.
+if (isMainModule(import.meta.url, process.argv[1])) {
+  await main()
+}

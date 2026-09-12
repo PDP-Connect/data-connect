@@ -5,13 +5,25 @@ import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
+import {
+  EXPECTED_REPO,
+  EXPECTED_SIGNER_WORKFLOW,
+  SUBJECT_DIGEST_ALG,
+  buildAttestationVerifyArgs,
+} from "./verify-npm-provenance"
 
 // `--repo`/`--signer-workflow` alone bind an attestation to a repository
 // and workflow file, but not to a specific commit — a workflow run
-// triggered from a different commit on the same ref would still pass. This
-// test parses the REAL workflow YAML and the REAL verification script to
-// assert the verification also pins `--source-digest` to `$GITHUB_SHA`,
-// in addition to the repo, workflow file, and digest algorithm.
+// triggered from a different commit on the same ref would still pass. The
+// verification must additionally pin `--source-digest` to `$GITHUB_SHA`
+// and `--digest-alg` to sha512 (npm's subject digest algorithm; `gh
+// attestation verify` defaults to sha256 and would hash the tarball wrong).
+//
+// These tests import the verifier and assert on the argument vector it
+// actually builds. They deliberately do NOT substring-match the script's
+// source text: every flag named here also appears verbatim in that file's
+// header comment, so a source-text assertion is satisfied by the prose
+// alone and passes even when the real argv has been gutted.
 
 interface WorkflowStep {
   name?: string
@@ -40,8 +52,21 @@ function findVerificationStep(workflow: WorkflowDocument): WorkflowStep {
   return step
 }
 
-function readVerifyScript(): string {
-  return readFileSync(resolve(process.cwd(), "scripts/verify-npm-provenance.ts"), "utf8")
+// The argv the verifier would hand to `gh` for a representative package,
+// built by the real production function rather than read off the page.
+function verifyArgs(sourceDigest = "4bb3f161ad0f0f5b1a9f2e6c7d8e9f0a1b2c3d4e"): string[] {
+  return buildAttestationVerifyArgs({
+    tarballPath: "/tmp/workdir/pdpp-local-collector-2.1.1.tgz",
+    bundlePath: "/tmp/workdir/bundle.json",
+    sourceDigest,
+  })
+}
+
+// Reads the value `gh` would receive for a flag, so a test fails when a
+// flag is dropped, reordered, or left with the wrong operand.
+function flagValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag)
+  return i === -1 ? undefined : args[i + 1]
 }
 
 describe("npm-release.yml attestation verification", () => {
@@ -56,28 +81,72 @@ describe("npm-release.yml attestation verification", () => {
     expect(run).toContain("@pdpp/local-collector")
   })
 
-  it("pins verification to this exact repo, workflow file, source commit, and digest algorithm", () => {
-    const script = readVerifyScript()
+  it("binds verification to an exact source commit via --source-digest", () => {
+    const sourceDigest = "4bb3f161ad0f0f5b1a9f2e6c7d8e9f0a1b2c3d4e"
+    const args = verifyArgs(sourceDigest)
 
-    expect(script).toContain("PDP-Connect/data-connect/.github/workflows/npm-release.yml")
-    expect(script).toContain("--source-digest")
-    expect(script).toContain("--digest-alg")
-    expect(script).toContain("sha512")
+    // Without this flag the attestation binds to the repo and workflow file
+    // but to no particular commit: a run from a different commit on the
+    // same ref verifies clean.
+    expect(args).toContain("--source-digest")
+    expect(flagValue(args, "--source-digest")).toBe(sourceDigest)
   })
 
-  it("verifies with gh attestation verify against a bundle fetched from the npm registry", () => {
-    const script = readVerifyScript()
+  it("hashes the tarball with sha512, npm's subject digest algorithm", () => {
+    const args = verifyArgs()
 
-    expect(script).toContain('"gh"')
-    expect(script).toContain("attestation")
-    expect(script).toContain("--bundle")
-    expect(script).toMatch(/dist\.attestations\.url|attestationsUrl/)
+    // `gh attestation verify` defaults to sha256. Against an npm
+    // provenance bundle that produces a digest mismatch reported as an
+    // issuer failure, which is what the sha512 flag exists to prevent.
+    expect(args).toContain("--digest-alg")
+    expect(flagValue(args, "--digest-alg")).toBe("sha512")
+    expect(SUBJECT_DIGEST_ALG).toBe("sha512")
   })
 
-  it("retries registry propagation lag instead of failing on the first lookup", () => {
-    const script = readVerifyScript()
+  it("pins the signer identity to this exact repo and workflow file", () => {
+    const args = verifyArgs()
 
-    expect(script).toContain("E404")
-    expect(script).toMatch(/PROPAGATION_RETRY_ATTEMPTS/)
+    expect(flagValue(args, "--repo")).toBe("PDP-Connect/data-connect")
+    expect(flagValue(args, "--signer-workflow")).toBe(
+      "PDP-Connect/data-connect/.github/workflows/npm-release.yml"
+    )
+    // A signer-workflow that names only the repo, or only a bare filename,
+    // would let a different workflow in the same repo sign a release.
+    expect(EXPECTED_SIGNER_WORKFLOW.startsWith(`${EXPECTED_REPO}/.github/workflows/`)).toBe(true)
+  })
+
+  it("builds the complete gh attestation verify argv, with the tarball and fetched bundle", () => {
+    const args = verifyArgs("abc123")
+
+    // Whole-vector equality: a dropped, reordered, or renamed flag fails
+    // here even if every other assertion is individually satisfied.
+    expect(args).toEqual([
+      "attestation",
+      "verify",
+      "/tmp/workdir/pdpp-local-collector-2.1.1.tgz",
+      "--bundle",
+      "/tmp/workdir/bundle.json",
+      "--digest-alg",
+      "sha512",
+      "--repo",
+      "PDP-Connect/data-connect",
+      "--signer-workflow",
+      "PDP-Connect/data-connect/.github/workflows/npm-release.yml",
+      "--source-digest",
+      "abc123",
+    ])
+  })
+
+  it("passes the subject tarball and bundle through to the operands gh reads", () => {
+    const args = buildAttestationVerifyArgs({
+      tarballPath: "/scratch/one.tgz",
+      bundlePath: "/scratch/one-bundle.json",
+      sourceDigest: "f00d",
+    })
+
+    // The tarball is a positional operand, not a flag value; verifying a
+    // different file than the one downloaded would still "pass" gh.
+    expect(args[2]).toBe("/scratch/one.tgz")
+    expect(flagValue(args, "--bundle")).toBe("/scratch/one-bundle.json")
   })
 })

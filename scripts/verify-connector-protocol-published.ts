@@ -52,12 +52,32 @@
 
 import { awaitPublished } from "./verify-release-complete.js"
 import { RegistryUnknownError } from "./release-registry-state.js"
+import { isMainModule } from "./is-main-module.js"
 
-const PACKAGE_NAME = "@pdpp/connector-protocol"
+export const PACKAGE_NAME = "@pdpp/connector-protocol"
 
 function fail(message: string): never {
   process.stderr.write(`[verify-connector-protocol-published] ${message}\n`)
   process.exit(1)
+}
+
+// An unanswerable registry and a genuinely absent package are different
+// failures, and the operator reading this log needs to know which one
+// stopped the release. Exported so the distinction is testable without
+// driving a process exit — and so the mutation gate can reach it, since
+// `vitest --related` discovers covering tests through the import graph.
+export function barrierFailureMessage(spec: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error)
+  if (error instanceof RegistryUnknownError) {
+    return (
+      `could not determine whether ${spec} is live — refusing to publish collector-runtime ` +
+      `against a connector-protocol release whose state is UNKNOWN.\n${detail}`
+    )
+  }
+  return (
+    `${spec} is not resolvable from the registry — refusing to publish collector-runtime against ` +
+    `a connector-protocol release that isn't live yet.\n${detail}`
+  )
 }
 
 async function main() {
@@ -71,23 +91,14 @@ async function main() {
   try {
     await awaitPublished(PACKAGE_NAME, version)
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    // An unanswerable registry and a genuinely absent package are different
-    // failures, and the operator reading this log needs to know which one
-    // stopped the release.
-    if (error instanceof RegistryUnknownError) {
-      fail(
-        `could not determine whether ${spec} is live — refusing to publish collector-runtime ` +
-          `against a connector-protocol release whose state is UNKNOWN.\n${detail}`
-      )
-    }
-    fail(
-      `${spec} is not resolvable from the registry — refusing to publish collector-runtime against ` +
-        `a connector-protocol release that isn't live yet.\n${detail}`
-    )
+    fail(barrierFailureMessage(spec, error))
   }
 
   process.stdout.write(`[verify-connector-protocol-published] confirmed ${spec} is live on the registry\n`)
 }
 
-await main()
+// Importing this module must not perform a registry check; see the note on
+// barrierFailureMessage.
+if (isMainModule(import.meta.url, process.argv[1])) {
+  await main()
+}
