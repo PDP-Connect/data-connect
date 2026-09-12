@@ -29,12 +29,19 @@
  * chosen to be discriminating under a bare `node --test` invocation with no
  * env override: local benchmarking (see /tmp/as-latency-0809.md) measured
  * an ~8000-record batch at ~1s wall time on unmodified code with a >1000ms
- * worst-case probe stall, and ~1s total test wall time is acceptable for
- * this suite. A smaller default (e.g. the original 800) completes in ~200ms
- * on unmodified code — too fast to reliably starve a probe issued 20ms in —
- * which would make the default CI invocation vacuously pass regardless of
- * whether the fix is present. Do not lower this default without re-proving
- * it still fails on a reverted fix.
+ * worst-case probe stall. A smaller default (e.g. the original 800)
+ * completes in ~200ms on unmodified code — too fast to reliably starve a
+ * probe issued 20ms in — which would make the default CI invocation
+ * vacuously pass regardless of whether the fix is present. Do not lower
+ * this default without re-proving it still fails on a reverted fix.
+ *
+ * That ~1s figure is the original benchmark and is no longer what this batch
+ * costs: the same 8000 records measure ~2.3-2.5s on a current developer
+ * machine and up to ~9.2s on a loaded CI runner. The record count is still
+ * the right one — it is the *stall* it provokes on unmodified code, not the
+ * wall time, that makes it discriminating — but do not treat ~1s as a
+ * baseline this test should hold to, and do not size a latency budget
+ * against it. See LIGHTWEIGHT_BUDGET_MS below.
  */
 
 import assert from "node:assert/strict";
@@ -159,7 +166,7 @@ interface IngestOutcome {
 
 test("a concurrent /v1/ingest batch must not block a lightweight GET / beyond an explicit budget", {
   timeout: 60_000,
-}, async () => {
+}, async (t) => {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
@@ -192,7 +199,58 @@ test("a concurrent /v1/ingest batch must not block a lightweight GET / beyond an
     // and no ingest-coordinator work at all — under healthy scheduling it
     // should resolve in low single-digit milliseconds even while a large
     // ingest is in flight on the same process.
-    const LIGHTWEIGHT_BUDGET_MS = 300;
+    //
+    // The budget is deliberately far above that healthy figure, because the
+    // defect this oracle exists to catch is not "a probe was slow" but "a
+    // probe waited out the batch". Removing the per-record yield
+    // (INGEST_BATCH_YIELD_BUDGET_MS in server/records.ts) stalls a probe for
+    // a large fraction of the batch's synchronous run — >2000ms at this
+    // record count per that constant's own benchmark, and this batch has
+    // measured up to ~9.2s wall on a loaded CI runner. The gap between
+    // "yield present" (single/double-digit ms) and "yield absent" (seconds)
+    // is wide enough that nothing discriminating is bought by tightening it.
+    //
+    // Measured, with the yield forced off in shouldYieldBeforeNextIngestRecord
+    // (7999/8000 would-be yields suppressed, verified per run), 10 runs per
+    // Node at the default record count: when a probe does land in the
+    // synchronous write loop it measures 2288-2717ms, and the yield-present
+    // arm tops out at 152.9ms across 14 runs. 1000ms sits in that gap with
+    // 6.5x headroom above the worst healthy probe and 2.3x below the
+    // smallest stall.
+    //
+    // What a tight budget does buy is false failures. At 300ms this test
+    // failed CI on one probe of ten measuring 391ms while the other nine
+    // stayed at 7.9-51.6ms — a single scheduling hiccup on a runner whose
+    // batch ran ~4x slower than a developer machine, not a starved probe.
+    // The same shape (one probe an order of magnitude above its nine
+    // siblings) reproduces locally on both Node 22 and Node 24, so it is
+    // ordinary tail latency, not a regression in the code under test.
+    //
+    // 1000ms stops encoding an assumption about how fast and how quiet the
+    // host machine is, and costs no detection: the runs that miss a reverted
+    // yield miss it by two orders of magnitude (worst probe 10-19ms), so
+    // 300ms would not have caught them either.
+    //
+    // What those runs miss it by is WHEN they sample, not the threshold. The
+    // ten probes fire in a burst starting 20ms in; when each returns in ~2ms
+    // the burst is over ~50ms into a ~2700ms batch, and since the NDJSON body
+    // is buffered whole and split synchronously before the write loop starts
+    // (transport.ts's "application/x-ndjson" parser uses parseAs: "buffer"),
+    // an early burst samples parse/setup rather than the blocking stretch.
+    // The probesStartedWhileActive guard below does not catch this: in the
+    // missing runs all 10/10 probes start while the ingest promise is
+    // unsettled, because the request IS in flight, just not yet blocking.
+    // Measured detection with the yield off: 2/10 runs on Node 22.23.2,
+    // 8/10 on 24.21.0. Making this deterministic means probing until
+    // ingestSettled instead of a fixed ten, and failing when the burst spans
+    // too little of the ingest wall time to mean anything — a change to this
+    // oracle's own behavior, not to the budget.
+    //
+    // The yield POLICY is pinned separately and deterministically, with no
+    // timing dependency, by test/ingest-batch-yield-decision.test.ts; this
+    // test's own job is the end-to-end one those unit tests cannot do —
+    // proving the yield is actually wired into the live ingest path.
+    const LIGHTWEIGHT_BUDGET_MS = 1000;
 
     // Structural settlement tracking (not a fixed sleep-and-hope): the
     // ingest promise's own resolution is the source of truth for whether
@@ -280,9 +338,24 @@ test("a concurrent /v1/ingest batch must not block a lightweight GET / beyond an
     const maxProbeLatency = Math.max(...probeLatencies);
     const overBudget = probeLatencies.filter((ms) => ms > LIGHTWEIGHT_BUDGET_MS);
 
-    console.log(
+    // t.diagnostic, not console.log: the accounting reporter
+    // (scripts/test-accounting/node-reporter.ts) consumes test:diagnostic and
+    // test:stderr but never test:stdout, so a console.log here is dropped
+    // before the reporter ever sees it. This matches the t.diagnostic
+    // convention already used elsewhere in this suite, and makes the numbers
+    // visible under a bare `node --test` run.
+    //
+    // Note what this does NOT do: that reporter buffers diagnostics and
+    // attaches them only to a test:fail event, discarding the buffer on a
+    // pass. So these latencies still do not appear in a green CI log, and
+    // there is still no way to watch this budget being approached before it
+    // breaks — which is how the 300ms budget went from comfortable to failing
+    // with no warning in between. Surfacing pass-path diagnostics is a change
+    // to the reporter's accounting contract, not to this test.
+    t.diagnostic(
       `[result] ingest(${RECORD_COUNT} records)=${ingestElapsed.toFixed(1)}ms wall, ` +
         `${probesStartedWhileActive}/${PROBE_COUNT} probes started while active; ` +
+        `budget=${LIGHTWEIGHT_BUDGET_MS}ms, max=${maxProbeLatency.toFixed(1)}ms; ` +
         `GET / probes (ms) = ${probeLatencies.map((v) => v.toFixed(1)).join(",")}`
     );
 
