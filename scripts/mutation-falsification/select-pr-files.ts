@@ -35,7 +35,7 @@ import { createHash } from "node:crypto"
  */
 export type SelectedFile = string
 
-export type CohortName = "client" | "reference-implementation"
+export type CohortName = "client" | "reference-implementation" | "scripts"
 
 /**
  * Everything a cohort's mutation run reads, recorded in the intent so a reader
@@ -104,6 +104,7 @@ export type ExclusionReason =
   | "not_production_source"
   | "outside_cohort"
   | "test_file"
+  | "excluded_tooling"
 
 /** One `git diff` name-status record, already parsed out of the NUL-delimited stream. */
 export interface DiffEntry {
@@ -474,6 +475,19 @@ export interface CohortDefinition {
   readonly root: string
   /** Repository-relative path prefixes whose files are mutable production source. */
   readonly productionPrefixes: readonly string[]
+  /**
+   * Repository-relative prefixes carved back out of `productionPrefixes`.
+   *
+   * A production prefix is a directory, so it selects everything beneath it,
+   * including tooling that happens to live there. The scripts cohort needs
+   * `scripts/` without `scripts/mutation-falsification/`: the latter is this
+   * pipeline's own machinery, and mutating the code that decides what counts as
+   * killed, survived, or inconclusive to ask whether that same code notices is
+   * circular. The exclusion is recorded with its own reason rather than applied
+   * silently, because the receipt's `excluded` list is supposed to be a complete
+   * account of the diff.
+   */
+  readonly excludedPrefixes?: readonly string[]
 }
 
 const PRODUCTION_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"]
@@ -523,6 +537,13 @@ export function classifyForCohort(
   const withinCohort = cohort.productionPrefixes.some((prefix) => entry.path.startsWith(prefix))
   if (!withinCohort) {
     return { selected: false, reason: "outside_cohort" }
+  }
+  // Carved back out of a production prefix that would otherwise swallow it.
+  // Checked after cohort membership so the recorded reason is the specific one:
+  // a file here is inside the cohort and deliberately held out of it, which is a
+  // different fact from a file that was never in the cohort at all.
+  if (cohort.excludedPrefixes?.some((prefix) => entry.path.startsWith(prefix))) {
+    return { selected: false, reason: "excluded_tooling" }
   }
   if (!isProductionSourceExtension(entry.path)) {
     return { selected: false, reason: "not_production_source" }
