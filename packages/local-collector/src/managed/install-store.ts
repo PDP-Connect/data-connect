@@ -48,42 +48,99 @@ import type { VerifiedArtifact } from "./registry-client.ts";
  * ancestor would report two siblings as nested.
  */
 export function assertRootsDisjoint(installRoot: string, durableRoot: string): void {
-  const real = (candidate: string): string => {
-    // Resolve symlinks on the part of the path that exists, then re-append the
-    // part that does not. Resolving only the existing ancestor would collapse
-    // two not-yet-created siblings onto their shared parent and report them as
-    // nested — which is the common case on a first run, when neither root has
-    // been created yet.
-    const absolute = resolve(candidate);
-    let existing = absolute;
-    const pending: string[] = [];
-    while (!existsSync(existing) && dirname(existing) !== existing) {
-      pending.unshift(basename(existing));
-      existing = dirname(existing);
-    }
-    return pending.length === 0 ? realpathSync(existing) : join(realpathSync(existing), ...pending);
-  };
+  // Resolve symlinks on the part of each path that exists, then re-append the
+  // part that does not. Resolving only the existing ancestor would collapse
+  // two not-yet-created siblings onto their shared parent and report them as
+  // nested — which is the common case on a first run, when neither root has
+  // been created yet.
+  const install = realpathOfExistingPrefix(installRoot);
+  const durable = realpathOfExistingPrefix(durableRoot);
 
-  const install = real(installRoot);
-  const durable = real(durableRoot);
-
-  // `relative()` answers "how do I get from parent to child": a path that
-  // needs no `..` to climb out, and is not itself absolute, is a path that
-  // stays inside. Checking `isAbsolute` matters on Windows, where `relative()`
-  // returns an absolute path when the two roots are on different drives —
-  // different drives being the one case that is genuinely disjoint.
-  const contains = (parent: string, child: string): boolean => {
-    if (parent === child) return true;
-    const rel = relative(parent, child);
-    return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
-  };
-
-  if (contains(install, durable) || contains(durable, install)) {
+  if (containsPath(install, durable) || containsPath(durable, install)) {
     throw new Error(
       `connector install store (${install}) and durable artifact root (${durable}) must not contain one another: ` +
         `an upgrade or uninstall under the install store would delete collected data`
     );
   }
+}
+
+/**
+ * Answer "does `parent` contain `child`" the way `assertRootsDisjoint` does.
+ *
+ * `relative()` answers "how do I get from parent to child": a path that needs
+ * no `..` to climb out, and is not itself absolute, is a path that stays
+ * inside. `isAbsolute` matters on Windows, where `relative()` returns an
+ * absolute path across drives.
+ */
+function containsPath(parent: string, child: string): boolean {
+  if (parent === child) return true;
+  const rel = relative(parent, child);
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
+}
+
+/**
+ * Resolve symlinks on the part of a path that exists and re-append the part
+ * that does not, so a not-yet-created path is not collapsed onto its nearest
+ * existing ancestor.
+ */
+function realpathOfExistingPrefix(candidate: string): string {
+  const absolute = resolve(candidate);
+  let existing = absolute;
+  const pending: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    pending.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  return pending.length === 0 ? realpathSync(existing) : join(realpathSync(existing), ...pending);
+}
+
+/**
+ * Reject a `config.entrypoint` that does not name a file inside the release.
+ *
+ * The install store's whole claim is that a release's bytes are contained
+ * under one digest-named directory, and `entrypoint` is the one field that is
+ * joined onto that directory without ever passing the archive member filter.
+ * An entrypoint of `../../../../elsewhere/evil.mjs` is not a member path, so
+ * {@link assertSafeMemberPath} never sees it; unchecked, it makes the release's
+ * declared entrypoint a path the host never verified and never unpacked. The
+ * runner spawns that path, so the field decides what code runs.
+ *
+ * The string rules come first and are the same class the publisher applies to
+ * connector names before they reach a shell: absolute paths, `..` segments,
+ * backslashes and NUL bytes are path-escape primitives with no legitimate use
+ * in a bundled connector's entrypoint. But string rules alone are not enough,
+ * because a path that is textually contained can still resolve outside through
+ * a symlink. So the resolved entrypoint is compared against the release root by
+ * **realpath**, not by string prefix — the same reason
+ * {@link assertRootsDisjoint} compares realpaths rather than the strings a
+ * caller passed in.
+ */
+export function assertContainedEntrypoint(releaseRoot: string, entrypoint: string): string {
+  if (entrypoint.length === 0) {
+    throw new Error("artifact declares an empty entrypoint");
+  }
+  if (isAbsolute(entrypoint) || entrypoint.startsWith("/") || /^[a-zA-Z]:/.test(entrypoint)) {
+    throw new Error(`artifact declares an absolute entrypoint: ${JSON.stringify(entrypoint)}`);
+  }
+  if (entrypoint.includes("\\")) {
+    throw new Error(`artifact entrypoint contains a backslash: ${JSON.stringify(entrypoint)}`);
+  }
+  if (entrypoint.includes("\0")) {
+    throw new Error(`artifact entrypoint contains a NUL byte: ${JSON.stringify(entrypoint)}`);
+  }
+  if (entrypoint.split("/").includes("..")) {
+    throw new Error(`artifact entrypoint escapes the release directory: ${JSON.stringify(entrypoint)}`);
+  }
+
+  const resolved = join(releaseRoot, entrypoint);
+  const realRoot = realpathOfExistingPrefix(releaseRoot);
+  const realEntrypoint = realpathOfExistingPrefix(resolved);
+  if (realRoot === realEntrypoint || !containsPath(realRoot, realEntrypoint)) {
+    throw new Error(
+      `artifact entrypoint ${JSON.stringify(entrypoint)} resolves to ${realEntrypoint}, outside the release directory ${realRoot}`
+    );
+  }
+  return resolved;
 }
 
 /** Filesystem-safe rendering of a digest: `sha256:ab…` becomes `sha256-ab…`. */
@@ -279,7 +336,10 @@ export function installVerifiedArtifact(input: {
       }
     }
 
-    const entrypoint = join(staging, config.entrypoint);
+    // Containment first, existence second. Checking only existence would let a
+    // traversing entrypoint pass whenever the file it points at happens to be
+    // there — which is precisely the case worth refusing.
+    const entrypoint = assertContainedEntrypoint(staging, config.entrypoint);
     if (!existsSync(entrypoint)) {
       throw new Error(
         `artifact declares entrypoint ${JSON.stringify(config.entrypoint)} but it is absent after unpack`
@@ -301,13 +361,16 @@ function describeRelease(
   config: VerifiedArtifact["config"],
   pinned: VerifiedArtifact["pinned"]
 ): InstalledRelease {
+  // Re-checked here rather than trusted from the install path: the idempotent
+  // branch returns straight from an already-present release directory without
+  // unpacking anything, so this is the only gate that entrypoint crosses.
   return Object.freeze({
     connectorKey: config.connector_key,
     connectorId: config.connector_id,
     version: config.version,
     digest: pinned.digest,
     directory,
-    entrypoint: join(directory, config.entrypoint),
+    entrypoint: assertContainedEntrypoint(directory, config.entrypoint),
   });
 }
 

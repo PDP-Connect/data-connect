@@ -69,6 +69,7 @@ export {
 } from "./registry-client.ts";
 export {
   activateRelease,
+  assertContainedEntrypoint,
   assertRootsDisjoint,
   assertSafeMemberPath,
   digestDirectoryName,

@@ -21,13 +21,14 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import {
+  assertContainedEntrypoint,
   assertRootsDisjoint,
   assertSafeMemberPath,
   type CollectionProfile,
@@ -433,6 +434,77 @@ test("an artifact whose entrypoint is absent after unpack is refused", async () 
   const fixture = buildFixture({ codeEntries: [{ path: "something-else.mjs", content: "//\n" }] });
   await withRoots(async (installRoot, durableRoot) => {
     await assert.rejects(obtain(fixture, installRoot, durableRoot), /absent after unpack/);
+  });
+});
+
+test("an artifact whose entrypoint climbs out of the release directory is refused", async () => {
+  // The escape that the archive member filter cannot see: `entrypoint` is a
+  // config field, not a member path, so it never passes through
+  // `assertSafeMemberPath`. Unchecked, `join(staging, entrypoint)` resolves
+  // outside the digest-named release directory and the runner is handed a path
+  // the host never unpacked or verified.
+  //
+  // The target file is created first, so the refusal cannot be the "absent
+  // after unpack" check passing for the wrong reason: this entrypoint escapes
+  // to a file that really is there.
+  const fixture = buildFixture({ config: { entrypoint: "../../../../connector-artifacts/evil.mjs" } });
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(durableRoot, { recursive: true });
+    writeFileSync(join(durableRoot, "evil.mjs"), "export const collectOura = () => {};\n");
+    assert.ok(existsSync(join(durableRoot, "evil.mjs")), "the escape target must exist for this to discriminate");
+
+    // Either refusal is correct — the `..` rule and the realpath comparison are
+    // independent gates on the same escape, and the test asserts the refusal,
+    // not which gate got there first.
+    await assert.rejects(
+      obtain(fixture, installRoot, durableRoot),
+      /entrypoint escapes the release directory|outside the release directory/
+    );
+  });
+});
+
+test("an artifact declaring an absolute entrypoint is refused", async () => {
+  // `join()` silently drops a leading separator, so an absolute entrypoint is
+  // contained by accident rather than by a check. Refusing it by name means the
+  // containment does not depend on that accident.
+  const fixture = buildFixture({ config: { entrypoint: "/etc/passwd" } });
+  await withRoots(async (installRoot, durableRoot) => {
+    await assert.rejects(obtain(fixture, installRoot, durableRoot), /absolute entrypoint/);
+  });
+});
+
+test("an entrypoint that resolves outside the release through a symlink is refused", () => {
+  // The case no string rule catches. `escape/evil.mjs` is relative, has no
+  // `..`, no backslash and no NUL; `join(release, entrypoint)` is a string
+  // prefixed by `release`, so a prefix check passes it too. Only comparing
+  // realpaths after resolution shows that it leaves the release directory —
+  // which is why `assertContainedEntrypoint` resolves rather than compares
+  // strings, for the same reason `assertRootsDisjoint` does.
+  withRoots((installRoot) => {
+    const release = join(installRoot, "release");
+    const outside = join(installRoot, "outside");
+    mkdirSync(release, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "evil.mjs"), "//\n");
+    symlinkSync(outside, join(release, "escape"));
+
+    // The string-only checks this test exists to get past.
+    const joined = join(release, "escape/evil.mjs");
+    assert.ok(joined.startsWith(release), "a prefix check would accept this path");
+    assert.equal(relative(release, joined).startsWith(".."), false, "a `..` check would accept this path");
+
+    assert.throws(
+      () => assertContainedEntrypoint(release, "escape/evil.mjs"),
+      /resolves to .*outside the release directory/
+    );
+
+    // A genuinely contained entrypoint in the same release still resolves.
+    mkdirSync(join(release, "code"), { recursive: true });
+    writeFileSync(join(release, "code", "collection-profile.mjs"), "//\n");
+    assert.equal(
+      assertContainedEntrypoint(release, "code/collection-profile.mjs"),
+      join(release, "code", "collection-profile.mjs")
+    );
   });
 });
 
