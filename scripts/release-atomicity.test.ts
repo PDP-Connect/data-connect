@@ -268,6 +268,14 @@ function execConverge(
       encoding: "utf8",
       env: {
         ...process.env,
+        // The driver branches on GITHUB_ACTIONS, and the suite itself runs
+        // inside GitHub Actions, so inheriting it silently rewrites the
+        // scenario under test: the non-loopback case hit the
+        // running-in-Actions refusal instead of the loopback guard, passing
+        // locally and failing in CI. Cleared here so a test that cares about
+        // that branch has to say so (see the GITHUB_ACTIONS case below), and
+        // so a test that does not is exercising the same guard everywhere.
+        GITHUB_ACTIONS: undefined,
         PATH: `${stubDir}:${process.env.PATH ?? ""}`,
         CONVERGE_PACKAGE_SOURCE: stage.packageSource,
         ...env,
@@ -840,26 +848,74 @@ describe("the npm converge publishes through", () => {
   describe("the acceptance-mode registry override", () => {
     const LOOPBACK = "http://127.0.0.1:9999/"
 
-    it("refuses a non-loopback registry rather than falling back", () => {
+    // Every non-loopback shape a plausible misconfiguration takes, including
+    // ones that merely CONTAIN a loopback spelling. A substring check would
+    // accept the last three, and each of them resolves off this machine.
+    it.each([
+      "https://registry.npmjs.org/",
+      "http://registry.internal.example.com/",
+      "http://127.0.0.1.example.com/",
+      "http://localhost.example.com/",
+      "http://evil.example.com/?h=127.0.0.1",
+    ])("refuses the non-loopback registry %s rather than falling back", registry => {
       const stub = makeStubNpm({
         view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
       })
       try {
         const result = runConverge(stub.dir, {
           ...MAIN_ENV,
-          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: "https://registry.npmjs.org/",
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: registry,
         })
         expect(result.status).not.toBe(0)
         expect(result.stderr).toMatch(/must point at a loopback address/)
         // Fails closed: nothing was published on the way to the refusal.
         expect(readPublishLog(stub.publishLog)).toEqual([])
+        // And the refusal beat every network call. The stub records EVERY
+        // invocation's argv, including the `npm view` registry reads, so an
+        // empty log is positive evidence that the driver refused before it
+        // could contact anything — not merely that it published nothing.
+        // This is the assertion the guard's original position failed: it
+        // validated the value only after lockstepRegistryState() had already
+        // run three `npm view` calls against a real registry.
+        expect(readArgvLog(stub.argvLog)).toEqual([])
       } finally {
         stub.cleanup()
       }
     })
 
+    // The other direction, without which the refusals above could be produced
+    // by a guard that rejects everything. A loopback value is ACCEPTED: the
+    // run completes, publishes the two missing packages, and carries the
+    // provenance override that is the whole reason the hatch exists.
+    it.each(["http://127.0.0.1:9999/", "http://localhost:9999/", "http://[::1]:9999/"])(
+      "accepts the loopback registry %s and publishes through it",
+      registry => {
+        const stub = makeStubNpm({
+          view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+        })
+        try {
+          const result = runConverge(stub.dir, {
+            ...MAIN_ENV,
+            CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: registry,
+          })
+          expect(result.status).toBe(0)
+          expect(result.stderr).not.toMatch(/must point at a loopback address/)
+          expect(readPublishLog(stub.publishLog)).toEqual([
+            "packages/collector-runtime",
+            "packages/local-collector",
+          ])
+          expect(readArgvLog(stub.argvLog).join("\n")).toMatch(/--provenance=false/)
+        } finally {
+          stub.cleanup()
+        }
+      }
+    )
+
     // The one machine where honouring it would matter is the one that does
-    // real releases, so there it is unreachable.
+    // real releases, so there it is unreachable. GITHUB_ACTIONS is set
+    // explicitly rather than inherited: execConverge clears it, because this
+    // suite itself runs inside Actions and the inherited value was silently
+    // turning the non-loopback case above into a second copy of this one.
     it("refuses outright inside GitHub Actions", () => {
       const stub = makeStubNpm({
         view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
@@ -874,6 +930,41 @@ describe("the npm converge publishes through", () => {
         expect(result.stderr).toMatch(/set inside GitHub Actions/)
         expect(readPublishLog(stub.publishLog)).toEqual([])
       } finally {
+        stub.cleanup()
+      }
+    })
+
+    // THE DEFECT THAT HID THE LOOPBACK GUARD FROM CI, asserted directly.
+    //
+    // The suite runs inside GitHub Actions, so before execConverge cleared
+    // GITHUB_ACTIONS every case in this describe block inherited it and hit
+    // the running-in-Actions refusal. The non-loopback case failed visibly,
+    // which is how this was found — but the more dangerous reading is that
+    // the loopback guard had NO CI coverage at all: whichever message the
+    // assertion expected, the guard under test was never the one that ran.
+    //
+    // So this pins the harness rather than the driver: with GITHUB_ACTIONS
+    // present in the parent process, a run that does not ask for it must
+    // still reach the loopback guard.
+    it("reaches the loopback guard even when the suite itself runs in Actions", () => {
+      const stub = makeStubNpm({
+        view: { [CP]: "published", [CR]: "missing", [LC]: "missing" },
+      })
+      const inherited = process.env.GITHUB_ACTIONS
+      process.env.GITHUB_ACTIONS = "true"
+      try {
+        const result = runConverge(stub.dir, {
+          ...MAIN_ENV,
+          CONVERGE_ACCEPTANCE_LOCAL_REGISTRY: "https://registry.npmjs.org/",
+        })
+        expect(result.status).not.toBe(0)
+        // The loopback guard's diagnosis, NOT the Actions one.
+        expect(result.stderr).toMatch(/must point at a loopback address/)
+        expect(result.stderr).not.toMatch(/set inside GitHub Actions/)
+        expect(readPublishLog(stub.publishLog)).toEqual([])
+      } finally {
+        if (inherited === undefined) delete process.env.GITHUB_ACTIONS
+        else process.env.GITHUB_ACTIONS = inherited
         stub.cleanup()
       }
     })

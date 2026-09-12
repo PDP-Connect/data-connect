@@ -432,13 +432,17 @@ async function buildLiveSiblings(
 // Rather than let a test reach into the command, the hatch is explicit, named,
 // and FENCED so it cannot weaken a real release:
 //
-//   - It requires CONVERGE_ACCEPTANCE_LOCAL_REGISTRY to be a 127.0.0.1 or
-//     localhost URL. Any other value is a refusal, not a fallback — a hatch
-//     that silently accepted a public registry would be a way to publish
-//     without provenance.
+//   - It requires CONVERGE_ACCEPTANCE_LOCAL_REGISTRY's HOSTNAME to be
+//     loopback — parsed as a URL, then compared, never matched as a
+//     substring, so registry.npmjs.org and 127.0.0.1.example.com are both
+//     refused. Any other value is a refusal, not a fallback — a hatch that
+//     silently accepted a public registry would be a way to publish without
+//     provenance.
 //   - It refuses outright when GITHUB_ACTIONS is set. A real release runs
 //     there and must always attach provenance, so the hatch is unreachable on
 //     the only machine where disabling it would matter.
+//   - Both refusals are evaluated by main() BEFORE the first registry read,
+//     so an unacceptable value stops the run before it contacts anything.
 //
 // The alternative — having the test pack separately and inspect that — is
 // exactly the substitution this is meant to avoid: it would assert on an
@@ -561,6 +565,16 @@ async function main(): Promise<void> {
     fail(`tag ${tag} is not of the form vX.Y.Z`)
   }
 
+  // Evaluated BEFORE the registry is touched, for the same reason the package
+  // source is: it is a configuration decision, and an unacceptable value must
+  // be refused before the run has contacted anything. It used to be resolved
+  // further down, next to the log line that announces it — which meant a
+  // non-loopback value was still refused, but only after `npm view` had
+  // already talked to a registry. The stubbed tests could not see that
+  // ordering; nothing published either way, but "refuses before it can reach
+  // the network" was not true as written.
+  const localRegistry = acceptanceLocalRegistry()
+
   // Re-read registry state here rather than trusting the resolver's output.
   // The resolve and converge steps run as separate jobs, so the registry may
   // have moved between them (a concurrent run, or propagation catching up).
@@ -597,8 +611,8 @@ async function main(): Promise<void> {
   log(`  release tooling: ${TOOLING_ROOT}`)
   log(`  package source:  ${packageSource}`)
   // Announced loudly. A run in acceptance mode publishes without provenance,
-  // so it must never be mistakable for a real one in a log.
-  const localRegistry = acceptanceLocalRegistry()
+  // so it must never be mistakable for a real one in a log. The value was
+  // already validated above; this only reports it.
   if (localRegistry) {
     log(`  ACCEPTANCE MODE: publishing to the loopback registry ${localRegistry}, provenance disabled`)
   }
