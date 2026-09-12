@@ -66,6 +66,10 @@ import {
 	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
 import {
+	type ArtifactCaptureContext,
+	captureFileArtifact,
+} from "./artifact-capture.ts";
+import {
 	ATTACHMENT_PREVIEW_CHARS,
 	applyProjectDirScope,
 	BYTES_PER_MB,
@@ -444,6 +448,7 @@ export async function emitSessionsFromAccumulators({
 // ─── Tool-results (attachments) ─────────────────────────────────────────
 
 interface WalkToolResultsArgs {
+	captureContext?: ArtifactCaptureContext | null;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
@@ -455,6 +460,7 @@ interface WalkToolResultsArgs {
 }
 
 export interface EmitToolResultFileArgs {
+	captureContext?: ArtifactCaptureContext | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	full: string;
 	projectDir: string;
@@ -466,12 +472,11 @@ export interface EmitToolResultFileArgs {
 export async function emitToolResultFile(
 	args: EmitToolResultFileArgs,
 ): Promise<void> {
-	// Tool-result blobs are machine-generated and unbounded (a single large
-	// command output can be hundreds of MB). The durable record keeps only a
-	// short preview plus the byte length (already known from `st.size`), so we
-	// read just a bounded head prefix instead of the whole file — keeping memory
-	// flat on huge sessions. A forbidden byte past the window cannot reach the
-	// preview anyway, so prefix-only screening is honest for this lossy field.
+	// The bounded head prefix below is unchanged: it remains the record's
+	// SEARCH PROJECTION, read without materialising a file that can be hundreds
+	// of MB. What changes is that it is no longer the only copy — the complete
+	// bytes now stream to the artifact spool and on to blob storage, so the
+	// record is reconstructable rather than merely findable.
 	const bounded = await readBoundedFilePreview(args.full);
 	if (bounded === null) {
 		return;
@@ -481,8 +486,19 @@ export async function emitToolResultFile(
 		bounded.buffer,
 		TOOL_RESULT_PREVIEW_CHARS,
 	);
+	const recordKey = `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`;
+	// Capture before emit: a `blob_ref` is written only once the complete bytes
+	// are durably held, so the record never claims a capture that is still in
+	// flight.
+	const captured = await captureFileArtifact({
+		context: args.captureContext ?? null,
+		mimeType: "application/octet-stream",
+		path: args.full,
+		recordKey,
+		stream: "attachments",
+	});
 	await args.emitRecord("attachments", {
-		id: `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`,
+		id: recordKey,
 		session_id: args.sessionId,
 		parent_uuid: null,
 		event_type: "tool_result_file",
@@ -493,10 +509,13 @@ export async function emitToolResultFile(
 			previewResult.kind === "binary" ? previewResult.reason : null,
 		content_bytes: args.st.size,
 		timestamp: new Date(args.st.mtimeMs).toISOString(),
+		artifact_capture: captured.status,
+		artifact_sha256: captured.sha256,
 	});
 }
 
 interface ProcessToolResultArgs {
+	captureContext?: ArtifactCaptureContext | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
 	full: string;
@@ -530,6 +549,7 @@ async function processToolResultEntry(
 		return;
 	}
 	await emitToolResultFile({
+		captureContext: args.captureContext ?? null,
 		emitRecord: args.emitRecord,
 		full: args.full,
 		toolResultsDir: args.toolResultsDir,
@@ -569,6 +589,7 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 				continue;
 			}
 			await processToolResultEntry(ent, {
+				captureContext: args.captureContext ?? null,
 				full,
 				toolResultsDir,
 				projectDir,
@@ -1041,6 +1062,8 @@ type SymlinkSkipped = (path: string) => Promise<void>;
 type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
 
 export interface ScanProjectDirsArgs {
+	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
+	captureContext?: ArtifactCaptureContext | null;
 	scope?: EnumerationScope | null;
 	onSymlink?: SymlinkSkipped;
 	onDirectoryError?: DirectoryReadFailure;
@@ -1168,6 +1191,7 @@ async function processSessionDir(
 
 	// tool-results/*.txt → attachments with event_type=tool_result_file.
 	await walkToolResults({
+		captureContext: args.captureContext ?? null,
 		sessionDir,
 		sessionId,
 		projectDir,
