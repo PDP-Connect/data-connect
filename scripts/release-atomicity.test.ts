@@ -179,6 +179,37 @@ process.exit(1)
   }
 }
 
+// Runs the publish-ordering barrier as the program `.releaserc.yaml` invokes
+// it, so the assertion lands on the script's own behaviour rather than on the
+// retry primitive it happens to call. The propagation delay is overridden
+// because a child process offers no seam to inject a sleep function through;
+// the attempt COUNT is left at its real value, so the budget is still spent.
+function runBarrierScript(
+  stubDir: string,
+  version: string
+): { status: number; stdout: string; stderr: string } {
+  const tsxEntry = require.resolve("tsx")
+  try {
+    const stdout = execFileSync(
+      process.execPath,
+      ["--import", tsxEntry, join(REPO_ROOT, "scripts/verify-connector-protocol-published.ts"), version],
+      {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${stubDir}:${process.env.PATH ?? ""}`,
+          PDPP_PROPAGATION_DELAY_MS: "10",
+        },
+      }
+    )
+    return { status: 0, stdout, stderr: "" }
+  } catch (error) {
+    const e = error as { status?: number; stdout?: string; stderr?: string }
+    return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+  }
+}
+
 function readPublishLog(path: string): string[] {
   return readFileSync(path, "utf8").split("\n").map(l => l.trim()).filter(Boolean)
 }
@@ -944,6 +975,62 @@ describe("release pipeline wiring", () => {
     expect(raised).toBeInstanceOf(Error)
     expect(String(raised)).toContain("9.9.9")
     expect(viewCount).toBeGreaterThan(1)
+  })
+
+  // The three tests above drive `awaitPublished` directly. That proves the
+  // primitive retries, but not that the barrier SCRIPT is the thing calling
+  // it — and the v2.2.1 incident was a hand-rolled single lookup inside this
+  // script, not a collapsed loop inside the primitive. Restoring that script
+  // body passes every assertion above. So the barrier is also exercised as
+  // the program `.releaserc.yaml` runs, with the stub registry on PATH.
+  it("routes the barrier script's own registry read through the retry budget", () => {
+    const stub = makeSequencedViewNpm(["missing", "published"])
+    try {
+      const result = runBarrierScript(stub.dir, "9.9.9")
+
+      // Asked twice and then succeeded: the script itself waited out the
+      // propagation miss rather than reading lag as "not published".
+      expect(stub.viewCount()).toBe(2)
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain("confirmed @pdpp/connector-protocol@9.9.9 is live")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("accepts a live version from the array shape npm 11 answers with", () => {
+    // `npm view <spec> version --json` answers `["9.9.9"]`, not "9.9.9". The
+    // barrier's pre-fix body compared that array to the version string and
+    // so rejected a version that was genuinely live — reported, absurdly, as
+    // `resolved version "9.9.9" does not match expected "9.9.9"`.
+    const stub = makeSequencedViewNpm(["published"])
+    try {
+      const result = runBarrierScript(stub.dir, "9.9.9")
+
+      expect(stub.viewCount()).toBe(1)
+      expect(result.status).toBe(0)
+      expect(result.stderr).not.toContain("does not match expected")
+    } finally {
+      stub.cleanup()
+    }
+  })
+
+  it("stops the release from the barrier script when the package never appears", () => {
+    // Fails closed, as the program and not just as the primitive, naming the
+    // package rather than reporting an unanswerable registry.
+    const stub = makeSequencedViewNpm(["missing"], { repeatLast: true })
+    try {
+      const result = runBarrierScript(stub.dir, "9.9.9")
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain("@pdpp/connector-protocol@9.9.9")
+      expect(result.stderr).toContain("isn't live yet")
+      expect(result.stderr).not.toContain("UNKNOWN")
+      // Every attempt in the budget was spent before believing the miss.
+      expect(stub.viewCount()).toBe(8)
+    } finally {
+      stub.cleanup()
+    }
   })
 
   it("runs the quality job before either publishing path", () => {

@@ -42,7 +42,18 @@ import {
 // quoted as "attempts x delay" overstates the wait by one delay; the numbers
 // here are chosen against the real elapsed figure, not the nominal product.
 const PROPAGATION_ATTEMPTS = 8
-const PROPAGATION_DELAY_MS = 30_000
+
+// The real delay, and the only value any release run uses. The override exists
+// so a test can drive the retry through the actual scripts — as child
+// processes, where no sleep function can be injected — without waiting out a
+// real propagation budget. A missing, non-numeric, or non-positive value keeps
+// the real delay, so a typo cannot silently collapse the budget to nothing.
+function propagationDelayMs(): number {
+  const override = Number(process.env.PDPP_PROPAGATION_DELAY_MS)
+  return Number.isFinite(override) && override > 0 ? override : 30_000
+}
+
+const PROPAGATION_DELAY_MS = propagationDelayMs()
 
 export const PROPAGATION_BUDGET_MS = (PROPAGATION_ATTEMPTS - 1) * PROPAGATION_DELAY_MS
 
