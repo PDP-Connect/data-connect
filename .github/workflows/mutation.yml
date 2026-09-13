@@ -109,6 +109,51 @@ jobs:
           # is not.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # PREREQUISITE. This workflow's definition comes from the merge ref, but
+      # the tree it checks out is the pull request head, for the line-number
+      # reason above. The two are not the same revision, so a cohort added to
+      # the matrix on the base branch runs against heads that were branched
+      # before it and do not contain the files it names. That is exactly what
+      # happened when the `scripts` cohort landed: every open pull request
+      # touching `scripts/` began invoking a Stryker configuration its own tree
+      # did not have, and the run died with `File does not exist!` after the
+      # intent packet had already been frozen.
+      #
+      # The intent step does not catch this. Its `--config` is read by a
+      # positional argument scan that ignores flags it does not know, so a head
+      # predating the cohort digests whichever configuration its own
+      # `run-intent.ts` derives from the cohort root -- the client's -- and
+      # reports success while naming a configuration this attempt never ran.
+      #
+      # This fails rather than skipping. A cohort that cannot run has produced
+      # no evidence about the suite, and a green check would claim it had. The
+      # remedy is a rebase, which is a fact about the branch and not about the
+      # tests, so the message says so instead of leaving a reader to infer a
+      # weak suite from an empty receipt.
+      - name: Verify this revision carries the cohort's tooling
+        env:
+          COHORT: ${{ matrix.cohort }}
+          COHORT_CONFIG: ${{ matrix.config }}
+        run: |
+          set -euo pipefail
+          if [[ -f "${COHORT_CONFIG}" ]]; then
+            echo "Cohort ${COHORT} resolves its configuration at ${COHORT_CONFIG}."
+            exit 0
+          fi
+          cat >&2 <<EOF
+          The ${COHORT} cohort needs ${COHORT_CONFIG}, and this revision does not
+          have it.
+
+          This workflow's definition is read from the merge ref while its tree is
+          the pull request head. The ${COHORT} cohort was added to the matrix on
+          the base branch after this branch was cut, so the matrix names a
+          configuration that only exists on the base branch.
+
+          This is a fact about the branch, not about its tests: nothing here says
+          the suite is weak. Rebase onto the base branch and the cohort runs.
+          EOF
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

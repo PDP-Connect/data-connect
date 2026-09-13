@@ -132,10 +132,66 @@ describe("projectOutcome", () => {
 
   it("projects Survived as survived, pending triage", () => {
     const projected = projectOutcome(
-      observation({ rawStatus: "Survived", failureOutput: undefined, killedBy: [] })
+      observation({
+        rawStatus: "Survived",
+        failureOutput: undefined,
+        killedBy: [],
+        testsCompleted: 3,
+      })
     )
     expect(projected.outcome).toBe("survived")
     expect(projected.basis).toBe("no_selected_test_failed")
+  })
+
+  it("projects a Survived that executed no tests as inconclusive", () => {
+    // Stryker defaults an unexecuted mutant to `Survived`. A runner that fails
+    // to execute its trials therefore reports survivors the suite in fact
+    // kills, which reads as a verdict on the tests and is a fact about the
+    // runner. Observed on the `scripts` cohort, where 47 mutants came back
+    // `Survived` with `testsCompleted: 0`, and applying three of them by hand
+    // failed 3, 6 and 3 tests respectively.
+    const projected = projectOutcome(
+      observation({
+        rawStatus: "Survived",
+        failureOutput: undefined,
+        killedBy: [],
+        testsCompleted: 0,
+      })
+    )
+    expect(projected.outcome).toBe("inconclusive")
+    expect(projected.basis).toBe("survived_without_executing_tests")
+  })
+
+  it("keeps Survived a survivor when the runner reported no count at all", () => {
+    // An absent count is a reporter that never wrote the field, not a reported
+    // zero. Treating the two alike would condemn every run predating it.
+    const projected = projectOutcome(
+      observation({
+        rawStatus: "Survived",
+        failureOutput: undefined,
+        killedBy: [],
+        testsCompleted: undefined,
+      })
+    )
+    expect(projected.outcome).toBe("survived")
+    expect(projected.basis).toBe("no_selected_test_failed")
+  })
+
+  it("reads testsCompleted off the raw report", () => {
+    const [observed] = readObservations(
+      {
+        files: {
+          "scripts/a.ts": {
+            mutants: [
+              { id: "1", mutatorName: "StringLiteral", status: "Survived", testsCompleted: 0 },
+            ],
+          },
+        },
+      },
+      { baselineComplete: true }
+    )
+    expect(observed?.testsCompleted).toBe(0)
+    expect(projectOutcome(observed!).outcome).toBe("inconclusive")
   })
 
   it.each<[StrykerStatus, string]>([
