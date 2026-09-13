@@ -35,6 +35,12 @@ const nextConfig = {
     },
     useTypeScriptCli: true,
   },
+  // Off everywhere: the dev-only "N" build-status badge (bottom-left, fixed
+  // position) never ships in a production build regardless of this flag —
+  // `next build`/`next start` don't include next-devtools — but it visually
+  // overlaps small-viewport UI (e.g. a mobile sticky action bar) in `next
+  // dev`, which is where this app's screenshots and manual review happen.
+  devIndicators: false,
   output: "standalone",
   outputFileTracingIncludes: {
     "/llms-full.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],

@@ -112,12 +112,6 @@ export interface OwnerConnectorTemplateLike {
   connector_key?: string | null;
   connector_modality?: string | null;
   display_name?: string | null;
-  /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: {
-    color?: string | null;
-    kind?: string | null;
-    svg?: string | null;
-  } | null;
   /**
    * Server-owned fact, meaningful only for Development-tier entries: true when
    * the connector-conformance roster names this connector a KNOWN scaffold
@@ -227,7 +221,6 @@ export interface ConnectorCatalogEntry {
   /** Manifest-authored external documentation links. */
   externalDocs: readonly ConnectorExternalDoc[];
   /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
-  icon?: OwnerConnectorTemplateLike["icon"];
   /**
    * Meaningful only for Development-tier entries: true when the connector is
    * a KNOWN scaffold (unconditional `SKIP_RESULT`, no real collection) rather
@@ -578,7 +571,6 @@ export function buildOwnerConnectorCatalog(
       displayName: cleanManifestText(template.display_name) ?? displayNameFor(manifestForCopy, connectorKey),
       disposition,
       externalDocs: externalDocsFromManifest(manifestForCopy),
-      icon: template.icon ?? null,
       isKnownScaffold:
         typeof template.is_known_scaffold === "boolean"
           ? template.is_known_scaffold

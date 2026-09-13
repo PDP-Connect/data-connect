@@ -1,0 +1,341 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * Unit tests for per-stream field and date-range narrowing.
+ *
+ * The picker granted every field of every checked stream with no date bound,
+ * and described that as "Everything in each data type you check, with no date
+ * limit" — an unbuilt feature phrased as a property of the protocol.
+ * `spec-core.md:761` makes `fields` a protocol-enforced allowlist and
+ * `spec-core.md:758-759` makes `time_range` a protocol-enforced window, both
+ * already enforced by the resource server.
+ *
+ * These tests pin the two rules most likely to be eroded later:
+ *
+ *   1. capability is read from the declaration, never assumed — offering a
+ *      control the manifest does not support produces a 400 at issuance,
+ *      after the owner has already chosen;
+ *   2. schema-required fields are the consent floor (`spec-core.md:764`) and
+ *      survive any submission that tries to drop them.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  describeStreamScope,
+  describeTimeField,
+  encodeScopeStreamKey,
+  normalizeScopeBound,
+  parseSubmittedStreamScopes,
+  resolveStreamScopeCapability,
+  resolveStreamScopeSelection,
+  scopeFieldsInputName,
+  scopeSinceInputName,
+  scopeUntilInputName,
+  type StreamScopeSource,
+} from "../server/hosted-mcp-stream-scope.ts";
+
+/** Shaped like ChatGPT's `messages` stream, which declares both capabilities. */
+function messagesStream(overrides: Partial<StreamScopeSource> = {}): StreamScopeSource {
+  return {
+    consent_time_field: "create_time",
+    name: "messages",
+    schema: {
+      properties: { author: {}, content: {}, conversation_id: {}, create_time: {}, id: {} },
+      required: ["id", "conversation_id"],
+    },
+    selection: { fields: true },
+    ...overrides,
+  };
+}
+
+const isoDay = (iso: string) => iso.slice(0, 10);
+
+// ─── Capability resolution ───────────────────────────────────────────────────
+
+test("capability splits required fields from the ones an owner may switch off", () => {
+  const capability = resolveStreamScopeCapability(messagesStream());
+
+  assert.deepEqual(capability.requiredFields, ["conversation_id", "id"]);
+  assert.deepEqual(capability.optionalFields, ["author", "content", "create_time"]);
+  assert.equal(capability.supportsFieldNarrowing, true);
+  assert.equal(capability.timeField, "create_time");
+});
+
+test("a stream that does not declare selection.fields offers no field control", () => {
+  const capability = resolveStreamScopeCapability(messagesStream({ selection: { fields: false } }));
+
+  assert.equal(capability.supportsFieldNarrowing, false);
+  assert.deepEqual(capability.optionalFields, [], "no control is offered for a capability the manifest lacks");
+  // Required fields are still reported, so the scope can be described honestly.
+  assert.deepEqual(capability.requiredFields, ["conversation_id", "id"]);
+});
+
+test("a stream without consent_time_field has no temporal scope", () => {
+  // spec-core.md:547 — absence is the normative signal, not an oversight.
+  const capability = resolveStreamScopeCapability(messagesStream({ consent_time_field: null }));
+
+  assert.equal(capability.timeField, null);
+});
+
+// ─── Field narrowing ─────────────────────────────────────────────────────────
+
+test("a narrowed field selection always includes the schema-required fields", () => {
+  // The owner checked only `content`; `id` and `conversation_id` are the
+  // consent floor and come along regardless (spec-core.md:764).
+  const result = resolveStreamScopeSelection(messagesStream(), { fields: ["content"] });
+
+  assert.ok("selection" in result);
+  assert.deepEqual(result.selection.fields, ["content", "conversation_id", "id"]);
+});
+
+test("selecting every field omits the allowlist rather than restating it", () => {
+  const all = ["author", "content", "conversation_id", "create_time", "id"];
+  const result = resolveStreamScopeSelection(messagesStream(), { fields: all });
+
+  assert.ok("selection" in result);
+  assert.equal(result.selection.fields, null, "asking for everything is not a narrowing");
+});
+
+test("a field the schema does not declare is rejected, not silently dropped", () => {
+  const result = resolveStreamScopeSelection(messagesStream(), { fields: ["content", "password"] });
+
+  assert.ok("error" in result);
+  assert.match(result.error.message, /no field named password/);
+});
+
+test("field narrowing on a stream that does not support it is rejected", () => {
+  const result = resolveStreamScopeSelection(messagesStream({ selection: { fields: false } }), {
+    fields: ["content"],
+  });
+
+  assert.ok("error" in result, "the resolver would 400 on this; catch it while the owner is still on the page");
+});
+
+test("omitting the field list asks for every field, which stays the default", () => {
+  const result = resolveStreamScopeSelection(messagesStream(), {});
+
+  assert.ok("selection" in result);
+  assert.equal(result.selection.fields, null);
+  assert.equal(result.selection.timeRange, null);
+});
+
+// ─── Date range ──────────────────────────────────────────────────────────────
+
+test("a since bound becomes the start of that day, inclusive", () => {
+  const result = resolveStreamScopeSelection(messagesStream(), { since: "2026-03-01" });
+
+  assert.ok("selection" in result);
+  assert.deepEqual(result.selection.timeRange, { since: "2026-03-01T00:00:00.000Z" });
+});
+
+test("an until bound covers the whole day the owner picked", () => {
+  // `until` is exclusive (spec-core.md:759). Picking one day as both bounds
+  // must authorize that day, not an empty window.
+  const result = resolveStreamScopeSelection(messagesStream(), { since: "2026-03-01", until: "2026-03-01" });
+
+  assert.ok("selection" in result);
+  assert.deepEqual(result.selection.timeRange, {
+    since: "2026-03-01T00:00:00.000Z",
+    until: "2026-03-02T00:00:00.000Z",
+  });
+});
+
+test("a date range on a stream with no consent_time_field is rejected", () => {
+  const result = resolveStreamScopeSelection(messagesStream({ consent_time_field: null }), { since: "2026-03-01" });
+
+  assert.ok("error" in result);
+  assert.match(result.error.message, /cannot be limited by date/);
+});
+
+test("an unparseable date is a correction, not a silently ignored value", () => {
+  for (const bad of ["yesterday", "03/01/2026", "2026-3-1", "2026-13-45"]) {
+    const result = resolveStreamScopeSelection(messagesStream(), { since: bad });
+    assert.ok("error" in result, `expected ${bad} to be rejected`);
+  }
+});
+
+test("a backwards range is rejected before it reaches the resolver", () => {
+  const result = resolveStreamScopeSelection(messagesStream(), { since: "2026-06-01", until: "2026-03-01" });
+
+  assert.ok("error" in result);
+  assert.match(result.error.message, /must come before/);
+});
+
+test("blank date inputs mean no bound, not an error", () => {
+  const result = resolveStreamScopeSelection(messagesStream(), { since: "", until: "   " });
+
+  assert.ok("selection" in result);
+  assert.equal(result.selection.timeRange, null);
+});
+
+test("normalizeScopeBound distinguishes unset from unparseable", () => {
+  assert.equal(normalizeScopeBound("", "since"), null, "unset");
+  assert.equal(normalizeScopeBound(undefined, "since"), null, "unset");
+  assert.equal(normalizeScopeBound("nonsense", "since"), undefined, "unparseable");
+  assert.equal(normalizeScopeBound("2026-03-01", "since"), "2026-03-01T00:00:00.000Z");
+});
+
+// ─── Owner-facing description (spec-core.md:545) ─────────────────────────────
+
+test("a scope is described in words, never as time_range", () => {
+  const capability = resolveStreamScopeCapability(messagesStream());
+  const result = resolveStreamScopeSelection(messagesStream(), { fields: ["content"], since: "2026-03-01" });
+
+  assert.ok("selection" in result);
+  const described = describeStreamScope(capability, result.selection, isoDay);
+
+  // spec-core.md:545 wants "created on or after ...", not "in time_range".
+  assert.equal(described, "3 of 5 fields · created on or after 2026-03-01");
+  assert.doesNotMatch(described, /time_range|consent_time_field/);
+});
+
+test("a closed range reports the last day the owner chose, not the exclusive bound", () => {
+  const capability = resolveStreamScopeCapability(messagesStream());
+  const result = resolveStreamScopeSelection(messagesStream(), { since: "2026-03-01", until: "2026-03-31" });
+
+  assert.ok("selection" in result);
+  // The grant stores 2026-04-01T00:00:00Z; the owner picked March 31.
+  assert.equal(describeStreamScope(capability, result.selection, isoDay), "All fields · created 2026-03-01 to 2026-03-31");
+});
+
+test("an unnarrowed scope says so plainly", () => {
+  const capability = resolveStreamScopeCapability(messagesStream());
+  const result = resolveStreamScopeSelection(messagesStream(), {});
+
+  assert.ok("selection" in result);
+  assert.equal(describeStreamScope(capability, result.selection, isoDay), "All fields · all dates");
+});
+
+test("time fields humanize to the verb an owner reads", () => {
+  // The cases below are the actual consent_time_field values declared across
+  // the shipped manifests, not invented shapes.
+  assert.equal(describeTimeField("create_time"), "created");
+  assert.equal(describeTimeField("created_at"), "created");
+  assert.equal(describeTimeField("created_utc"), "created");
+  assert.equal(describeTimeField("date_created"), "created");
+  assert.equal(describeTimeField("updated_at"), "updated");
+  assert.equal(describeTimeField("sent_at"), "sent");
+  assert.equal(describeTimeField("played_at"), "played");
+  assert.equal(describeTimeField("order_date"), "ordered");
+  assert.equal(describeTimeField("watched_at"), "watched");
+  assert.equal(describeTimeField("added_at"), "added");
+  assert.equal(describeTimeField("starred_at"), "starred");
+  assert.equal(describeTimeField("taken_at"), "taken");
+  assert.equal(describeTimeField("start_date"), "started");
+  assert.equal(describeTimeField("observed_on"), "recorded");
+  assert.equal(describeTimeField("timestamp"), "recorded");
+  // Both affix positions occur in the fleet and must reduce alike.
+  assert.equal(describeTimeField("date_received"), "received");
+  assert.equal(describeTimeField("message_received_at"), "received");
+  assert.equal(describeTimeField("rtime_last_played"), "played");
+  // An unrecognized field must never print raw at the owner — a slightly
+  // generic sentence beats a leaked internal identifier.
+  assert.equal(describeTimeField("weird_internal_ts"), "dated");
+  assert.equal(describeTimeField(null), "dated");
+});
+
+test("no shipped consent_time_field renders as a raw identifier", () => {
+  // Guards the whole fleet, not just the cases enumerated above: whatever a
+  // manifest declares, the owner must never read the field name itself.
+  for (const field of ["day", "month", "as_of", "export_time", "friend_since", "file_modified_at"]) {
+    const verb = describeTimeField(field);
+    assert.equal(verb.includes("_"), false, `${field} must not surface an underscore`);
+    assert.equal(verb, verb.toLowerCase(), `${field} must render as a plain lowercase verb`);
+  }
+});
+
+// ─── Form encoding and parsing ───────────────────────────────────────────────
+
+const SOURCE_A = JSON.stringify(["https://registry.pdpp.dev/connectors/chatgpt", "conn_a"]);
+const SOURCE_B = JSON.stringify(["https://registry.pdpp.dev/connectors/chatgpt", "conn_b"]);
+
+test("submitted scope is recovered per stream, by name", () => {
+  const body = {
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content", "id"],
+    [scopeSinceInputName(SOURCE_A, "messages")]: "2026-03-01",
+    [scopeUntilInputName(SOURCE_A, "messages")]: "2026-03-31",
+  };
+
+  const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
+
+  assert.deepEqual(scopes.get("messages"), {
+    fields: ["content", "id"],
+    since: "2026-03-01",
+    until: "2026-03-31",
+  });
+});
+
+test("one source's controls never narrow another's", () => {
+  // Two connected accounts of the same connector share every stream name, so
+  // cross-applying their windows would silently grant the wrong scope. Keying
+  // on the source identity (not a render position) is what prevents it, since
+  // the POST iterates submitted selections rather than the GET's row order.
+  const body = {
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content"],
+    [scopeFieldsInputName(SOURCE_B, "messages")]: ["author"],
+  };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content"]);
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_B).get("messages")?.fields, ["author"]);
+});
+
+test("a stream name with separators or unicode round-trips intact", () => {
+  // The encoding exists so a stream name cannot collide with the `__`
+  // separator the input name uses.
+  for (const name of ["month_categories", "a__b", "naïve", "with space"]) {
+    const body = { [scopeFieldsInputName(SOURCE_A, name)]: ["x"] };
+    const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
+    assert.deepEqual(scopes.get(name)?.fields, ["x"], `expected ${name} to round-trip`);
+  }
+});
+
+test("a single checked field arrives as a list, not a bare string", () => {
+  // Form encoders send one value as a string and several as an array.
+  const body = { [scopeFieldsInputName(SOURCE_A, "messages")]: "content" };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content"]);
+});
+
+test("numeric-keyed objects from qs arrayLimit overflow are read as lists", () => {
+  // Per-field checkboxes across many streams exceed qs's arrayLimit, after
+  // which it yields {0: ..., 1: ...} instead of an array.
+  const body = { [scopeFieldsInputName(SOURCE_A, "messages")]: { 0: "content", 1: "id" } };
+
+  assert.deepEqual(parseSubmittedStreamScopes(body, SOURCE_A).get("messages")?.fields, ["content", "id"]);
+});
+
+test("unrelated and malformed inputs are ignored rather than guessed at", () => {
+  const body = {
+    _csrf: "token",
+    access_mode: "continuous",
+    [`narrow_fields_${encodeScopeStreamKey(SOURCE_A)}__`]: "orphan",
+    [`narrow_fields_${encodeScopeStreamKey(SOURCE_A)}__!!!not-base64!!!`]: "junk",
+    selection: "abc",
+  };
+
+  const scopes = parseSubmittedStreamScopes(body, SOURCE_A);
+  // Nothing decodes to a usable stream name, so nothing is claimed.
+  assert.equal(scopes.size, 0);
+});
+
+test("an absent body yields no scopes instead of throwing", () => {
+  assert.equal(parseSubmittedStreamScopes(null, SOURCE_A).size, 0);
+  assert.equal(parseSubmittedStreamScopes(undefined, SOURCE_A).size, 0);
+  assert.equal(parseSubmittedStreamScopes({}, SOURCE_A).size, 0);
+});
+
+test("a parsed submission resolves against the declaration end to end", () => {
+  const body = {
+    [scopeFieldsInputName(SOURCE_A, "messages")]: ["content"],
+    [scopeSinceInputName(SOURCE_A, "messages")]: "2026-03-01",
+  };
+  const submitted = parseSubmittedStreamScopes(body, SOURCE_A).get("messages") ?? {};
+  const result = resolveStreamScopeSelection(messagesStream(), submitted);
+
+  assert.ok("selection" in result);
+  assert.deepEqual(result.selection.fields, ["content", "conversation_id", "id"]);
+  assert.deepEqual(result.selection.timeRange, { since: "2026-03-01T00:00:00.000Z" });
+});

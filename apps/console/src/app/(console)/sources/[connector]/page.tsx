@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { buttonVariants, ConnectorIcon, IcButton, IcTimestamp } from "@pdpp/brand-react";
 import type { StreamManifestEntry } from "@pdpp/display";
 import {
   formatConnectorKeyForDisplay,
@@ -41,6 +41,7 @@ import {
 } from "../../lib/connection-evidence.ts";
 import { isBrowserBoundConnector, isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
+import { loadConnectorBrandIndex, type ConnectorBrandIconIndex } from "../../lib/connector-brand-index.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { isRevokedConnection } from "../../lib/records-list-classification.ts";
 import {
@@ -158,6 +159,7 @@ export interface ConnectorPageModel {
   connectionPrimaryAction: RefRequiredAction | null;
   connectionRenderedVerdict: RefRenderedVerdict | null;
   connectorId: string;
+  connectorIndex: ConnectorBrandIconIndex;
   connectorInstanceId: string | null;
   /** Current durable horizon disclosures from the reference owner projection. */
   coverageHorizons: readonly RefCoverageHorizon[];
@@ -404,9 +406,10 @@ async function loadConnectorPageModel(
   routeId: string,
   explicitConnectionId?: string | null
 ): Promise<ConnectorPageModel> {
-  const [summary, manifests] = await Promise.all([
+  const [summary, manifests, connectorIndex] = await Promise.all([
     resolveConnectionForRecordsRoute(routeId, explicitConnectionId),
     listConnectorManifests(),
+    loadConnectorBrandIndex(),
   ]);
   if (!summary) {
     notFound();
@@ -526,6 +529,7 @@ async function loadConnectorPageModel(
     connectionPrimaryAction: actionability.primaryAction,
     connectionRenderedVerdict: summary.rendered_verdict ?? null,
     connectorId,
+    connectorIndex,
     connectorInstanceId,
     coverageHorizons: summary.coverage_horizons ?? [],
     deviceLabels,
@@ -661,6 +665,7 @@ function ConnectorPageView({
     connectionId,
     connectionPrimaryAction,
     connectorId,
+    connectorIndex,
     connectorInstanceId,
     connectionLabelSeed,
     coverageHorizons,
@@ -799,6 +804,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
+            <ConnectorIcon connectorId={connectorId} connectorIndex={connectorIndex} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}

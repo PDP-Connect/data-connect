@@ -263,6 +263,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectionPrimaryAction: renderedVerdict.required_actions[0] ?? null,
     connectionRenderedVerdict: renderedVerdict,
     connectorId: "claude_code",
+    connectorIndex: { brandIcons: {} },
     connectorInstanceId: connectionId,
     coverageHorizons: [],
     deviceLabels: ["workstation"],

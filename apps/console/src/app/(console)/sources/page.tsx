@@ -36,6 +36,7 @@ import {
 import { isPagedRequest, parseConnectorSummaryPageState } from "../components/connector-summary-pager.ts";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
+import { loadConnectorBrandIndex } from "../lib/connector-brand-index.ts";
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
@@ -101,6 +102,7 @@ export default async function RecordsIndexPage({
     );
     const scenario = isSourcesDemoScenario(demoParam) ? demoParam : "mixed";
     const instances = toSourcesView(buildSourcesDemoSummaries(scenario));
+    const connectorIndex = await loadConnectorBrandIndex();
     // Seed a churn advisory for the demo so the protocol-toned notice is
     // screenshot-able without a live version-stats route.
     const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
@@ -109,17 +111,23 @@ export default async function RecordsIndexPage({
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
-        <SourcesView churnAdvisory={churnAdvisory} instances={instances} interactive={false} />
+        <SourcesView churnAdvisory={churnAdvisory} connectorIndex={connectorIndex} instances={instances} interactive={false} />
       </RecordroomShellWithPalette>
     );
   }
 
   let manifests: Awaited<ReturnType<typeof listConnectorManifests>>;
   let page: Awaited<ReturnType<typeof fetchSourcesPage>>;
+  let connectorIndex: Awaited<ReturnType<typeof loadConnectorBrandIndex>>;
   try {
-    const [pageResult, connectorManifests] = await Promise.all([fetchSourcesPage(pageState), listConnectorManifests()]);
+    const [pageResult, connectorManifests, loadedConnectorIndex] = await Promise.all([
+      fetchSourcesPage(pageState),
+      listConnectorManifests(),
+      loadConnectorBrandIndex(),
+    ]);
     page = pageResult;
     manifests = connectorManifests;
+    connectorIndex = loadedConnectorIndex;
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -155,6 +163,7 @@ export default async function RecordsIndexPage({
     <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
       <SourcesHeader error={params.error} message={params.message} />
       <SourcesView
+        connectorIndex={connectorIndex}
         instances={instances}
         interactive={true}
         reactivateAction={reactivateConnectionAction}

@@ -76,6 +76,27 @@ export default {
   inPlace: false,
   checkers: [],
 
+  // The dry run executes this cohort's selected tests once, unmutated, to
+  // establish the baseline every mutant is judged against. The command runner
+  // reports no per-test identities, so the whole selection runs in one command
+  // and the baseline costs as much as the selection does.
+  //
+  // Stryker allows five minutes by default. This cohort's tests are
+  // integration-weight and the selection grows with the number of test files a
+  // revision touches, so a large revision can exceed that while every test
+  // still passes -- the ceiling is the baseline's, not the suite's.
+  //
+  // Ten minutes is headroom over the cohort's own test job, not a fix for a
+  // baseline that fails to terminate. A dry run that does not finish inside
+  // this is a hang to diagnose, not a number to raise: the console prebuild in
+  // the mutation workflow exists because its absence produced exactly that,
+  // and raising this instead only delays the same empty result.
+  //
+  // This bounds only the unmutated baseline. `timeoutMS` and `timeoutFactor`
+  // still bound each mutant, so a mutant that induces an infinite loop is
+  // killed on time rather than waiting this out.
+  dryRunTimeoutMinutes: 10,
+
   // Stryker copies the working tree into the sandbox, so anything not needed to
   // run this cohort's tests is excluded. `node_modules` is deliberately absent
   // from this list: the tests import from it, and Stryker links it into the

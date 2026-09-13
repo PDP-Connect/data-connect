@@ -131,6 +131,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Connector catalog rows are required to interpret connections and records.",
   },
+  consent_challenges: {
+    classification: "backup_required",
+    reason: "Owner-bound consent requests and single-use decision status/digests are durable authorization state.",
+  },
   consent_exchange_codes: {
     classification: "backup_required",
     reason: "Consent exchange state is durable owner authorization state until expiry or redemption.",

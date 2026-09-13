@@ -18,8 +18,8 @@ export type { IcButtonProps } from "./button.tsx";
 export { buttonVariants, IcButton } from "./button.tsx";
 // ─── Carbon + Copyline ────────────────────────────────────────────
 export { Carbon, Copyline } from "./carbon.tsx";
-// ─── ConnectorIcon (manifest-declared brand mark or Monogram fallback) ───
-export type { ConnectorIconLike } from "./connector-icon.tsx";
+// ─── ConnectorIcon (connector-index brand mark or Monogram fallback) ───
+export type { ConnectorBrandIcon, ConnectorIconIndexLike } from "./connector-icon.tsx";
 export { ConnectorIcon } from "./connector-icon.tsx";
 // ─── CopyMono (click-to-copy protocol id) ─────────────────────────
 export { CopyMono } from "./copy-mono.tsx";
@@ -44,6 +44,8 @@ export {
 } from "./dialog.tsx";
 // ─── Endorse (status badge — only home of state color) ────────────
 export { Endorse } from "./endorse.tsx";
+// ─── Tooltip and popover (anchored, non-modal explanations) ───────────────
+export { IcPopover, IcPopoverClose, IcPopoverPopup, IcPopoverTrigger } from "./popover.tsx";
 export type { IcInputProps } from "./input.tsx";
 // ─── Input + Field ────────────────────────────────────────────────
 export { IcField, IcInput } from "./input.tsx";
@@ -96,6 +98,7 @@ export {
 export { Tag } from "./tag.tsx";
 export type { TextColor, TextProps, TextSize } from "./text.tsx";
 export { Text } from "./text.tsx";
+export { IcTooltip, IcTooltipContent, IcTooltipTrigger } from "./tooltip.tsx";
 // ─── Text (shared typographic primitive) ──────────────────────────
 export { textVariants } from "./text-variants.ts";
 // ─── Timestamp ────────────────────────────────────────────────────
