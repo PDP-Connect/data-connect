@@ -83,6 +83,7 @@ export {
   isBlobUploadPayload,
 } from "./local-device-blob-capture.ts";
 export {
+  assertSpoolReferenceAuthorityIsComplete,
   DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS,
   LocalDeviceBlobSpool,
   type LocalDeviceBlobSpoolContent,

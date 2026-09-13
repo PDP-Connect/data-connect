@@ -55,12 +55,20 @@ import { pipeline } from "node:stream/promises";
  * visibly unresolved rather than silently deleted — reporting a failure is not
  * durability.
  *
- * Reclamation is therefore a sweep, never a per-upload delete: see
- * {@link LocalDeviceBlobSpool.reclaimUnreferenced}. One body can be owed to
- * several `blob_upload` rows at once (same content, different record
+ * Reclamation is therefore a sweep, never a per-upload delete: one body can be
+ * owed to several `blob_upload` rows at once (same content, different record
  * coordinates), and the delete must follow the DURABLE record that every such
  * obligation is met — neither of which a delete inside one upload's send path
  * can honour.
+ *
+ * **That sweep is currently DISABLED, and nothing reclaims spooled bodies.**
+ * See {@link LocalDeviceBlobSpool.reclaimUnreferencedUnsafe}: it has no correct
+ * ownership contract with capture, so it can delete a body a live obligation
+ * names. Until capture admission and reclamation share one, the spool grows
+ * without bound and an operator reclaims by hand. Retaining surplus bytes is
+ * the deliberate choice — surplus disk is recoverable, a destroyed artifact is
+ * not, and a `blob_upload` row whose body is missing is classified TERMINAL,
+ * so the loss is permanent rather than retried.
  */
 export interface LocalDeviceBlobSpoolOptions {
   /** Root directory for the spool. Created on demand. */
@@ -86,13 +94,17 @@ export interface LocalDeviceBlobSpoolReclaimResult {
 }
 
 /**
- * Grace period before an unreferenced body may be reclaimed.
+ * Age gate applied by {@link LocalDeviceBlobSpool.reclaimUnreferencedUnsafe}.
  *
- * `captureBlobArtifact` commits bytes, then enqueues the row naming them. A
- * body in that gap is unreferenced but live, so reclamation must not consider
- * recently-written entries at all. One hour is far longer than the gap between
- * those two steps can plausibly be, and the cost of being generous is retained
- * disk, whereas the cost of being tight is destroyed bytes.
+ * This was intended to close the capture race: `captureBlobArtifact` commits
+ * bytes, then enqueues the row naming them, so a body in that gap is
+ * unreferenced but live. **It does not close it, at any length.** The sweep
+ * reads a file's metadata and then deletes its PATHNAME; a capture that
+ * commits in between replaces the object at that pathname, so the age the
+ * sweep tested belongs to a file that no longer exists. Lengthening this
+ * value widens the window it is evaluated in, not the safety of the delete.
+ *
+ * Kept only because the disabled sweep still takes it — see that method.
  */
 export const DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS = 60 * 60_000;
 
@@ -162,6 +174,47 @@ async function* toByteChunks(content: LocalDeviceBlobSpoolContent): AsyncIterabl
   }
 }
 
+/**
+ * Hard precondition for enabling spool reclamation: every queue that can name
+ * a body in this spool must be represented in the reference set.
+ *
+ * The spool is content-addressed, so one body serves every capture of that
+ * content regardless of which connection captured it. Reclamation asks "does
+ * anything still owe this body", and an answer drawn from a subset of the
+ * queues is not that question — it is "does THIS queue still owe it", which
+ * reads a body another connection owes as unreferenced.
+ *
+ * The shapes are not hypothetical. `resolveCollectorQueuePath` puts each
+ * connection's queue in ONE directory as `<connectorId>.<sourceInstanceId>.sqlite`,
+ * so a spool sited in that directory is shared by all of them while
+ * `drainCollectorOutbox` holds exactly one. Two ownership models are sound:
+ *
+ *  - **Per-queue spool.** Site the spool under a path derived from the queue,
+ *    so the queue holding it is the only one that can name its bodies. Costs
+ *    cross-connection deduplication of identical content.
+ *  - **Complete reference authority.** Keep one shared spool and build the
+ *    reference set by unioning `outstandingBlobDigests()` over every queue
+ *    sharing it, including queues no run has opened yet.
+ *
+ * This throws rather than warns: a silent partial answer here deletes
+ * artifacts. Call it before any reclamation is enabled.
+ */
+export function assertSpoolReferenceAuthorityIsComplete(input: {
+  /** Queue paths whose `blob_upload` rows contributed to the reference set. */
+  consultedQueuePaths: readonly string[];
+  /** Every queue path that can name a body in this spool. */
+  sharingQueuePaths: readonly string[];
+}): void {
+  const consulted = new Set(input.consultedQueuePaths);
+  const missing = input.sharingQueuePaths.filter((path) => !consulted.has(path));
+  if (missing.length > 0) {
+    throw new Error(
+      `spool reference authority is incomplete: ${missing.length} queue(s) share this spool but were not consulted (${missing.join(", ")}); ` +
+        "reclaiming against a subset can delete a body another connection still owes"
+    );
+  }
+}
+
 export class LocalDeviceBlobSpool {
   readonly #root: string;
 
@@ -198,11 +251,26 @@ export class LocalDeviceBlobSpool {
    *
    *  1. `flush: true` on the write stream fsyncs the temp file's CONTENT
    *     before close resolves.
-   *  2. After the rename, {@link #syncDir} fsyncs the containing directory so
-   *     the NAME that makes those bytes reachable is itself durable.
+   *  2. After the rename, {@link #syncDir} fsyncs the SHARD directory so the
+   *     name that makes those bytes reachable is itself durable.
    *
-   * Only after both does `put` return, so a successful return means the bytes
-   * survive power loss and not merely process death.
+   * **Scope of that guarantee.** It covers the content and the shard's own
+   * entry. It does NOT cover the shard directory's entry in `objects/`, nor
+   * `objects/`'s entry in the spool root, when `mkdirSync(…, {recursive: true})`
+   * has just created them: an fsync of a directory persists the entries IN it,
+   * not the entry naming IT in its parent. For the first body written to a
+   * shard — and for the first body written to a brand-new spool — power loss
+   * can therefore still leave a synced directory that its unsynced parent does
+   * not list, which loses the body as surely as losing the bytes.
+   *
+   * So: a successful return means the bytes and their shard entry are durable
+   * against power loss GIVEN the shard's ancestors already were, which holds
+   * for every write after a shard's first. Closing the remaining case means
+   * fsyncing each directory this call newly creates, in its own parent, from
+   * the spool root down. Not done here: it costs an fsync per level on a path
+   * that is hot, and the residual exposure is one body per new shard, which is
+   * a smaller loss than the eager-delete defect this design replaced. Do not
+   * restate this as an unqualified durability guarantee.
    */
   async put(content: LocalDeviceBlobSpoolContent): Promise<LocalDeviceBlobSpoolEntry> {
     const hash = createHash("sha256");
@@ -231,8 +299,9 @@ export class LocalDeviceBlobSpool {
     try {
       mkdirSync(shardDir, { recursive: true });
       renameSync(tempPath, finalPath);
-      // The content is already durable; make the directory entry that names it
-      // durable too, so power loss cannot leave the bytes unreachable.
+      // The content is already durable; make the shard's entry for it durable
+      // too. This does NOT sync the shard's own entry in `objects/` when the
+      // mkdir above just created it — see the qualification on `put`.
       this.#syncDir(shardDir);
     } catch (error) {
       this.#discardTemp(tempPath);
@@ -282,8 +351,48 @@ export class LocalDeviceBlobSpool {
   /**
    * Reclaim committed bodies that no longer have any delivery obligation.
    *
-   * This replaces per-upload eager deletion, which was unsafe for two
-   * independent reasons:
+   * **NOT SAFE UNDER CONCURRENT CAPTURE. Disabled by default; no production
+   * caller enables it.** Two defects are unresolved, and neither is closed by
+   * tuning `minAgeMs`:
+   *
+   *  1. **The delete is not synchronised with capture.** The reference set is
+   *     snapshotted by the caller, this loop then `await`s a file's metadata,
+   *     and only then unlinks the PATHNAME. A capture that commits inside that
+   *     window replaces the object and enqueues a new obligation, and the
+   *     unlink destroys the FRESH body while judging it by the OLD one's age
+   *     and the OLD snapshot. Reproduced with the default one-hour grace by
+   *     `local-device-blob-spool-reclaim-race.test.ts`. Because a `blob_upload`
+   *     row naming absent bytes is classified TERMINAL, the resulting loss is
+   *     permanent rather than retried.
+   *
+   *     A correct repair needs an ownership contract, not a longer wait or a
+   *     second stat: the check and the delete must apply to the same object.
+   *     POSIX offers no "unlink if this is still that inode", so the contract
+   *     has to come from capture and reclamation agreeing on exclusion (a lock
+   *     over the spool root, or reclamation running only when no capture can
+   *     be in flight), which does not exist today.
+   *
+   *  2. **The reference authority is incomplete.** `outstandingDigests` comes
+   *     from ONE outbox, while the spool is content-addressed and therefore
+   *     shared. Per-connection queues are separate files in one directory
+   *     (`<connectorId>.<sourceInstanceId>.sqlite`, see
+   *     `resolveCollectorQueuePath`), so a spool sited beside them is shared by
+   *     every connection while the sweep sees only the caller's own rows. A
+   *     digest another connection still owes reads as unreferenced. Before this
+   *     can be enabled, either give each queue its own spool, or build the
+   *     reference set from every queue sharing the spool — see
+   *     {@link assertSpoolReferenceAuthorityIsComplete}.
+   *
+   * `minAgeMs` was intended as the answer to (1) and is not; see
+   * {@link DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS}.
+   *
+   * Retained here rather than deleted so the sweep's shape and its tests stay
+   * available to whoever builds that contract. It is off by default and callers
+   * must pass `acknowledgeUnsafe: true` to run it at all.
+   *
+   * The sweep's own logic — the part that a correct contract would preserve —
+   * was unsafe for two further reasons that ARE resolved, and that a future
+   * repair must not reintroduce:
    *
    *  1. **A body can be shared.** The spool is content-addressed, so identical
    *     content captured under different record coordinates yields several
@@ -302,24 +411,31 @@ export class LocalDeviceBlobSpool {
    * non-`succeeded` `blob_upload` row — see
    * `LocalDeviceOutbox.outstandingBlobDigests`. Anything in it is kept.
    *
-   * `minAgeMs` closes the concurrent-capture race. `captureBlobArtifact`
-   * commits bytes BEFORE it enqueues the row that references them, so a body
-   * captured moments ago may legitimately have no reference yet; a sweep that
-   * trusted the reference set alone would delete live bytes in that window.
-   * Only entries whose mtime is older than `minAgeMs` are eligible, so a body
-   * must be unreferenced AND have been unreferenced for longer than any
-   * capture takes between its two steps.
-   *
    * Using absence-of-reference (rather than presence-of-success) as the
    * reclaim signal is also what makes this safe against pruning: `pruneSent`
    * deletes acknowledged rows, so "delivered" evidence is not permanent, while
    * "still owed" evidence is. An unreferenced body is one that is either
    * delivered or pruned after delivery — reclaimable in both cases.
+   *
+   * `minAgeMs` only skips entries whose observed mtime is younger than it. It
+   * is NOT a safety property: see defect (1) above and
+   * {@link DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS}.
    */
-  async reclaimUnreferenced(input: {
+  async reclaimUnreferencedUnsafe(input: {
+    /**
+     * Must be `true`. Exists so no caller reaches this sweep without naming
+     * the hazard at the call site; `reclaimDrainedBlobSpool` does not pass it
+     * unless a test opts in explicitly.
+     */
+    acknowledgeUnsafe: true;
     minAgeMs?: number;
     outstandingDigests: ReadonlySet<string>;
   }): Promise<LocalDeviceBlobSpoolReclaimResult> {
+    if (input.acknowledgeUnsafe !== true) {
+      throw new Error(
+        "reclaimUnreferencedUnsafe requires acknowledgeUnsafe: true — this sweep can delete a concurrently recaptured body"
+      );
+    }
     const minAgeMs = input.minAgeMs ?? DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS;
     const now = Date.now();
     const result: LocalDeviceBlobSpoolReclaimResult = {

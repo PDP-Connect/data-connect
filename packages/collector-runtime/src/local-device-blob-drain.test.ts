@@ -81,12 +81,13 @@ function capture(h: Harness, body: Buffer, recordKey = "tool_result_file:drain")
 }
 
 /**
- * Drains with reclamation's capture-race grace period disabled.
+ * Drains exactly as production does — which today means reclaiming nothing.
  *
- * Production keeps a long `minAgeMs` so a body written but not yet enqueued is
- * never eligible. A test that wants to observe reclamation at all must waive
- * that wait, so `spoolReclaimMinAgeMs: 0` is the harness default here; the
- * grace period itself is covered by its own test below.
+ * `spoolReclaimMinAgeMs: 0` is kept so these tests state the strongest form of
+ * their claim: bodies are retained even with the sweep's grace period waived,
+ * because the sweep does not run at all. Reclamation is disabled pending an
+ * ownership contract with capture; see
+ * `local-device-blob-spool-reclaim-race.test.ts`.
  */
 function drain(h: Harness, blobUpload: DrainBlobUploadFn, spoolReclaimMinAgeMs = 0) {
   return drainCollectorOutbox({
@@ -112,7 +113,7 @@ async function readAll(stream: NodeJS.ReadableStream): Promise<Buffer> {
 }
 
 describe("blob_upload drain", () => {
-  it("uploads the spooled bytes byte-exactly and reclaims the local copy after acknowledgement", async () => {
+  it("uploads the spooled bytes byte-exactly and retains the local copy after acknowledgement", async () => {
     const h = makeHarness();
     const body = randomBytes(256 * 1024);
     const captured = await capture(h, body);
@@ -126,10 +127,9 @@ describe("blob_upload drain", () => {
     assert.equal(result.sent, 1);
     assert.deepEqual(uploaded, body, "the server received the complete original bytes");
     assert.equal(h.outbox.get(captured.outboxId)?.status, "succeeded");
-    assert.equal(
+    assert.ok(
       h.spool.has(captured.sha256),
-      false,
-      "reclaimed only once the row is durably succeeded and nothing else owes the body"
+      "retained: nothing owes the body, but reclamation is disabled, so delivery deletes nothing"
     );
     h.outbox.close();
   });
@@ -182,7 +182,7 @@ describe("blob_upload drain", () => {
     // second commit lands on the same digest, so there is one body, not two.
     assert.equal(serverStore.size, 1);
     assert.deepEqual(serverStore.get(captured.sha256), body);
-    assert.equal(h.spool.has(captured.sha256), false);
+    assert.ok(h.spool.has(captured.sha256), "the local copy is retained; reclamation is disabled");
     h.outbox.close();
   });
 
@@ -302,7 +302,7 @@ describe("blob_upload drain", () => {
  * ran before `acknowledge()` committed. They are separate failures with
  * separate triggers, so they get separate tests.
  */
-describe("blob spool reclamation", () => {
+describe("blob spool retention", () => {
   it("delivers BOTH records when two record coordinates share one body", async () => {
     const h = makeHarness();
     const body = randomBytes(16 * 1024);
@@ -358,8 +358,8 @@ describe("blob spool reclamation", () => {
     assert.ok(h.spool.has(first.sha256), "shared body retained for the outstanding row");
     assert.deepEqual(await readFile(h.spool.pathFor(first.sha256)), body);
 
-    // And once the straggler succeeds, the body becomes reclaimable. It has
-    // exhausted its attempts by now, so return it to `ready` the way an
+    // And the straggler can still be delivered from those retained bytes. It
+    // has exhausted its attempts by now, so return it to `ready` the way an
     // operator would before letting it complete.
     h.outbox.requeueDeadLetters({ dryRun: false, kind: "blob_upload" });
     const finish = await drain(h, async (args) => {
@@ -367,7 +367,11 @@ describe("blob spool reclamation", () => {
       return { sha256: args.sha256, size_bytes: args.sizeBytes };
     });
     assert.equal(finish.sent, 1);
-    assert.equal(h.spool.has(first.sha256), false, "reclaimed once the last obligation is acknowledged");
+    assert.equal(h.outbox.outstandingBlobDigests().size, 0, "both obligations are met");
+    assert.ok(
+      h.spool.has(first.sha256),
+      "still retained afterwards: nothing reclaims, so surplus bytes outlive the last obligation"
+    );
     h.outbox.close();
   });
 
@@ -415,7 +419,9 @@ describe("blob spool reclamation", () => {
     const body = randomBytes(4096);
 
     // A body committed by `put` before its row is enqueued is unreferenced but
-    // live. Reclamation must not consider it, or concurrent capture loses bytes.
+    // live. Nothing may delete it, or concurrent capture loses bytes. Today
+    // that holds because the drain reclaims nothing at all; the grace period
+    // below would be the weaker, and insufficient, reason.
     const entry = await h.spool.put([body]);
     assert.equal(h.outbox.outstandingBlobDigests().size, 0, "nothing references it yet");
 
@@ -432,12 +438,12 @@ describe("blob spool reclamation", () => {
       spoolReclaimMinAgeMs: 60 * 60_000,
     });
 
-    assert.ok(h.spool.has(entry.sha256), "mid-capture bytes survive the sweep");
+    assert.ok(h.spool.has(entry.sha256), "mid-capture bytes survive a drain");
     assert.deepEqual(await readFile(h.spool.pathFor(entry.sha256)), body);
     h.outbox.close();
   });
 
-  it("retains a dead-lettered upload's bytes across repeated sweeps", async () => {
+  it("retains a dead-lettered upload's bytes across repeated drains", async () => {
     const h = makeHarness();
     const body = randomBytes(4096);
     const captured = await capture(h, body, "tool_result_file:record-A");
@@ -445,16 +451,16 @@ describe("blob spool reclamation", () => {
     await drain(h, () => Promise.reject(new Error("permanent upstream rejection")));
     assert.equal(h.outbox.get(captured.outboxId)?.status, "dead_letter");
 
-    // A dead letter is an UNMET obligation, so its bytes stay claimed. Sweeping
-    // repeatedly must not erode that. Each sweep observes the state the previous
+    // A dead letter is an UNMET obligation, so its bytes stay claimed. Draining
+    // repeatedly must not erode that. Each drain observes the state the previous
     // one left, so these run in sequence rather than concurrently.
     const stillRejecting = () => Promise.reject(new Error("still rejecting"));
     await drain(h, stillRejecting);
-    assert.ok(h.spool.has(captured.sha256), "retained after sweep 1");
+    assert.ok(h.spool.has(captured.sha256), "retained after drain 1");
     await drain(h, stillRejecting);
-    assert.ok(h.spool.has(captured.sha256), "retained after sweep 2");
+    assert.ok(h.spool.has(captured.sha256), "retained after drain 2");
     await drain(h, stillRejecting);
-    assert.ok(h.spool.has(captured.sha256), "retained after sweep 3");
+    assert.ok(h.spool.has(captured.sha256), "retained after drain 3");
     assert.deepEqual(await readFile(h.spool.pathFor(captured.sha256)), body);
     h.outbox.close();
   });

@@ -2462,11 +2462,22 @@ export interface DrainCollectorOutboxInput {
   /** Content-addressed local store holding the bytes `blob_upload` rows name. */
   spool?: LocalDeviceBlobSpool;
   /**
-   * Grace period before an unreferenced spool body may be reclaimed. Exists so
-   * tests can exercise the sweep without waiting out the production default;
-   * production leaves it unset. See `DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS`.
+   * Grace period applied by the reclaim sweep when it is enabled. Only
+   * meaningful alongside `spoolReclaimUnsafe`. See
+   * `DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS` — it is not a safety property.
    */
   spoolReclaimMinAgeMs?: number;
+  /**
+   * Run the spool reclaim sweep after the drain.
+   *
+   * **Off by default, and no production caller sets it.** The sweep can delete
+   * a body a live `blob_upload` row names when a capture commits concurrently,
+   * and a row naming absent bytes is TERMINAL — so enabling it trades bounded
+   * disk growth for unbounded, permanent artifact loss. Left as an option only
+   * so the sweep's behaviour stays under test while the ownership contract it
+   * needs is built. See `LocalDeviceBlobSpool.reclaimUnreferencedUnsafe`.
+   */
+  spoolReclaimUnsafe?: boolean;
 }
 
 /**
@@ -2515,10 +2526,11 @@ export async function drainCollectorOutbox(input: DrainCollectorOutboxInput): Pr
   try {
     return await runCollectorOutboxDrain(input);
   } finally {
-    // Reclaim spooled bodies AFTER the drain has committed its acknowledgements.
-    // Placed in `finally` so an aborted or budget-truncated drain still reclaims
-    // whatever is now genuinely unowed, and so the sweep can never run while
-    // this drain still holds an unacknowledged obligation it just delivered.
+    // When enabled, reclaim runs AFTER the drain has committed its
+    // acknowledgements, in `finally` so an aborted or budget-truncated drain
+    // still sweeps and so it never runs while this drain holds an
+    // unacknowledged obligation it just delivered. It is DISABLED by default —
+    // see `reclaimDrainedBlobSpool`.
     await reclaimDrainedBlobSpool(input);
   }
 }
@@ -2526,20 +2538,32 @@ export async function drainCollectorOutbox(input: DrainCollectorOutboxInput): Pr
 /**
  * Reclaim spool bodies no longer owed to any undelivered `blob_upload` row.
  *
- * Reads the outstanding reference set from the durable outbox, so only bytes
- * whose delivery obligations are all recorded as met (or pruned after being
- * met) are eligible. Never deletes a body a `ready`, `leased`, or `dead_letter`
- * row still claims, and never a body young enough to be mid-capture.
+ * **Disabled unless `spoolReclaimUnsafe` is set, which no production caller
+ * does, so nothing reclaims spooled bodies today.** The sweep it would run has
+ * no ownership contract with capture: it snapshots the reference set, awaits a
+ * body's metadata, then unlinks that pathname, and a capture committing in
+ * between leaves it deleting a FRESH body by an OLD body's age. A `blob_upload`
+ * row whose bytes are absent is classified TERMINAL, so that loss is permanent
+ * rather than retried — strictly worse than the unbounded disk growth that
+ * leaving the sweep off costs. Reproduced with the default grace period in
+ * `local-device-blob-spool-reclaim-race.test.ts`.
  *
- * Failure to reclaim is not a drain failure: retained bytes cost disk, whereas
- * propagating the error would fail a drain that actually delivered its work.
+ * A second defect blocks it independently: the reference set comes from THIS
+ * drain's outbox, while a content-addressed spool can be shared by every
+ * per-connection queue in the same directory. See
+ * `assertSpoolReferenceAuthorityIsComplete`.
+ *
+ * Both must be resolved before the default flips. Until then the spool grows
+ * without bound and an operator reclaims by hand; that is the deliberate
+ * trade, not an oversight.
  */
 async function reclaimDrainedBlobSpool(input: DrainCollectorOutboxInput): Promise<void> {
-  if (!input.spool) {
+  if (!(input.spool && input.spoolReclaimUnsafe)) {
     return;
   }
   try {
-    await input.spool.reclaimUnreferenced({
+    await input.spool.reclaimUnreferencedUnsafe({
+      acknowledgeUnsafe: true,
       outstandingDigests: input.outbox.outstandingBlobDigests(),
       ...(input.spoolReclaimMinAgeMs === undefined ? {} : { minAgeMs: input.spoolReclaimMinAgeMs }),
     });
@@ -2901,8 +2925,9 @@ async function sendOutboxItem(
  * Deliver one spooled artifact body. Deliberately deletes nothing.
  *
  * Reclaiming the local copy here would be wrong twice over, so the send path
- * owns delivery only and reclamation is a separate sweep over durable queue
- * state ({@link LocalDeviceBlobSpool.reclaimUnreferenced}):
+ * owns delivery only. Reclamation is a separate sweep over durable queue state
+ * ({@link LocalDeviceBlobSpool.reclaimUnreferencedUnsafe}), and that sweep is
+ * currently disabled — so today nothing deletes a spooled body at all:
  *
  *  - **The body may be shared.** Content addressing means identical content
  *    under different record coordinates is several rows over ONE file. A
@@ -2928,19 +2953,55 @@ async function sendBlobUploadItem(item: LocalDeviceOutboxItem, deps: SendOutboxI
   // Throws LocalDeviceBlobSpoolMissingError when the body is gone — mapped to
   // a dead-letter by failOutboxItem, since no retry can conjure the bytes.
   const content = deps.spool.openRead(payload.sha256);
-  const uploaded = await deps.blobUpload({
-    connectorId: payload.connectorId,
-    connectorInstanceId: payload.connectorInstanceId,
-    content,
-    mimeType: payload.mimeType,
-    recordKey: payload.recordKey,
-    sha256: payload.sha256,
-    sizeBytes: payload.sizeBytes,
-    stream: payload.stream,
-    ...(payload.jsonPath ? { jsonPath: payload.jsonPath } : {}),
-  });
-  if (uploaded.sha256 !== payload.sha256 || uploaded.size_bytes !== payload.sizeBytes) {
-    throw new Error(`blob upload integrity mismatch for ${item.id}`);
+  // This function opens the stream, so this function closes it. A transport
+  // that throws — the common case, since every retry and dead-letter passes
+  // through here — may have read none of it, and an unread `createReadStream`
+  // holds its descriptor open until GC. Under the drain's retry loop that
+  // accumulates one leaked descriptor per failed attempt.
+  try {
+    const uploaded = await deps.blobUpload({
+      connectorId: payload.connectorId,
+      connectorInstanceId: payload.connectorInstanceId,
+      content,
+      mimeType: payload.mimeType,
+      recordKey: payload.recordKey,
+      sha256: payload.sha256,
+      sizeBytes: payload.sizeBytes,
+      stream: payload.stream,
+      ...(payload.jsonPath ? { jsonPath: payload.jsonPath } : {}),
+    });
+    if (uploaded.sha256 !== payload.sha256 || uploaded.size_bytes !== payload.sizeBytes) {
+      throw new Error(`blob upload integrity mismatch for ${item.id}`);
+    }
+  } finally {
+    // Destroying a fully-consumed stream is a no-op, so this is safe on the
+    // success path too. It never touches the spooled body — only this reader.
+    destroyReadStream(content);
+  }
+}
+
+/**
+ * Release a read stream's descriptor without letting cleanup mask a failure.
+ *
+ * `createReadStream` opens its descriptor asynchronously, so destroying a
+ * stream before that open settles can still surface the open's outcome as an
+ * `error` event. Destroying a stream over a file that is still there emits
+ * nothing (verified), so this only fires when the body disappeared between
+ * `openRead`'s existence check and the open — a narrow window, but one with no
+ * listener on it, and an `error` with no listener terminates the process.
+ * Attaching a sink first keeps the upload's own failure the one that
+ * propagates, which is the outcome the drain classifies and retries on.
+ */
+function destroyReadStream(stream: NodeJS.ReadableStream): void {
+  const destroyable = stream as NodeJS.ReadableStream & { destroy?: () => void };
+  try {
+    stream.on("error", () => {
+      // The upload's own error is the one that matters; this reader is being
+      // discarded, so its late open/close failure is not a delivery outcome.
+    });
+    destroyable.destroy?.();
+  } catch {
+    // Cleanup must not replace the error the caller is already propagating.
   }
 }
 
