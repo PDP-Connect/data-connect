@@ -19,13 +19,8 @@ const REQUIRED_PATH_FRAGMENTS = [
   "connectors/collection-profiles/chatgpt-pdpp/provenance.json",
   "licenses/pdpp-node-license",
   "personal-server/dist/personal-server",
-  // The SQLite addon. better-sqlite3 13.x ships Node-API prebuilds under
-  // `prebuilds/<platform>-<arch>.node` and builds no `build/Release` at all, so
-  // the 12.x path this used to name is absent from a 13.x bundle. The filename
-  // is platform-dependent, so it is appended per platform below rather than
-  // spelled here; every platform's bundle carries all eight, and each build
-  // verifies the one its own runtime would load.
-  "personal-server/dist/node_modules/better-sqlite3/prebuilds/",
+  // The SQLite addon is required through `sqliteAddonAlternatives` rather than
+  // named here, because it has two legitimate shapes on disk. See that function.
   "playwright-runner/dist/playwright-runner",
   "pdpp-runtime/connector-loader.mjs",
   "pdpp-runtime/connector-loader-bootstrap.mjs",
@@ -66,6 +61,11 @@ export function assertPackagedRuntime(entries, artifactName) {
     expectedPath => !packagedPaths.has(expectedPath)
   )
 
+  const addonAlternatives = sqliteAddonAlternatives(platform)
+  if (!addonAlternatives.some(candidate => packagedPaths.has(candidate))) {
+    missing.push(`one of [${addonAlternatives.join(", ")}]`)
+  }
+
   if (missing.length > 0) {
     fail(
       `${artifactName} is missing packaged runtime files: ${missing.join(", ")}`
@@ -83,24 +83,18 @@ function artifactPlatform(artifactName) {
   fail(`Cannot determine artifact platform from ${artifactName}`)
 }
 
-function expectedRuntimePaths(platform) {
+function runtimePathRoot(platform) {
   const root = {
     linux: "usr/lib/dataconnect/",
     macos: "contents/resources/",
     windows: "",
   }[platform]
   if (root === undefined) fail(`Unsupported runtime platform: ${platform}`)
-  // node-gyp-build names a Node-API prebuild after the platform and
-  // architecture it was compiled for. The x64 build is the one every runner in
-  // this matrix produces except the Apple Silicon one, and both architectures
-  // ship in every bundle, so naming the x64 file asserts the addon is present
-  // without this function needing an architecture it is not given.
-  const prebuildName = {
-    linux: "linux-x64.node",
-    macos: "darwin-x64.node",
-    windows: "win32-x64.node",
-  }[platform]
+  return root
+}
 
+function expectedRuntimePaths(platform) {
+  const root = runtimePathRoot(platform)
   return REQUIRED_PATH_FRAGMENTS.map(fragment => {
     const executableSuffix =
       platform === "windows" &&
@@ -108,11 +102,31 @@ function expectedRuntimePaths(platform) {
         fragment.endsWith("playwright-runner/dist/playwright-runner"))
         ? ".exe"
         : ""
-    const resolved = fragment.endsWith("better-sqlite3/prebuilds/")
-      ? `${fragment}${prebuildName}`
-      : fragment
-    return `${root}${resolved}${executableSuffix}`.toLowerCase()
+    return `${root}${fragment}${executableSuffix}`.toLowerCase()
   })
+}
+
+// The addon requirement, as the alternatives that satisfy it. Naming the 13.x
+// prebuild alone is as version-specific as naming the 12.x path was: it asserts
+// which release produced the bundle, when what has to be true is that the
+// sidecar can open a database. 12.x builds `build/Release/better_sqlite3.node`,
+// 13.x ships `prebuilds/<platform>-<arch>.node`, and either is an addon its own
+// `lib/binding.js` will load.
+//
+// This does not relax the check. A bundle carrying neither shape still fails,
+// and it is still exactly one addon that has to be there.
+function sqliteAddonAlternatives(platform) {
+  const root = runtimePathRoot(platform)
+  const addonRoot = "personal-server/dist/node_modules/better-sqlite3"
+  const names = {
+    linux: ["linux-x64.node", "linuxmusl-x64.node"],
+    macos: ["darwin-x64.node", "darwin-arm64.node"],
+    windows: ["win32-x64.node"],
+  }[platform]
+  return [
+    `${root}${addonRoot}/build/Release/better_sqlite3.node`.toLowerCase(),
+    ...names.map(name => `${root}${addonRoot}/prebuilds/${name}`.toLowerCase()),
+  ]
 }
 
 function packagedEntryPath(entry, platform) {
@@ -219,7 +233,14 @@ function listAppImageEntries(artifact) {
 const WINDOWS_BROWSER_FRAGMENT = "playwright-runner/dist/browsers/chromium-"
 const WINDOWS_BROWSER_EXECUTABLE = "/chrome.exe"
 const WINDOWS_NODE_FILENAME = "pdpp-node.exe"
-const WINDOWS_RUNTIME_PATHS = new Set(expectedRuntimePaths("windows"))
+// Retention, not requirement: this decides which installer entries are kept
+// while streaming `7z l`. Every addon alternative has to be retained too, or the
+// entry that would satisfy the requirement is discarded before the check runs
+// and a correct bundle is reported as missing its addon.
+const WINDOWS_RUNTIME_PATHS = new Set([
+  ...expectedRuntimePaths("windows"),
+  ...sqliteAddonAlternatives("windows"),
+])
 const COMMAND_ERROR_OUTPUT_LIMIT = 64 * 1024
 
 function windowsInstallerEntryPath(entry) {
@@ -334,6 +355,45 @@ export function selectMacAppExecutables(
   }
 }
 
+// Where this app bundle's SQLite addon is, so the architecture check below can
+// run `file` on it. The same two shapes as `sqliteAddonAlternatives`, resolved
+// against the filesystem instead of an entry listing.
+//
+// Naming the 12.x path unconditionally here would have failed a correct 13.x
+// bundle on macOS even with the entry check fixed, because the caller treats
+// every path in its list as a hard `existsSync` requirement.
+//
+// When neither shape is present this fails rather than returning nothing, so a
+// bundle with no addon is still rejected, by this function instead of by a
+// confusing `file` invocation on a path that does not exist.
+//
+// 13.x ships both macOS architectures, and the caller asserts the file it gets
+// back matches the architecture being built. So the prebuild for that
+// architecture is preferred, not whichever is found first -- returning
+// `darwin-arm64.node` to an x86_64 build would fail a correct bundle on the
+// architecture check.
+function macSqliteAddon(app, artifactName, expectedArch) {
+  const addonRoot = join(
+    app,
+    "Contents",
+    "Resources",
+    "personal-server",
+    "dist",
+    "node_modules",
+    "better-sqlite3"
+  )
+  const preferredArch = expectedArch === "arm64" ? "arm64" : "x64"
+  const candidates = [
+    join(addonRoot, "build", "Release", "better_sqlite3.node"),
+    join(addonRoot, "prebuilds", `darwin-${preferredArch}.node`),
+  ]
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found) return found
+  fail(
+    `${artifactName} carries no better-sqlite3 addon; looked for ${candidates.join(", ")}`
+  )
+}
+
 function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   if (verifyCodeSignature) {
     run("codesign", ["--verify", "--deep", "--strict", app])
@@ -369,18 +429,7 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
       "dist",
       "personal-server"
     ),
-    join(
-      app,
-      "Contents",
-      "Resources",
-      "personal-server",
-      "dist",
-      "node_modules",
-      "better-sqlite3",
-      "build",
-      "Release",
-      "better_sqlite3.node"
-    ),
+    macSqliteAddon(app, artifactName, expectedArch),
     join(
       app,
       "Contents",
