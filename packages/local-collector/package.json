@@ -45,6 +45,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace=@pdpp/connector-protocol --workspace=@pdpp/collector-runtime && rm -rf dist && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
+    "derive:connector-sources": "tsx scripts/write-derived-connector-sources.ts",
     "prepack": "npm run build",
     "pack-install-run": "node --import tsx scripts/pack-install-run.ts",
     "test": "tsx scripts/run-tests.ts",
