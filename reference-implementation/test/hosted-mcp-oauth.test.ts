@@ -44,9 +44,16 @@ interface CloseableTestServer {
   readonly asServer: { closeAllConnections?: () => void; close: (callback: () => void) => void };
   readonly rsPort: number;
   readonly rsServer: { closeAllConnections?: () => void; close: (callback: () => void) => void };
+  // Closing the HTTP listeners does not stop the scheduler. `startServer` arms a
+  // ref'd 60s `setInterval` per connector once one exists (scheduler.ts:692,
+  // reached via `onScheduleMutation -> refresh`), and only `schedulerManager.stop()`
+  // clears it. Every other server-starting suite in this directory stops it here
+  // for that reason -- see browser-enrollment-shell-route.test.ts:86.
+  readonly schedulerManager?: { stop?: () => void } | null;
 }
 
 async function closeServer(server: CloseableTestServer): Promise<void> {
+  server.schedulerManager?.stop?.();
   server.asServer.closeAllConnections?.();
   server.rsServer.closeAllConnections?.();
   await Promise.allSettled([
