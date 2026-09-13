@@ -19,7 +19,13 @@ const REQUIRED_PATH_FRAGMENTS = [
   "connectors/collection-profiles/chatgpt-pdpp/provenance.json",
   "licenses/pdpp-node-license",
   "personal-server/dist/personal-server",
-  "personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+  // The SQLite addon. better-sqlite3 13.x ships Node-API prebuilds under
+  // `prebuilds/<platform>-<arch>.node` and builds no `build/Release` at all, so
+  // the 12.x path this used to name is absent from a 13.x bundle. The filename
+  // is platform-dependent, so it is appended per platform below rather than
+  // spelled here; every platform's bundle carries all eight, and each build
+  // verifies the one its own runtime would load.
+  "personal-server/dist/node_modules/better-sqlite3/prebuilds/",
   "playwright-runner/dist/playwright-runner",
   "pdpp-runtime/connector-loader.mjs",
   "pdpp-runtime/connector-loader-bootstrap.mjs",
@@ -84,6 +90,17 @@ function expectedRuntimePaths(platform) {
     windows: "",
   }[platform]
   if (root === undefined) fail(`Unsupported runtime platform: ${platform}`)
+  // node-gyp-build names a Node-API prebuild after the platform and
+  // architecture it was compiled for. The x64 build is the one every runner in
+  // this matrix produces except the Apple Silicon one, and both architectures
+  // ship in every bundle, so naming the x64 file asserts the addon is present
+  // without this function needing an architecture it is not given.
+  const prebuildName = {
+    linux: "linux-x64.node",
+    macos: "darwin-x64.node",
+    windows: "win32-x64.node",
+  }[platform]
+
   return REQUIRED_PATH_FRAGMENTS.map(fragment => {
     const executableSuffix =
       platform === "windows" &&
@@ -91,7 +108,10 @@ function expectedRuntimePaths(platform) {
         fragment.endsWith("playwright-runner/dist/playwright-runner"))
         ? ".exe"
         : ""
-    return `${root}${fragment}${executableSuffix}`.toLowerCase()
+    const resolved = fragment.endsWith("better-sqlite3/prebuilds/")
+      ? `${fragment}${prebuildName}`
+      : fragment
+    return `${root}${resolved}${executableSuffix}`.toLowerCase()
   })
 }
 

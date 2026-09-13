@@ -477,11 +477,36 @@ async function build() {
   const pkgNodeMajor = target.match(/node(\d+)/)?.[1];
   if (pkgNodeMajor) {
     for (const bsqlDist of findPackageCopies(join(DIST, 'node_modules'), 'better-sqlite3')) {
-      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor} in ${relative(DIST, bsqlDist)}...`);
+      const where = relative(DIST, bsqlDist);
+
+      // 13.x ships Node-API prebuilds in `prebuilds/<platform>-<arch>.node` and
+      // builds no `build/Release` at all. Node-API is ABI-stable across Node
+      // versions, so those need no per-ABI download and there is nothing for
+      // this step to do -- which is just as well, because 13.x publishes no
+      // downloadable linux-x64 prebuild for any ABI.
+      //
+      // The 12.11.1 copy nested under personal-server-ts-server is the older
+      // shape, compiled against the host Node by `npm install`, and does need
+      // redownloading for the pkg target's ABI.
+      if (existsSync(join(bsqlDist, 'prebuilds'))) {
+        log(`better-sqlite3 in ${where} ships Node-API prebuilds; no per-ABI download needed.`);
+        continue;
+      }
+
+      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor} in ${where}...`);
       try {
         exec(`npx prebuild-install -r node -t ${pkgNodeMajor}.0.0 --platform ${PLATFORM} --arch ${ARCH}`, { cwd: bsqlDist });
       } catch (e) {
         log(`WARNING: prebuild-install failed, falling back to local build: ${e.message}`);
+      }
+
+      // A missing addon is only observable at runtime, on first database
+      // access, long after this build reports success. Checking here keeps the
+      // failure attached to the step that caused it.
+      if (!existsSync(join(bsqlDist, 'build', 'Release', 'better_sqlite3.node'))) {
+        throw new Error(
+          `better-sqlite3 in ${where} has no build/Release/better_sqlite3.node after preparing it for Node ${pkgNodeMajor}.`
+        );
       }
     }
   }
