@@ -24,6 +24,10 @@ function observation(overrides: Partial<MutantObservation> = {}): MutantObservat
     killedBy: ["covers the boundary"],
     failureOutput: "AssertionError [ERR_ASSERTION]: expected 3 to equal 4",
     baselineComplete: true,
+    // A default kill executed the test that killed it. Cases that turn on the
+    // count -- a reported zero, or a reporter that wrote no count at all --
+    // say so explicitly in `overrides`.
+    testsCompleted: 1,
     ...overrides,
   }
 }
