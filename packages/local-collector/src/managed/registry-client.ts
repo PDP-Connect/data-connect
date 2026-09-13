@@ -107,8 +107,28 @@ export interface ArtifactIdentityPolicy {
  *
  * Read off `.github/workflows/publish-polyfill-connectors.yml` on
  * data-connectors#97, which verifies its own signature immediately after
- * signing with this exact identity regexp and issuer — so this is the pattern
- * a consumer is *told* to expect by the producer, not one inferred.
+ * signing with this identity and issuer — so the workflow path is the one a
+ * consumer is *told* to expect by the producer, not one inferred.
+ *
+ * **The ref is constrained, and that is the point.** The producer's own
+ * expression stops at `…publish-polyfill-connectors.yml@` and accepts anything
+ * after it; copying that into the consumer reproduced the publisher trust
+ * defect on this side of the wire. An unanchored `@` accepts the workflow
+ * running on an unreviewed branch or on an arbitrary tag, and anyone who can
+ * push a branch to the repository can push a modified copy of the workflow and
+ * have it sign an artifact this host would then accept. A digest pins *which
+ * bytes*; it does not establish that those bytes passed through the reviewed
+ * publication authority.
+ *
+ * So the default accepts the workflow only on `refs/heads/main`. Publishing
+ * from a release tag or a reusable workflow is a deliberate host-policy
+ * decision, expressed by passing a policy to {@link verifyPinnedArtifact} —
+ * not something a consumer should infer on a publisher's behalf.
+ *
+ * Note what this does *not* rest on: a guard inside the workflow (its
+ * self-verification step, say) is not evidence here, because an unreviewed copy
+ * of the workflow can change that guard. The constraint has to live on the
+ * consumer, in the identity it will accept.
  *
  * It is a default, not a constant: a host passes its own policy to
  * {@link verifyPinnedArtifact}, and a different publisher is a different
@@ -116,7 +136,7 @@ export interface ArtifactIdentityPolicy {
  */
 export const PDP_CONNECT_CONNECTOR_IDENTITY = Object.freeze({
   certificateIdentityPattern:
-    /^https:\/\/github\.com\/PDP-Connect\/data-connectors\/\.github\/workflows\/publish-polyfill-connectors\.yml@/,
+    /^https:\/\/github\.com\/PDP-Connect\/data-connectors\/\.github\/workflows\/publish-polyfill-connectors\.yml@refs\/heads\/main$/,
   certificateIssuer: "https://token.actions.githubusercontent.com",
 });
 

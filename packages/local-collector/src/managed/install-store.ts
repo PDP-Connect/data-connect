@@ -28,7 +28,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 
@@ -87,11 +87,98 @@ function realpathOfExistingPrefix(candidate: string): string {
   const absolute = resolve(candidate);
   let existing = absolute;
   const pending: string[] = [];
-  while (!existsSync(existing) && dirname(existing) !== existing) {
+  while (!pathPresent(existing) && dirname(existing) !== existing) {
     pending.unshift(basename(existing));
     existing = dirname(existing);
   }
-  return pending.length === 0 ? realpathSync(existing) : join(realpathSync(existing), ...pending);
+  // `realpathSync` needs a resolvable path. A component that is present but
+  // dangling (a symlink whose target does not exist yet) is not resolvable, so
+  // follow the link by hand and re-append the remainder — the point is to learn
+  // where the component *points*, not to require that it already works.
+  //
+  // `resolve`, not `join`: a symlink target may be absolute, and `join` would
+  // splice an absolute target onto the link's parent to produce a path that is
+  // neither real nor outside the store, which is how a redirected component
+  // would slip past the containment check below.
+  try {
+    return pending.length === 0 ? realpathSync(existing) : join(realpathSync(existing), ...pending);
+  } catch {
+    const viaLink = resolve(dirname(existing), readlinkSync(existing));
+    return pending.length === 0 ? viaLink : join(viaLink, ...pending);
+  }
+}
+
+/**
+ * "Is there something here", as distinct from "does something resolvable live
+ * here".
+ *
+ * `existsSync` follows symlinks, so it answers `false` for a dangling one and
+ * a caller walking up a path would step straight past it — treating a
+ * redirected component as a plain not-yet-created directory and losing exactly
+ * the redirection worth catching. `lstat` answers the question actually being
+ * asked: is this component present at all.
+ */
+function pathPresent(candidate: string): boolean {
+  try {
+    lstatSync(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a path that must live inside the install store, refusing it if any
+ * component of it is redirected out of the store.
+ *
+ * {@link assertRootsDisjoint} proves the two *roots* are disjoint. That is not
+ * enough on its own: it says nothing about the descendants the installer walks
+ * afterwards. A pre-existing `install/connectors/<key> → durable-data` symlink
+ * leaves both roots exactly where they were declared, and still causes a fresh
+ * install to write its staging directory and its final release inside the
+ * durable tree. The separation the module's header promises — "upgrading or
+ * removing installed code must never delete a collected archive" — is then
+ * false, because the code *is* the archive directory.
+ *
+ * So the fixed boundary is the **canonical install root**, resolved once, and
+ * every store path is canonicalized and checked back against it. A redirected
+ * descendant is refused rather than treated as a new valid root, which is the
+ * distinction {@link assertContainedEntrypoint} alone cannot make: it
+ * canonicalizes the release directory it is handed, so a release directory that
+ * has *already* been redirected simply becomes the root it validates against.
+ *
+ * What this does not cover, stated plainly rather than implied:
+ *
+ *  - **Ownership.** This checks where a path resolves, not who may write there.
+ *    A store on a world-writable path is still a store anyone can rewrite; that
+ *    is a deployment property (directory permissions, a dedicated user), not
+ *    something a path check can establish.
+ *  - **Concurrent replacement.** This is a precheck, so it is TOCTOU-bounded:
+ *    an attacker who can swap a component between this check and the subsequent
+ *    write can still win the race. Closing that needs `O_NOFOLLOW`-class
+ *    handle-relative operations, which Node's `fs` does not expose portably.
+ *    The check therefore raises the bar from "a symlink planted at any time
+ *    silently redirects the store" to "an attacker must already have write
+ *    access to the store *and* win a race", and is not claimed to do more.
+ */
+function resolveInsideStore(canonicalInstallRoot: string, candidate: string, what: string): string {
+  const resolved = realpathOfExistingPrefix(candidate);
+  if (!containsPath(canonicalInstallRoot, resolved) || resolved === canonicalInstallRoot) {
+    throw new Error(
+      `${what} ${JSON.stringify(candidate)} resolves to ${resolved}, outside the connector install store ${canonicalInstallRoot}: ` +
+        `refusing to treat a redirected store path as a valid release location`
+    );
+  }
+  return resolved;
+}
+
+/**
+ * The canonical install root, which is the trust boundary every store path is
+ * measured against. Resolved once per operation so a single consistent answer
+ * is used for every check within it.
+ */
+function canonicalStoreRoot(installRoot: string): string {
+  return realpathOfExistingPrefix(installRoot);
 }
 
 /**
@@ -282,32 +369,49 @@ export function installVerifiedArtifact(input: {
   const { artifact, installRoot, durableRoot } = input;
   assertRootsDisjoint(installRoot, durableRoot);
 
+  // The fixed trust boundary for every path below, resolved once.
+  const storeRoot = canonicalStoreRoot(installRoot);
+
   const { config, pinned, layers } = artifact;
   const target = releaseDirectory(installRoot, config.connector_key, pinned.digest);
+  // The release's parent (`connectors/<key>`) is checked as well as the release
+  // itself: redirecting the parent is what relocates a *fresh* install, and the
+  // release path does not exist yet at that point to be checked on its own.
+  resolveInsideStore(storeRoot, dirname(target), "connector directory");
+  const canonicalTarget = resolveInsideStore(storeRoot, target, "release directory");
 
   if (existsSync(target)) {
-    // Already installed. The directory is named by digest and its contents are
-    // immutable, so re-installing the same digest is a no-op rather than a
-    // rewrite — which is what makes install idempotent and safe to run during
-    // a collection.
-    return describeRelease(target, config, pinned);
+    // Already installed — but a digest in a directory name is not evidence that
+    // the current contents still match it. The cached release is only reusable
+    // if it still agrees with the authenticated layers we are holding; anything
+    // else is quarantined and rebuilt from those layers below.
+    const reusable = cachedReleaseMatches(canonicalTarget, artifact);
+    if (reusable === null) {
+      return describeRelease(canonicalTarget, config, pinned, storeRoot);
+    }
+    quarantineRelease(canonicalTarget, storeRoot, reusable);
   }
 
   const staging = `${target}.staging-${createHash("sha256").update(`${process.pid}:${Date.now()}`).digest("hex").slice(0, 12)}`;
   mkdirSync(staging, { recursive: true });
+  const canonicalStaging = resolveInsideStore(storeRoot, staging, "staging directory");
 
   try {
     const writeFile = (relativePath: string, bytes: Uint8Array): void => {
-      const destination = join(staging, relativePath);
+      const destination = join(canonicalStaging, relativePath);
       // Defence in depth: the member path was filtered during extraction, and
       // the resolved destination is checked again here. The two checks fail
       // for different reasons (a bad member name vs. a bad join), and the
       // cost of keeping both is one comparison.
-      const relativeToStaging = relative(staging, destination);
+      const relativeToStaging = relative(canonicalStaging, destination);
       if (relativeToStaging.startsWith("..") || relativeToStaging === "") {
         throw new Error(`refusing to write outside the release directory: ${JSON.stringify(relativePath)}`);
       }
+      // …and a third: the parent directory a member lands in must still be
+      // inside the store once resolved, so a directory member cannot redirect
+      // later members of the same layer out of the release.
       mkdirSync(dirname(destination), { recursive: true });
+      resolveInsideStore(storeRoot, dirname(destination), "release member directory");
       writeFileSync(destination, bytes);
     };
 
@@ -339,39 +443,158 @@ export function installVerifiedArtifact(input: {
     // Containment first, existence second. Checking only existence would let a
     // traversing entrypoint pass whenever the file it points at happens to be
     // there — which is precisely the case worth refusing.
-    const entrypoint = assertContainedEntrypoint(staging, config.entrypoint);
-    if (!existsSync(entrypoint)) {
-      throw new Error(
-        `artifact declares entrypoint ${JSON.stringify(config.entrypoint)} but it is absent after unpack`
-      );
-    }
+    const entrypoint = assertContainedEntrypoint(canonicalStaging, config.entrypoint);
+    assertRegularFile(entrypoint, config.entrypoint, "after unpack");
 
     mkdirSync(dirname(target), { recursive: true });
+    resolveInsideStore(storeRoot, dirname(target), "connector directory");
     renameSync(staging, target);
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
     throw error;
   }
 
-  return describeRelease(target, config, pinned);
+  return describeRelease(resolveInsideStore(storeRoot, target, "release directory"), config, pinned, storeRoot);
+}
+
+/**
+ * Require that a path is a *regular file*, not merely present.
+ *
+ * `existsSync` follows symlinks and is true for directories, so on its own it
+ * answers a weaker question than the one that matters: the runner is about to
+ * be handed this path to execute. `lstat` is used rather than `stat` so a
+ * symlink is refused as a symlink instead of being judged by its target.
+ */
+function assertRegularFile(resolved: string, declared: string, when: string): void {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(resolved);
+  } catch {
+    throw new Error(`artifact declares entrypoint ${JSON.stringify(declared)} but it is absent ${when}`);
+  }
+  if (!stats.isFile()) {
+    throw new Error(
+      `artifact declares entrypoint ${JSON.stringify(declared)} but ${resolved} is not a regular file ${when}`
+    );
+  }
 }
 
 function describeRelease(
   directory: string,
   config: VerifiedArtifact["config"],
-  pinned: VerifiedArtifact["pinned"]
+  pinned: VerifiedArtifact["pinned"],
+  storeRoot: string
 ): InstalledRelease {
   // Re-checked here rather than trusted from the install path: the idempotent
   // branch returns straight from an already-present release directory without
   // unpacking anything, so this is the only gate that entrypoint crosses.
+  //
+  // Containment is checked against the release directory *and* the release
+  // directory is checked against the store root. Containment alone is not
+  // enough, because it canonicalizes whatever directory it is handed: a release
+  // directory that has already been redirected out of the store becomes the
+  // root that the entrypoint is judged "contained" by.
+  const canonicalDirectory = resolveInsideStore(storeRoot, directory, "release directory");
+  const entrypoint = assertContainedEntrypoint(canonicalDirectory, config.entrypoint);
+  // Presence is not enough either: the runner is handed this path to execute,
+  // so it must still be a regular file, not a deleted one or a directory.
+  assertRegularFile(entrypoint, config.entrypoint, "in the installed release");
   return Object.freeze({
     connectorKey: config.connector_key,
     connectorId: config.connector_id,
     version: config.version,
     digest: pinned.digest,
-    directory,
-    entrypoint: assertContainedEntrypoint(directory, config.entrypoint),
+    directory: canonicalDirectory,
+    entrypoint,
   });
+}
+
+/**
+ * Decide whether an already-present release directory may be reused.
+ *
+ * Returns `null` when the cached release still matches the authenticated
+ * artifact, or a human-readable reason when it does not.
+ *
+ * This exists because the digest-named directory was being treated as its own
+ * evidence. It is not: the name records which artifact was *installed* there,
+ * and says nothing about whether the bytes on disk are still those bytes. A
+ * release whose executable has been edited, or deleted, keeps its directory
+ * name either way. So the cached contents are re-derived from the layers we are
+ * currently holding — which reached us through digest verification and
+ * signature checking — and compared byte-for-byte.
+ *
+ * Only the files the installer itself writes are compared. Extra files are not
+ * a mismatch: an active collection may legitimately have written scratch state
+ * beside the code, and refusing those would break the running case this is
+ * meant to protect.
+ */
+function cachedReleaseMatches(directory: string, artifact: VerifiedArtifact): string | null {
+  const { config, layers } = artifact;
+
+  const expected = new Map<string, Uint8Array>();
+  const profileBytes = layers.get(LAYER_MEDIA_TYPES.profile);
+  if (profileBytes !== undefined) expected.set("collection-profile.json", profileBytes);
+  const provenanceBytes = layers.get(LAYER_MEDIA_TYPES.provenance);
+  if (provenanceBytes !== undefined) expected.set("provenance.json", provenanceBytes);
+  expected.set("config.json", new TextEncoder().encode(`${JSON.stringify(config, null, 2)}\n`));
+  expected.set(
+    "oci-manifest.json",
+    new TextEncoder().encode(`${JSON.stringify(artifact.manifest, null, 2)}\n`)
+  );
+  for (const [mediaType, prefix] of [
+    [LAYER_MEDIA_TYPES.code, "code"],
+    [LAYER_MEDIA_TYPES.assets, "assets"],
+    [LAYER_MEDIA_TYPES.licenses, "licenses"],
+  ] as const) {
+    const blob = layers.get(mediaType);
+    if (blob === undefined) continue;
+    for (const member of readTarGz(blob)) expected.set(join(prefix, member.path), member.bytes);
+  }
+
+  for (const [relativePath, bytes] of expected) {
+    const candidate = join(directory, relativePath);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(candidate);
+    } catch {
+      return `${relativePath} is missing`;
+    }
+    // `lstat`, so a file swapped for a symlink is a mismatch even when the
+    // symlink target happens to hold the right bytes.
+    if (!stats.isFile()) return `${relativePath} is not a regular file`;
+    if (stats.size !== bytes.byteLength) return `${relativePath} has the wrong size`;
+    if (!Buffer.from(readFileSync(candidate)).equals(Buffer.from(bytes))) {
+      return `${relativePath} does not match the verified artifact`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Move an invalid cached release aside so it can be rebuilt from verified bytes.
+ *
+ * Moved rather than deleted, and this is the deliberate part: a collection may
+ * already be running out of that directory against an absolute path it resolved
+ * earlier. Deleting or overwriting in place would pull the code out from under
+ * it mid-run, which is exactly what the install/activate split exists to
+ * prevent. A rename leaves the running process's open paths resolving to the
+ * quarantined directory, while the next install writes a clean release at the
+ * canonical location.
+ *
+ * The quarantined copy is kept rather than removed because it is evidence: the
+ * host has just found modified code in a content-addressed store, and that is
+ * worth being able to inspect afterwards.
+ */
+function quarantineRelease(directory: string, storeRoot: string, reason: string): void {
+  const stamp = `${Date.now().toString(36)}-${process.pid}`;
+  const quarantined = `${directory}.invalid-${stamp}`;
+  resolveInsideStore(storeRoot, dirname(quarantined), "quarantine parent directory");
+  renameSync(directory, quarantined);
+  process.emitWarning(
+    `connector release ${directory} did not match its verified artifact (${reason}); ` +
+      `moved to ${quarantined} and reinstalling from verified layers`,
+    "ManagedConnectorCacheWarning"
+  );
 }
 
 /**
@@ -388,8 +611,13 @@ function describeRelease(
  * absolute path under a digest directory whose contents never change.
  */
 export function activateRelease(installRoot: string, release: InstalledRelease): void {
+  const storeRoot = canonicalStoreRoot(installRoot);
   const pointerPath = join(installRoot, "connectors", release.connectorKey, "current.json");
   mkdirSync(dirname(pointerPath), { recursive: true });
+  // The pointer decides what runs next, so its parent is held to the same
+  // boundary as the release itself: a redirected `connectors/<key>` would
+  // otherwise write the activation record outside the store.
+  resolveInsideStore(storeRoot, dirname(pointerPath), "activation pointer directory");
   const temporary = `${pointerPath}.tmp-${process.pid}`;
   writeFileSync(
     temporary,

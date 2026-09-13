@@ -21,10 +21,11 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 
 import {
@@ -40,6 +41,7 @@ import {
   LAYER_MEDIA_TYPES,
   managedConnectorCommand,
   obtainManagedConnectors,
+  PDP_CONNECT_CONNECTOR_IDENTITY,
   readTarGz,
   type RegistryClient,
   type SignatureVerifier,
@@ -622,4 +624,240 @@ test("definitions derived from a profile leave unclaimed optional fields absent"
   assert.equal("enforces_source_roots" in managed.definition, false);
   assert.equal("time_scopable_streams" in managed.definition, false);
   assert.deepEqual([...managed.definition.streams], []);
+});
+
+// ---------------------------------------------------------------------------
+// The store boundary: a pre-existing symlink under the install root must not
+// relocate a release into the durable tree.
+//
+// `assertRootsDisjoint` proves the two *roots* are disjoint and stops there.
+// These two cases are the ones that got past it: the roots stay exactly where
+// they were declared, and a symlink *beneath* the install root moves the
+// release anyway. Both require pre-existing local manipulation — neither is a
+// remote signature bypass — but both falsify the separation the install store
+// exists to provide, which is that removing installed code can never delete a
+// collected archive.
+// ---------------------------------------------------------------------------
+
+/** The digest directory name for a fixture, as the store spells it. */
+const releaseDirOf = (installRoot: string, digest: string): string =>
+  join(installRoot, "connectors", CONNECTOR_KEY, digest.replace(":", "-"));
+
+test("a release directory redirected into the durable tree is refused, not reused", async () => {
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(join(installRoot, "connectors", CONNECTOR_KEY), { recursive: true });
+    mkdirSync(join(durableRoot, "code"), { recursive: true });
+    // A plausible-looking release, planted inside the durable tree.
+    writeFileSync(join(durableRoot, "code", "collection-profile.mjs"), "export const collectOura = () => {};\n");
+    symlinkSync(durableRoot, releaseDirOf(installRoot, fixture.digest));
+
+    // Without the store-root check this is the cached-install branch: the
+    // digest directory "exists", so the release is accepted and the entrypoint
+    // handed back resolves inside durable data.
+    await assert.rejects(
+      obtain(fixture, installRoot, durableRoot),
+      /outside the connector install store/
+    );
+
+    // The durable tree was neither executed from nor disturbed.
+    assert.ok(existsSync(join(durableRoot, "code", "collection-profile.mjs")));
+  });
+});
+
+test("a connector directory redirected into the durable tree cannot receive a fresh install", async () => {
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    // The durable root really exists, as it would on a host that has been
+    // collecting: the redirection is a live symlink, not a dangling one.
+    mkdirSync(durableRoot, { recursive: true });
+    mkdirSync(join(installRoot, "connectors"), { recursive: true });
+    symlinkSync(durableRoot, join(installRoot, "connectors", CONNECTOR_KEY));
+
+    await assert.rejects(
+      obtain(fixture, installRoot, durableRoot),
+      /outside the connector install store/
+    );
+
+    // Nothing — staging or final — was written into the durable tree.
+    assert.deepEqual(readdirSync(durableRoot), [], "a refused install must not write into durable data");
+  });
+});
+
+test("a connector directory redirected through a not-yet-created target is still refused", async () => {
+  // The dangling variant. `existsSync` follows symlinks, so it reports `false`
+  // for a link whose target does not exist yet — a path walk that trusts it
+  // steps straight past the link and treats the redirected component as an
+  // ordinary directory still to be created. The refusal must come from the
+  // store boundary, not from a later `ENOENT` that happens to stop the write.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(join(installRoot, "connectors"), { recursive: true });
+    symlinkSync(durableRoot, join(installRoot, "connectors", CONNECTOR_KEY));
+    assert.equal(existsSync(durableRoot), false, "this case is about a dangling link");
+
+    await assert.rejects(
+      obtain(fixture, installRoot, durableRoot),
+      /outside the connector install store/
+    );
+  });
+});
+
+test("an install store reached through a symlinked root still installs normally", async () => {
+  // The boundary is "does this resolve back inside the canonical store", not
+  // "is a symlink involved anywhere". A deployment that reaches its store
+  // through a symlinked parent is legitimate and must keep working, or the
+  // check above would be enforced by breaking ordinary setups.
+  const fixture = buildFixture();
+  await withRoots(async (_unusedInstallRoot, durableRoot) => {
+    const base = mkdtempSync(join(tmpdir(), "managed-connectors-linked-"));
+    try {
+      const realStore = join(base, "real-store");
+      mkdirSync(realStore, { recursive: true });
+      const linkedInstall = join(base, "install-link");
+      symlinkSync(realStore, linkedInstall);
+
+      const managed = await obtain(fixture, linkedInstall, durableRoot);
+      const entry = managed[0];
+      assert.ok(entry);
+      assert.ok(
+        realpathSync(entry.entrypoint).startsWith(realpathSync(realStore)),
+        "the release must land inside the canonical store"
+      );
+      assert.match(readFileSync(entry.entrypoint, "utf8"), /collectOura/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cached fast path: a digest in a directory name is not evidence that the
+// directory's current contents still match that digest.
+// ---------------------------------------------------------------------------
+
+test("a cached release whose executable was modified is rebuilt from the verified layers", async () => {
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const first = await obtain(fixture, installRoot, durableRoot);
+    const entrypoint = first[0]?.entrypoint;
+    assert.ok(entrypoint);
+
+    // Tamper with installed code the way a local compromise would.
+    writeFileSync(entrypoint, "export const collectOura = () => 'MODIFIED';\n");
+    assert.match(readFileSync(entrypoint, "utf8"), /MODIFIED/, "the tamper must have landed");
+
+    // Reinstalling the *same* verified artifact must not bless the edit.
+    const second = await obtain(fixture, installRoot, durableRoot);
+    const reinstalled = second[0]?.entrypoint;
+    assert.ok(reinstalled);
+
+    // Behaviour, not a string: import the path the manager hands the runner and
+    // check which module body actually executes.
+    const loaded = (await import(`${pathToFileURL(reinstalled).href}?case=modified`)) as {
+      readonly collectOura: () => unknown;
+    };
+    assert.equal(loaded.collectOura(), undefined, "the returned path must execute the verified module");
+    assert.doesNotMatch(readFileSync(reinstalled, "utf8"), /MODIFIED/);
+  });
+});
+
+test("a cached release whose executable was deleted is rebuilt rather than returned missing", async () => {
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const first = await obtain(fixture, installRoot, durableRoot);
+    const entrypoint = first[0]?.entrypoint;
+    assert.ok(entrypoint);
+    rmSync(entrypoint, { force: true });
+    assert.equal(existsSync(entrypoint), false, "the delete must have landed");
+
+    const second = await obtain(fixture, installRoot, durableRoot);
+    const reinstalled = second[0]?.entrypoint;
+    assert.ok(reinstalled);
+    assert.ok(existsSync(reinstalled), "a reinstall must never return a nonexistent entrypoint");
+    assert.match(readFileSync(reinstalled, "utf8"), /collectOura/);
+  });
+});
+
+test("reinstalling an untouched release is still a no-op, and connector scratch state survives", async () => {
+  // The counterweight to the two tests above: content validation must not turn
+  // every reinstall into a rewrite, and must not treat a connector's own
+  // working files as tampering. Rewriting a release that is currently being
+  // collected from is the thing the install/activate split exists to avoid.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const first = await obtain(fixture, installRoot, durableRoot);
+    const directory = releaseDirOf(installRoot, fixture.digest);
+    writeFileSync(join(directory, "scratch-state.json"), '{"cursor":1}\n');
+
+    const second = await obtain(fixture, installRoot, durableRoot);
+    assert.equal(first[0]?.entrypoint, second[0]?.entrypoint);
+    assert.ok(existsSync(join(directory, "scratch-state.json")), "connector scratch state must survive a reinstall");
+    assert.deepEqual(
+      readdirSync(join(installRoot, "connectors", CONNECTOR_KEY)).filter((e) => e.includes(".invalid-")),
+      [],
+      "an untouched release must not be quarantined"
+    );
+  });
+});
+
+test("a quarantined release is moved aside, not deleted, so an active run keeps resolving", async () => {
+  // An in-flight collection already resolved an absolute path under the old
+  // directory. Rebuilding must not pull that code out from under it, so the
+  // invalid release is renamed rather than removed.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const first = await obtain(fixture, installRoot, durableRoot);
+    const running = first[0]?.entrypoint;
+    assert.ok(running);
+    writeFileSync(running, "export const collectOura = () => 'MODIFIED';\n");
+
+    await obtain(fixture, installRoot, durableRoot);
+
+    const quarantined = readdirSync(join(installRoot, "connectors", CONNECTOR_KEY)).filter((e) =>
+      e.includes(".invalid-")
+    );
+    assert.equal(quarantined.length, 1, "the invalid release must be kept aside as evidence");
+    assert.ok(
+      existsSync(join(installRoot, "connectors", CONNECTOR_KEY, quarantined[0]!, "code", "collection-profile.mjs")),
+      "the quarantined copy must still hold the bytes an active run resolved"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default signer policy.
+// ---------------------------------------------------------------------------
+
+test("the default signer policy accepts the publish workflow only on the reviewed ref", () => {
+  // A digest pins which bytes; it does not establish that those bytes passed
+  // through the reviewed publication authority. An expression that stops at
+  // `…publish-polyfill-connectors.yml@` accepts the workflow running on any
+  // branch or tag, so anyone able to push a branch can publish a modified copy
+  // of the workflow and have it sign an artifact this host would accept.
+  const pattern = PDP_CONNECT_CONNECTOR_IDENTITY.certificateIdentityPattern;
+  const workflow = "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml";
+
+  assert.equal(pattern.test(`${workflow}@refs/heads/main`), true, "the reviewed ref must still be accepted");
+
+  for (const rejected of [
+    `${workflow}@refs/heads/attacker-branch`,
+    `${workflow}@refs/tags/v0.0.0-anything`,
+    `${workflow}@refs/pull/1/merge`,
+    "https://github.com/attacker/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main",
+  ]) {
+    assert.equal(pattern.test(rejected), false, `must not accept ${rejected}`);
+  }
+});
+
+test("an artifact signed by the publish workflow on an unreviewed branch is refused end to end", async () => {
+  // The policy test above is a string check on the pattern; this one drives the
+  // real verification path so the constraint is proven where it is enforced.
+  const fixture = buildFixture({
+    signerIdentity:
+      "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/attacker-branch",
+  });
+  await withRoots(async (installRoot, durableRoot) => {
+    await assert.rejects(obtain(fixture, installRoot, durableRoot), /this host does not accept/);
+  });
 });
