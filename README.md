@@ -50,7 +50,7 @@ Use this path if a binary is not available for your platform.
 
 ### Requirements
 
-- Node.js 22 or 23.
+- Node.js 24.15.0 or later. CI builds on 24.21.0.
 - Rust stable and the Tauri build prerequisites for your operating system.
 - Internet access during setup to install dependencies and resolve bundled
   connectors when they are absent.

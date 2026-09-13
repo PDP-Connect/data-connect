@@ -58,21 +58,21 @@ jobs:
             pkg_target: node22-linux-x64
             binary_name: playwright-runner
             ps_binary_name: personal-server
-          # Pinned to windows-2022 (not windows-latest) because that runner image's Visual
-          # Studio install path changed to a bare "\18\" (VS 2026 naming) that node-gyp's
+          # This entry was pinned to windows-2022 because that image's Visual Studio
+          # install path changed to a bare "\18\" (VS 2026 naming) that node-gyp's
           # bundled-with-npm version can't parse ("unknown version \"undefined\"" when
           # building better-sqlite3). npm_config_node_gyp does not work around this: npm's
           # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
           # during `npm ci`, ignoring that config (npm/cli#2839).
           #
-          # The npm side of that blocker is now gone: this workflow runs Node 24.21.0,
-          # which bundles npm 11.11.0 and node-gyp 12.2.0 — past the node-gyp 12.1.0 that
-          # added VS2026 detection. (The old note here said to wait for Node 22 LTS to
-          # bundle npm>=11.6.3; that will not happen, because a Node line does not take a
-          # major npm bump mid-life and npm 11 shipped with Node 24.) The pin therefore
-          # remains only because unpinning has not been verified against a windows-latest
-          # runner, not because a known blocker survives. Unpin when a release build on
-          # windows-latest is confirmed green — see PDP-Connect/data-connect#47.
+          # That blocker is gone. This workflow runs Node 24.21.0, which bundles npm
+          # 11.19.0 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
+          # detection. (The old note here said to wait for Node 22 LTS to bundle
+          # npm>=11.6.3; that will not happen, because a Node line does not take a major
+          # npm bump mid-life and npm 11 shipped with Node 24.) The runner is therefore
+          # windows-latest, and the build job compiles better-sqlite3 natively there.
+          # Not yet exercised on this runner: a signed-installer run and publication —
+          # see PDP-Connect/data-connect#47.
           - platform: windows-latest
             os_family: windows
             target: x86_64-pc-windows-msvc
