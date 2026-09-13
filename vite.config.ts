@@ -27,6 +27,7 @@ export default defineConfig({
       "scripts/ensure-pdpp-runtime.test.mjs",
       "scripts/release-github.test.mjs",
       "scripts/release-workflow.test.ts",
+      "scripts/mutation-test-identity.test.ts",
       "scripts/mutation-falsification/*.test.ts",
       "scripts/npm-release-commit-analyzer.test.ts",
       "scripts/npm-release-signer-workflow.test.ts",
@@ -38,7 +39,14 @@ export default defineConfig({
       "scripts/verify-bundled-personal-server.test.mjs",
       "playwright-runner/scripts/build.test.js",
     ],
-    setupFiles: ["./src/test/setup.ts"],
+    // The second file reconciles the test identity Stryker's Vitest runner
+    // records with the one Vitest 5 filters on (stryker-js#6210). It is inert
+    // outside a mutation run. It must stay last: Stryker prepends its own
+    // sandbox setup file, and this one has to overwrite what that one wrote.
+    setupFiles: [
+      "./src/test/setup.ts",
+      "./scripts/mutation-test-identity-setup.ts",
+    ],
   },
   define: {
     __COMMIT_HASH__: JSON.stringify(commitHash),
