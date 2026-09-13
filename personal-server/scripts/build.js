@@ -9,8 +9,8 @@
 
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, lstatSync, readlinkSync, cpSync, writeFileSync, readFileSync } from 'fs';
-import { join, dirname, posix, resolve, relative, win32 } from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { join, dirname, posix, resolve, relative, sep, win32 } from 'path';
+import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { createRequire } from 'module';
 import { isMainModule } from '../../scripts/is-main-module.js';
@@ -312,8 +312,113 @@ function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
     // now. Widening it to the first choice would re-point the other
     // specifiers at their ESM artifacts, which is a larger change than the
     // one this failure calls for.
-    return fileURLToPath(import.meta.resolve(specifier, pathToFileURL(fromFile).href));
+    //
+    // `import.meta.resolve(specifier, parentURL)` cannot do this job. Its
+    // second argument exists only under `--experimental-import-meta-resolve`,
+    // and this build runs plain `node scripts/build.js`. Without the flag Node
+    // does not reject the extra argument, it silently ignores it and resolves
+    // from *this file* -- `personal-server/scripts/build.js` -- so every
+    // import-only specifier was answered out of the build tree's own
+    // `personal-server/node_modules` rather than out of the copy sitting in
+    // `dist`. `toImportPath` then faithfully wrote the relative path to that
+    // answer, which is how the shipped artifact came to hold
+    // `../../../../../node_modules/@opendatalabs/vana-sdk/dist/index.browser.js`:
+    // an absolute dependency on the build machine, fatal the moment the dist
+    // is moved anywhere else. `assertImportsStayInsideDist` now fails the
+    // build on any such path, so this cannot regress silently.
+    return resolveImportOnlyExport(specifier, fromFile, packageJsonCache);
   }
+}
+
+// Resolve a subpath its author published under `import` alone, starting from
+// the *importing file* -- which during this step is the copy under `dist`, not
+// the original in the build tree. `packageRootFor` walks `node_modules` upward
+// exactly the way Node resolves a bare specifier, so the package copy this
+// answers with is the one the shipped file will actually load.
+function resolveImportOnlyExport(specifier, fromFile, packageJsonCache) {
+  const packageName = specifier.startsWith('@')
+    ? specifier.split('/').slice(0, 2).join('/')
+    : specifier.split('/')[0];
+
+  const packageRoot = packageRootFor(packageName, fromFile);
+  if (!packageRoot) {
+    throw new Error(`Cannot find package ${packageName} from ${fromFile}`);
+  }
+
+  const packageJsonPath = join(packageRoot, 'package.json');
+  const packageJson =
+    packageJsonCache.get(packageJsonPath) ??
+    JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  packageJsonCache.set(packageJsonPath, packageJson);
+
+  const subpath =
+    specifier === packageName ? '.' : `./${specifier.slice(packageName.length + 1)}`;
+  const target = resolveExportsSubpath(packageJson.exports, subpath);
+  if (!target) {
+    throw new Error(`Missing export mapping for ${specifier} in ${packageJsonPath}`);
+  }
+
+  return join(packageRoot, target);
+}
+
+// The conditions this build resolves under, most specific first. The files
+// being rewritten are ESM run by Node, so `import` applies and `require` does
+// not. `browser` is listed because personal-server-ts-core imports
+// `@opendatalabs/vana-sdk/browser` by name; the specifier picks that entry, and
+// the condition only decides between artifacts inside it.
+const EXPORT_CONDITIONS = ['browser', 'import', 'module', 'default'];
+
+// Pick a subpath out of an `exports` map: exact key first, then the single
+// best-matching `./*` pattern, as the specification orders them. Returns null
+// for an unmapped subpath and for one the author explicitly blocked with
+// `null`, so the caller can tell "no such export" apart from a resolved file.
+export function resolveExportsSubpath(exports, subpath) {
+  if (!exports || typeof exports !== 'object') return null;
+
+  if (Object.hasOwn(exports, subpath)) {
+    return selectExportCondition(exports[subpath]);
+  }
+
+  // Longest matching prefix wins, which is what makes `./direct/*` beat `./*`
+  // for `./direct/escrow-payment` rather than the map's key order deciding it.
+  let best = null;
+  for (const [pattern, entry] of Object.entries(exports)) {
+    const star = pattern.indexOf('*');
+    if (star === -1) continue;
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) continue;
+    if (subpath.length < prefix.length + suffix.length) continue;
+    if (best && prefix.length <= best.prefix.length) continue;
+    best = { prefix, entry, match: subpath.slice(prefix.length, subpath.length - suffix.length) };
+  }
+  if (!best) return null;
+
+  const target = selectExportCondition(best.entry);
+  return target ? target.replaceAll('*', best.match) : null;
+}
+
+// Walk the condition object the way Node does: first condition present wins,
+// nested objects recurse, and an explicit `null` blocks the subpath.
+function selectExportCondition(entry) {
+  if (entry === null || entry === undefined) return null;
+  if (typeof entry === 'string') return entry;
+  if (Array.isArray(entry)) {
+    for (const candidate of entry) {
+      const resolved = selectExportCondition(candidate);
+      if (resolved) return resolved;
+    }
+    return null;
+  }
+  for (const condition of EXPORT_CONDITIONS) {
+    if (!Object.hasOwn(entry, condition)) continue;
+    const resolved = selectExportCondition(entry[condition]);
+    if (resolved) return resolved;
+    // An explicit `null` under a matching condition blocks the subpath rather
+    // than falling through to a less specific one.
+    if (entry[condition] === null) return null;
+  }
+  return null;
 }
 
 function rewriteCopiedPackageImports() {
@@ -358,6 +463,69 @@ function rewriteCopiedPackageImports() {
       writeFileSync(file, rewritten);
     }
   }
+
+  assertImportsStayInsideDist(jsFiles);
+}
+
+/**
+ * The artifact boundary, checked rather than hoped for.
+ *
+ * `dist` is the whole deliverable: the executable, and beside it the full
+ * production dependency tree this build copies in. Everything a shipped file
+ * imports has to be reachable from within that directory, because the host is
+ * promised nothing else -- no `personal-server/node_modules`, no repository, no
+ * npm install. A relative import that climbs out of `dist` reads a path that
+ * exists only on the machine that built it.
+ *
+ * That is not hypothetical. This build shipped
+ * `../../../../../node_modules/@opendatalabs/vana-sdk/dist/index.browser.js`,
+ * which booted fine in place and died with `Cannot find module` the first time
+ * the dist was copied anywhere else -- a defect no in-place smoke test can see,
+ * and one four green platform builds did not catch. So the boundary is asserted
+ * here, in the step that writes these paths, where the failure names the file
+ * and the specifier that caused it.
+ *
+ * Scope is honest and narrow: this checks the static relative imports this
+ * build itself rewrote. It does not model `require()`, dynamic `import()`, or
+ * the bare specifiers left for Node to resolve out of `dist/node_modules` at
+ * runtime. The relocated-boot check in `verify-artifact-relocatable.js` is what
+ * exercises the rest.
+ */
+export function assertImportsStayInsideDist(jsFiles, distRoot = DIST) {
+  const escaping = [];
+
+  for (const file of jsFiles) {
+    const lines = readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, index) => {
+      const trimmed = line.trimStart();
+      if (
+        !(trimmed.startsWith('import ') || trimmed.startsWith('export ')) ||
+        !trimmed.includes(' from ')
+      ) {
+        return;
+      }
+      const match = /from\s+(["'])([^"'`]+)\1/.exec(line);
+      if (!match) return;
+
+      const specifier = match[2];
+      if (!specifier.startsWith('.')) return;
+
+      const target = resolve(dirname(file), specifier);
+      if (target === distRoot || target.startsWith(distRoot + sep)) return;
+
+      escaping.push(`${relative(distRoot, file)}:${index + 1} imports ${specifier}`);
+    });
+  }
+
+  if (escaping.length === 0) return;
+
+  throw new Error(
+    [
+      `${escaping.length} import(s) in the built artifact resolve outside ${distRoot}.`,
+      'The dist is the whole deliverable; a path that leaves it only works on this machine.',
+      ...escaping.map(entry => `  ${entry}`),
+    ].join('\n')
+  );
 }
 
 export function listProductionDependencyPaths({
