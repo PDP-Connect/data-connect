@@ -10,7 +10,7 @@
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, lstatSync, readlinkSync, cpSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname, posix, resolve, relative, win32 } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { platform, arch } from 'os';
 import { createRequire } from 'module';
 import { isMainModule } from '../../scripts/is-main-module.js';
@@ -95,7 +95,36 @@ function toImportPath(fromFile, toFile) {
   return rel.startsWith('.') ? rel : `./${rel}`;
 }
 
-function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
+// Walk `node_modules` upward from the importing file, the way Node resolves a
+// bare specifier, and answer with the first copy of the package that is
+// actually visible to it.
+//
+// A fixed `DIST/node_modules` lookup was right only while one copy of each
+// package existed. It stopped being right when personal-server-ts-mcp pinned
+// `personal-server-ts-core` at exactly 0.2.0 while personal-server-ts-server
+// requires 1.16.1: npm nests the 0.2.0 copy under ts-mcp, and the two versions
+// do not export the same subpaths. `./gateway` exists in 0.2.0 and was removed
+// in 1.x, so ts-mcp's own `import ... from "@opendatalabs/personal-server-ts-core/gateway"`
+// was being answered from the top-level 1.16.1 package.json, which has no such
+// entry, and the build stopped on a subpath that is present on disk in the copy
+// that importer resolves.
+function packageRootFor(packageName, fromFile) {
+  const segments = packageName.split('/');
+  let directory = dirname(fromFile);
+  for (;;) {
+    const candidate = join(directory, 'node_modules', ...segments);
+    if (existsSync(join(candidate, 'package.json'))) {
+      return candidate;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return null;
+    }
+    directory = parent;
+  }
+}
+
+function resolveWorkspaceSpecifier(specifier, fromFile, packageJsonCache) {
   const workspacePackages = [
     '@opendatalabs/personal-server-ts-core',
     '@opendatalabs/personal-server-ts-mcp',
@@ -105,7 +134,8 @@ function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
   );
   if (!packageName) return null;
 
-  const packageRoot = join(DIST, 'node_modules', ...packageName.split('/'));
+  const packageRoot =
+    packageRootFor(packageName, fromFile) ?? join(DIST, 'node_modules', ...packageName.split('/'));
   const packageJsonPath = join(packageRoot, 'package.json');
   const packageJson =
     packageJsonCache.get(packageJsonPath) ??
@@ -127,6 +157,37 @@ function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
   return join(packageRoot, importTarget);
 }
 
+// Every copy of a package under a `node_modules` tree, top level and nested.
+// npm nests a second copy whenever two dependents pin incompatible ranges, and
+// a step that treats the top-level copy as the only one silently leaves the
+// nested one as it found it.
+function findPackageCopies(nodeModulesRoot, packageName) {
+  const copies = [];
+  if (!existsSync(nodeModulesRoot)) return copies;
+
+  for (const entry of readdirSync(nodeModulesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+
+    if (entry.name === packageName) {
+      copies.push(join(nodeModulesRoot, entry.name));
+      continue;
+    }
+
+    // Scopes hold packages rather than being one, so descend a level.
+    const children = entry.name.startsWith('@')
+      ? readdirSync(join(nodeModulesRoot, entry.name), { withFileTypes: true })
+          .filter(child => child.isDirectory())
+          .map(child => join(nodeModulesRoot, entry.name, child.name))
+      : [join(nodeModulesRoot, entry.name)];
+
+    for (const child of children) {
+      copies.push(...findPackageCopies(join(child, 'node_modules'), packageName));
+    }
+  }
+
+  return copies;
+}
+
 function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
   if (
     !specifier ||
@@ -143,11 +204,32 @@ function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
     specifier === '@opendatalabs/personal-server-ts-mcp' ||
     specifier.startsWith('@opendatalabs/personal-server-ts-mcp/')
   ) {
-    return resolveWorkspaceSpecifier(specifier, packageJsonCache);
+    return resolveWorkspaceSpecifier(specifier, fromFile, packageJsonCache);
   }
 
   const requireFromFile = createRequire(fromFile);
-  return requireFromFile.resolve(specifier);
+  try {
+    return requireFromFile.resolve(specifier);
+  } catch (error) {
+    if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
+      throw error;
+    }
+    // The files being rewritten here are ESM, so a subpath their author
+    // published under `import` alone is legitimate and `require.resolve` is
+    // simply the wrong resolver for it. That only started to matter when
+    // personal-server-ts-core began routing through `@opendatalabs/vana-sdk`,
+    // whose `./browser` and `./*` entries carry `types` and `import` and no
+    // `require` -- correct for a browser build, which has no CJS artifact to
+    // point at. Every dependency before it shipped dual CJS/ESM, so the CJS
+    // resolver happened to answer for all of them.
+    //
+    // The ESM resolver is consulted only on this error, so every specifier
+    // that resolves today keeps resolving to the same file it resolves to
+    // now. Widening it to the first choice would re-point the other
+    // specifiers at their ESM artifacts, which is a larger change than the
+    // one this failure calls for.
+    return fileURLToPath(import.meta.resolve(specifier, pathToFileURL(fromFile).href));
+  }
 }
 
 function rewriteCopiedPackageImports() {
@@ -259,7 +341,7 @@ async function build() {
   // Must redirect better-sqlite3, bindings, and file-uri-to-path to external node_modules
   const nativeModulesList = ['better-sqlite3', 'bindings', 'file-uri-to-path'];
   const runtimeExternalModules = [
-    '@opendatalabs/personal-server-ts-core/config',
+    '@opendatalabs/personal-server-ts-server/config',
     '@opendatalabs/personal-server-ts-server',
     '@opendatalabs/personal-server-ts-mcp',
     '@hono/node-server',
@@ -383,11 +465,19 @@ async function build() {
   // Re-download the better-sqlite3 prebuilt binary for the pkg target Node version.
   // The local npm install compiles for the host Node.js, which may differ from the
   // Node.js version embedded in the pkg binary (e.g. local Node 20 vs pkg Node 22).
+  //
+  // Every copy is redownloaded, not just the one at the top of `dist`. npm
+  // nests a second better-sqlite3 whenever a dependency pins a different major
+  // -- personal-server-ts-server 1.16.1 pins 12.11.1 while this package
+  // declares 13.x -- and the nested copy is the one its own code loads. Fixing
+  // only the top-level copy left that nested addon compiled against the host
+  // Node, and the packaged binary died on first database access with
+  // `NODE_MODULE_VERSION 137 ... requires 127`. The build still succeeded,
+  // because nothing in the build loads the addon.
   const pkgNodeMajor = target.match(/node(\d+)/)?.[1];
   if (pkgNodeMajor) {
-    const bsqlDist = join(DIST, 'node_modules', 'better-sqlite3');
-    if (existsSync(bsqlDist)) {
-      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor}...`);
+    for (const bsqlDist of findPackageCopies(join(DIST, 'node_modules'), 'better-sqlite3')) {
+      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor} in ${relative(DIST, bsqlDist)}...`);
       try {
         exec(`npx prebuild-install -r node -t ${pkgNodeMajor}.0.0 --platform ${PLATFORM} --arch ${ARCH}`, { cwd: bsqlDist });
       } catch (e) {

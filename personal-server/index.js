@@ -37,11 +37,67 @@ import { registerPdppAuthorizationRoutes } from './pdpp/github-authorization/htt
 import { loadInstalledManifest } from './pdpp/installed-manifest.js';
 import { createPersonalServerServeOptions } from './listener-options.cjs';
 
+// Bare specifiers that have to be loaded from beside the executable rather than
+// from the pkg snapshot. The value names the package directory and the export
+// subpath within it; the file is read from that package's own manifest at
+// startup, never spelled out here.
+//
+// These used to name a file directly -- `@hono/node-server/dist/index.js` --
+// which is a copy of a decision the package makes in its `exports` map, and it
+// went stale the moment the package made that decision differently:
+// `@hono/node-server` 2.x renamed `dist/index.js` to `dist/index.mjs` and
+// `dist/index.cjs`, so the packaged binary asked for a file that no longer
+// exists and died at startup with `Cannot find module`. The build still
+// succeeded, because nothing before this point loads the path.
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
-  '@opendatalabs/personal-server-ts-core/config': '@opendatalabs/personal-server-ts-core/dist/config/index.js',
-  '@opendatalabs/personal-server-ts-server': '@opendatalabs/personal-server-ts-server/dist/api.js',
-  '@hono/node-server': '@hono/node-server/dist/index.js',
+  // `loadConfig` and `saveConfig` moved package: personal-server-ts-core 0.2.0
+  // exported them from its own `./config`, and 1.x dropped them there with no
+  // replacement anywhere in that package. They are published from
+  // personal-server-ts-server's `./config` instead, same names and same
+  // `loadConfig(options?) => Promise<ServerConfig>` signature.
+  '@opendatalabs/personal-server-ts-server/config': {
+    packageName: '@opendatalabs/personal-server-ts-server',
+    subpath: './config',
+  },
+  '@opendatalabs/personal-server-ts-server': {
+    packageName: '@opendatalabs/personal-server-ts-server',
+    subpath: '.',
+  },
+  '@hono/node-server': {
+    packageName: '@hono/node-server',
+    subpath: '.',
+  },
 };
+
+// Read the file a package publishes for one of its export subpaths.
+//
+// This walks the same `import`/`default` conditions the rewriter in
+// `scripts/build.js` walks, including the nested form 2.x uses
+// (`{ import: { types, default } }`), and falls back to `main` for a package
+// with no `exports` map. It is deliberately small: it answers for the three
+// entrypoints above and nothing else.
+function packagedEntrypointFile(nodeModulesRoot, { packageName, subpath }) {
+  const packageRoot = join(nodeModulesRoot, ...packageName.split('/'));
+  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
+
+  const selectCondition = entry => {
+    if (typeof entry === 'string') return entry;
+    if (!entry || typeof entry !== 'object') return undefined;
+    return selectCondition(entry.import ?? entry.node ?? entry.default);
+  };
+
+  const target = selectCondition(manifest.exports?.[subpath]) ??
+    (subpath === '.' ? manifest.main : undefined);
+
+  if (!target) {
+    throw new Error(
+      `${packageName} publishes no import target for ${subpath}; ` +
+        'its exports map changed shape and PACKAGED_RUNTIME_ENTRYPOINTS needs revisiting.'
+    );
+  }
+
+  return join(packageRoot, ...target.split('/'));
+}
 
 const PDPP_SERVING_PROFILES = {
   'github-pdpp': {
@@ -240,7 +296,8 @@ function personalServerExternalOrigin(serverAddress, tunnelServerAddr) {
 async function importRuntimeModule(specifier) {
   const packagedEntrypoint = PACKAGED_RUNTIME_ENTRYPOINTS[specifier];
   if (process.pkg && packagedEntrypoint) {
-    const filesystemEntrypoint = join(dirname(process.execPath), 'node_modules', ...packagedEntrypoint.split('/'));
+    const nodeModulesRoot = join(dirname(process.execPath), 'node_modules');
+    const filesystemEntrypoint = packagedEntrypointFile(nodeModulesRoot, packagedEntrypoint);
     return import(pathToFileURL(filesystemEntrypoint).href);
   }
 
@@ -531,7 +588,7 @@ async function main() {
       'PDPP_SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS'
     );
     const [{ loadConfig }, { createServer }, { serve }] = await Promise.all([
-      importRuntimeModule('@opendatalabs/personal-server-ts-core/config'),
+      importRuntimeModule('@opendatalabs/personal-server-ts-server/config'),
       importRuntimeModule('@opendatalabs/personal-server-ts-server'),
       importRuntimeModule('@hono/node-server'),
     ]);

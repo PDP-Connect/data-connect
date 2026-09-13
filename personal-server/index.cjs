@@ -84,7 +84,7 @@ async function main() {
   const ownerAddress = process.env.OWNER_ADDRESS || undefined;
 
   try {
-    const { loadConfig } = await import('@opendatalabs/personal-server-ts-core/config');
+    const { loadConfig } = await import('@opendatalabs/personal-server-ts-server/config');
     const { createServer } = await import('@opendatalabs/personal-server-ts-server');
     const { serve } = await import('@hono/node-server');
     const { requireDesktopAuth } = await import('./protected-routes.js');
