@@ -109,51 +109,6 @@ jobs:
           # is not.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # PREREQUISITE. This workflow's definition comes from the merge ref, but
-      # the tree it checks out is the pull request head, for the line-number
-      # reason above. The two are not the same revision, so a cohort added to
-      # the matrix on the base branch runs against heads that were branched
-      # before it and do not contain the files it names. That is exactly what
-      # happened when the `scripts` cohort landed: every open pull request
-      # touching `scripts/` began invoking a Stryker configuration its own tree
-      # did not have, and the run died with `File does not exist!` after the
-      # intent packet had already been frozen.
-      #
-      # The intent step does not catch this. Its `--config` is read by a
-      # positional argument scan that ignores flags it does not know, so a head
-      # predating the cohort digests whichever configuration its own
-      # `run-intent.ts` derives from the cohort root -- the client's -- and
-      # reports success while naming a configuration this attempt never ran.
-      #
-      # This fails rather than skipping. A cohort that cannot run has produced
-      # no evidence about the suite, and a green check would claim it had. The
-      # remedy is a rebase, which is a fact about the branch and not about the
-      # tests, so the message says so instead of leaving a reader to infer a
-      # weak suite from an empty receipt.
-      - name: Verify this revision carries the cohort's tooling
-        env:
-          COHORT: ${{ matrix.cohort }}
-          COHORT_CONFIG: ${{ matrix.config }}
-        run: |
-          set -euo pipefail
-          if [[ -f "${COHORT_CONFIG}" ]]; then
-            echo "Cohort ${COHORT} resolves its configuration at ${COHORT_CONFIG}."
-            exit 0
-          fi
-          cat >&2 <<EOF
-          The ${COHORT} cohort needs ${COHORT_CONFIG}, and this revision does not
-          have it.
-
-          This workflow's definition is read from the merge ref while its tree is
-          the pull request head. The ${COHORT} cohort was added to the matrix on
-          the base branch after this branch was cut, so the matrix names a
-          configuration that only exists on the base branch.
-
-          This is a fact about the branch, not about its tests: nothing here says
-          the suite is weak. Rebase onto the base branch and the cohort runs.
-          EOF
-          exit 1
-
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -168,6 +123,26 @@ jobs:
       # landing on the base branch mid-review do not enter this revision's scope.
       # `-z` keeps paths with spaces or newlines intact; the list is written to a
       # file and read from there rather than concatenated into a shell command.
+      #
+      # This step is also where a missing cohort configuration is caught, and it
+      # is caught for APPLICABLE cohorts only. It belongs here rather than in a
+      # step of its own because this is the first point at which applicability
+      # is known, and applicability is what decides whether the absence matters.
+      # This workflow's definition is read from the merge ref while its tree is
+      # the pull request
+      # head, so a head branched before a cohort was added does not carry the
+      # configuration the matrix names. Whether that absence matters depends
+      # entirely on the diff. A revision that changes production code in the
+      # cohort must have the configuration -- it is about to run an engine
+      # against it, and a green check with no evidence would claim a run that
+      # never happened. A revision that changes nothing in the cohort was never
+      # going to run it, so the same absence costs no evidence and is reported as
+      # `not_applicable`, which is neither a pass nor a failure.
+      #
+      # An earlier revision checked this unconditionally, before applicability
+      # was known, and failed the scripts cohort on docs-only branches that had
+      # changed no script. `run-intent.ts` now orders the two: applicability
+      # first, then the requirement, with the rebase remedy in the message.
       - name: Freeze intent
         id: intent
         env:
