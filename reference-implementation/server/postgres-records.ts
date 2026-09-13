@@ -3121,7 +3121,23 @@ async function postgresPersistContentAddressedBlobWithinFence({
         blobId,
       ]);
       const [storedRow] = stored.rows;
-      if (!storedRow || storedRow.sha256 !== sha256 || Number(storedRow.size_bytes) !== sizeBytes) {
+      if (!storedRow) {
+        // The INSERT above is ON CONFLICT DO NOTHING, so it no-ops when the row
+        // already exists. Concurrent reclamation (`deleteUnreferencedBlobsPostgres`)
+        // can then commit its delete between that no-op and this SELECT, leaving
+        // no row to bind. That is the same reclaimed-during-publication race the
+        // FK-violation handler below catches at the later binding window, and it
+        // is equally retryable — re-running the publication re-inserts the bytes.
+        // Reporting it as `api_error` (HTTP 500) would tell a caller a retry is
+        // pointless, so classify it as the retryable 409 instead.
+        throw Object.assign(new Error("Blob was reclaimed during publication; retry the upload."), {
+          code: "blob_publication_conflict",
+          statusCode: 409,
+        });
+      }
+      if (storedRow.sha256 !== sha256 || Number(storedRow.size_bytes) !== sizeBytes) {
+        // A row under this content-addressed id whose bytes disagree is a real
+        // integrity fault, not a race: retrying cannot fix it.
         const err: PgQueryError = new Error("Blob storage collision");
         err.code = "api_error";
         throw err;

@@ -288,6 +288,109 @@ if (POSTGRES_URL) {
       }
     )
   })
+
+  // The test above stops after deleting the FIRST of two sharers, so it only
+  // pins sibling retention. Deleting the LAST sharer is the postcondition that
+  // decides whether the shared bytes are ever reclaimed, and it is the case
+  // where owner-scoped candidate selection fails: `blobs.connector_instance_id`
+  // records whichever connection uploaded the bytes first, so after that
+  // connection is gone no candidate query keyed on it can ever see the row
+  // again. Both delete paths are covered because both reclaim independently.
+  for (const scope of ["per-stream", "whole-connection"] as const) {
+    test(`${scope} delete reclaims a shared blob when it removes the LAST binding`, async () => {
+      await withTemporaryPostgresDatabase(
+        {
+          closeConnections: closePostgresStorage,
+          connectionString: POSTGRES_URL,
+          databaseName: `pdpp_last_owner_reclaim_${Date.now().toString(36)}`,
+        },
+        async url => {
+          initDb(":memory:")
+          await initPostgresStorage({ backend: "postgres", databaseUrl: url })
+          try {
+            const sharedBytes = Buffer.alloc(32 * 1024, 0x3c)
+            const uploader = {
+              connectorId:
+                "https://registry.pdpp.test/connectors/last_owner_first",
+              connectorInstanceId: "cin_last_owner_first",
+            }
+            const survivor = {
+              connectorId:
+                "https://registry.pdpp.test/connectors/last_owner_second",
+              connectorInstanceId: "cin_last_owner_second",
+            }
+            const uploaders = [uploader, survivor]
+            const blobIds: string[] = []
+            for (const identity of uploaders) {
+              blobIds.push(
+                // biome-ignore lint/performance/noAwaitInLoops: the second upload must observe the first's committed row to dedupe.
+                await seedRecordWithBlob({
+                  bytes: sharedBytes,
+                  connectorId: identity.connectorId,
+                  connectorInstanceId: identity.connectorInstanceId,
+                  recordKey: "att-1",
+                })
+              )
+            }
+            const sharedBlobId = blobIds[0] ?? ""
+            assert.equal(
+              blobIds[0],
+              blobIds[1],
+              "fixture premise: identical bytes dedupe to a single content-addressed blob row"
+            )
+            assert.equal(
+              await countBindings(sharedBlobId),
+              2,
+              "baseline: both connections bind the same blob"
+            )
+
+            const removeConnection = async (identity: typeof uploader) =>
+              scope === "per-stream"
+                ? await deleteAllRecordsForConnector(identity.connectorId)
+                : await withPostgresTransaction(client =>
+                    deleteConnectionRecordRowsPostgres(
+                      client,
+                      identity.connectorInstanceId
+                    )
+                  )
+
+            // Delete the UPLOADER first, so the survivor is a connection that
+            // never owned the row. This is the ordering that strands the bytes.
+            await removeConnection(uploader)
+            assert.equal(
+              await countBlobs(sharedBlobId),
+              1,
+              "a blob the surviving connection still binds must NOT be deleted"
+            )
+            const retainedBytes = await postgresQuery<{ data: Buffer }>(
+              "SELECT data FROM blobs WHERE blob_id = $1",
+              [sharedBlobId]
+            )
+            assert.ok(
+              retainedBytes.rows[0]?.data.equals(sharedBytes),
+              "the survivor's payload is preserved byte-for-byte, not truncated or zeroed"
+            )
+
+            await removeConnection(survivor)
+            assert.equal(
+              await countBindings(sharedBlobId),
+              0,
+              "the last delete removes the final binding"
+            )
+            assert.equal(
+              await countBlobs(sharedBlobId),
+              0,
+              "removing the final binding must reclaim the row even though a DIFFERENT connection uploaded it"
+            )
+          } finally {
+            await closePostgresStorage()
+            closeDb()
+          }
+        }
+      )
+    })
+  }
+
   for (const scope of ["per-stream", "whole-connection"] as const) {
     test(`${scope} delete reclaims more than one batch while retaining shared blobs`, async () => {
       await withTemporaryPostgresDatabase(
