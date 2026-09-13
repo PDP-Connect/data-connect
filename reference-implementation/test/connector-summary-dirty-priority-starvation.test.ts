@@ -68,6 +68,25 @@ const NOW = "2026-08-10T00:00:00.000Z";
 /** Matches the production maintenance tick (`server/index.ts`). */
 const PRODUCTION_PAGE_SIZE = 25;
 
+/**
+ * Per-repair blocking cost charged to the starvation scenario's first round, so
+ * `missing` genuinely consumes the round rather than being assumed to.
+ *
+ * `missing` repairs up to BOUNDED_MISSING_REPAIR_CANDIDATES=25 rows per phase,
+ * so at this cost its phase alone bills ~500ms against a ROUND_BUDGET_MS
+ * budget — the deadline is spent well before `generic` is reached, which is
+ * what a slow contended discovery does in production and what the 2026-08-17
+ * incident actually looked like.
+ */
+const SLOW_REPAIR_MS = 20;
+
+/**
+ * The starvation round's budget. Deliberately far smaller than `missing`'s
+ * charged phase cost above, so round 0's denial of `generic` is structural
+ * rather than a race this test hopes to win.
+ */
+const ROUND_BUDGET_MS = 50;
+
 function withTempDb(fn: () => Promise<void>) {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), "pdpp-dirty-priority-"));
@@ -718,20 +737,26 @@ test(
 test(
   "MISSING-VS-GENERIC STARVATION: a slow 'missing' discovery phase never starves 'generic' for more than one consecutive round",
   withTempDb(async () => {
-    // A large sibling fleet with no evidence at all yet — `missing`'s own
-    // discovery must inspect every id in scope regardless of how many it
-    // will actually repair (capped at BOUNDED_MISSING_REPAIR_CANDIDATES=25),
-    // making that phase's discovery cost real and measurable rather than
-    // simulated. This is what stood in for the live incident's slow/
-    // contended discovery under a tight cooperative budget.
-    const missingIds = seedConnections(200);
-
-    // One already-warm, genuinely dirty connection — exactly the live
-    // incident's shape (SUCCEEDED run, current terminal facts, dirty=1).
+    // ORDER MATTERS HERE. The dirty connection is seeded and warmed FIRST,
+    // alone, and the large sibling fleet is created AFTERWARDS — so those 200
+    // rows still have no evidence when the contended round runs and `missing`
+    // has 200 genuine candidates to repair.
+    //
+    // Seeding the fleet first and then warming everything with one 60s sweep
+    // (as this fixture previously did) warms all 201 rows, leaving ZERO
+    // genuinely-missing candidates. `missing` then inspected 201 ids, repaired
+    // none, cost ~0ms, and `generic` ran immediately in round 0 — measured:
+    // `attemptedIds: ["dirty_cin_0000"]`, `repairDurationMs: 25` against a 50ms
+    // budget. The phase the test is named for never contended for anything.
     const [dirtyId] = seedConnections(1, { connectorId: "dirty" });
     assert.ok(dirtyId);
     seedSuccessfulRun(dirtyId, 1);
     await runBoundedSummaryEvidenceSweep({ maxDurationMs: 60_000, pageSize: PRODUCTION_PAGE_SIZE });
+
+    // Now the cold fleet: real `missing` candidates, repaired at a real,
+    // configured per-unit cost below.
+    const missingIds = seedConnections(200);
+
     await markConnectorSummaryEvidenceDirty({ connectorInstanceId: dirtyId, reason: "run.completed" });
 
     // Pin the alternation so this test does not depend on ordering from
@@ -740,29 +765,66 @@ test(
     __testOnlySetNextFirstObservationPhase("missing");
 
     const scope = [dirtyId, ...missingIds];
-    let sawDirtyClassified = false;
-    for (let round = 0; round < 2; round += 1) {
-      // biome-ignore lint/performance/noAwaitInLoops: Each round must observe the prior round's alternation state.
-      const outcome = await reconcileDirtyConnectorSummaryEvidence(scope, {
-        // Large enough for a real repair transaction to complete once
-        // `generic` gets first opportunity, small enough that `missing`'s
-        // 201-row discovery (when it goes first) can exhaust it before
-        // `generic` ever starts.
-        maxDurationMs: 50,
+
+    // ROUND 0 — `missing` holds first opportunity (pinned above) and must
+    // consume the whole budget, so `generic` is DENIED its turn entirely.
+    //
+    // A budget alone does not produce that denial reliably. Measured on this
+    // host with the previous `maxDurationMs: 50` and no charge, the dirty row
+    // converged in round 0 of 0..1 in 5 of 5 runs, at ~11ms of the 50ms
+    // budget — so the loop broke immediately, round 1 never ran, and the
+    // alternation flip this test is named for was never exercised. Reverting
+    // `connector-summary-read-model.ts`'s alternation to a fixed
+    // missing-then-generic order — the exact 2026-08-17 regression, 11 sources
+    // stuck at `unknown` for over an hour — left the test passing 3 of 3.
+    //
+    // So the contention is made real rather than hoped for: each repair unit
+    // blocks for a real, configured interval, so `missing`'s own batch of up
+    // to BOUNDED_MISSING_REPAIR_CANDIDATES=25 repairs costs far more than the
+    // round's budget — which is what a slow contended discovery does in
+    // production.
+    //
+    // The charge is held across BOTH rounds below, not just round 0. Lifting it
+    // for round 1 would let `missing` finish its whole batch cheaply (measured:
+    // 25 repairs in 10ms against the 50ms budget), so `generic` would get its
+    // turn even under a FIXED missing-then-generic order — and round 1 would
+    // then prove only that the load went away, not that the alternation works.
+    process.env.PDPP_TEST_REPAIR_CANDIDATE_SQLITE_DELAY_MS = String(SLOW_REPAIR_MS);
+    let denial: Awaited<ReturnType<typeof reconcileDirtyConnectorSummaryEvidence>>;
+    let service: Awaited<ReturnType<typeof reconcileDirtyConnectorSummaryEvidence>>;
+    try {
+      denial = await reconcileDirtyConnectorSummaryEvidence(scope, {
+        maxDurationMs: ROUND_BUDGET_MS,
       });
-      sawDirtyClassified ||= "dirty" in outcome.candidateReasonCounts;
-      if (connectionIsCurrentAfterRound(dirtyId)) {
-        break;
-      }
+
+      assert.equal(
+        "dirty" in denial.candidateReasonCounts,
+        false,
+        "round 0: `generic` is denied its turn — this is the starvation the alternation must bound, not prevent"
+      );
+      assert.equal(
+        connectionIsCurrentAfterRound(dirtyId),
+        false,
+        "round 0: the dirty row is still unconverged, so round 1 has something real to service"
+      );
+
+      // ROUND 1 — under the SAME load. The alternation must now hand `generic`
+      // first opportunity; under a fixed missing-then-generic order it does
+      // not, `missing` consumes this round too, and the row stays dirty.
+      service = await reconcileDirtyConnectorSummaryEvidence(scope, {
+        maxDurationMs: ROUND_BUDGET_MS,
+      });
+    } finally {
+      delete process.env.PDPP_TEST_REPAIR_CANDIDATE_SQLITE_DELAY_MS;
     }
 
     assert.ok(
-      sawDirtyClassified,
-      "the dirty candidate must be classified by the generic phase within the alternation's 2-round bound"
+      "dirty" in service.candidateReasonCounts,
+      "round 1: `generic` receives first opportunity after being denied once — a tranche is denied for at most one consecutive round"
     );
     assert.ok(
       connectionIsCurrentAfterRound(dirtyId),
-      "the dirty row must converge within 2 rounds, not stay dirty forever behind a slow 'missing' discovery"
+      "round 1: the dirty row converges, rather than staying dirty forever behind a slow 'missing' discovery"
     );
   })
 );
