@@ -188,6 +188,90 @@ function findPackageCopies(nodeModulesRoot, packageName) {
   return copies;
 }
 
+/** Every `.node` addon under a directory, at any depth. */
+function collectNativeAddons(dir, found = []) {
+  if (!existsSync(dir)) return found;
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = join(dir, entry.name);
+    if (entry.isDirectory()) collectNativeAddons(entryPath, found);
+    else if (entry.isFile() && entry.name.endsWith('.node')) found.push(entryPath);
+  }
+
+  return found;
+}
+
+/**
+ * The C library an ELF file needs, or `null` for anything that is not a native
+ * ELF for this machine.
+ *
+ * Read straight from the `DT_NEEDED` entries rather than inferred from the
+ * filename: packages disagree about naming (`linuxmusl-x64.node` for
+ * better-sqlite3, `secp256k1.musl.node` for secp256k1), and a name is a claim
+ * while the dynamic section is the fact linuxdeploy will act on.
+ */
+function neededLibc(addonPath) {
+  // `-d` needs a parsable ELF; anything else (Mach-O, PE) exits non-zero and is
+  // not our problem -- see below.
+  const result = spawnSync('readelf', ['-d', addonPath], { encoding: 'utf8' });
+  if (result.status !== 0 || !result.stdout) return null;
+
+  const needed = [...result.stdout.matchAll(/Shared library: \[([^\]]+)\]/g)].map(m => m[1]);
+  return needed.find(lib => lib.startsWith('libc.')) ?? null;
+}
+
+/**
+ * Delete bundled addons that this Linux build's own C library cannot satisfy.
+ *
+ * Packages that ship prebuilt binaries ship one per platform they support, and
+ * exactly one of them is ever loadable here. The rest are usually just weight.
+ * On Linux they are not: linuxdeploy walks the AppDir, identifies ELF files by
+ * magic bytes, and resolves every `DT_NEEDED` entry it finds.
+ *
+ * Mach-O and PE addons it cannot parse, so it skips them, and a foreign-arch
+ * ELF it warns about and ships. A *musl* addon is neither -- it is a native
+ * x86_64 ELF, so it is parsed like any other, and it needs
+ * `libc.musl-x86_64.so.1`, which does not exist on a glibc runner. linuxdeploy
+ * cannot resolve it and exits non-zero. Tauri discards the tool's output and
+ * reports only `failed to run linuxdeploy`, which is the whole of the
+ * diagnostic for the ubuntu-22.04 bundling failure.
+ *
+ * Two packages in this bundle ship one: better-sqlite3
+ * (`prebuilds/linuxmusl-x64.node`) and secp256k1
+ * (`prebuilds/linux-x64/secp256k1.musl.node`). Matching on the libc rather than
+ * on either package's naming scheme is what makes this cover both, and the next
+ * one.
+ *
+ * This removes no capability. Both Linux bundle targets, `appimage` and `deb`,
+ * are glibc formats, so a musl addon could never have been the one loaded from
+ * either; the matching glibc build sits beside each one and is untouched.
+ */
+function pruneUnsatisfiableAddons() {
+  if (PLATFORM !== 'linux') return;
+
+  // What this machine -- and so the bundle it is producing -- actually links.
+  const hostLibc = neededLibc(process.execPath) ?? 'libc.so.6';
+
+  const removed = [];
+  for (const addon of collectNativeAddons(join(DIST, 'node_modules'))) {
+    const libc = neededLibc(addon);
+    // `null` is a non-ELF or foreign-arch addon, which linuxdeploy handles on
+    // its own. Only a native ELF wanting a different libc is the failure.
+    if (libc === null || libc === hostLibc) continue;
+
+    rmSync(addon, { force: true });
+    removed.push(`${relative(DIST, addon)} (needs ${libc})`);
+  }
+
+  if (removed.length === 0) {
+    log('No bundled addon requires a foreign C library.');
+    return;
+  }
+
+  for (const entry of removed) log(`Removed unloadable addon ${entry}.`);
+  log(`Pruned ${removed.length} addon(s) this ${hostLibc} build cannot load.`);
+}
+
 function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
   if (
     !specifier ||
@@ -510,6 +594,10 @@ async function build() {
       }
     }
   }
+
+  // Last, so it sees the tree exactly as it will be bundled -- including the
+  // addons the step above just downloaded.
+  pruneUnsatisfiableAddons();
 
   log('Build complete!');
   log(`Output: ${DIST}`);
