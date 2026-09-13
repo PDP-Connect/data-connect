@@ -66,6 +66,12 @@ import {
 	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
 import {
+	type ArtifactCaptureContext,
+	ArtifactCaptureLedger,
+	captureFileArtifact,
+	openArtifactCapture,
+} from "./artifact-capture.ts";
+import {
 	ATTACHMENT_PREVIEW_CHARS,
 	applyProjectDirScope,
 	BYTES_PER_MB,
@@ -444,6 +450,8 @@ export async function emitSessionsFromAccumulators({
 // ─── Tool-results (attachments) ─────────────────────────────────────────
 
 interface WalkToolResultsArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
@@ -455,6 +463,9 @@ interface WalkToolResultsArgs {
 }
 
 export interface EmitToolResultFileArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	/** Records which bodies remain owed, so their mtime is not checkpointed. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	full: string;
 	projectDir: string;
@@ -463,26 +474,59 @@ export interface EmitToolResultFileArgs {
 	toolResultsDir: string;
 }
 
+/**
+ * Emit one tool-result attachment record, capturing its body when configured.
+ *
+ * Returns false when the source could not be read at all, so the caller can
+ * withhold the checkpoint and let the next run retry. That signal is NOT the
+ * same as the capture ledger: an unreadable file owes a retry even on a run
+ * with no artifact stores wired, because not even the preview record was
+ * emitted. Capture state alone cannot carry that, since the ledger is inert
+ * when capture is disabled.
+ */
 export async function emitToolResultFile(
 	args: EmitToolResultFileArgs,
-): Promise<void> {
-	// Tool-result blobs are machine-generated and unbounded (a single large
-	// command output can be hundreds of MB). The durable record keeps only a
-	// short preview plus the byte length (already known from `st.size`), so we
-	// read just a bounded head prefix instead of the whole file — keeping memory
-	// flat on huge sessions. A forbidden byte past the window cannot reach the
-	// preview anyway, so prefix-only screening is honest for this lossy field.
+): Promise<boolean> {
+	// The bounded head prefix below is unchanged: it remains the record's
+	// SEARCH PROJECTION, read without materialising a file that can be hundreds
+	// of MB. What changes is that it is no longer the only copy — the complete
+	// bytes now stream to the artifact spool and on to blob storage, so the
+	// record is reconstructable rather than merely findable.
 	const bounded = await readBoundedFilePreview(args.full);
 	if (bounded === null) {
-		return;
+		// The file could not be read at all, so there is no preview to emit and no
+		// capture to attempt. Returning silently here used to let the caller
+		// checkpoint the file as enumerated, and a later readable run then skipped
+		// it forever — the bytes were lost to a transient EACCES/EIO.
+		//
+		// Record the obligation explicitly instead. `unavailable` is the honest
+		// status: nothing is durably held. The caller reads the ledger, withholds
+		// this file's checkpoint, and the next run re-examines it. One unreadable
+		// file still does not abort the session.
+		args.captureLedger?.record(args.full, "unavailable");
+		return false;
 	}
 	const rel = args.full.slice(args.toolResultsDir.length + 1);
 	const previewResult = safeTextPreview(
 		bounded.buffer,
 		TOOL_RESULT_PREVIEW_CHARS,
 	);
+	const recordKey = `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`;
+	// Capture before emit: a `blob_ref` is written only once the complete bytes
+	// are durably held, so the record never claims a capture that is still in
+	// flight.
+	const captured = await captureFileArtifact({
+		context: args.captureContext ?? null,
+		mimeType: "application/octet-stream",
+		path: args.full,
+		recordKey,
+		stream: "attachments",
+	});
+	// A body that is not durably held is still owed. The ledger keeps that
+	// obligation off the file-mtime checkpoint so the next run retries it.
+	args.captureLedger?.record(args.full, captured.status);
 	await args.emitRecord("attachments", {
-		id: `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`,
+		id: recordKey,
 		session_id: args.sessionId,
 		parent_uuid: null,
 		event_type: "tool_result_file",
@@ -493,10 +537,15 @@ export async function emitToolResultFile(
 			previewResult.kind === "binary" ? previewResult.reason : null,
 		content_bytes: args.st.size,
 		timestamp: new Date(args.st.mtimeMs).toISOString(),
+		artifact_capture: captured.status,
+		artifact_sha256: captured.sha256,
 	});
+	return true;
 }
 
 interface ProcessToolResultArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
 	full: string;
@@ -521,15 +570,35 @@ async function processToolResultEntry(
 		return;
 	}
 	const mtime = st.mtimeMs;
-	if (args.fileMtimes[args.full] === mtime) {
+	// An unchanged file is normally settled work. It is NOT settled when its
+	// body is still owed: the prior run enumerated the preview but did not
+	// durably hold the bytes, so skipping on mtime alone would bury the retry
+	// behind a checkpoint that only a source rewrite could lift.
+	//
+	// The checkpoint VALUE, not its mere presence, is what answers this across
+	// runs. The ledger is per-run, so a run that follows a failure starts with an
+	// empty outstanding set; only a checkpoint that encodes "body durably held"
+	// can prove the file is settled. A plain mtime — written by a run that had no
+	// stores wired, or before this encoding existed — means the body state is
+	// unknown, so the file is revisited ONCE and backfilled. See
+	// `ArtifactCaptureLedger.isSettled`.
+	const settled = args.captureLedger
+		? args.captureLedger.isSettled(args.full, args.fileMtimes[args.full], mtime)
+		: args.fileMtimes[args.full] === mtime;
+	if (settled) {
+		args.newMtimes[args.full] = args.fileMtimes[args.full] ?? mtime;
+		return;
+	}
+	if (!args.requested.has("attachments")) {
+		// Nothing will attempt capture on this pass, so the plain mtime is an
+		// honest record of the enumeration that did happen — and, because it does
+		// not claim a captured body, a later capture-enabled run still revisits it.
 		args.newMtimes[args.full] = mtime;
 		return;
 	}
-	args.newMtimes[args.full] = mtime;
-	if (!args.requested.has("attachments")) {
-		return;
-	}
-	await emitToolResultFile({
+	const emitted = await emitToolResultFile({
+		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		emitRecord: args.emitRecord,
 		full: args.full,
 		toolResultsDir: args.toolResultsDir,
@@ -537,6 +606,24 @@ async function processToolResultEntry(
 		sessionId: args.sessionId,
 		st,
 	});
+	if (!emitted) {
+		// The source was unreadable, so nothing was enumerated and nothing was
+		// captured. Leave NO checkpoint: the absent entry is the retry obligation,
+		// and it survives a run with capture disabled, where the ledger is inert.
+		return;
+	}
+	// Checkpoint only once the body is no longer owed. Withholding the value for
+	// an outstanding artifact is what makes the next run retry this file while
+	// every captured sibling stays settled.
+	//
+	// The value written must be the one `isSettled` accepts: a captured body gets
+	// the stronger encoding, so the NEXT run recognises it and skips the file.
+	// Writing the plain mtime here instead would make every successfully captured
+	// file read as "body state unknown" forever, re-reading it on every run.
+	if (!(args.captureLedger?.isOutstanding(args.full) ?? false)) {
+		args.newMtimes[args.full] =
+			args.captureLedger?.checkpointValue(args.full, mtime) ?? mtime;
+	}
 }
 
 async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
@@ -569,6 +656,8 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 				continue;
 			}
 			await processToolResultEntry(ent, {
+				captureContext: args.captureContext ?? null,
+				captureLedger: args.captureLedger ?? null,
 				full,
 				toolResultsDir,
 				projectDir,
@@ -1041,6 +1130,10 @@ type SymlinkSkipped = (path: string) => Promise<void>;
 type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
 
 export interface ScanProjectDirsArgs {
+	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
+	captureContext?: ArtifactCaptureContext | null;
+	/** Bodies still owed, kept off the file-mtime checkpoint so they retry. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	scope?: EnumerationScope | null;
 	onSymlink?: SymlinkSkipped;
 	onDirectoryError?: DirectoryReadFailure;
@@ -1168,6 +1261,8 @@ async function processSessionDir(
 
 	// tool-results/*.txt → attachments with event_type=tool_result_file.
 	await walkToolResults({
+		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		sessionDir,
 		sessionId,
 		projectDir,
@@ -2480,6 +2575,16 @@ if (isMainModule(import.meta.url)) {
 						next[path] = value;
 			};
 
+			// The artifact stores live with the collector runner that spawned this
+			// process; `bin/collector-runner.ts` hands their locations over in the
+			// child env. Null means this run has none (a fixture, or a caller that
+			// has not opted in) and every body is honestly recorded `unavailable`.
+			const openedCapture = openArtifactCapture({ connectorId: "claude_code" });
+			const captureContext = openedCapture?.context ?? null;
+			const captureLedger = new ArtifactCaptureLedger({
+				enabled: captureContext !== null,
+			});
+
 			const claudeHome =
 				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
 			const baseDir =
@@ -2882,6 +2987,8 @@ if (isMainModule(import.meta.url)) {
 					await scanProjectDirs({
 						baseDir,
 						buildOnly: requested.has("memory_notes"),
+						captureContext,
+						captureLedger,
 						emit,
 						emitRecord: countingEmitRecord,
 						fileMtimes: nonJsonlMtimeGate,
@@ -3076,7 +3183,30 @@ if (isMainModule(import.meta.url)) {
 				}
 				await emitLocalJsonlTelemetry(emit, telemetry);
 			};
-			await collectProjectStreams();
+			try {
+				await collectProjectStreams();
+				if (captureLedger.size > 0) {
+					// Visible, and retried: these files' mtimes were withheld above, so
+					// the next run re-examines exactly them.
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_outstanding=${captureLedger.size}`,
+					});
+				}
+				if (captureLedger.pendingUpload > 0) {
+					// Bodies that ARE durably spooled but have not been delivered
+					// upstream, because no upload transport is wired yet. Reported so
+					// the partial state is legible rather than passing as complete:
+					// local retention is done, remote delivery is still owed.
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+					});
+				}
+			} finally {
+				// Releasing the outbox handle must not mask a collection failure.
+				openedCapture?.close();
+			}
 		},
 	});
 }
