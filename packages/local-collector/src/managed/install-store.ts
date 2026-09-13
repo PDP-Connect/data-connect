@@ -27,7 +27,7 @@
  * that is checked every run.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -573,17 +573,42 @@ function cachedReleaseMatches(directory: string, artifact: VerifiedArtifact): st
 /**
  * Move an invalid cached release aside so it can be rebuilt from verified bytes.
  *
- * Moved rather than deleted, and this is the deliberate part: a collection may
- * already be running out of that directory against an absolute path it resolved
- * earlier. Deleting or overwriting in place would pull the code out from under
- * it mid-run, which is exactly what the install/activate split exists to
- * prevent. A rename leaves the running process's open paths resolving to the
- * quarantined directory, while the next install writes a clean release at the
- * canonical location.
+ * ## What a repair does to a collection that is already running
  *
- * The quarantined copy is kept rather than removed because it is evidence: the
- * host has just found modified code in a content-addressed store, and that is
- * worth being able to inspect afterwards.
+ * This used to claim that renaming "leaves the running process's open paths
+ * resolving to the quarantined directory". That is **false for pathname
+ * lookups**, and the difference matters enough to state precisely rather than
+ * imply:
+ *
+ *  - **Already-open descriptors and already-loaded module code survive.** A
+ *    descriptor holds an inode, and a rename does not disturb it; a module
+ *    whose body Node has already evaluated keeps running.
+ *  - **Any read that resolves a pathname *after* the repair does not.** The
+ *    absolute paths a running collection captured earlier — including the
+ *    `import.meta.url`-relative sibling paths a connector uses for its own
+ *    scratch state — name the *canonical* release directory. The rename moves
+ *    the old contents out of that name and the reinstall writes fresh verified
+ *    bytes into it. So a later `readFileSync(join(here, "scratch-state.json"))`
+ *    does not follow the moved directory: it hits the replacement release,
+ *    where that scratch file does not exist, and throws `ENOENT`. Executed
+ *    counterexample, and the test named "…a running module's pathname reads"
+ *    holds this behaviour in place rather than describing it away.
+ *
+ * **The policy, stated as a limit rather than a guarantee: a cache repair is
+ * not safe to perform under an active collection, and this module cannot make
+ * it safe.** Protecting active runs properly needs the caller to know no run is
+ * in progress — the same knowledge {@link activateRelease} is already gated on
+ * by `activate` defaulting to `false`. What is *not* available here is a way to
+ * detect a run from inside the installer, so the honest arrangement is: the
+ * repair happens (leaving modified code in a content-addressed store is worse),
+ * it is loud about having happened, and the limit is written down where someone
+ * scheduling a repair will read it.
+ *
+ * The quarantined copy is therefore kept for two reasons, only one of which was
+ * true before: it is **evidence** — the host has just found modified code in a
+ * content-addressed store, worth inspecting afterwards — and it is the only
+ * place a running collection's scratch state still exists, so a recovery can
+ * find it. It is not a live path the running collection keeps reading through.
  */
 function quarantineRelease(directory: string, storeRoot: string, reason: string): void {
   const stamp = `${Date.now().toString(36)}-${process.pid}`;
@@ -592,7 +617,10 @@ function quarantineRelease(directory: string, storeRoot: string, reason: string)
   renameSync(directory, quarantined);
   process.emitWarning(
     `connector release ${directory} did not match its verified artifact (${reason}); ` +
-      `moved to ${quarantined} and reinstalling from verified layers`,
+      `moved to ${quarantined} and reinstalling from verified layers. ` +
+      `A collection running out of this release keeps its loaded code and open descriptors, but any path it ` +
+      `resolves from now on — including its own scratch state beside the code — names the replacement release, ` +
+      `not the quarantined copy. Repair under an active collection is not safe; its state is preserved only at ${quarantined}.`,
     "ManagedConnectorCacheWarning"
   );
 }
@@ -608,7 +636,11 @@ function quarantineRelease(directory: string, storeRoot: string, reason: string)
  *
  * Activation is separated from install so that a collection in progress keeps
  * running the release it started with: the running process already resolved an
- * absolute path under a digest directory whose contents never change.
+ * absolute path under a digest directory, and an ordinary install writes a new
+ * sibling rather than touching it. The one path that does disturb an existing
+ * digest directory is a cache repair — see {@link quarantineRelease}, which
+ * states plainly what that costs an active run rather than claiming it costs
+ * nothing.
  */
 export function activateRelease(installRoot: string, release: InstalledRelease): void {
   const storeRoot = canonicalStoreRoot(installRoot);
@@ -618,10 +650,78 @@ export function activateRelease(installRoot: string, release: InstalledRelease):
   // boundary as the release itself: a redirected `connectors/<key>` would
   // otherwise write the activation record outside the store.
   resolveInsideStore(storeRoot, dirname(pointerPath), "activation pointer directory");
-  const temporary = `${pointerPath}.tmp-${process.pid}`;
-  writeFileSync(
-    temporary,
-    `${JSON.stringify({ digest: release.digest, version: release.version, activatedAt: new Date().toISOString() }, null, 2)}\n`
-  );
-  renameSync(temporary, pointerPath);
+
+  const payload = `${JSON.stringify({ digest: release.digest, version: release.version, activatedAt: new Date().toISOString() }, null, 2)}\n`;
+  const temporary = createExclusiveTemporary(storeRoot, pointerPath, payload);
+  try {
+    renameSync(temporary, pointerPath);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Write the activation payload to a fresh temporary leaf beside the pointer,
+ * refusing to write through anything already sitting at that path.
+ *
+ * Checking the temporary file's *parent* is not enough, and that gap was real:
+ * with a parent that resolves correctly inside the store, a plain
+ * `writeFileSync` at a predictable leaf follows a symlink planted there and
+ * writes activation JSON through it. Planting
+ * `current.json.tmp-<pid>` → a durable `archive.json` was therefore enough to
+ * replace a collected archive's bytes and leave `current.json` a symlink whose
+ * realpath is still that archive. The leaf name was guessable (the process ID
+ * is not a secret) and no race was needed, so the concurrent-replacement
+ * qualification on {@link resolveInsideStore} did not cover it.
+ *
+ * Two independent things close it, and both are kept because they fail for
+ * different reasons:
+ *
+ *  - **`wx` (`O_CREAT|O_EXCL|O_WRONLY`).** The kernel refuses `O_EXCL` when the
+ *    final component exists *at all* — including a symlink, which it will not
+ *    follow. This is the load-bearing half: it is enforced by the same syscall
+ *    that creates the file, so there is no window between deciding the path is
+ *    safe and writing to it. A pre-planted leaf is an `EEXIST`, not a write
+ *    through to wherever it pointed.
+ *  - **An unpredictable name.** 16 bytes of `randomBytes` rather than the
+ *    process ID, so an attacker cannot know which leaf to plant in the first
+ *    place. On its own this would only be obscurity; behind `O_EXCL` it means
+ *    the refusal below is a genuine anomaly rather than routine collision.
+ *
+ * The created leaf is then checked to be a regular file inside the store before
+ * anything is written, so the file being renamed onto the pointer is one this
+ * function made.
+ */
+function createExclusiveTemporary(storeRoot: string, pointerPath: string, payload: string): string {
+  const temporary = `${pointerPath}.tmp-${randomBytes(16).toString("hex")}`;
+  try {
+    // `wx`: create-or-fail. Never `w`, which would follow a symlink at this leaf.
+    writeFileSync(temporary, payload, { flag: "wx" });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      throw new Error(
+        `refusing to activate through an existing path at ${JSON.stringify(temporary)}: ` +
+          `the activation temporary must be created fresh, never written through something already there`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+
+  try {
+    // The parent was checked above; this checks the leaf itself, which is the
+    // component the previous version never looked at.
+    const stats = lstatSync(temporary);
+    if (!stats.isFile()) {
+      throw new Error(`activation temporary ${JSON.stringify(temporary)} is not a regular file`);
+    }
+    resolveInsideStore(storeRoot, temporary, "activation temporary file");
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+
+  return temporary;
 }

@@ -21,7 +21,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
@@ -317,6 +317,120 @@ test("install does not activate: no current.json until activation is asked for",
     });
     assert.ok(existsSync(join(installRoot, "connectors", CONNECTOR_KEY, "current.json")));
   });
+});
+
+test("activation does not write through a symlink planted at its temporary leaf", async () => {
+  // The activation pointer's *parent* was checked and its *leaf* was not, so a
+  // symlink planted at the predictable `current.json.tmp-<pid>` was followed:
+  // activation JSON replaced a durable archive's bytes and `current.json` ended
+  // up a symlink whose realpath was still that archive. No race was needed, so
+  // the concurrent-replacement qualification did not cover it.
+  //
+  // The assertion that matters is byte-identity of the archive, not the shape
+  // of the error: a fix that merely renamed the temporary file would still be
+  // wrong if some other predictable path could be planted.
+  const fixture = buildFixture();
+  const ARCHIVE = "COLLECTED-DATA\n";
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(durableRoot, { recursive: true });
+    const archive = join(durableRoot, "archive.json");
+    writeFileSync(archive, ARCHIVE);
+
+    // Plant the leaf the old implementation would have written through.
+    const pointerDir = join(installRoot, "connectors", CONNECTOR_KEY);
+    mkdirSync(pointerDir, { recursive: true });
+    symlinkSync(archive, join(pointerDir, `current.json.tmp-${process.pid}`));
+
+    await obtainManagedConnectors({
+      lock: fixture.lock,
+      installRoot,
+      durableRoot,
+      client: fixture.client,
+      verifier: fixture.verifier,
+      activate: true,
+    });
+
+    assert.equal(readFileSync(archive, "utf8"), ARCHIVE, "the durable archive must be byte-identical after activation");
+
+    // …and the pointer that was written is a real file in the store, not a
+    // symlink that resolves back out into the durable tree.
+    const pointer = join(pointerDir, "current.json");
+    assert.equal(lstatSync(pointer).isSymbolicLink(), false, "the activation pointer must not be a symlink");
+    assert.equal(
+      JSON.parse(readFileSync(pointer, "utf8")).digest,
+      fixture.digest,
+      "the pointer must hold the activation record"
+    );
+  });
+});
+
+test("a failed activation leaves no temporary leaf behind and does not touch durable data", async () => {
+  // The counterpart to the test above: activation can still fail *after* the
+  // temporary is created — here the pointer path is a non-empty directory, so
+  // the rename fails with EISDIR. A leaked `current.json.tmp-*` would be a path
+  // some later caller could find, and the whole point of creating it fresh is
+  // that no such path is lying around between runs.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(durableRoot, { recursive: true });
+    const archive = join(durableRoot, "archive.json");
+    writeFileSync(archive, "COLLECTED-DATA\n");
+
+    const pointerDir = join(installRoot, "connectors", CONNECTOR_KEY);
+    mkdirSync(pointerDir, { recursive: true });
+    mkdirSync(join(pointerDir, "current.json"), { recursive: true });
+    writeFileSync(join(pointerDir, "current.json", "occupant"), "x\n");
+
+    await assert.rejects(
+      obtainManagedConnectors({
+        lock: fixture.lock,
+        installRoot,
+        durableRoot,
+        client: fixture.client,
+        verifier: fixture.verifier,
+        activate: true,
+      })
+    );
+
+    assert.equal(readFileSync(archive, "utf8"), "COLLECTED-DATA\n", "a failed activation must not touch durable data");
+    assert.deepEqual(
+      readdirSync(pointerDir).filter((entry) => entry.includes("current.json.tmp-")),
+      [],
+      "a failed activation must not leave its temporary leaf behind"
+    );
+  });
+});
+
+test("activation creates its temporary leaf exclusively, so an occupied path is refused not followed", async () => {
+  // The randomized name means an attacker cannot know which leaf to plant, so
+  // the end-to-end test above cannot exercise a *collision* — it can only prove
+  // the old predictable name no longer works. This proves the other half
+  // directly: the create-or-fail open is what refuses, so even a leaf that
+  // somehow already exists is never written through.
+  //
+  // Driven against `writeFileSync`'s real flag semantics rather than a mock,
+  // because the guarantee is the kernel's `O_EXCL`, not ours.
+  const base = mkdtempSync(join(tmpdir(), "managed-connectors-excl-"));
+  try {
+    const archive = join(base, "archive.json");
+    writeFileSync(archive, "COLLECTED-DATA\n");
+    const leaf = join(base, "current.json.tmp-planted");
+    symlinkSync(archive, leaf);
+
+    assert.throws(
+      () => writeFileSync(leaf, "ACTIVATION-JSON\n", { flag: "wx" }),
+      (error: NodeJS.ErrnoException) => error.code === "EEXIST",
+      "the create-or-fail open must refuse a planted leaf rather than follow it"
+    );
+    assert.equal(readFileSync(archive, "utf8"), "COLLECTED-DATA\n");
+
+    // …and the control: the flag the module used before does follow it, which
+    // is why the flag is the fix rather than the name.
+    writeFileSync(leaf, "ACTIVATION-JSON\n");
+    assert.equal(readFileSync(archive, "utf8"), "ACTIVATION-JSON\n", "the old flag follows the symlink");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("a tampered layer is refused: the digest chain breaks", async () => {
@@ -801,10 +915,12 @@ test("reinstalling an untouched release is still a no-op, and connector scratch 
   });
 });
 
-test("a quarantined release is moved aside, not deleted, so an active run keeps resolving", async () => {
-  // An in-flight collection already resolved an absolute path under the old
-  // directory. Rebuilding must not pull that code out from under it, so the
-  // invalid release is renamed rather than removed.
+test("a quarantined release is moved aside, not deleted, so its bytes survive as evidence", async () => {
+  // The invalid release is renamed rather than removed: the host has just found
+  // modified code in a content-addressed store, and that is worth inspecting.
+  // This test says only that, which is all the rename establishes — what a
+  // repair costs a *running* collection is the test below, which drives a real
+  // reader instead of checking that a directory exists.
   const fixture = buildFixture();
   await withRoots(async (installRoot, durableRoot) => {
     const first = await obtain(fixture, installRoot, durableRoot);
@@ -820,7 +936,77 @@ test("a quarantined release is moved aside, not deleted, so an active run keeps 
     assert.equal(quarantined.length, 1, "the invalid release must be kept aside as evidence");
     assert.ok(
       existsSync(join(installRoot, "connectors", CONNECTOR_KEY, quarantined[0]!, "code", "collection-profile.mjs")),
-      "the quarantined copy must still hold the bytes an active run resolved"
+      "the quarantined copy must still hold the bytes that were found modified"
+    );
+  });
+});
+
+test("a repair does not preserve a running module's pathname reads, and the module says so", async () => {
+  // The claim this replaces was that renaming an invalid release "leaves the
+  // running process's open paths resolving to the quarantined directory". It
+  // does not, and checking that a quarantined *directory exists* could never
+  // have caught that — so this drives a real reader across a real repair.
+  //
+  // The connector's exported function resolves its sibling scratch file at CALL
+  // time through `import.meta.url`, which is how a connector actually finds its
+  // own working state. The function is imported and called BEFORE the repair,
+  // then the SAME already-imported function is called after it.
+  const fixture = buildFixture({
+    codeEntries: [
+      {
+        path: "collection-profile.mjs",
+        content:
+          `import { readFileSync } from "node:fs";\n` +
+          `import { fileURLToPath } from "node:url";\n` +
+          `import { dirname, join } from "node:path";\n` +
+          `const here = dirname(fileURLToPath(import.meta.url));\n` +
+          `export const readScratch = () => readFileSync(join(here, "scratch-state.json"), "utf8").trim();\n`,
+      },
+    ],
+  });
+
+  await withRoots(async (installRoot, durableRoot) => {
+    const first = await obtain(fixture, installRoot, durableRoot);
+    const entrypoint = first[0]?.entrypoint;
+    assert.ok(entrypoint);
+    const releaseDir = releaseDirOf(installRoot, fixture.digest);
+
+    // The running collection's own scratch state, beside its code.
+    writeFileSync(join(releaseDir, "code", "scratch-state.json"), "RUN-STATE\n");
+    const running = (await import(`${pathToFileURL(entrypoint).href}?case=active-run`)) as {
+      readonly readScratch: () => string;
+    };
+    assert.equal(running.readScratch(), "RUN-STATE", "the reader must work before the repair");
+
+    // Trigger a repair by modifying a file the installer wrote — not the
+    // scratch file, which is legitimately extra and must not itself be a
+    // mismatch.
+    writeFileSync(join(releaseDir, "provenance.json"), `${JSON.stringify({ builder: "TAMPERED" }, null, 2)}\n`);
+    const second = await obtain(fixture, installRoot, durableRoot);
+    assert.equal(second[0]?.entrypoint, entrypoint, "the repaired release reoccupies the same canonical path");
+
+    // Behaviour, not a string. The already-imported function still exists and
+    // still runs — loaded module code survives a rename — but the path it
+    // resolves now names the REPLACEMENT release, where its state is absent.
+    assert.throws(
+      () => running.readScratch(),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+      "a repair must be understood to break the running collection's pathname reads, not claimed to preserve them"
+    );
+
+    // …and the state is recoverable only from the quarantine, which is exactly
+    // what the module's warning now tells an operator.
+    const quarantined = readdirSync(join(installRoot, "connectors", CONNECTOR_KEY)).filter((e) =>
+      e.includes(".invalid-")
+    );
+    assert.equal(quarantined.length, 1);
+    assert.equal(
+      readFileSync(
+        join(installRoot, "connectors", CONNECTOR_KEY, quarantined[0]!, "code", "scratch-state.json"),
+        "utf8"
+      ).trim(),
+      "RUN-STATE",
+      "the only surviving copy of the running collection's state is under the quarantine"
     );
   });
 });
