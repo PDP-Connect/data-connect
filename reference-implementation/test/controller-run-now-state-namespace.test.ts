@@ -47,11 +47,22 @@ function at<T>(items: readonly T[], index: number): T {
 // on the captured call proves the exact value the connector would scrape from.
 
 const AMAZON = "amazon";
+// `streams` is non-empty so the seeded row survives read-path validation.
+// The recovery continuation resolves the CURRENT registered policy by reading
+// this manifest back (see maybeContinueRecoveryAfterProgress) and fails closed
+// when it cannot be parsed, so a manifest real registration would reject can no
+// longer stand in for a registered one.
 const AMAZON_MANIFEST = {
   connector_id: AMAZON,
   name: "Amazon",
   runtime_requirements: { bindings: { browser: { required: true } } },
-  streams: [],
+  streams: [
+    {
+      name: "order_items",
+      primary_key: ["id"],
+      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    },
+  ],
   version: "1.0.0",
 };
 

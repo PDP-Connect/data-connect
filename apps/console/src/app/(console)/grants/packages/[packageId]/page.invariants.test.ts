@@ -126,3 +126,34 @@ test("revoke flow preserves package partial-failure details for the operator", a
   assert.match(refClientSrc, PARTIAL_FAILURE_THROW_RE);
   assert.match(refClientSrc, PARTIAL_FAILURE_COPY_RE);
 });
+
+// Round 3 regression. `pkg.status` is a DERIVED lifecycle that reads
+// "expired" once a deadline passes (reference-implementation/server/
+// grant-lifecycle.ts). Gating the revoke form on it silently removed the
+// owner's control from every expired-but-never-revoked package: revoking one
+// is still a meaningful, durable act that cascades to child grants, tokens
+// and members, and the reference route accepts it — it guards on the
+// persisted column, not the derived one. The gate must read the same field
+// the backend does.
+const REVOKE_GATE_USES_PERSISTED_RE = /const isRevocable = \(pkg\.persisted_status \?\? pkg\.status\) === "active"/;
+const REVOKE_SECTION_GATED_RE = /\{isRevocable \?/;
+const REVOKE_GATE_NOT_DERIVED_RE = /const is\w+ = pkg\.status === "active"/;
+const PERSISTED_STATUS_FIELD_RE = /persisted_status\?: string;/;
+
+test("revoke form is gated on the persisted status, never the derived lifecycle", async () => {
+  const pageSrc = await readFile(PAGE_FILE, "utf8");
+  assert.match(pageSrc, REVOKE_GATE_USES_PERSISTED_RE);
+  assert.match(pageSrc, REVOKE_SECTION_GATED_RE);
+  // An expired package has not been revoked; gating on the derived status
+  // would drop the revoke affordance the moment its deadline passed.
+  assert.doesNotMatch(
+    pageSrc,
+    REVOKE_GATE_NOT_DERIVED_RE,
+    "revocability must not be derived from the displayed lifecycle"
+  );
+});
+
+test("ref-client types persisted_status so the console can tell revoked from expired", async () => {
+  const refClientSrc = await readFile(REF_CLIENT_FILE, "utf8");
+  assert.match(refClientSrc, PERSISTED_STATUS_FIELD_RE);
+});

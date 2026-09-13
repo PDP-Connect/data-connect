@@ -244,13 +244,20 @@ async function readAllTimelinePages({
     stream,
     cursor: null as string | null,
     records: [] as TimelineRecord[],
+    seenIds: new Set<string>(),
     hasMore: true,
   }))
   let remaining = Math.max(0, maxRecords)
 
   while (remaining > 0) {
-    const active = pending.filter(entry => entry.hasMore)
-    if (!active.length) break
+    const ready = pending.filter(entry => entry.hasMore)
+    if (!ready.length) break
+    // Fetching from more streams than the budget can absorb would force us to
+    // discard part of a page. Read from only as many streams as we can seat, so
+    // every fetched record is admitted and every cursor we keep is honest. The
+    // streams we skip stay untouched at `cursor: null`, meaning unread rather
+    // than exhausted, and `loadMore` replays them from the beginning.
+    const active = ready.slice(0, Math.min(ready.length, remaining))
     const pageLimit = Math.max(
       1,
       Math.min(100, Math.floor(remaining / active.length))
@@ -267,16 +274,37 @@ async function readAllTimelinePages({
       }))
     )
     let added = 0
+    let advanced = false
     for (const { entry, page } of pages) {
-      const pageRecords = page.data.slice(0, remaining - added)
-      entry.records.push(...pageRecords)
-      added += pageRecords.length
-      entry.hasMore = page.has_more && pageRecords.length === page.data.length
-      entry.cursor =
+      let consumedWholePage = true
+      for (const record of page.data) {
+        if (added >= remaining) {
+          // The global budget stopped this page short. Leave the cursor where
+          // it was so the unread remainder stays reachable, and never let
+          // budget exhaustion be recorded as source exhaustion.
+          consumedWholePage = false
+          break
+        }
+        if (entry.seenIds.has(record.id)) continue
+        entry.seenIds.add(record.id)
+        entry.records.push(record)
+        added += 1
+      }
+      if (!consumedWholePage) {
+        entry.hasMore = true
+        continue
+      }
+      const nextCursor =
         typeof page.next_cursor === "string" ? page.next_cursor : null
-      if (entry.hasMore && !entry.cursor) entry.hasMore = false
+      if (page.has_more !== entry.hasMore || nextCursor !== entry.cursor) {
+        advanced = true
+      }
+      entry.hasMore = page.has_more
+      entry.cursor = nextCursor
     }
-    if (added === 0) break
+    // Progress is either new records or a moved cursor; without either, a
+    // source that keeps returning nothing would loop forever.
+    if (added === 0 && !advanced) break
     remaining -= added
   }
 
@@ -340,7 +368,10 @@ async function readNextTimelinePages({
   let remaining = Math.max(0, maxRecords)
 
   while (remaining > 0) {
-    const active = pending.filter(entry => entry.hasMore && entry.cursor)
+    // A stream with more records but no cursor was never consumed past its
+    // start, so replaying it from the beginning is what makes it reachable.
+    // Records already held are filtered by `seenIds` below.
+    const active = pending.filter(entry => entry.hasMore)
     if (!active.length) break
     const pageLimit = Math.max(
       1,
@@ -351,29 +382,43 @@ async function readNextTimelinePages({
         entry,
         page: await read<PdppRecordList>(
           port,
-          `/v1/streams/${encodeURIComponent(entry.streamRead.stream.id)}/records?limit=${pageLimit}&cursor=${encodeURIComponent(entry.cursor!)}`,
+          `/v1/streams/${encodeURIComponent(entry.streamRead.stream.id)}/records?limit=${pageLimit}${entry.cursor ? `&cursor=${encodeURIComponent(entry.cursor)}` : ""}`,
           capability,
           signal
         ),
       }))
     )
     let accepted = 0
-    let fetched = 0
+    let advanced = false
     for (const { entry, page } of pages) {
-      fetched += page.data.length
+      let consumedWholePage = true
       for (const record of page.data) {
-        if (accepted >= remaining) break
+        if (accepted >= remaining) {
+          // The global budget stopped this page short. Keep the cursor that
+          // still returns this record so the next read can pick it up.
+          consumedWholePage = false
+          break
+        }
         if (entry.seenIds.has(record.id)) continue
         entry.seenIds.add(record.id)
         entry.records.push(record)
         accepted += 1
       }
-      entry.hasMore = page.has_more
-      entry.cursor =
+      if (!consumedWholePage) continue
+      // The whole page was admitted or knowingly skipped as duplicate, so its
+      // cursor is safe to commit. A source that reports more records without a
+      // cursor stays `hasMore` and is replayed from the start next round.
+      const nextCursor =
         typeof page.next_cursor === "string" ? page.next_cursor : null
-      if (entry.hasMore && !entry.cursor) entry.hasMore = false
+      if (page.has_more !== entry.hasMore || nextCursor !== entry.cursor) {
+        advanced = true
+      }
+      entry.hasMore = page.has_more
+      entry.cursor = nextCursor
     }
-    if (fetched === 0) break
+    // Progress is either new records or a moved cursor. Without both, replaying
+    // an all-duplicate page would spin forever.
+    if (accepted === 0 && !advanced) break
     remaining -= accepted
   }
 

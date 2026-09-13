@@ -719,6 +719,64 @@ export function classifyInteractionSensitivity(kind: unknown): InteractionSensit
   return INTERACTION_KIND_SENSITIVITY[kind] || "secret";
 }
 
+/**
+ * RFC 8030 §5.3 Push Message Urgency. The application server sends this to
+ * the *push service* (which "MUST NOT forward the Urgency header field to
+ * the user agent"), where it decides whether a message is worth waking a
+ * device that is on low battery. A push message with no Urgency header
+ * "defaults to a value of 'normal'" — the RFC's own device-state table maps
+ * `normal` to "on neither power nor Wi-Fi" (chat/calendar) and `high` to
+ * "low battery" (an "incoming phone call or time-sensitive alert").
+ *
+ * We only ever request the two ends we can justify: `high` for a push the
+ * owner must act on before anything else can proceed, and the protocol
+ * default `normal` for everything else. `very-low`/`low` are deliberately
+ * unused — no PDPP push is an advertisement or a topic update.
+ */
+export type WebPushUrgency = "high" | "normal";
+
+/** RFC 8030 §5.3: "A push message without the Urgency header field defaults to a value of 'normal'." */
+export const DEFAULT_WEB_PUSH_URGENCY: WebPushUrgency = "normal";
+
+/**
+ * The only payload `type` that earns `high`: a blocked, response-required
+ * interaction. The run has stopped and cannot advance until the owner types
+ * or pastes a value, and for an OTP that value is itself expiring (the
+ * `DEFAULT_TTL_SECONDS` above is 10 minutes) — RFC 8030's own worked example
+ * for `high` is a "time-sensitive alert".
+ *
+ * Deliberately narrow. `pdpp.escalation` is NOT here even though it also
+ * means "syncing stopped pending the owner": an escalation is a cross-run
+ * governance notice with no expiring value attached, so it keeps the default
+ * per the same RFC guidance against overusing `high`. Widening this set is a
+ * product decision, not a cleanup.
+ */
+const BLOCKED_INTERACTION_PUSH_TYPES: ReadonlySet<string> = new Set(["pdpp.pending_interaction"]);
+
+/**
+ * Request `Urgency: high` only for the blocked credential/OTP prompt
+ * (`pdpp.pending_interaction`, whose `secret` sensitivity is exactly the
+ * OTP/credentials case). Everything else keeps the RFC default `normal`:
+ * `pdpp.escalation` (governance notice, nothing expiring),
+ * `pdpp.assistance_requested` (owner acts in another app, but PDPP expects
+ * no response so the run is not waiting on us), and
+ * `pdpp.test_notification`.
+ *
+ * Reads only the `type` this module itself set in the build* functions
+ * above; a payload of an unrecognized shape gets the default rather than
+ * escalating, so a caller cannot obtain `high` by accident.
+ */
+export function resolveWebPushUrgency(payload: unknown): WebPushUrgency {
+  if (!payload || typeof payload !== "object") {
+    return DEFAULT_WEB_PUSH_URGENCY;
+  }
+  const { type } = payload as { type?: unknown };
+  if (typeof type !== "string" || !BLOCKED_INTERACTION_PUSH_TYPES.has(type)) {
+    return DEFAULT_WEB_PUSH_URGENCY;
+  }
+  return "high";
+}
+
 function interactionPushBody(sensitivity: InteractionSensitivity): string {
   switch (sensitivity) {
     case "external":
@@ -958,7 +1016,7 @@ export async function defaultSendNotification(
   try {
     // `web-push` builds VAPID headers and the encrypted body itself from
     // `subscription`/`payload`/these options — unchanged from before this
-    // guard. `agent` and `timeout` are the only additions: neither alters
+    // guard. `agent`, `timeout` and `urgency` are the only additions: none alters
     // protocol correctness. `agent` pins which literal address the library's
     // own `https.request` call (which we do not otherwise touch) is allowed
     // to dial. `timeout` bounds how long that request can stay open — without
@@ -974,6 +1032,16 @@ export async function defaultSendNotification(
       contentEncoding: "aes128gcm",
       TTL: DEFAULT_TTL_SECONDS,
       timeout: WEB_PUSH_SEND_TIMEOUT_MS,
+      // RFC 8030 §5.3: tells the push service whether this is worth waking a
+      // low-battery device. Without it the RFC default `normal` applies, and
+      // push services (FCM in particular) are explicitly permitted to
+      // defer/batch `normal` messages to save battery — an accept-but-defer
+      // gap the server cannot see, because `sendNotification` still resolves.
+      // `resolveWebPushUrgency` returns `high` only for the blocked,
+      // response-required credential/OTP prompt and `normal` otherwise.
+      // `web-push` validates this against its own `supportedUrgency` set and
+      // sets the `Urgency` request header from it.
+      urgency: resolveWebPushUrgency(payload),
     });
   } finally {
     // Runs on success, error, AND timeout (a timeout rejects the promise via

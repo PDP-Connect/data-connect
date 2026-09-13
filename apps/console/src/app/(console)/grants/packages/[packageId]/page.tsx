@@ -88,7 +88,15 @@ export default async function GrantPackageDetailPage({
   // multi-package lineage; a lone package needs no cumulative pivot.
   const hasLineage = cumulative !== null && (cumulative.package_count > 1 || pkg.parent_package_id !== null);
 
-  const isActive = pkg.status === "active";
+  // Revocability is decided by the PERSISTED status, not the displayed one.
+  // `pkg.status` is a derived lifecycle that reads "expired" once the deadline
+  // passes, but an expired package has not been revoked: revoking it is still
+  // a meaningful, durable act that cascades to child grants, tokens and
+  // members, and the revoke route accepts it (it guards on the same persisted
+  // field). Gating this form on `status` silently removed the owner's control
+  // the moment a grant lapsed. Falls back to `status` when an older reference
+  // server does not send `persisted_status`.
+  const isRevocable = (pkg.persisted_status ?? pkg.status) === "active";
   const childCount = pkg.children.length;
   const subscriptionsHref = "/event-subscriptions";
 
@@ -226,7 +234,7 @@ export default async function GrantPackageDetailPage({
         </p>
       </Section>
 
-      {isActive ? (
+      {isRevocable ? (
         <Section
           description="Revoking the package dispatches one revoke per active child grant and invalidates the package's MCP refresh token only after every child succeeds. If one child fails, the page reports which child did not revoke and leaves the package active."
           title="Revoke"

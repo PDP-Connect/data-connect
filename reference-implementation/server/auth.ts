@@ -51,6 +51,11 @@ import {
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
 import {
+  derivePackageLifecycle,
+  deriveGrantLifecycle,
+  type PackageMemberLifecycleInput,
+} from "./grant-lifecycle.ts";
+import {
   base64UrlSha256,
   generateOAuthRefreshToken,
   generateToken,
@@ -379,6 +384,8 @@ interface RegisteredClientRow extends DbRow {
 interface GrantPackageMemberRow extends DbRow {
   added_at: string;
   grant_access_mode?: string;
+  /** `grants.expires_at`; null means no expiry. Drives the derived lifecycle. */
+  grant_expires_at?: string | null;
   grant_id: string;
   grant_status: string;
   member_revoked_at?: string | null;
@@ -7668,7 +7675,8 @@ const postgresGrantPackageStore: GrantPackageStore = {
       await postgresQuery<GrantPackageMemberRow>(
         `SELECT gm.package_id, gm.grant_id, gm.source_json::text AS source_json,
               gm.status AS member_status, gm.added_at, gm.revoked_at AS member_revoked_at,
-              g.status AS grant_status, g.access_mode AS grant_access_mode
+              g.status AS grant_status, g.expires_at AS grant_expires_at,
+              g.access_mode AS grant_access_mode
          FROM grant_package_members gm
          JOIN grants g ON gm.grant_id = g.grant_id
          WHERE gm.package_id = $1
@@ -7699,6 +7707,69 @@ const postgresGrantPackageStore: GrantPackageStore = {
     );
   },
 };
+
+/**
+ * Rows per SQLite page for the per-package member reads. Must match the
+ * `LIMIT` in `list-all-by-package.sql` and `list-active-by-package.sql` and
+ * those files' `@max_rows`: the artifact bounds ONE page, and the loop below
+ * asks for another whenever a full one comes back.
+ */
+const GRANT_PACKAGE_MEMBER_PAGE_SIZE = 256;
+
+/**
+ * Reads every member row of one package by walking keyset pages.
+ *
+ * Membership has NO enforced ceiling: `createHostedMcpGrantPackage` writes one
+ * member per approved authorization detail and never counts them. Reading the
+ * whole set in one statement therefore overflowed the artifact's declared
+ * `@max_rows: 256` on a 257-member package and threw
+ * SmallEnumerationOverflowError, failing the owner's detail route and the MCP
+ * token fan-out. Paging makes the declared bound describe one page -- a real
+ * `LIMIT` the SQL guarantees -- instead of an assumption about the data.
+ *
+ * The keyset is the composite `(added_at, grant_id)`, matching each query's
+ * ORDER BY exactly. Both parts are required. Nothing makes `added_at` unique --
+ * it is a per-member `nowIso()` at millisecond precision -- so ties are
+ * POSSIBLE, not routine: measured over 300 members through the real issuance
+ * path every timestamp was in fact distinct. The tiebreak is not there for the
+ * common case but for the failure mode when it does happen, which is silent:
+ * with 600 members sharing one timestamp, an `added_at`-only keyset cannot
+ * advance past the tied page boundary and returns 256 of them with no error
+ * raised. `grant_id` breaks that tie -- it is the membership primary key
+ * within a package (`PRIMARY KEY(package_id, grant_id)`) and is never
+ * rewritten -- so the pair is total and stable regardless of collisions.
+ *
+ * Keying on `(added_at, grant_id)` rather than `grant_id` alone is also what
+ * preserves behavior: `getGrantPackageForOwner` returns `children` in this
+ * order and the route passes it through unchanged, so a `grant_id`-only
+ * keyset would have reordered an owner-visible payload.
+ *
+ * Both queries take the keyset as `(package_id, added_at, added_at, grant_id)`;
+ * '' sorts before every real value, so the first page starts at the beginning.
+ */
+function readAllMemberPages(
+  query: Parameters<typeof allowUnboundedReadAcknowledged>[0],
+  packageId: string
+): readonly GrantPackageMemberRow[] {
+  const all: GrantPackageMemberRow[] = [];
+  let afterAddedAt = "";
+  let afterGrantId = "";
+  for (;;) {
+    const page = allowUnboundedReadAcknowledged<GrantPackageMemberRow>(query, [
+      packageId,
+      afterAddedAt,
+      afterAddedAt,
+      afterGrantId,
+    ]);
+    all.push(...page);
+    const last = page.at(-1);
+    if (page.length < GRANT_PACKAGE_MEMBER_PAGE_SIZE || !last) {
+      return all;
+    }
+    afterAddedAt = last.added_at;
+    afterGrantId = last.grant_id;
+  }
+}
 
 const sqliteGrantPackageStore: GrantPackageStore = {
   getPackageById: (packageId) => getOne(referenceQueries.authGrantPackagesGetById, [packageId]),
@@ -7754,13 +7825,9 @@ const sqliteGrantPackageStore: GrantPackageStore = {
   insertPackageToken: ({ tokenId, packageId, subjectId, clientId, expiresAt }) =>
     exec(referenceQueries.authTokensInsertMcpPackage, [tokenId, packageId, subjectId, clientId, expiresAt]),
   listActiveMembers: (packageId) =>
-    allowUnboundedReadAcknowledged<GrantPackageMemberRow>(referenceQueries.authGrantPackageMembersListActiveByPackage, [
-      packageId,
-    ]),
+    readAllMemberPages(referenceQueries.authGrantPackageMembersListActiveByPackage, packageId),
   listAllMembers: (packageId) =>
-    allowUnboundedReadAcknowledged<GrantPackageMemberRow>(referenceQueries.authGrantPackageMembersListAllByPackage, [
-      packageId,
-    ]),
+    readAllMemberPages(referenceQueries.authGrantPackageMembersListAllByPackage, packageId),
   markMemberRevoked: ({ packageId, grantId, revokedAt }) =>
     exec(referenceQueries.authGrantPackageMembersMarkRevokedByGrant, [revokedAt, packageId, grantId]),
   markPackageRevokedCascade: ({ packageId, revokedAt }) => {
@@ -8669,6 +8736,113 @@ function decodeGrantPackageCursor(cursor: unknown): GrantPackageCursor | null {
   throw err;
 }
 
+/** One page of the keyset-paged member read. */
+interface MemberLifecycleRow extends DbRow {
+  grant_expires_at: string | null;
+  grant_id: string;
+  grant_status: string;
+  member_status: string;
+  package_id: string;
+}
+
+/**
+ * Rows per SQLite page. Must match the `LIMIT` in
+ * `queries/auth/grant-package-members/expiries-by-package.sql` and that file's
+ * `@max_rows`: the artifact bounds ONE page, and the loop below asks for
+ * another page whenever a full one comes back.
+ */
+const MEMBER_LIFECYCLE_PAGE_SIZE = 256;
+
+/**
+ * Every member's lifecycle inputs for the given packages, grouped by package
+ * and deliberately NOT reduced.
+ *
+ * Returns status as well as deadline. Reducing on deadlines alone was a
+ * defect: a member revoked before its deadline carries no `expires_at`, read
+ * as "no deadline, therefore live", and a package with every child revoked
+ * reported 'active' beside an `active_child_count` of 0.
+ *
+ * The detail route hands `derivePackageLifecycle` the full member list; this
+ * lets the list route hand it the same thing. Reducing in SQL instead was the
+ * other defect: `grants.expires_at` is TEXT, so `MAX()` over it orders
+ * lexicographically, and '2026-09-08T02:00:00+05:00' sorts after
+ * '2026-09-08T01:00:00Z' while being four hours EARLIER. The two routes then
+ * reduced the same member set by two different orderings and disagreed.
+ *
+ * Packages with no members are simply absent from the map; the caller passes
+ * an empty list, which reports the persisted status unchanged.
+ */
+async function listMemberLifecycleByPackage(
+  packageIds: readonly string[]
+): Promise<Map<string, PackageMemberLifecycleInput[]>> {
+  const grouped = new Map<string, PackageMemberLifecycleInput[]>();
+  if (packageIds.length === 0) {
+    return grouped;
+  }
+  const wanted = [...new Set(packageIds)];
+  const collect = (rows: readonly MemberLifecycleRow[]) => {
+    for (const row of rows) {
+      const member: PackageMemberLifecycleInput = {
+        expiresAt: row.grant_expires_at ?? null,
+        grantStatus: row.grant_status,
+        memberStatus: row.member_status,
+      };
+      const existing = grouped.get(row.package_id);
+      if (existing) {
+        existing.push(member);
+      } else {
+        grouped.set(row.package_id, [member]);
+      }
+    }
+  };
+  if (isPostgresStorageBackend()) {
+    // Postgres filters to the requested packages in SQL, so one round trip.
+    const { rows } = await postgresQuery<MemberLifecycleRow>(
+      `SELECT gpm.package_id, gpm.grant_id, gpm.status AS member_status,
+              g.status AS grant_status, g.expires_at AS grant_expires_at
+         FROM grant_package_members gpm
+         JOIN grants g ON gpm.grant_id = g.grant_id
+        WHERE gpm.package_id = ANY($1)`,
+      [wanted]
+    );
+    collect(rows);
+    return grouped;
+  }
+  // SQLite reads one package at a time, in keyset pages of
+  // MEMBER_LIFECYCLE_PAGE_SIZE ordered by grant_id.
+  //
+  // Paged rather than read whole because membership has NO enforced ceiling.
+  // The artifact previously declared @max_rows: 256 as though 256 members per
+  // package were an established invariant; no issuance path enforces one, so a
+  // 257-member package overflowed `allowUnboundedReadAcknowledged` and failed
+  // the entire list route for every package on the page. Paging makes the
+  // declared bound a property the SQL actually guarantees (it is a LIMIT) and
+  // lets any member count read correctly.
+  //
+  // Reading the whole joined table once and filtering here would have been
+  // fewer statements but would have converted a per-package bound into a
+  // global one, so memberships in unrelated packages could overflow it.
+  for (const packageId of wanted) {
+    // grant_id is the membership primary key within a package: unique and
+    // never rewritten, so the keyset is total and no member is skipped or
+    // repeated across pages. '' sorts before every real id.
+    let afterGrantId = "";
+    for (;;) {
+      const page = allowUnboundedReadAcknowledged<MemberLifecycleRow>(
+        referenceQueries.authGrantPackageMembersExpiriesByPackage,
+        [packageId, afterGrantId]
+      );
+      collect(page);
+      const last = page.at(-1);
+      if (page.length < MEMBER_LIFECYCLE_PAGE_SIZE || !last) {
+        break;
+      }
+      afterGrantId = last.grant_id;
+    }
+  }
+  return grouped;
+}
+
 export async function listGrantPackagesForOwner(
   opts: { limit?: number; cursor?: string } = {}
 ): Promise<Record<string, unknown>> {
@@ -8691,6 +8865,10 @@ export async function listGrantPackagesForOwner(
               gp.parent_package_id, gp.trace_id, gp.scenario_id, gp.created_at, gp.approved_at, gp.revoked_at,
               (SELECT COUNT(*) FROM grant_package_members gpm
                  WHERE gpm.package_id = gp.package_id) AS member_count
+              -- Member deadlines are fetched separately and reduced in JS, NOT
+              -- reduced here. See queries/auth/grant-packages/list-all.sql:
+              -- expires_at is TEXT, so SQL MAX() is a lexicographic max, not
+              -- a chronological one.
          FROM grant_packages gp
          ${where}
          ORDER BY gp.created_at DESC, gp.package_id DESC
@@ -8708,21 +8886,39 @@ export async function listGrantPackagesForOwner(
     }
     rows = rows.slice(0, limit + 1);
   }
-  const normalized = rows
+  // One clock read for the whole page, so two packages sharing a deadline can
+  // never disagree about whether it has passed.
+  const nowMs = Date.now();
+  // Normalize BEFORE enriching, so the lookahead row is identified against the
+  // same rows that will actually be returned.
+  const normalizedRows = rows
     .map((row) => {
       const pkg = normalizePackageRow(row);
       if (!pkg) {
         return null;
       }
       const memberCount = row.member_count === null || row.member_count === undefined ? 0 : Number(row.member_count);
-      return {
-        ...pkg,
-        member_count: Number.isFinite(memberCount) ? memberCount : 0,
-      };
+      return { ...pkg, member_count: Number.isFinite(memberCount) ? memberCount : 0 };
     })
     .filter((row) => row !== null);
-  const data = normalized.slice(0, limit);
-  const hasMore = normalized.length > limit;
+  // The (limit + 1)th row exists ONLY to answer `has_more`. Drop it before
+  // enriching: reading the members of a package that is about to be discarded
+  // is work whose only observable effect was failure — one oversized package
+  // just past the page boundary could overflow the bounded read and fail a
+  // page of packages that were each fine.
+  const hasMore = normalizedRows.length > limit;
+  const pageRows = normalizedRows.slice(0, limit);
+  // Every member's lifecycle inputs for the RETURNED packages, UNREDUCED,
+  // keyed by package. The reduction is done by the same shared function the
+  // detail route uses, so the two surfaces cannot reach different answers
+  // about one package.
+  const memberLifecycleByPackage = await listMemberLifecycleByPackage(pageRows.map((row) => row.package_id));
+  const data = pageRows.map((pkg) => ({
+    ...pkg,
+    // Raw column retained for decision paths; see getGrantPackageForOwner.
+    persisted_status: pkg.status,
+    status: derivePackageLifecycle(pkg.status, memberLifecycleByPackage.get(pkg.package_id) ?? [], nowMs),
+  }));
   const tail = hasMore ? data.at(-1) : null;
   return {
     data,
@@ -8778,11 +8974,19 @@ export async function getGrantPackageForOwner(packageId: unknown): Promise<Recor
   // `getGrantPackageAccess`, which intentionally hides revoked rows.
   const memberRows = await store.listAllMembers(packageId);
 
+  // One clock read for the whole package so every child and the package
+  // status itself are judged against the same instant. Reading the clock
+  // per row could report a package 'active' whose every child read
+  // 'expired' if a deadline elapsed mid-loop.
+  const nowMs = Date.now();
+
   const children = await Promise.all(
     memberRows.map(async (row) => ({
       added_at: row.added_at,
       grant_id: row.grant_id,
-      grant_status: row.grant_status,
+      // Reported lifecycle, not the raw column: `grants.status` never says
+      // 'expired'. See server/grant-lifecycle.ts.
+      grant_status: deriveGrantLifecycle(row.grant_status, row.grant_expires_at, nowMs),
       member_status: row.member_status,
       revoked_at: row.member_revoked_at || null,
       source: await normalizePersistedPackageMemberSource(parsePackageJson(row.source_json) || null, {
@@ -8795,6 +8999,31 @@ export async function getGrantPackageForOwner(packageId: unknown): Promise<Recor
     ...grantPackage,
     children,
     member_count: children.length,
+    // The raw `grant_packages.status` column, kept alongside the derived one
+    // so callers that must DECIDE rather than DISPLAY (the revoke guard in
+    // routes/ref-grants.ts) can still tell "not yet revoked" from "past its
+    // deadline". Expiry must not make a package unrevokable: revocation is a
+    // durable act on the artifact and still cascades to tokens and members.
+    persisted_status: grantPackage.status,
+    // A package carries no `expires_at` and no revocation of its own beyond an
+    // explicit owner revoke; both are carried by its members. Reported
+    // terminal only once NO member is live, since a package with any live
+    // member still grants access. Revocation is passed in alongside the
+    // deadline because a member revoked before its deadline carries no
+    // `expires_at` at all — reducing on deadlines alone reported a package
+    // with every child revoked as 'active'.
+    status: derivePackageLifecycle(
+      grantPackage.status,
+      memberRows.map((row) => ({
+        expiresAt: row.grant_expires_at,
+        grantStatus: row.grant_status,
+        // `member_status` is optional on the row type; an absent value means
+        // the membership carries no revocation of its own, which is the same
+        // default `active_child_count` applies when it filters on this column.
+        memberStatus: row.member_status ?? "active",
+      })),
+      nowMs
+    ),
   };
 }
 
@@ -9796,10 +10025,11 @@ function issueSqliteRefreshPackageAccessToken(
     getOne<GrantPackageListRow>(referenceQueries.authGrantPackagesGetById, [packageId]),
     row
   );
-  const members = allowUnboundedReadAcknowledged<GrantPackageMemberRow>(
-    referenceQueries.authGrantPackageMembersListAllByPackage,
-    [packageId]
-  );
+  // Paged, like every other per-package member read: membership has no
+  // enforced ceiling, so reading the whole set in one statement overflowed the
+  // declared bound and made an oversized package unable to refresh its access
+  // token at all. See readAllMemberPages.
+  const members = readAllMemberPages(referenceQueries.authGrantPackageMembersListAllByPackage, packageId);
   if (members.length === 0 || members.some((member) => member.grant_access_mode !== "continuous")) {
     throw refreshGrantUnavailable("Refresh token package contains a non-continuous grant");
   }

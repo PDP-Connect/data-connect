@@ -75,6 +75,12 @@ export interface GrantPackageSummaryRow {
   readonly member_count: number;
   readonly package_id: string;
   readonly parent_package_id: string | null;
+  /**
+   * Raw `grant_packages.status`. `status` above is the DERIVED lifecycle
+   * (active / expired / revoked) and is what gets serialized to owners; this
+   * one is for decisions that must not treat "expired" as "already revoked".
+   */
+  readonly persisted_status: string;
   readonly revoked_at: string | null;
   readonly scenario_id: string | null;
   readonly status: string;
@@ -265,6 +271,14 @@ export function mountRefGrantPackagesGet(app: AppLike, ctx: MountRefGrantsContex
         object: "grant_package",
         package_id: pkg.package_id,
         parent_package_id: pkg.parent_package_id,
+        // The raw column, alongside the derived `status`. A client deciding
+        // whether to OFFER revocation needs "has this been revoked?", which is
+        // not the same question as "what is this package's lifecycle?" — an
+        // expired package has not been revoked and is still revokable (the
+        // revoke route itself guards on this same field, below). Without it a
+        // console gating on `status === "active"` silently drops the owner's
+        // revoke control the moment a deadline passes.
+        persisted_status: pkg.persisted_status,
         revoked_at: pkg.revoked_at,
         scenario_id: pkg.scenario_id,
         status: pkg.status,
@@ -348,8 +362,14 @@ export function mountRefGrantPackagesRevoke(app: AppLike, ctx: MountRefGrantsCon
           ctx.pdppError(res, 404, "not_found", `grant package not found: ${id}`);
           return;
         }
-        if (pkg.status !== "active") {
-          ctx.pdppError(res, 409, "already_revoked", `grant package ${id} is already ${pkg.status}`);
+        // Deliberately the PERSISTED status, not the reported one. `status`
+        // is now a derived lifecycle that reads 'expired' once the deadline
+        // passes (see server/grant-lifecycle.ts), but an expired package has
+        // not been revoked and must stay revokable: revocation is durable and
+        // still cascades to child grants, tokens, and members. Only a real
+        // prior revocation is `already_revoked`.
+        if (pkg.persisted_status !== "active") {
+          ctx.pdppError(res, 409, "already_revoked", `grant package ${id} is already ${pkg.persisted_status}`);
           return;
         }
         const xRequestId = req.headers["x-request-id"];

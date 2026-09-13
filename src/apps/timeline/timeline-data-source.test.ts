@@ -78,6 +78,9 @@ describe("production Timeline PDPP data source", () => {
         response({ data: [{ name: "repositories", record_count: 1 }] })
       )
       .mockResolvedValueOnce(
+        // The stream holds one record. A truncated page must carry a cursor
+        // (see the server's null-cursor conformance oracle), so the terminal
+        // page here reports no more records rather than an uncursored `true`.
         response({
           data: [
             {
@@ -89,7 +92,7 @@ describe("production Timeline PDPP data source", () => {
               },
             },
           ],
-          has_more: true,
+          has_more: false,
         })
       )
 
