@@ -2,7 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -43,7 +53,14 @@ import { pipeline } from "node:stream/promises";
  * Retention is deliberately NOT tied to outbox row lifetime. A dead-lettered
  * `blob_upload` keeps its bytes on disk so the artifact stays recoverable and
  * visibly unresolved rather than silently deleted — reporting a failure is not
- * durability. `release` is therefore called only on acknowledged success.
+ * durability.
+ *
+ * Reclamation is therefore a sweep, never a per-upload delete: see
+ * {@link LocalDeviceBlobSpool.reclaimUnreferenced}. One body can be owed to
+ * several `blob_upload` rows at once (same content, different record
+ * coordinates), and the delete must follow the DURABLE record that every such
+ * obligation is met — neither of which a delete inside one upload's send path
+ * can honour.
  */
 export interface LocalDeviceBlobSpoolOptions {
   /** Root directory for the spool. Created on demand. */
@@ -56,6 +73,28 @@ export interface LocalDeviceBlobSpoolEntry {
   /** Byte length of the complete content. */
   sizeBytes: number;
 }
+
+export interface LocalDeviceBlobSpoolReclaimResult {
+  /** Bytes returned to the filesystem. */
+  bytesReclaimed: number;
+  /** Bodies deleted because nothing owes their delivery any more. */
+  reclaimed: number;
+  /** Bodies kept because a non-`succeeded` `blob_upload` row still claims them. */
+  retainedReferenced: number;
+  /** Bodies kept because they are younger than the capture-race grace period. */
+  retainedTooRecent: number;
+}
+
+/**
+ * Grace period before an unreferenced body may be reclaimed.
+ *
+ * `captureBlobArtifact` commits bytes, then enqueues the row naming them. A
+ * body in that gap is unreferenced but live, so reclamation must not consider
+ * recently-written entries at all. One hour is far longer than the gap between
+ * those two steps can plausibly be, and the cost of being generous is retained
+ * disk, whereas the cost of being tight is destroyed bytes.
+ */
+export const DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS = 60 * 60_000;
 
 export type LocalDeviceBlobSpoolContent =
   | AsyncIterable<Buffer | Uint8Array | string>
@@ -80,6 +119,30 @@ export class LocalDeviceBlobSpoolMissingError extends Error {
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * Whether a file's mtime is at least `ageMs` old, compared at whole-millisecond
+ * resolution.
+ *
+ * Two clock mismatches make a naive `mtimeMs < now - ageMs` wrong:
+ *
+ *  - `stat().mtimeMs` carries sub-millisecond precision (e.g. `…537.2615`)
+ *    while `Date.now()` truncates to whole milliseconds (`…537`), so the two
+ *    are not directly comparable.
+ *  - With `ageMs = 0` the question is "has this file's timestamp arrived yet",
+ *    and a file written during the SAME millisecond as the comparison is not
+ *    strictly less than it. A strict `<` therefore answers "no" for any file
+ *    created in the sweep's own millisecond — which for `sweepTemp(0)` is most
+ *    of them, making an explicit sweep-everything call silently reclaim nothing.
+ *
+ * Flooring the mtime puts both sides on whole milliseconds, and `<=` makes an
+ * age of zero mean "including this millisecond" rather than "strictly before
+ * it". A non-zero `ageMs` is unaffected in practice: the extra millisecond of
+ * tolerance is immaterial against a grace period measured in minutes or hours.
+ */
+function isOlderThan(mtimeMs: number, ageMs: number, now: number): boolean {
+  return Math.floor(mtimeMs) <= now - ageMs;
+}
 
 function assertSha256(sha256: string): void {
   if (!SHA256_HEX.test(sha256)) {
@@ -122,6 +185,24 @@ export class LocalDeviceBlobSpool {
    * Re-spooling identical content is a no-op that returns the existing entry:
    * the digest is the identity, so duplicate artifacts across sessions share
    * one on-disk body.
+   *
+   * **Durability across power loss requires an explicit sync protocol**, which
+   * a rename alone does not provide. `rename(2)` is atomic with respect to
+   * other processes, so a concurrent reader sees the old name or the new one
+   * and never a partial file — but atomicity is not persistence. Without an
+   * explicit flush, the written bytes and the directory entry naming them may
+   * both sit in the page cache, and a power cut can lose either or both,
+   * including in the order that leaves a present name over absent content.
+   * Node's `createWriteStream` does NOT close that gap: its `flush` option
+   * defaults to false, so stream close returns without an `fsync`. So:
+   *
+   *  1. `flush: true` on the write stream fsyncs the temp file's CONTENT
+   *     before close resolves.
+   *  2. After the rename, {@link #syncDir} fsyncs the containing directory so
+   *     the NAME that makes those bytes reachable is itself durable.
+   *
+   * Only after both does `put` return, so a successful return means the bytes
+   * survive power loss and not merely process death.
    */
   async put(content: LocalDeviceBlobSpoolContent): Promise<LocalDeviceBlobSpoolEntry> {
     const hash = createHash("sha256");
@@ -136,7 +217,9 @@ export class LocalDeviceBlobSpool {
             yield chunk;
           }
         })(toByteChunks(content)),
-        createWriteStream(tempPath)
+        // flush: true fsyncs the file content before close resolves. Without
+        // it the rename can publish a name over bytes still only in cache.
+        createWriteStream(tempPath, { flush: true })
       );
     } catch (error) {
       this.#discardTemp(tempPath);
@@ -144,9 +227,13 @@ export class LocalDeviceBlobSpool {
     }
     const sha256 = hash.digest("hex");
     const finalPath = this.pathFor(sha256);
+    const shardDir = join(this.#objectsDir(), sha256.slice(0, 2));
     try {
-      mkdirSync(join(this.#objectsDir(), sha256.slice(0, 2)), { recursive: true });
+      mkdirSync(shardDir, { recursive: true });
       renameSync(tempPath, finalPath);
+      // The content is already durable; make the directory entry that names it
+      // durable too, so power loss cannot leave the bytes unreachable.
+      this.#syncDir(shardDir);
     } catch (error) {
       this.#discardTemp(tempPath);
       throw error;
@@ -193,14 +280,89 @@ export class LocalDeviceBlobSpool {
   }
 
   /**
-   * Delete the committed body for `sha256`.
+   * Reclaim committed bodies that no longer have any delivery obligation.
    *
-   * Called only after the upload is acknowledged by the server. A failed or
-   * dead-lettered upload deliberately retains its bytes: the artifact must
-   * stay recoverable and visibly unresolved, never silently dropped.
+   * This replaces per-upload eager deletion, which was unsafe for two
+   * independent reasons:
+   *
+   *  1. **A body can be shared.** The spool is content-addressed, so identical
+   *     content captured under different record coordinates yields several
+   *     `blob_upload` rows over ONE on-disk body. Deleting it when the first
+   *     upload succeeded destroyed the bytes the other rows still owed, and
+   *     because missing spool bytes are classified TERMINAL, those rows
+   *     dead-lettered permanently through the ordinary retry path.
+   *  2. **Deletion must follow durable acknowledgement.** Deleting inside the
+   *     send, before the outbox row is marked `succeeded`, leaves a window
+   *     where a stop makes a still-pending row bodiless. Reclaiming from the
+   *     committed queue state instead of from in-flight control flow removes
+   *     the window rather than narrowing it: there is no interval in which the
+   *     bytes are gone and the obligation is not yet recorded as met.
+   *
+   * `outstandingDigests` is the set of digests still claimed by a
+   * non-`succeeded` `blob_upload` row — see
+   * `LocalDeviceOutbox.outstandingBlobDigests`. Anything in it is kept.
+   *
+   * `minAgeMs` closes the concurrent-capture race. `captureBlobArtifact`
+   * commits bytes BEFORE it enqueues the row that references them, so a body
+   * captured moments ago may legitimately have no reference yet; a sweep that
+   * trusted the reference set alone would delete live bytes in that window.
+   * Only entries whose mtime is older than `minAgeMs` are eligible, so a body
+   * must be unreferenced AND have been unreferenced for longer than any
+   * capture takes between its two steps.
+   *
+   * Using absence-of-reference (rather than presence-of-success) as the
+   * reclaim signal is also what makes this safe against pruning: `pruneSent`
+   * deletes acknowledged rows, so "delivered" evidence is not permanent, while
+   * "still owed" evidence is. An unreferenced body is one that is either
+   * delivered or pruned after delivery — reclaimable in both cases.
    */
-  release(sha256: string): void {
-    rmSync(this.pathFor(sha256), { force: true });
+  async reclaimUnreferenced(input: {
+    minAgeMs?: number;
+    outstandingDigests: ReadonlySet<string>;
+  }): Promise<LocalDeviceBlobSpoolReclaimResult> {
+    const minAgeMs = input.minAgeMs ?? DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS;
+    const now = Date.now();
+    const result: LocalDeviceBlobSpoolReclaimResult = {
+      bytesReclaimed: 0,
+      reclaimed: 0,
+      retainedReferenced: 0,
+      retainedTooRecent: 0,
+    };
+    let shards: string[];
+    try {
+      shards = await readdir(this.#objectsDir());
+    } catch {
+      return result;
+    }
+    for (const shard of shards) {
+      let names: string[];
+      try {
+        names = await readdir(join(this.#objectsDir(), shard));
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        const sha256 = `${shard}${name}`;
+        if (input.outstandingDigests.has(sha256)) {
+          result.retainedReferenced += 1;
+          continue;
+        }
+        const path = join(this.#objectsDir(), shard, name);
+        try {
+          const stats = await stat(path);
+          if (!isOlderThan(stats.mtimeMs, minAgeMs, now)) {
+            result.retainedTooRecent += 1;
+            continue;
+          }
+          rmSync(path, { force: true });
+          result.reclaimed += 1;
+          result.bytesReclaimed += stats.size;
+        } catch {
+          // Gone already, or unreadable. Never treat that as reclaimed.
+        }
+      }
+    }
+    return result;
   }
 
   /** Total bytes currently held across all committed entries. */
@@ -245,12 +407,12 @@ export class LocalDeviceBlobSpool {
     } catch {
       return 0;
     }
-    const cutoff = Date.now() - olderThanMs;
+    const now = Date.now();
     let swept = 0;
     for (const name of names) {
       const path = join(this.#tempDir(), name);
       try {
-        if ((await stat(path)).mtimeMs < cutoff) {
+        if (isOlderThan((await stat(path)).mtimeMs, olderThanMs, now)) {
           rmSync(path, { force: true });
           swept += 1;
         }
@@ -259,6 +421,23 @@ export class LocalDeviceBlobSpool {
       }
     }
     return swept;
+  }
+
+  /**
+   * Flush a directory entry so the name of a just-renamed file is durable.
+   *
+   * Content `fsync` makes the bytes survive; it does not make the link that
+   * reaches them survive. Both are needed for power-loss durability. A failure
+   * here is surfaced by the caller rather than swallowed: an unsyncable
+   * directory means the commit cannot be claimed as durable.
+   */
+  #syncDir(path: string): void {
+    const fd = openSync(path, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   }
 
   #discardTemp(path: string): void {

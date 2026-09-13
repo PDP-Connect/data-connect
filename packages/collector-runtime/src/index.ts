@@ -83,11 +83,13 @@ export {
   isBlobUploadPayload,
 } from "./local-device-blob-capture.ts";
 export {
+  DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS,
   LocalDeviceBlobSpool,
   type LocalDeviceBlobSpoolContent,
   type LocalDeviceBlobSpoolEntry,
   LocalDeviceBlobSpoolMissingError,
   type LocalDeviceBlobSpoolOptions,
+  type LocalDeviceBlobSpoolReclaimResult,
 } from "./local-device-blob-spool.ts";
 export {
   DEFAULT_LOCAL_DEVICE_REQUEST_TIMEOUT_MS,

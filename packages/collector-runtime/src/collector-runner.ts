@@ -2461,6 +2461,12 @@ export interface DrainCollectorOutboxInput {
   sourceInstanceId?: string;
   /** Content-addressed local store holding the bytes `blob_upload` rows name. */
   spool?: LocalDeviceBlobSpool;
+  /**
+   * Grace period before an unreferenced spool body may be reclaimed. Exists so
+   * tests can exercise the sweep without waiting out the production default;
+   * production leaves it unset. See `DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS`.
+   */
+  spoolReclaimMinAgeMs?: number;
 }
 
 /**
@@ -2506,6 +2512,43 @@ export interface DrainCollectorOutboxResult {
  * runner pass.
  */
 export async function drainCollectorOutbox(input: DrainCollectorOutboxInput): Promise<DrainCollectorOutboxResult> {
+  try {
+    return await runCollectorOutboxDrain(input);
+  } finally {
+    // Reclaim spooled bodies AFTER the drain has committed its acknowledgements.
+    // Placed in `finally` so an aborted or budget-truncated drain still reclaims
+    // whatever is now genuinely unowed, and so the sweep can never run while
+    // this drain still holds an unacknowledged obligation it just delivered.
+    await reclaimDrainedBlobSpool(input);
+  }
+}
+
+/**
+ * Reclaim spool bodies no longer owed to any undelivered `blob_upload` row.
+ *
+ * Reads the outstanding reference set from the durable outbox, so only bytes
+ * whose delivery obligations are all recorded as met (or pruned after being
+ * met) are eligible. Never deletes a body a `ready`, `leased`, or `dead_letter`
+ * row still claims, and never a body young enough to be mid-capture.
+ *
+ * Failure to reclaim is not a drain failure: retained bytes cost disk, whereas
+ * propagating the error would fail a drain that actually delivered its work.
+ */
+async function reclaimDrainedBlobSpool(input: DrainCollectorOutboxInput): Promise<void> {
+  if (!input.spool) {
+    return;
+  }
+  try {
+    await input.spool.reclaimUnreferenced({
+      outstandingDigests: input.outbox.outstandingBlobDigests(),
+      ...(input.spoolReclaimMinAgeMs === undefined ? {} : { minAgeMs: input.spoolReclaimMinAgeMs }),
+    });
+  } catch {
+    // Reclaim is opportunistic housekeeping. Bytes stay; disk is the only cost.
+  }
+}
+
+async function runCollectorOutboxDrain(input: DrainCollectorOutboxInput): Promise<DrainCollectorOutboxResult> {
   const sentByKind: Partial<Record<LocalDeviceOutboxItem["kind"], number>> = {};
   const result: DrainCollectorOutboxResult = {
     deadLettered: 0,
@@ -2855,12 +2898,20 @@ async function sendOutboxItem(
 }
 
 /**
- * Deliver one spooled artifact body, then release its local copy.
+ * Deliver one spooled artifact body. Deliberately deletes nothing.
  *
- * The release happens only after the server has acknowledged the upload AND
- * the returned digest matches the one computed at spool time. Any earlier
- * release would re-open the hazard this whole mechanism exists to close: bytes
- * deleted locally while the remote copy is unconfirmed.
+ * Reclaiming the local copy here would be wrong twice over, so the send path
+ * owns delivery only and reclamation is a separate sweep over durable queue
+ * state ({@link LocalDeviceBlobSpool.reclaimUnreferenced}):
+ *
+ *  - **The body may be shared.** Content addressing means identical content
+ *    under different record coordinates is several rows over ONE file. A
+ *    per-row delete destroys bytes the other rows still owe, and since missing
+ *    spool bytes are TERMINAL those rows dead-letter permanently.
+ *  - **Deletion must follow durable acknowledgement.** This function returns
+ *    before `acknowledge()` commits, so any delete here precedes the durable
+ *    record that the obligation was met and leaves a window where a stop
+ *    strands a pending row without its body.
  *
  * A digest or size mismatch is raised as a plain error, not an
  * `OutboxPayloadShapeError`, so it retries before dead-lettering — a truncated
@@ -2891,7 +2942,6 @@ async function sendBlobUploadItem(item: LocalDeviceOutboxItem, deps: SendOutboxI
   if (uploaded.sha256 !== payload.sha256 || uploaded.size_bytes !== payload.sizeBytes) {
     throw new Error(`blob upload integrity mismatch for ${item.id}`);
   }
-  deps.spool.release(payload.sha256);
 }
 
 function assertBlobUploadPayload(payload: unknown, id: string): BlobUploadPayload {
