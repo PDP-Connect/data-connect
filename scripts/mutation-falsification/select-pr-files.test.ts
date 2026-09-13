@@ -11,6 +11,7 @@ import {
   freezeIntent,
   type LineRange,
   mergeRanges,
+  NO_CONFIGURATION_READ,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
   readsMutatedSource,
@@ -202,6 +203,41 @@ describe("freezeIntent", () => {
       { path: "src/gone.ts", reason: "deleted" },
     ])
     expect(intent.applicability).toBe("applicable")
+    expect(verifyIntentDigest(intent)).toBe(true)
+  })
+
+  it("refuses to freeze an applicable packet that read no configuration", () => {
+    // The sentinel means "this attempt opened no Stryker configuration", which
+    // only a cohort that never runs can truthfully say. A revision selecting
+    // mutation targets is about to run an engine against a configuration, so a
+    // packet claiming both would report evidence with nothing behind it. This
+    // is the guard that keeps the conditional requirement from decaying into no
+    // requirement at all.
+    expect(() =>
+      freezeIntent({
+        cohort: clientCohort,
+        baseCommit: "base",
+        headCommit: "head",
+        diff: parseNameStatusZ("M\0src/b.ts\0"),
+        executionInputs: { ...inputs, configDigest: NO_CONFIGURATION_READ },
+        hunks: new Map([["src/b.ts", [{ startLine: 3, endLine: 4 }]]]),
+      })
+    ).toThrow(/must name the configuration/)
+  })
+
+  it("allows the no-configuration sentinel on a not_applicable packet", () => {
+    // The permitted direction. Nothing ran, so there is no configuration whose
+    // bytes produced evidence, and the packet says that rather than naming a
+    // file it never opened.
+    const intent = freezeIntent({
+      cohort: clientCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("M\0docs/architecture.md\0"),
+      executionInputs: { ...inputs, configDigest: NO_CONFIGURATION_READ },
+    })
+    expect(intent.applicability).toBe("not_applicable")
+    expect(intent.executionInputs.configDigest).toBe(NO_CONFIGURATION_READ)
     expect(verifyIntentDigest(intent)).toBe(true)
   })
 

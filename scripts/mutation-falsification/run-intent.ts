@@ -13,12 +13,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import ts from "typescript"
 import {
+  classifyForCohort,
   type CohortDefinition,
   type CohortName,
   escapesCohortRoot,
   type ExecutionInputs,
   freezeIntent,
   type LineRange,
+  NO_CONFIGURATION_READ,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
   readsMutatedSource,
@@ -67,21 +69,57 @@ const configPath =
   optionalArgument("config") ??
   (cohortRoot === "." ? "stryker.config.mjs" : `${cohortRoot}/stryker.config.mjs`)
 
+const diff = parseNameStatusZ(readFileSync(argument("diff"), "utf8"))
+
+// Whether this cohort has anything to say about this revision, decided from the
+// diff alone. `freezeIntent` reaches the same verdict from the same classifier;
+// this asks the question early because what the run is required to have on disk
+// depends on the answer.
+//
+// The configuration is a requirement of RUNNING the cohort, not of describing
+// it. A revision that changes no production file in this cohort never invokes
+// Stryker, so a missing configuration costs it no evidence and must not be
+// reported as a failure of its tests. Digesting the configuration before this
+// point made the requirement unconditional: a docs-only branch cut before the
+// cohort existed died here on a bare ENOENT naming a file its own tree had no
+// reason to carry.
+//
+// When the cohort IS applicable the configuration is still mandatory, and the
+// digest is still bound into the intent, because evidence has to name the
+// configuration that produced it. The distinction is applicability, not
+// leniency.
+const isApplicable = diff.some((entry) => classifyForCohort(entry, cohort).selected)
+
+if (isApplicable && !existsSync(configPath)) {
+  throw new Error(
+    `the ${cohortName} cohort selected production files in this revision, so it must run, ` +
+      `but its Stryker configuration ${configPath} is not present in the checked-out tree. ` +
+      `This workflow's definition is read from the merge ref while its tree is the pull ` +
+      `request head, so a head branched before this cohort was added does not carry the ` +
+      `configuration the matrix names. Rebase onto the base branch and the cohort runs. ` +
+      `This is a fact about the branch, not about its tests.`
+  )
+}
+
 // Every input the run depends on, named so a later run can tell whether it is
 // looking at the same thing. The lockfile is in here because Stryker's own
 // incremental tracking does not see changes outside mutated and test files,
 // which is exactly where a dependency change lives.
+//
+// `configDigest` is the empty-digest sentinel for a non-applicable cohort. Such
+// an attempt runs no engine, so there is no configuration whose bytes produced
+// its evidence; naming one would be a claim the attempt cannot support. The
+// field stays present and typed so the packet shape and its digest do not fork
+// on applicability.
 const executionInputs: ExecutionInputs = {
   cohortRoot,
-  configDigest: digestOfFile(configPath),
+  configDigest: isApplicable ? digestOfFile(configPath) : NO_CONFIGURATION_READ,
   toolVersion: JSON.parse(
     readFileSync("node_modules/@stryker-mutator/core/package.json", "utf8")
   ).version,
   runtimeVersion: process.version,
   lockfileDigests: [{ path: "package-lock.json", digest: digestOfFile("package-lock.json") }],
 }
-
-const diff = parseNameStatusZ(readFileSync(argument("diff"), "utf8"))
 
 /**
  * First and last line of every statement in a TypeScript source file.

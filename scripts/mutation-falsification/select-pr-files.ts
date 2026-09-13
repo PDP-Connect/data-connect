@@ -45,10 +45,29 @@ export type CohortName = "client" | "reference-implementation" | "scripts"
  * cache, and an earlier revision that used this identity for that purpose got
  * it wrong -- it did not cover the resolved test command.
  */
+/**
+ * `configDigest` for an attempt that read no Stryker configuration at all.
+ *
+ * A cohort the revision made no production change to never invokes the engine,
+ * so no configuration's bytes produced its evidence. Recording a real digest
+ * there would name a file the attempt never read, and recording a plausible
+ * hex string would be indistinguishable from one. This value is deliberately
+ * not a digest: it cannot collide with one, and it reads as what it is.
+ *
+ * Only a `not_applicable` packet may carry it. An applicable attempt has a
+ * configuration by construction -- `run-intent.ts` refuses to freeze one
+ * without it.
+ */
+export const NO_CONFIGURATION_READ = "none:not-applicable"
+
 export interface ExecutionInputs {
   /** Cohort root relative to the repository root, e.g. "." or "reference-implementation". */
   readonly cohortRoot: string
-  /** Digest of the resolved Stryker configuration for this cohort. */
+  /**
+   * Digest of the resolved Stryker configuration for this cohort, or
+   * {@link NO_CONFIGURATION_READ} when the cohort is not applicable to this
+   * revision and therefore read no configuration.
+   */
   readonly configDigest: string
   /** Resolved version of the mutation tool, e.g. "10.0.0". */
   readonly toolVersion: string
@@ -905,6 +924,20 @@ export function freezeIntent(input: {
   }
   mutate.sort()
   excluded.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+
+  // The sentinel says "this attempt read no configuration", which only a cohort
+  // that never runs can truthfully say. Allowing it on an applicable packet
+  // would let a revision that DOES mutate production code record evidence
+  // naming no configuration, which is the failure this whole distinction exists
+  // to keep out.
+  if (mutate.length > 0 && input.executionInputs.configDigest === NO_CONFIGURATION_READ) {
+    throw new Error(
+      `the ${input.cohort.name} cohort selected ${mutate.length} mutation target(s) in this ` +
+        `revision, so it runs an engine against a configuration, but its execution inputs ` +
+        `record ${NO_CONFIGURATION_READ}. An applicable attempt must name the configuration ` +
+        `whose bytes produced its evidence.`
+    )
+  }
 
   const body = {
     schema: "pdpp.mutation.intent.v1" as const,

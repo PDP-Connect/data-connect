@@ -123,6 +123,26 @@ jobs:
       # landing on the base branch mid-review do not enter this revision's scope.
       # `-z` keeps paths with spaces or newlines intact; the list is written to a
       # file and read from there rather than concatenated into a shell command.
+      #
+      # This step is also where a missing cohort configuration is caught, and it
+      # is caught for APPLICABLE cohorts only. It belongs here rather than in a
+      # step of its own because this is the first point at which applicability
+      # is known, and applicability is what decides whether the absence matters.
+      # This workflow's definition is read from the merge ref while its tree is
+      # the pull request
+      # head, so a head branched before a cohort was added does not carry the
+      # configuration the matrix names. Whether that absence matters depends
+      # entirely on the diff. A revision that changes production code in the
+      # cohort must have the configuration -- it is about to run an engine
+      # against it, and a green check with no evidence would claim a run that
+      # never happened. A revision that changes nothing in the cohort was never
+      # going to run it, so the same absence costs no evidence and is reported as
+      # `not_applicable`, which is neither a pass nor a failure.
+      #
+      # An earlier revision checked this unconditionally, before applicability
+      # was known, and failed the scripts cohort on docs-only branches that had
+      # changed no script. `run-intent.ts` now orders the two: applicability
+      # first, then the requirement, with the rebase remedy in the message.
       - name: Freeze intent
         id: intent
         env:

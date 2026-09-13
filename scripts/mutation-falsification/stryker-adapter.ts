@@ -60,6 +60,12 @@ export interface MutantObservation {
   readonly failureOutput: string | undefined
   /** True only when the baseline run for this cohort completed successfully. */
   readonly baselineComplete: boolean
+  /**
+   * How many tests the runner reported executing against this mutant, when it
+   * reported a count at all. `undefined` means the field was absent, which is
+   * not the same as a reported zero.
+   */
+  readonly testsCompleted: number | undefined
 }
 
 export type ProjectedOutcome = "killed" | "survived" | "inconclusive"
@@ -163,6 +169,20 @@ export function projectOutcome(observation: MutantObservation): Projection {
       return { ...carry, outcome: "killed", basis: "owning_test_failed" }
     }
     case "Survived":
+      // A survivor the runner reached without running anything is the
+      // `NoCoverage` case wearing a different label, and it gets the same
+      // answer: no test executed, so nothing was established about the suite.
+      // Stryker defaults an unexecuted mutant to `Survived`, so a runner that
+      // fails to execute its trials reports a cohort of survivors that the
+      // suite in fact kills -- which reads as a damning verdict on the tests
+      // and is a statement about the runner.
+      //
+      // Only a reported zero counts. An absent count is an older or different
+      // reporter that never carried the field, and inferring failure from a
+      // field that was never written would condemn every run that predates it.
+      if (observation.testsCompleted === 0) {
+        return { ...carry, outcome: "inconclusive", basis: "survived_without_executing_tests" }
+      }
       // Survival is an observation pending independent triage, not a defect
       // finding, and not a claim about tests that were never selected.
       return { ...carry, outcome: "survived", basis: "no_selected_test_failed" }
@@ -291,6 +311,10 @@ export function readObservations(
         failureOutput:
           typeof mutant.statusReason === "string" ? mutant.statusReason : undefined,
         baselineComplete: context.baselineComplete,
+        testsCompleted:
+          typeof mutant.testsCompleted === "number" && Number.isFinite(mutant.testsCompleted)
+            ? mutant.testsCompleted
+            : undefined,
       })
     }
   }
