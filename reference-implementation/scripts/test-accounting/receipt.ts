@@ -43,6 +43,12 @@ export function accountingEventLine(event: unknown): string {
 // and loop-generated 1-to-N identities resolve naturally because the join is
 // over emitted identities, never over static source occurrences.
 export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
+  // blob publication conflict coverage: both tests gate on `skip: !POSTGRES_URL`
+  // and carry no `(skipped: ...)` title suffix, so they resolve here. Both are
+  // listed together because the accounting parser aborts on the FIRST
+  // unexplained skip in a run, which would hide the second.
+  "blob publication reports a retryable conflict when reclamation wins the pre-binding window",
+  "blob publication reports a retryable conflict when reclamation wins its FK lock",
   "PostgreSQL device-ingest conformance: derived repair and canonical records",
   "PostgreSQL device-ingest conformance: device ack ignores held semantic index capacity",
   "PostgreSQL device-ingest conformance: device/direct writer collision matrix",
