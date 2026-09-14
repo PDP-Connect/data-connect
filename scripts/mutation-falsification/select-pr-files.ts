@@ -588,6 +588,52 @@ export function selectCohortTests(
 }
 
 /**
+ * Whether a test belongs to a nested package that runs its tests its own way.
+ *
+ * A cohort's command runner executes one command for the whole selection, so
+ * every selected test has to be runnable by that one command. A vendored
+ * sub-package with its own `package.json` `test` script is not: it declares a
+ * different contract. `vendor/brand-react` runs
+ * `node --import tsx --import ./css-stub-register.ts` because its tests import
+ * `.tsx` components which in turn `import "./components.css"` -- two loaders the
+ * cohort command does not carry, and would have to adopt wholesale to run these.
+ *
+ * Such a test is not part of the cohort's suite either: reference-implementation
+ * discovery walks `test/` only (`scripts/run-tests.ts:57`), so these files never
+ * run in the cohort's own test job. They reached the baseline solely because the
+ * revision touched them, and there they failed with ERR_UNKNOWN_FILE_EXTENSION,
+ * rejected the baseline, and cost the attempt every mutant's verdict.
+ *
+ * Withholding is not skipping, and here it removes no coverage the baseline
+ * otherwise had: the package's own `npm test` still runs these, and they still
+ * fail if broken. They are held out only of a cohort baseline whose single
+ * command was never able to execute them.
+ *
+ * The judgement is the package boundary, not the file extension -- a nested
+ * `package.json` declaring its own `test` script is the durable signal that some
+ * other runner owns these files.
+ */
+export function ownedByNestedTestRunner(
+  testPath: SelectedFile,
+  cohortRoot: string,
+  hasOwnTestScript: (packageJsonPath: string) => boolean
+): boolean {
+  const segments = testPath.split("/")
+  // Every directory strictly above the test file, nearest first. The cohort root
+  // itself is excluded: its `package.json` is the cohort's own, and treating it
+  // as a nested runner would withhold the whole suite.
+  for (let depth = segments.length - 1; depth > 0; depth -= 1) {
+    const directory = segments.slice(0, depth).join("/")
+    const packageJsonPath =
+      cohortRoot === "." ? `${directory}/package.json` : `${cohortRoot}/${directory}/package.json`
+    if (hasOwnTestScript(packageJsonPath)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
  * Whether a test can run inside Stryker's sandbox for a cohort.
  *
  * Stryker copies a cohort into a sandbox rooted at the cohort root and writes
@@ -613,12 +659,31 @@ export function escapesCohortRoot(testPath: SelectedFile, testSource: string): b
   // literal is measured against the budget rather than matched at a fixed
   // depth, because the same `../../` escapes from `scripts/` but not from
   // `test/nested/`.
-  for (const [, literal] of testSource.matchAll(/["'`]([^"'`\n]*\.\.\/[^"'`\n]*)["'`]/g)) {
+  //
+  // `join` takes its segments either way, so the same escape has two spellings:
+  // one literal `"../../x"`, or separate arguments `"..", "..", "x"`. Measuring
+  // only the first missed `join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md")`
+  // -- a real repository-root read whose ENOENT in the sandbox rejected a whole
+  // cohort's baseline. A run of adjacent `".."` literals is therefore counted as
+  // one climb, the same as the slash-joined form it is equivalent to.
+  for (const [, literals] of testSource.matchAll(
+    /((?:["'`][^"'`\n]*["'`]\s*,\s*)*["'`][^"'`\n]*\.\.[^"'`\n]*["'`])/g
+  )) {
     let climbed = 0
-    for (const segment of literal.split("/")) {
-      if (segment === "..") {
-        climbed += 1
-      } else if (segment !== "." && segment !== "") {
+    for (const [, literal] of literals.matchAll(/["'`]([^"'`\n]*)["'`]/g)) {
+      // A lone `".."` argument climbs one level; a slash-joined literal climbs
+      // by its own leading `..` segments. Either way the run ends at the first
+      // segment that names something, which is where the descent begins.
+      let escaped = false
+      for (const segment of literal.split("/")) {
+        if (segment === "..") {
+          climbed += 1
+        } else if (segment !== "." && segment !== "") {
+          escaped = true
+          break
+        }
+      }
+      if (escaped) {
         break
       }
     }
