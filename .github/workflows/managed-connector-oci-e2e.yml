@@ -1,0 +1,439 @@
+name: managed-connector OCI end-to-end (local registry; NOT GHCR, NOT Sigstore)
+
+# Pulls a REAL connector artifact out of a REAL OCI registry through the consumer path in
+# packages/local-collector/src/managed/, installs it, and imports the installed entrypoint.
+#
+# WHAT THIS JOB IS FOR. packages/local-collector/test/managed-connectors.test.ts already proves
+# the verification logic against artifacts this repo constructs, which is the right shape for the
+# adversarial cases and stays exactly as it is — this job is IN ADDITION to that suite, not a
+# replacement. But a fixture shares one weakness with every fixture: the artifact is built by the
+# same understanding that reads it, so a misunderstanding of the real format is invisible. The
+# artifact here is produced by data-connectors' own scripts/build-connector-oci-artifact.mjs and
+# pushed with oras, which breaks that circularity. Until this job existed, that end-to-end pull had
+# run exactly once, by hand, on one machine, because the test skips unless PDPP_TEST_OCI_REGISTRY
+# is set. Now it runs on every PR that touches the managed-connector path.
+#
+# ============================================================================================
+# WHAT THIS JOB DOES **NOT** PROVE — read this before citing it as evidence.
+# ============================================================================================
+#
+#   1. SIGSTORE KEYLESS VERIFICATION IS NOT EXERCISED. The SignatureVerifier in the test is a
+#      STUB that returns the certificate identity the real publish workflow would carry. Nothing
+#      here contacts Fulcio or Rekor, and no Cosign signature is made, checked, or even present on
+#      the artifact. Keyless verification depends on the public-good Sigstore instances and an
+#      Actions OIDC token bound to data-connectors' own workflow; it is not reproducible against a
+#      local registry:2 at all. A green run here says NOTHING about whether signature verification
+#      works. That step becomes real only once data-connectors#97 publishes and a consumer-side
+#      job verifies a genuinely signed artifact.
+#
+#   2. GHCR TRANSPORT IS NOT EXERCISED. The registry is registry:2 over --plain-http on localhost.
+#      ghcr.io differs where registries usually differ: token auth, 307 redirects to a blob CDN,
+#      rate limits, and its own tolerance for non-image artifact types. This job proves the
+#      consumer agrees with the OCI distribution spec, not that it agrees with ghcr.io.
+#
+#   3. NO REAL OURA CREDENTIAL IS USED, so no collection happens. The claim is that the installed
+#      bundle LOADS and exposes its declared entrypoint — not that it can log in or fetch data.
+#
+# The job name repeats (1) and (2) so that a reader scanning a checks list sees the gap without
+# opening this file. Do not rename it to something reassuring.
+#
+# WHERE THE PRODUCER HALF COMES FROM. data-connectors is a separate repository and the builder is
+# NOT on its default branch — it arrives with PDP-Connect/data-connectors#97, still open. The
+# revision is therefore pinned by SHA in .github/managed-connector-e2e-pin.json. That follows the
+# cross-repo SHA pinning already established BETWEEN these repos in the other direction —
+# data-connectors' own .github/cross-repo-pins.json, which consumer-drift-signal.yml reads by raw
+# fetch. (There is no cross-repo-pins.json in THIS repo; see the pin file if that surprises you.)
+# The reasoning, the weakness of pinning an unmerged PR head, and why the connector stays `oura`
+# while data-connectors' publish pilot moved to `ynab` are all written down in the pin file.
+
+on:
+  pull_request:
+    paths:
+      # The consumer implementation and its tests.
+      - "packages/local-collector/src/managed/**"
+      - "packages/local-collector/test/managed-connectors.test.ts"
+      - "packages/local-collector/test/managed-connectors-live-registry.test.ts"
+      # This job's own control files: a PR that only edits the workflow or moves the producer pin
+      # would otherwise not run the thing it changed. Same reasoning as consumer-drift-signal.yml's
+      # "Producer workflows should include their own control files in triggers".
+      - ".github/workflows/managed-connector-oci-e2e.yml"
+      - ".github/managed-connector-e2e-pin.json"
+  push:
+    branches: [main]
+    paths:
+      - "packages/local-collector/src/managed/**"
+      - "packages/local-collector/test/managed-connectors.test.ts"
+      - "packages/local-collector/test/managed-connectors-live-registry.test.ts"
+      - ".github/workflows/managed-connector-oci-e2e.yml"
+      - ".github/managed-connector-e2e-pin.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  end-to-end:
+    name: Pull a real artifact from a real registry (no Sigstore, no GHCR)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    services:
+      # An ephemeral registry for the life of the job. `registry:2` is the reference
+      # implementation of the OCI distribution spec, which is the point: the consumer's HTTP
+      # expectations are checked against a real server's responses rather than against a mock
+      # written by the same understanding being tested. It is pinned by digest — an unpinned
+      # `registry:2` is a moving target that could change this job's meaning without a diff.
+      registry:
+        image: registry:2@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+        ports:
+          - 5000:5000
+
+    steps:
+      - name: Check out this repository (the consumer)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned data-connectors revision
+        id: pin
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const pin = JSON.parse(fs.readFileSync(".github/managed-connector-e2e-pin.json", "utf8"))["data-connectors"];
+
+            // Refuse rather than fall back. An empty or malformed pin would otherwise check out
+            // whatever the default branch is today, and this job would report that the consumer
+            // agrees with a producer revision nobody chose.
+            if (!/^[0-9a-f]{40}$/.test(pin?.sha ?? "")) {
+              console.error(`::error::.github/managed-connector-e2e-pin.json has no valid 40-hex data-connectors SHA`);
+              process.exit(1);
+            }
+            for (const [key, value] of Object.entries({ connector: pin.connector, version: pin.version })) {
+              if (typeof value !== "string" || value === "") {
+                console.error(`::error::.github/managed-connector-e2e-pin.json is missing "${key}"`);
+                process.exit(1);
+              }
+            }
+
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
+              `sha=${pin.sha}`,
+              `connector=${pin.connector}`,
+              `version=${pin.version}`,
+              "",
+            ].join("\n"));
+            console.log(`Producer pinned at data-connectors ${pin.sha} (connector ${pin.connector}@${pin.version}).`);
+          '
+
+      - name: Check out data-connectors (the producer) at the pinned SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PDP-Connect/data-connectors
+          # A PR head is not reachable by `ref: <sha>` alone on a fresh clone, so fetch everything
+          # and resolve the pin explicitly below. If the pinned commit has been force-pushed out of
+          # existence, this job fails at `git checkout` with the SHA in the message — which is the
+          # intended failure, not a silent substitution.
+          fetch-depth: 0
+          path: data-connectors
+          persist-credentials: false
+
+      - name: Pin the producer checkout to the recorded SHA
+        working-directory: data-connectors
+        env:
+          PINNED_SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # `git fetch origin <sha>` covers the case where the pinned commit is a PR head that the
+          # default clone's refs do not reach.
+          git fetch --no-tags origin "$PINNED_SHA" 2>/dev/null || true
+          if ! git cat-file -e "${PINNED_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::data-connectors commit $PINNED_SHA is not fetchable." >&2
+            echo "::error::It is pinned in .github/managed-connector-e2e-pin.json as an UNMERGED pull-request head," >&2
+            echo "::error::so a force-push to that branch can make it unreachable. Re-pin to a live commit." >&2
+            exit 1
+          fi
+          git checkout --detach "$PINNED_SHA"
+          echo "Producer checkout is at $(git rev-parse HEAD)."
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Install this repository's dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install the producer's dependencies
+        working-directory: data-connectors
+        # BOTH trees, matching data-connectors' own publish workflow: the root `workspaces` list
+        # does not name packages/polyfill-connectors, so a root `npm ci` never creates that
+        # package's node_modules — and that tree is what the connector bundle's externals resolve
+        # against. --ignore-scripts skips patchright's browser download, which the bundle does not
+        # need.
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix packages/polyfill-connectors
+
+      - name: Build the connector artifact with the producer's own builder
+        working-directory: data-connectors
+        env:
+          CONNECTOR: ${{ steps.pin.outputs.connector }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/build-connector-oci-artifact.mjs \
+            --connector "$CONNECTOR" \
+            --version "$VERSION" \
+            --out "${RUNNER_TEMP}/artifact"
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20 # v1.2.3
+        with:
+          version: "1.2.3"
+
+      - name: Push the artifact to the ephemeral registry
+        id: push
+        env:
+          CONNECTOR: ${{ steps.pin.outputs.connector }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        # Mirrors the push in data-connectors' publish-polyfill-connectors.yml: same artifact type,
+        # same config media type, and the layer media types read from the layers.json the BUILDER
+        # wrote rather than restated here, so this job cannot drift from what was actually built.
+        # The differences from the real publish are deliberate and are the documented gap:
+        # --plain-http to localhost instead of ghcr.io, and no `cosign sign`.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/artifact"
+
+          mapfile -t LAYER_ARGS < <(node -e '
+            const spec = require("./layers.json");
+            for (const layer of spec.layers) console.log(`${layer.file}:${layer.mediaType}`);
+          ')
+
+          oras push --plain-http "localhost:5000/pdp-connect/connector/${CONNECTOR}:${VERSION}" \
+            --artifact-type application/vnd.pdpp.connector.v1+json \
+            --config config.json:application/vnd.pdpp.connector.config.v1+json \
+            --format json "${LAYER_ARGS[@]}" > push-result.json
+
+          # THE digest, read from the completed push's own structured output rather than recomputed
+          # here. Recomputing would be this job asserting against its own arithmetic; reading it
+          # back means the consumer is pinned to what the registry says it stored.
+          digest="$(node -e 'console.log(require("./push-result.json").digest)')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::oras push did not report a usable digest: '$digest'" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${CONNECTOR}:${VERSION} as $digest"
+
+      - name: Pull it back through the consumer, install it, and import the entrypoint
+        working-directory: packages/local-collector
+        env:
+          PDPP_TEST_OCI_REGISTRY: localhost:5000
+          PDPP_TEST_OCI_DIGEST: ${{ steps.push.outputs.digest }}
+          PDPP_TEST_OCI_REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
+          # The installed bundle leaves packages/polyfill-connectors' own dependencies external, so
+          # a host has to make the connector runtime resolvable from the install root. That is a
+          # real, undecided consumer obligation recorded in OCI-CONSUMER-0911.md, and the test
+          # symlinks this tree rather than pretending the artifact is self-contained.
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+        run: node --test --import tsx test/managed-connectors-live-registry.test.ts
+
+      - name: Assert the test actually ran rather than skipping
+        working-directory: packages/local-collector
+        # The failure this job most needs to survive is its own. The test SKIPS when
+        # PDPP_TEST_OCI_REGISTRY or PDPP_TEST_OCI_DIGEST is unset, and `node --test` exits 0 on a
+        # skipped test — so a typo in an env var name above would turn this whole job green while
+        # proving nothing at all, which is worse than not having the job. This re-runs it and
+        # requires a PASS and zero SKIPS in the TAP-ish summary.
+        env:
+          PDPP_TEST_OCI_REGISTRY: localhost:5000
+          PDPP_TEST_OCI_DIGEST: ${{ steps.push.outputs.digest }}
+          PDPP_TEST_OCI_REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+        run: |
+          set -euo pipefail
+          node --test --import tsx test/managed-connectors-live-registry.test.ts | tee result.txt
+          # node --test's default (spec) reporter writes "ℹ pass 1" / "ℹ skipped 0". Matching on the
+          # counts rather than the leading glyph keeps this from breaking on a reporter tweak, while
+          # still failing if the numbers are not the ones we require.
+          if ! grep -qE 'pass 1$' result.txt; then
+            echo "::error::the live-registry test did not report exactly one passing test" >&2
+            exit 1
+          fi
+          if ! grep -qE 'skipped 0$' result.txt; then
+            echo "::error::the live-registry test SKIPPED — its env vars did not reach it, so this" >&2
+            echo "::error::job proved nothing. Check PDPP_TEST_OCI_REGISTRY and PDPP_TEST_OCI_DIGEST." >&2
+            exit 1
+          fi
+          rm -f result.txt
+
+      - name: Prove this job can fail — a tampered artifact must be rejected
+        working-directory: packages/local-collector
+        # A green end-to-end job that cannot go red manufactures false confidence in exactly the
+        # claim that most needs to be true. So: corrupt the code layer's bytes, push THAT as a
+        # second artifact, point the consumer at its honest digest, and require the consumer to
+        # refuse it. If this step's inner run ever succeeds, the verification path has stopped
+        # working and the job fails loudly.
+        #
+        # The corruption is a single flipped byte in code.tar.gz, which the consumer rejects while
+        # unpacking (install-store.ts's readTarGz, zlib Z_DATA_ERROR "incorrect data check").
+        #
+        # WHAT THIS PROBE DOES NOT REACH, stated precisely because an earlier draft of this comment
+        # overclaimed it: it does NOT exercise the per-layer digest check. `oras push` recomputes
+        # the layer digests for whatever bytes it is handed, so a re-pushed tampered artifact is
+        # INTERNALLY CONSISTENT — the manifest honestly describes the corrupt bytes, the digest
+        # check passes, and unpacking is what fails. Verified locally 2026-09-12 against registry:2:
+        # rejected at install-store.ts:277, never at the digest comparison. The next step covers
+        # the digest check separately, because two integrity gates deserve two probes.
+        env:
+          CONNECTOR: ${{ steps.pin.outputs.connector }}
+          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+        run: |
+          set -euo pipefail
+
+          rm -rf "${RUNNER_TEMP}/tampered"
+          cp -r "${RUNNER_TEMP}/artifact" "${RUNNER_TEMP}/tampered"
+          (
+            cd "${RUNNER_TEMP}/tampered"
+            node -e '
+              const fs = require("node:fs");
+              const bytes = fs.readFileSync("code.tar.gz");
+              bytes[Math.floor(bytes.length / 2)] ^= 0xff;
+              fs.writeFileSync("code.tar.gz", bytes);
+            '
+            mapfile -t LAYER_ARGS < <(node -e '
+              const spec = require("./layers.json");
+              for (const layer of spec.layers) console.log(`${layer.file}:${layer.mediaType}`);
+            ')
+            oras push --plain-http "localhost:5000/pdp-connect/connector/${CONNECTOR}:tampered" \
+              --artifact-type application/vnd.pdpp.connector.v1+json \
+              --config config.json:application/vnd.pdpp.connector.config.v1+json \
+              --format json "${LAYER_ARGS[@]}" > push-result.json
+          )
+
+          tampered_digest="$(node -e 'console.log(require(process.env.RUNNER_TEMP + "/tampered/push-result.json").digest)')"
+          echo "Tampered artifact pushed as $tampered_digest"
+
+          # `|| true` so `set -e` does not abort on the failure we are demanding.
+          set +e
+          PDPP_TEST_OCI_REGISTRY=localhost:5000 \
+          PDPP_TEST_OCI_DIGEST="$tampered_digest" \
+          PDPP_TEST_OCI_REPOSITORY="pdp-connect/connector/${CONNECTOR}" \
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES="$RUNTIME_MODULES" \
+            node --test --import tsx test/managed-connectors-live-registry.test.ts > tampered.txt 2>&1
+          tampered_exit=$?
+          set -e
+
+          if [ "$tampered_exit" -eq 0 ]; then
+            echo "::error::THE CONSUMER ACCEPTED A CORRUPTED CODE LAYER." >&2
+            echo "::error::The per-layer digest check in src/managed/ is not rejecting tampered bytes," >&2
+            echo "::error::which means the passing run above proves far less than it appears to." >&2
+            cat tampered.txt >&2
+            exit 1
+          fi
+
+          # Reject for the RIGHT reason. Any nonzero exit would otherwise satisfy this step —
+          # including a typo in the env vars, which is how a falsification probe quietly becomes
+          # theatre. Require evidence the failure came from unpacking corrupted bytes.
+          if ! grep -qE 'incorrect data check|digest|checksum' tampered.txt; then
+            echo "::error::the tampered artifact was rejected, but not for an integrity reason." >&2
+            echo "::error::This step must fail on the digest/unpack check, not on an unrelated error." >&2
+            cat tampered.txt >&2
+            exit 1
+          fi
+
+          echo "OK: the consumer rejected the tampered artifact on an integrity check."
+          rm -f tampered.txt
+
+      - name: Prove the per-layer digest check has teeth — corrupt blobs in flight
+        working-directory: packages/local-collector
+        # The step above cannot reach the per-layer digest check, because `oras push` recomputes
+        # digests and hands the consumer a self-consistent manifest. The gate that matters most is
+        # the one the step above LEAVES UNPROVEN: verifyPinnedArtifact's per-blob hash comparison,
+        # the check that stands between a pinned digest and a registry (or CDN, or proxy) that
+        # serves different bytes than it promised. That is exactly the ghcr.io-with-a-blob-CDN
+        # threat this job otherwise cannot model.
+        #
+        # So model it honestly: a proxy in front of the registry that passes MANIFESTS through
+        # untouched and flips one byte in every BLOB. The manifest's claimed layer digests stay
+        # correct, the served bytes do not match them, and nothing but the digest comparison can
+        # notice. Verified locally 2026-09-12: rejected in registry-client.ts's verifyPinnedArtifact
+        # with "digest mismatch" — a different file and a different failure from the step above.
+        env:
+          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+          HONEST_DIGEST: ${{ steps.push.outputs.digest }}
+          REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
+        run: |
+          set -euo pipefail
+
+          cat > "${RUNNER_TEMP}/corrupt-proxy.mjs" <<'PROXY'
+          import http from "node:http";
+          const upstream = "http://localhost:5000";
+          http
+            .createServer(async (request, response) => {
+              const upstreamResponse = await fetch(upstream + request.url, {
+                headers: { accept: request.headers.accept ?? "*/*" },
+              });
+              const body = Buffer.from(await upstreamResponse.arrayBuffer());
+              // Blobs only. The manifest passes through byte-for-byte, so its claimed layer
+              // digests remain correct and the ONLY thing that can catch this is the consumer
+              // hashing what it received and comparing.
+              if (/\/blobs\/sha256:/.test(request.url) && body.length > 100) {
+                body[Math.floor(body.length / 2)] ^= 0xff;
+              }
+              response.writeHead(upstreamResponse.status, {
+                "content-type": upstreamResponse.headers.get("content-type") ?? "application/octet-stream",
+              });
+              response.end(body);
+            })
+            .listen(6099, () => console.log("blob-corrupting proxy listening on 6099"));
+          PROXY
+
+          node "${RUNNER_TEMP}/corrupt-proxy.mjs" &
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
+
+          # Wait for the proxy rather than sleeping a guessed interval: if it never comes up, say
+          # so instead of reporting a pass that was really a connection error.
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://localhost:6099/v2/"; then break; fi
+            sleep 0.5
+          done
+          if ! curl -sf -o /dev/null "http://localhost:6099/v2/"; then
+            echo "::error::the blob-corrupting proxy never became reachable; this probe proved nothing." >&2
+            exit 1
+          fi
+
+          set +e
+          PDPP_TEST_OCI_REGISTRY=localhost:6099 \
+          PDPP_TEST_OCI_DIGEST="$HONEST_DIGEST" \
+          PDPP_TEST_OCI_REPOSITORY="$REPOSITORY" \
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES="$RUNTIME_MODULES" \
+            node --test --import tsx test/managed-connectors-live-registry.test.ts > proxied.txt 2>&1
+          proxied_exit=$?
+          set -e
+
+          if [ "$proxied_exit" -eq 0 ]; then
+            echo "::error::THE CONSUMER ACCEPTED BLOBS THAT DID NOT MATCH THEIR PINNED DIGESTS." >&2
+            echo "::error::A registry or blob CDN could serve arbitrary code for a pinned digest." >&2
+            cat proxied.txt >&2
+            exit 1
+          fi
+
+          # Reject for the RIGHT reason, and specifically NOT for the unpack reason the previous
+          # step already covers — if this fails at zlib instead of the digest comparison, the
+          # digest check is still unproven and this step must not claim otherwise.
+          if ! grep -qE 'digest mismatch' proxied.txt; then
+            echo "::error::blob corruption was rejected, but not by the per-layer digest check." >&2
+            echo "::error::Expected a 'digest mismatch' from verifyPinnedArtifact. Got:" >&2
+            cat proxied.txt >&2
+            exit 1
+          fi
+
+          echo "OK: the consumer rejected blobs that did not hash to their pinned digests."
+          rm -f proxied.txt
