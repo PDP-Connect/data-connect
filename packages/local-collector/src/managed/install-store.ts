@@ -27,7 +27,7 @@
  * that is checked every run.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -392,8 +392,7 @@ export function installVerifiedArtifact(input: {
     quarantineRelease(canonicalTarget, storeRoot, reusable);
   }
 
-  const staging = `${target}.staging-${createHash("sha256").update(`${process.pid}:${Date.now()}`).digest("hex").slice(0, 12)}`;
-  mkdirSync(staging, { recursive: true });
+  const staging = allocateExclusiveStaging(target, storeRoot);
   const canonicalStaging = resolveInsideStore(storeRoot, staging, "staging directory");
 
   try {
@@ -412,7 +411,27 @@ export function installVerifiedArtifact(input: {
       // later members of the same layer out of the release.
       mkdirSync(dirname(destination), { recursive: true });
       resolveInsideStore(storeRoot, dirname(destination), "release member directory");
-      writeFileSync(destination, bytes);
+      // …and the leaf itself, which none of the three checks above looks at.
+      // `wx` (`O_CREAT|O_EXCL`) is the same primitive the activation temporary
+      // uses and for the same reason: the kernel refuses an existing final
+      // component — including a symlink, which it will not follow — and it does
+      // so in the syscall that creates the file, leaving no window between
+      // deciding the path is safe and writing to it. Staging is allocated
+      // fresh above, so nothing this install put there can already be present;
+      // an `EEXIST` here is a leaf someone else created.
+      try {
+        writeFileSync(destination, bytes, { flag: "wx" });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(
+            `refusing to write release member ${JSON.stringify(relativePath)} through an existing path at ` +
+              `${JSON.stringify(destination)}: release members must be created fresh, never written through ` +
+              `something already there`,
+            { cause: error }
+          );
+        }
+        throw error;
+      }
     };
 
     // JSON layers land as files so the installed release is self-describing:
@@ -693,6 +712,70 @@ export function activateRelease(installRoot: string, release: InstalledRelease):
  * anything is written, so the file being renamed onto the pointer is one this
  * function made.
  */
+/**
+ * Allocate a staging directory that this install is the sole owner of.
+ *
+ * The previous recipe derived the name from `sha256(pid:Date.now())` and
+ * created it with `mkdirSync(…, { recursive: true })`. Both halves were wrong
+ * in the same way {@link createExclusiveTemporary} documents for the activation
+ * pointer, and the repair there did not reach these writes:
+ *
+ *  - **Recursive mkdir is not an allocation.** It succeeds when the directory
+ *    already exists, so the store adopted whatever tree was sitting at that
+ *    path instead of refusing it. Non-recursive `mkdirSync` fails `EEXIST` on
+ *    an existing final component, which turns "make this directory" back into a
+ *    claim of exclusive ownership.
+ *  - **The name was derivable.** The process ID is not a secret and the clock
+ *    is not either, so the staging path could be computed and pre-created. 16
+ *    bytes of `randomBytes` means an attacker cannot know which path to plant.
+ *
+ * The ordering matters: the parent is created recursively — a fresh install
+ * legitimately needs `connectors/<key>` to come into existence — and checked to
+ * be inside the store, and only the staging leaf is allocated exclusively.
+ * Containment is therefore preserved rather than traded away for exclusivity.
+ *
+ * `O_EXCL` is the load-bearing half here as well: it is enforced by the same
+ * syscall that creates the directory. The random name only makes the refusal a
+ * genuine anomaly instead of a routine collision.
+ */
+function allocateExclusiveStaging(target: string, storeRoot: string): string {
+  mkdirSync(dirname(target), { recursive: true });
+  resolveInsideStore(storeRoot, dirname(target), "connector directory");
+
+  const staging = `${target}.staging-${randomBytes(16).toString("hex")}`;
+  try {
+    // No `recursive`: create-or-fail, so an existing tree is refused rather
+    // than adopted. The parent above already exists, so this can only fail
+    // because the staging path itself is occupied.
+    mkdirSync(staging);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(
+        `refusing to stage an install at the existing path ${JSON.stringify(staging)}: ` +
+          `staging must be allocated fresh, never written into something already there`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+
+  try {
+    // The directory this call just made must be a real directory inside the
+    // store — not a symlink `mkdir` would have refused anyway, but checked so
+    // the guarantee is enforced here rather than assumed from the syscall.
+    const stats = lstatSync(staging);
+    if (!stats.isDirectory()) {
+      throw new Error(`staging path ${JSON.stringify(staging)} is not a directory`);
+    }
+    resolveInsideStore(storeRoot, staging, "staging directory");
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+
+  return staging;
+}
+
 function createExclusiveTemporary(storeRoot: string, pointerPath: string, payload: string): string {
   const temporary = `${pointerPath}.tmp-${randomBytes(16).toString("hex")}`;
   try {

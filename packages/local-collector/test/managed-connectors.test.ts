@@ -20,10 +20,11 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
@@ -842,6 +843,190 @@ test("an install store reached through a symlinked root still installs normally"
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Staging allocation: the same leaf defect the activation pointer had, at the
+// other write site.
+//
+// `installVerifiedArtifact` derived its staging directory from the process ID
+// and the clock, created it with a *recursive* mkdir — which succeeds happily
+// on a tree that already exists — and then wrote each member with an ordinary
+// `writeFileSync`. The parent of every member was checked; the leaf never was.
+// So a `collection-profile.json` symlink planted inside a pre-created staging
+// tree was followed, and the layer's bytes replaced a durable archive's. The
+// activation-pointer `wx` repair closed one write site; these are the others.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `*.staging-*` directory currently sitting beside a fixture's release.
+ * Used to prove a refused install leaves nothing behind, and to let a test
+ * plant inside the staging directory the store actually allocated.
+ */
+const stagingDirsOf = (installRoot: string, digest: string): string[] => {
+  const parent = join(installRoot, "connectors", CONNECTOR_KEY);
+  const leaf = `${basename(releaseDirOf(installRoot, digest))}.staging-`;
+  return existsSync(parent)
+    ? readdirSync(parent)
+        .filter((entry) => entry.startsWith(leaf))
+        .map((entry) => join(parent, entry))
+    : [];
+};
+
+/**
+ * Run one `obtainManagedConnectors` install in a child process whose
+ * `fs.mkdirSync` is patched *before* the store module loads, so the patch is
+ * visible to the binding import the store uses.
+ *
+ * The store now allocates staging under 16 random bytes, so a test cannot
+ * predict the path to plant on. Hooking the allocation instead gives the
+ * attacker strictly more power than a real one has — and that is the point: the
+ * refusal must hold even when the path is known, so the repair does not rest on
+ * the name being secret.
+ *
+ * The child rebuilds the fixture from this same file, so it installs the real
+ * artifact through the real code path rather than a re-description of it.
+ */
+function installWithStagingHook(
+  installRoot: string,
+  durableRoot: string,
+  hook: "plant-leaf" | "occupy" | "observe",
+  plantTarget: string
+): { rejected: boolean; error: string; fired: string[] } {
+  const testModule = pathToFileURL(join(import.meta.dirname, "managed-connectors.test.ts")).href;
+  const script = `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const realMkdir = fs.mkdirSync;
+    const fired = [];
+    const HOOK = ${JSON.stringify(hook)};
+    const ROOT = ${JSON.stringify(installRoot)};
+    fs.mkdirSync = (p, options) => {
+      // Gate on this call's own install root: importing the test module runs
+      // its other cases too, and their staging paths must not trip the hook.
+      const isStaging = typeof p === "string" && p.startsWith(ROOT) && p.includes(".staging-");
+      if (isStaging && fired.length === 0) {
+        fired.push(p);
+        if (HOOK === "occupy") {
+          realMkdir(p, { recursive: true });
+          fs.writeFileSync(path.join(p, "leftover.txt"), "from an earlier attempt\\n");
+        }
+      }
+      const result = realMkdir(p, options);
+      if (isStaging && fired.length === 1 && HOOK === "plant-leaf" && fs.existsSync(p)) {
+        try { fs.symlinkSync(${JSON.stringify(plantTarget)}, path.join(p, "collection-profile.json")); } catch {}
+      }
+      return result;
+    };
+    (async () => {
+      const t = await import(${JSON.stringify(testModule)});
+      const fixture = t.buildFixtureForChild();
+      let rejected = false, error = "";
+      try {
+        await t.obtainForChild(fixture, ${JSON.stringify(installRoot)}, ${JSON.stringify(durableRoot)});
+      } catch (e) { rejected = true; error = String(e && e.message); }
+      fs.writeFileSync(process.env.RESULT, JSON.stringify({ rejected, error, fired }));
+      process.exit(0);
+    })();
+  `;
+  const resultPath = join(mkdtempSync(join(tmpdir(), "staging-hook-")), "result.json");
+  const run = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "-e", script], {
+    env: { ...process.env, RESULT: resultPath, STAGING_HOOK_CHILD: "1" },
+    encoding: "utf8",
+  });
+  assert.equal(existsSync(resultPath), true, `child produced no result: ${run.stderr}`);
+  return JSON.parse(readFileSync(resultPath, "utf8"));
+}
+
+/** Fixture and install entrypoints the child process above re-uses. */
+export const buildFixtureForChild = (): Fixture => buildFixture();
+export const obtainForChild = (fixture: Fixture, installRoot: string, durableRoot: string) =>
+  obtain(fixture, installRoot, durableRoot);
+
+test("a symlink planted at a staging output leaf is refused, not written through", async () => {
+  // The assertion that matters is byte-identity of the durable archive, not the
+  // text of the refusal: a fix that merely re-randomised the staging name would
+  // still write through a leaf an attacker managed to land on.
+  const fixture = buildFixture();
+  const ARCHIVE = "COLLECTED-DATA\n";
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(durableRoot, { recursive: true });
+    const archive = join(durableRoot, "archive.json");
+    writeFileSync(archive, ARCHIVE);
+
+    const outcome = installWithStagingHook(installRoot, durableRoot, "plant-leaf", archive);
+    assert.equal(outcome.fired.length, 1, "the test must actually have planted a leaf, or it proves nothing");
+    assert.equal(outcome.rejected, true, `install must refuse; got: ${outcome.error}`);
+
+    assert.equal(
+      readFileSync(archive, "utf8"),
+      ARCHIVE,
+      "the durable archive must be byte-identical after a refused install"
+    );
+    assert.equal(
+      lstatSync(archive).isSymbolicLink(),
+      false,
+      "the durable archive must still be the file it was"
+    );
+    assert.deepEqual(
+      stagingDirsOf(installRoot, fixture.digest),
+      [],
+      "a refused install must not leave its staging directory behind"
+    );
+  });
+});
+
+test("a staging directory that already exists is refused rather than adopted", async () => {
+  // The other half of the cause: allocation must fail when the directory is
+  // already there. Recursive mkdir returned success on an existing tree, which
+  // is what let a pre-created staging directory be adopted in the first place.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const outcome = installWithStagingHook(installRoot, durableRoot, "occupy", "");
+    assert.equal(outcome.fired.length, 1, "the test must actually have occupied the staging path");
+    assert.equal(outcome.rejected, true, `install must refuse; got: ${outcome.error}`);
+
+    const occupied = outcome.fired[0];
+    assert.ok(occupied);
+    assert.equal(
+      readFileSync(join(occupied, "leftover.txt"), "utf8"),
+      "from an earlier attempt\n",
+      "a refused install must not consume the tree it declined to use"
+    );
+  });
+});
+
+test("staging is allocated under an unguessable name, not from the pid and clock", async () => {
+  // Defence in depth behind the flag. The old name was `sha256(pid:Date.now())`,
+  // which an attacker on the host can compute; the refusals above must not be
+  // the only thing between a planted path and a durable file.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const outcome = installWithStagingHook(installRoot, durableRoot, "observe", "");
+    assert.equal(outcome.rejected, false, `the observe control must install; got: ${outcome.error}`);
+    assert.equal(outcome.fired.length, 1, "exactly one staging directory per install");
+
+    const observed = basename(outcome.fired[0] ?? "");
+    assert.equal(
+      /\.staging-[0-9a-f]{32}$/.test(observed),
+      true,
+      `staging must be named from 16 random bytes, got ${observed}`
+    );
+  });
+});
+
+test("a completed install leaves no staging directory behind", async () => {
+  // The positive control for the three tests above: staging is still renamed
+  // into place on the ordinary path, so the refusals are not being bought by
+  // breaking installs.
+  const fixture = buildFixture();
+  await withRoots(async (installRoot, durableRoot) => {
+    const managed = await obtain(fixture, installRoot, durableRoot);
+    const entry = managed[0];
+    assert.ok(entry);
+    assert.match(readFileSync(entry.entrypoint, "utf8"), /collectOura/);
+    assert.deepEqual(stagingDirsOf(installRoot, fixture.digest), []);
   });
 });
 
