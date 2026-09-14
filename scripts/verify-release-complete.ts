@@ -29,6 +29,11 @@
 // bounded wait before it is believed, while an UNKNOWN answer (the registry
 // did not answer at all) fails immediately, because waiting cannot turn "I
 // could not tell" into an answer.
+//
+// The wait is an INJECTED PARAMETER defaulting to the real values, not an
+// environment override or a test-mode branch. A release run passes nothing and
+// gets the real 30s; a test passes a fast wait and still drives this exact
+// code. Nothing here reads the environment to decide how long to wait.
 
 import {
   LOCKSTEP_PACKAGES,
@@ -42,7 +47,15 @@ import {
 // quoted as "attempts x delay" overstates the wait by one delay; the numbers
 // here are chosen against the real elapsed figure, not the nominal product.
 const PROPAGATION_ATTEMPTS = 8
-const PROPAGATION_DELAY_MS = 30_000
+
+// The real delay, and the only value any release run uses. There is no
+// environment override and no test-mode branch: a code path that behaves
+// differently under test is the same defect class this whole step exists to
+// catch — a pipeline believing its own report instead of the registry. A test
+// that needs a faster retry passes `delayMs` through the same parameter a
+// release run leaves at its default, so the path under test IS the production
+// path.
+export const PROPAGATION_DELAY_MS = 30_000
 
 export const PROPAGATION_BUDGET_MS = (PROPAGATION_ATTEMPTS - 1) * PROPAGATION_DELAY_MS
 
@@ -59,13 +72,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// The propagation wait, as an injected parameter. Both fields default to the
+// real production values, so every release run gets the real 30s delay and the
+// real sleep without passing anything — and a caller that wants a faster retry
+// (a test) drives the SAME code path rather than a second one.
+export interface PropagationWait {
+  /** Milliseconds to wait between attempts. Defaults to the real 30s. */
+  delayMs?: number
+  /** How to wait. Defaults to a real timer. */
+  sleepFn?: (ms: number) => Promise<void>
+}
+
 // Resolves once the package is live, or throws after the propagation budget.
 // An UNKNOWN registry answer is rethrown immediately rather than retried.
 export async function awaitPublished(
   name: LockstepPackage,
   version: string,
-  sleepFn: (ms: number) => Promise<void> = sleep
+  wait: PropagationWait = {}
 ): Promise<void> {
+  const { delayMs = PROPAGATION_DELAY_MS, sleepFn = sleep } = wait
   for (let attempt = 1; attempt <= PROPAGATION_ATTEMPTS; attempt++) {
     let state: "published" | "missing"
     try {
@@ -78,18 +103,26 @@ export async function awaitPublished(
     if (state === "published") return
 
     if (attempt === PROPAGATION_ATTEMPTS) {
+      // The budget is quoted from the delay ACTUALLY used, not from the
+      // production constant: an error message that reports a 210s wait after
+      // waiting 70ms is a false statement about what the step did.
+      const budgetMs = (PROPAGATION_ATTEMPTS - 1) * delayMs
       throw new Error(
         `${name}@${version} is still not resolvable after ${attempt} attempts ` +
-          `(~${Math.round(PROPAGATION_BUDGET_MS / 1000)}s) — the release is incomplete`
+          `(~${Math.round(budgetMs / 1000)}s) — the release is incomplete`
       )
     }
 
     log(`${name}@${version} not yet resolvable (attempt ${attempt}/${PROPAGATION_ATTEMPTS}), waiting...`)
-    await sleepFn(PROPAGATION_DELAY_MS)
+    await sleepFn(delayMs)
   }
 }
 
-async function main(): Promise<void> {
+// Exported so a test can drive the whole postcondition — argv parsing, the
+// per-package loop, the UNKNOWN-vs-MISSING split — with a fast wait, instead of
+// asserting against a substitute. `wait` defaults to the production values, so
+// the CLI path below passes nothing and behaves exactly as it did.
+export async function main(wait: PropagationWait = {}): Promise<void> {
   const version = process.argv[2]
   if (!version) {
     fail("Usage: verify-release-complete.ts <version>")
@@ -100,7 +133,7 @@ async function main(): Promise<void> {
   const missing: string[] = []
   for (const name of LOCKSTEP_PACKAGES) {
     try {
-      await awaitPublished(name, version)
+      await awaitPublished(name, version, wait)
       log(`  ok  ${name}@${version}`)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
