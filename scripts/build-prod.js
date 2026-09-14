@@ -75,8 +75,9 @@ function findAppBundle() {
 async function build() {
   log('Building DataConnect for production...');
 
-  // Keep local production builds on the same fail-closed Node 22 sidecar
-  // contract as the release workflow.
+  // Keep local production builds on the same fail-closed sidecar contract as
+  // the release workflow: stagePdppNode refuses any Node other than
+  // RELEASE_NODE_VERSION (scripts/stage-pdpp-node.mjs).
   stagePdppNode({ ...nativeTauriTarget(PLAT, arch()), projectRoot: ROOT });
 
   // 1. Install playwright-runner dependencies
