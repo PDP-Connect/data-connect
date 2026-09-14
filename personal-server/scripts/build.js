@@ -332,93 +332,59 @@ function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
 
 // Resolve a subpath its author published under `import` alone, starting from
 // the *importing file* -- which during this step is the copy under `dist`, not
-// the original in the build tree. `packageRootFor` walks `node_modules` upward
-// exactly the way Node resolves a bare specifier, so the package copy this
-// answers with is the one the shipped file will actually load.
-function resolveImportOnlyExport(specifier, fromFile, packageJsonCache) {
-  const packageName = specifier.startsWith('@')
-    ? specifier.split('/').slice(0, 2).join('/')
-    : specifier.split('/')[0];
+// the original in the build tree.
+//
+// This asks Node itself rather than reimplementing `exports`. The previous
+// version walked the map by hand under a fixed condition list of
+// `['browser', 'import', 'module', 'default']`, and disagreed with real Node on
+// every export-map form that list cannot express:
+//
+//  - **`node` was never consulted.** These files are ESM run by Node, so `node`
+//    applies and outranks `browser`. For `{ node, browser, default }` the hand
+//    resolver picked the browser artifact; Node picks the node one.
+//  - **Author order was disregarded.** The spec resolves conditions in the
+//    order the *author* wrote them, not in the consumer's preference order. For
+//    `{ default, browser }` Node takes `default` because it is listed first;
+//    iterating a fixed list took `browser`.
+//  - **Nested condition objects repeated both faults** one level down, e.g.
+//    `{ import: { node, browser } }`.
+//  - **Wildcard specificity was incomplete.** Only prefix length was compared,
+//    so between `./p/*` and `./p/*.js` the winner depended on key order rather
+//    than on the longer pattern.
+//
+// `import.meta.resolve(specifier, parentURL)` still cannot do this job, for the
+// reason recorded above: the second argument needs
+// `--experimental-import-meta-resolve`, and without it Node silently ignores
+// the argument and resolves from *this* file. So the resolver is run in a short
+// child process whose `--input-type=module` evaluation is rooted at the
+// importing file's own directory, where the one-argument form resolves exactly
+// as the shipped file will. That is Node's real resolver, including conditions,
+// author order, wildcards and `null` blocks, with no second implementation to
+// drift.
+//
+// `packageJsonCache` is retained for callers but no longer consulted here:
+// resolution is delegated, so there is no map for this function to read.
+export function resolveImportOnlyExport(specifier, fromFile, _packageJsonCache) {
+  const from = dirname(fromFile);
+  const probe = spawnSync(
+    process.execPath,
+    ['--input-type=module', '--eval', `process.stdout.write(import.meta.resolve(${JSON.stringify(specifier)}))`],
+    { cwd: from, encoding: 'utf8' }
+  );
 
-  const packageRoot = packageRootFor(packageName, fromFile);
-  if (!packageRoot) {
-    throw new Error(`Cannot find package ${packageName} from ${fromFile}`);
+  if (probe.status !== 0) {
+    // Refuse rather than guess. An unresolvable or unsupported specifier must
+    // fail the build loudly; the old code's fallback answer was the defect.
+    throw new Error(
+      `Cannot resolve ${specifier} from ${fromFile}: ${(probe.stderr || '').trim() || 'node resolution failed'}`
+    );
   }
 
-  const packageJsonPath = join(packageRoot, 'package.json');
-  const packageJson =
-    packageJsonCache.get(packageJsonPath) ??
-    JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-  packageJsonCache.set(packageJsonPath, packageJson);
-
-  const subpath =
-    specifier === packageName ? '.' : `./${specifier.slice(packageName.length + 1)}`;
-  const target = resolveExportsSubpath(packageJson.exports, subpath);
-  if (!target) {
-    throw new Error(`Missing export mapping for ${specifier} in ${packageJsonPath}`);
+  const resolved = probe.stdout.trim();
+  if (!resolved.startsWith('file:')) {
+    throw new Error(`Refusing non-file resolution for ${specifier} from ${fromFile}: ${resolved}`);
   }
-
-  return join(packageRoot, target);
-}
-
-// The conditions this build resolves under, most specific first. The files
-// being rewritten are ESM run by Node, so `import` applies and `require` does
-// not. `browser` is listed because personal-server-ts-core imports
-// `@opendatalabs/vana-sdk/browser` by name; the specifier picks that entry, and
-// the condition only decides between artifacts inside it.
-const EXPORT_CONDITIONS = ['browser', 'import', 'module', 'default'];
-
-// Pick a subpath out of an `exports` map: exact key first, then the single
-// best-matching `./*` pattern, as the specification orders them. Returns null
-// for an unmapped subpath and for one the author explicitly blocked with
-// `null`, so the caller can tell "no such export" apart from a resolved file.
-export function resolveExportsSubpath(exports, subpath) {
-  if (!exports || typeof exports !== 'object') return null;
-
-  if (Object.hasOwn(exports, subpath)) {
-    return selectExportCondition(exports[subpath]);
-  }
-
-  // Longest matching prefix wins, which is what makes `./direct/*` beat `./*`
-  // for `./direct/escrow-payment` rather than the map's key order deciding it.
-  let best = null;
-  for (const [pattern, entry] of Object.entries(exports)) {
-    const star = pattern.indexOf('*');
-    if (star === -1) continue;
-    const prefix = pattern.slice(0, star);
-    const suffix = pattern.slice(star + 1);
-    if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) continue;
-    if (subpath.length < prefix.length + suffix.length) continue;
-    if (best && prefix.length <= best.prefix.length) continue;
-    best = { prefix, entry, match: subpath.slice(prefix.length, subpath.length - suffix.length) };
-  }
-  if (!best) return null;
-
-  const target = selectExportCondition(best.entry);
-  return target ? target.replaceAll('*', best.match) : null;
-}
-
-// Walk the condition object the way Node does: first condition present wins,
-// nested objects recurse, and an explicit `null` blocks the subpath.
-function selectExportCondition(entry) {
-  if (entry === null || entry === undefined) return null;
-  if (typeof entry === 'string') return entry;
-  if (Array.isArray(entry)) {
-    for (const candidate of entry) {
-      const resolved = selectExportCondition(candidate);
-      if (resolved) return resolved;
-    }
-    return null;
-  }
-  for (const condition of EXPORT_CONDITIONS) {
-    if (!Object.hasOwn(entry, condition)) continue;
-    const resolved = selectExportCondition(entry[condition]);
-    if (resolved) return resolved;
-    // An explicit `null` under a matching condition blocks the subpath rather
-    // than falling through to a less specific one.
-    if (entry[condition] === null) return null;
-  }
-  return null;
+  return fileURLToPath(resolved);
 }
 
 function rewriteCopiedPackageImports() {

@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { pathToFileURL } from "node:url"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { after, describe, it } from "node:test"
 import {
   assertImportsStayInsideDist,
   listProductionDependencyPaths,
-  resolveExportsSubpath,
+  resolveImportOnlyExport,
 } from "./build.js"
 
 describe("personal-server production dependency listing", () => {
@@ -73,74 +74,125 @@ describe("personal-server production dependency listing", () => {
   })
 })
 
-// The `exports` shapes here are copied from `@opendatalabs/vana-sdk`, the
-// package whose import-only subpaths made this resolver necessary.
-describe("import-only export resolution", () => {
-  it("prefers the browser artifact the specifier already asked for", () => {
-    assert.equal(
-      resolveExportsSubpath(
-        {
-          "./browser": {
-            types: "./dist/index.browser.d.ts",
-            import: "./dist/index.browser.js",
-          },
-        },
-        "./browser"
-      ),
-      "./dist/index.browser.js"
-    )
+// Export resolution is delegated to Node, so these tests check *agreement with
+// Node* rather than the behaviour of a second implementation.
+//
+// Each case builds a real package on disk with a valid, import-only export map,
+// imports the specifier for real to learn Node's answer, then asks the build's
+// resolver the same question. The previous hand-rolled resolver disagreed with
+// Node on four of these; the last two are positive controls it already got
+// right, and they must keep passing.
+describe("import-only export resolution agrees with Node", () => {
+  const roots = []
+  after(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true })
   })
 
-  it("never answers with a `types` entry", () => {
-    assert.equal(
-      resolveExportsSubpath({ "./x": { types: "./x.d.ts" } }, "./x"),
-      null
-    )
-  })
+  const FILES = [
+    "node.js", "browser.js", "default.js", "b.js", "index.js",
+    "a-thing.js", "star-thing.js", "long-m.js", "short-m.js.js",
+    "qnode.js", "qbrowser.js",
+  ]
 
-  it("substitutes the wildcard match into the target", () => {
-    assert.equal(
-      resolveExportsSubpath(
-        { "./*": { import: "./dist/*.js" } },
-        "./protocol/personal-server-registration"
-      ),
-      "./dist/protocol/personal-server-registration.js"
+  /** Build a package with `exports`, then return Node's answer and the build's. */
+  async function bothAnswers(exports, specifier) {
+    const root = mkdtempSync(join(tmpdir(), "export-map-"))
+    roots.push(root)
+    const pkg = join(root, "node_modules", "pkg")
+    mkdirSync(pkg, { recursive: true })
+    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }))
+    writeFileSync(
+      join(pkg, "package.json"),
+      JSON.stringify({ name: "pkg", version: "1.0.0", type: "module", exports })
     )
-  })
-
-  // Key order in the object must not decide this; the longer prefix does.
-  it("lets a longer pattern win over a shorter one regardless of key order", () => {
-    const exports = {
-      "./*": { import: "./dist/*.js" },
-      "./direct/*": { import: "./dist/direct/*.js" },
+    for (const file of FILES) {
+      writeFileSync(join(pkg, file), `export const which = ${JSON.stringify(file)}\n`)
     }
-    assert.equal(
-      resolveExportsSubpath(exports, "./direct/escrow-payment"),
-      "./dist/direct/escrow-payment.js"
+
+    const importer = join(root, "importer.mjs")
+    writeFileSync(importer, `export { which } from ${JSON.stringify(specifier)}\n`)
+
+    let node
+    try {
+      node = (await import(pathToFileURL(importer).href)).which
+    } catch (error) {
+      node = `ERR:${error.code}`
+    }
+
+    let build
+    try {
+      build = basename(resolveImportOnlyExport(specifier, importer, new Map()))
+    } catch {
+      build = "ERR:refused"
+    }
+    return { node, build }
+  }
+
+  // Defect 1: `node` applies to these files and outranks `browser`. The fixed
+  // condition list never contained it, so the browser artifact was chosen.
+  it("honours an applicable `node` condition over `browser`", async () => {
+    const { node, build } = await bothAnswers(
+      { "./x": { node: "./node.js", browser: "./browser.js", default: "./default.js" } },
+      "pkg/x"
     )
+    assert.equal(node, "node.js")
+    assert.equal(build, node)
   })
 
-  it("treats an explicit null condition as a blocked subpath", () => {
-    assert.equal(
-      resolveExportsSubpath(
-        { "./server-only": { browser: null, import: "./dist/server-only.js" } },
-        "./server-only"
-      ),
-      null
+  // Defect 2: conditions resolve in the order the *author* wrote them.
+  it("respects author condition order rather than a fixed preference list", async () => {
+    const { node, build } = await bothAnswers(
+      { "./y": { default: "./default.js", browser: "./browser.js" } },
+      "pkg/y"
     )
+    assert.equal(node, "default.js")
+    assert.equal(build, node)
   })
 
-  it("reports an unmapped subpath rather than guessing a file", () => {
-    assert.equal(
-      resolveExportsSubpath({ ".": { import: "./dist/index.js" } }, "./missing"),
-      null
+  // Defect 3: the same two faults one level down, inside a nested object.
+  it("applies conditions correctly inside a nested condition object", async () => {
+    const { node, build } = await bothAnswers(
+      { "./q": { import: { node: "./qnode.js", browser: "./qbrowser.js" } } },
+      "pkg/q"
     )
+    assert.equal(node, "qnode.js")
+    assert.equal(build, node)
+  })
+
+  // Defect 4: specificity compared prefix length only, so with equal prefixes
+  // the winner depended on key order instead of on the longer pattern.
+  it("orders wildcard specificity by the whole pattern, not the prefix alone", async () => {
+    const { node, build } = await bothAnswers(
+      { "./p/*": { import: "./short-*.js" }, "./p/*.js": { import: "./long-*.js" } },
+      "pkg/p/m.js"
+    )
+    assert.equal(node, "long-m.js")
+    assert.equal(build, node)
+  })
+
+  it("positive control: resolves a plain import-only subpath", async () => {
+    const { node, build } = await bothAnswers(
+      { "./b": { types: "./b.d.ts", import: "./b.js" } },
+      "pkg/b"
+    )
+    assert.equal(node, "b.js")
+    assert.equal(build, node)
+  })
+
+  it("positive control: resolves an import-only package root", async () => {
+    const { node, build } = await bothAnswers({ ".": { import: "./index.js" } }, "pkg")
+    assert.equal(node, "index.js")
+    assert.equal(build, node)
+  })
+
+  // Refusal, not a guess: a subpath Node will not resolve must fail the build.
+  it("refuses a subpath Node does not export rather than answering anyway", async () => {
+    const { node, build } = await bothAnswers({ "./r": { require: "./r.cjs" } }, "pkg/r")
+    assert.equal(node, "ERR:ERR_PACKAGE_PATH_NOT_EXPORTED")
+    assert.equal(build, "ERR:refused")
   })
 })
 
-// The regression this whole change exists for: the build emitted
-// `../../../../../node_modules/@opendatalabs/vana-sdk/dist/index.browser.js`,
-// which points at the build machine and at nothing on any other host.
 describe("artifact boundary", () => {
   const roots = []
   after(() => {
