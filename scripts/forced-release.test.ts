@@ -249,15 +249,13 @@ describe("the ordinary path keeps refusing unscoped commits", () => {
       config.plugins.map(plugin => (Array.isArray(plugin) ? plugin[0] : plugin))
     expect(names(forced)).toEqual(names(gated))
 
-    // The three packages publish through ./scripts/idempotent-npm-publish.mjs
-    // rather than "@semantic-release/npm" directly — a wrapper that skips a
-    // version already live on the registry instead of failing with E403, so a
-    // partially-published release converges on a re-run. A forced release must
-    // keep that wrapper, or forcing would be the one path that can still
-    // hard-fail on a live package.
+    // The three packages publish in a fixed order: connector-protocol first,
+    // then the publish-ordering barrier, then the two packages that depend on
+    // it. A forced release must keep that order, or forcing would be the one
+    // path that can publish a dependent package before its dependency is live.
     const pkgRoots = forced.plugins
       .filter((plugin): plugin is [string, Record<string, unknown>] =>
-        Array.isArray(plugin) && String(plugin[0]).includes("idempotent-npm-publish")
+        Array.isArray(plugin) && plugin[0] === "@semantic-release/npm"
       )
       .map(([, options]) => options.pkgRoot)
     expect(pkgRoots).toEqual([
@@ -368,13 +366,11 @@ describe("npm-release workflow wiring", () => {
   // earlier version of this test passed while `release` no longer waited on
   // the quality job at all. Asserting the dependency edge itself is what
   // makes "quality gates release" a claim this test can actually falsify.
-  it("keeps quality gating release on both paths", () => {
-    // `quality` also gates the converge path (a partially-published release
-    // being finished), which publishes real tarballs and so must clear the
-    // same bar. Asserted as "contains the version condition" rather than as
-    // an exact string, so widening the gate to cover another publishing path
-    // does not read as removing it — while narrowing it to drop the version
-    // condition still fails here.
+  it("keeps quality gating release", () => {
+    // Asserted as "contains the version condition" rather than as an exact
+    // string, so widening the gate to cover another publishing path would not
+    // read as removing it — while narrowing it to drop the version condition
+    // still fails here.
     expect(workflow.jobs.quality?.if).toContain(
       "needs.resolve-version.outputs.new-release-published == 'true'"
     )

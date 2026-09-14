@@ -150,7 +150,7 @@ describe("classifyForCohort", () => {
       classifyForCohort({ status: "M", path: "scripts/verify-npm-provenance.ts" }, scriptsCohort)
     ).toEqual({ selected: true })
     expect(
-      classifyForCohort({ status: "M", path: "scripts/converge-release.ts" }, scriptsCohort)
+      classifyForCohort({ status: "M", path: "scripts/verify-release-complete.ts" }, scriptsCohort)
     ).toEqual({ selected: true })
   })
 

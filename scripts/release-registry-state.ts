@@ -8,11 +8,13 @@
 // answered honestly, so it is answered in exactly one place rather than
 // re-derived at each call site:
 //
-//   - resolve-release-version.ts asks it to decide whether the newest tag
-//     names a release that is actually complete, or one that stopped early
-//     and must be converged on instead of bumped past.
-//   - idempotent-npm-publish.mjs asks it to decide whether to skip a
-//     package's `npm publish` (already live at this exact version) or run it.
+//   - resolve-release-version.ts asks it whether the newest tag names a
+//     release that is actually complete, so a run that stopped early is
+//     reported as superseded rather than passing unnoticed.
+//   - verify-release-complete.ts asks it, after a release, whether every
+//     package the tag claims is actually live.
+//   - verify-connector-protocol-published.ts asks it at the publish-ordering
+//     barrier, before the next package in the sequence publishes.
 //
 // THE RULE THIS MODULE EXISTS TO ENFORCE: "I could not tell" is never
 // "not published".
@@ -36,9 +38,9 @@
 //
 // npm version-immutability is the constraint the whole design is built
 // around: once `@pdpp/connector-protocol@2.2.1` exists, it can never be
-// replaced, only skipped. So "already published" has to be a first-class,
-// non-error outcome of the publish path rather than a failure to recover
-// from. That is what makes re-running a release converge instead of crash.
+// replaced. That is why a half-published version is never completed in place
+// — the release pipeline reports it as superseded and the next version
+// carries the packages it was missing.
 //
 // E404 CLASSIFICATION: npm emits the code as a discrete `npm error code E404`
 // line. Matching the bare substring `E404` anywhere in the error text would

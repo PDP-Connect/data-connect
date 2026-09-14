@@ -1,72 +1,44 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Decides what the npm-release workflow should do on this run, BEFORE
+// Reports what the registry holds for the newest release tag, BEFORE
 // semantic-release is invoked.
 //
-// This is the half of the atomic-release design that makes convergence
-// REACHABLE. scripts/idempotent-npm-publish.mjs makes a re-run survivable
-// (publishing a live version is a skip, not an E403); this script makes a
-// re-run actually happen, by noticing that the newest tag names a release
-// that is not finished.
+// THE POLICY THIS IMPLEMENTS
 //
-// THE GAP THIS CLOSES
+// A release that is interrupted partway through publishing stays explicitly
+// incomplete. It is not finished later from its own tag.
 //
-// semantic-release derives the next version from GIT TAGS ONLY — see
-// semantic-release@25's lib/get-last-release.js, which reads branch.tags and
-// never contacts a registry. So after a run that pushed tag v2.2.1 and then
-// died partway through publishing, a re-run sees:
+// There is no retry that finishes it. semantic-release pushes the git tag
+// BEFORE it publishes, so an interrupted release leaves the tag on the commit
+// it ran at. Re-running that same run resolves zero commits since the last
+// release and therefore no version at all — the publish step is never
+// reached. Executed against semantic-release@25.0.9 with this repo's
+// commit-analyzer rules: with the tag on HEAD, "Analysis of 0 commits
+// complete: no release".
 //
-//     Found git tag v2.2.1 associated with version 2.2.1 on branch main
-//     Found 0 commits since last release
-//     Analysis of 0 commits complete: no release
-//     There are no relevant changes, so no new version is released.
+// So the incomplete version stays incomplete, and recovery is forward only:
+// the next in-scope commit on main — or any commit plus a forced dispatch —
+// produces the next version, which supersedes it. The lockstep
+// invariant — the three packages share whatever version a run publishes — is
+// satisfied by the new version. The old one keeps whatever partial set it
+// got, and the pipeline says so out loud instead of blocking.
 //
-// The tag says 2.2.1 shipped. The registry says two thirds of it did not.
-// semantic-release cannot see the disagreement because it only reads one of
-// the two sources. Forcing a release does not help either: a forced release
-// changes which COMMITS count as releasable, and there are no commits in the
-// window to reclassify. Nothing in the tool's own lifecycle can finish the
-// job, because the job it would compute is a different version.
+// WHAT THIS SCRIPT THEREFORE DOES
 //
-// This script reconciles the two sources of truth and emits a decision:
+// It always resolves to an ordinary release. semantic-release computes the
+// next version from commits exactly as it always has. What this script adds
+// is the REPORT: when the newest tag is partially published, the decision
+// carries that tag, its version, and the packages missing from it, so the
+// workflow can name the superseded version in its log rather than leaving a
+// half-published release undiscovered.
 //
-//   converge  the newest tag's version is NOT fully published. The release
-//             to run is that tag's version — not a new one. The workflow's
-//             `converge` job checks THAT TAG out and runs
-//             scripts/converge-release.ts, which publishes only the missing
-//             packages at that version. Nothing is republished, no version is
-//             burned, and the lockstep invariant ("all three share a
-//             version") ends up TRUE rather than abandoned.
+// It runs as a pre-flight rather than a plugin because the report has to be
+// available to jobs that run before and after semantic-release, not only
+// inside its lifecycle.
 //
-//   release   the newest tag is fully published (or there is no tag). This
-//             is an ordinary release; semantic-release computes the next
-//             version from commits exactly as before. This script gets out
-//             of the way.
-//
-// WHY CONVERGE RATHER THAN BUMP
-//
-// Bumping all three to a fresh 2.2.2 needs no new mechanism, and that is its
-// only advantage. It republishes connector-protocol with content identical
-// to the live 2.2.1 purely to paper over a failed run; it permanently
-// strands 2.2.1 as a version that exists for one package and can never exist
-// for the other two, so the lockstep invariant becomes a claim the registry
-// visibly contradicts; and it fixes nothing, because the next partial
-// failure burns another version. Converging republishes nothing and leaves
-// the invariant true.
-//
-// WHY THIS IS A PRE-FLIGHT AND NOT A PLUGIN
-//
-// The decision has to be made before semantic-release starts, because it
-// determines which COMMIT gets checked out and released. A plugin runs
-// inside a lifecycle that has already resolved a version from the wrong
-// source. Reconciling first, then handing semantic-release a checkout where
-// its own tag-based resolution produces the right answer, keeps the fix on
-// the outside of the tool rather than fighting its internals.
-//
-// SAFETY: an UNKNOWN registry answer aborts. A registry outage must not be
-// able to make a COMPLETE release look partial and pull the pipeline into
-// re-releasing something that already shipped.
+// SAFETY: an UNKNOWN registry answer aborts. The pipeline must not publish
+// while it cannot tell what the registry already holds.
 
 import { execFile } from "node:child_process"
 import { appendFileSync } from "node:fs"
@@ -103,14 +75,19 @@ export async function newestReleaseTag(cwd: string): Promise<string | null> {
   return null
 }
 
-export type Decision =
-  | { mode: "release"; reason: string }
-  | { mode: "converge"; tag: string; version: string; missing: readonly string[]; reason: string }
+// Every decision is a release. `superseded` is present only when the newest
+// tag is partially published: it is the incomplete version this run's release
+// supersedes, carried for reporting and never used to gate anything.
+export interface Decision {
+  mode: "release"
+  reason: string
+  superseded?: { tag: string; version: string; missing: readonly string[] }
+}
 
 export async function decide(cwd: string): Promise<Decision> {
   const tag = await newestReleaseTag(cwd)
   if (!tag) {
-    return { mode: "release", reason: "no release tag exists yet; nothing to converge on" }
+    return { mode: "release", reason: "no release tag exists yet; there is no prior release to report on" }
   }
 
   const version = versionFromTag(tag)
@@ -132,29 +109,44 @@ export async function decide(cwd: string): Promise<Decision> {
   }
 
   // A tag whose version has NONE of the three packages published is not a
-  // partial release — it is a tag that was pushed and then everything failed,
-  // or a tag from before these packages were published from this repo at all.
-  // Converging on it would mean publishing a version from a commit that never
-  // got past its first publish. That is a real release, so route it back to
-  // the ordinary path rather than the convergence path.
+  // partially-completed release — it is a tag that was pushed and then
+  // everything failed, or a tag from before these packages were published
+  // from this repo at all. There is no partial set to report as superseded.
   if (state.published.length === 0) {
     return {
       mode: "release",
       reason:
-        `newest tag ${tag} has no published packages at ${version} — that is not a partially-completed ` +
-        `release, so this runs as an ordinary release`,
+        `newest tag ${tag} has no published packages at ${version} — nothing of it reached the registry, ` +
+        `so there is no partial release to report`,
     }
   }
 
+  // Partially published. This still runs as an ordinary release; the partial
+  // version is reported, not repaired.
   return {
-    mode: "converge",
-    tag,
-    version,
-    missing: state.missing,
+    mode: "release",
     reason:
-      `newest tag ${tag} is a partially-completed release: ` +
-      `${state.published.join(", ")} live at ${version}, missing ${state.missing.join(", ")}`,
+      `newest tag ${tag} is incomplete on npm: ` +
+      `${state.published.join(", ")} live at ${version}, missing ${state.missing.join(", ")}. ` +
+      `The next successful release will supersede it.`,
+    superseded: { tag, version, missing: state.missing },
   }
+}
+
+// The one line CI prints about a superseded version. `newVersion` is the
+// version this run is publishing, which is what makes the sentence true.
+export function supersededMessage(
+  superseded: NonNullable<Decision["superseded"]>,
+  newVersion: string
+): string {
+  const short = superseded.missing.map(name => name.replace(/^@pdpp\//, ""))
+  const live = LOCKSTEP_PACKAGES.filter(name => !superseded.missing.includes(name)).map(name =>
+    name.replace(/^@pdpp\//, "")
+  )
+  return (
+    `${superseded.tag} is incomplete on npm (${live.join(", ")} only; missing ${short.join(", ")}) ` +
+    `and is superseded by ${newVersion}`
+  )
 }
 
 function emit(outputs: Record<string, string>): void {
@@ -173,18 +165,14 @@ async function main(): Promise<void> {
 
   log(decision.reason)
 
-  if (decision.mode === "converge") {
-    log(`converging on ${decision.tag}; publishing only: ${decision.missing.join(", ")}`)
-    emit({
-      mode: "converge",
-      "converge-tag": decision.tag,
-      "converge-version": decision.version,
-      "converge-missing": decision.missing.join(","),
-    })
-    return
-  }
-
-  emit({ mode: "release", "converge-tag": "", "converge-version": "", "converge-missing": "" })
+  // Emitted for reporting only. No job is gated on these: a partially
+  // published prior version does not change what this run publishes.
+  emit({
+    mode: decision.mode,
+    "superseded-tag": decision.superseded?.tag ?? "",
+    "superseded-version": decision.superseded?.version ?? "",
+    "superseded-missing": decision.superseded?.missing.join(",") ?? "",
+  })
 }
 
 // Only run when invoked as a script, so the exported helpers can be imported
