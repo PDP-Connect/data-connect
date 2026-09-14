@@ -274,11 +274,14 @@ const CAPTURED_BODY_MARKER = "pdpp.artifact.body.v1";
  * technique and the same reasoning as `contentGateValue` for the markdown
  * streams.
  *
- * A cursor written before this encoding existed holds the raw mtime, which
- * cannot equal the digest. Such a file therefore mismatches ONCE, is revisited,
- * captures, and is then checkpointed in the new encoding — a one-time re-read
- * per file, never a repeated one. That is the migration: it needs no version
- * flag, no new user setting and no status enum in shared state.
+ * A cursor written before this encoding existed holds the raw mtime. A 52-bit
+ * digest colliding with that raw mtime is negligible, not impossible: nothing
+ * in the construction forbids it, and a collision would simply skip that one
+ * file's backfill. Such a file therefore mismatches ONCE in practice, is
+ * revisited, captures, and is then checkpointed in the new encoding — a
+ * one-time re-read per file, never a repeated one. That is the migration: it
+ * needs no version flag, no new user setting and no status enum in shared
+ * state.
  */
 export function capturedBodyCheckpoint(mtimeMs: number): number {
 	const digest = createHash("sha256")
@@ -335,6 +338,13 @@ export class ArtifactCaptureLedger {
 	 * terminal reporting instead of making it disappear: a captured body without
 	 * an upload is an honest partial state, and reporting it as complete would
 	 * be the dishonest repair.
+	 *
+	 * SCOPE: this counts bodies spooled by THIS RUN only. It is not a queue
+	 * length over all runs — a later run that skips an already-captured file
+	 * reports zero while that retained body still sits in the spool. Wiring a
+	 * transport therefore cannot use this number to find the work: bodies
+	 * already settled by a captured checkpoint have to be reconciled from a
+	 * durable record, not from this counter.
 	 */
 	get pendingUpload(): number {
 		return this.#pendingUpload;
