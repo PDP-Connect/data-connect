@@ -62,6 +62,12 @@ export interface MutantObservation {
    * observation was built without a test table to check against.
    */
   readonly knownTestIds: ReadonlySet<string>
+  /**
+   * Stryker's own `static` flag: the mutated code ran once at load time, so the
+   * engine could not scope the trial to the tests that cover it and ran the
+   * whole suite instead. `false` when the report did not carry the flag.
+   */
+  readonly isStatic: boolean
 
   /** Retained failure output for the killing test, if the runner produced any. */
   readonly failureOutput: string | undefined
@@ -149,6 +155,10 @@ function isRunnerCrashOutput(failureOutput: string | undefined): boolean {
  * `knownTestIds` empty means no test table was read at all, which is the case
  * for callers that only have mutant records. Resolution is not required then --
  * the check would refuse every kill on missing input rather than on evidence.
+ * That relaxation is real but it must not be silent: a report that HAS kills
+ * and no test table would otherwise be graded by the weaker pre-resolution rule
+ * with nothing in the receipt saying so, so `projectOutcome` gives that case
+ * its own basis (`killed_without_resolvable_test_table`) before reaching here.
  */
 export function hasOwningTestEvidence(
   failureOutput: string | undefined,
@@ -185,6 +195,37 @@ export function projectOutcome(observation: MutantObservation): Projection {
     case "Killed": {
       if (isRunnerCrashOutput(observation.failureOutput)) {
         return { ...carry, outcome: "inconclusive", basis: "killed_by_runner_crash" }
+      }
+      // A static mutant is held before any identity is looked at, and that
+      // ordering is the point. The engine could not scope the trial: the
+      // mutated code ran at load time, so Stryker ran the WHOLE suite and the
+      // failure that came back says the suite noticed, not that a test owning
+      // this code did. Whether a killer id happens to resolve is not evidence
+      // of ownership either way -- it depends on how the run was scoped, and a
+      // narrow `--mutate` range leaves the stock id resolvable in the test
+      // table while the same mutant in a whole-file run does not. Deciding
+      // here, on the flag alone, is what makes the answer a function of the
+      // mutant rather than of the run that observed it.
+      if (observation.isStatic) {
+        return { ...carry, outcome: "inconclusive", basis: "static_whole_suite_kill" }
+      }
+      // A kill naming a test, in a report with no test table to name it
+      // against, cannot be resolved -- and resolution is the whole reason the
+      // named-killer rule was strengthened. `hasOwningTestEvidence` relaxes to
+      // the pre-resolution non-empty rule on an empty inventory, which is right
+      // for callers holding only mutant records and wrong for a report that
+      // carried kills and lost its table. Naming that case rather than letting
+      // it inherit the weaker rule keeps the receipt honest about which rule
+      // graded it.
+      if (
+        observation.killedBy.some((test) => test.trim().length > 0) &&
+        observation.knownTestIds.size === 0
+      ) {
+        return {
+          ...carry,
+          outcome: "inconclusive",
+          basis: "killed_without_resolvable_test_table",
+        }
       }
       if (
         !hasOwningTestEvidence(
@@ -372,6 +413,7 @@ export function readObservations(
         rawStatus: isStrykerStatus(mutant.status) ? mutant.status : "Pending",
         killedBy,
         knownTestIds,
+        isStatic: mutant.static === true,
         failureOutput:
           typeof mutant.statusReason === "string" ? mutant.statusReason : undefined,
         baselineComplete: context.baselineComplete,

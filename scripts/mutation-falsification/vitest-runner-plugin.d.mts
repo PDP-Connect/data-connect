@@ -74,11 +74,11 @@ export declare function buildIdentityMap(
 
 /**
  * Builds the stock-id to corrected-id lookup a mutant run rewrites killers
- * with, from the filter Stryker passes and any map the dry run left behind.
+ * with, from the filter Stryker passes and from nothing else -- so every worker
+ * computes the same map for the same mutant.
  */
 export declare function correctedByStockIdFrom(
-  testFilter: readonly string[] | undefined,
-  fromDryRun?: ReadonlyMap<string, { id: string }>
+  testFilter: readonly string[] | undefined
 ): Map<string, string>
 
 /** The message the run fails with when identity cannot be reconciled. */

@@ -480,6 +480,26 @@ describe("killer identity carried through mutantRun", () => {
     expect(killed(result).killedBy).toEqual(["f.test.ts#outer > checks value"])
   })
 
+  // The fourth cell, and the one that makes the policy deterministic: the same
+  // instance that reconciled the dry run, handed a mutant with no filter. A
+  // static mutant is exactly that -- no per-test coverage, so no `testFilter`
+  // -- and Stryker reuses the dry run's worker for some of them. If the dry
+  // run's map were consulted here, whether a static kill resolved would depend
+  // on which worker the mutant happened to land on, and the same head would
+  // report a different valid denominator at a different concurrency.
+  it("does not rewrite a killer id from the dry run it ran itself", async () => {
+    const runner = reconcilingRunner({
+      status: "killed",
+      killedBy: ["f.test.ts#outer checks value"],
+      nrOfTests: 1,
+    })
+    await runner.dryRun({} as never)
+
+    const result = await runner.mutantRun({ testFilter: undefined } as never)
+
+    expect(killed(result).killedBy).toEqual(["f.test.ts#outer checks value"])
+  })
+
   // With neither a dry run nor a filter there is nothing to map from, and the
   // wrapper is a pass-through -- the stock runner's behaviour.
   it("forwards killer ids unchanged with no map and no filter", async () => {

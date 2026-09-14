@@ -116,8 +116,8 @@ export function splitTestId(id) {
  * It is not, however, injective. Two different suite chains can collapse onto
  * one stock name -- `["a b", "c"]` and `["a", "b c"]` both flatten to
  * `a b c` -- and the stock name is all Stryker has to match on. See
- * `findAmbiguousStockIds`: the wrapper refuses such a run rather than picking
- * one of the chains.
+ * `buildIdentityMap`'s collision check: the wrapper refuses such a run rather
+ * than picking one of the chains.
  *
  * @param {string} correctedName a suite chain joined with " > "
  * @returns {string} the same chain joined the way the stock runner joins it
@@ -317,9 +317,16 @@ export function describeIrreconcilableIdentity({
  *
  * Stryker derives `testFilter` from the coverage the dry run reconciled, so its
  * entries are already the corrected ids -- computing the stock form of each is
- * the whole mapping, and it needs no state carried from the dry run. That
- * matters because mutants run in a pool of child processes and the instance
- * that reconciled the dry run is not the one running the mutant.
+ * the whole mapping.
+ *
+ * The filter is the ONLY source. No state is carried from the dry run, and that
+ * is a deliberate policy rather than an implementation detail. Stryker hands
+ * the dry run's process pool to the mutation executor, so one worker in every
+ * run is the one that reconciled the dry run and still holds its map. Reading
+ * that map here would make a mutant with no filter resolve on that worker and
+ * not on any other, so the same head would report a different result at a
+ * different concurrency. Rebuilding from the filter alone gives every worker
+ * the same answer for the same mutant.
  *
  * A stock id that two filter entries compute to is DROPPED rather than
  * resolved: the same losslessness rule the dry run enforces. The dry run would
@@ -329,13 +336,11 @@ export function describeIrreconcilableIdentity({
  * resolving to the wrong test.
  *
  * @param {readonly string[] | undefined} testFilter corrected ids for this mutant
- * @param {ReadonlyMap<string, { id: string }>} fromDryRun the same-process map
  * @returns {Map<string, string>} corrected id, keyed by stock id
  */
-export function correctedByStockIdFrom(testFilter, fromDryRun = new Map()) {
+export function correctedByStockIdFrom(testFilter) {
   /** @type {Map<string, string>} */
   const corrected = new Map()
-  for (const [stockId, entry] of fromDryRun) corrected.set(stockId, entry.id)
 
   /** @type {Set<string>} */
   const ambiguous = new Set()
@@ -409,17 +414,6 @@ export class SeparatorReconcilingTestRunner {
   #log
 
   /**
-   * The identity map the dry run validated, retained so `mutantRun` can put a
-   * kill under the same identity the baseline was recorded under.
-   *
-   * Empty until a dry run reconciles. A `mutantRun` reached without one leaves
-   * every id alone, which is the stock runner's behaviour.
-   *
-   * @type {Map<string, { id: string, name: string }>}
-   */
-  #correctedByStockId = new Map()
-
-  /**
    * @param {import('@stryker-mutator/api/test-runner').TestRunner} inner
    * @param {import('@stryker-mutator/api/logging').Logger} log
    */
@@ -467,11 +461,15 @@ export class SeparatorReconcilingTestRunner {
       }
     }
 
-    this.#correctedByStockId = identity.correctedByStockId
+    // Local to this call on purpose. Nothing about the dry run is retained on
+    // the instance: `mutantRun` rebuilds from its own `testFilter`, so a
+    // mutant's identities do not depend on whether it happened to land on the
+    // worker that ran the dry run.
+    const correctedByStockId = identity.correctedByStockId
 
     let reconciled = 0
     const tests = result.tests.map(test => {
-      const corrected = this.#correctedByStockId.get(test.id)
+      const corrected = correctedByStockId.get(test.id)
       if (!corrected) return test
       reconciled += 1
       return { ...test, id: corrected.id, name: corrected.name }
@@ -479,7 +477,7 @@ export class SeparatorReconcilingTestRunner {
 
     this.#log.debug(
       `stryker-js#6210 wrapper: reconciled ${reconciled} of ${result.tests.length} ` +
-        `test identities against ${this.#correctedByStockId.size} coverage keys.`
+        `test identities against ${correctedByStockId.size} coverage keys.`
     )
 
     return { ...result, tests }
@@ -496,28 +494,28 @@ export class SeparatorReconcilingTestRunner {
    * real -- an assertion failed -- but the evidence cannot be linked to the
    * test that produced it.
    *
-   * The map is rebuilt from `options.testFilter` rather than read off the dry
-   * run's, because Stryker runs mutants in a pool of child processes
-   * (core/dist/src/test-runner/child-process-test-runner-proxy.js) and the
-   * instance that reconciled the dry run is not the instance running this
-   * mutant. The filter is the right source anyway: Stryker derives it from the
-   * coverage this wrapper reconciled, so its entries are exactly the corrected
-   * ids this mutant's killers should be reported under. The dry run's map is
-   * consulted first for the same-process case.
+   * The map is rebuilt from `options.testFilter` and from nothing else. Stryker
+   * derives the filter from the coverage this wrapper reconciled, so its
+   * entries are exactly the corrected ids this mutant's killers should be
+   * reported under, and every instance handed the same mutant computes the same
+   * map from it. Reading the dry run's map instead would make the answer depend
+   * on WHICH worker ran the mutant: Stryker hands the dry run's process pool to
+   * the mutation executor (core/dist/src/process/3-dry-run-executor.js), so one
+   * worker in every run still holds that map while the others
+   * (core/dist/src/test-runner/child-process-test-runner-proxy.js) do not.
    *
    * Status, counts, errors and every other field are forwarded untouched: this
    * normalises identity, it does not reclassify a result. An id with no entry
-   * in either map is left as it is -- an unknown identity must not be rewritten
+   * in the map is left as it is -- an unknown identity must not be rewritten
    * into a known-looking one.
    *
-   * STATIC mutants are the case this cannot reach. They carry no per-test
-   * coverage, so Stryker runs the whole suite with no `testFilter`, and there
-   * is nothing to rebuild the mapping from. Their killers stay space-joined and
-   * do not resolve against the report's test table -- which the downstream
-   * predicate reads as an unattributed kill and holds `inconclusive`. That is
-   * the correct answer for them: the suite did fail, but nothing identifies
-   * WHICH test owns the mutant, which is exactly what a static mutant's
-   * whole-suite run cannot tell you.
+   * STATIC mutants are the case this deliberately cannot reach. They carry no
+   * per-test coverage, so Stryker runs the whole suite with no `testFilter`,
+   * and there is nothing to rebuild the mapping from -- on any worker. Their
+   * killers stay space-joined. What a static kill means is decided downstream
+   * by the projector, not here: `stryker-adapter.ts` holds every `static: true`
+   * kill `inconclusive` under its own basis, so the classification does not
+   * depend on this wrapper resolving an id, nor on how the run was scoped.
    */
   async mutantRun(options) {
     const result = await this.#inner.mutantRun(options)
@@ -525,10 +523,7 @@ export class SeparatorReconcilingTestRunner {
       return result
     }
 
-    const corrected = correctedByStockIdFrom(
-      options.testFilter,
-      this.#correctedByStockId
-    )
+    const corrected = correctedByStockIdFrom(options.testFilter)
     if (corrected.size === 0) return result
 
     return {
