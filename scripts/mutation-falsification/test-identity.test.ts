@@ -234,6 +234,11 @@ describe("ambiguous test identity", () => {
     const result = await runner.dryRun({} as never)
 
     expect(result.status).toBe("complete")
+    // Narrowed on the discriminant rather than cast: the refusal branch carries
+    // no `tests`, so reaching the assertion below is itself part of the claim.
+    if ("errorMessage" in result && result.errorMessage !== undefined) {
+      throw new Error(`expected a reconciled run, got: ${result.errorMessage}`)
+    }
     expect(result.tests).toEqual([
       {
         id: "f.test.ts#outer > checks value",

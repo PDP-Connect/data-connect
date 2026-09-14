@@ -59,6 +59,22 @@ const STRYKER_NAMESPACE = "__stryker__"
 const VITEST_FULL_NAME_SEPARATOR = " > "
 
 /**
+ * The part of Vitest's task shape this file walks: a name, and the enclosing
+ * suite chain reached by following `suite` outward. Declared recursively
+ * because the walk follows that field to the root -- typing it as `unknown`
+ * and re-asserting at each step is what the loop below would otherwise need.
+ *
+ * Only the fields read here are named. Vitest's own task type carries much
+ * more, and narrowing to what is used keeps this declaration honest about what
+ * the hook depends on.
+ */
+interface NamedTask {
+  name: string
+  suite?: NamedTask
+  file?: { filepath?: string }
+}
+
+/**
  * Rebuilds the runner's test identity with Vitest's separator.
  *
  * Deliberately the same walk the runner performs in its `collectTestName`
@@ -68,9 +84,9 @@ const VITEST_FULL_NAME_SEPARATOR = " > "
  * pattern it builds is unanchored, so a suite-chain substring of Vitest's
  * `fullTestName` is what matches.
  */
-function fullNameOf(task: { name: string; suite?: unknown }): string {
+function fullNameOf(task: NamedTask): string {
   const parts = [task.name]
-  let current = (task as { suite?: { name: string; suite?: unknown } }).suite
+  let current = task.suite
   while (current) {
     parts.unshift(current.name)
     current = current.suite
@@ -89,11 +105,7 @@ beforeEach(context => {
   // reconcile. Writing an id here would invent coverage attribution.
   if (!namespace || typeof namespace.currentTestId !== "string") return
 
-  const task = context.task as {
-    name: string
-    suite?: unknown
-    file?: { filepath?: string }
-  }
+  const task = context.task as NamedTask
 
   // Rebuild the whole id rather than editing the recorded one. The recorded id
   // is `filepath#space-joined-name`, and a space is not a separator that can be
