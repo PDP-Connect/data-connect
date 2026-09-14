@@ -60,6 +60,8 @@ import {
   resolveRequestBindings,
 } from "./connection-identity.ts";
 import {
+  ConnectorInstanceAdmissionError,
+  connectorInstanceLockWaitMs,
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
@@ -6683,6 +6685,14 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           exec(referenceQueries.recordsDeleteDeleteRecordChangesByStream, [connectorInstanceId, stream]);
           exec(referenceQueries.recordsDeleteDeleteVersionCounterByStream, [connectorInstanceId, stream]);
           exec(referenceQueries.recordsDeleteDeleteBlobBindingsByStream, [connectorInstanceId, stream]);
+          // Reclaim blobs the binding delete above just orphaned. Refcount-gated
+          // (see delete-blobs-by-stream.sql) because content-addressed blob rows
+          // are shared across connections and the FK cascades. Postgres parity:
+          // the same pair runs in `postgresDeleteAllRecordsForConnector` -- but
+          // only the Postgres arm keys candidates on the just-unbound ids; this
+          // arm still keys on the first uploader. See the KNOWN GAP note in
+          // `deleteConnectionRecordRowsSqlite`.
+          exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
       });
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
@@ -6784,10 +6794,35 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
-        await postgresQuery("DELETE FROM blob_bindings WHERE connector_instance_id = $1 AND stream = $2", [
-          connectorInstanceId,
-          stream,
-        ]);
+        await withPostgresTransaction(
+          async (client) => {
+            const unbound = await client.query<{ blob_id: string }>(
+              "DELETE FROM blob_bindings WHERE connector_instance_id = $1 AND stream = $2 RETURNING blob_id",
+              [connectorInstanceId, stream]
+            );
+            // Reclaim blobs this delete just unbound, mirroring
+            // `deleteConnectionRecordRowsPostgres` (and SQLite's
+            // `delete-blobs-by-instance.sql`). Dropping the bindings above without
+            // this left the `blobs` rows behind permanently — nothing else in the
+            // codebase collects orphans, so those bytes were junk forever.
+            //
+            // Refcount-gated, NOT supersede-and-delete. `blobs` is globally
+            // content-addressed (the insert conflicts on `blob_id` alone, with no
+            // connector or instance in the conflict target), so identical bytes
+            // from a sibling connection share ONE row; and the FK from
+            // `blob_bindings` is ON DELETE CASCADE, so an ungated delete here
+            // would silently destroy a live sibling's binding. `NOT EXISTS`
+            // deletes only rows no binding still references. Scoped to the rows
+            // THIS delete unbound (above), not to rows this instance uploaded:
+            // content addressing means the last connection to release a shared
+            // row is often not the one that created it.
+            await deleteUnreferencedBlobsPostgres(
+              client,
+              unbound.rows.map((row) => row.blob_id)
+            );
+          },
+          { lockConnectorInstanceId: connectorInstanceId }
+        );
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
@@ -6983,10 +7018,84 @@ export function deleteConnectionRecordRowsSqlite(connectorInstanceId: string) {
   // connection. The registered delete query removes only unreferenced rows,
   // after this connection's bindings are gone, so the sibling binding remains
   // valid under SQLite's blob_bindings foreign key.
+  //
+  // KNOWN GAP (Postgres arm repaired, SQLite arm not): candidates are keyed on
+  // `blobs.connector_instance_id`, which names the FIRST uploader of globally
+  // content-addressed bytes. A row this connection was the LAST to reference
+  // but did not upload is left with zero bindings and no way to ever be seen
+  // again. Repairing this needs a returning-many read primitive the bounded
+  // `lib/db.ts` layer does not expose yet.
   exec(referenceQueries.recordsDeleteDeleteBlobsByInstance, [connectorInstanceId]);
   exec(referenceQueries.recordsDeleteDeleteAttentionRecordsByInstance, [connectorInstanceId]);
   exec(referenceQueries.recordsDeleteDeleteRecordsByInstance, [connectorInstanceId]);
   return count;
+}
+
+/**
+ * Reclaim only locked candidates, with a fresh reference snapshot per batch.
+ *
+ * `unboundBlobIds` is the set of blobs whose bindings THIS delete just removed,
+ * captured by the caller's `DELETE ... RETURNING blob_id`. Candidates must be
+ * keyed on that set rather than on `blobs.connector_instance_id`: `blobs` is
+ * globally content-addressed, so the row records whichever connection uploaded
+ * the bytes FIRST, not who still references them. When two connections publish
+ * identical bytes they share one row owned by the first; deleting the second
+ * leaves a row with zero bindings that an owner-scoped candidate query can
+ * never see again, and nothing else in the codebase collects orphans. Keying on
+ * the unbound set reclaims exactly the bytes this delete stranded, whoever
+ * uploaded them.
+ */
+async function deleteUnreferencedBlobsPostgres(client: PostgresClient, unboundBlobIds: string[]): Promise<void> {
+  if (unboundBlobIds.length === 0) {
+    return;
+  }
+  // Deterministic lock order across concurrent connection deletes that unbind
+  // an overlapping shared row: both take `blobs` rows in ascending blob_id.
+  const orderedBlobIds = [...new Set(unboundBlobIds)].sort();
+  // Match the store's admission budget even for caller-owned transactions that
+  // did not acquire an instance advisory lock. SET LOCAL ends at COMMIT/ROLLBACK.
+  await client.query(`SET LOCAL lock_timeout = '${connectorInstanceLockWaitMs()}ms'`);
+  const batchSize = 256;
+  let offset = 0;
+  let hasMore = true;
+  try {
+    while (hasMore) {
+      const batch = orderedBlobIds.slice(offset, offset + batchSize);
+      if (batch.length === 0) {
+        return;
+      }
+      // The FK takes KEY SHARE when a writer adds a binding. Wait here, then
+      // check references in a NEW READ COMMITTED statement so committed writers
+      // are visible. A single CTE would retain the stale statement snapshot.
+      // Batches bound the rows locked per statement; locks remain transaction-wide.
+      // biome-ignore lint/performance/noAwaitInLoops: each batch must lock and reclaim before the next one starts.
+      const candidates = await client.query<{ blob_id: string }>(
+        `SELECT blob_id FROM blobs
+          WHERE blob_id = ANY($1::text[])
+          ORDER BY blob_id FOR UPDATE`,
+        [batch]
+      );
+      const blobIds = candidates.rows.map((row) => row.blob_id);
+      if (blobIds.length > 0) {
+        await client.query(
+          `DELETE FROM blobs
+          WHERE blob_id = ANY($1::text[])
+            AND NOT EXISTS (
+              SELECT 1 FROM blob_bindings WHERE blob_bindings.blob_id = blobs.blob_id
+            )`,
+          [blobIds]
+        );
+      }
+      offset += batchSize;
+      hasMore = offset < orderedBlobIds.length;
+    }
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === "55P03") {
+      // biome-ignore lint/style/useErrorCause: preserve the coordinator's no-argument admission error contract.
+      throw new ConnectorInstanceAdmissionError();
+    }
+    throw err;
+  }
 }
 
 /**
@@ -7003,16 +7112,16 @@ export async function deleteConnectionRecordRowsPostgres(client: PostgresClient,
   const count = Number(countResult.rows[0]?.count || 0);
   await client.query("DELETE FROM record_changes WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM version_counter WHERE connector_instance_id = $1", [connectorInstanceId]);
-  await client.query("DELETE FROM blob_bindings WHERE connector_instance_id = $1", [connectorInstanceId]);
-  await client.query(
-    `DELETE FROM blobs
-      WHERE connector_instance_id = $1
-        AND NOT EXISTS (
-          SELECT 1
-            FROM blob_bindings
-           WHERE blob_bindings.blob_id = blobs.blob_id
-        )`,
+  // RETURNING captures the blobs this delete unbound. Reclamation must be keyed
+  // on that set, not on `blobs.connector_instance_id` — see
+  // `deleteUnreferencedBlobsPostgres`.
+  const unbound = await client.query<{ blob_id: string }>(
+    "DELETE FROM blob_bindings WHERE connector_instance_id = $1 RETURNING blob_id",
     [connectorInstanceId]
+  );
+  await deleteUnreferencedBlobsPostgres(
+    client,
+    unbound.rows.map((row) => row.blob_id)
   );
   await client.query("DELETE FROM connector_attention_records WHERE connector_instance_id = $1", [connectorInstanceId]);
   await client.query("DELETE FROM records WHERE connector_instance_id = $1", [connectorInstanceId]);

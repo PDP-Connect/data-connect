@@ -406,6 +406,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly recordsDeleteDeleteBlobBindingsByInstance: MutationQuery;
   readonly recordsDeleteDeleteBlobBindingsByStream: MutationQuery;
   readonly recordsDeleteDeleteBlobsByInstance: MutationQuery;
+  readonly recordsDeleteDeleteBlobsByStream: MutationQuery;
   readonly recordsDeleteDeleteRecordChangesByConnector: MutationQuery;
   readonly recordsDeleteDeleteRecordChangesByInstance: MutationQuery;
   readonly recordsDeleteDeleteRecordChangesByStream: MutationQuery;
@@ -887,6 +888,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "recordsDeleteDeleteBlobBindingsByStream",
     "recordsDeleteDeleteBlobBindingsByInstance",
     "recordsDeleteDeleteBlobsByInstance",
+    "recordsDeleteDeleteBlobsByStream",
     "recordsDeleteDeleteAttentionRecordsByInstance",
     "recordsDeleteListDistinctStreamsByConnector",
     "recordsDeleteListInstanceStreamsByConnector",

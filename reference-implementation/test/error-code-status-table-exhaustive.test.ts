@@ -39,6 +39,12 @@ const EXPECTED_CODE_TO_STATUS = {
   archive_reconnect_resume_failed: 502,
   authentication_error: 401,
   blob_not_found: 404,
+  // A blob was reclaimed by `deleteUnreferencedBlobsPostgres` inside the
+  // publication window, so there is no row left to bind. 409 (not 500) because
+  // re-running the publication re-inserts the bytes -- it is a retryable race,
+  // and an `api_error` would tell the caller a retry is pointless. Emitted from
+  // both race windows in `server/postgres-records.ts` with `statusCode: 409`.
+  blob_publication_conflict: 409,
   browser_enrollment_shell_required: 400,
   connection_is_grouping_canonical: 409,
   connection_not_found: 404,

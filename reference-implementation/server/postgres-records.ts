@@ -952,7 +952,8 @@ export function postgresPrepareDeviceFinalRecords(
                 primary_key_text = $5,
                 semantic_time = $6
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
-            AND deleted = FALSE`,
+            AND deleted = FALSE
+            AND (cursor_value, primary_key_text, semantic_time) IS DISTINCT FROM ($4, $5, $6)`,
           [connectorInstanceId, input.stream, recordKey, cursor, primary, semanticTime]
         );
         result.push({
@@ -1625,7 +1626,8 @@ async function repairPostgresIdenticalIngest({
               primary_key_text = $5,
               semantic_time = $6
         WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
-          AND deleted = FALSE`,
+          AND deleted = FALSE
+          AND (cursor_value, primary_key_text, semantic_time) IS DISTINCT FROM ($4, $5, $6)`,
       [connectorInstanceId, stream, recordKey, storedCursorValue, storedPrimaryKeyText, storedSemanticTime]
     );
   }
@@ -2982,7 +2984,10 @@ async function deletePostgresRecordTailForPair(
   connectorInstanceId: string,
   stream: string
 ): Promise<void> {
-  const semanticScopePrefix = `[${JSON.stringify(stream)},`;
+  const semanticScopePrefix = `[${JSON.stringify(stream)},`
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_");
   await client.query("DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
     stream,
@@ -3003,7 +3008,7 @@ async function deletePostgresRecordTailForPair(
     connectorInstanceId,
     stream,
   ]);
-  await client.query("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2", [
+  await client.query("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'", [
     connectorInstanceId,
     `${semanticScopePrefix}%`,
   ]);
@@ -3116,7 +3121,23 @@ async function postgresPersistContentAddressedBlobWithinFence({
         blobId,
       ]);
       const [storedRow] = stored.rows;
-      if (!storedRow || storedRow.sha256 !== sha256 || Number(storedRow.size_bytes) !== sizeBytes) {
+      if (!storedRow) {
+        // The INSERT above is ON CONFLICT DO NOTHING, so it no-ops when the row
+        // already exists. Concurrent reclamation (`deleteUnreferencedBlobsPostgres`)
+        // can then commit its delete between that no-op and this SELECT, leaving
+        // no row to bind. That is the same reclaimed-during-publication race the
+        // FK-violation handler below catches at the later binding window, and it
+        // is equally retryable — re-running the publication re-inserts the bytes.
+        // Reporting it as `api_error` (HTTP 500) would tell a caller a retry is
+        // pointless, so classify it as the retryable 409 instead.
+        throw Object.assign(new Error("Blob was reclaimed during publication; retry the upload."), {
+          code: "blob_publication_conflict",
+          statusCode: 409,
+        });
+      }
+      if (storedRow.sha256 !== sha256 || Number(storedRow.size_bytes) !== sizeBytes) {
+        // A row under this content-addressed id whose bytes disagree is a real
+        // integrity fault, not a race: retrying cannot fix it.
         const err: PgQueryError = new Error("Blob storage collision");
         err.code = "api_error";
         throw err;
@@ -3135,7 +3156,16 @@ async function postgresPersistContentAddressedBlobWithinFence({
       return { ...storedRow, binding_inserted: (binding.rowCount ?? 0) > 0 };
     },
     { lockConnectorInstanceId: effectiveConnectorInstanceId }
-  );
+  ).catch((error: unknown) => {
+    const queryError = error as { code?: string; constraint?: string } | null;
+    if (queryError?.code === "23503" && queryError.constraint === "blob_bindings_blob_id_fkey") {
+      throw Object.assign(new Error("Blob was reclaimed during publication; retry the upload.", { cause: error }), {
+        code: "blob_publication_conflict",
+        statusCode: 409,
+      });
+    }
+    throw error;
+  });
 
   return {
     binding_inserted: Boolean(row.binding_inserted),
