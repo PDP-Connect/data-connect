@@ -31,6 +31,8 @@ import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
 import { validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
+import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
+import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
 import {
   type EnrollmentExchangeResponse,
   type HeartbeatLastError,
@@ -2443,6 +2445,13 @@ function sanitizeCollectorGapDetails(value: string): string {
 
 export interface DrainCollectorOutboxInput {
   abortSignal?: AbortSignal;
+  /**
+   * Uploads one spooled artifact body. Supplied together with `spool` to
+   * enable `blob_upload` delivery; when either is absent a claimed
+   * `blob_upload` row dead-letters as unsupported rather than being dropped,
+   * so its spooled bytes stay on disk and visibly unresolved.
+   */
+  blobUpload?: DrainBlobUploadFn;
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>;
   connectorId: string;
@@ -2450,7 +2459,46 @@ export interface DrainCollectorOutboxInput {
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
   sourceInstanceId?: string;
+  /** Content-addressed local store holding the bytes `blob_upload` rows name. */
+  spool?: LocalDeviceBlobSpool;
+  /**
+   * Grace period applied by the reclaim sweep when it is enabled. Only
+   * meaningful alongside `spoolReclaimUnsafe`. See
+   * `DEFAULT_SPOOL_RECLAIM_MIN_AGE_MS` — it is not a safety property.
+   */
+  spoolReclaimMinAgeMs?: number;
+  /**
+   * Run the spool reclaim sweep after the drain.
+   *
+   * **Off by default, and no production caller sets it.** The sweep can delete
+   * a body a live `blob_upload` row names when a capture commits concurrently,
+   * and a row naming absent bytes is TERMINAL — so enabling it trades bounded
+   * disk growth for unbounded, permanent artifact loss. Left as an option only
+   * so the sweep's behaviour stays under test while the ownership contract it
+   * needs is built. See `LocalDeviceBlobSpool.reclaimUnreferencedUnsafe`.
+   */
+  spoolReclaimUnsafe?: boolean;
 }
+
+/**
+ * Uploads one spooled body, streaming it from local disk.
+ *
+ * Returns the server's blob reference on success. The drain treats a thrown
+ * error exactly like any other delivery failure — transient classes retry with
+ * backoff, the rest dead-letter after `maxAttempts` — so a blob upload inherits
+ * the same durability machinery as a record batch.
+ */
+export type DrainBlobUploadFn = (args: {
+  connectorId: string;
+  connectorInstanceId: string | null;
+  content: NodeJS.ReadableStream;
+  jsonPath?: string;
+  mimeType: string;
+  recordKey: string;
+  sha256: string;
+  sizeBytes: number;
+  stream: string;
+}) => Promise<{ sha256: string; size_bytes: number }>;
 
 export interface DrainCollectorOutboxResult {
   deadLettered: number;
@@ -2475,6 +2523,56 @@ export interface DrainCollectorOutboxResult {
  * runner pass.
  */
 export async function drainCollectorOutbox(input: DrainCollectorOutboxInput): Promise<DrainCollectorOutboxResult> {
+  try {
+    return await runCollectorOutboxDrain(input);
+  } finally {
+    // When enabled, reclaim runs AFTER the drain has committed its
+    // acknowledgements, in `finally` so an aborted or budget-truncated drain
+    // still sweeps and so it never runs while this drain holds an
+    // unacknowledged obligation it just delivered. It is DISABLED by default —
+    // see `reclaimDrainedBlobSpool`.
+    await reclaimDrainedBlobSpool(input);
+  }
+}
+
+/**
+ * Reclaim spool bodies no longer owed to any undelivered `blob_upload` row.
+ *
+ * **Disabled unless `spoolReclaimUnsafe` is set, which no production caller
+ * does, so nothing reclaims spooled bodies today.** The sweep it would run has
+ * no ownership contract with capture: it snapshots the reference set, awaits a
+ * body's metadata, then unlinks that pathname, and a capture committing in
+ * between leaves it deleting a FRESH body by an OLD body's age. A `blob_upload`
+ * row whose bytes are absent is classified TERMINAL, so that loss is permanent
+ * rather than retried — strictly worse than the unbounded disk growth that
+ * leaving the sweep off costs. Reproduced with the default grace period in
+ * `local-device-blob-spool-reclaim-race.test.ts`.
+ *
+ * A second defect blocks it independently: the reference set comes from THIS
+ * drain's outbox, while a content-addressed spool can be shared by every
+ * per-connection queue in the same directory. See
+ * `assertSpoolReferenceAuthorityIsComplete`.
+ *
+ * Both must be resolved before the default flips. Until then the spool grows
+ * without bound and an operator reclaims by hand; that is the deliberate
+ * trade, not an oversight.
+ */
+async function reclaimDrainedBlobSpool(input: DrainCollectorOutboxInput): Promise<void> {
+  if (!(input.spool && input.spoolReclaimUnsafe)) {
+    return;
+  }
+  try {
+    await input.spool.reclaimUnreferencedUnsafe({
+      acknowledgeUnsafe: true,
+      outstandingDigests: input.outbox.outstandingBlobDigests(),
+      ...(input.spoolReclaimMinAgeMs === undefined ? {} : { minAgeMs: input.spoolReclaimMinAgeMs }),
+    });
+  } catch {
+    // Reclaim is opportunistic housekeeping. Bytes stay; disk is the only cost.
+  }
+}
+
+async function runCollectorOutboxDrain(input: DrainCollectorOutboxInput): Promise<DrainCollectorOutboxResult> {
   const sentByKind: Partial<Record<LocalDeviceOutboxItem["kind"], number>> = {};
   const result: DrainCollectorOutboxResult = {
     deadLettered: 0,
@@ -2654,7 +2752,10 @@ async function drainClaimedOutboxItem(
       leaseEpoch: item.lease_epoch,
       leaseMs: input.policy.leaseMs,
     });
-    await sendOutboxItem(input.client, current);
+    await sendOutboxItem(input.client, current, {
+      ...(input.blobUpload ? { blobUpload: input.blobUpload } : {}),
+      ...(input.spool ? { spool: input.spool } : {}),
+    });
     input.outbox.acknowledge({
       holder: input.holderId,
       id: current.id,
@@ -2693,6 +2794,10 @@ function failOutboxItem(
         error instanceof LocalDeviceReceiptValidationError);
     const isTerminal =
       error instanceof OutboxPayloadShapeError ||
+      // The spooled bytes are gone. No retry can reproduce them, so fail fast
+      // to a dead-letter where the loss is visible and attributable rather
+      // than burning attempts against an absent path.
+      error instanceof LocalDeviceBlobSpoolMissingError ||
       isTerminalCommitRejection ||
       (!isExplicitTransient && item.attempt_count + 1 >= input.policy.maxAttempts);
     if (isTerminal) {
@@ -2747,10 +2852,16 @@ class OutboxPayloadShapeError extends Error {
  */
 const DEFAULT_GAP_RETRY_BACKOFF_MS = 15 * 60_000;
 
+interface SendOutboxItemDeps {
+  blobUpload?: DrainBlobUploadFn;
+  spool?: LocalDeviceBlobSpool;
+}
+
 async function sendOutboxItem(
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>,
-  item: LocalDeviceOutboxItem
+  item: LocalDeviceOutboxItem,
+  deps: SendOutboxItemDeps = {}
 ): Promise<void> {
   if (item.kind === "record_batch") {
     const payload = assertRecordBatchPayload(item.payload, item.id);
@@ -2803,7 +2914,102 @@ async function sendOutboxItem(
     });
     return;
   }
+  if (item.kind === "blob_upload") {
+    await sendBlobUploadItem(item, deps);
+    return;
+  }
   throw new OutboxPayloadShapeError(`unsupported outbox kind ${item.kind} for id ${item.id}`);
+}
+
+/**
+ * Deliver one spooled artifact body. Deliberately deletes nothing.
+ *
+ * Reclaiming the local copy here would be wrong twice over, so the send path
+ * owns delivery only. Reclamation is a separate sweep over durable queue state
+ * ({@link LocalDeviceBlobSpool.reclaimUnreferencedUnsafe}), and that sweep is
+ * currently disabled — so today nothing deletes a spooled body at all:
+ *
+ *  - **The body may be shared.** Content addressing means identical content
+ *    under different record coordinates is several rows over ONE file. A
+ *    per-row delete destroys bytes the other rows still owe, and since missing
+ *    spool bytes are TERMINAL those rows dead-letter permanently.
+ *  - **Deletion must follow durable acknowledgement.** This function returns
+ *    before `acknowledge()` commits, so any delete here precedes the durable
+ *    record that the obligation was met and leaves a window where a stop
+ *    strands a pending row without its body.
+ *
+ * A digest or size mismatch is raised as a plain error, not an
+ * `OutboxPayloadShapeError`, so it retries before dead-lettering — a truncated
+ * transfer is usually transport damage, and the authoritative bytes are still
+ * on local disk to try again from.
+ */
+async function sendBlobUploadItem(item: LocalDeviceOutboxItem, deps: SendOutboxItemDeps): Promise<void> {
+  const payload = assertBlobUploadPayload(item.payload, item.id);
+  if (!(deps.blobUpload && deps.spool)) {
+    throw new OutboxPayloadShapeError(
+      `collector drain has no blob upload transport for ${item.id}; spooled bytes retained`
+    );
+  }
+  // Throws LocalDeviceBlobSpoolMissingError when the body is gone — mapped to
+  // a dead-letter by failOutboxItem, since no retry can conjure the bytes.
+  const content = deps.spool.openRead(payload.sha256);
+  // This function opens the stream, so this function closes it. A transport
+  // that throws — the common case, since every retry and dead-letter passes
+  // through here — may have read none of it, and an unread `createReadStream`
+  // holds its descriptor open until GC. Under the drain's retry loop that
+  // accumulates one leaked descriptor per failed attempt.
+  try {
+    const uploaded = await deps.blobUpload({
+      connectorId: payload.connectorId,
+      connectorInstanceId: payload.connectorInstanceId,
+      content,
+      mimeType: payload.mimeType,
+      recordKey: payload.recordKey,
+      sha256: payload.sha256,
+      sizeBytes: payload.sizeBytes,
+      stream: payload.stream,
+      ...(payload.jsonPath ? { jsonPath: payload.jsonPath } : {}),
+    });
+    if (uploaded.sha256 !== payload.sha256 || uploaded.size_bytes !== payload.sizeBytes) {
+      throw new Error(`blob upload integrity mismatch for ${item.id}`);
+    }
+  } finally {
+    // Destroying a fully-consumed stream is a no-op, so this is safe on the
+    // success path too. It never touches the spooled body — only this reader.
+    destroyReadStream(content);
+  }
+}
+
+/**
+ * Release a read stream's descriptor without letting cleanup mask a failure.
+ *
+ * `createReadStream` opens its descriptor asynchronously, so destroying a
+ * stream before that open settles can still surface the open's outcome as an
+ * `error` event. Destroying a stream over a file that is still there emits
+ * nothing (verified), so this only fires when the body disappeared between
+ * `openRead`'s existence check and the open — a narrow window, but one with no
+ * listener on it, and an `error` with no listener terminates the process.
+ * Attaching a sink first keeps the upload's own failure the one that
+ * propagates, which is the outcome the drain classifies and retries on.
+ */
+function destroyReadStream(stream: NodeJS.ReadableStream): void {
+  const destroyable = stream as NodeJS.ReadableStream & { destroy?: () => void };
+  try {
+    stream.on("error", () => {
+      // The upload's own error is the one that matters; this reader is being
+      // discarded, so its late open/close failure is not a delivery outcome.
+    });
+    destroyable.destroy?.();
+  } catch {
+    // Cleanup must not replace the error the caller is already propagating.
+  }
+}
+
+function assertBlobUploadPayload(payload: unknown, id: string): BlobUploadPayload {
+  if (!isBlobUploadPayload(payload)) {
+    throw new OutboxPayloadShapeError(`malformed blob_upload payload: ${id}`);
+  }
+  return payload;
 }
 
 function assertRecordBatchPayload(payload: unknown, id: string): RecordBatchPayload {

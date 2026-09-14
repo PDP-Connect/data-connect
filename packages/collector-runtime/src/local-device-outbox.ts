@@ -984,6 +984,46 @@ export class LocalDeviceOutbox {
     return Boolean(row);
   }
 
+  /**
+   * Every content digest still claimed by an undelivered `blob_upload` row,
+   * across all source instances.
+   *
+   * This is the durable reference set behind spool reclamation. Identical
+   * content captured under different record coordinates produces DIFFERENT
+   * rows sharing ONE digest-addressed body, so a body may be claimed by many
+   * rows at once and must survive until the last of them is delivered. The
+   * outbox is the only durable record of those obligations, which makes it the
+   * authoritative registry — a separate refcount would be a second source of
+   * truth that drifts whenever a crash lands between the two writes.
+   *
+   * `succeeded` is excluded because an acknowledged row no longer needs its
+   * local copy. `ready`, `leased`, and `dead_letter` are all retained: a
+   * dead-lettered upload deliberately keeps its bytes so the artifact stays
+   * recoverable and visibly unresolved, and `requeueDeadLetters` can return it
+   * to `ready` at any time.
+   *
+   * Whole-file by design. The spool is content-addressed and therefore shared
+   * across source instances, so reclaiming against one lane's rows alone would
+   * delete bodies another lane still owes.
+   */
+  outstandingBlobDigests(): Set<string> {
+    const rows = this.#db
+      .prepare(
+        `SELECT DISTINCT json_extract(payload_json, '$.sha256') AS sha256
+           FROM local_device_outbox
+          WHERE kind = 'blob_upload'
+            AND status != 'succeeded'`
+      )
+      .all();
+    const digests = new Set<string>();
+    for (const row of rows) {
+      if (isRecord(row) && typeof row.sha256 === "string" && row.sha256.length > 0) {
+        digests.add(row.sha256);
+      }
+    }
+    return digests;
+  }
+
   countOpenGaps(input: { sourceInstanceId: string }): number {
     const row = this.#db
       .prepare(
