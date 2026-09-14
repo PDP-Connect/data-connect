@@ -1,9 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// The postcondition of the whole release pipeline: after any run that
-// produced or converged on a release, ALL THREE lockstep packages are live at
-// that version.
+// The postcondition of the release pipeline: after a run that published a
+// release, ALL THREE lockstep packages are live at that version.
 //
 // This exists because "the release job exited 0" is not the same claim as
 // "the release happened". The v2.2.1 failure is the proof: the run reported a
@@ -17,7 +16,7 @@
 // the missing packages named, instead of succeeding quietly and leaving the
 // discovery to whoever installs next.
 //
-// It is deliberately the LAST step of both publishing paths, and deliberately
+// It is deliberately the LAST step of the publishing path, and deliberately
 // re-reads the registry rather than trusting anything the publish steps
 // reported about themselves. The maker is not the judge: a publish step
 // asserting its own success is exactly the assumption that failed.
@@ -150,8 +149,10 @@ export async function main(wait: PropagationWait = {}): Promise<void> {
   if (missing.length > 0) {
     fail(
       `lockstep release ${version} is INCOMPLETE — missing: ${missing.join(", ")}. ` +
-        `The tag claims a release the registry does not hold. Re-run the release workflow on main: ` +
-        `it will converge on this version and publish only what is missing.`
+        `The tag claims a release the registry does not hold. Do not re-run this workflow run: ` +
+        `the tag is already on this commit, so semantic-release finds zero commits since the last ` +
+        `release and resolves no version at all. ${version} stays incomplete. Land the next in-scope ` +
+        `commit on main — or any commit plus a forced dispatch — and the next version supersedes it.`
     )
   }
 
