@@ -54,13 +54,13 @@
     "verify": "npm run typecheck && npm run check && npm test && npm run artifact:verify"
   },
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.6.2"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
-    "@types/node": "^26.5.0",
+    "@biomejs/biome": "2.5.13",
+    "@types/node": "^26.5.1",
     "tsx": "^4.23.13",
-    "ultracite": "7.11.0"
+    "ultracite": "7.11.1"
   },
   "engines": {
     "node": ">=22.14.0"

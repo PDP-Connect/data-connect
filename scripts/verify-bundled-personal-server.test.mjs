@@ -85,6 +85,48 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("better-sqlite3")
   })
 
+  it("accepts either better-sqlite3 addon layout", () => {
+    // 12.x builds `build/Release/better_sqlite3.node`; 13.x ships
+    // `prebuilds/<platform>-<arch>.node` and builds no `build/Release` at all.
+    // Either is an addon the sidecar can open a database with, so requiring one
+    // release's filename fails a correct bundle built from the other.
+    // `runtimeEntries` already carries the 12.x shape.
+    expect(() =>
+      assertPackagedRuntime(runtimeEntries, "DataConnect.deb")
+    ).not.toThrow()
+
+    const napiEntries = runtimeEntries.map(entry =>
+      entry.includes("better_sqlite3.node")
+        ? "usr/lib/DataConnect/personal-server/dist/node_modules/better-sqlite3/prebuilds/linux-x64.node"
+        : entry
+    )
+    expect(() =>
+      assertPackagedRuntime(napiEntries, "DataConnect.deb")
+    ).not.toThrow()
+  })
+
+  it("rejects an artifact carrying neither better-sqlite3 addon layout", () => {
+    // Still all-or-nothing: an addon in one of its two real shapes, not an
+    // addon optionally.
+    expect(() =>
+      assertPackagedRuntime(
+        runtimeEntries.filter(entry => !entry.includes("better-sqlite3")),
+        "DataConnect.deb"
+      )
+    ).toThrow("better-sqlite3")
+  })
+
+  it("rejects an addon path that is neither shape", () => {
+    const strayEntries = runtimeEntries.map(entry =>
+      entry.includes("better_sqlite3.node")
+        ? "usr/lib/DataConnect/personal-server/dist/node_modules/better-sqlite3/build/Debug/better_sqlite3.node"
+        : entry
+    )
+    expect(() =>
+      assertPackagedRuntime(strayEntries, "DataConnect.deb")
+    ).toThrow("better-sqlite3")
+  })
+
   it("rejects an artifact missing a PDPP runtime dependency", () => {
     expect(() =>
       assertPackagedRuntime(

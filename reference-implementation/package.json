@@ -68,7 +68,7 @@
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
-    "fastify": "^5.12.3",
+    "fastify": "^5.12.4",
     "ipaddr.js": "2.5.0",
     "patchright": "1.63.0",
     "pg": "^8.23.0",
@@ -79,13 +79,13 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
-    "@babel/parser": "8.0.4",
-    "@biomejs/biome": "2.5.12",
+    "@babel/parser": "8.0.5",
+    "@biomejs/biome": "2.5.13",
     "@types/better-sqlite3": "^9.6.0",
     "@types/pg": "8.23.1",
     "jsdom": "^30.0.1",
     "pino-pretty": "^13.0.0",
-    "ultracite": "7.11.0"
+    "ultracite": "7.11.1"
   },
   "optionalDependencies": {
     "@opendatalabs/remote-surface": "^1.5.2"

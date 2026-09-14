@@ -34,9 +34,9 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 hex = "0.4"
-sigstore = { version = "0.13", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls-native-roots"] }
+sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
 semver = "1.0"
-dirs = "6.0"
+dirs = "7.0"
 dotenvy = "0.15"
 mime_guess = "2.0.5"
 flate2 = "1.0"

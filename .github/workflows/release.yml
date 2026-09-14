@@ -166,6 +166,16 @@ jobs:
           npm run test:security
           npm run build
 
+      # Boot the artifact where it has never been. Building it and running it in
+      # place proves nothing about the sidecar we ship: in its own tree it can
+      # reach `personal-server/node_modules` by accident, which is how a build
+      # shipped an absolute import into the build machine's dependency tree,
+      # passed every platform build green, and failed the first time the dist was
+      # copied. This is the check that would have caught it.
+      - name: Verify the personal-server artifact runs outside its build tree
+        working-directory: personal-server
+        run: node scripts/verify-artifact-relocatable.js
+
       - name: Install PDPP runtime dependencies
         run: node scripts/ensure-pdpp-runtime.js
 
