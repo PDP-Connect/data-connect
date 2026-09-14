@@ -8,6 +8,7 @@ import {
   hasOwningTestEvidence,
   type MutantObservation,
   projectOutcome,
+  readKnownTestIds,
   readObservations,
   type StrykerStatus,
   summarize,
@@ -28,6 +29,10 @@ function observation(overrides: Partial<MutantObservation> = {}): MutantObservat
     // count -- a reported zero, or a reporter that wrote no count at all --
     // say so explicitly in `overrides`.
     testsCompleted: 1,
+    // No test table by default: these fixtures are mutant records on their own,
+    // and requiring resolution against a table that was never read would refuse
+    // every kill on missing input. Cases that turn on resolution supply one.
+    knownTestIds: new Set<string>(),
     ...overrides,
   }
 }
@@ -51,6 +56,36 @@ describe("hasOwningTestEvidence", () => {
   it("accepts a kill that names a killing test, in either runner's dialect", () => {
     expect(hasOwningTestEvidence("AssertionError [ERR_ASSERTION]: no", ["t1"])).toBe(true)
     expect(hasOwningTestEvidence("expected 'http:' to be 'https:'", ["38"])).toBe(true)
+  })
+
+  // A named test is not an attribution unless the name RESOLVES. Stryker
+  // renumbers the tests it observed when it writes the report and leaves an
+  // unrecognised id as the raw string it arrived as, so a killer that is still
+  // a raw identity names a test the run has no record of observing.
+  it("accepts a killer id that resolves to an observed test", () => {
+    expect(
+      hasOwningTestEvidence("expected 3 to equal 4", ["0"], new Set(["0", "1"]))
+    ).toBe(true)
+  })
+
+  it("refuses a killer id that resolves to nothing in the test table", () => {
+    expect(
+      hasOwningTestEvidence(
+        "expected 3 to equal 4",
+        ["f.test.ts#outer checks value"],
+        new Set(["0", "1"])
+      )
+    ).toBe(false)
+  })
+
+  // Without a test table there is nothing to resolve against, and refusing
+  // every kill on missing input would be refusing on absence of evidence
+  // rather than on evidence. Callers holding only mutant records keep the
+  // non-empty check.
+  it("does not require resolution when no test table was read", () => {
+    expect(
+      hasOwningTestEvidence("expected 3 to equal 4", ["t1"], new Set())
+    ).toBe(true)
   })
 
   it("accepts a real assertion kill whose retained text carries no assertion words", () => {
@@ -271,6 +306,78 @@ describe("summarize", () => {
       validDenominator: 2,
       rawStatusCounts: { Killed: 1, Survived: 1, Timeout: 1, NoCoverage: 1 },
     })
+  })
+})
+
+// The report is where the two identity namespaces meet: the test table is keyed
+// by the ids the dry run reported, and `killedBy` is keyed by whatever the
+// mutant run returned. These drive a whole report through the reader and the
+// projector, both directions, rather than checking the predicate alone.
+describe("killer identity resolved against the report's test table", () => {
+  function report(killedBy: readonly string[]) {
+    return {
+      files: {
+        "scripts/a.ts": {
+          mutants: [
+            {
+              id: "1",
+              mutatorName: "ConditionalExpression",
+              status: "Killed",
+              killedBy,
+              statusReason: "expected 3 to equal 4",
+              testsCompleted: 6,
+            },
+          ],
+        },
+      },
+      testFiles: {
+        "scripts/a.test.ts": {
+          tests: [
+            { id: "0", name: "outer > checks value" },
+            { id: "1", name: "outer > checks other" },
+          ],
+        },
+      },
+    }
+  }
+
+  it("reads the test table the report names", () => {
+    expect([...readKnownTestIds(report(["0"]))]).toEqual(["0", "1"])
+  })
+
+  it("projects a kill whose killer resolves to the test table", () => {
+    const [observation] = readObservations(report(["0"]), { baselineComplete: true })
+
+    expect(observation.knownTestIds.has("0")).toBe(true)
+    expect(projectOutcome(observation)).toMatchObject({
+      outcome: "killed",
+      basis: "owning_test_failed",
+    })
+  })
+
+  // The negative control, and the whole point of P2-3: an unknown identity is
+  // non-empty, so the old predicate accepted it. It names a test the report has
+  // no record of, and cannot become an attributed kill.
+  it("refuses a kill whose killer is an unknown identity", () => {
+    const [observation] = readObservations(
+      report(["scripts/a.test.ts#outer checks value"]),
+      { baselineComplete: true }
+    )
+
+    expect(projectOutcome(observation)).toMatchObject({
+      outcome: "inconclusive",
+      basis: "killed_without_owning_test_identity",
+    })
+  })
+
+  it("keeps a report with no test table readable", () => {
+    const [observation] = readObservations(
+      { files: report(["0"]).files },
+      { baselineComplete: true }
+    )
+
+    expect(observation.knownTestIds.size).toBe(0)
+    expect(projectOutcome(observation)).toMatchObject({ outcome: "killed" })
   })
 })
 

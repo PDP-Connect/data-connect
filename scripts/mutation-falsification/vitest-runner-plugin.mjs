@@ -130,80 +130,247 @@ export function toStockRunnerName(correctedName) {
 }
 
 /**
- * Finds the stock ids that more than one corrected coverage key maps onto.
+ * The prefix the setup file writes a refused identity under.
  *
- * The stock runner's id is lossy: it joins the suite chain with a single space,
- * so `describe("a b") > it("c")` and `describe("a") > it("b c")` are both
- * reported as `file#a b c`. Keyed by that id, the second corrected key would
- * overwrite the first, and both tests would then be rewritten to whichever key
- * happened to come last -- one test carrying another's coverage, reported as a
- * clean reconciliation.
+ * Kept byte-identical to `UNMAPPABLE_KEY_PREFIX` in
+ * `test-identity-setup.ts`; that file cannot import from here, because it is
+ * loaded into the test environment and this module pulls in Stryker's
+ * host-side packages. `test-identity.test.ts` asserts the two agree.
+ */
+export const UNMAPPABLE_KEY_PREFIX = " stryker-6210-unmappable:"
+
+/**
+ * Builds the validated map from stock id to corrected identity, or explains
+ * why the run cannot be reconciled.
  *
- * There is no way to recover the true chain from a stock id, so this is not
- * something the wrapper can repair. It reports the collisions instead, and
- * `dryRun` refuses the run. Mutation evidence attributed to the wrong test is
- * worse than no mutation evidence, because nothing downstream can tell.
+ * Three separate ways identity can fail, all of which end the run rather than
+ * producing a mapping that looks clean:
+ *
+ *   - **Unmappable.** The setup file refused a title containing `" > "`. It
+ *     could not have produced a lossless key, and the flattened lookup would
+ *     not have found its reported test anyway.
+ *   - **Collision.** Two corrected keys flatten onto one stock id --
+ *     `describe("a b") > it("c")` and `describe("a") > it("b c")` both report
+ *     as `file#a b c`. The stock id is all the reported test carries, so one of
+ *     the two would take the other's coverage under a reconciled-looking name.
+ *   - **Alias.** Two reported tests share one stock id. Then one corrected key
+ *     stands for two distinct tests, and the coverage recorded against it
+ *     cannot be said to belong to either.
+ *
+ * The alias check is what requires the full reported inventory rather than only
+ * the covered keys: two tests can collide on a stock id while only one of them
+ * is covered, and inspecting coverage alone would never see the second.
  *
  * @param {readonly string[]} correctedIds coverage keys written by the setup file
- * @returns {Array<{ stockId: string, correctedIds: string[] }>} sorted, empty when unambiguous
+ * @param {readonly { id: string }[]} reportedTests the full dry-run inventory
+ * @returns {{ ok: true, correctedByStockId: Map<string, { id: string, name: string }> }
+ *   | { ok: false, message: string }}
  */
-export function findAmbiguousStockIds(correctedIds) {
+export function buildIdentityMap(correctedIds, reportedTests) {
+  const unmappable = correctedIds
+    .filter(id => id.startsWith(UNMAPPABLE_KEY_PREFIX))
+    .map(id => id.slice(UNMAPPABLE_KEY_PREFIX.length))
+    .sort()
+
   /** @type {Map<string, Set<string>>} */
-  const byStockId = new Map()
+  const correctedByStock = new Map()
   for (const correctedId of correctedIds) {
+    if (correctedId.startsWith(UNMAPPABLE_KEY_PREFIX)) continue
     const { file, name } = splitTestId(correctedId)
     const stockId = `${file}#${toStockRunnerName(name)}`
-    const seen = byStockId.get(stockId) ?? new Set()
+    const seen = correctedByStock.get(stockId) ?? new Set()
     seen.add(correctedId)
-    byStockId.set(stockId, seen)
+    correctedByStock.set(stockId, seen)
   }
 
-  return [...byStockId.entries()]
-    .filter(([, correctedForStockId]) => correctedForStockId.size > 1)
-    .map(([stockId, correctedForStockId]) => ({
-      stockId,
-      correctedIds: [...correctedForStockId].sort(),
-    }))
+  const collisions = [...correctedByStock.entries()]
+    .filter(([, keys]) => keys.size > 1)
+    .map(([stockId, keys]) => ({ stockId, correctedIds: [...keys].sort() }))
     .sort((left, right) => left.stockId.localeCompare(right.stockId))
+
+  /** @type {Map<string, number>} */
+  const reportedCounts = new Map()
+  for (const test of reportedTests) {
+    reportedCounts.set(test.id, (reportedCounts.get(test.id) ?? 0) + 1)
+  }
+  const aliases = [...reportedCounts.entries()]
+    .filter(([stockId, count]) => count > 1 && correctedByStock.has(stockId))
+    .map(([stockId]) => stockId)
+    .sort()
+
+  // Every corrected key has to name a test that was actually reported. A key
+  // with no reported test is an observation the run cannot place -- the
+  // literal-title case reaches here as an orphan when the setup file's refusal
+  // is bypassed, and so would any future divergence in how the two sides build
+  // an identity.
+  const unmatched = [...correctedByStock.keys()]
+    .filter(stockId => !reportedCounts.has(stockId))
+    .sort()
+
+  if (
+    unmappable.length > 0 ||
+    collisions.length > 0 ||
+    aliases.length > 0 ||
+    unmatched.length > 0
+  ) {
+    return {
+      ok: false,
+      message: describeIrreconcilableIdentity({
+        unmappable,
+        collisions,
+        aliases,
+        unmatched,
+      }),
+    }
+  }
+
+  /** @type {Map<string, { id: string, name: string }>} */
+  const correctedByStockId = new Map()
+  for (const [stockId, keys] of correctedByStock) {
+    const correctedId = [...keys][0]
+    correctedByStockId.set(stockId, {
+      id: correctedId,
+      name: splitTestId(correctedId).name,
+    })
+  }
+  return { ok: true, correctedByStockId }
 }
 
 /**
- * The message `dryRun` fails with when identity cannot be reconciled.
+ * The message the run fails with when identity cannot be reconciled.
  *
- * Names the colliding tests, because the repair is a rename in the test suite
- * and the operator has to know which titles to change.
+ * Names the tests involved in each case, because every repair is a rename in
+ * the test suite and the operator has to know which titles to change.
  *
- * @param {ReturnType<typeof findAmbiguousStockIds>} collisions
+ * @param {{
+ *   unmappable: readonly string[],
+ *   collisions: readonly { stockId: string, correctedIds: string[] }[],
+ *   aliases: readonly string[],
+ *   unmatched: readonly string[],
+ * }} findings
  * @returns {string}
  */
-export function describeAmbiguousIdentity(collisions) {
-  const detail = collisions
-    .map(
-      ({ stockId, correctedIds }) =>
-        `  ${JSON.stringify(stockId)} <- ${correctedIds
-          .map(id => JSON.stringify(id))
-          .join(", ")}`
+export function describeIrreconcilableIdentity({
+  unmappable,
+  collisions,
+  aliases,
+  unmatched,
+}) {
+  const sections = []
+
+  if (unmappable.length > 0) {
+    sections.push(
+      `${unmappable.length} test title(s) contain ${JSON.stringify(
+        VITEST_FULL_NAME_SEPARATOR
+      )}, which is the separator Vitest joins a suite chain with. A title ` +
+        `carrying it is indistinguishable from an extra suite level, so the ` +
+        `identity cannot be mapped back:\n` +
+        unmappable.map(chain => `  ${JSON.stringify(chain)}`).join("\n") +
+        `\nRename each test so its own title does not contain the separator.`
     )
-    .join("\n")
+  }
+
+  if (collisions.length > 0) {
+    sections.push(
+      `${collisions.length} stock test id(s) correspond to more than one ` +
+        `corrected identity. The runner joins a suite chain with a single ` +
+        `space, so distinct chains such as "a b" > "c" and "a" > "b c" ` +
+        `collapse onto one id:\n` +
+        collisions
+          .map(
+            ({ stockId, correctedIds }) =>
+              `  ${JSON.stringify(stockId)} <- ${correctedIds
+                .map(id => JSON.stringify(id))
+                .join(", ")}`
+          )
+          .join("\n") +
+        `\nRename one test in each group so the space-joined chains differ.`
+    )
+  }
+
+  if (aliases.length > 0) {
+    sections.push(
+      `${aliases.length} stock test id(s) are reported by more than one test, ` +
+        `so one corrected identity would stand for several tests:\n` +
+        aliases.map(stockId => `  ${JSON.stringify(stockId)}`).join("\n") +
+        `\nRename the duplicates so each test has its own id.`
+    )
+  }
+
+  if (unmatched.length > 0) {
+    sections.push(
+      `${unmatched.length} coverage key(s) do not correspond to any reported ` +
+        `test, so the coverage recorded against them cannot be attributed:\n` +
+        unmatched.map(stockId => `  ${JSON.stringify(stockId)}`).join("\n")
+    )
+  }
 
   return (
-    `Cannot reconcile test identity for stryker-js#6210: ${collisions.length} ` +
-    `test id(s) reported by the Vitest runner correspond to more than one test. ` +
-    `The runner joins a suite chain with a single space, so distinct chains ` +
-    `such as "a b" > "c" and "a" > "b c" collapse onto one id, and coverage ` +
-    `cannot be attributed to the test that produced it:\n${detail}\n` +
-    `Rename one test in each group so the space-joined chains differ.`
+    `Cannot reconcile test identity for stryker-js#6210. Mutation evidence ` +
+    `attributed to the wrong test is worse than no mutation evidence, because ` +
+    `nothing downstream can tell:\n\n${sections.join("\n\n")}`
   )
 }
 
 /**
- * Behavioural check that the defect this wrapper repairs is still live.
+ * Builds the stock-id to corrected-id lookup a mutant run rewrites killers with.
  *
- * Asserts on what the stock runner does, not on its source text: it reports a
- * test whose suite chain is known, and the reported name is compared against
- * both joins. A wrapper that silently repairs nothing is worse than an absent
- * one -- it would keep claiming a repair, and the day the shapes diverge again
- * nothing would say so.
+ * Stryker derives `testFilter` from the coverage the dry run reconciled, so its
+ * entries are already the corrected ids -- computing the stock form of each is
+ * the whole mapping, and it needs no state carried from the dry run. That
+ * matters because mutants run in a pool of child processes and the instance
+ * that reconciled the dry run is not the one running the mutant.
+ *
+ * A stock id that two filter entries compute to is DROPPED rather than
+ * resolved: the same losslessness rule the dry run enforces. The dry run would
+ * have refused such an inventory outright, so this is a belt-and-braces guard
+ * against a filter assembled from somewhere else; dropping leaves the killer
+ * under its stock id, which then fails to resolve downstream rather than
+ * resolving to the wrong test.
+ *
+ * @param {readonly string[] | undefined} testFilter corrected ids for this mutant
+ * @param {ReadonlyMap<string, { id: string }>} fromDryRun the same-process map
+ * @returns {Map<string, string>} corrected id, keyed by stock id
+ */
+export function correctedByStockIdFrom(testFilter, fromDryRun = new Map()) {
+  /** @type {Map<string, string>} */
+  const corrected = new Map()
+  for (const [stockId, entry] of fromDryRun) corrected.set(stockId, entry.id)
+
+  /** @type {Set<string>} */
+  const ambiguous = new Set()
+  for (const correctedId of testFilter ?? []) {
+    const { file, name } = splitTestId(correctedId)
+    const stockId = `${file}#${toStockRunnerName(name)}`
+    const existing = corrected.get(stockId)
+    if (existing !== undefined && existing !== correctedId) {
+      ambiguous.add(stockId)
+      continue
+    }
+    corrected.set(stockId, correctedId)
+  }
+  for (const stockId of ambiguous) corrected.delete(stockId)
+
+  return corrected
+}
+
+/**
+ * Tripwire for the day upstream ships its fix. NOT proof that it has not.
+ *
+ * A wrapper that silently repairs nothing is worse than an absent one, so this
+ * looks for the shape upstream's fix would produce: the stock runner reporting
+ * a name already joined with Vitest's separator. It is a heuristic, and it is
+ * deliberately not treated as an oracle -- the executable premise check lives
+ * in `test-identity.test.ts`, which reads the runner's shipped identity builder.
+ *
+ * A reported name containing `" > "` is NOT on its own that shape. An ordinary
+ * `it("a > b")` produces one under the unfixed runner too, and warning on it
+ * says the opposite of the truth. What distinguishes the two is the whole
+ * inventory: if upstream has switched separators then EVERY multi-level name
+ * carries `" > "`, whereas a literal title is one name among many that do not.
+ * So the check requires agreement across the reported tests rather than a
+ * single sighting -- and those literal titles are refused upstream of here
+ * anyway, at the setup file's structured boundary.
  *
  * @param {readonly import('@stryker-mutator/api/test-runner').TestResult[]} tests
  * @param {Record<string, unknown>} perTest coverage keys from the same dry run
@@ -213,11 +380,14 @@ export function describeUnexpectedAgreement(tests, perTest) {
   const coverageKeys = Object.keys(perTest)
   if (coverageKeys.length === 0 || tests.length === 0) return undefined
   // The setup file only ever writes a corrected key, so a corrected key proves
-  // nothing on its own. What would prove upstream has shipped its fix is the
-  // stock runner reporting a name already joined with Vitest's separator.
-  const stockAlreadyCorrected = tests.some(test =>
-    test.name.includes(VITEST_FULL_NAME_SEPARATOR)
+  // nothing on its own. Only a name the STOCK runner built can say anything,
+  // and only if every name it built agrees.
+  const multiLevel = tests.filter(test =>
+    test.name.includes(STOCK_RUNNER_SEPARATOR)
   )
+  const stockAlreadyCorrected =
+    multiLevel.length > 0 &&
+    multiLevel.every(test => test.name.includes(VITEST_FULL_NAME_SEPARATOR))
   if (stockAlreadyCorrected) {
     return (
       `The stock Vitest runner now reports names joined with ` +
@@ -237,6 +407,17 @@ export function describeUnexpectedAgreement(tests, perTest) {
 export class SeparatorReconcilingTestRunner {
   #inner
   #log
+
+  /**
+   * The identity map the dry run validated, retained so `mutantRun` can put a
+   * kill under the same identity the baseline was recorded under.
+   *
+   * Empty until a dry run reconciles. A `mutantRun` reached without one leaves
+   * every id alone, which is the stock runner's behaviour.
+   *
+   * @type {Map<string, { id: string, name: string }>}
+   */
+  #correctedByStockId = new Map()
 
   /**
    * @param {import('@stryker-mutator/api/test-runner').TestRunner} inner
@@ -277,30 +458,20 @@ export class SeparatorReconcilingTestRunner {
     const warning = describeUnexpectedAgreement(result.tests, perTest)
     if (warning) this.#log.warn(warning)
 
-    const correctedIds = Object.keys(perTest)
-    const collisions = findAmbiguousStockIds(correctedIds)
-    if (collisions.length > 0) {
-      const message = describeAmbiguousIdentity(collisions)
-      this.#log.error(message)
+    const identity = buildIdentityMap(Object.keys(perTest), result.tests)
+    if (!identity.ok) {
+      this.#log.error(identity.message)
       return {
         status: DryRunStatus.Error,
-        errorMessage: message,
+        errorMessage: identity.message,
       }
     }
 
-    /** Corrected id, keyed by the id the stock runner reports for that test. */
-    const correctedByStockId = new Map()
-    for (const correctedId of correctedIds) {
-      const { file, name } = splitTestId(correctedId)
-      correctedByStockId.set(`${file}#${toStockRunnerName(name)}`, {
-        id: correctedId,
-        name,
-      })
-    }
+    this.#correctedByStockId = identity.correctedByStockId
 
     let reconciled = 0
     const tests = result.tests.map(test => {
-      const corrected = correctedByStockId.get(test.id)
+      const corrected = this.#correctedByStockId.get(test.id)
       if (!corrected) return test
       reconciled += 1
       return { ...test, id: corrected.id, name: corrected.name }
@@ -308,14 +479,62 @@ export class SeparatorReconcilingTestRunner {
 
     this.#log.debug(
       `stryker-js#6210 wrapper: reconciled ${reconciled} of ${result.tests.length} ` +
-        `test identities against ${correctedByStockId.size} coverage keys.`
+        `test identities against ${this.#correctedByStockId.size} coverage keys.`
     )
 
     return { ...result, tests }
   }
 
+  /**
+   * Forwards the mutant run, rewriting only the killer identities.
+   *
+   * The dry run rewrote the baseline's ids, so a kill coming back under the
+   * stock id names a test that is not in the report's inventory: the report
+   * helper's `remapTestId` leaves unknown ids alone
+   * (core/dist/src/reporters/mutation-test-report-helper.js), and the killer
+   * ends up as a raw string next to a test table keyed by number. The kill is
+   * real -- an assertion failed -- but the evidence cannot be linked to the
+   * test that produced it.
+   *
+   * The map is rebuilt from `options.testFilter` rather than read off the dry
+   * run's, because Stryker runs mutants in a pool of child processes
+   * (core/dist/src/test-runner/child-process-test-runner-proxy.js) and the
+   * instance that reconciled the dry run is not the instance running this
+   * mutant. The filter is the right source anyway: Stryker derives it from the
+   * coverage this wrapper reconciled, so its entries are exactly the corrected
+   * ids this mutant's killers should be reported under. The dry run's map is
+   * consulted first for the same-process case.
+   *
+   * Status, counts, errors and every other field are forwarded untouched: this
+   * normalises identity, it does not reclassify a result. An id with no entry
+   * in either map is left as it is -- an unknown identity must not be rewritten
+   * into a known-looking one.
+   *
+   * STATIC mutants are the case this cannot reach. They carry no per-test
+   * coverage, so Stryker runs the whole suite with no `testFilter`, and there
+   * is nothing to rebuild the mapping from. Their killers stay space-joined and
+   * do not resolve against the report's test table -- which the downstream
+   * predicate reads as an unattributed kill and holds `inconclusive`. That is
+   * the correct answer for them: the suite did fail, but nothing identifies
+   * WHICH test owns the mutant, which is exactly what a static mutant's
+   * whole-suite run cannot tell you.
+   */
   async mutantRun(options) {
-    return this.#inner.mutantRun(options)
+    const result = await this.#inner.mutantRun(options)
+    if (!Array.isArray(result.killedBy) || result.killedBy.length === 0) {
+      return result
+    }
+
+    const corrected = correctedByStockIdFrom(
+      options.testFilter,
+      this.#correctedByStockId
+    )
+    if (corrected.size === 0) return result
+
+    return {
+      ...result,
+      killedBy: result.killedBy.map(id => corrected.get(id) ?? id),
+    }
   }
 
   async dispose() {

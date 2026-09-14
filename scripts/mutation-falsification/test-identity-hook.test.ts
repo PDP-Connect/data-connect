@@ -17,9 +17,9 @@
 // module registers the same `beforeEach` the mutation cohort loads, and the
 // assertions below read the id it actually wrote.
 
-import { describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it } from "vitest"
 
-import "./test-identity-setup.ts"
+import { UNMAPPABLE_KEY_PREFIX } from "./test-identity-setup.ts"
 
 import { VITEST_FULL_NAME_SEPARATOR } from "./vitest-runner-plugin.mjs"
 
@@ -40,9 +40,26 @@ function namespace(): StrykerNamespace {
 // registered at import time, which puts it ahead of every hook this file
 // registers -- seeding from a local `beforeEach` would run after the hook had
 // already read the namespace and returned.
-;(globalThis as Record<string, unknown>)[STRYKER_NAMESPACE] = {
-  currentTestId: "pending",
-}
+//
+// The namespace object is MODIFIED, not replaced. Under a real mutation run
+// Stryker's own setup file has already installed this object and captured its
+// reference for mutant activation, hit counting and coverage; assigning a fresh
+// `{currentTestId}` over it would leave the runner holding the old one. Only
+// the one field this fixture owns is touched, and its prior value is put back
+// after the suite.
+const runnerNamespace = ((globalThis as Record<string, unknown>)[
+  STRYKER_NAMESPACE
+] ??= {}) as StrykerNamespace
+const priorTestId = runnerNamespace.currentTestId
+runnerNamespace.currentTestId = "pending"
+
+afterAll(() => {
+  if (priorTestId === undefined) {
+    delete runnerNamespace.currentTestId
+  } else {
+    runnerNamespace.currentTestId = priorTestId
+  }
+})
 
 describe("test identity setup hook", () => {
   describe("nested suite", () => {
@@ -78,6 +95,19 @@ describe("test identity setup hook", () => {
           "does not record the stock runner's space-joined identity"
       )
     })
+  })
+
+  // The structured boundary, driven through the real hook with a real title.
+  // This test's own name carries the separator, so its chain cannot be
+  // recovered from the joined string -- it is indistinguishable from
+  // `describe("carries") > it("a literal separator")` one level deeper. The
+  // hook must record the refusal marker rather than a key that looks ordinary,
+  // because one step later nothing can tell the two apart.
+  it("carries > a literal separator", () => {
+    const recorded = namespace().currentTestId ?? ""
+
+    expect(recorded.startsWith(UNMAPPABLE_KEY_PREFIX)).toBe(true)
+    expect(recorded).toContain("carries > a literal separator")
   })
 
   // A test one suite deep, asserted against a literal rather than the

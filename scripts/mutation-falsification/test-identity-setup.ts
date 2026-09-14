@@ -10,10 +10,23 @@
 // `testNamePattern`, and Vitest 5 matches the pattern against `fullTestName`,
 // which it joins with " > " (`getFullName(task, separator = " > ")` in
 // vitest/dist/task-utils.js, applied at `interpretTaskModes` via
-// `t.fullTestName.match(namePattern)`). A space-joined pattern therefore
-// matches nothing: every test is set to `mode=skip`, `perTest` coverage comes
-// back empty, and Stryker re-runs the whole suite for each mutant. The runner's
-// peer range is `vitest >=2.0.0`, so the incompatible pair installs clean.
+// `t.fullTestName.match(namePattern)`). The runner's peer range is
+// `vitest >=2.0.0`, so the incompatible pair installs clean.
+//
+// The mismatch bites in two distinct phases, and they are worth keeping apart:
+//
+//   - The DRY RUN records coverage against the runner's own space-joined key.
+//     Whether `perTest` comes back populated depends on how that phase is run,
+//     not on the pattern.
+//   - Each MUTANT RUN then hands Stryker's per-test filter to Vitest as a
+//     `testNamePattern`. A space-joined pattern matches no `fullTestName`, so
+//     every test is set to `mode=skip` and the mutant is reported having run
+//     zero tests.
+//
+// Issue #6210 reports the second: populated dry-run coverage alongside zero
+// executed tests for covered mutants. That is not the same as an empty
+// `perTest` with a full-suite fallback, which is a different failure of the
+// same join. Tests here name the phase they observe.
 //
 // This file is a Vitest setup file -- a documented extension point -- listed
 // under `test.setupFiles` in `vite.mutation-scripts.config.ts`. It is not a
@@ -31,12 +44,21 @@
 // Why a setup file is the right seam. The runner prepends its own sandbox setup
 // file to each project's `setupFiles` (`project.config.setupFiles = [localSetup,
 // ...project.config.setupFiles]` in vitest-test-runner.js `init()`), so ours is
-// registered after it, and Vitest runs `beforeEach` hooks in registration
-// order. The runner's hook writes the space-joined identity to
+// listed after it, and Vitest runs `beforeEach` hooks in registration order.
+// The runner's hook writes the space-joined identity to
 // `globalThis.__stryker__.currentTestId`; ours then overwrites it with the same
 // identity joined the way Vitest 5 filters on. Coverage is attributed to that
 // corrected id, so the `testFilter` Stryker later derives from coverage is a
 // pattern Vitest actually matches.
+//
+// Being listed second is not on its own enough to register second. Vitest's
+// default `sequence.setupFiles` is `"parallel"`, which imports the files with
+// `Promise.all` -- whichever finishes importing first registers first. If ours
+// won that race the runner's hook would run last and restore the space-joined
+// id. `vite.mutation-scripts.config.ts` sets `sequence.setupFiles: "list"` to
+// make registration follow the listed order; `setup-order.test.ts` drives the
+// scheduler's real policy against controlled import completion and shows both
+// outcomes.
 //
 // This runs on every root-suite run, not only under Stryker. Outside a mutation
 // run `globalThis.__stryker__` carries no `currentTestId` and nothing is
@@ -75,21 +97,60 @@ interface NamedTask {
 }
 
 /**
- * Rebuilds the runner's test identity with Vitest's separator.
+ * The prefix a refused identity is written under.
  *
- * Deliberately the same walk the runner performs in its `collectTestName`
- * (dist/src/test-helpers.js): the test's own name, prefixed by each enclosing
- * suite name outward. Only the join differs. The file name is not included --
- * the runner's id carries the file path on the other side of a `#`, and the
- * pattern it builds is unanchored, so a suite-chain substring of Vitest's
- * `fullTestName` is what matches.
+ * A refusal has to survive the trip to the host, and the only channel back is
+ * this one string. So the hook writes a key that cannot collide with a real
+ * identity and that the wrapper recognises, rather than throwing -- a throw in
+ * a `beforeEach` fails that one test and would be read downstream as an
+ * ordinary test failure, not as an identity the run cannot trust.
+ *
+ * Kept byte-identical to the copy in `vitest-runner-plugin.mjs`, which cannot
+ * be imported here: this file is loaded into the test environment and that
+ * module pulls in Stryker's host-side packages. `test-identity.test.ts` asserts
+ * the two agree.
  */
-function fullNameOf(task: NamedTask): string {
+export const UNMAPPABLE_KEY_PREFIX = " stryker-6210-unmappable:"
+
+/**
+ * Collects the suite chain a task hangs from, outermost first.
+ *
+ * The same walk the runner performs in its `collectTestName`
+ * (dist/src/test-helpers.js): the test's own name, prefixed by each enclosing
+ * suite name outward. The file name is not included -- the runner's id carries
+ * the file path on the other side of a `#`, and the pattern it builds is
+ * unanchored, so a suite-chain substring of Vitest's `fullTestName` is what
+ * matches.
+ */
+function chainOf(task: NamedTask): string[] {
   const parts = [task.name]
   let current = task.suite
   while (current) {
     parts.unshift(current.name)
     current = current.suite
+  }
+  return parts
+}
+
+/**
+ * Rebuilds the runner's test identity with Vitest's separator, or refuses.
+ *
+ * This is the last point at which the chain is still structured. One step
+ * later it is a single string, and a `" > "` inside a test's own title is
+ * indistinguishable from the join -- `it("a > b")` under `describe("outer")`
+ * and `describe("outer") > describe("a") > it("b")` produce the same key.
+ * Nothing downstream can separate them, so neither can be trusted: the first
+ * has no reported test to match (the stock runner reports `outer a > b`, which
+ * does not flatten to the looked-for `outer a b`), and where both exist, one
+ * key stands for two tests.
+ *
+ * Refusing here is what makes the mapping lossless. A chain whose parts contain
+ * no separator round-trips: join with `" > "`, and the parts are recoverable.
+ */
+function fullNameOf(task: NamedTask): string | undefined {
+  const parts = chainOf(task)
+  if (parts.some(part => part.includes(VITEST_FULL_NAME_SEPARATOR))) {
+    return undefined
   }
   return parts.join(VITEST_FULL_NAME_SEPARATOR).trim()
 }
@@ -111,5 +172,15 @@ beforeEach(context => {
   // is `filepath#space-joined-name`, and a space is not a separator that can be
   // told apart from a space inside a test's own name.
   const filepath = task.file?.filepath ?? "unknown.js"
-  namespace.currentTestId = `${filepath}#${fullNameOf(task)}`
+  const corrected = fullNameOf(task)
+
+  // A title carrying the separator cannot be mapped losslessly, and this is the
+  // last place that is knowable. Record the refusal under a key the wrapper
+  // refuses the run on, naming the chain so the operator knows which title to
+  // rename. Leaving the stock id in place instead would let an unmappable test
+  // pass as an ordinary one.
+  namespace.currentTestId =
+    corrected === undefined
+      ? `${UNMAPPABLE_KEY_PREFIX}${filepath}#${chainOf(task).join(" | ")}`
+      : `${filepath}#${corrected}`
 })

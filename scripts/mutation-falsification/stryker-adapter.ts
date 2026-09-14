@@ -56,6 +56,13 @@ export interface MutantObservation {
   readonly rawStatus: StrykerStatus
   /** Test identities Stryker reported as covering or killing this mutant. */
   readonly killedBy: readonly string[]
+  /**
+   * The ids of every test the report's own test table names, so a killer
+   * reference can be required to resolve to one of them. Empty when the
+   * observation was built without a test table to check against.
+   */
+  readonly knownTestIds: ReadonlySet<string>
+
   /** Retained failure output for the killing test, if the runner produced any. */
   readonly failureOutput: string | undefined
   /** True only when the baseline run for this cohort completed successfully. */
@@ -130,15 +137,35 @@ function isRunnerCrashOutput(failureOutput: string | undefined): boolean {
  * populates from the runner's own per-test results -- and the absence of
  * crash evidence. A `Killed` with no named test is a status the engine wrote
  * about itself with nothing to attribute it to, which stays `inconclusive`.
+ *
+ * A named test is not enough on its own. The identity has to RESOLVE: Stryker
+ * renumbers the tests it observed when it writes the report, and leaves an id
+ * it does not recognise as the raw string it came in as. So a `killedBy` entry
+ * that is not in the report's test table names a test the run has no record of
+ * observing, and a string nothing can be looked up by is not an attribution.
+ * Requiring resolution is what stops an unknown or ambiguous identity from
+ * acquiring authority merely by being non-empty.
+ *
+ * `knownTestIds` empty means no test table was read at all, which is the case
+ * for callers that only have mutant records. Resolution is not required then --
+ * the check would refuse every kill on missing input rather than on evidence.
  */
 export function hasOwningTestEvidence(
   failureOutput: string | undefined,
-  killedBy: readonly string[] = []
+  killedBy: readonly string[] = [],
+  knownTestIds: ReadonlySet<string> = new Set()
 ): boolean {
   if (isRunnerCrashOutput(failureOutput)) {
     return false
   }
-  return killedBy.some((test) => test.trim().length > 0)
+  const named = killedBy.filter((test) => test.trim().length > 0)
+  if (named.length === 0) {
+    return false
+  }
+  if (knownTestIds.size === 0) {
+    return true
+  }
+  return named.some((test) => knownTestIds.has(test))
 }
 
 /**
@@ -159,7 +186,13 @@ export function projectOutcome(observation: MutantObservation): Projection {
       if (isRunnerCrashOutput(observation.failureOutput)) {
         return { ...carry, outcome: "inconclusive", basis: "killed_by_runner_crash" }
       }
-      if (!hasOwningTestEvidence(observation.failureOutput, observation.killedBy)) {
+      if (
+        !hasOwningTestEvidence(
+          observation.failureOutput,
+          observation.killedBy,
+          observation.knownTestIds
+        )
+      ) {
         return {
           ...carry,
           outcome: "inconclusive",
@@ -278,6 +311,35 @@ interface StrykerReport {
     string,
     { readonly mutants?: readonly Record<string, unknown>[] } | undefined
   >
+  readonly testFiles?: Record<
+    string,
+    { readonly tests?: readonly Record<string, unknown>[] } | undefined
+  >
+}
+
+/**
+ * The ids of every test the report's own test table names.
+ *
+ * This is the inventory a killer reference has to resolve against. Stryker
+ * renumbers test ids when it writes the report -- `remapTestId` in
+ * core/dist/src/reporters/mutation-test-report-helper.js maps each observed
+ * test to its index and leaves an unknown id untouched -- so a `killedBy`
+ * entry that is still a raw identity string is one the run never observed.
+ */
+export function readKnownTestIds(report: unknown): ReadonlySet<string> {
+  const testFiles = (report as StrykerReport | null)?.testFiles
+  const known = new Set<string>()
+  if (testFiles === undefined || testFiles === null || typeof testFiles !== "object") {
+    return known
+  }
+  for (const entry of Object.values(testFiles)) {
+    for (const test of entry?.tests ?? []) {
+      if (typeof test.id === "string") {
+        known.add(test.id)
+      }
+    }
+  }
+  return known
 }
 
 /**
@@ -296,6 +358,7 @@ export function readObservations(
   if (files === undefined || files === null || typeof files !== "object") {
     return []
   }
+  const knownTestIds = readKnownTestIds(report)
   const observations: MutantObservation[] = []
   for (const [file, entry] of Object.entries(files)) {
     for (const mutant of entry?.mutants ?? []) {
@@ -308,6 +371,7 @@ export function readObservations(
         mutatorName: typeof mutant.mutatorName === "string" ? mutant.mutatorName : "unknown",
         rawStatus: isStrykerStatus(mutant.status) ? mutant.status : "Pending",
         killedBy,
+        knownTestIds,
         failureOutput:
           typeof mutant.statusReason === "string" ? mutant.statusReason : undefined,
         baselineComplete: context.baselineComplete,

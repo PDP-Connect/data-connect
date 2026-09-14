@@ -9,19 +9,19 @@
 // `test-identity.test.ts`, which `tsc -b` typechecks -- the real contract
 // instead of an implicit `any`.
 //
-// The shapes here are written against the plugin's own behaviour, not widened
-// to Stryker's union types. `dryRun` is declared returning the two results the
-// wrapper actually constructs, because the tests assert on `result.tests` and
-// on `result.errorMessage`; declaring the upstream `DryRunResult` union would
-// hide those fields behind a narrowing the wrapper's own contract does not
-// require.
+// `dryRun` is declared returning upstream's own `DryRunResult`, not a narrower
+// union written here. The wrapper forwards the inner runner's result untouched
+// on several paths, including a timeout -- which upstream's union models as a
+// variant carrying no `tests` at all. A handwritten declaration that promises
+// `tests` on every non-error branch asserts away a state the implementation
+// really can forward. Callers narrow on `status`, which is what the
+// discriminant is for.
 
 import type { Logger } from "@stryker-mutator/api/logging"
 import type { PluginDeclaration } from "@stryker-mutator/api/plugin"
 import type {
   DryRunOptions,
-  DryRunStatus,
-  MutantCoverage,
+  DryRunResult,
   MutantRunOptions,
   MutantRunResult,
   TestResult,
@@ -49,21 +49,45 @@ export declare function splitTestId(id: string): { file: string; name: string }
 /** Rewrites a `" > "`-joined chain into the space-joined id the stock runner reports. */
 export declare function toStockRunnerName(correctedName: string): string
 
+/** The prefix the setup file writes a refused identity under. */
+export declare const UNMAPPABLE_KEY_PREFIX: " stryker-6210-unmappable:"
+
 /** One stock id that more than one corrected coverage key maps onto. */
 export interface StockIdCollision {
   stockId: string
   correctedIds: string[]
 }
 
-/** Finds the stock ids that more than one corrected coverage key maps onto. */
-export declare function findAmbiguousStockIds(
-  correctedIds: readonly string[]
-): StockIdCollision[]
+/** The validated map from stock id to corrected identity, or why there is none. */
+export type IdentityMap =
+  | { ok: true; correctedByStockId: Map<string, { id: string; name: string }> }
+  | { ok: false; message: string }
 
-/** The message `dryRun` fails with when identity cannot be reconciled. */
-export declare function describeAmbiguousIdentity(
+/**
+ * Builds the validated identity map from the covered keys and the full
+ * reported inventory, or explains why the run cannot be reconciled.
+ */
+export declare function buildIdentityMap(
+  correctedIds: readonly string[],
+  reportedTests: readonly { id: string }[]
+): IdentityMap
+
+/**
+ * Builds the stock-id to corrected-id lookup a mutant run rewrites killers
+ * with, from the filter Stryker passes and any map the dry run left behind.
+ */
+export declare function correctedByStockIdFrom(
+  testFilter: readonly string[] | undefined,
+  fromDryRun?: ReadonlyMap<string, { id: string }>
+): Map<string, string>
+
+/** The message the run fails with when identity cannot be reconciled. */
+export declare function describeIrreconcilableIdentity(findings: {
+  unmappable: readonly string[]
   collisions: readonly StockIdCollision[]
-): string
+  aliases: readonly string[]
+  unmatched: readonly string[]
+}): string
 
 /**
  * Behavioural check that the defect this wrapper repairs is still live.
@@ -78,28 +102,12 @@ export declare function describeUnexpectedAgreement(
   perTest: Record<string, unknown>
 ): string | undefined
 
-/** The dry-run result the wrapper returns when it refuses an ambiguous run. */
-export interface ReconciliationRefused {
-  status: DryRunStatus.Error
-  errorMessage: string
-}
-
-/** The dry-run result the wrapper returns when identities reconcile. */
-export interface ReconciliationComplete {
-  status: DryRunStatus
-  tests: TestResult[]
-  mutantCoverage?: MutantCoverage
-  errorMessage?: undefined
-}
-
-/** Delegating `TestRunner` that rewrites dry-run identities. */
+/** Delegating `TestRunner` that rewrites dry-run and killer identities. */
 export declare class SeparatorReconcilingTestRunner implements TestRunner {
   constructor(inner: TestRunner, log: Logger)
   capabilities(): Promise<TestRunnerCapabilities> | TestRunnerCapabilities
   init(): Promise<void>
-  dryRun(
-    options: DryRunOptions
-  ): Promise<ReconciliationRefused | ReconciliationComplete>
+  dryRun(options: DryRunOptions): Promise<DryRunResult>
   mutantRun(options: MutantRunOptions): Promise<MutantRunResult>
   dispose(): Promise<void>
 }
