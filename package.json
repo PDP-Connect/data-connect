@@ -77,7 +77,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#48440fead5343d568773594b20cfc9306f1d6255",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#72ef9329526d352c81cd8bf1b936af4e2ae5af36",
     "@semantic-release/exec": "^7.1.0",
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/vitest-runner": "10.0.0",
