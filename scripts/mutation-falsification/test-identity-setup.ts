@@ -15,8 +15,18 @@
 // back empty, and Stryker re-runs the whole suite for each mutant. The runner's
 // peer range is `vitest >=2.0.0`, so the incompatible pair installs clean.
 //
-// This file is a Vitest setup file -- a documented extension point -- listed in
-// `vite.config.ts` under `test.setupFiles`. It is not a patch of the runner.
+// This file is a Vitest setup file -- a documented extension point -- listed
+// under `test.setupFiles` in `vite.mutation-scripts.config.ts`. It is not a
+// patch of the runner.
+//
+// It is registered only there, and only the scripts mutation configuration
+// selects that file. The rewrite below is correct only for a run whose reported
+// test ids are rewritten to match it, which is what `testRunner: "vitest-6210"`
+// does. Registering this file in the shared `vite.config.ts` would rewrite the
+// coverage keys of every cohort, including those on the stock `vitest` runner,
+// whose reported ids would stay space-joined; Stryker's exact-string
+// `testsById.get(testId)` would then fail to join and their coverage would be
+// discarded.
 //
 // Why a setup file is the right seam. The runner prepends its own sandbox setup
 // file to each project's `setupFiles` (`project.config.setupFiles = [localSetup,
@@ -44,7 +54,7 @@ const STRYKER_NAMESPACE = "__stryker__"
 /**
  * The separator Vitest 5 builds `fullTestName` with, and therefore the one a
  * `testNamePattern` has to be written in to match. Asserted against Vitest's
- * own source in `scripts/mutation-test-identity.test.ts`.
+ * own source in `scripts/mutation-falsification/test-identity.test.ts`.
  */
 const VITEST_FULL_NAME_SEPARATOR = " > "
 
@@ -68,7 +78,7 @@ function fullNameOf(task: { name: string; suite?: unknown }): string {
   return parts.join(VITEST_FULL_NAME_SEPARATOR).trim()
 }
 
-beforeEach((context) => {
+beforeEach(context => {
   const namespace = (
     globalThis as Record<string, unknown> & {
       [STRYKER_NAMESPACE]?: { currentTestId?: string }
@@ -79,7 +89,11 @@ beforeEach((context) => {
   // reconcile. Writing an id here would invent coverage attribution.
   if (!namespace || typeof namespace.currentTestId !== "string") return
 
-  const task = context.task as { name: string; suite?: unknown; file?: { filepath?: string } }
+  const task = context.task as {
+    name: string
+    suite?: unknown
+    file?: { filepath?: string }
+  }
 
   // Rebuild the whole id rather than editing the recorded one. The recorded id
   // is `filepath#space-joined-name`, and a space is not a separator that can be

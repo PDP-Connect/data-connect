@@ -23,7 +23,7 @@
  * core/dist/src/mutants/test-coverage.js is an exact-string lookup):
  *
  *   - In the test environment, `stryker-setup.js` records the running test's
- *     identity as a coverage key. `scripts/mutation-test-identity-setup.ts`, a
+ *     identity as a coverage key. `scripts/mutation-falsification/test-identity-setup.ts`, a
  *     Vitest setup file, rewrites that key to Vitest's separator.
  *   - Here on the host, the runner's `convertTestToTestResult` builds
  *     `TestResult.id` for each test it reports. This plugin rewrites those ids
@@ -53,6 +53,7 @@ import {
   PluginKind,
   tokens,
 } from "@stryker-mutator/api/plugin"
+import { DryRunStatus } from "@stryker-mutator/api/test-runner"
 import { strykerPlugins as vitestRunnerPlugins } from "@stryker-mutator/vitest-runner"
 
 /** The separator Vitest 5 builds `fullTestName` with. */
@@ -75,14 +76,14 @@ export const WRAPPED_RUNNER_NAME = "vitest-6210"
  */
 export function stockVitestRunnerFactory() {
   const declaration = vitestRunnerPlugins.find(
-    (plugin) =>
-      plugin.kind === PluginKind.TestRunner && plugin.name === STOCK_RUNNER_NAME,
+    plugin =>
+      plugin.kind === PluginKind.TestRunner && plugin.name === STOCK_RUNNER_NAME
   )
   if (!declaration?.factory) {
     throw new Error(
       `@stryker-mutator/vitest-runner no longer exports a ${PluginKind.TestRunner} ` +
         `plugin named "${STOCK_RUNNER_NAME}". Re-check stryker-js#6210 before ` +
-        `restoring this wrapper.`,
+        `restoring this wrapper.`
     )
   }
   return declaration.factory
@@ -107,12 +108,16 @@ export function splitTestId(id) {
 /**
  * Rewrites a corrected coverage key into the id the stock runner reports.
  *
- * This direction is the well-defined one. Going the other way is not: the
- * runner's space-joined name cannot be re-split, because a space inside a
- * test's own name is indistinguishable from a separator. Going this way is
- * unambiguous, because " > " is the separator the setup file wrote and a test
- * name containing that exact sequence would have been joined the same way by
- * Vitest itself.
+ * This direction is computable where the reverse is not: the runner's
+ * space-joined name cannot be re-split, because a space inside a test's own
+ * name is indistinguishable from a separator. Computing it this way is what
+ * lets the wrapper find the reported test that a corrected key belongs to.
+ *
+ * It is not, however, injective. Two different suite chains can collapse onto
+ * one stock name -- `["a b", "c"]` and `["a", "b c"]` both flatten to
+ * `a b c` -- and the stock name is all Stryker has to match on. See
+ * `findAmbiguousStockIds`: the wrapper refuses such a run rather than picking
+ * one of the chains.
  *
  * @param {string} correctedName a suite chain joined with " > "
  * @returns {string} the same chain joined the way the stock runner joins it
@@ -122,6 +127,73 @@ export function toStockRunnerName(correctedName) {
     .split(VITEST_FULL_NAME_SEPARATOR)
     .join(STOCK_RUNNER_SEPARATOR)
     .trim()
+}
+
+/**
+ * Finds the stock ids that more than one corrected coverage key maps onto.
+ *
+ * The stock runner's id is lossy: it joins the suite chain with a single space,
+ * so `describe("a b") > it("c")` and `describe("a") > it("b c")` are both
+ * reported as `file#a b c`. Keyed by that id, the second corrected key would
+ * overwrite the first, and both tests would then be rewritten to whichever key
+ * happened to come last -- one test carrying another's coverage, reported as a
+ * clean reconciliation.
+ *
+ * There is no way to recover the true chain from a stock id, so this is not
+ * something the wrapper can repair. It reports the collisions instead, and
+ * `dryRun` refuses the run. Mutation evidence attributed to the wrong test is
+ * worse than no mutation evidence, because nothing downstream can tell.
+ *
+ * @param {readonly string[]} correctedIds coverage keys written by the setup file
+ * @returns {Array<{ stockId: string, correctedIds: string[] }>} sorted, empty when unambiguous
+ */
+export function findAmbiguousStockIds(correctedIds) {
+  /** @type {Map<string, Set<string>>} */
+  const byStockId = new Map()
+  for (const correctedId of correctedIds) {
+    const { file, name } = splitTestId(correctedId)
+    const stockId = `${file}#${toStockRunnerName(name)}`
+    const seen = byStockId.get(stockId) ?? new Set()
+    seen.add(correctedId)
+    byStockId.set(stockId, seen)
+  }
+
+  return [...byStockId.entries()]
+    .filter(([, correctedForStockId]) => correctedForStockId.size > 1)
+    .map(([stockId, correctedForStockId]) => ({
+      stockId,
+      correctedIds: [...correctedForStockId].sort(),
+    }))
+    .sort((left, right) => left.stockId.localeCompare(right.stockId))
+}
+
+/**
+ * The message `dryRun` fails with when identity cannot be reconciled.
+ *
+ * Names the colliding tests, because the repair is a rename in the test suite
+ * and the operator has to know which titles to change.
+ *
+ * @param {ReturnType<typeof findAmbiguousStockIds>} collisions
+ * @returns {string}
+ */
+export function describeAmbiguousIdentity(collisions) {
+  const detail = collisions
+    .map(
+      ({ stockId, correctedIds }) =>
+        `  ${JSON.stringify(stockId)} <- ${correctedIds
+          .map(id => JSON.stringify(id))
+          .join(", ")}`
+    )
+    .join("\n")
+
+  return (
+    `Cannot reconcile test identity for stryker-js#6210: ${collisions.length} ` +
+    `test id(s) reported by the Vitest runner correspond to more than one test. ` +
+    `The runner joins a suite chain with a single space, so distinct chains ` +
+    `such as "a b" > "c" and "a" > "b c" collapse onto one id, and coverage ` +
+    `cannot be attributed to the test that produced it:\n${detail}\n` +
+    `Rename one test in each group so the space-joined chains differ.`
+  )
 }
 
 /**
@@ -143,16 +215,16 @@ export function describeUnexpectedAgreement(tests, perTest) {
   // The setup file only ever writes a corrected key, so a corrected key proves
   // nothing on its own. What would prove upstream has shipped its fix is the
   // stock runner reporting a name already joined with Vitest's separator.
-  const stockAlreadyCorrected = tests.some((test) =>
-    test.name.includes(VITEST_FULL_NAME_SEPARATOR),
+  const stockAlreadyCorrected = tests.some(test =>
+    test.name.includes(VITEST_FULL_NAME_SEPARATOR)
   )
   if (stockAlreadyCorrected) {
     return (
       `The stock Vitest runner now reports names joined with ` +
       `${JSON.stringify(VITEST_FULL_NAME_SEPARATOR)}, so stryker-js#6210 appears ` +
-      `to be fixed upstream. Delete scripts/mutation-vitest-runner-plugin.mjs, ` +
-      `scripts/mutation-test-identity-setup.ts, and their references in ` +
-      `stryker.scripts.config.mjs and vite.config.ts.`
+      `to be fixed upstream. Delete scripts/mutation-falsification/vitest-runner-plugin.mjs, ` +
+      `scripts/mutation-falsification/test-identity-setup.ts, and their references in ` +
+      `stryker.scripts.config.mjs and vite.mutation-scripts.config.ts.`
     )
   }
   return undefined
@@ -192,6 +264,10 @@ export class SeparatorReconcilingTestRunner {
    * reported is computed, and the test carrying that id takes the corrected
    * one. A test with no coverage keeps its reported identity -- it is not in
    * any mutant's filter, so its identity never has to match anything.
+   *
+   * Fails the run if two coverage keys compute the same stock id. That mapping
+   * is not injective, and silently keeping one of the two would attribute a
+   * test's coverage to a different test under a name that looks reconciled.
    */
   async dryRun(options) {
     const result = await this.#inner.dryRun(options)
@@ -201,9 +277,20 @@ export class SeparatorReconcilingTestRunner {
     const warning = describeUnexpectedAgreement(result.tests, perTest)
     if (warning) this.#log.warn(warning)
 
+    const correctedIds = Object.keys(perTest)
+    const collisions = findAmbiguousStockIds(correctedIds)
+    if (collisions.length > 0) {
+      const message = describeAmbiguousIdentity(collisions)
+      this.#log.error(message)
+      return {
+        status: DryRunStatus.Error,
+        errorMessage: message,
+      }
+    }
+
     /** Corrected id, keyed by the id the stock runner reports for that test. */
     const correctedByStockId = new Map()
-    for (const correctedId of Object.keys(perTest)) {
+    for (const correctedId of correctedIds) {
       const { file, name } = splitTestId(correctedId)
       correctedByStockId.set(`${file}#${toStockRunnerName(name)}`, {
         id: correctedId,
@@ -212,7 +299,7 @@ export class SeparatorReconcilingTestRunner {
     }
 
     let reconciled = 0
-    const tests = result.tests.map((test) => {
+    const tests = result.tests.map(test => {
       const corrected = correctedByStockId.get(test.id)
       if (!corrected) return test
       reconciled += 1
@@ -221,7 +308,7 @@ export class SeparatorReconcilingTestRunner {
 
     this.#log.debug(
       `stryker-js#6210 wrapper: reconciled ${reconciled} of ${result.tests.length} ` +
-        `test identities against ${correctedByStockId.size} coverage keys.`,
+        `test identities against ${correctedByStockId.size} coverage keys.`
     )
 
     return { ...result, tests }
@@ -246,13 +333,13 @@ function createWrappedVitestTestRunner(injector, log) {
 }
 createWrappedVitestTestRunner.inject = tokens(
   commonTokens.injector,
-  commonTokens.logger,
+  commonTokens.logger
 )
 
 export const strykerPlugins = [
   declareFactoryPlugin(
     PluginKind.TestRunner,
     WRAPPED_RUNNER_NAME,
-    createWrappedVitestTestRunner,
+    createWrappedVitestTestRunner
   ),
 ]

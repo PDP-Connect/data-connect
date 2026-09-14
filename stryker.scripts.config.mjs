@@ -40,13 +40,19 @@ export default {
   //
   // The repair is two documented extension points, not a patch: this plugin
   // (Stryker's `plugins` + `PluginKind.TestRunner`), which corrects the test
-  // ids the runner reports, and `scripts/mutation-test-identity-setup.ts`, a
-  // Vitest setup file listed in vite.config.ts, which corrects the coverage
-  // keys the sandbox records. Stryker matches the two by exact string, so both
-  // halves are load-bearing. Nothing under node_modules is modified.
+  // ids the runner reports, and a Vitest setup file
+  // (`scripts/mutation-falsification/test-identity-setup.ts`), which corrects
+  // the coverage keys the sandbox records.
+  // Stryker matches the two by exact string, so both halves are load-bearing,
+  // and neither is correct without the other: a rewritten coverage key under a
+  // stock runner's space-joined id simply fails to join. They are therefore
+  // paired in one place -- the setup file is registered only by
+  // `vite.mutation-scripts.config.ts`, which only this cohort selects, so no
+  // cohort running the stock `vitest` runner sees either half. Nothing under
+  // node_modules is modified.
   plugins: [
     "@stryker-mutator/vitest-runner",
-    "./scripts/mutation-vitest-runner-plugin.mjs",
+    "./scripts/mutation-falsification/vitest-runner-plugin.mjs",
   ],
   testRunner: "vitest-6210",
   // The `scripts/` tests run as part of the root Vitest project -- `test.include`
@@ -69,7 +75,7 @@ export default {
   // `plugins` entry: without it coverage comes back empty and every mutant
   // re-runs the whole suite, which times out. The two are load-bearing
   // together.
-  vitest: { configFile: "vite.config.ts", related: false },
+  vitest: { configFile: "vite.mutation-scripts.config.ts", related: false },
 
   // Populated from the pull request diff by the workflow; empty means this
   // revision touched no scripts production source.
