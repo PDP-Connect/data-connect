@@ -41,9 +41,10 @@
  * `node_modules` is modified, so a reinstall cannot silently drop the repair,
  * and `npm ci` needs no lifecycle script for it to hold.
  *
- * Registered by `stryker.scripts.config.mjs` as `testRunner: "vitest-6210"`.
+ * Registered by the scripts and client Stryker configurations as
+ * `testRunner: "vitest-6210"`.
  * `assertStockRunnerStillJoinsWithSpaces` fails once upstream ships its fix,
- * which is the signal to delete this file, the setup file, and the two config
+ * which is the signal to delete this file, the setup file, and their config
  * references rather than to keep a wrapper that repairs nothing.
  */
 
@@ -525,7 +526,7 @@ export function describeUnexpectedAgreement(tests, perTest) {
       `${JSON.stringify(VITEST_FULL_NAME_SEPARATOR)}, so stryker-js#6210 appears ` +
       `to be fixed upstream. Delete scripts/mutation-falsification/vitest-runner-plugin.mjs, ` +
       `scripts/mutation-falsification/test-identity-setup.ts, and their references in ` +
-      `stryker.scripts.config.mjs and vite.mutation-scripts.config.ts.`
+      `the scripts and client Stryker and Vitest mutation configurations.`
     )
   }
   return undefined

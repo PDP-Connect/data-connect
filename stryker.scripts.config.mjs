@@ -46,8 +46,8 @@ export default {
   // Stryker matches the two by exact string, so both halves are load-bearing,
   // and neither is correct without the other: a rewritten coverage key under a
   // stock runner's space-joined id simply fails to join. They are therefore
-  // paired in one place -- the setup file is registered only by
-  // `vite.mutation-scripts.config.ts`, which only this cohort selects, so no
+  // paired in each mutation configuration -- this cohort selects
+  // `vite.mutation-scripts.config.ts`, and the client selects its own, so no
   // cohort running the stock `vitest` runner sees either half. Nothing under
   // node_modules is modified.
   plugins: [

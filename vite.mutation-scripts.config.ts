@@ -1,19 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// The Vitest configuration the scripts mutation cohort runs under, and the only
-// place `scripts/mutation-falsification/test-identity-setup.ts` is registered.
+// The Vitest configuration the scripts mutation cohort runs under.
 //
-// It exists because that setup file rewrites the coverage key Stryker's Vitest
-// runner records, and that rewrite is only correct for a run whose reported test
-// ids are rewritten to match. `stryker.scripts.config.mjs` does that with
-// `testRunner: "vitest-6210"`; `stryker.config.mjs` (client) and the reference
-// cohort use the stock `vitest` runner and do not. Registering the setup file in
-// the shared `vite.config.ts` would apply the coverage-key rewrite to those
-// cohorts too, while their reported ids stayed space-joined -- Stryker's
+// `scripts/mutation-falsification/test-identity-setup.ts` rewrites coverage
+// keys. That rewrite is only correct when reported test ids are rewritten to
+// match. `stryker.scripts.config.mjs` does that with
+// `testRunner: "vitest-6210"`; the client pairs the same repair in its own
+// `vite.mutation-client.config.ts`. Registering the setup file in
+// the shared `vite.config.ts` would also affect runs using the stock runner,
+// while their reported ids stayed space-joined -- Stryker's
 // `testsById.get(testId)` is an exact-string lookup, so their coverage would no
 // longer join and would be discarded. The two halves of the repair are matched
-// here, in one configuration, and nowhere else.
+// here and in the client mutation configuration.
 //
 // Everything else comes from the root configuration by extension, so the test
 // inventory this cohort mutates against is the same one `npm test` runs.
@@ -35,9 +34,8 @@
 // registration follows the listed order. The runner prepends its own file to
 // this array in `init()`, which puts it first in that list.
 //
-// Set here rather than in the root configuration: only this cohort pairs the
-// two hooks, and no other cohort should have its setup scheduling changed to
-// satisfy this one's ordering requirement.
+// Set in the mutation configurations rather than in the root configuration:
+// only runs that pair the two hooks need this ordering requirement.
 
 import { defineConfig, mergeConfig } from "vitest/config"
 
