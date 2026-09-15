@@ -31,10 +31,14 @@ export function getRowDescription(run: Run) {
   const startedAt = formatShortWeekdayMonthTime(run.startDate)
 
   if (run.status === "running" || run.status === "pending") {
+    // The connector's latest progress message (for example "Fetching budgets")
+    // is the only live signal for hosts that export records at the end.
+    const progress = run.statusMessage?.trim()
+    const suffix = progress ? ` · ${progress}` : ""
     if (run.phase && run.phase.total > 0) {
-      return `Started ${startedAt} · Step ${run.phase.step} of ${run.phase.total}`
+      return `Started ${startedAt} · Step ${run.phase.step} of ${run.phase.total}${suffix}`
     }
-    return `Started ${startedAt}`
+    return `Started ${startedAt}${suffix}`
   }
 
   const finishedAt = run.endDate
