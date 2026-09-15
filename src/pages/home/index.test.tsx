@@ -93,6 +93,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 }))
 
 vi.mock("@/hooks/useConnector", () => ({
+  installedPdppConnectionId: (platform: { id: string; runtime?: string }) =>
+    platform.runtime === "pdpp-network" && platform.id !== "github-pdpp"
+      ? `${platform.id}-owner`
+      : null,
   useConnector: () => ({
     startImport: mockStartImport,
     stopExport: mockStopExport,
@@ -399,6 +403,7 @@ describe("Home", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("prepare_installed_pdpp_import", {
         connectorId: "apple-health-pdpp",
+        connectionId: "apple-health-pdpp-owner",
         directory: true,
       })
       expect(mockStartImport).toHaveBeenCalledWith(
@@ -422,6 +427,7 @@ describe("Home", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("prepare_installed_pdpp_import", {
         connectorId: "apple-health-pdpp",
+        connectionId: "apple-health-pdpp-owner",
         directory: false,
       })
     })

@@ -150,29 +150,50 @@ pub(crate) fn create_import_directory_for_test(
     connector_id: &str,
     connection_id: &str,
 ) -> PreparedImportForTest {
-    let root = canonical_import_root().unwrap();
+    let temp_root = tempfile::tempdir().unwrap();
+    let root = temp_root.path().join("pdpp-imports");
+    fs::create_dir_all(&root).unwrap();
     let scope = import_scope(&root, connector_id, connection_id);
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("export.xml"), "<HealthData/>").unwrap();
-    PreparedImportForTest(
-        copy_import_with_limits(source.path(), &root, &scope, CopyLimits::default()).unwrap(),
-    )
+    PreparedImportForTest {
+        path: copy_import_with_limits(source.path(), &root, &scope, CopyLimits::default()).unwrap(),
+        _temp_root: temp_root,
+    }
 }
 
 #[cfg(test)]
-pub(crate) struct PreparedImportForTest(PathBuf);
+pub(crate) struct PreparedImportForTest {
+    path: PathBuf,
+    _temp_root: tempfile::TempDir,
+}
 
 #[cfg(test)]
 impl PreparedImportForTest {
     pub(crate) fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
+}
+
+fn import_root_for_supplied_path(_supplied: &Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        let directory =
+            fs::canonicalize(_supplied).map_err(|e| format!("Import is unavailable: {e}"))?;
+        if let Some(root) = directory.ancestors().nth(3).filter(|root| {
+            root.file_name()
+                .is_some_and(|name| name.to_string_lossy() == "pdpp-imports")
+        }) {
+            return Ok(root.to_path_buf());
+        }
+    }
+    canonical_import_root()
 }
 
 #[cfg(test)]
 impl Drop for PreparedImportForTest {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -181,7 +202,7 @@ pub(crate) fn validate_import_directory(
     connection_id: &str,
     supplied: &str,
 ) -> Result<PathBuf, String> {
-    let root = canonical_import_root()?;
+    let root = import_root_for_supplied_path(Path::new(supplied))?;
     validate_import_at(
         &root,
         &import_scope(&root, connector_id, connection_id),
@@ -210,7 +231,7 @@ impl ImportedDirectory {
         connection_id: &str,
         supplied: &str,
     ) -> Result<Self, String> {
-        let root = canonical_import_root()?;
+        let root = import_root_for_supplied_path(Path::new(supplied))?;
         let expected_scope = import_scope(&root, connector_id, connection_id);
         let directory = validate_import_at(&root, &expected_scope, Path::new(supplied))?;
         let claim = claim_import_at(&root, &directory)?;

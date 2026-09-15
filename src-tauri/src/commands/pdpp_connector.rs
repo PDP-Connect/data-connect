@@ -187,6 +187,9 @@ impl PdppInteractionResponder {
 
 #[derive(Clone)]
 pub struct PdppRunOptions {
+    /// Maximum time without a valid connector message. Progress and other
+    /// valid protocol messages re-arm this idle watchdog; an owner interaction
+    /// pauses it until the response is sent.
     pub timeout: Option<Duration>,
     pub control: PdppRunControl,
     pub scope_validators: PdppScopeValidators,
@@ -514,8 +517,7 @@ pub fn supervise_pdpp_connector(
     let stdout_thread = spawn_reader(stdout, options.max_stdout_line_bytes, true, tx.clone());
     let stderr_thread = spawn_reader(stderr, options.max_stderr_bytes, false, tx);
 
-    let mut normal_started = Instant::now();
-    let mut normal_elapsed = Duration::ZERO;
+    let mut idle_started = Instant::now();
     let mut pending_interaction: Option<PendingInteraction> = None;
     let mut interaction_generation = 0u64;
     let mut stdout_closed = false;
@@ -557,7 +559,7 @@ pub fn supervise_pdpp_connector(
             && pending_interaction.is_none()
             && options
                 .timeout
-                .is_some_and(|timeout| normal_elapsed + normal_started.elapsed() >= timeout)
+                .is_some_and(|timeout| idle_started.elapsed() >= timeout)
         {
             termination = Some(PdppRunStatus::TimedOut);
             set_failure(&mut failure, "PDPP connector exceeded its runtime timeout");
@@ -584,7 +586,7 @@ pub fn supervise_pdpp_connector(
                     .take()
                     .expect("matching response requires a pending interaction");
                 close_pending_interaction(&options, &start.run_id, pending);
-                normal_started = Instant::now();
+                idle_started = Instant::now();
             }
         }
         if termination.is_none()
@@ -605,7 +607,7 @@ pub fn supervise_pdpp_connector(
                 set_failure(&mut failure, error);
                 terminate_child(&mut child);
             } else {
-                normal_started = Instant::now();
+                idle_started = Instant::now();
             }
         }
         match rx.recv_timeout(Duration::from_millis(10)) {
@@ -732,7 +734,6 @@ pub fn supervise_pdpp_connector(
                                     continue;
                                 }
                             };
-                            normal_elapsed += normal_started.elapsed();
                             interaction_generation += 1;
                             let responder = PdppInteractionResponder {
                                 run_id: start.run_id.clone(),
@@ -766,6 +767,9 @@ pub fn supervise_pdpp_connector(
                         set_failure(&mut failure, error);
                         terminate_child(&mut child);
                     }
+                }
+                if failure.is_none() {
+                    idle_started = Instant::now();
                 }
                 if failure.is_some() {
                     terminate_child(&mut child);
@@ -1361,6 +1365,36 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         }
     }
 
+    fn periodic_progress_fixture() -> PdppConnectorCommand {
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${JSON.stringify(message)}\n`);
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  if (JSON.parse(line).type !== 'START') process.exit(70);
+  let count = 0;
+  const timer = setInterval(() => {
+    count += 1;
+    emit({ type: 'PROGRESS', stream: 'items', message: `progress ${count}` });
+    if (count === 5) {
+      clearInterval(timer);
+      emit({ type: 'DONE', status: 'succeeded', records_emitted: 0 });
+      setImmediate(() => process.exit(0));
+    }
+  }, 40);
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+
     fn output_while_waiting_fixture(output: &str) -> PdppConnectorCommand {
         PdppConnectorCommand {
             program: "node".into(),
@@ -1605,7 +1639,7 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
     }
 
     #[test]
-    fn interaction_pauses_the_normal_timeout_then_response_resumes_it() {
+    fn interaction_pauses_the_idle_timeout_then_response_rearms_it() {
         let result = supervise_pdpp_connector(
             &delayed_after_interaction_fixture(),
             &scoped(),
@@ -1625,9 +1659,25 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
         )
         .unwrap();
 
-        // The 50ms owner interaction exceeds the normal 25ms policy without
+        // The 50ms owner interaction exceeds the idle 25ms policy without
         // timing out; the connector then exceeds that policy after response.
         assert_eq!(result.status, PdppRunStatus::TimedOut);
+    }
+
+    #[test]
+    fn connector_progress_rearms_the_idle_timeout() {
+        let result = supervise_pdpp_connector(
+            &periodic_progress_fixture(),
+            &scoped(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_millis(150)),
+                ..options()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.event_counts.progress, 5);
     }
 
     #[test]
