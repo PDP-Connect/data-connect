@@ -36,6 +36,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 hex = "0.4"
 sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
+oci-client = "0.17"
 semver = "1.0"
 dirs = "7.0"
 dotenvy = "0.15"
