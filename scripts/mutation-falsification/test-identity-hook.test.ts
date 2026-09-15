@@ -13,15 +13,54 @@
 // the separator changed to a single space the suite stayed green.
 //
 // The setup file exports nothing; it registers its hook on import. So this
-// drives the real hook rather than a copy of its arithmetic: importing the
-// module registers the same `beforeEach` the mutation cohort loads, and the
-// assertions below read the id it actually wrote.
+// drives the real hook rather than a copy of its arithmetic, by two routes:
+//
+//   - Most tests let the hook run the way it normally does -- it is registered
+//     by importing the module, ahead of every hook this file registers -- and
+//     read the id it wrote for the test that is currently running.
+//   - The refusal tests capture the registered callback (see `hookCallback`)
+//     and call it with a task built here. That route exists because the refusal
+//     is triggered by a test's own TITLE carrying `" > "`, and a title like
+//     that cannot stay in this cohort's inventory: the wrapper refuses the
+//     whole run over it, correctly. Driving the same callback with a synthetic
+//     task keeps the hook itself under test without making the cohort
+//     unrunnable.
 
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 
 import { UNMAPPABLE_KEY_PREFIX } from "./test-identity-setup.ts"
 
 import { VITEST_FULL_NAME_SEPARATOR } from "./vitest-runner-plugin.mjs"
+
+// The registered `beforeEach` callback, captured from the real module.
+//
+// The setup file exports nothing callable -- it registers its hook on import
+// and that is its whole interface. To drive that hook against a task this file
+// builds, `vitest`'s `beforeEach` is stubbed for the duration of one fresh
+// import, so the callback the module registers is handed here instead of to the
+// runner. What is captured is the real function from the real file; only the
+// registration is intercepted.
+//
+// The stub is installed with `vi.doMock`, which is not hoisted, and torn down
+// immediately after the import so the rest of this file -- and every other file
+// in the run -- registers hooks normally.
+let hookCallback: (context: { task: unknown }) => void = () => {
+  throw new Error("the setup file's beforeEach callback was never captured")
+}
+
+vi.doMock("vitest", async () => {
+  const actual = await vi.importActual<typeof import("vitest")>("vitest")
+  return {
+    ...actual,
+    beforeEach: (callback: (context: { task: unknown }) => void) => {
+      hookCallback = callback
+    },
+  }
+})
+vi.resetModules()
+await import("./test-identity-setup.ts")
+vi.doUnmock("vitest")
+vi.resetModules()
 
 /** `INSTRUMENTER_CONSTANTS.NAMESPACE`, as the setup file inlines it. */
 const STRYKER_NAMESPACE = "__stryker__"
@@ -97,17 +136,50 @@ describe("test identity setup hook", () => {
     })
   })
 
-  // The structured boundary, driven through the real hook with a real title.
-  // This test's own name carries the separator, so its chain cannot be
-  // recovered from the joined string -- it is indistinguishable from
-  // `describe("carries") > it("a literal separator")` one level deeper. The
-  // hook must record the refusal marker rather than a key that looks ordinary,
-  // because one step later nothing can tell the two apart.
-  it("carries > a literal separator", () => {
-    const recorded = namespace().currentTestId ?? ""
+  // The structured boundary, driven through the REAL hook -- the same callback
+  // the mutation cohort registers -- but against a task built here rather than
+  // against this test's own title.
+  //
+  // It used to be a real title: `it("carries > a literal separator")`. That
+  // cannot stay. The cohort runs the whole root suite, so the fixture sat in
+  // the inventory the wrapper validates, and `reportedIdsCarryingSeparator`
+  // refuses exactly such an id -- correctly, since nothing downstream can tell
+  // that chain from one suite level deeper. The fixture was in fact the live
+  // instance of the defect this round repairs: it executes no instrumented
+  // code, so its refusal never reached the host and the run passed regardless.
+  // A title that makes the cohort unrunnable is not a control worth keeping in
+  // that form.
+  //
+  // What the control is actually for is the hook's decision, and that is
+  // preserved: `hookCallback` is the real registered function, and the task is
+  // the shape Vitest hands it. Only the route to the callback is synthetic.
+  it("refuses a title that carries the separator", () => {
+    const recorded = driveHook({
+      name: "carries > a literal separator",
+      suite: { name: "test identity setup hook" },
+      file: { filepath: "scripts/mutation-falsification/synthetic.test.ts" },
+    })
 
     expect(recorded.startsWith(UNMAPPABLE_KEY_PREFIX)).toBe(true)
     expect(recorded).toContain("carries > a literal separator")
+    // The refusal names the chain with a separator that is NOT Vitest's, so the
+    // marker can never be mistaken for a corrected identity.
+    expect(recorded).toContain("test identity setup hook | carries > a literal separator")
+  })
+
+  // The same hook, same route, on an ordinary chain: the marker must not be
+  // written. Without this the test above would pass against a hook that refused
+  // everything.
+  it("does not refuse an ordinary chain driven the same way", () => {
+    const recorded = driveHook({
+      name: "checks value",
+      suite: { name: "outer" },
+      file: { filepath: "scripts/mutation-falsification/synthetic.test.ts" },
+    })
+
+    expect(recorded).toBe(
+      "scripts/mutation-falsification/synthetic.test.ts#outer > checks value"
+    )
   })
 
   // A test one suite deep, asserted against a literal rather than the
@@ -131,4 +203,39 @@ function splitOnFirstHash(id: string): [string, string] {
   const boundary = id.indexOf("#")
   if (boundary === -1) return [id, ""]
   return [id.slice(0, boundary), id.slice(boundary + 1)]
+}
+
+/** The part of Vitest's task shape the hook walks, as the hook declares it. */
+interface SyntheticTask {
+  name: string
+  suite?: SyntheticTask
+  file?: { filepath?: string }
+}
+
+/**
+ * Runs the setup file's real `beforeEach` against a task built here, and
+ * returns the id it recorded.
+ *
+ * The callback is the registered one, captured by importing the setup module
+ * with `vitest`'s `beforeEach` stubbed for the duration of that import. So the
+ * function under test is the same object the mutation cohort runs -- a copy of
+ * its arithmetic would assert nothing about the file that ships.
+ *
+ * A fresh import is needed because the module registers on import and exports
+ * no callback; `vi.resetModules()` makes the second import re-execute rather
+ * than return the cached registration.
+ *
+ * The namespace field is saved and restored around the call: the hook writes to
+ * the same `currentTestId` the surrounding suite's assertions read, and leaving
+ * a synthetic id there would corrupt whichever test ran next.
+ */
+function driveHook(task: SyntheticTask): string {
+  const before = runnerNamespace.currentTestId
+  try {
+    runnerNamespace.currentTestId = "pending"
+    hookCallback({ task } as never)
+    return runnerNamespace.currentTestId ?? ""
+  } finally {
+    runnerNamespace.currentTestId = before
+  }
 }

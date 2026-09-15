@@ -58,14 +58,37 @@ export interface StockIdCollision {
   correctedIds: string[]
 }
 
+/**
+ * One final id that more than one reported test would be rewritten onto, with
+ * the stock ids that landed on it -- those are the names the operator renames.
+ */
+export interface FinalIdCollision {
+  finalId: string
+  stockIds: string[]
+}
+
 /** The validated map from stock id to corrected identity, or why there is none. */
 export type IdentityMap =
   | { ok: true; correctedByStockId: Map<string, { id: string; name: string }> }
   | { ok: false; message: string }
 
 /**
+ * Reported ids whose own title carries the separator.
+ *
+ * The half of the setup file's refusal that cannot travel through coverage: a
+ * test executing no instrumented code records no key, so the refusal is
+ * recomputed from the reported name instead.
+ */
+export declare function reportedIdsCarryingSeparator(
+  reportedTests: readonly { id: string; name?: string }[]
+): string[]
+
+/**
  * Builds the validated identity map from the covered keys and the full
  * reported inventory, or explains why the run cannot be reconciled.
+ *
+ * Uniqueness is validated over the ENTIRE inventory after the rewrite, covered
+ * or not, because the rewrite is what can create a duplicate final id.
  */
 export declare function buildIdentityMap(
   correctedIds: readonly string[],
@@ -84,9 +107,11 @@ export declare function correctedByStockIdFrom(
 /** The message the run fails with when identity cannot be reconciled. */
 export declare function describeIrreconcilableIdentity(findings: {
   unmappable: readonly string[]
+  unmappableReported?: readonly string[]
   collisions: readonly StockIdCollision[]
   aliases: readonly string[]
   unmatched: readonly string[]
+  duplicateFinalIds?: readonly FinalIdCollision[]
 }): string
 
 /**

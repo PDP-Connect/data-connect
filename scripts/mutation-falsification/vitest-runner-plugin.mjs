@@ -140,15 +140,62 @@ export function toStockRunnerName(correctedName) {
 export const UNMAPPABLE_KEY_PREFIX = " stryker-6210-unmappable:"
 
 /**
+ * Detects the identities the setup file's structured boundary would refuse,
+ * reading the reported inventory rather than the coverage keys.
+ *
+ * This is the half of the refusal that does NOT travel through coverage, and it
+ * has to exist separately for a mechanical reason: the setup file's refusal is
+ * written to `globalThis.__stryker__.currentTestId`, which the sandbox turns
+ * into a coverage key, and a test that executes no instrumented code produces
+ * no coverage entry at all. Its refusal is then simply absent here. There is no
+ * in-memory channel to carry it instead -- Vitest runs the suite in a forked
+ * worker (`vitest/dist/workers/forks.js`), so the setup file's `globalThis` is
+ * not the host's, and the only worker-to-host channel the stock runner reads is
+ * `suite.meta`, which this wrapper never sees: it wraps the whole runner and
+ * receives `{ tests, mutantCoverage }` and nothing else. Manufacturing a
+ * coverage hit to carry the refusal would be worse -- it would invent a
+ * mutant-to-test attribution that never happened.
+ *
+ * So the refusal is recomputed here from data that is always present. The
+ * predicate is the same one the hook applies, and it is exact rather than an
+ * approximation: the stock runner joins a suite chain with a single space
+ * (`nameParts.join(' ').trim()` in its `collectTestName`), so a `" > "` inside
+ * a name it reported cannot have come from the join. It can only have come from
+ * a literal `" > "` inside one chain part -- which is precisely what the hook
+ * refuses, one step earlier, where the chain is still structured.
+ *
+ * The hook's refusal is still the better one where both fire: it names the
+ * structured chain, so the operator sees which level carries the separator.
+ * This one names the reported id. They are reported together and neither is
+ * dropped.
+ *
+ * @param {readonly { id: string, name?: string }[]} reportedTests
+ * @returns {string[]} reported ids whose own title carries the separator
+ */
+export function reportedIdsCarryingSeparator(reportedTests) {
+  return reportedTests
+    .filter(test => {
+      const { name } = splitTestId(test.id)
+      return name.includes(VITEST_FULL_NAME_SEPARATOR)
+    })
+    .map(test => test.id)
+    .sort()
+}
+
+/**
  * Builds the validated map from stock id to corrected identity, or explains
  * why the run cannot be reconciled.
  *
- * Three separate ways identity can fail, all of which end the run rather than
+ * Five separate ways identity can fail, all of which end the run rather than
  * producing a mapping that looks clean:
  *
  *   - **Unmappable.** The setup file refused a title containing `" > "`. It
  *     could not have produced a lossless key, and the flattened lookup would
  *     not have found its reported test anyway.
+ *   - **Unmappable, uncovered.** The same refusal for a test that executed no
+ *     instrumented code, so the hook's marker never reached coverage. Detected
+ *     here from the reported name instead -- see
+ *     `reportedIdsCarryingSeparator`.
  *   - **Collision.** Two corrected keys flatten onto one stock id --
  *     `describe("a b") > it("c")` and `describe("a") > it("b c")` both report
  *     as `file#a b c`. The stock id is all the reported test carries, so one of
@@ -156,10 +203,17 @@ export const UNMAPPABLE_KEY_PREFIX = " stryker-6210-unmappable:"
  *   - **Alias.** Two reported tests share one stock id. Then one corrected key
  *     stands for two distinct tests, and the coverage recorded against it
  *     cannot be said to belong to either.
+ *   - **Duplicate final id.** Two reported tests come out of the rewrite under
+ *     one id. This is checked over the WHOLE rewritten inventory, covered or
+ *     not, because the rewrite is what creates the duplicate: a covered
+ *     `describe("outer") > it("checks value")` is rewritten to
+ *     `f#outer > checks value`, which is already the reported id of an
+ *     uncovered `it("outer > checks value")`. Neither id is a duplicate before
+ *     the rewrite, so nothing that inspects only the inputs can see it.
  *
- * The alias check is what requires the full reported inventory rather than only
- * the covered keys: two tests can collide on a stock id while only one of them
- * is covered, and inspecting coverage alone would never see the second.
+ * The last three are what require the full reported inventory rather than only
+ * the covered keys: an uncovered test contributes no coverage key, and
+ * inspecting coverage alone would never see it.
  *
  * @param {readonly string[]} correctedIds coverage keys written by the setup file
  * @param {readonly { id: string }[]} reportedTests the full dry-run inventory
@@ -171,6 +225,11 @@ export function buildIdentityMap(correctedIds, reportedTests) {
     .filter(id => id.startsWith(UNMAPPABLE_KEY_PREFIX))
     .map(id => id.slice(UNMAPPABLE_KEY_PREFIX.length))
     .sort()
+
+  // The refusal that could not travel through coverage. Recomputed from the
+  // inventory so an uncovered test carrying the separator is refused on the
+  // same terms as a covered one.
+  const unmappableReported = reportedIdsCarryingSeparator(reportedTests)
 
   /** @type {Map<string, Set<string>>} */
   const correctedByStock = new Map()
@@ -193,8 +252,11 @@ export function buildIdentityMap(correctedIds, reportedTests) {
   for (const test of reportedTests) {
     reportedCounts.set(test.id, (reportedCounts.get(test.id) ?? 0) + 1)
   }
+  // Every duplicate STOCK id is refused, not only those that happen to carry
+  // coverage. Two tests reported under one id are two tests one identity would
+  // have to stand for, whether or not either of them reached instrumented code.
   const aliases = [...reportedCounts.entries()]
-    .filter(([stockId, count]) => count > 1 && correctedByStock.has(stockId))
+    .filter(([, count]) => count > 1)
     .map(([stockId]) => stockId)
     .sort()
 
@@ -207,19 +269,47 @@ export function buildIdentityMap(correctedIds, reportedTests) {
     .filter(stockId => !reportedCounts.has(stockId))
     .sort()
 
+  // Uniqueness of the FINAL ids, over the entire inventory. Every reported test
+  // is put through the rewrite the dry run is about to perform -- a covered
+  // test takes its corrected id, an uncovered one keeps the id it was reported
+  // under -- and the results are counted. This is the only check that sees a
+  // duplicate produced BY the rewrite rather than present in its inputs.
+  //
+  // Each group records the STOCK ids that landed on the shared final id, not
+  // just the final id itself. Every repair here is a rename, and the stock id
+  // is the one the operator can find in the suite -- naming only the collided
+  // result would say what went wrong without saying which tests to change.
+  /** @type {Map<string, string[]>} */
+  const stockIdsByFinalId = new Map()
+  for (const test of reportedTests) {
+    const keys = correctedByStock.get(test.id)
+    const finalId = keys?.size === 1 ? [...keys][0] : test.id
+    const group = stockIdsByFinalId.get(finalId) ?? []
+    group.push(test.id)
+    stockIdsByFinalId.set(finalId, group)
+  }
+  const duplicateFinalIds = [...stockIdsByFinalId.entries()]
+    .filter(([, stockIds]) => stockIds.length > 1)
+    .map(([finalId, stockIds]) => ({ finalId, stockIds: [...stockIds].sort() }))
+    .sort((left, right) => left.finalId.localeCompare(right.finalId))
+
   if (
     unmappable.length > 0 ||
+    unmappableReported.length > 0 ||
     collisions.length > 0 ||
     aliases.length > 0 ||
-    unmatched.length > 0
+    unmatched.length > 0 ||
+    duplicateFinalIds.length > 0
   ) {
     return {
       ok: false,
       message: describeIrreconcilableIdentity({
         unmappable,
+        unmappableReported,
         collisions,
         aliases,
         unmatched,
+        duplicateFinalIds,
       }),
     }
   }
@@ -244,17 +334,21 @@ export function buildIdentityMap(correctedIds, reportedTests) {
  *
  * @param {{
  *   unmappable: readonly string[],
+ *   unmappableReported?: readonly string[],
  *   collisions: readonly { stockId: string, correctedIds: string[] }[],
  *   aliases: readonly string[],
  *   unmatched: readonly string[],
+ *   duplicateFinalIds?: readonly string[],
  * }} findings
  * @returns {string}
  */
 export function describeIrreconcilableIdentity({
   unmappable,
+  unmappableReported = [],
   collisions,
   aliases,
   unmatched,
+  duplicateFinalIds = [],
 }) {
   const sections = []
 
@@ -266,6 +360,20 @@ export function describeIrreconcilableIdentity({
         `carrying it is indistinguishable from an extra suite level, so the ` +
         `identity cannot be mapped back:\n` +
         unmappable.map(chain => `  ${JSON.stringify(chain)}`).join("\n") +
+        `\nRename each test so its own title does not contain the separator.`
+    )
+  }
+
+  if (unmappableReported.length > 0) {
+    sections.push(
+      `${unmappableReported.length} reported test id(s) carry ` +
+        `${JSON.stringify(VITEST_FULL_NAME_SEPARATOR)} in the name the stock ` +
+        `runner built. That runner joins a suite chain with a single space, so ` +
+        `the separator can only have come from a test's own title, and the ` +
+        `identity cannot be mapped back. These are refused here rather than at ` +
+        `the setup file's boundary because a test that executes no instrumented ` +
+        `code records no coverage key, so its refusal never reaches the host:\n` +
+        unmappableReported.map(id => `  ${JSON.stringify(id)}`).join("\n") +
         `\nRename each test so its own title does not contain the separator.`
     )
   }
@@ -302,6 +410,24 @@ export function describeIrreconcilableIdentity({
       `${unmatched.length} coverage key(s) do not correspond to any reported ` +
         `test, so the coverage recorded against them cannot be attributed:\n` +
         unmatched.map(stockId => `  ${JSON.stringify(stockId)}`).join("\n")
+    )
+  }
+
+  if (duplicateFinalIds.length > 0) {
+    sections.push(
+      `${duplicateFinalIds.length} test id(s) would be shared by more than one ` +
+        `test after the rewrite. The duplicate is created BY the rewrite -- a ` +
+        `covered nested test is corrected onto an id another test was already ` +
+        `reported under -- so neither id is a duplicate before it:\n` +
+        duplicateFinalIds
+          .map(
+            ({ finalId, stockIds }) =>
+              `  ${JSON.stringify(finalId)} <- ${stockIds
+                .map(id => JSON.stringify(id))
+                .join(", ")}`
+          )
+          .join("\n") +
+        `\nRename one test in each group so the corrected identities differ.`
     )
   }
 

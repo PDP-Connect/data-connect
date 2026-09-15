@@ -105,6 +105,25 @@ interface NamedTask {
  * a `beforeEach` fails that one test and would be read downstream as an
  * ordinary test failure, not as an identity the run cannot trust.
  *
+ * This channel reaches the host ONLY for a test that executes instrumented
+ * code. `currentTestId` is what the sandbox attributes a coverage entry to, so
+ * a test that hits no mutant produces no entry and its refusal is simply not
+ * there to be read. There is no in-memory alternative: Vitest runs the suite in
+ * a forked worker (`vitest/dist/workers/forks.js`), so this file's `globalThis`
+ * is not the host's, and the only worker-to-host channel the stock runner reads
+ * is `suite.meta`, which the wrapper never sees -- it wraps the whole runner
+ * and receives `{ tests, mutantCoverage }`. Writing a synthetic coverage hit to
+ * carry the refusal would invent a mutant-to-test attribution that never
+ * happened, which is the thing this machinery exists to prevent.
+ *
+ * So the uncovered half of the refusal is recomputed on the host, from the
+ * reported inventory, by `reportedIdsCarryingSeparator` in
+ * `vitest-runner-plugin.mjs`. That check is exact rather than a fallback: the
+ * stock runner joins a chain with a single space, so a `" > "` in a name it
+ * built can only have come from a title. This hook's refusal remains the better
+ * one where both fire, because it names the structured chain and so says which
+ * suite level carries the separator.
+ *
  * Kept byte-identical to the copy in `vitest-runner-plugin.mjs`, which cannot
  * be imported here: this file is loaded into the test environment and that
  * module pulls in Stryker's host-side packages. `test-identity.test.ts` asserts

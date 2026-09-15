@@ -31,6 +31,7 @@ import {
   buildIdentityMap,
   correctedByStockIdFrom,
   describeUnexpectedAgreement,
+  reportedIdsCarryingSeparator,
   SeparatorReconcilingTestRunner,
   STOCK_RUNNER_SEPARATOR,
   splitTestId,
@@ -256,6 +257,130 @@ describe("test identity mapping", () => {
     expect(identity.message).toContain("f.test.ts#a b c")
     expect(identity.message).toContain("f.test.ts#a b > c")
     expect(identity.message).toContain("f.test.ts#a > b c")
+  })
+
+  // THE decisive case. `describe("outer") > it("checks value")` covers selected
+  // code; `it("outer > checks value")` covers nothing. Both are reported, and
+  // their stock ids are DISTINCT -- `f#outer checks value` and
+  // `f#outer > checks value` -- so no input is ambiguous and no earlier check
+  // fires. The rewrite is what collides them: the covered test is corrected
+  // onto `f#outer > checks value`, which is already the second test's reported
+  // id, and the dry run comes back complete with two tests sharing one
+  // identity.
+  //
+  // The uncovered test's own refusal cannot arrive: the hook writes it to
+  // `currentTestId`, the sandbox turns that into a coverage key, and a test
+  // that reaches no instrumented code produces no key. So the refusal is
+  // recomputed from the reported inventory instead, which is data that is
+  // always present.
+  it("refuses an uncovered literal title that the rewrite would collide with", () => {
+    const identity = buildIdentityMap(
+      ["f.test.ts#outer > checks value"],
+      [
+        { id: "f.test.ts#outer checks value" },
+        { id: "f.test.ts#outer > checks value" },
+      ]
+    )
+
+    expect(identity.ok).toBe(false)
+    if (identity.ok) throw new Error("expected a refusal")
+    // Both ids are named, because the repair is a rename and the operator has
+    // to know which two tests are involved.
+    expect(identity.message).toContain("f.test.ts#outer checks value")
+    expect(identity.message).toContain("f.test.ts#outer > checks value")
+  })
+
+  // The same pair through the real entrypoint. `buildIdentityMap` returning a
+  // refusal is not the claim -- `dryRun` returning `DryRunStatus.Error` is,
+  // because a run that comes back complete still produces a mutation score.
+  it("fails the dry run on an uncovered literal title", async () => {
+    const runner = new SeparatorReconcilingTestRunner(
+      {
+        dryRun: async () => ({
+          status: "complete",
+          tests: [
+            {
+              id: "f.test.ts#outer checks value",
+              name: "outer checks value",
+              status: "success",
+            },
+            {
+              id: "f.test.ts#outer > checks value",
+              name: "outer > checks value",
+              status: "success",
+            },
+          ],
+          mutantCoverage: {
+            static: {},
+            perTest: { "f.test.ts#outer > checks value": { 0: 1 } },
+          },
+        }),
+      } as never,
+      { warn: () => {}, error: () => {}, debug: () => {} } as never
+    )
+
+    const result = await runner.dryRun({} as never)
+
+    expect(result.status).toBe(DryRunStatus.Error)
+    const { errorMessage } = result as { errorMessage: string }
+    expect(errorMessage).toContain("Cannot reconcile test identity")
+    expect(errorMessage).toContain("f.test.ts#outer checks value")
+    expect(errorMessage).toContain("f.test.ts#outer > checks value")
+  })
+
+  // The predicate is exact, not a heuristic, and this is why: the stock runner
+  // joins with a single space, so a `" > "` in a name it built can only have
+  // come from a title. Asserted on the helper directly so the reasoning has its
+  // own test rather than only being exercised through a composite refusal.
+  it("finds a reported separator only in a test's own title", () => {
+    expect(
+      reportedIdsCarryingSeparator([
+        { id: "f.test.ts#outer checks value" },
+        { id: "f.test.ts#outer > checks value" },
+        { id: "g.test.ts#a b c" },
+      ])
+    ).toEqual(["f.test.ts#outer > checks value"])
+  })
+
+  // Duplicate STOCK ids are refused whether or not either test is covered. At
+  // the previous head the alias check required the stock id to appear in the
+  // covered mapping, so two uncovered tests sharing an id passed unremarked.
+  it("refuses two reported tests sharing a stock id with no coverage", () => {
+    const identity = buildIdentityMap(
+      ["f.test.ts#covered > elsewhere"],
+      [
+        { id: "f.test.ts#covered elsewhere" },
+        { id: "g.test.ts#a b" },
+        { id: "g.test.ts#a b" },
+      ]
+    )
+
+    expect(identity.ok).toBe(false)
+    if (identity.ok) throw new Error("expected a refusal")
+    expect(identity.message).toContain("reported by more than one test")
+    expect(identity.message).toContain("g.test.ts#a b")
+  })
+
+  // The positive control for the whole-inventory rule: uncovered tests are
+  // ordinary. A run whose inventory is larger than its coverage must still
+  // reconcile, or the new checks would simply be refusing everything.
+  it("reconciles an inventory holding tests that covered nothing", () => {
+    const identity = buildIdentityMap(
+      ["f.test.ts#outer > checks value"],
+      [
+        { id: "f.test.ts#outer checks value" },
+        { id: "f.test.ts#outer checks other" },
+        { id: "g.test.ts#unrelated thing" },
+      ]
+    )
+
+    expect(identity.ok).toBe(true)
+    if (!identity.ok) throw new Error(identity.message)
+    // Only the covered test is mapped. The other two keep the ids they were
+    // reported under, which is correct: they are in no mutant's filter.
+    expect([...identity.correctedByStockId.keys()]).toEqual([
+      "f.test.ts#outer checks value",
+    ])
   })
 
   // Every coverage key has to name a test that was actually reported. This is
