@@ -88,8 +88,11 @@ export function Home() {
   const [pendingInteraction, setPendingInteraction] =
     useState<PendingPdppInteraction | null>(null)
   const [interactionInput, setInteractionInput] = useState("")
+  const staticSecretSetup = staticSecretDialogPlatform?.setup
   const declaredStaticSecretFields =
-    staticSecretDialogPlatform?.setup?.credentialCapture.fields ?? []
+    staticSecretSetup?.modality === "static_secret"
+      ? staticSecretSetup.credentialCapture.fields
+      : []
   const staticSecretSetupFields = declaredStaticSecretFields
   const setupSubmitDisabled = staticSecretSetupFields.some(
     field => field.required && !setupSecretInputs[field.name]?.trim()

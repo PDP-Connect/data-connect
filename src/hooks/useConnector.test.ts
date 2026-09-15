@@ -128,7 +128,7 @@ describe("useConnector.startImport", () => {
           collectionMode: "incremental",
           streams: [],
           githubToken: null,
-          connectionId: null,
+          connectionId: "apple-health-pdpp-owner",
           setupSecrets: null,
           importDirectory: "/private/imports/run-1",
         },
@@ -245,6 +245,32 @@ describe("useConnector.startImport", () => {
     )
     expect(startRun).toHaveBeenCalledWith(
       expect.not.objectContaining({ setupSecrets: expect.anything() })
+    )
+  })
+
+  it("assigns an owner connection to a browser PDPP connector without setup fields", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport({
+        ...TEST_PLATFORM,
+        id: "anthropic-pdpp",
+        filename: "anthropic-pdpp",
+        runtime: "pdpp-network",
+        setup: null,
+      })
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      expect.objectContaining({
+        request: expect.objectContaining({
+          connectorId: "anthropic-pdpp",
+          connectionId: "anthropic-pdpp-owner",
+        }),
+      })
     )
   })
 

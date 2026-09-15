@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn bundled_lock_activates_only_hash_verified_pdpp_profiles() {
-        let manifest = br#"{"version":"0.5.0","connector_key":"github"}"#;
+        let manifest = br#"{"version":"0.5.0","connector_id":"https://registry.pdpp.org/connectors/github","connector_key":"github"}"#;
         let entrypoint = b"export default {};\n";
         let provenance = br#"{"upstream":{"commit":"test"}}"#;
         let artifact = pdpp_artifact(manifest, entrypoint, provenance);
@@ -1511,6 +1511,10 @@ mod tests {
         assert_eq!(
             installs[0].entrypoint_sha256.as_deref(),
             Some(calculate_checksum(entrypoint).as_str())
+        );
+        assert_eq!(
+            installs[0].manifest_connector_id.as_deref(),
+            Some("https://registry.pdpp.org/connectors/github")
         );
 
         std::fs::write(
@@ -1562,7 +1566,7 @@ mod tests {
 
     #[test]
     fn installs_real_shaped_pdpp_archive_and_derives_activation_metadata() {
-        let manifest = br#"{"version":"0.5.0","connector_key":"github"}"#;
+        let manifest = br#"{"version":"0.5.0","connector_id":"https://registry.pdpp.org/connectors/github","connector_key":"github"}"#;
         let entrypoint = b"export default {};\n";
         let provenance = br#"{"upstream":{"commit":"test"}}"#;
         let artifact = pdpp_artifact(manifest, entrypoint, provenance);
@@ -1596,6 +1600,10 @@ mod tests {
             )
             .expect("installed manifest"),
             manifest
+        );
+        assert_eq!(
+            install.manifest_connector_id.as_deref(),
+            Some("https://registry.pdpp.org/connectors/github")
         );
         assert_eq!(
             std::fs::read(
