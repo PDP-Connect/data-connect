@@ -248,6 +248,50 @@ describe("useConnector.startImport", () => {
     )
   })
 
+  it("passes generic static secrets to installed PDPP host invokes", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "ynab-pdpp",
+          filename: "ynab-pdpp",
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: {
+              fields: [{ name: "secret", required: true, secret: true }],
+            },
+          },
+        },
+        {
+          setupSecrets: {
+            secret: "ynab_transient_pat",
+          },
+        }
+      )
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: expect.objectContaining({
+          connectorId: "ynab-pdpp",
+          connectionId: "ynab-pdpp-owner",
+          setupSecrets: {
+            secret: "ynab_transient_pat",
+          },
+        }),
+      }
+    )
+    expect(startRun).toHaveBeenCalledWith(
+      expect.not.objectContaining({ setupSecrets: expect.anything() })
+    )
+  })
+
   it("preserves the legacy connector command for non-PDPP platforms", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")

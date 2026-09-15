@@ -18,7 +18,7 @@ const PDPP_NETWORK_RUNTIME = "pdpp-network"
 
 interface StartImportOptions {
   githubToken?: string | null
-  setupSecrets?: { username: string; password: string } | null
+  setupSecrets?: Record<string, string> | null
   importDirectory?: string | null
 }
 
@@ -46,9 +46,11 @@ async function startInstalledPdppConnectorRun(
       githubToken:
         platform.id === "github-pdpp" ? (options.githubToken ?? null) : null,
       connectionId:
-        platform.id === "chatgpt-pdpp" ? "chatgpt-pdpp-owner" : null,
-      setupSecrets:
-        platform.id === "chatgpt-pdpp" ? (options.setupSecrets ?? null) : null,
+        platform.runtime === PDPP_NETWORK_RUNTIME &&
+        platform.id !== "github-pdpp"
+          ? `${platform.id}-owner`
+          : null,
+      setupSecrets: options.setupSecrets ?? null,
       ...(options.importDirectory !== undefined
         ? { importDirectory: options.importDirectory }
         : {}),

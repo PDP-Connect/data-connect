@@ -42,7 +42,6 @@ const BUNDLED_NODE_NAME: &str = if cfg!(windows) {
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_CONNECTOR_KEY: &str = "github";
 const CHATGPT_CONNECTOR_KEY: &str = "chatgpt";
-const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PENDING_PDPP_INTERACTIONS: LazyLock<
@@ -72,7 +71,7 @@ pub struct StartInstalledPdppConnectorRequest {
     pub connection_id: Option<String>,
     #[serde(default)]
     pub github_token: Option<String>,
-    /// The pinned ChatGPT profile declares exactly two static-secret fields.
+    /// Static-secret fields are declared by the installed manifest.
     /// They are accepted for this invocation only and never enter run state,
     /// export data, or a command response.
     #[serde(default)]
@@ -337,7 +336,7 @@ fn start_installed_pdpp_connector_run_impl(
         resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)
     })?;
     let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
-    let setup_complete = chatgpt_setup_complete(&resolved, request.connection_id())?;
+    let setup_complete = browser_setup_complete(&resolved, request.connection_id())?;
     let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
     let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
@@ -407,7 +406,7 @@ fn start_installed_pdpp_connector_run_impl(
         // Mark setup only after the credentialed run and its export/state
         // commit have succeeded. A failed launch, login, cancellation, or
         // timeout must leave the next attempt in owner-attended setup.
-        if should_mark_chatgpt_setup_complete(&resolved, &request, &result.status) {
+        if should_mark_browser_setup_complete(&resolved, &request, &result.status) {
             mark_connection_setup_complete(&resolved.connector_id, request.connection_id())?;
         }
         Some(export)
@@ -677,8 +676,10 @@ pub fn reset_installed_pdpp_browser_profile(
     connector_id: String,
     connection_id: String,
 ) -> Result<(), String> {
-    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
-        return Err("PDPP browser profile reset is only available for ChatGPT".into());
+    let runtime = resolve_pdpp_runtime_root(None)?;
+    let resolved = resolve_active_installed_pdpp_connector(&connector_id, &runtime)?;
+    if !requires_browser(&resolved.manifest) {
+        return Err("PDPP connector does not declare a browser profile".into());
     }
     validate_connection_id(&connection_id)?;
     PdppBrowserLease::reset_profile(&connector_id, &connection_id)?;
@@ -686,14 +687,16 @@ pub fn reset_installed_pdpp_browser_profile(
 }
 
 /// A non-secret marker and its durable owner profile are both required before
-/// the UI may omit recovery credentials for a scheduled ChatGPT run.
+/// the UI may omit recovery credentials for a scheduled browser run.
 #[tauri::command]
 pub fn is_installed_pdpp_browser_setup_complete(
     connector_id: String,
     connection_id: String,
 ) -> Result<bool, String> {
-    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
-        return Err("PDPP browser setup state is only available for ChatGPT".into());
+    let runtime = resolve_pdpp_runtime_root(None)?;
+    let resolved = resolve_active_installed_pdpp_connector(&connector_id, &runtime)?;
+    if !requires_browser(&resolved.manifest) {
+        return Ok(false);
     }
     validate_connection_id(&connection_id)?;
     Ok(is_connection_setup_complete(&connector_id, &connection_id)?
@@ -967,6 +970,7 @@ fn validate_manifest(
             "PDPP connector manifest does not match active install id {connector_id}"
         ));
     }
+    required_static_secret_fields(manifest)?;
     if manifest.version.as_deref() != Some(active_version) {
         return Err("PDPP connector manifest version does not match active install".into());
     }
@@ -1000,40 +1004,51 @@ fn validate_manifest(
     Ok(())
 }
 
-fn required_chatgpt_static_secret_fields(
+fn required_static_secret_fields(
     manifest: &PdppConnectorManifest,
-) -> Result<Vec<(&str, &str)>, String> {
-    let setup = manifest
-        .setup
-        .as_ref()
-        .ok_or("ChatGPT PDPP connector must declare setup")?;
+) -> Result<&[PdppStaticSecretField], String> {
+    let Some(setup) = &manifest.setup else {
+        return Ok(&[]);
+    };
     if setup.modality != "static_secret" {
-        return Err("ChatGPT PDPP connector must use setup.modality static_secret".into());
+        return Err("PDPP connector setup modality is not supported".into());
     }
     let fields = &setup
         .credential_capture
         .as_ref()
-        .ok_or("ChatGPT PDPP connector must declare credential_capture")?
+        .ok_or("PDPP static-secret setup must declare credential_capture")?
         .fields;
-    if fields.len() != 2
-        || fields[0].name != "username"
-        || !fields[0].required
-        || !fields[0].secret
-        || fields[0].env != ["CHATGPT_USERNAME"]
-        || fields[1].name != "password"
-        || !fields[1].required
-        || !fields[1].secret
-        || fields[1].env != ["CHATGPT_PASSWORD"]
-    {
-        return Err(
-            "ChatGPT PDPP setup must declare only required secret username and password fields"
-                .into(),
-        );
+    if fields.is_empty() {
+        return Err("PDPP static-secret setup must declare fields".into());
     }
-    Ok(vec![
-        ("username", "CHATGPT_USERNAME"),
-        ("password", "CHATGPT_PASSWORD"),
-    ])
+    let mut names = HashSet::new();
+    let mut environment = HashSet::new();
+    for field in fields {
+        if field.name.is_empty() || !names.insert(&field.name) || field.env.is_empty() {
+            return Err("PDPP static-secret fields must have unique names and declare env".into());
+        }
+        for env in &field.env {
+            if !valid_credential_env(env) || !environment.insert(env) {
+                return Err("PDPP static-secret env names must be safe and unique".into());
+            }
+        }
+    }
+    Ok(fields)
+}
+
+fn valid_credential_env(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with("PDPP_")
+        && !name.starts_with("DATACONNECT_")
+        && !name.starts_with("LD_")
+        && !name.starts_with("DYLD_")
+        && !matches!(
+            name,
+            "NODE_OPTIONS" | "NODE_PATH" | "PATH" | "HOME" | "HOMEDRIVE" | "HOMEPATH"
+        )
+        && name.bytes().enumerate().all(|(index, c)| {
+            c == b'_' || c.is_ascii_uppercase() || (index > 0 && c.is_ascii_digit())
+        })
 }
 
 fn validate_chatgpt_runtime_requirements(
@@ -1295,76 +1310,71 @@ fn resolve_child_secrets_for_connection(
             values: Vec::new(),
         });
     }
-    if manifest_key == CHATGPT_CONNECTOR_KEY {
-        if request.github_token.is_some() {
-            return Err("githubToken can only be passed to the GitHub PDPP connector".into());
-        }
-        let expected = required_chatgpt_static_secret_fields(&resolved.manifest)?;
-        let Some(provided) = request.setup_secrets.as_ref() else {
-            return if setup_complete {
-                Ok(PdppChildSecrets::default())
-            } else {
-                Err("ChatGPT PDPP connector requires setupSecrets.username and setupSecrets.password for first setup or explicit recovery".into())
-            };
-        };
-        if provided.len() != expected.len()
-            || expected.iter().any(|(field, _)| {
-                provided
-                    .get(*field)
-                    .is_none_or(|value| value.trim().is_empty())
-            })
+    let fields = required_static_secret_fields(&resolved.manifest)?;
+    let mut provided = request.setup_secrets.clone().unwrap_or_default();
+    // Retain the existing GitHub request/debug-token API. The manifest still
+    // selects the field and every child environment variable receiving it.
+    if request.github_token.is_some()
+        || (resolved.manifest.connector_key.as_deref() == Some(GITHUB_CONNECTOR_KEY)
+            && request.setup_secrets.is_none())
+    {
+        if resolved.manifest.connector_key.as_deref() != Some(GITHUB_CONNECTOR_KEY)
+            || request.setup_secrets.is_some()
+            || fields.len() != 1
         {
-            return Err(
-                "ChatGPT PDPP connector requires only non-empty setupSecrets.username and setupSecrets.password"
-                    .into(),
-            );
+            return Err("githubToken requires a single-field GitHub setup and cannot be combined with setupSecrets".into());
         }
-        let mut secrets = PdppChildSecrets::default();
-        for (field, environment_key) in expected {
-            let value = provided[field].clone();
-            secrets.values.push(value.clone());
-            secrets
-                .environment
-                .insert(environment_key.to_owned(), value);
-        }
-        return Ok(secrets);
+        provided.insert(fields[0].name.clone(), resolve_github_credential(request)?);
     }
-
-    if request.setup_secrets.is_some() {
-        return Err("setupSecrets can only be passed to the ChatGPT PDPP connector".into());
+    if provided.is_empty() && request.setup_secrets.is_none() && setup_complete {
+        return Ok(PdppChildSecrets::default());
     }
-    if manifest_key != GITHUB_CONNECTOR_KEY {
-        return Err("DataConnect does not support this PDPP connector identity".into());
+    if provided
+        .keys()
+        .any(|name| !fields.iter().any(|field| &field.name == name))
+    {
+        return Err("PDPP setupSecrets contains an undeclared field".into());
     }
-
-    let token = resolve_github_credential(request)?;
     let mut secrets = PdppChildSecrets::default();
-    secrets.values.push(token.clone());
-    secrets
-        .environment
-        .insert("GITHUB_TOKEN".into(), token.clone());
-    secrets
-        .environment
-        .insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token);
+    for field in fields {
+        let value = provided
+            .get(&field.name)
+            .filter(|value| !value.trim().is_empty());
+        let Some(value) = value else {
+            if field.required {
+                return Err(format!(
+                    "PDPP connector requires setupSecrets.{} for first setup or explicit recovery",
+                    field.name
+                ));
+            }
+            continue;
+        };
+        if field.secret {
+            secrets.values.push(value.clone());
+        }
+        for env in &field.env {
+            secrets.environment.insert(env.clone(), value.clone());
+        }
+    }
     Ok(secrets)
 }
 
-fn chatgpt_setup_complete(
+fn browser_setup_complete(
     resolved: &ResolvedInstalledPdppConnector,
     connection_id: &str,
 ) -> Result<bool, String> {
-    if !is_chatgpt_connector(&resolved.manifest) {
+    if !requires_browser(&resolved.manifest) {
         return Ok(false);
     }
     is_connection_setup_complete(&resolved.connector_id, connection_id)
 }
 
-fn should_mark_chatgpt_setup_complete(
+fn should_mark_browser_setup_complete(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     status: &PdppRunStatus,
 ) -> bool {
-    is_chatgpt_connector(&resolved.manifest)
+    requires_browser(&resolved.manifest)
         && request.setup_secrets.is_some()
         && *status == PdppRunStatus::Succeeded
 }
@@ -1405,14 +1415,22 @@ fn build_command(
 ) -> Result<PdppConnectorCommand, String> {
     let mut env = secrets.environment.clone();
     if let Some(binding) = browser_binding {
-        if resolved.manifest.connector_key.as_deref() != Some(CHATGPT_CONNECTOR_KEY) {
-            return Err("PDPP browser binding is only available to the ChatGPT connector".into());
+        if !requires_browser(&resolved.manifest) {
+            return Err("PDPP browser binding requires a declared browser capability".into());
         }
         // The pinned runtime resolves this documented compatibility seam before it
         // considers an isolated local browser. It is a PDPP runtime concern,
         // unrelated to DataConnect's legacy Playwright page API.
         env.insert(
-            "PDPP_CHATGPT_REMOTE_CDP_URL".into(),
+            format!(
+                "PDPP_{}_REMOTE_CDP_URL",
+                resolved
+                    .manifest
+                    .connector_key
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase()
+            ),
             binding.cdp_http_url.clone(),
         );
     }
@@ -2246,6 +2264,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
+
     #[test]
     fn admits_chatgpt_dev_connector_identity_from_matching_install_record() {
         let mut manifest = chatgpt_browser_manifest();
@@ -2328,11 +2348,20 @@ mod tests {
         }
     }
 
+    fn github_setup() -> Value {
+        serde_json::from_str::<Value>(include_str!(
+            "../../tests/fixtures/github.collection-profile.origin-main.json"
+        ))
+        .unwrap()["setup"]
+            .clone()
+    }
+
     fn github_manifest() -> Value {
         json!({
             "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
+            "setup": github_setup(),
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 {
@@ -2353,6 +2382,7 @@ mod tests {
             "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
+            "setup": github_setup(),
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 { "name": "user" },
@@ -3029,22 +3059,52 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
-    fn admits_manifest_declared_browser_bindings() {
-        let manifest = json!({
-            "connector_id": "https://registry.pdpp.org/connectors/github",
-            "connector_key": GITHUB_CONNECTOR_KEY,
-            "version": "1.0.0",
-            "runtime_requirements": {
-                "bindings": {
-                    "network": { "required": true },
-                    "browser": { "required": true }
-                }
-            },
-            "streams": [{ "name": "repositories" }]
-        });
-        let (temp, mut install) = install_fixture(manifest, success_script());
+    fn browser_handoff_follows_declared_capability_and_connector_key() {
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
-        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+        let mut resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let binding = PdppBrowserBinding {
+            backend: "chromium",
+            cdp_http_url: "http://127.0.0.1:9222".into(),
+            lease_id: "fixture".into(),
+            profile_key: "fixture".into(),
+        };
+        let runtime = resolve_pdpp_runtime_root(None).unwrap();
+        assert!(build_command(
+            &resolved,
+            &PdppChildSecrets::default(),
+            &CommandCustomization::default(),
+            Some(&binding),
+            &runtime
+        )
+        .is_err());
+        resolved
+            .manifest
+            .runtime_requirements
+            .as_mut()
+            .unwrap()
+            .bindings
+            .as_mut()
+            .unwrap()
+            .insert(
+                "browser".into(),
+                BindingRequirement {
+                    required: Some(true),
+                },
+            );
+        resolved.manifest.connector_key = Some("example".into());
+        let command = build_command(
+            &resolved,
+            &PdppChildSecrets::default(),
+            &CommandCustomization::default(),
+            Some(&binding),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            command.env["PDPP_EXAMPLE_REMOTE_CDP_URL"],
+            binding.cdp_http_url
+        );
     }
 
     #[test]
@@ -3143,7 +3203,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             PdppRunStatus::Cancelled,
             PdppRunStatus::TimedOut,
         ] {
-            assert!(!should_mark_chatgpt_setup_complete(
+            assert!(!should_mark_browser_setup_complete(
                 &resolved,
                 &credentialed,
                 &status
@@ -3153,7 +3213,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 Err(error) if error.contains("first setup or explicit recovery")
             ));
         }
-        assert!(should_mark_chatgpt_setup_complete(
+        assert!(should_mark_browser_setup_complete(
             &resolved,
             &credentialed,
             &PdppRunStatus::Succeeded
