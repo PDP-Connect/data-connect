@@ -13,8 +13,38 @@ const entryMatchesToken = (entry: PlatformRegistryEntry, token: string) => {
   return false
 }
 
+// Connectors installed at runtime (from the catalog) are not in the generated
+// registry, which is built from the lock at build time. The platform loader
+// registers an entry for each installed Collection Profile the registry does
+// not already cover, so they get a source route and a place on Home.
+const RUNTIME_REGISTRY: PlatformRegistryEntry[] = []
+
+const slugFor = (platform: Platform) => {
+  const fromUri = platform.id.match(/\/connectors\/([a-z0-9][a-z0-9-]*)\/?$/i)?.[1]
+  const base = fromUri ?? platform.filename ?? platform.name ?? platform.id
+  return base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+}
+
+export const registerRuntimePlatformEntries = (platforms: Platform[]) => {
+  for (const platform of platforms) {
+    if (platform.runtime !== "pdpp-network") continue
+    const token = normalizeToken(platform.id)
+    if (PLATFORM_REGISTRY.some(entry => entryMatchesToken(entry, token))) continue
+    if (RUNTIME_REGISTRY.some(entry => entryMatchesToken(entry, token))) continue
+    RUNTIME_REGISTRY.push({
+      id: slugFor(platform),
+      displayName: platform.name,
+      platformIds: [platform.id],
+      availability: "requiresConnector",
+      showInConnectList: true,
+    })
+  }
+}
+
 const findRegistryEntryByToken = (token: string) =>
-  PLATFORM_REGISTRY.find(entry => entryMatchesToken(entry, token)) ?? null
+  PLATFORM_REGISTRY.find(entry => entryMatchesToken(entry, token)) ??
+  RUNTIME_REGISTRY.find(entry => entryMatchesToken(entry, token)) ??
+  null
 
 export const getPlatformRegistryEntryById = (platformId: string) =>
   findRegistryEntryByToken(normalizeToken(platformId))
