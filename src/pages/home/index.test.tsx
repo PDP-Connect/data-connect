@@ -52,6 +52,25 @@ const MANUAL_UPLOAD_PLATFORM = {
   setup: { modality: "manual_or_upload" },
 }
 
+const chatgptStaticSecretFields = [
+  {
+    name: "username",
+    label: "ChatGPT email",
+    type: "email",
+    required: true,
+    secret: true,
+    autocomplete: "username",
+  },
+  {
+    name: "password",
+    label: "ChatGPT password",
+    type: "password",
+    required: true,
+    secret: true,
+    autocomplete: "current-password",
+  },
+]
+
 vi.mock("react-router-dom", async () => {
   const actual =
     await vi.importActual<typeof import("react-router-dom")>("react-router-dom")
@@ -140,9 +159,7 @@ function mockManualUploadPlatform() {
 
 function openManualUpload() {
   renderHome()
-  fireEvent.click(
-    screen.getByRole("button", { name: /connect apple health/i })
-  )
+  fireEvent.click(screen.getByRole("button", { name: /connect apple health/i }))
 }
 
 describe("Home", () => {
@@ -308,26 +325,7 @@ describe("Home", () => {
           runtime: "pdpp-network",
           setup: {
             modality: "static_secret",
-            credentialCapture: {
-              fields: [
-                {
-                  name: "username",
-                  label: "ChatGPT email",
-                  type: "email",
-                  required: true,
-                  secret: true,
-                  autocomplete: "username",
-                },
-                {
-                  name: "password",
-                  label: "ChatGPT password",
-                  type: "password",
-                  required: true,
-                  secret: true,
-                  autocomplete: "current-password",
-                },
-              ],
-            },
+            credentialCapture: { fields: chatgptStaticSecretFields },
           },
         },
       ],
@@ -443,16 +441,15 @@ describe("Home", () => {
     errorSpy.mockRestore()
   })
 
-  it("reuses a completed owner profile without asking for static secrets again", async () => {
-    mockInvoke.mockResolvedValue(true)
+  it("captures generic manifest-declared static secrets before launching", async () => {
     mockUsePlatforms.mockReturnValue({
       platforms: [
         {
-          id: "chatgpt-pdpp",
-          company: "OpenAI",
-          name: "ChatGPT",
-          filename: "chatgpt-pdpp",
-          description: "ChatGPT PDPP export",
+          id: "ynab-pdpp",
+          company: "YNAB",
+          name: "YNAB",
+          filename: "ynab-pdpp",
+          description: "YNAB PDPP export",
           isUpdated: false,
           logoURL: "",
           needsConnection: true,
@@ -463,7 +460,18 @@ describe("Home", () => {
           runtime: "pdpp-network",
           setup: {
             modality: "static_secret",
-            credentialCapture: { fields: [] },
+            credentialCapture: {
+              fields: [
+                {
+                  name: "secret",
+                  label: "YNAB personal access token",
+                  type: "password",
+                  required: true,
+                  secret: true,
+                  autocomplete: "off",
+                },
+              ],
+            },
           },
         },
       ],
@@ -475,23 +483,82 @@ describe("Home", () => {
     })
 
     renderHome()
-    fireEvent.click(screen.getByRole("button", { name: /connect chatgpt/i }))
+    fireEvent.click(screen.getByRole("button", { name: /connect ynab/i }))
+
+    const tokenInput = await screen.findByLabelText(
+      /ynab personal access token/i
+    )
+    expect(mockStartImport).not.toHaveBeenCalled()
+    fireEvent.change(tokenInput, {
+      target: { value: "ynab_transient_pat" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "is_installed_pdpp_browser_setup_complete",
-        { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" }
-      )
       expect(mockStartImport).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "chatgpt-pdpp" })
+        expect.objectContaining({ id: "ynab-pdpp" }),
+        {
+          setupSecrets: {
+            secret: "ynab_transient_pat",
+          },
+        }
       )
     })
-    expect(screen.queryByLabelText(/chatgpt password/i)).toBeNull()
-    expect(mockStartImport).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ setupSecrets: expect.anything() })
-    )
+    expect(screen.queryByLabelText(/ynab personal access token/i)).toBeNull()
   })
+
+  it.each(["chatgpt-pdpp", "example-pdpp"])(
+    "reuses a completed %s owner profile without asking for static secrets again",
+    async connectorId => {
+      mockInvoke.mockResolvedValue(true)
+      mockUsePlatforms.mockReturnValue({
+        platforms: [
+          {
+            id: connectorId,
+            company: "OpenAI",
+            name: "ChatGPT",
+            filename: "chatgpt-pdpp",
+            description: "ChatGPT PDPP export",
+            isUpdated: false,
+            logoURL: "",
+            needsConnection: true,
+            connectURL: null,
+            connectSelector: null,
+            exportFrequency: null,
+            vectorize_config: null,
+            runtime: "pdpp-network",
+            setup: {
+              modality: "static_secret",
+              credentialCapture: { fields: chatgptStaticSecretFields },
+            },
+          },
+        ],
+        connectedPlatforms: {},
+        loadPlatforms: vi.fn(),
+        refreshConnectedStatus: vi.fn(),
+        getPlatformById: vi.fn(),
+        isPlatformConnected: vi.fn(() => false),
+      })
+
+      renderHome()
+      fireEvent.click(screen.getByRole("button", { name: /connect chatgpt/i }))
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith(
+          "is_installed_pdpp_browser_setup_complete",
+          { connectorId, connectionId: `${connectorId}-owner` }
+        )
+        expect(mockStartImport).toHaveBeenCalledWith(
+          expect.objectContaining({ id: connectorId })
+        )
+      })
+      expect(screen.queryByLabelText(/chatgpt password/i)).toBeNull()
+      expect(mockStartImport).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ setupSecrets: expect.anything() })
+      )
+    }
+  )
 
   it("resets an expired ChatGPT session and returns the owner to setup", async () => {
     mockInvoke.mockImplementation(command =>
@@ -517,7 +584,7 @@ describe("Home", () => {
           runtime: "pdpp-network",
           setup: {
             modality: "static_secret",
-            credentialCapture: { fields: [] },
+            credentialCapture: { fields: chatgptStaticSecretFields },
           },
         },
       ],

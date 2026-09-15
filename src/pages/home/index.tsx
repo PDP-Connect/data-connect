@@ -80,22 +80,22 @@ export function Home() {
   const [githubTokenDialogPlatform, setGithubTokenDialogPlatform] =
     useState<Platform | null>(null)
   const [githubTokenInput, setGithubTokenInput] = useState("")
-  const [chatgptSetupDialogPlatform, setChatgptSetupDialogPlatform] =
+  const [staticSecretDialogPlatform, setStaticSecretDialogPlatform] =
     useState<Platform | null>(null)
-  const [chatgptUsernameInput, setChatgptUsernameInput] = useState("")
-  const [chatgptPasswordInput, setChatgptPasswordInput] = useState("")
+  const [setupSecretInputs, setSetupSecretInputs] = useState<
+    Record<string, string>
+  >({})
   const [pendingInteraction, setPendingInteraction] =
     useState<PendingPdppInteraction | null>(null)
   const [interactionInput, setInteractionInput] = useState("")
-  const chatgptSetupFields =
-    chatgptSetupDialogPlatform?.setup?.modality === "static_secret"
-      ? chatgptSetupDialogPlatform.setup.credentialCapture.fields
+  const staticSecretSetup = staticSecretDialogPlatform?.setup
+  const declaredStaticSecretFields =
+    staticSecretSetup?.modality === "static_secret"
+      ? staticSecretSetup.credentialCapture.fields
       : []
-  const chatgptUsernameField = chatgptSetupFields.find(
-    field => field.name === "username"
-  )
-  const chatgptPasswordField = chatgptSetupFields.find(
-    field => field.name === "password"
+  const staticSecretSetupFields = declaredStaticSecretFields
+  const setupSubmitDisabled = staticSecretSetupFields.some(
+    field => field.required && !setupSecretInputs[field.name]?.trim()
   )
   const knownSuccessfulRunIdsRef = useRef<Set<string> | null>(null)
   const homeUiDebugEnabled = useMemo(
@@ -166,7 +166,7 @@ export function Home() {
       platform: Platform,
       options?: {
         githubToken?: string
-        setupSecrets?: { username: string; password: string }
+        setupSecrets?: Record<string, string>
         importDirectory?: string | null
       }
     ) => {
@@ -199,29 +199,24 @@ export function Home() {
         setGithubTokenDialogPlatform(platform)
         return
       }
-      if (
-        platform.id === "chatgpt-pdpp" &&
-        platform.setup?.modality === "static_secret"
-      ) {
+      if (platform.setup?.modality === "static_secret") {
         void invoke<boolean>("is_installed_pdpp_browser_setup_complete", {
           connectorId: platform.id,
-          connectionId: "chatgpt-pdpp-owner",
+          connectionId: `${platform.id}-owner`,
         })
           .then(setupComplete => {
             if (setupComplete) {
               void runImportSource(platform)
               return
             }
-            setChatgptUsernameInput("")
-            setChatgptPasswordInput("")
-            setChatgptSetupDialogPlatform(platform)
+            setSetupSecretInputs({})
+            setStaticSecretDialogPlatform(platform)
           })
           // A missing marker is the safe fallback for a failed or older host:
           // show first-setup recovery rather than accidentally sending no auth.
           .catch(() => {
-            setChatgptUsernameInput("")
-            setChatgptPasswordInput("")
-            setChatgptSetupDialogPlatform(platform)
+            setSetupSecretInputs({})
+            setStaticSecretDialogPlatform(platform)
           })
         return
       }
@@ -254,31 +249,43 @@ export function Home() {
     ]
   )
 
-  const closeChatgptSetupDialog = useCallback(() => {
-    setChatgptSetupDialogPlatform(null)
-    setChatgptUsernameInput("")
-    setChatgptPasswordInput("")
+  const closeStaticSecretDialog = useCallback(() => {
+    setStaticSecretDialogPlatform(null)
+    setSetupSecretInputs({})
   }, [])
 
-  const submitChatgptSetup = useCallback(
+  const submitStaticSecret = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault()
-      const platform = chatgptSetupDialogPlatform
-      const username = chatgptUsernameInput.trim()
-      const password = chatgptPasswordInput
-      if (!platform || !username || !password) return
+      const platform = staticSecretDialogPlatform
+      if (!platform) return
+      const setupSecrets = Object.fromEntries(
+        staticSecretSetupFields.map(field => [
+          field.name,
+          field.name === "username"
+            ? (setupSecretInputs[field.name] ?? "").trim()
+            : (setupSecretInputs[field.name] ?? ""),
+        ])
+      )
+      if (
+        staticSecretSetupFields.some(
+          field => field.required && !setupSecrets[field.name]?.trim()
+        )
+      ) {
+        return
+      }
 
-      closeChatgptSetupDialog()
+      closeStaticSecretDialog()
       void runImportSource(platform, {
-        setupSecrets: { username, password },
+        setupSecrets,
       })
     },
     [
-      chatgptPasswordInput,
-      chatgptSetupDialogPlatform,
-      chatgptUsernameInput,
-      closeChatgptSetupDialog,
+      staticSecretDialogPlatform,
+      closeStaticSecretDialog,
       runImportSource,
+      setupSecretInputs,
+      staticSecretSetupFields,
     ]
   )
 
@@ -322,7 +329,7 @@ export function Home() {
           ? { code: interactionInput }
           : status === "success" && fields.length > 0
             ? { [fields[0]]: interactionInput }
-          : undefined
+            : undefined
       try {
         await invoke("submit_installed_pdpp_interaction_response", {
           runId: interaction.runId,
@@ -542,69 +549,61 @@ export function Home() {
       </AlertDialog>
 
       <AlertDialog
-        open={Boolean(chatgptSetupDialogPlatform)}
+        open={Boolean(staticSecretDialogPlatform)}
         onOpenChange={open => {
-          if (!open) closeChatgptSetupDialog()
+          if (!open) closeStaticSecretDialog()
         }}
       >
         <AlertDialogContent size="sm" className="max-w-[380px]!">
-          <form onSubmit={submitChatgptSetup} className="grid gap-4">
+          <form onSubmit={submitStaticSecret} className="grid gap-4">
             <AlertDialogHeader>
               <AlertDialogTitle className="w-full text-left">
-                Connect ChatGPT
+                Connect {staticSecretDialogPlatform?.name ?? "source"}
               </AlertDialogTitle>
               <AlertDialogDescription className="text-left">
-                Use these only for initial setup or owner-mediated recovery.
-                DataConnect passes them only to this run and does not save them.
+                {staticSecretDialogPlatform?.id === "chatgpt-pdpp"
+                  ? "Use these only for initial setup or owner-mediated recovery. DataConnect passes them only to this run and does not save them."
+                  : "DataConnect passes these credentials only to this run and does not save them."}
               </AlertDialogDescription>
             </AlertDialogHeader>
-            <div className="grid gap-1.5">
-              <label
-                htmlFor="chatgpt-pdpp-username"
-                className="text-xs font-medium text-foreground"
-              >
-                {chatgptUsernameField?.label ?? "ChatGPT email"}
-              </label>
-              <Input
-                id="chatgpt-pdpp-username"
-                type={chatgptUsernameField?.type ?? "email"}
-                autoComplete={chatgptUsernameField?.autocomplete ?? "username"}
-                value={chatgptUsernameInput}
-                onChange={event => setChatgptUsernameInput(event.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <label
-                htmlFor="chatgpt-pdpp-password"
-                className="text-xs font-medium text-foreground"
-              >
-                {chatgptPasswordField?.label ?? "ChatGPT password"}
-              </label>
-              <Input
-                id="chatgpt-pdpp-password"
-                type="password"
-                autoComplete={
-                  chatgptPasswordField?.autocomplete ?? "current-password"
-                }
-                value={chatgptPasswordInput}
-                onChange={event => setChatgptPasswordInput(event.target.value)}
-              />
-            </div>
+            {staticSecretSetupFields.map((field, index) => {
+              const inputId = `${staticSecretDialogPlatform?.id ?? "pdpp"}-${field.name}`
+              return (
+                <div key={field.name} className="grid gap-1.5">
+                  <label
+                    htmlFor={inputId}
+                    className="text-xs font-medium text-foreground"
+                  >
+                    {field.label ?? field.name}
+                  </label>
+                  <Input
+                    id={inputId}
+                    type={field.type ?? "password"}
+                    autoComplete={field.autocomplete ?? "off"}
+                    value={setupSecretInputs[field.name] ?? ""}
+                    onChange={event =>
+                      setSetupSecretInputs(current => ({
+                        ...current,
+                        [field.name]: event.target.value,
+                      }))
+                    }
+                    autoFocus={index === 0}
+                  />
+                </div>
+              )
+            })}
             <AlertDialogFooter>
               <AlertDialogCancel
                 type="button"
                 size="sm"
-                onClick={closeChatgptSetupDialog}
+                onClick={closeStaticSecretDialog}
               >
                 Cancel
               </AlertDialogCancel>
-              <Button
-                type="submit"
-                size="sm"
-                disabled={!chatgptUsernameInput.trim() || !chatgptPasswordInput}
-              >
-                Start owner-attended sync
+              <Button type="submit" size="sm" disabled={setupSubmitDisabled}>
+                {staticSecretDialogPlatform?.id === "chatgpt-pdpp"
+                  ? "Start owner-attended sync"
+                  : "Start import"}
               </Button>
             </AlertDialogFooter>
           </form>
@@ -671,7 +670,8 @@ export function Home() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           {pendingInteraction?.kind === "otp" ||
-          Object.keys(pendingInteraction?.schema?.properties ?? {}).length > 0 ? (
+          Object.keys(pendingInteraction?.schema?.properties ?? {}).length >
+            0 ? (
             <div className="grid gap-1.5">
               <label
                 htmlFor="pdpp-interaction-input"
@@ -702,9 +702,8 @@ export function Home() {
               size="sm"
               disabled={
                 (pendingInteraction?.kind === "otp" ||
-                  Object.keys(
-                    pendingInteraction?.schema?.properties ?? {}
-                  ).length > 0) &&
+                  Object.keys(pendingInteraction?.schema?.properties ?? {})
+                    .length > 0) &&
                 !interactionInput
               }
               onClick={() => void respondToPendingInteraction("success")}

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use super::connector_store::{
     get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
 };
+use super::pdpp_installed_connector::pdpp_stream_to_dataconnect_scope;
 
 // Chromium download constants
 const CHROMIUM_REVISION: &str = "1200";
@@ -107,6 +108,7 @@ pub struct Platform {
 
 #[derive(Debug, Deserialize)]
 struct ActivePdppPlatformManifest {
+    connector_id: String,
     connector_key: Option<String>,
     display_name: Option<String>,
     name: Option<String>,
@@ -536,21 +538,38 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
     platforms
 }
 
-fn load_active_pdpp_platforms() -> Vec<Platform> {
+fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
     let Some(manifest) = read_active_connector_manifest() else {
         return Vec::new();
     };
+    let resource_dir = app.path().resource_dir().ok();
+    load_pdpp_platforms_with_resource_dir(
+        manifest.connectors.into_values(),
+        resource_dir.as_deref(),
+    )
+}
 
+pub(super) fn load_pdpp_platforms(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+) -> Vec<Platform> {
+    load_pdpp_platforms_with_resource_dir(installs, None)
+}
+
+fn load_pdpp_platforms_with_resource_dir(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+    resource_dir: Option<&Path>,
+) -> Vec<Platform> {
     let mut platforms = Vec::new();
-    for install in manifest.connectors.into_values() {
+    for install in installs {
         if install.artifact_kind.as_deref() != Some("pdpp-collection-profile") {
             continue;
         }
-        let Some(path) = active_install_path(&install.root_path, &install.metadata_relative_path)
+        let Ok(content) =
+            super::pdpp_installed_connector::read_admitted_pdpp_manifest_with_resource_dir(
+                &install,
+                resource_dir,
+            )
         else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
@@ -571,8 +590,12 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
             .setup
             .as_ref()
             .is_some_and(|setup| setup.modality == "manual_or_upload");
-        let scopes =
-            pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams, manual_upload);
+        let scopes = pdpp_streams_to_dataconnect_scopes(
+            &connector_key,
+            &manifest.connector_id,
+            &manifest.streams,
+            manual_upload,
+        );
         if scopes.is_empty() {
             continue;
         }
@@ -606,35 +629,19 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
 
 fn pdpp_streams_to_dataconnect_scopes(
     connector_key: &str,
+    connector_identity: &str,
     streams: &[ActivePdppStream],
     include_generic_streams: bool,
 ) -> Vec<String> {
     let mut scopes = Vec::new();
     for stream in streams {
         let scope = if include_generic_streams {
-            Some(format!("pdpp.manual.{connector_key}.{}", stream.name))
+            format!("pdpp.manual.{connector_key}.{}", stream.name)
         } else {
-            match (connector_key, stream.name.as_str()) {
-                ("github", "user") => Some("github.profile".to_owned()),
-                ("github", "repositories") => Some("github.repositories".to_owned()),
-                ("github", "starred") => Some("github.starred".to_owned()),
-                ("chatgpt", "conversations") => Some("chatgpt.conversations".to_owned()),
-                ("chatgpt", "messages") => Some("chatgpt.messages".to_owned()),
-                ("chatgpt", "memories") => Some("chatgpt.memories".to_owned()),
-                ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts".to_owned()),
-                ("chatgpt", "custom_instructions") => {
-                    Some("chatgpt.custom_instructions".to_owned())
-                }
-                ("chatgpt", "shared_conversations") => {
-                    Some("chatgpt.shared_conversations".to_owned())
-                }
-                _ => None,
-            }
+            pdpp_stream_to_dataconnect_scope(connector_key, connector_identity, &stream.name)
         };
-        if let Some(scope) = scope {
-            if !scopes.contains(&scope) {
-                scopes.push(scope);
-            }
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
         }
     }
     scopes
@@ -668,7 +675,7 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
         }
     }
 
-    for platform in load_active_pdpp_platforms() {
+    for platform in load_active_pdpp_platforms(&app) {
         if !seen_ids.contains(&platform.id) {
             seen_ids.insert(platform.id.clone());
             platforms.push(platform);
@@ -2895,8 +2902,36 @@ mod tests {
                 name: stream.into(),
             }];
             assert_eq!(
-                pdpp_streams_to_dataconnect_scopes(key, &streams, true),
+                pdpp_streams_to_dataconnect_scopes(
+                    key,
+                    &format!("https://registry.pdpp.org/connectors/{key}"),
+                    &streams,
+                    true,
+                ),
                 vec![format!("pdpp.manual.{key}.{stream}")]
+            );
+        }
+    }
+
+    #[test]
+    fn pdpp_streams_map_to_legacy_and_generic_scope_ids() {
+        for (fixture, expected) in [
+            (include_str!("../../tests/fixtures/github.collection-profile.origin-main.json"),
+             "github.profile pdpp.github.user_stats github.repositories github.starred pdpp.github.issues pdpp.github.pull_requests pdpp.github.gists"),
+            (include_str!("../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"),
+             "chatgpt.conversations chatgpt.messages chatgpt.memories chatgpt.custom_gpts chatgpt.custom_instructions chatgpt.shared_conversations"),
+            (include_str!("../../tests/fixtures/ynab.collection-profile.origin-main.json"),
+             "pdpp.ynab.budgets pdpp.ynab.accounts pdpp.ynab.account_stats pdpp.ynab.category_groups pdpp.ynab.categories pdpp.ynab.payees pdpp.ynab.payee_locations pdpp.ynab.transactions pdpp.ynab.scheduled_transactions pdpp.ynab.months pdpp.ynab.month_categories"),
+        ] {
+            let manifest: super::ActivePdppPlatformManifest = serde_json::from_str(fixture).unwrap();
+            assert_eq!(
+                super::pdpp_streams_to_dataconnect_scopes(
+                    manifest.connector_key.as_deref().unwrap(),
+                    &manifest.connector_id,
+                    &manifest.streams,
+                    false,
+                ),
+                expected.split_whitespace().collect::<Vec<_>>()
             );
         }
     }
