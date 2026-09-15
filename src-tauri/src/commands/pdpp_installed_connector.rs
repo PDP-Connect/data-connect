@@ -1021,8 +1021,13 @@ pub(crate) fn host_unavailable_reason(
         }
         Some(modality) => return Some(format!("Requires unavailable setup: {modality}")),
         None => {
+            // Without a setup modality the host has no way to hand a filesystem
+            // connector its input (no picker, no managed import directory), so a
+            // connector that reads local files directly is not runnable here yet.
             if !required_bindings.iter().any(|binding| binding == "network") {
-                return Some("PDPP connector manifest must require the network binding".into());
+                return Some(
+                    "Reads local files directly; the desktop can only run file-based connectors that use a manual upload".into(),
+                );
             }
         }
     }
@@ -3582,7 +3587,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         install.root_path = temp.path().to_string_lossy().into_owned();
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
-            .contains("must require the network binding"));
+            .contains("Reads local files directly"));
 
         let mut wrong_version = github_manifest();
         wrong_version["version"] = json!("2.0.0");

@@ -48,7 +48,9 @@ pub(crate) struct CatalogBindingRequirement {
 
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct CatalogSetup {
-    pub modality: String,
+    /// The catalog schema allows `null` for connectors whose manifest declares
+    /// no setup modality; treat that the same as an absent setup block.
+    pub modality: Option<String>,
 }
 
 impl CatalogConnector {
@@ -65,7 +67,7 @@ impl CatalogConnector {
     }
 
     pub(crate) fn setup_modality(&self) -> Option<&str> {
-        self.setup.as_ref().map(|setup| setup.modality.as_str())
+        self.setup.as_ref().and_then(|setup| setup.modality.as_deref())
     }
 }
 
