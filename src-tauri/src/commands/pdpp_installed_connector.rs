@@ -2351,7 +2351,17 @@ fn to_response(
         progress,
         records_truncated: result.records_truncated,
         events_truncated: result.events_truncated,
-        failure: failure.map(|failure| redact_secrets(&failure, secrets)),
+        failure: failure.map(|failure| {
+            let failure = redact_secrets(&failure, secrets);
+            if result.attach_stderr_tail {
+                // Redact the whole stderr first, then cut the tail, so a
+                // secret can never be split across the cut.
+                let stderr = redact_secrets(&result.stderr, secrets);
+                super::pdpp_connector::failure_with_stderr_tail(&failure, &stderr, result.stderr_truncated)
+            } else {
+                failure
+            }
+        }),
         stderr_bytes: result.stderr.len(),
         stderr_truncated: result.stderr_truncated,
         exit_code: result.exit_code,

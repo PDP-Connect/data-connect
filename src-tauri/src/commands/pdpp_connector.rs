@@ -324,6 +324,9 @@ pub struct PdppRunResult {
     pub done: Option<PdppDone>,
     pub stderr: String,
     pub stderr_truncated: bool,
+    /// True when the child exited without DONE: the host attaches a redacted
+    /// stderr tail to the failure message after secrets have been removed.
+    pub attach_stderr_tail: bool,
     pub exit_code: Option<i32>,
     pub failure: Option<String>,
 }
@@ -821,15 +824,15 @@ pub fn supervise_pdpp_connector(
         set_failure(&mut failure, "PDPP stderr reader terminated unexpectedly");
     }
     let exit_code = exit.code();
+    let mut attach_stderr_tail = false;
     match done.as_ref() {
         None => {
-            if let Some(existing) = failure.as_mut() {
-                *existing = failure_with_stderr_tail(existing, &stderr_text);
-            } else {
-                failure = Some(failure_with_stderr_tail(
-                    "PDPP connector exited without a terminal DONE message",
-                    &stderr_text,
-                ));
+            // Do not embed stderr here: it is redacted later by the caller,
+            // which knows the secrets. Cutting a tail before redaction could
+            // split a credential so that redaction no longer matches it.
+            attach_stderr_tail = true;
+            if failure.is_none() {
+                failure = Some("PDPP connector exited without a terminal DONE message".into());
             }
         }
         Some(done) if done.records_emitted != record_count => set_failure(
@@ -870,6 +873,7 @@ pub fn supervise_pdpp_connector(
         done,
         stderr: stderr_text,
         stderr_truncated,
+        attach_stderr_tail,
         exit_code,
         failure,
     })
@@ -1168,11 +1172,20 @@ fn append_stderr(output: &mut String, truncated: &mut bool, limit: usize, line: 
     output.push_str(line);
 }
 
-fn failure_with_stderr_tail(message: &str, stderr: &str) -> String {
+/// Append the last lines of an ALREADY-REDACTED stderr to a failure message.
+/// `truncated` means the reader cut the stream at its byte cap; the final line
+/// may then be a fragment that split a secret, so it is dropped.
+pub(crate) fn failure_with_stderr_tail(message: &str, stderr: &str, truncated: bool) -> String {
     if stderr.trim().is_empty() {
         return message.to_string();
     }
-    let lines = stderr.lines().collect::<Vec<_>>();
+    let mut lines = stderr.lines().collect::<Vec<_>>();
+    if truncated {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return message.to_string();
+    }
     let start = lines.len().saturating_sub(8);
     let mut tail = lines[start..].join("\n");
     if tail.len() > 2048 {
@@ -1504,9 +1517,12 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
         assert_eq!(result.status, PdppRunStatus::Failed);
         let failure = result.failure.expect("missing DONE failure");
         assert!(failure.starts_with("PDPP connector exited without a terminal DONE message"));
-        assert!(failure.contains("stderr tail:"));
-        assert!(failure.contains("GitHub API request failed: 401 Unauthorized"));
-        assert!(failure.contains("request id: fixture-1"));
+        assert!(result.attach_stderr_tail);
+        assert!(!failure.contains("stderr tail:"), "tail is attached only after redaction");
+        let with_tail = failure_with_stderr_tail(&failure, &result.stderr, result.stderr_truncated);
+        assert!(with_tail.contains("stderr tail:"));
+        assert!(with_tail.contains("GitHub API request failed: 401 Unauthorized"));
+        assert!(with_tail.contains("request id: fixture-1"));
     }
     #[test]
     fn rejects_counter_scope_field_and_resource_violations() {
