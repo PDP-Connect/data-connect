@@ -19,6 +19,7 @@ const PDPP_NETWORK_RUNTIME = "pdpp-network"
 interface StartImportOptions {
   githubToken?: string | null
   setupSecrets?: { username: string; password: string } | null
+  importDirectory?: string | null
 }
 
 function isDuplicateStartError(error: unknown): boolean {
@@ -48,6 +49,9 @@ async function startInstalledPdppConnectorRun(
         platform.id === "chatgpt-pdpp" ? "chatgpt-pdpp-owner" : null,
       setupSecrets:
         platform.id === "chatgpt-pdpp" ? (options.setupSecrets ?? null) : null,
+      ...(options.importDirectory !== undefined
+        ? { importDirectory: options.importDirectory }
+        : {}),
     },
   })
 }
