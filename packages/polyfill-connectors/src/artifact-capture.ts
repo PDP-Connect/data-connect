@@ -38,7 +38,7 @@ import {
 	LocalDeviceBlobSpool,
 	LocalDeviceOutbox,
 } from "@pdpp/collector-runtime";
-import { resolveArtifactCaptureEnv } from "../../src/artifact-capture-env.ts";
+import { resolveArtifactCaptureEnv } from "./artifact-capture-env.ts";
 
 /**
  * Whether this run can actually deliver a spooled body upstream.
