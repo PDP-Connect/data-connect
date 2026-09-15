@@ -391,14 +391,36 @@ pub(crate) fn activate_bundled_pdpp_connectors(app: &AppHandle) -> Result<(), St
     let installs = bundled_pdpp_connector_installs(&get_bundled_connectors_dir(&app))?;
     log::info!("Activating {} bundled OCI connector(s)", installs.len());
     for install in installs {
+        let existing_root_path =
+            get_active_connector_install(&install.connector_id).map(|existing| existing.root_path);
+        let replaced = activate_bundled_connector_install(install.clone())?;
         log::info!(
-            "Activating bundled OCI connector {}@{}",
-            install.connector_id,
-            install.version
+            "{}",
+            bundled_activation_log_message(
+                &install.connector_id,
+                &install.version,
+                replaced,
+                existing_root_path.as_deref(),
+            )
         );
-        activate_bundled_connector_install(install)?;
     }
     Ok(())
+}
+
+fn bundled_activation_log_message(
+    connector_id: &str,
+    version: &str,
+    replaced: bool,
+    existing_root_path: Option<&str>,
+) -> String {
+    if replaced {
+        format!("Activating bundled OCI connector {connector_id}@{version}")
+    } else {
+        format!(
+            "Bundled OCI connector {connector_id}: kept existing install at {}",
+            existing_root_path.unwrap_or("<unknown>")
+        )
+    }
 }
 
 fn get_bundled_connectors_dir(app: &AppHandle) -> PathBuf {
@@ -1729,6 +1751,7 @@ fn install_verified_legacy_connector(
         metadata_relative_path: metadata_relative.to_string_lossy().to_string(),
         script_relative_path: script_relative.to_string_lossy().to_string(),
         artifact_kind: None,
+        artifact_digest: None,
         manifest_path: None,
         entrypoint_path: None,
         entrypoint_sha256: None,
@@ -1849,6 +1872,7 @@ fn active_pdpp_install_at(
         metadata_relative_path: manifest_relative.to_string_lossy().into_owned(),
         script_relative_path: entrypoint_relative.to_string_lossy().into_owned(),
         artifact_kind: Some("pdpp-collection-profile".to_string()),
+        artifact_digest: connector.oci.as_ref().map(|oci| oci.digest.clone()),
         manifest_path: Some(manifest_relative.to_string_lossy().into_owned()),
         entrypoint_path: Some(entrypoint_relative.to_string_lossy().into_owned()),
         entrypoint_sha256: Some(connector.entrypoint_sha256.clone()),
@@ -1962,13 +1986,13 @@ fn scan_connectors_dir_no_overwrite(dir: &PathBuf, versions: &mut HashMap<String
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_certificate_identity_for_url, bundled_pdpp_connector_installs, calculate_checksum,
-        connector_path_within_root, connector_root_relative_path,
-        install_verified_connector_artifact_into, verify_checksum, verify_sigstore_bundle_async,
-        verify_sigstore_bundle_blocking, BundledConnectorLock, ConnectorFiles, ConnectorIndex,
-        IndexedConnector, IndexedConnectorCommon, LegacyIndexedConnector,
-        DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY,
-        VANA_LEGACY_ARTIFACT_URLS,
+        artifact_certificate_identity_for_url, bundled_activation_log_message,
+        bundled_pdpp_connector_installs, calculate_checksum, connector_path_within_root,
+        connector_root_relative_path, install_verified_connector_artifact_into, verify_checksum,
+        verify_sigstore_bundle_async, verify_sigstore_bundle_blocking, BundledConnectorLock,
+        ConnectorFiles, ConnectorIndex, IndexedConnector, IndexedConnectorCommon,
+        LegacyIndexedConnector, DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+        VANA_LEGACY_ARTIFACT_CERTIFICATE_IDENTITY, VANA_LEGACY_ARTIFACT_URLS,
     };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
@@ -2396,6 +2420,23 @@ mod tests {
             )
             .as_deref(),
             Some("Requires unavailable binding: desktop_session")
+        );
+    }
+
+    #[test]
+    fn bundled_activation_log_names_the_install_it_kept() {
+        assert_eq!(
+            bundled_activation_log_message(
+                "github-pdpp",
+                "0.5.0",
+                false,
+                Some("/home/test/.dataconnect/connectors-store/github-pdpp/0.5.0"),
+            ),
+            "Bundled OCI connector github-pdpp: kept existing install at /home/test/.dataconnect/connectors-store/github-pdpp/0.5.0"
+        );
+        assert_eq!(
+            bundled_activation_log_message("github-pdpp", "0.5.0", true, None),
+            "Activating bundled OCI connector github-pdpp@0.5.0"
         );
     }
 
