@@ -16,6 +16,18 @@ import { durationSince } from "@/lib/telemetry/client"
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = "DUPLICATE_ACTIVE_RUN"
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
 
+/**
+ * The connection an installed PDPP connector runs under. The import picker
+ * (prepare) and the run start must derive the same value, or the staged copy
+ * lands in one connection scope and the run looks for it in another.
+ */
+export function installedPdppConnectionId(platform: Platform): string | null {
+  return platform.runtime === PDPP_NETWORK_RUNTIME &&
+    platform.id !== "github-pdpp"
+    ? `${platform.id}-owner`
+    : null
+}
+
 interface StartImportOptions {
   githubToken?: string | null
   setupSecrets?: Record<string, string> | null
@@ -45,11 +57,7 @@ async function startInstalledPdppConnectorRun(
       streams: [],
       githubToken:
         platform.id === "github-pdpp" ? (options.githubToken ?? null) : null,
-      connectionId:
-        platform.runtime === PDPP_NETWORK_RUNTIME &&
-        platform.id !== "github-pdpp"
-          ? `${platform.id}-owner`
-          : null,
+      connectionId: installedPdppConnectionId(platform),
       setupSecrets: options.setupSecrets ?? null,
       ...(options.importDirectory !== undefined
         ? { importDirectory: options.importDirectory }

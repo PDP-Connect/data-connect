@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import type { Platform } from "@/types"
+import { installedPdppConnectionId } from "@/hooks/useConnector"
 
 export function useHomeManualUpload(
   onImportReady: (platform: Platform, importDirectory: string) => void
@@ -33,6 +34,7 @@ export function useHomeManualUpload(
           "prepare_installed_pdpp_import",
           {
             connectorId: platform.id,
+            connectionId: installedPdppConnectionId(platform),
             directory,
           }
         )
