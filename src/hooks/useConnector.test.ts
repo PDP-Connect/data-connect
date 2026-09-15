@@ -100,6 +100,33 @@ describe("useConnector.startImport", () => {
     expect(deleteRun).not.toHaveBeenCalled()
   })
 
+  it("keeps the installed host error in the run status message", async () => {
+    mockInvoke.mockRejectedValue(
+      new Error("Import directory does not belong to this connection")
+    )
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport({
+        ...TEST_PLATFORM,
+        id: "apple-health-pdpp",
+        runtime: "pdpp-network",
+      })
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(updateRunStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "apple-health-pdpp-1700000000000",
+        status: "error",
+        statusMessage: "Import directory does not belong to this connection",
+      })
+    )
+  })
+
   it("passes a prepared manual import to the installed host without credentials", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")

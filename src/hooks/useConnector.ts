@@ -35,13 +35,21 @@ interface StartImportOptions {
 }
 
 function isDuplicateStartError(error: unknown): boolean {
-  const message =
-    typeof error === "string"
-      ? error
-      : error instanceof Error
-        ? error.message
-        : String(error)
-  return message.includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+  return getErrorMessage(error).includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+}
+
+function getErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error
+  if (error instanceof Error) return error.message
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message
+  }
+  return String(error)
 }
 
 async function startInstalledPdppConnectorRun(
@@ -119,6 +127,7 @@ export function useConnector() {
                 runId,
                 status: "error",
                 endDate: new Date().toISOString(),
+                statusMessage: getErrorMessage(error),
                 onlyIfRunning: true,
               })
             )
@@ -155,6 +164,7 @@ export function useConnector() {
             runId,
             status: "error",
             endDate: new Date().toISOString(),
+            statusMessage: getErrorMessage(error),
           })
         )
         trackCollectionFailed({

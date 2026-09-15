@@ -286,10 +286,6 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
     [downloadConnector, onReloadPlatforms]
   )
 
-  if (visibleCount === 0 && !isCheckingUpdates && !error) {
-    return null
-  }
-
   return (
     <div className={cn(updatesPanelClassName, "mb-6")}>
       {/* Header */}
@@ -304,7 +300,9 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
           <Text as="span" intent="small" weight="medium">
             {visibleCount > 0
               ? `${visibleCount} Connector${visibleCount > 1 ? "s" : ""}`
-              : "Checking for updates…"}
+              : isCheckingUpdates
+                ? "Checking for updates…"
+                : "Connector availability"}
           </Text>
         </div>
         <button
@@ -334,6 +332,12 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
             {error}
           </Text>
         </div>
+      )}
+
+      {visibleCount === 0 && !isCheckingUpdates && !error && (
+        <Text as="p" intent="small" color="mutedForeground">
+          No connector updates or new connectors available
+        </Text>
       )}
 
       {/* Updates list */}
