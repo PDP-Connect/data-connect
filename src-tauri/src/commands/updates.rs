@@ -1484,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn check_connector_updates_carries_catalog_metadata_and_preserves_update_flags() {
+    fn check_connector_updates_carries_index_metadata_and_preserves_update_flags() {
         let mut fixture = real_shaped_index(b"artifact", b"manifest", b"entrypoint", b"provenance");
         let pdpp = &mut fixture["connectors"]["github-pdpp"][0];
         pdpp["tier"] = json!("preview");
