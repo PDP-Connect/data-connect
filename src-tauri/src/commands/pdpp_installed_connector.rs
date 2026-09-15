@@ -2319,12 +2319,192 @@ mod tests {
     const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
 
     #[test]
-    fn admits_chatgpt_dev_connector_identity_from_matching_install_record() {
-        let mut manifest = chatgpt_browser_manifest();
-        manifest["connector_id"] = json!("https://registry.pdpp.dev/connectors/chatgpt");
-        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+    fn registry_identity_is_bound_to_the_install_digest_not_the_domain() {
+        for key in ["github", "chatgpt"] {
+            for domain in ["org", "dev"] {
+                let mut manifest = if key == "github" {
+                    github_manifest()
+                } else {
+                    chatgpt_browser_manifest()
+                };
+                manifest["connector_id"] =
+                    json!(format!("https://registry.pdpp.{domain}/connectors/{key}"));
+                let (temp, mut install) = install_fixture(manifest.clone(), success_script());
+                install.root_path = temp.path().to_string_lossy().into_owned();
+                install.connector_id = format!("{key}-pdpp");
+                install.version = manifest["version"].as_str().unwrap().into();
+                assert!(read_admitted_pdpp_manifest(&install).is_ok());
+                install.connector_id = "different-pdpp".into();
+                assert!(read_admitted_pdpp_manifest(&install)
+                    .unwrap_err()
+                    .contains("does not match"));
+                install.connector_id = format!("{key}-pdpp");
+                manifest["connector_id"] = json!("https://other.example/connector");
+                fs::write(
+                    temp.path().join("profile/collection-profile.json"),
+                    serde_json::to_vec_pretty(&manifest).unwrap(),
+                )
+                .unwrap();
+                assert!(read_admitted_pdpp_manifest(&install)
+                    .unwrap_err()
+                    .contains("checksum mismatch"));
+                assert!(super::super::connector::load_pdpp_platforms([install]).is_empty());
+            }
+        }
+    }
 
-        assert!(validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).is_ok());
+    #[test]
+    fn rejects_invalid_https_identity_and_unsafe_static_secret_fields() {
+        for identity in [
+            "",
+            "http://registry.pdpp.dev/connectors/github",
+            "https://",
+            "https:example.com",
+            "https://example.com/a b",
+        ] {
+            let mut manifest = github_manifest();
+            manifest["connector_id"] = json!(identity);
+            assert!(validate_manifest(
+                "github-pdpp",
+                "1.0.0",
+                &serde_json::from_value(manifest).unwrap()
+            )
+            .is_err());
+        }
+        for env in [
+            "NODE_OPTIONS",
+            "PDPP_CONNECTOR_NETWORK",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BAD=ENV",
+        ] {
+            let mut manifest = github_manifest();
+            manifest["setup"]["credential_capture"]["fields"][0]["env"] = json!([env]);
+            assert!(validate_manifest(
+                "github-pdpp",
+                "1.0.0",
+                &serde_json::from_value(manifest).unwrap()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn generic_projection_cannot_forge_curated_scope_keys() {
+        for (key, stream, identity) in [
+            (
+                "github",
+                "repositories",
+                "https://evil.example/connectors/github",
+            ),
+            (
+                "chatgpt",
+                "conversations",
+                "https://evil.example/connectors/chatgpt",
+            ),
+            (
+                "github",
+                "profile",
+                "https://registry.pdpp.dev/connectors/github",
+            ),
+        ] {
+            let mut manifest = github_manifest();
+            manifest["connector_key"] = json!(key);
+            manifest["connector_id"] = json!(identity);
+            manifest["streams"] = json!([{ "name": stream }]);
+            let (temp, mut install) = install_fixture(manifest, success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            install.connector_id = format!("{key}-pdpp");
+            let platforms = super::super::connector::load_pdpp_platforms([install.clone()]);
+            let scope = format!("pdpp.{key}.{stream}");
+            assert_eq!(platforms[0].scopes, Some(vec![scope.clone()]));
+            let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+            let mut request = request_with_token("fixture");
+            request.connector_id = install.connector_id;
+            request.streams = vec![stream.into()];
+            let record: PdppRecord = serde_json::from_value(json!({
+                "stream": stream, "key": "forged", "data": {"full_name": "attacker/backdoor"}, "emitted_at": "2026-09-15T00:00:00Z"
+            })).unwrap();
+            let state = PdppCollectionConnectionState {
+                snapshot_by_stream: HashMap::from([(stream.into(), vec![record])]),
+                ..Default::default()
+            };
+            let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+            assert_eq!(export["requestedScopes"], json!([scope]));
+            assert!(!export
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with("github.") || key.starts_with("chatgpt.")));
+            request.streams = vec!["undeclared".into()];
+            assert!(validate_request(&request, &resolved.manifest)
+                .unwrap_err()
+                .contains("not in the connector manifest"));
+            assert!(build_export_data(&resolved, &request, &state, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn ynab_is_discovered_scoped_run_and_exported_from_its_manifest() {
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ynab.collection-profile.origin-main.json"
+        ))
+        .unwrap();
+        let script = success_script()
+            .replace("GITHUB_TOKEN", "YNAB_PAT")
+            .replace("GITHUB_PERSONAL_ACCESS_TOKEN", "YNAB_PERSONAL_ACCESS_TOKEN")
+            .replace("{ id: 'repo-1' }", "{ id: 'budget-1', name: 'Household' }");
+        let (temp, mut install) = install_fixture(manifest.clone(), &script);
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = "ynab-pdpp".into();
+        install.version = manifest["version"].as_str().unwrap().into();
+        let platforms = super::super::connector::load_pdpp_platforms([install.clone()]);
+        assert_eq!(platforms.len(), 1);
+        assert_eq!(platforms[0].id, "ynab-pdpp");
+        assert_eq!(
+            platforms[0].scopes.as_ref().unwrap().len(),
+            manifest["streams"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            serde_json::to_value(&platforms[0]).unwrap()["setup"]["credentialCapture"]["fields"][0]
+                ["name"],
+            "secret"
+        );
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            connector_id: "ynab-pdpp".into(),
+            streams: vec!["budgets".into()],
+            github_token: None,
+            setup_secrets: Some(HashMap::from([("secret".into(), "ynab-fixture".into())])),
+            ..request_with_token("")
+        };
+        let secrets = resolve_child_secrets(&request, &resolved).unwrap();
+        assert_eq!(
+            sorted_env_bytes(&secrets.environment),
+            b"YNAB_PAT=ynab-fixture\nYNAB_PERSONAL_ACCESS_TOKEN=ynab-fixture"
+        );
+        let result = run_resolved_installed_pdpp_connector(
+            &resolved,
+            &request,
+            CommandCustomization {
+                max_retained_records: 8,
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.record_count, 1);
+        let state = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([("budgets".into(), result.records)]),
+            ..Default::default()
+        };
+        let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+        assert_eq!(export["requestedScopes"], json!(["pdpp.ynab.budgets"]));
+        assert_eq!(
+            export["pdpp.ynab.budgets"]["budgets"][0]["name"],
+            "Household"
+        );
     }
 
     // The production registry is process-global. Serialize the small set of
@@ -3044,6 +3224,94 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         }
     }
 
+    fn sorted_env_bytes(environment: &HashMap<String, String>) -> Vec<u8> {
+        let mut entries = environment
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries.join("\n").into_bytes()
+    }
+
+    fn normalized_command_env_bytes(
+        command: &PdppConnectorCommand,
+        manifest_path: &Path,
+        runtime_root: &Path,
+    ) -> Vec<u8> {
+        let manifest_path = manifest_path.to_string_lossy();
+        let runtime_root = runtime_root.to_string_lossy();
+        let mut normalized = command.env.clone();
+        for value in normalized.values_mut() {
+            if value == &*manifest_path {
+                *value = "<manifest>".into();
+            } else if value == &*runtime_root {
+                *value = "<runtime>".into();
+            }
+        }
+        sorted_env_bytes(&normalized)
+    }
+
+    #[test]
+    fn github_and_chatgpt_child_secret_envs_are_byte_identical() {
+        let chatgpt_request = StartInstalledPdppConnectorRequest {
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "fixture-password".into()),
+            ])),
+            ..request_with_token("")
+        };
+        for (manifest, request, expected) in [
+            (github_manifest(), request_with_token("ghp_fixture_token"),
+             "DATACONNECT_PDPP_RUNTIME_ROOT=<runtime>\nGITHUB_PERSONAL_ACCESS_TOKEN=ghp_fixture_token\nGITHUB_TOKEN=ghp_fixture_token\nPDPP_CONNECTOR_MANIFEST_PATH=<manifest>\nPDPP_CONNECTOR_NETWORK=1"),
+            (chatgpt_browser_manifest(), chatgpt_request,
+             "CHATGPT_PASSWORD=fixture-password\nCHATGPT_USERNAME=owner@example.com\nDATACONNECT_PDPP_RUNTIME_ROOT=<runtime>\nPDPP_CONNECTOR_MANIFEST_PATH=<manifest>\nPDPP_CONNECTOR_NETWORK=1"),
+        ] {
+            let (temp, mut install) = install_fixture(manifest.clone(), success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            install.connector_id = request.connector_id.clone();
+            install.version = manifest["version"].as_str().unwrap().into();
+            let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+            let secrets = resolve_child_secrets(&request, &resolved).unwrap();
+            let runtime = temp.path().join("runtime");
+            let command = build_command(&resolved, &secrets, &CommandCustomization::default(), None, &runtime).unwrap();
+            assert!(command.clear_env);
+            assert_eq!(normalized_command_env_bytes(&command, &resolved.manifest_path, &runtime), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn admits_chatgpt_dev_connector_identity_from_matching_install_record() {
+        let mut manifest = chatgpt_browser_manifest();
+        manifest["connector_id"] = json!("https://registry.pdpp.dev/connectors/chatgpt");
+        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+
+        assert!(validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).is_ok());
+    }
+
+    #[test]
+    fn chatgpt_exports_all_six_declared_streams() {
+        let (temp, mut install) = install_fixture(chatgpt_browser_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            connector_id: install.connector_id,
+            streams: vec![],
+            ..request_with_token("")
+        };
+        let export = build_export_data(&resolved, &request, &Default::default(), &[]).unwrap();
+        assert_eq!(export["requestedScopes"].as_array().unwrap().len(), 6);
+        for stream in &resolved.manifest.streams {
+            assert_eq!(
+                export[format!("chatgpt.{}", stream.name)][&stream.name],
+                json!([])
+            );
+        }
+    }
+
     #[test]
     fn resolves_confined_pdpp_install_and_rejects_legacy_kind() {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
@@ -3267,6 +3535,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         }
         assert!(should_mark_browser_setup_complete(
             &resolved,
+            &credentialed,
+            &PdppRunStatus::Succeeded
+        ));
+        let mut generic = resolved;
+        generic.manifest.connector_key = Some("example".into());
+        assert!(should_mark_browser_setup_complete(
+            &generic,
             &credentialed,
             &PdppRunStatus::Succeeded
         ));
@@ -3649,7 +3924,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     fn validates_request_bounds_before_spawning() {
         let mut request = request_with_token("token");
         request.run_id = "bad run id".into();
-        assert!(validate_request_metadata(&request).unwrap_err().contains("runId"));
+        assert!(validate_request_metadata(&request)
+            .unwrap_err()
+            .contains("runId"));
 
         let mut request = request_with_token("token");
         request.collection_mode = "streaming".into();
@@ -3916,7 +4193,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let export = build_export_data(&resolved, &request, &collection_state, &[]).unwrap();
         assert_eq!(
             export["requestedScopes"],
-            json!(["github.profile", "github.repositories", "github.starred", "pdpp.github.gists", "pdpp.github.issues", "pdpp.github.pull_requests", "pdpp.github.user_stats"])
+            json!([
+                "github.profile",
+                "github.repositories",
+                "github.starred",
+                "pdpp.github.gists",
+                "pdpp.github.issues",
+                "pdpp.github.pull_requests",
+                "pdpp.github.user_stats"
+            ])
         );
         assert_eq!(
             export["github.profile"],
