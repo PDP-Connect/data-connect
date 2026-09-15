@@ -3471,7 +3471,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
-    fn resolves_only_the_published_pdpp_dev_identity_aliases() {
+    fn resolves_generic_https_pdpp_identity_aliases() {
         let mut github = github_manifest();
         github["connector_id"] = json!(GITHUB_PUBLISHED_CONNECTOR_ID);
         let (temp, mut install) = install_fixture(github, success_script());
@@ -3490,17 +3490,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         foreign["connector_id"] = json!("https://registry.pdpp.dev/connectors/github/other");
         let (temp, mut install) = install_fixture(foreign, success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
-        assert!(resolve_installed_pdpp_connector(&install)
-            .unwrap_err()
-            .contains("does not match"));
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
 
         let mut foreign = github_manifest();
         foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/github");
         let (temp, mut install) = install_fixture(foreign, success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
-        assert!(resolve_installed_pdpp_connector(&install)
-            .unwrap_err()
-            .contains("does not match"));
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
 
         let mut foreign = chatgpt_browser_manifest();
         foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/chatgpt");
@@ -3508,9 +3504,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         install.root_path = temp.path().to_string_lossy().into_owned();
         install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
         install.version = "0.1.0".into();
-        assert!(resolve_installed_pdpp_connector(&install)
-            .unwrap_err()
-            .contains("does not match"));
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
     }
 
     #[test]
@@ -3539,7 +3533,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
-    fn rejects_manifest_version_mismatch_and_accepts_optional_network() {
+    fn rejects_manifest_version_mismatch_and_requires_network_or_filesystem() {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         install.connector_id = "not-github".into();
@@ -3554,7 +3548,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         });
         let (temp, mut install) = install_fixture(no_network, success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
-        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("must require the network binding"));
 
         let mut wrong_version = github_manifest();
         wrong_version["version"] = json!("2.0.0");
@@ -4061,7 +4057,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             fixture["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
             let manifest: PdppConnectorManifest = serde_json::from_value(fixture).unwrap();
             assert!(!host_can_run(&["network".into(), binding.into()], None));
-            assert!(validate_manifest("github-pdpp", "1.0.0", &manifest)
+            assert!(validate_manifest("1.0.0", manifest.connector_id.as_deref(), &manifest)
                 .unwrap_err()
                 .contains(binding));
         }

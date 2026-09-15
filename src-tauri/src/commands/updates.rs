@@ -369,7 +369,14 @@ fn bundled_pdpp_connector_installs(
 }
 
 pub(crate) fn activate_bundled_pdpp_connectors(app: &AppHandle) -> Result<(), String> {
-    for install in bundled_pdpp_connector_installs(&get_bundled_connectors_dir(&app))? {
+    let installs = bundled_pdpp_connector_installs(&get_bundled_connectors_dir(&app))?;
+    log::info!("Activating {} bundled OCI connector(s)", installs.len());
+    for install in installs {
+        log::info!(
+            "Activating bundled OCI connector {}@{}",
+            install.connector_id,
+            install.version
+        );
         activate_bundled_connector_install(install)?;
     }
     Ok(())
@@ -1391,6 +1398,13 @@ fn install_oci_artifact_into(
     }
     let connector = PdppIndexedConnector {
         common: IndexedConnectorCommon {
+            tier: locked
+                .map(|entry| entry.common.tier.clone())
+                .unwrap_or_else(development_tier),
+            required_bindings: locked
+                .map(|entry| entry.common.required_bindings.clone())
+                .unwrap_or_else(legacy_required_bindings),
+            setup_modality: locked.and_then(|entry| entry.common.setup_modality.clone()),
             connector_id: id.to_string(),
             company: company.to_string(),
             version: reference.version.clone(),
@@ -2578,7 +2592,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_bundled_lock_resolves_github_and_chatgpt_profiles() {
+    fn checked_in_bundled_lock_resolves_all_oci_profiles() {
         let bundled_connectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("DataConnect repository root")
@@ -2590,7 +2604,10 @@ mod tests {
             .map(|install| install.connector_id.as_str())
             .collect::<Vec<_>>();
         connector_ids.sort_unstable();
-        assert_eq!(connector_ids, ["chatgpt-pdpp", "github-pdpp"]);
+        assert_eq!(
+            connector_ids,
+            ["apple-health-pdpp", "chatgpt-pdpp", "github-pdpp", "ynab-pdpp"]
+        );
     }
 
     #[test]
