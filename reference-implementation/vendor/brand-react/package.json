@@ -36,10 +36,10 @@
     "react-dom": "^19.2.8",
     "tsx": "^4.23.13",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "ultracite": "7.11.0"
+    "ultracite": "7.11.1"
   },
   "peerDependencies": {
-    "next": "^16.3.4",
+    "next": "^16.3.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   }
