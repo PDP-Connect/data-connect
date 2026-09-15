@@ -527,33 +527,31 @@ fn reap_abandoned_imports_at(root: &Path, now: SystemTime) -> Result<(), String>
                     continue;
                 }
                 let marker_path = claim_marker_path(&candidate)?;
-                let marker_existed = match fs::symlink_metadata(&marker_path) {
+                let marker_exists = match fs::symlink_metadata(&marker_path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        continue;
+                    }
                     Ok(_) => true,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                     Err(error) => {
                         return Err(format!("Could not inspect staged import claim: {error}"))
                     }
                 };
-                let modified = if marker_existed {
-                    fs::symlink_metadata(&marker_path)
-                } else {
-                    fs::metadata(&candidate)
+                if !marker_exists {
+                    continue;
                 }
-                .and_then(|metadata| metadata.modified())
-                .map_err(|e| format!("Could not inspect staged import age: {e}"))?;
+                let modified = fs::metadata(&marker_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|e| format!("Could not inspect staged import age: {e}"))?;
                 if now.duration_since(modified).unwrap_or_default() < STAGED_IMPORT_TTL {
                     continue;
                 }
-                let Ok(claim) = lock_import_marker(&candidate, true) else {
+                let Ok(claim) = lock_import_marker(&candidate, false) else {
                     continue;
                 };
-                let refreshed = if marker_existed {
-                    fs::metadata(&marker_path)
-                } else {
-                    fs::metadata(&candidate)
-                }
-                .and_then(|metadata| metadata.modified())
-                .map_err(|e| format!("Could not recheck staged import age: {e}"))?;
+                let refreshed = fs::metadata(&marker_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|e| format!("Could not recheck staged import age: {e}"))?;
                 if now.duration_since(refreshed).unwrap_or_default() < STAGED_IMPORT_TTL {
                     continue;
                 }
@@ -800,7 +798,8 @@ mod tests {
         let stale_with_marker = root.join("connector-a/connection-a/import-stale-marked");
         let recent = root.join("connector-b/connection-b/import-recent");
         let claimed = root.join("connector-c/connection-c/import-claimed");
-        for directory in [&stale, &stale_with_marker, &recent, &claimed] {
+        let unprepared = root.join("connector-d/connection-d/import-unprepared");
+        for directory in [&stale, &stale_with_marker, &recent, &claimed, &unprepared] {
             fs::create_dir_all(directory).unwrap();
         }
         let old = SystemTime::now() - STAGED_IMPORT_TTL - Duration::from_secs(1);
@@ -810,6 +809,13 @@ mod tests {
             .set_modified(old)
             .unwrap();
         fs::File::open(&claimed).unwrap().set_modified(old).unwrap();
+        fs::File::open(&unprepared)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let stale_claim = lock_import_marker(&stale, true).unwrap();
+        stale_claim.marker.set_modified(old).unwrap();
+        drop(stale_claim);
         let stale_claim = lock_import_marker(&stale_with_marker, true).unwrap();
         stale_claim.marker.set_modified(old).unwrap();
         drop(stale_claim);
@@ -822,6 +828,7 @@ mod tests {
         assert!(!stale_with_marker.exists());
         assert!(recent.exists());
         assert!(claimed.exists());
+        assert!(unprepared.exists());
         drop(claim);
     }
 
