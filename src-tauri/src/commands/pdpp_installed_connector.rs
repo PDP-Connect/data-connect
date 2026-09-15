@@ -885,7 +885,12 @@ fn resolve_installed_pdpp_connector_with_runtime(
     let manifest_content = read_verified_manifest(&manifest_path, manifest_sha256)?;
     let manifest: PdppConnectorManifest = serde_json::from_str(&manifest_content)
         .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
-    validate_manifest(&install.connector_id, &install.version, &manifest)?;
+    validate_manifest(
+        &install.connector_id,
+        &install.version,
+        install.manifest_connector_id.as_deref(),
+        &manifest,
+    )?;
     validate_chatgpt_runtime_requirements(&provenance_path, &manifest, runtime_root)?;
     Ok(ResolvedInstalledPdppConnector {
         connector_id: install.connector_id.clone(),
@@ -962,13 +967,14 @@ fn validate_relative_path(path: &str, label: &str) -> Result<PathBuf, String> {
 fn validate_manifest(
     connector_id: &str,
     active_version: &str,
+    installed_manifest_connector_id: Option<&str>,
     manifest: &PdppConnectorManifest,
 ) -> Result<(), String> {
     if manifest.streams.is_empty() {
         return Err("PDPP connector manifest must declare at least one stream".into());
     }
-    // Install records pin the complete manifest digest, including connector_id.
-    // Their connectorId is a package ID (<connector_key>-pdpp), not a URI.
+    // The active install records the URI only after verifying the manifest
+    // digest supplied by the lock. Its connectorId remains a package ID.
     let identity = manifest.connector_id.as_deref().unwrap_or_default();
     if !identity.starts_with("https://")
         || identity
@@ -978,6 +984,9 @@ fn validate_manifest(
             .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
     {
         return Err("PDPP connector_id must be a valid https:// URI".into());
+    }
+    if installed_manifest_connector_id != Some(identity) {
+        return Err("PDPP connector manifest identity does not match active install".into());
     }
     let key = manifest.connector_key.as_deref().unwrap_or_default();
     if key.is_empty()
@@ -2367,6 +2376,7 @@ mod tests {
             assert!(validate_manifest(
                 "github-pdpp",
                 "1.0.0",
+                Some(identity),
                 &serde_json::from_value(manifest).unwrap()
             )
             .is_err());
@@ -2383,6 +2393,7 @@ mod tests {
             assert!(validate_manifest(
                 "github-pdpp",
                 "1.0.0",
+                Some("https://registry.pdpp.org/connectors/github"),
                 &serde_json::from_value(manifest).unwrap()
             )
             .is_err());
@@ -2546,6 +2557,7 @@ mod tests {
             temp,
             ActiveConnectorInstall {
                 connector_id: "github-pdpp".into(),
+                manifest_connector_id: manifest["connector_id"].as_str().map(str::to_owned),
                 company: "GitHub".into(),
                 version: "1.0.0".into(),
                 root_path: String::new(),
@@ -3030,15 +3042,17 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .status()
             .unwrap();
         assert!(status.success());
-        let version = serde_json::from_str::<Value>(
+        let manifest = serde_json::from_str::<Value>(
             &fs::read_to_string(root.join("profile/collection-profile.json")).unwrap(),
         )
-        .unwrap()["version"]
+        .unwrap();
+        let version = manifest["version"]
             .as_str()
             .unwrap()
             .to_owned();
         ActiveConnectorInstall {
             connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            manifest_connector_id: manifest["connector_id"].as_str().map(str::to_owned),
             company: "OpenAI".into(),
             version,
             root_path: root.to_string_lossy().into_owned(),
@@ -3287,7 +3301,21 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         manifest["connector_id"] = json!("https://registry.pdpp.dev/connectors/chatgpt");
         let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
 
-        assert!(validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).is_ok());
+        assert!(validate_manifest(
+            CHATGPT_CONNECTOR_INSTALL_ID,
+            "0.1.0",
+            Some("https://registry.pdpp.dev/connectors/chatgpt"),
+            &manifest,
+        )
+        .is_ok());
+        assert!(validate_manifest(
+            CHATGPT_CONNECTOR_INSTALL_ID,
+            "0.1.0",
+            Some("https://registry.pdpp.org/connectors/chatgpt"),
+            &manifest,
+        )
+        .unwrap_err()
+        .contains("identity does not match active install"));
     }
 
     #[test]
@@ -3431,7 +3459,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     fn admits_the_actual_chatgpt_browser_capability_without_extending_start() {
         let manifest: PdppConnectorManifest =
             serde_json::from_value(chatgpt_browser_manifest()).unwrap();
-        validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).unwrap();
+        validate_manifest(
+            CHATGPT_CONNECTOR_INSTALL_ID,
+            "0.1.0",
+            manifest.connector_id.as_deref(),
+            &manifest,
+        )
+        .unwrap();
         let request = StartInstalledPdppConnectorRequest {
             run_id: "chatgpt-browser-fixture".into(),
             connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),

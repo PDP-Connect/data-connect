@@ -1092,6 +1092,7 @@ fn install_verified_legacy_connector(
 
     let install = ActiveConnectorInstall {
         connector_id: common.connector_id.clone(),
+        manifest_connector_id: None,
         company: common.company.clone(),
         version: common.version.clone(),
         root_path: install_root.to_string_lossy().to_string(),
@@ -1116,6 +1117,7 @@ fn install_verified_legacy_connector(
 #[derive(Deserialize)]
 struct PdppManifestIdentity {
     version: String,
+    connector_id: String,
 }
 
 fn install_verified_pdpp_connector(
@@ -1210,6 +1212,7 @@ fn active_pdpp_install_at(
 
     Ok(ActiveConnectorInstall {
         connector_id: common.connector_id.clone(),
+        manifest_connector_id: Some(manifest.connector_id),
         company: common.company.clone(),
         version: common.version.clone(),
         root_path: install_root.to_string_lossy().into_owned(),
