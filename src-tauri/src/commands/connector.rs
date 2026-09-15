@@ -611,18 +611,25 @@ fn pdpp_streams_to_dataconnect_scopes(
 ) -> Vec<String> {
     let mut scopes = Vec::new();
     for stream in streams {
-        let scope = match (connector_key, stream.name.as_str()) {
-            ("github", "user") => Some("github.profile".to_owned()),
-            ("github", "repositories") => Some("github.repositories".to_owned()),
-            ("github", "starred") => Some("github.starred".to_owned()),
-            ("chatgpt", "conversations") => Some("chatgpt.conversations".to_owned()),
-            ("chatgpt", "messages") => Some("chatgpt.messages".to_owned()),
-            ("chatgpt", "memories") => Some("chatgpt.memories".to_owned()),
-            ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts".to_owned()),
-            ("chatgpt", "custom_instructions") => Some("chatgpt.custom_instructions".to_owned()),
-            ("chatgpt", "shared_conversations") => Some("chatgpt.shared_conversations".to_owned()),
-            _ if include_generic_streams => Some(format!("{connector_key}.{}", stream.name)),
-            _ => None,
+        let scope = if include_generic_streams {
+            Some(format!("pdpp.manual.{connector_key}.{}", stream.name))
+        } else {
+            match (connector_key, stream.name.as_str()) {
+                ("github", "user") => Some("github.profile".to_owned()),
+                ("github", "repositories") => Some("github.repositories".to_owned()),
+                ("github", "starred") => Some("github.starred".to_owned()),
+                ("chatgpt", "conversations") => Some("chatgpt.conversations".to_owned()),
+                ("chatgpt", "messages") => Some("chatgpt.messages".to_owned()),
+                ("chatgpt", "memories") => Some("chatgpt.memories".to_owned()),
+                ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts".to_owned()),
+                ("chatgpt", "custom_instructions") => {
+                    Some("chatgpt.custom_instructions".to_owned())
+                }
+                ("chatgpt", "shared_conversations") => {
+                    Some("chatgpt.shared_conversations".to_owned())
+                }
+                _ => None,
+            }
         };
         if let Some(scope) = scope {
             if !scopes.contains(&scope) {
@@ -2811,8 +2818,9 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, resolve_automation_browser_path_from,
-        resolve_browser_status, resolve_icon_path, ActivePdppPlatformManifest, ConnectorMetadata,
+        manifest_looks_like_connector, pdpp_streams_to_dataconnect_scopes,
+        resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
+        ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2877,6 +2885,19 @@ mod tests {
             }
             assert!(setup.get("credential_capture").is_none());
             assert!(setup.get("manual_or_upload").is_none());
+        }
+    }
+
+    #[test]
+    fn manual_scope_discovery_never_reaches_curated_projection_arms() {
+        for (key, stream) in [("github", "repositories"), ("chatgpt", "conversations")] {
+            let streams = vec![ActivePdppStream {
+                name: stream.into(),
+            }];
+            assert_eq!(
+                pdpp_streams_to_dataconnect_scopes(key, &streams, true),
+                vec![format!("pdpp.manual.{key}.{stream}")]
+            );
         }
     }
 
