@@ -10,6 +10,7 @@ import { cn } from "@/lib/classes"
 
 export interface SourceRowProps {
   iconName: string
+  iconImageSrc?: string
   label: string
   meta?: string
   showArrow?: boolean
@@ -20,6 +21,7 @@ export interface SourceRowProps {
 
 interface SourceRowContentProps {
   iconName: string
+  iconImageSrc?: string
   fallbackLabel?: string
   iconClassName?: string
   label: string
@@ -28,6 +30,7 @@ interface SourceRowContentProps {
 
 function SourceRowContent({
   iconName,
+  iconImageSrc,
   fallbackLabel,
   iconClassName,
   label,
@@ -40,6 +43,7 @@ function SourceRowContent({
     >
       <PlatformIcon
         iconName={iconName}
+        imageSrc={iconImageSrc}
         className={cn(iconClassName)}
         fallbackLabel={fallbackLabel}
       />
@@ -56,10 +60,7 @@ function SourceRowContent({
   )
 }
 
-interface SourceRowActionButtonProps extends Omit<
-  ComponentProps<"button">,
-  "type"
-> {}
+type SourceRowActionButtonProps = Omit<ComponentProps<"button">, "type">
 
 export const sourceRowActionStyle =
   "text-foreground-muted/70 group-hover:text-foreground"
@@ -103,6 +104,7 @@ export function SourceRowActionButton({
 /* @deprecated Unused! Use SourceRowWithActions instead */
 export function SourceRow({
   iconName,
+  iconImageSrc,
   label,
   meta,
   showArrow,
@@ -116,6 +118,7 @@ export function SourceRow({
     <>
       <SourceRowContent
         iconName={iconName}
+        iconImageSrc={iconImageSrc}
         fallbackLabel={fallbackLabel}
         iconClassName={iconClassName}
         label={label}
@@ -137,6 +140,7 @@ export function SourceRow({
 
 export interface SourceRowWithActionsProps {
   iconName: string
+  iconImageSrc?: string
   label: string
   meta?: string
   fallbackLabel?: string
@@ -187,6 +191,7 @@ export function SourceRowList({ children, className }: SourceRowListProps) {
 
 export function SourceRowWithActions({
   iconName,
+  iconImageSrc,
   label,
   meta,
   fallbackLabel,
@@ -226,6 +231,7 @@ export function SourceRowWithActions({
       >
         <SourceRowContent
           iconName={iconName}
+          iconImageSrc={iconImageSrc}
           fallbackLabel={fallbackLabel}
           iconClassName={iconClassName}
           label={label}

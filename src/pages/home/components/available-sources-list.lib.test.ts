@@ -1,12 +1,21 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest"
-import type { Platform, Run } from "@/types"
+import type { ConnectorUpdateInfo, Platform, Run } from "@/types"
 import { buildAvailableCards } from "./available-sources-list.lib"
 
 vi.mock("@/lib/platform/utils", () => ({
   getPlatformRegistryEntry: (platform: { id?: string }) => {
-    const entries: Record<string, { id?: string; displayName: string; availability?: string; brandDomain?: string }> = {
+    const entries: Record<
+      string,
+      {
+        id?: string
+        displayName: string
+        availability?: string
+        brandDomain?: string
+        platformIds?: string[]
+      }
+    > = {
       chatgpt: {
         displayName: "ChatGPT",
         availability: "requiresConnector",
@@ -22,20 +31,56 @@ vi.mock("@/lib/platform/utils", () => ({
         availability: "available",
         brandDomain: "spotify.com",
       },
+      x: {
+        id: "x",
+        displayName: "X (Twitter)",
+        availability: "comingSoon",
+        brandDomain: "x.com",
+        platformIds: ["x", "twitter"],
+      },
+      twitter: {
+        id: "x",
+        displayName: "X (Twitter)",
+        availability: "comingSoon",
+        brandDomain: "x.com",
+        platformIds: ["x", "twitter"],
+      },
+      heb: {
+        displayName: "H-E-B",
+        availability: "requiresConnector",
+        brandDomain: "heb.com",
+        platformIds: ["heb-playwright", "heb"],
+      },
+      "heb-playwright": {
+        id: "heb",
+        displayName: "H-E-B",
+        availability: "requiresConnector",
+        brandDomain: "heb.com",
+        platformIds: ["heb-playwright", "heb"],
+      },
+      "heb-pdpp": {
+        id: "heb",
+        displayName: "H-E-B",
+        availability: "requiresConnector",
+        brandDomain: "heb.com",
+        platformIds: ["heb-pdpp", "heb-playwright"],
+      },
       "github-pdpp": {
         id: "github",
         displayName: "GitHub",
         availability: "requiresConnector",
         brandDomain: "github.com",
+        platformIds: ["github-pdpp", "github-playwright"],
       },
       "github-playwright": {
         id: "github",
         displayName: "GitHub",
         availability: "requiresConnector",
         brandDomain: "github.com",
+        platformIds: ["github-pdpp", "github-playwright"],
       },
     }
-    return platform.id ? entries[platform.id] ?? null : null
+    return platform.id ? (entries[platform.id] ?? null) : null
   },
 }))
 
@@ -75,6 +120,28 @@ function makePlatform(id: string, overrides: Partial<Platform> = {}): Platform {
     exportFrequency: null,
     vectorize_config: null,
     runtime: null,
+    ...overrides,
+  }
+}
+
+function makeUpdate(
+  id: string,
+  overrides: Partial<ConnectorUpdateInfo> = {}
+): ConnectorUpdateInfo {
+  return {
+    id,
+    name: id,
+    description: `${id} connector`,
+    company: id,
+    currentVersion: null,
+    latestVersion: "1.0.0",
+    hasUpdate: false,
+    isNew: true,
+    tier: "supported",
+    requiredBindings: [],
+    setupModality: null,
+    runnable: true,
+    unavailableReason: null,
     ...overrides,
   }
 }
@@ -164,7 +231,10 @@ describe("buildAvailableCards — availability", () => {
 
   it("does not produce an onClick handler for comingSoon platforms", () => {
     const cards = buildAvailableCards({
-      platforms: [makePlatform("coming-soon-platform"), makePlatform("chatgpt")],
+      platforms: [
+        makePlatform("coming-soon-platform"),
+        makePlatform("chatgpt"),
+      ],
       connectedPlatformIdSet: emptyConnected,
       connectingPlatforms: emptyConnecting,
       onExport,
@@ -213,22 +283,37 @@ describe("buildAvailableCards — availability", () => {
   })
 
   it.each([
-    ["legacy first", [makePlatform("github-playwright"), makePlatform("github-pdpp", { runtime: "pdpp-network" })]],
-    ["PDPP first", [makePlatform("github-pdpp", { runtime: "pdpp-network" }), makePlatform("github-playwright")]],
-  ])("deduplicates canonical sources and prefers PDPP runtime when %s", (_order, platforms) => {
-    const cards = buildAvailableCards({
-      platforms,
-      connectedPlatformIdSet: emptyConnected,
-      connectingPlatforms: emptyConnecting,
-      onExport,
-    })
+    [
+      "legacy first",
+      [
+        makePlatform("github-playwright"),
+        makePlatform("github-pdpp", { runtime: "pdpp-network" }),
+      ],
+    ],
+    [
+      "PDPP first",
+      [
+        makePlatform("github-pdpp", { runtime: "pdpp-network" }),
+        makePlatform("github-playwright"),
+      ],
+    ],
+  ])(
+    "deduplicates canonical sources and prefers PDPP runtime when %s",
+    (_order, platforms) => {
+      const cards = buildAvailableCards({
+        platforms,
+        connectedPlatformIdSet: emptyConnected,
+        connectingPlatforms: emptyConnecting,
+        onExport,
+      })
 
-    expect(cards.filter(card => card.iconName === "GitHub")).toHaveLength(1)
-    cards.find(card => card.iconName === "GitHub")?.onClick?.()
-    expect(onExport).toHaveBeenLastCalledWith(
-      expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" })
-    )
-  })
+      expect(cards.filter(card => card.iconName === "GitHub")).toHaveLength(1)
+      cards.find(card => card.iconName === "GitHub")?.onClick?.()
+      expect(onExport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "github-pdpp", runtime: "pdpp-network" })
+      )
+    }
+  )
 
   it("canonicalizes legacy connected and running state onto the PDPP card", () => {
     const legacyRun = {
@@ -257,10 +342,117 @@ describe("buildAvailableCards — availability", () => {
       connectingPlatforms: new Map([["github-playwright", legacyRun]]),
       onExport,
     })
-    expect(runningCards.find(card => card.iconName === "GitHub")).toMatchObject({
-      cardId: "github-pdpp",
-      isConnecting: true,
-      connectingRun: legacyRun,
+    expect(runningCards.find(card => card.iconName === "GitHub")).toMatchObject(
+      {
+        cardId: "github-pdpp",
+        isConnecting: true,
+        connectingRun: legacyRun,
+      }
+    )
+  })
+
+  it("keeps an installed source in the same slot while its install card becomes connect", () => {
+    const sourceOrder = new Map<string, number>()
+    const update = makeUpdate("new-source")
+    const initialCards = buildAvailableCards({
+      platforms: [makePlatform("spotify")],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+      connectorUpdates: [update],
+      sourceOrder,
+      onInstall: vi.fn(),
     })
+    const initialOrder = initialCards.map(card => card.sourceKey)
+
+    const installedCards = buildAvailableCards({
+      platforms: [
+        makePlatform("spotify"),
+        makePlatform("new-source", { runtime: "pdpp-network" }),
+      ],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+      connectorUpdates: [update],
+      sourceOrder,
+      onInstall: vi.fn(),
+    })
+
+    expect(installedCards.map(card => card.sourceKey)).toEqual(initialOrder)
+    expect(
+      installedCards.find(card => card.sourceKey === "new-source")
+    ).toMatchObject({
+      action: "connect",
+      label: "Connect new-source",
+    })
+  })
+
+  it("renders unavailable catalog entries at the bottom with their device reason", () => {
+    const card = buildAvailableCards({
+      platforms: [],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+      connectorUpdates: [
+        makeUpdate("desktop-only", {
+          name: "Desktop-only",
+          runnable: false,
+          unavailableReason: "Requires unavailable binding: desktop_session",
+        }),
+      ],
+    }).find(source => source.sourceKey === "desktop-only")
+
+    expect(card).toMatchObject({
+      action: "unavailable",
+      isAvailable: false,
+      availabilityReason:
+        "Not available on this device · Requires unavailable binding: desktop_session",
+      onClick: undefined,
+    })
+  })
+
+  it("marks a legacy runtime card with the legacy label", () => {
+    const card = buildAvailableCards({
+      platforms: [makePlatform("github-playwright", { runtime: "playwright" })],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+    }).find(source => source.cardId === "github-playwright")
+
+    expect(card?.label).toBe("Connect GitHub (legacy)")
+  })
+
+  it("labels a legacy source when a Collection Profile shares its display name", () => {
+    const card = buildAvailableCards({
+      platforms: [makePlatform("heb-playwright", { runtime: "playwright" })],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+      connectorUpdates: [makeUpdate("heb-pdpp", { name: "H-E-B" })],
+    }).find(source => source.cardId === "heb-playwright")
+
+    expect(card?.label).toBe("Install H-E-B (legacy)")
+  })
+
+  it("does not label an unrelated legacy source", () => {
+    const card = buildAvailableCards({
+      platforms: [makePlatform("spotify", { runtime: "playwright" })],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+    }).find(source => source.cardId === "spotify")
+
+    expect(card?.label).toBe("Connect Spotify")
+  })
+
+  it("renders X and Twitter as one canonical source card", () => {
+    const cards = buildAvailableCards({
+      platforms: [makePlatform("twitter"), makePlatform("x")],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+    })
+
+    expect(cards.filter(card => card.sourceKey === "x")).toHaveLength(1)
   })
 })

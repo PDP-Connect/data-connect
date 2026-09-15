@@ -10,7 +10,9 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use super::connector_store::{
     get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
 };
-use super::pdpp_installed_connector::pdpp_stream_to_dataconnect_scope;
+use super::pdpp_installed_connector::{
+    pdpp_stream_to_dataconnect_scope, read_admitted_pdpp_asset_with_resource_dir,
+};
 
 // Chromium download constants
 const CHROMIUM_REVISION: &str = "1200";
@@ -113,8 +115,14 @@ struct ActivePdppPlatformManifest {
     display_name: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    brand: Option<ActivePdppBrand>,
     setup: Option<ActivePdppSetup>,
     streams: Vec<ActivePdppStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivePdppBrand {
+    icon: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -555,7 +563,7 @@ pub(super) fn load_pdpp_platforms(
     load_pdpp_platforms_with_resource_dir(installs, None)
 }
 
-fn load_pdpp_platforms_with_resource_dir(
+pub(super) fn load_pdpp_platforms_with_resource_dir(
     installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
     resource_dir: Option<&Path>,
 ) -> Vec<Platform> {
@@ -600,6 +608,30 @@ fn load_pdpp_platforms_with_resource_dir(
             continue;
         }
 
+        let logo_url = manifest
+            .brand
+            .as_ref()
+            .and_then(|brand| brand.icon.as_deref())
+            .and_then(|icon_path| {
+                let bytes = match read_admitted_pdpp_asset_with_resource_dir(
+                    &install,
+                    resource_dir,
+                    icon_path,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        log::warn!(
+                            "Could not load the {} PDPP brand icon: {}",
+                            connector_key,
+                            error
+                        );
+                        return None;
+                    }
+                };
+                Some(image_data_url(icon_path, &bytes))
+            })
+            .unwrap_or_default();
+
         platforms.push(Platform {
             id: install.connector_id,
             company,
@@ -612,7 +644,7 @@ fn load_pdpp_platforms_with_resource_dir(
                 .description
                 .unwrap_or_else(|| format!("{} PDPP connector", connector_key)),
             is_updated: false,
-            logo_url: connector_key,
+            logo_url,
             needs_connection: true,
             connect_url: None,
             connect_selector: None,
@@ -625,6 +657,24 @@ fn load_pdpp_platforms_with_resource_dir(
     }
 
     platforms
+}
+
+fn image_data_url(path: &str, bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let mime_type = match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    };
+    format!("data:{mime_type};base64,{}", STANDARD.encode(bytes))
 }
 
 fn pdpp_streams_to_dataconnect_scopes(

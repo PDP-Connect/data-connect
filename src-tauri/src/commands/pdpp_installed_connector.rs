@@ -930,6 +930,27 @@ pub(crate) fn read_admitted_pdpp_manifest_with_resource_dir(
     read_admitted_pdpp_manifest_with_runtime(install, &runtime_root)
 }
 
+pub(crate) fn read_admitted_pdpp_asset_with_resource_dir(
+    install: &ActiveConnectorInstall,
+    resource_dir: Option<&Path>,
+    asset_path: &str,
+) -> Result<Vec<u8>, String> {
+    let runtime_root = resolve_pdpp_runtime_root(resource_dir)?;
+    let resolved = resolve_installed_pdpp_connector_with_runtime(install, &runtime_root)?;
+    let asset_path = Path::new(asset_path);
+    let asset_relative = if asset_path.starts_with("assets") {
+        asset_path.to_path_buf()
+    } else {
+        Path::new("assets").join(asset_path)
+    };
+    let asset_path = confined_existing_file(
+        &resolved.root,
+        &asset_relative.to_string_lossy(),
+        "PDPP asset path",
+    )?;
+    fs::read(&asset_path).map_err(|e| format!("Failed to read PDPP asset: {e}"))
+}
+
 fn read_admitted_pdpp_manifest_with_runtime(
     install: &ActiveConnectorInstall,
     runtime_root: &Path,
@@ -2802,6 +2823,81 @@ mod tests {
             manifest.connector_id.as_deref(),
             manifest,
         )
+    }
+
+    #[test]
+    fn installed_collection_profiles_expose_manifest_brand_icons() {
+        let apple_manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        let whatsapp_manifest = json!({
+            "connector_id": "https://registry.pdpp.dev/connectors/whatsapp",
+            "connector_key": "whatsapp",
+            "version": "0.2.0",
+            "display_name": "WhatsApp (chat export)",
+            "brand": { "icon": "icons/whatsapp.svg" },
+            "runtime_requirements": {
+                "bindings": { "filesystem": { "required": true } }
+            },
+            "setup": {
+                "modality": "manual_or_upload",
+                "manual_or_upload": {
+                    "import_dir_env_var": "WHATSAPP_EXPORT_DIR"
+                }
+            },
+            "streams": [{ "name": "chats" }]
+        });
+
+        let (apple_temp, mut apple_install) =
+            install_fixture(apple_manifest.clone(), success_script());
+        let (whatsapp_temp, mut whatsapp_install) =
+            install_fixture(whatsapp_manifest.clone(), success_script());
+        for (temp, icon_name, icon_bytes) in [
+            (
+                &apple_temp,
+                "apple_health.svg",
+                b"apple-health-icon".as_slice(),
+            ),
+            (&whatsapp_temp, "whatsapp.svg", b"whatsapp-icon".as_slice()),
+        ] {
+            let icon_path = temp.path().join("assets/icons").join(icon_name);
+            fs::create_dir_all(icon_path.parent().unwrap()).unwrap();
+            fs::write(icon_path, icon_bytes).unwrap();
+        }
+        apple_install.root_path = apple_temp.path().to_string_lossy().into_owned();
+        apple_install.connector_id = "apple-health-pdpp".into();
+        apple_install.company = "Apple".into();
+        apple_install.version = apple_manifest["version"].as_str().unwrap().into();
+        whatsapp_install.root_path = whatsapp_temp.path().to_string_lossy().into_owned();
+        whatsapp_install.connector_id = "whatsapp-pdpp".into();
+        whatsapp_install.company = "WhatsApp".into();
+        whatsapp_install.version = whatsapp_manifest["version"].as_str().unwrap().into();
+
+        let resource_temp = tempfile::tempdir().unwrap();
+        let runtime = resource_temp.path().join("pdpp-runtime");
+        fs::create_dir_all(runtime.join("node_modules/p-queue")).unwrap();
+        fs::create_dir_all(runtime.join("node_modules/patchright")).unwrap();
+        fs::write(runtime.join("connector-loader.mjs"), "export {};\n").unwrap();
+        fs::write(
+            runtime.join("connector-loader-bootstrap.mjs"),
+            "export {};\n",
+        )
+        .unwrap();
+        fs::write(runtime.join("node_modules/p-queue/package.json"), "{}\n").unwrap();
+        fs::write(runtime.join("node_modules/patchright/package.json"), "{}\n").unwrap();
+
+        let platforms = super::super::connector::load_pdpp_platforms_with_resource_dir(
+            [apple_install, whatsapp_install],
+            Some(resource_temp.path()),
+        );
+
+        assert_eq!(platforms.len(), 2);
+        assert!(platforms
+            .iter()
+            .all(|platform| platform.logo_url.starts_with("data:image/svg+xml;base64,")));
+        assert!(platforms[0].logo_url.contains("YXBwbGUtaGVhbHRoLWljb24="));
+        assert!(platforms[1].logo_url.contains("d2hhdHNhcHAtaWNvbg=="));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { ArrowUpRight } from "lucide-react"
 import {
   ActionButton,
@@ -15,9 +15,12 @@ import { cn } from "@/lib/classes"
 import type { Platform, Run } from "@/types"
 import { OpenExternalLink } from "@/components/typography/link-open-external"
 import { buildAvailableCards } from "./available-sources-list.lib"
+import { ConnectorUpdatesRefreshButton } from "./connector-updates"
 import { ConfirmAction } from "@/components/elements/confirm-action"
 import { buttonVariants } from "@/components/ui/button"
 import { buildRunningImportExpectationLine } from "./available-sources-estimator"
+import { useConnectorUpdates } from "@/hooks/useConnectorUpdates"
+import { useShowDevelopmentConnectors } from "@/hooks/use-show-development-connectors"
 import {
   getConnectingAccountLine,
   getConnectingStatusLine,
@@ -30,6 +33,7 @@ interface AvailableSourcesListProps {
   onExport: (platform: Platform) => void
   onStopRun: (runId: string) => Promise<void> | void
   connectedPlatformIds: string[]
+  onReloadPlatforms?: () => Promise<void> | void
   className?: string
 }
 
@@ -39,10 +43,22 @@ export function AvailableSourcesList({
   onExport,
   onStopRun,
   connectedPlatformIds,
+  onReloadPlatforms,
   className,
 }: AvailableSourcesListProps) {
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [sourceOrder] = useState(() => new Map<string, number>())
+  const {
+    updates,
+    isCheckingUpdates,
+    error: updatesError,
+    downloadErrors,
+    checkForUpdates,
+    downloadConnector,
+    isDownloading,
+  } = useConnectorUpdates()
+  const { showDevelopmentConnectors } = useShowDevelopmentConnectors()
   const connectedPlatformIdSet = useMemo(
     () => new Set(connectedPlatformIds),
     [connectedPlatformIds]
@@ -61,6 +77,22 @@ export function AvailableSourcesList({
   const hasBlockingRun = useMemo(() => {
     return runs.some(run => isBlockingRun(run))
   }, [runs])
+
+  const visibleUpdates = useMemo(
+    () =>
+      updates.filter(
+        update => update.tier !== "development" || showDevelopmentConnectors
+      ),
+    [showDevelopmentConnectors, updates]
+  )
+
+  const installConnector = useCallback(
+    async (id: string) => {
+      const installed = await downloadConnector(id)
+      if (installed) await onReloadPlatforms?.()
+    },
+    [downloadConnector, onReloadPlatforms]
+  )
 
   useEffect(() => {
     const hasRunning = runs.some(run => run.status === "running")
@@ -82,8 +114,25 @@ export function AvailableSourcesList({
         connectedPlatformIdSet,
         connectingPlatforms,
         onExport,
+        connectorUpdates: visibleUpdates,
+        onInstall: id => {
+          void installConnector(id)
+        },
+        isInstalling: isDownloading,
+        downloadErrors,
+        sourceOrder,
       }),
-    [platforms, connectedPlatformIdSet, connectingPlatforms, onExport]
+    [
+      connectedPlatformIdSet,
+      connectingPlatforms,
+      downloadErrors,
+      installConnector,
+      isDownloading,
+      onExport,
+      platforms,
+      sourceOrder,
+      visibleUpdates,
+    ]
   )
 
   const stopRun = async (runId: string) => {
@@ -98,10 +147,20 @@ export function AvailableSourcesList({
   if (availableCards.length === 0) {
     return (
       <section className={cn("space-y-gap", className)}>
-        <Header />
+        <Header
+          isCheckingUpdates={isCheckingUpdates}
+          onRefresh={() => {
+            void checkForUpdates(true)
+          }}
+        />
+        {updatesError ? <UpdateError message={updatesError} /> : null}
         <div className="action-outset">
           <ActionPanel>
-            <Text weight="medium">All connected (more soon)</Text>
+            <Text weight="medium">
+              {isCheckingUpdates
+                ? "Checking for connectors…"
+                : "All connected (more soon)"}
+            </Text>
           </ActionPanel>
         </div>
       </section>
@@ -110,7 +169,13 @@ export function AvailableSourcesList({
 
   return (
     <section className={cn("space-y-gap", className)}>
-      <Header />
+      <Header
+        isCheckingUpdates={isCheckingUpdates}
+        onRefresh={() => {
+          void checkForUpdates(true)
+        }}
+      />
+      {updatesError ? <UpdateError message={updatesError} /> : null}
       <div className="grid grid-cols-2 gap-3 action-outset">
         {availableCards.map(
           ({
@@ -118,6 +183,10 @@ export function AvailableSourcesList({
             iconName,
             iconImageSrc,
             label,
+            tier,
+            availabilityReason,
+            actionError,
+            isInstalling,
             isAvailable,
             isConnecting,
             connectingStatusMessage,
@@ -192,7 +261,36 @@ export function AvailableSourcesList({
                   />
                 ) : null}
               </div>
+            ) : availabilityReason || actionError ? (
+              <div className="ml-auto flex max-w-full flex-col items-end gap-0.5">
+                {availabilityReason ? (
+                  <Text
+                    as="p"
+                    intent="fine"
+                    muted
+                    truncate
+                    align="right"
+                    title={availabilityReason}
+                  >
+                    {availabilityReason}
+                  </Text>
+                ) : null}
+                {actionError ? (
+                  <Text
+                    as="p"
+                    intent="fine"
+                    muted
+                    truncate
+                    align="right"
+                    title={actionError}
+                  >
+                    Installation failed · {actionError}
+                  </Text>
+                ) : null}
+              </div>
             ) : null
+
+            const isWaiting = isWaitingForBlockingRun && !isInstalling
 
             const cardContent = (
               <SourceStack
@@ -200,17 +298,31 @@ export function AvailableSourcesList({
                 iconImageSrc={iconImageSrc}
                 label={label}
                 infoSlot={infoSlot}
-                showArrow={isAvailable && !isConnecting && !hasBlockingRun}
+                showArrow={
+                  isAvailable &&
+                  !isConnecting &&
+                  !isInstalling &&
+                  !hasBlockingRun
+                }
                 trailingSlot={
                   isConnecting ? (
                     <Spinner className="size-4" aria-hidden="true" />
-                  ) : isWaitingForBlockingRun ? (
+                  ) : isInstalling ? (
+                    <Spinner className="size-4" aria-hidden="true" />
+                  ) : isWaiting ? (
                     <EyebrowBadge
                       variant="outline"
                       className="text-foreground-muted"
                       title="Another import is waiting for sign-in"
                     >
                       Waiting
+                    </EyebrowBadge>
+                  ) : tier ? (
+                    <EyebrowBadge
+                      variant="outline"
+                      className="text-foreground-muted"
+                    >
+                      {tier === "preview" ? "Preview" : "Development"}
                     </EyebrowBadge>
                   ) : availability === "comingSoon" ? (
                     <EyebrowBadge
@@ -219,14 +331,7 @@ export function AvailableSourcesList({
                     >
                       Coming Soon
                     </EyebrowBadge>
-                  ) : isAvailable ? null : (
-                    <EyebrowBadge
-                      variant="outline"
-                      className="text-foreground-muted"
-                    >
-                      soon
-                    </EyebrowBadge>
-                  )
+                  ) : null
                 }
                 labelColor={isAvailable ? "foreground" : "mutedForeground"}
               />
@@ -257,7 +362,7 @@ export function AvailableSourcesList({
               <ActionButton
                 key={cardId}
                 onClick={onClick}
-                disabled={!isAvailable || hasBlockingRun}
+                disabled={!isAvailable || hasBlockingRun || isInstalling}
                 selected={false}
                 size="xl"
                 className={cn("h-auto p-0 disabled:opacity-100")}
@@ -272,12 +377,32 @@ export function AvailableSourcesList({
   )
 }
 
-const Header = () => {
+function UpdateError({ message }: { message: string }) {
   return (
-    <div className="flex items-baseline justify-between">
-      <Text as="h2" weight="medium">
-        Import sources
-      </Text>
+    <Text as="p" intent="fine" muted truncate title={message}>
+      Connector refresh unavailable · {message}
+    </Text>
+  )
+}
+
+const Header = ({
+  isCheckingUpdates,
+  onRefresh,
+}: {
+  isCheckingUpdates: boolean
+  onRefresh: () => void | Promise<void>
+}) => {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex min-w-0 items-center gap-1">
+        <Text as="h2" weight="medium" truncate>
+          Import sources
+        </Text>
+        <ConnectorUpdatesRefreshButton
+          isCheckingUpdates={isCheckingUpdates}
+          onRefresh={onRefresh}
+        />
+      </div>
       <Text as="p" intent="small" muted>
         <OpenExternalLink
           href="https://github.com/PDP-Connect/data-connectors/blob/main/AUTHORING.md"

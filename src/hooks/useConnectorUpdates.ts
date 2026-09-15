@@ -45,8 +45,13 @@ export function useConnectorUpdates() {
 
       try {
         await invoke('download_connector', { id });
-        // Remove from updates list after successful download
-        dispatch(removeConnectorUpdate(id));
+        // Keep new connectors in the list until the platform reload completes.
+        // AvailableSourcesList uses the retained entry to keep the source's
+        // stable card order while the newly installed platform is discovered.
+        const update = updates.find(candidate => candidate.id === id);
+        if (!update?.isNew) {
+          dispatch(removeConnectorUpdate(id));
+        }
         // Note: Caller is responsible for reloading platforms after successful download
         return true;
       } catch (err) {
@@ -63,7 +68,7 @@ export function useConnectorUpdates() {
         });
       }
     },
-    [dispatch]
+    [dispatch, updates]
   );
 
   const isDownloading = useCallback(

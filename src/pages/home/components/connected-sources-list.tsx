@@ -20,6 +20,7 @@ import type { Platform, Run } from "@/types"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
 import { Link } from "react-router-dom"
 import { isBlockingRun } from "./available-sources-list.policy"
+import { getPlatformSourceLabel } from "./available-sources-list.lib"
 
 interface ConnectedSourcesListProps {
   platforms: Platform[]
@@ -184,7 +185,8 @@ export function ConnectedSourcesList({
             <SourceRowWithActions
               key={platform.id}
               iconName={platform.name}
-              label={platform.name}
+              iconImageSrc={platform.logoURL}
+              label={getPlatformSourceLabel(platform)}
               meta={meta}
               rowAction={{
                 onClick: onOpenRuns ? () => onOpenRuns(platform) : undefined,
