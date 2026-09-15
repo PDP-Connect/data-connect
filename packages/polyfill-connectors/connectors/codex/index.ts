@@ -69,6 +69,12 @@ import {
 	type StreamScope,
 	stringifyForJsonl,
 } from "@pdpp/connector-protocol";
+import {
+	type ArtifactCaptureContext,
+	captureFileArtifact,
+	type OpenedArtifactCapture,
+	openArtifactCapture,
+} from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
 import {
 	dateDirectoryInRange,
@@ -94,6 +100,7 @@ import {
 	listDirectoryInventory,
 	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
+import { CodexArtifactLedger } from "./artifact-ledger.ts";
 import {
 	buildPromptRecord,
 	buildRolloutOnlySessionRecord,
@@ -108,6 +115,7 @@ import {
 	parseFrontmatter,
 	payloadOutputPreview,
 	RULES_SUFFIX_RE,
+	type SessionCaptureState,
 	splitRulesLines,
 	type TimestampRange,
 	TWO_DIGIT_DIR_RE,
@@ -148,6 +156,13 @@ const GUARD_PREFIX_BYTES = 64 * 1024;
 // guard. Both paths force a parse from byte offset 0, so keep unmatched
 // function-call state bounded across full replay.
 const MAX_PENDING_FUNCTION_CALLS = 1024;
+
+// Validates a persisted `captured_sha256` before it is trusted as proof that a
+// body is already held (Biome useTopLevelRegex).
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** MIME type recorded for a captured rollout file. */
+const ROLLOUT_MIME_TYPE = "application/jsonl";
 
 let stdoutDrainPromise: Promise<void> | null = null;
 
@@ -1167,9 +1182,68 @@ export interface EmitSessionsFromMapsArgs {
 	 * and no fingerprints are tracked.
 	 */
 	cursor?: CarryForwardCursor<ThreadFingerprint>;
+	/**
+	 * What durable state still vouches for, per session id — see
+	 * `durableCaptureLookup`. Omitted by callers pinning the pre-reconciliation
+	 * contract, in which case only this run's aggregates speak for the body.
+	 */
+	durableCapture?: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	/** Sessions whose body reference changed without any count moving. */
+	forceReemit?: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	threadsMap: Map<string, ThreadRow>;
+}
+
+/**
+ * Read a session's held-body digest out of the state this run is about to
+ * persist, preferring what the run can say about the CURRENT file over what
+ * history says about a file that is gone.
+ *
+ * Two sources, consulted in that order.
+ *
+ * 1. The rollout file cursors. This map is authoritative about the current
+ *    generation because of the invariant every writer into it maintains: a
+ *    `captured_sha256` is only ever written alongside a size and mtime the run
+ *    has just confirmed. The skip path writes one after `decideRolloutAction`
+ *    returned `skip` (size AND mtime equal) or after capturing the current
+ *    bytes itself; the parse path writes either a fresh digest or
+ *    `priorStillDescribesFile`, which tests the same equality. So "present in
+ *    `newFileCursors`" already means "describes this file generation", and
+ *    reconciliation does not restate that rule in a second place where the two
+ *    copies could drift apart. The prior map answers only for a file this scan
+ *    never reached (`newFileCursors` has no entry) — filtered out by an
+ *    enumeration scope, or a run that skipped rollouts entirely.
+ *
+ * 2. The retained reference on the session's own fingerprint. A file cursor is
+ *    scan state: when the source rollout is deleted from every watched root, a
+ *    completed scan legitimately checkpoints a map without it, and after that
+ *    neither cursor map can name the body. The bytes are still held, so the
+ *    session's reference must be too — which is why it also lives in
+ *    per-session state that no scan prunes.
+ *
+ * The ordering is what keeps history from outranking the present. A file the
+ * scan DID reach and deliberately left unmarked (capture failed, bytes
+ * rewritten, a new generation this run could not hold) is a present object
+ * with no digest, and that ENDS the lookup: neither the stale prior map nor
+ * the retained reference may rescue it. `artifactCaptureFields` then reports
+ * this run's own outcome. The retained reference speaks only when the run has
+ * nothing at all to say about the file — the source is gone.
+ */
+function durableCaptureLookup(args: {
+	fileCursors: Record<string, RolloutFileCursor>;
+	newFileCursors: Record<string, RolloutFileCursor>;
+	retained: (id: string) => string | undefined;
+}): (id: string) => SessionCaptureState | undefined {
+	return (id: string): SessionCaptureState | undefined => {
+		const cursor = args.newFileCursors[id] ?? args.fileCursors[id];
+		if (cursor) {
+			const sha256 = cursor.captured_sha256;
+			return sha256 === undefined ? undefined : { sha256 };
+		}
+		const retained = args.retained(id);
+		return retained === undefined ? undefined : { sha256: retained };
+	};
 }
 
 /**
@@ -1187,11 +1261,19 @@ export function shouldReemitThreadSession(
 	thread: ThreadRow,
 	agg: RolloutAggregate | undefined,
 	priorFingerprint: ThreadFingerprint | undefined,
+	captureReferenceChanged = false,
 ): boolean {
 	if (!priorFingerprint) {
 		return true;
 	}
 	if (agg) {
+		return true;
+	}
+	// A backfill moves no count and no `updated_at` — the fingerprint this gate
+	// compares is identical on both sides — but the stored row's body reference
+	// is now wrong. Churn reduction must not suppress the one emit that repairs
+	// it.
+	if (captureReferenceChanged) {
 		return true;
 	}
 	const priorUpdatedAt = priorFingerprint.updated_at ?? null;
@@ -1209,17 +1291,53 @@ function makeThreadFingerprint(
 	thread: ThreadRow,
 	agg: RolloutAggregate | undefined,
 	priorFingerprint: ThreadFingerprint | undefined,
+	durableCapture: SessionCaptureState | undefined,
 ): ThreadFingerprint {
 	// Counts must follow the same fallback chain as buildThreadSessionRecord
 	// — otherwise the fingerprint we persist would disagree with the record
 	// we just emitted, and the next run would think state_5 hasn't moved
 	// while the count field oscillates.
+	const retained = retainedReference(agg, durableCapture);
 	return {
 		updated_at: thread.updated_at ?? null,
 		message_count: agg?.messageCount ?? priorFingerprint?.message_count ?? null,
 		function_call_count:
 			agg?.functionCallCount ?? priorFingerprint?.function_call_count ?? null,
+		// Omitted rather than written as null when there is no reference, so a
+		// session that never had a body adds no key to STATE and the fingerprint
+		// shape is unchanged for every pre-capture caller.
+		...(retained === null ? {} : { retained_sha256: retained }),
 	};
+}
+
+/**
+ * The body reference to persist for this session, following exactly the
+ * precedence the emitted record uses — the two must agree, or the row and the
+ * state that defends it would drift.
+ *
+ *   1. This run captured the bytes: that digest is the reference.
+ *   2. This run examined the file and did NOT end up holding it (capture
+ *      failed or was unavailable): the session has no reference this run can
+ *      vouch for. Clearing it is the point — a superseded or unheld
+ *      generation must not leave history behind to be mistaken for the
+ *      current body on a later metadata-only run. The retry obligation lives
+ *      on the unmarked file cursor, as before.
+ *   3. Otherwise take whatever `durableCaptureLookup` resolved. That single
+ *      call is the only carry-forward path, and it has already applied the
+ *      rule that a scanned-but-unmarked file ends the lookup — so a file the
+ *      scan reached and left digestless cannot have its reference resurrected
+ *      here either.
+ */
+function retainedReference(
+	agg: RolloutAggregate | undefined,
+	durableCapture: SessionCaptureState | undefined,
+): string | null {
+	if (agg?.artifactCapture) {
+		return agg.artifactCapture === "captured"
+			? (agg.artifactSha256 ?? null)
+			: null;
+	}
+	return durableCapture?.sha256 ?? null;
 }
 
 /**
@@ -1251,22 +1369,31 @@ export function emitSessionsFromMaps({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsFromMapsArgs): void {
 	const emittedSessionIds = new Set<string>();
 	for (const [id, t] of threadsMap) {
 		emittedSessionIds.add(id);
 		const agg = rolloutAggregates.get(id);
 		const prior = cursor?.prior(id);
-		if (shouldReemitThreadSession(t, agg, prior)) {
-			emitRecord("sessions", buildThreadSessionRecord(id, t, agg, prior));
+		const durable = durableCapture?.(id);
+		if (shouldReemitThreadSession(t, agg, prior, forceReemit?.has(id))) {
+			emitRecord(
+				"sessions",
+				buildThreadSessionRecord(id, t, agg, prior, durable),
+			);
 		}
-		cursor?.note(id, makeThreadFingerprint(t, agg, prior));
+		cursor?.note(id, makeThreadFingerprint(t, agg, prior, durable));
 	}
 	for (const [id, agg] of rolloutAggregates) {
 		if (emittedSessionIds.has(id)) {
 			continue;
 		}
-		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		emitRecord(
+			"sessions",
+			buildRolloutOnlySessionRecord(id, agg, durableCapture?.(id)),
+		);
 		// Rollout-only sessions don't have a state_5 row to fingerprint
 		// against (updated_at lives in threads). They re-emit whenever
 		// their rollout file mtime changes — the rollout-file mtime gate
@@ -1276,7 +1403,10 @@ export function emitSessionsFromMaps({
 
 interface EmitSessionsFromRowsArgs {
 	cursor: CarryForwardCursor<ThreadFingerprint>;
+	durableCapture: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	/** Sessions whose body reference changed without any count moving. */
+	forceReemit: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	threadsRows: Iterable<ThreadRow>;
 }
@@ -1286,19 +1416,28 @@ function emitSessionsFromRows({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsFromRowsArgs): void {
 	for (const t of threadsRows) {
 		const agg = rolloutAggregates.get(t.id);
 		rolloutAggregates.delete(t.id);
 		const prior = cursor.prior(t.id);
-		if (shouldReemitThreadSession(t, agg, prior)) {
-			emitRecord("sessions", buildThreadSessionRecord(t.id, t, agg, prior));
+		const durable = durableCapture(t.id);
+		if (shouldReemitThreadSession(t, agg, prior, forceReemit.has(t.id))) {
+			emitRecord(
+				"sessions",
+				buildThreadSessionRecord(t.id, t, agg, prior, durable),
+			);
 		}
-		cursor.note(t.id, makeThreadFingerprint(t, agg, prior));
+		cursor.note(t.id, makeThreadFingerprint(t, agg, prior, durable));
 	}
 
 	for (const [id, agg] of rolloutAggregates) {
-		emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+		emitRecord(
+			"sessions",
+			buildRolloutOnlySessionRecord(id, agg, durableCapture(id)),
+		);
 	}
 }
 
@@ -1485,8 +1624,16 @@ export function decideRolloutAction(input: {
 			},
 		};
 	}
-	// Same size, different mtime, prefix intact: content is byte-identical up to
-	// the boundary and the file did not grow. A touch with no new data — skip.
+	// Same size, different mtime, prefix intact: a touch with no new data.
+	//
+	// Unreachable from the production caller, which only recomputes the prefix
+	// guard when the file GREW (`resolveRolloutAction`); a same-size file
+	// therefore arrives with `guardMatches: false` and resolves to `unsafe_full`
+	// above, reparsing in full. Kept because the guard is an input, not a fact
+	// this function can establish: a caller that has verified the prefix by
+	// other means gets the cheaper answer, and the unit test above pins that
+	// contract. Do not read this branch as a description of what a touch does
+	// in production — there, a touch reparses.
 	return { kind: "skip" };
 }
 
@@ -1500,6 +1647,10 @@ interface RolloutRoot {
 interface ScanRolloutsArgs {
 	sourceGaps: Record<string, RolloutSourceGap>;
 	activeQuietMs: number;
+	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
+	captureContext?: ArtifactCaptureContext | null;
+	/** Bodies still owed, kept off the committed cursor so they retry. */
+	captureLedger?: CodexArtifactLedger | null;
 	emitRecord: (stream: string, data: RecordData) => void;
 	fileCursors: Record<string, RolloutFileCursor>;
 	fileMtimes: Record<string, number>;
@@ -1708,8 +1859,23 @@ async function processRolloutEntry(
 	// This map stays PATH-keyed (its pre-existing semantics): a relocated file
 	// has a new path, so it never spuriously hits this fast path — it falls
 	// through to resolveRolloutAction, which is keyed by the stable UUID.
+	//
+	// A capture-enabled run may NOT take it. The path predates capture and
+	// returns before any of it: a history carrying only `file_mtimes` entries
+	// (enrollment, or a connector-version upgrade) has no rich cursor to hold a
+	// `captured_sha256`, so an unchanged file would match the legacy mtime and
+	// return here on EVERY run — never capturing, never writing the richer
+	// marker, never even recording an obligation. Falling through costs one
+	// reparse per legacy entry, after which the rich cursor exists and the
+	// ordinary skip path takes over; a failed capture leaves no marker, so the
+	// retry obligation is the same one every other path carries. When capture is
+	// not configured there is nothing to gain by reparsing, so the old behaviour
+	// stands unchanged.
+	const legacyEntryNeedsCapture =
+		args.captureLedger?.enabled === true && !cursor;
 	if (
 		!cursor &&
+		!legacyEntryNeedsCapture &&
 		!args.sourceGaps[entry.path] &&
 		args.fileMtimes[entry.path] === mtime
 	) {
@@ -1721,6 +1887,33 @@ async function processRolloutEntry(
 	if (args.sourceGaps[entry.path] && action.kind === "skip")
 		action = { kind: "full" };
 	if (action.kind === "skip") {
+		// An unchanged file is normally settled work. It is NOT settled when its
+		// body is still owed: the prior run parsed the lines but did not durably
+		// hold the bytes, so skipping on the offset alone would bury the retry
+		// behind a cursor that only a source append could lift. Capturing here —
+		// WITHOUT reparsing, since no new lines exist — is also what backfills
+		// files whose cursors predate capture being configured.
+		if (
+			args.captureLedger?.enabled &&
+			!args.captureLedger.isSettled(cursorKey, cursor?.captured_sha256)
+		) {
+			const captured = await captureRolloutBody(args, entry.path, cursorKey);
+			if (cursor) {
+				args.newFileCursors[cursorKey] = {
+					...cursor,
+					...(captured !== undefined ? { captured_sha256: captured } : {}),
+				};
+				args.newMtimes[entry.path] = mtime;
+				// No reparse happened, so no aggregate carries this outcome. Record
+				// the backfill so the run still owes the session record its body
+				// reference; without this the digest reaches only the cursor and the
+				// stored row keeps saying nothing about the bytes now held.
+				if (captured !== undefined) {
+					args.captureLedger.noteBackfilled(cursorKey);
+				}
+				return "skipped";
+			}
+		}
 		carryFileCursorForward(args, entry, mtime);
 		return "skipped";
 	}
@@ -1770,13 +1963,95 @@ async function processRolloutEntry(
 		seed: action.kind === "append" ? action.seed : undefined,
 	});
 
-	args.newFileCursors[cursorKey] = await buildFileCursorAfterParse(
+	const builtCursor = await buildFileCursorAfterParse(entry.path, result);
+	// Capture AFTER the parse commits its offset, so the digest covers a file
+	// that already has a committed boundary, and BEFORE the cursor is written,
+	// so a failed capture leaves no marker and the next run retries.
+	const captured = await captureRolloutBody(
+		args,
 		entry.path,
-		result,
+		cursorKey,
+		result.sessionId,
 	);
+	// The prior digest may be carried forward ONLY when the bytes it vouches for
+	// are still the bytes this cursor describes. `captured_sha256` is defined as
+	// "sha256 of the rollout file's complete bytes as of `size_bytes`", so a
+	// parse that moved the committed boundary invalidates it: on a capture-less
+	// run `capturedMarker` returns `priorCaptured` unchanged, which would stamp
+	// the OLD digest at the NEW size and make `isSettled` treat the appended
+	// bytes as already held — they would never be captured.
+	//
+	// The condition is the skip path's own criterion — size AND mtime both equal
+	// — so the only file we vouch for is one `decideRolloutAction` would itself
+	// have called unchanged. Size equality alone is not enough: a same-length
+	// in-place rewrite keeps `size_bytes` and changes the bytes, and on a
+	// capture-less run that would carry a digest of content the file no longer
+	// holds (the next enabled run then matches size and mtime, skips, and the
+	// rewritten bytes are never captured).
+	//
+	// This still keeps the marker for the case it exists for — a
+	// `sourceGaps`-forced full reparse of an untouched file, where size and
+	// mtime both hold and dropping the marker would force a needless re-capture.
+	// It gives up the marker on a bare `utimes` touch, which re-captures once,
+	// idempotently, on the next enabled run: the right trade, since a touch is
+	// indistinguishable from a rewrite by stat alone.
+	const priorStillDescribesFile =
+		cursor !== undefined &&
+		builtCursor.size_bytes === cursor.size_bytes &&
+		builtCursor.mtime_ms === cursor.mtime_ms
+			? cursor.captured_sha256
+			: undefined;
+	const marker = args.captureLedger?.capturedMarker(
+		cursorKey,
+		captured ?? priorStillDescribesFile,
+	);
+	args.newFileCursors[cursorKey] = {
+		...builtCursor,
+		...(marker !== undefined ? { captured_sha256: marker } : {}),
+	};
 	args.newMtimes[entry.path] = mtime;
 	delete args.sourceGaps[entry.path];
 	return "parsed";
+}
+
+/**
+ * Capture one rollout file's complete bytes, recording the outcome on the
+ * ledger so an unheld body is retried rather than buried under a cursor.
+ *
+ * Returns the digest when the bytes are durably held, undefined otherwise.
+ * Failures are reported, never thrown: one unreadable rollout must not abort a
+ * whole scan, and the ledger keeps the obligation visible.
+ */
+async function captureRolloutBody(
+	args: ScanRolloutsArgs,
+	path: string,
+	cursorKey: string,
+	sessionId?: string | null,
+): Promise<string | undefined> {
+	if (!args.captureLedger?.enabled) {
+		return undefined;
+	}
+	const result = await captureFileArtifact({
+		context: args.captureContext ?? null,
+		mimeType: ROLLOUT_MIME_TYPE,
+		path,
+		recordKey: cursorKey,
+		stream: "sessions",
+	});
+	args.captureLedger.record(cursorKey, result.status, result.sha256);
+	// Surface the outcome on the session record. The aggregate is written during
+	// the parse, which runs before capture, so this is the point at which the
+	// answer exists.
+	const aggregate = sessionId
+		? args.rolloutAggregates.get(sessionId)
+		: undefined;
+	if (aggregate) {
+		aggregate.artifactCapture = result.status;
+		aggregate.artifactSha256 = result.sha256;
+	}
+	return result.status === "captured" && result.sha256
+		? result.sha256
+		: undefined;
 }
 
 /** Whether a root directory exists, distinguishing ENOENT from a real I/O
@@ -2090,7 +2365,9 @@ async function reportMalformedRolloutGap(
 
 interface EmitSessionsArgs {
 	cursor: CarryForwardCursor<ThreadFingerprint>;
+	durableCapture: (id: string) => SessionCaptureState | undefined;
 	emitRecord: (stream: string, data: RecordData) => void;
+	forceReemit: ReadonlySet<string>;
 	rolloutAggregates: Map<string, RolloutAggregate>;
 	stateDbPath: string;
 }
@@ -2100,6 +2377,8 @@ function emitSessions({
 	rolloutAggregates,
 	emitRecord,
 	cursor,
+	durableCapture,
+	forceReemit,
 }: EmitSessionsArgs): void {
 	// Sessions: prefer state_5.sqlite#threads; fall back to rollout-derived
 	// fields only when state_5 doesn't have the session. Session PK stays the
@@ -2107,7 +2386,10 @@ function emitSessions({
 	const db = openThreadsDb(stateDbPath);
 	if (!db) {
 		for (const [id, agg] of rolloutAggregates) {
-			emitRecord("sessions", buildRolloutOnlySessionRecord(id, agg));
+			emitRecord(
+				"sessions",
+				buildRolloutOnlySessionRecord(id, agg, durableCapture(id)),
+			);
 		}
 		return;
 	}
@@ -2118,6 +2400,8 @@ function emitSessions({
 			rolloutAggregates,
 			emitRecord,
 			cursor,
+			durableCapture,
+			forceReemit,
 		});
 	} finally {
 		db.close();
@@ -2263,12 +2547,23 @@ function coerceRolloutFileCursor(value: unknown): RolloutFileCursor | null {
 		}
 	}
 	const sourceLines = num(v.source_line_count);
+	// Absent (a pre-capture cursor, or a run with no spool) is a legitimate
+	// state meaning "body state unknown", not corruption: unlike the six fields
+	// above it is never load-bearing for the tail/skip decision, so a missing
+	// or malformed value costs one backfill pass rather than dropping the
+	// cursor and forcing a full reparse.
+	const capturedSha =
+		typeof v.captured_sha256 === "string" &&
+		SHA256_HEX_RE.test(v.captured_sha256)
+			? v.captured_sha256
+			: null;
 	return {
 		...(sourceLines !== null &&
 		Number.isSafeInteger(sourceLines) &&
 		sourceLines >= 0
 			? { source_line_count: sourceLines }
 			: {}),
+		...(capturedSha !== null ? { captured_sha256: capturedSha } : {}),
 		...(v.jsonl_gaps !== undefined ? { jsonl_gaps: gaps } : {}),
 		mtime_ms: mtime,
 		size_bytes: size,
@@ -2515,6 +2810,9 @@ function coerceFingerprintEntry(value: unknown): ThreadFingerprint | null {
 		updated_at: nullableFiniteNumber(v.updated_at),
 		message_count: nullableFiniteNumber(v.message_count),
 		function_call_count: nullableFiniteNumber(v.function_call_count),
+		...(typeof v.retained_sha256 === "string" && v.retained_sha256.length > 0
+			? { retained_sha256: v.retained_sha256 }
+			: {}),
 	};
 }
 
@@ -2862,7 +3160,39 @@ async function main(): Promise<void> {
 		return fail("START.scope.streams is required");
 	}
 
+	// The artifact stores live with the collector runner that spawned this
+	// process; `bin/collector-runner.ts` hands their locations over in the child
+	// env. Null means this run has none (a fixture, or a caller that has not
+	// opted in) and every body is honestly recorded `unavailable`.
+	//
+	// Acquired OUTSIDE the guarded span and released inside its `finally`, so the
+	// handle is closed on every exit from the collection that opened it —
+	// including the throwing ones, which previously ran past the close and leaked
+	// the outbox handle for the whole life of a failing process.
+	const openedCapture = openArtifactCapture({ connectorId: "codex" });
+	try {
+		await collect({ openedCapture, requested, startMsg });
+	} finally {
+		releaseArtifactStore(openedCapture);
+	}
+}
+
+interface CollectArgs {
+	openedCapture: OpenedArtifactCapture | null;
+	requested: Map<string, StreamScope>;
+	startMsg: StartMessage;
+}
+
+async function collect({
+	openedCapture,
+	requested,
+	startMsg,
+}: CollectArgs): Promise<void> {
 	const resFilters = buildResourceFilters(requested);
+	const captureContext = openedCapture?.context ?? null;
+	const captureLedger = new CodexArtifactLedger({
+		enabled: captureContext !== null,
+	});
 	const dirs = resolveCodexDirs();
 	const fileMtimes = readFileMtimes(startMsg);
 	const fileCursors = readPriorFileCursors(startMsg);
@@ -2966,6 +3296,8 @@ async function main(): Promise<void> {
 		rolloutScan = await scanRollouts({
 			sourceGaps,
 			activeQuietMs: resolveActiveRolloutQuietMs(),
+			captureContext,
+			captureLedger,
 			roots: [
 				{ baseDir: dirs.baseDir, label: "sessions" },
 				{ baseDir: dirs.archiveBaseDir, label: "sessions_archive" },
@@ -2984,9 +3316,15 @@ async function main(): Promise<void> {
 		parsedRolloutFiles = rolloutScan.parsedFiles;
 	}
 
+	// A skip-path backfill parses nothing and may leave state_5 untouched, so
+	// neither ordinary trigger fires — yet the stored session row is now stale
+	// against a body this run durably holds. That is the targeted update: the
+	// same emission path, entered for the sessions whose reference just changed.
+	const backfilledSessions = captureLedger.backfilled;
 	if (
 		requested.has("sessions") &&
 		(parsedRolloutFiles > 0 ||
+			backfilledSessions.size > 0 ||
 			readPriorSessionsSourceMtimeMs(startMsg) !== sessionsSourceMtimeMs)
 	) {
 		emitSessions({
@@ -2994,6 +3332,13 @@ async function main(): Promise<void> {
 			rolloutAggregates,
 			emitRecord,
 			cursor: threadFingerprints,
+			durableCapture: durableCaptureLookup({
+				fileCursors,
+				newFileCursors,
+				retained: (id) =>
+					threadFingerprints.prior(id)?.retained_sha256 ?? undefined,
+			}),
+			forceReemit: backfilledSessions,
 		});
 		await waitForEmitDrain();
 	}
@@ -3030,8 +3375,50 @@ async function main(): Promise<void> {
 		});
 	}
 
+	// Both obligations are reported before DONE, and neither is implied by the
+	// other: `outstanding` are bodies this run could not hold (their markers were
+	// withheld, so the next run retries exactly them), while `awaiting_upload`
+	// are bodies that ARE held locally but not yet delivered upstream — counted
+	// at capture time, since no transport exists to discharge them
+	// (see `hasUploadTransport` in src/artifact-capture.ts).
+	if (captureLedger.size > 0) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex artifact_bodies_outstanding=${captureLedger.size}`,
+		});
+	}
+	if (captureLedger.pendingUpload > 0) {
+		emit({
+			type: "PROGRESS",
+			message: `Codex artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+		});
+	}
+	await waitForEmitDrain();
+
 	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
 	flushAndExit(0);
+}
+
+/**
+ * Release the artifact store without letting cleanup speak over a real failure.
+ *
+ * `finally` runs while a primary error is propagating, so a throw from `close()`
+ * would REPLACE that error and report a cleanup symptom in place of the cause.
+ * The close failure is made visible and then swallowed — the same rule
+ * `claude_code` applies (data-connectors#100).
+ */
+function releaseArtifactStore(
+	openedCapture: OpenedArtifactCapture | null,
+): void {
+	try {
+		openedCapture?.close();
+	} catch (closeError) {
+		console.error(
+			`codex: releasing the artifact store failed: ${
+				closeError instanceof Error ? closeError.message : String(closeError)
+			}`,
+		);
+	}
 }
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime
