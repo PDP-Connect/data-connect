@@ -347,17 +347,25 @@ export async function installConnectorsAtomically({
   }
 }
 
-// The two Collection Profile connectors get their v2 entries AUTHORED from a
+// The Collection Profile connectors get their v2 entries AUTHORED from a
 // fresh registry lookup, not migrated from the v1 tarball entry: the OCI
 // artifacts are built from today's `packages/polyfill-connectors` sources,
 // while the v1 tarballs were built from July pdpp pins, so the bytes
 // legitimately differ. Authoring never consults the signed index — the
-// registry, not the index, is the source of truth for these two connectors.
+// registry, not the index, is the source of truth for these connectors.
 export const OCI_CONNECTOR_KEYS = Object.freeze({
+  "apple-health-pdpp": "apple-health",
   "chatgpt-pdpp": "chatgpt",
   "github-pdpp": "github",
+  "ynab-pdpp": "ynab",
 })
 const OCI_DISPLAY_METADATA = Object.freeze({
+  "apple-health-pdpp": Object.freeze({
+    company: "apple",
+    name: "Apple Health (PDPP Collection Profile)",
+    description:
+      "Collects Apple Health export data through the PDPP Collection Profile protocol.",
+  }),
   "chatgpt-pdpp": Object.freeze({
     company: "openai",
     name: "ChatGPT (PDPP Collection Profile)",
@@ -369,6 +377,12 @@ const OCI_DISPLAY_METADATA = Object.freeze({
     name: "GitHub (PDPP Collection Profile)",
     description:
       "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
+  }),
+  "ynab-pdpp": Object.freeze({
+    company: "ynab",
+    name: "YNAB (PDPP Collection Profile)",
+    description:
+      "Collects YNAB budgets, accounts, categories, transactions, and other financial data through the PDPP Collection Profile protocol.",
   }),
 })
 
@@ -421,7 +435,7 @@ export async function authorOciProfile(
   }
 }
 
-// Build a v2 lock by authoring the two OCI Collection Profile entries from
+// Build a v2 lock by authoring the OCI Collection Profile entries from
 // the registry and carrying every other (legacy tarball) entry through
 // unchanged. This is NOT a migration: an authored entry has no prior hashes
 // to preserve, so it never rejects on byte drift the way the old
@@ -429,7 +443,12 @@ export async function authorOciProfile(
 // already exclude the OCI connectorIds (they are never requested from the
 // signed index), so this only adds them. `metadata` supplies the
 // non-registry display fields (see `authorOciProfile`) per connectorId.
-export async function authorOciLock(lock, versions, metadata = {}, options = {}) {
+export async function authorOciLock(
+  lock,
+  versions,
+  metadata = {},
+  options = {}
+) {
   const connectors = lock.connectors.filter(
     entry => !(entry.connectorId in OCI_CONNECTOR_KEYS)
   )
@@ -439,10 +458,15 @@ export async function authorOciLock(lock, versions, metadata = {}, options = {})
       throw new Error(`Unknown OCI connector key: ${connectorId}`)
     const version = versions[connectorId]
     if (!version) throw new Error(`Missing target version for ${connectorId}`)
+    const metadataOverrides = Object.fromEntries(
+      Object.entries(metadata[connectorId] ?? {}).filter(
+        ([, value]) => value != null
+      )
+    )
     connectors.push(
       await authorOciProfile(connectorId, connectorKey, version, {
         ...OCI_DISPLAY_METADATA[connectorId],
-        ...metadata[connectorId],
+        ...metadataOverrides,
         ...options,
       })
     )
@@ -535,9 +559,9 @@ async function main() {
   })
   // OCI-backed connectorIds are never requested from the signed index: their
   // v2 entries are authored straight from the registry, below.
-  const requestedConnectorIds = Object.keys(dependencies.connectors ?? {}).filter(
-    connectorId => fromLocal || !(connectorId in OCI_CONNECTOR_KEYS)
-  )
+  const requestedConnectorIds = Object.keys(
+    dependencies.connectors ?? {}
+  ).filter(connectorId => fromLocal || !(connectorId in OCI_CONNECTOR_KEYS))
   let lock = await generateLock({
     dependencies,
     source,
@@ -559,11 +583,13 @@ async function main() {
         entry => entry.connectorId === connectorId
       )
       ociVersions[connectorId] = requestedVersion
-      ociMetadata[connectorId] = {
-        company: existingEntry?.company,
-        name: existingEntry?.name,
-        description: existingEntry?.description,
-      }
+      ociMetadata[connectorId] = existingEntry
+        ? {
+            company: existingEntry.company,
+            name: existingEntry.name,
+            description: existingEntry.description,
+          }
+        : {}
     }
     lock = await authorOciLock(lock, ociVersions, ociMetadata)
   }
