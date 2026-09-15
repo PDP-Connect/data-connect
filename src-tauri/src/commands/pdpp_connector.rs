@@ -818,10 +818,16 @@ pub fn supervise_pdpp_connector(
     }
     let exit_code = exit.code();
     match done.as_ref() {
-        None => set_failure(
-            &mut failure,
-            "PDPP connector exited without a terminal DONE message",
-        ),
+        None => {
+            if let Some(existing) = failure.as_mut() {
+                *existing = failure_with_stderr_tail(existing, &stderr_text);
+            } else {
+                failure = Some(failure_with_stderr_tail(
+                    "PDPP connector exited without a terminal DONE message",
+                    &stderr_text,
+                ));
+            }
+        }
         Some(done) if done.records_emitted != record_count => set_failure(
             &mut failure,
             format!(
@@ -1157,6 +1163,23 @@ fn append_stderr(output: &mut String, truncated: &mut bool, limit: usize, line: 
     }
     output.push_str(line);
 }
+
+fn failure_with_stderr_tail(message: &str, stderr: &str) -> String {
+    if stderr.trim().is_empty() {
+        return message.to_string();
+    }
+    let lines = stderr.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(8);
+    let mut tail = lines[start..].join("\n");
+    if tail.len() > 2048 {
+        let mut offset = tail.len() - 2048;
+        while !tail.is_char_boundary(offset) {
+            offset += 1;
+        }
+        tail = tail[offset..].to_string();
+    }
+    format!("{message}; stderr tail:\n{tail}")
+}
 fn terminate_child(child: &mut std::process::Child) {
     #[cfg(unix)]
     unsafe {
@@ -1467,6 +1490,19 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
             let result = supervise_pdpp_connector(&fixture(mode), &scoped(), &options()).unwrap();
             assert_eq!(result.status, PdppRunStatus::Failed, "{mode}");
         }
+    }
+
+    #[test]
+    fn includes_child_stderr_tail_when_done_is_missing() {
+        let result =
+            supervise_pdpp_connector(&fixture("missing-done-with-stderr"), &scoped(), &options())
+                .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Failed);
+        let failure = result.failure.expect("missing DONE failure");
+        assert!(failure.starts_with("PDPP connector exited without a terminal DONE message"));
+        assert!(failure.contains("stderr tail:"));
+        assert!(failure.contains("GitHub API request failed: 401 Unauthorized"));
+        assert!(failure.contains("request id: fixture-1"));
     }
     #[test]
     fn rejects_counter_scope_field_and_resource_violations() {
