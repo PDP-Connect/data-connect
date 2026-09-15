@@ -102,7 +102,7 @@ pub struct Platform {
     pub runtime: Option<String>,
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
-    pub setup: Option<ActivePdppStaticSecretSetup>,
+    pub setup: Option<ActivePdppSetup>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,15 +111,28 @@ struct ActivePdppPlatformManifest {
     display_name: Option<String>,
     name: Option<String>,
     description: Option<String>,
-    setup: Option<ActivePdppStaticSecretSetup>,
+    setup: Option<ActivePdppSetup>,
     streams: Vec<ActivePdppStream>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ActivePdppStaticSecretSetup {
+pub(crate) struct ActivePdppSetup {
     modality: String,
-    credential_capture: ActivePdppCredentialCapture,
+    #[serde(
+        default,
+        rename = "credentialCapture",
+        alias = "credential_capture",
+        skip_serializing_if = "Option::is_none"
+    )]
+    credential_capture: Option<ActivePdppCredentialCapture>,
+    #[serde(
+        default,
+        rename = "manualOrUpload",
+        alias = "manual_or_upload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    manual_or_upload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -554,7 +567,12 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
         } else {
             install.company.clone()
         };
-        let scopes = pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams);
+        let manual_upload = manifest
+            .setup
+            .as_ref()
+            .is_some_and(|setup| setup.modality == "manual_or_upload");
+        let scopes =
+            pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams, manual_upload);
         if scopes.is_empty() {
             continue;
         }
@@ -589,23 +607,31 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
 fn pdpp_streams_to_dataconnect_scopes(
     connector_key: &str,
     streams: &[ActivePdppStream],
+    include_generic_streams: bool,
 ) -> Vec<String> {
     let mut scopes = Vec::new();
     for stream in streams {
-        let scope = match (connector_key, stream.name.as_str()) {
-            ("github", "user") => Some("github.profile"),
-            ("github", "repositories") => Some("github.repositories"),
-            ("github", "starred") => Some("github.starred"),
-            ("chatgpt", "conversations") => Some("chatgpt.conversations"),
-            ("chatgpt", "messages") => Some("chatgpt.messages"),
-            ("chatgpt", "memories") => Some("chatgpt.memories"),
-            ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts"),
-            ("chatgpt", "custom_instructions") => Some("chatgpt.custom_instructions"),
-            ("chatgpt", "shared_conversations") => Some("chatgpt.shared_conversations"),
-            _ => None,
+        let scope = if include_generic_streams {
+            Some(format!("pdpp.manual.{connector_key}.{}", stream.name))
+        } else {
+            match (connector_key, stream.name.as_str()) {
+                ("github", "user") => Some("github.profile".to_owned()),
+                ("github", "repositories") => Some("github.repositories".to_owned()),
+                ("github", "starred") => Some("github.starred".to_owned()),
+                ("chatgpt", "conversations") => Some("chatgpt.conversations".to_owned()),
+                ("chatgpt", "messages") => Some("chatgpt.messages".to_owned()),
+                ("chatgpt", "memories") => Some("chatgpt.memories".to_owned()),
+                ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts".to_owned()),
+                ("chatgpt", "custom_instructions") => {
+                    Some("chatgpt.custom_instructions".to_owned())
+                }
+                ("chatgpt", "shared_conversations") => {
+                    Some("chatgpt.shared_conversations".to_owned())
+                }
+                _ => None,
+            }
         };
         if let Some(scope) = scope {
-            let scope = scope.to_string();
             if !scopes.contains(&scope) {
                 scopes.push(scope);
             }
@@ -2792,8 +2818,9 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, resolve_automation_browser_path_from,
-        resolve_browser_status, resolve_icon_path, ConnectorMetadata,
+        manifest_looks_like_connector, pdpp_streams_to_dataconnect_scopes,
+        resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
+        ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2833,6 +2860,44 @@ mod tests {
             }]),
             runtime_requirements: None,
             capabilities: None,
+        }
+    }
+
+    #[test]
+    fn active_pdpp_setup_decodes_snake_case_and_serializes_frontend_shape() {
+        for (fixture, field) in [
+            (
+                include_str!("../../tests/fixtures/apple-health.collection-profile.json"),
+                "manualOrUpload",
+            ),
+            (
+                include_str!("../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"),
+                "credentialCapture",
+            ),
+        ] {
+            let manifest: ActivePdppPlatformManifest = serde_json::from_str(fixture).unwrap();
+            let setup = serde_json::to_value(manifest.setup.unwrap()).unwrap();
+            assert!(setup.get(field).is_some());
+            if field == "credentialCapture" {
+                assert!(setup[field]["fields"]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty()));
+            }
+            assert!(setup.get("credential_capture").is_none());
+            assert!(setup.get("manual_or_upload").is_none());
+        }
+    }
+
+    #[test]
+    fn manual_scope_discovery_never_reaches_curated_projection_arms() {
+        for (key, stream) in [("github", "repositories"), ("chatgpt", "conversations")] {
+            let streams = vec![ActivePdppStream {
+                name: stream.into(),
+            }];
+            assert_eq!(
+                pdpp_streams_to_dataconnect_scopes(key, &streams, true),
+                vec![format!("pdpp.manual.{key}.{stream}")]
+            );
         }
     }
 
