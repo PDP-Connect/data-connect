@@ -42,8 +42,10 @@ const BUNDLED_NODE_NAME: &str = if cfg!(windows) {
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_CONNECTOR_KEY: &str = "github";
 const GITHUB_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/github";
+const GITHUB_PUBLISHED_CONNECTOR_ID: &str = "https://registry.pdpp.dev/connectors/github";
 const CHATGPT_CONNECTOR_KEY: &str = "chatgpt";
 const CHATGPT_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/chatgpt";
+const CHATGPT_PUBLISHED_CONNECTOR_ID: &str = "https://registry.pdpp.dev/connectors/chatgpt";
 const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -864,12 +866,18 @@ fn validate_manifest(
     let identity_matches = match manifest.connector_key.as_deref() {
         Some(GITHUB_CONNECTOR_KEY) => {
             connector_id == "github-pdpp"
-                && manifest.connector_id.as_deref() == Some(GITHUB_CONNECTOR_ID)
+                && matches!(
+                    manifest.connector_id.as_deref(),
+                    Some(GITHUB_CONNECTOR_ID | GITHUB_PUBLISHED_CONNECTOR_ID)
+                )
                 && !requires_browser(manifest)
         }
         Some(CHATGPT_CONNECTOR_KEY) => {
             connector_id == CHATGPT_CONNECTOR_INSTALL_ID
-                && manifest.connector_id.as_deref() == Some(CHATGPT_CONNECTOR_ID)
+                && matches!(
+                    manifest.connector_id.as_deref(),
+                    Some(CHATGPT_CONNECTOR_ID | CHATGPT_PUBLISHED_CONNECTOR_ID)
+                )
                 && requires_browser(manifest)
                 && required_chatgpt_static_secret_fields(manifest).is_ok()
         }
@@ -2095,7 +2103,9 @@ mod tests {
         fs::write(temp.path().join("provenance.json"), &provenance_bytes).unwrap();
         let manifest_sha = format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
+            hex::encode(Sha256::digest(
+                serde_json::to_vec_pretty(&manifest).unwrap()
+            ))
         );
         let entrypoint_sha = format!("sha256:{}", hex::encode(Sha256::digest(script.as_bytes())));
         let provenance_sha = format!("sha256:{}", hex::encode(Sha256::digest(&provenance_bytes)));
@@ -2169,7 +2179,10 @@ mod tests {
     }
 
     fn sha256_for(path: &Path) -> String {
-        format!("sha256:{}", hex::encode(Sha256::digest(fs::read(path).unwrap())))
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(fs::read(path).unwrap()))
+        )
     }
 
     fn unpacked_actual_chatgpt_install(
@@ -2396,6 +2409,49 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
             .contains("not a PDPP"));
+    }
+
+    #[test]
+    fn resolves_only_the_published_pdpp_dev_identity_aliases() {
+        let mut github = github_manifest();
+        github["connector_id"] = json!(GITHUB_PUBLISHED_CONNECTOR_ID);
+        let (temp, mut install) = install_fixture(github, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut chatgpt = chatgpt_browser_manifest();
+        chatgpt["connector_id"] = json!(CHATGPT_PUBLISHED_CONNECTOR_ID);
+        let (temp, mut install) = install_fixture(chatgpt, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut foreign = github_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.dev/connectors/github/other");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("does not match"));
+
+        let mut foreign = github_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/github");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("does not match"));
+
+        let mut foreign = chatgpt_browser_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/chatgpt");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        assert!(resolve_installed_pdpp_connector(&install)
+            .unwrap_err()
+            .contains("does not match"));
     }
 
     #[test]
@@ -3491,7 +3547,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         install.connector_id = "not-github".into();
         install.manifest_sha256 = Some(format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
+            hex::encode(Sha256::digest(
+                serde_json::to_vec_pretty(&manifest).unwrap()
+            ))
         ));
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
@@ -3709,8 +3767,7 @@ setInterval(() => {}, 1000);
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
         fs::copy(&ambient_node, &bundled_node).unwrap();
 
-        let resolved_node =
-            resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
+        let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);
 
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
