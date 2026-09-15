@@ -17,6 +17,7 @@ import { PlatformGithubIcon } from "@/components/icons/platform-github"
 import { SettingsRowDescriptionCopy } from "@/pages/settings/components/settings-row-description-copy"
 import { SettingsRowDescriptionStatus } from "@/pages/settings/components/settings-row-description-status"
 import { Text } from "@/components/typography/text"
+import { useShowDevelopmentConnectors } from "@/hooks/use-show-development-connectors"
 import { Switch } from "@/components/ui/switch"
 import { LINKS } from "@/config/links"
 import { cn } from "@/lib/classes"
@@ -85,6 +86,8 @@ export function SettingsAbout({
   clearPersonalServerDataError,
   onClearPersonalServerData,
 }: SettingsAboutProps) {
+  const { showDevelopmentConnectors, updateShowDevelopmentConnectors } =
+    useShowDevelopmentConnectors()
   const [isBrowserRefreshLoading, setIsBrowserRefreshLoading] = useState(false)
   const [isNodeTestResultOpen, setIsNodeTestResultOpen] = useState(false)
 
@@ -412,6 +415,19 @@ export function SettingsAbout({
                     account-linked identity are sent.
                   </Text>
                 </div>
+              }
+            />
+
+            <SettingsRow
+              icon={<FlaskConicalIcon aria-hidden="true" />}
+              title="Show development connectors"
+              description="Include development connectors in the install panel."
+              right={
+                <Switch
+                  checked={showDevelopmentConnectors}
+                  onCheckedChange={updateShowDevelopmentConnectors}
+                  aria-label="Show development connectors"
+                />
               }
             />
 

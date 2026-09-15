@@ -19,6 +19,7 @@ export function useConnectorUpdates() {
     (state: RootState) => state.app.isCheckingUpdates
   );
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const checkForUpdates = useCallback(
@@ -39,7 +40,7 @@ export function useConnectorUpdates() {
 
   const downloadConnector = useCallback(
     async (id: string) => {
-      setError(null);
+      setDownloadErrors(prev => ({ ...prev, [id]: '' }));
       setDownloadingIds((prev) => new Set(prev).add(id));
 
       try {
@@ -50,8 +51,8 @@ export function useConnectorUpdates() {
         return true;
       } catch (err) {
         const errorMsg =
-          err instanceof Error ? err.message : 'Failed to download connector';
-        setError(errorMsg);
+          err instanceof Error ? err.message : String(err || 'Failed to download connector');
+        setDownloadErrors(prev => ({ ...prev, [id]: errorMsg }));
         console.error('Failed to download connector:', err);
         return false;
       } finally {
@@ -84,6 +85,7 @@ export function useConnectorUpdates() {
     lastUpdateCheck,
     isCheckingUpdates,
     error,
+    downloadErrors,
     hasUpdates,
     updateCount,
     newConnectorCount,

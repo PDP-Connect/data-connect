@@ -14,12 +14,11 @@ import { PlatformIcon } from "@/components/icons/platform-icon"
 import { stateFocus } from "@/components/typography/field"
 import { Text } from "@/components/typography/text"
 import { cn } from "@/lib/utils"
+import { useShowDevelopmentConnectors } from "@/hooks/use-show-development-connectors"
 import { useConnectorUpdates } from "@/hooks/useConnectorUpdates"
 import type { ConnectorUpdateInfo } from "@/types"
 
-// NOTE(callum): This component is intentionally not mounted right now.
-// We keep it as a ready-to-reuse UI surface for connector update/install flows.
-// The app still performs silent background checks at startup via useInitialize.
+// The app also performs silent background checks at startup via useInitialize.
 
 const updatesPanelClassName = cn([
   // layout
@@ -141,12 +140,14 @@ interface ConnectorUpdateItemProps {
   update: ConnectorUpdateInfo
   onDownload: (id: string) => void
   isDownloading: boolean
+  error?: string
 }
 
 const ConnectorUpdateItem = memo(function ConnectorUpdateItem({
   update,
   onDownload,
   isDownloading,
+  error,
 }: ConnectorUpdateItemProps) {
   const badgeVariant = update.isNew
     ? "new"
@@ -190,34 +191,46 @@ const ConnectorUpdateItem = memo(function ConnectorUpdateItem({
         <Text as="span" intent="small" color="mutedForeground">
           {versionLabel}
         </Text>
+        {!update.runnable && (
+          <Text as="span" intent="small" muted>
+            {update.unavailableReason ?? "Not supported by this device"}
+          </Text>
+        )}
+        {error && (
+          <Text as="span" intent="small" role="alert">
+            {error}
+          </Text>
+        )}
       </div>
 
       {/* Download button */}
-      <button
-        type="button"
-        onClick={() => onDownload(update.id)}
-        disabled={isDownloading}
-        className={getActionButtonClassName(isDownloading)}
-      >
-        {isDownloading ? (
-          <>
-            <Loader2Icon
-              className="size-3.5 animate-spin motion-reduce:animate-none"
-              aria-hidden
-            />
-            <Text as="span" intent="button" color="inherit">
-              Installing…
-            </Text>
-          </>
-        ) : (
-          <>
-            <DownloadIcon className="size-3.5" aria-hidden />
-            <Text as="span" intent="button" color="inherit">
-              {update.isNew ? "Install" : "Update"}
-            </Text>
-          </>
-        )}
-      </button>
+      {update.runnable && (
+        <button
+          type="button"
+          onClick={() => onDownload(update.id)}
+          disabled={isDownloading}
+          className={getActionButtonClassName(isDownloading)}
+        >
+          {isDownloading ? (
+            <>
+              <Loader2Icon
+                className="size-3.5 animate-spin motion-reduce:animate-none"
+                aria-hidden
+              />
+              <Text as="span" intent="button" color="inherit">
+                Installing…
+              </Text>
+            </>
+          ) : (
+            <>
+              <DownloadIcon className="size-3.5" aria-hidden />
+              <Text as="span" intent="button" color="inherit">
+                {update.isNew ? "Install" : "Update"}
+              </Text>
+            </>
+          )}
+        </button>
+      )}
     </div>
   )
 })
@@ -231,10 +244,36 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
     updates,
     isCheckingUpdates,
     error,
+    downloadErrors,
     checkForUpdates,
     downloadConnector,
     isDownloading,
   } = useConnectorUpdates()
+
+  const { showDevelopmentConnectors } = useShowDevelopmentConnectors()
+  const visible = updates.filter(
+    update => showDevelopmentConnectors || update.tier !== "development"
+  )
+  const groups = [
+    {
+      title: "Installed with update available",
+      entries: visible.filter(
+        update => update.runnable && !update.isNew && update.hasUpdate
+      ),
+    },
+    {
+      title: "Installable",
+      entries: visible.filter(update => update.runnable && update.isNew),
+    },
+    {
+      title: "Not available on this device",
+      entries: visible.filter(update => !update.runnable),
+    },
+  ]
+  const visibleCount = groups.reduce(
+    (count, group) => count + group.entries.length,
+    0
+  )
 
   // Wrap downloadConnector to reload platforms after successful download
   const handleDownload = useCallback(
@@ -247,7 +286,7 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
     [downloadConnector, onReloadPlatforms]
   )
 
-  if (updates.length === 0 && !isCheckingUpdates && !error) {
+  if (visibleCount === 0 && !isCheckingUpdates && !error) {
     return null
   }
 
@@ -257,14 +296,14 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
       <div
         className={cn(
           "flex items-center justify-between",
-          updates.length > 0 ? "mb-3" : "mb-0"
+          visibleCount > 0 ? "mb-3" : "mb-0"
         )}
       >
         <div className="flex items-center gap-2">
           <DownloadIcon className="size-4 text-primary-500" aria-hidden />
           <Text as="span" intent="small" weight="medium">
-            {updates.length > 0
-              ? `${updates.length} Connector${updates.length > 1 ? "s" : ""} Available`
+            {visibleCount > 0
+              ? `${visibleCount} Connector${visibleCount > 1 ? "s" : ""}`
               : "Checking for updates…"}
           </Text>
         </div>
@@ -299,17 +338,24 @@ export function ConnectorUpdates({ onReloadPlatforms }: ConnectorUpdatesProps) {
 
       {/* Updates list */}
       <div className="space-y-2">
-        {updates.map(update => {
-          const downloading = isDownloading(update.id)
-          return (
-            <ConnectorUpdateItem
-              key={update.id}
-              update={update}
-              onDownload={handleDownload}
-              isDownloading={downloading}
-            />
-          )
-        })}
+        {groups
+          .filter(group => group.entries.length > 0)
+          .map(group => (
+            <section key={group.title} aria-label={group.title}>
+              <Text as="h2" intent="small">
+                {group.title}
+              </Text>
+              {group.entries.map(update => (
+                <ConnectorUpdateItem
+                  key={update.id}
+                  update={update}
+                  onDownload={handleDownload}
+                  isDownloading={isDownloading(update.id)}
+                  error={downloadErrors[update.id]}
+                />
+              ))}
+            </section>
+          ))}
       </div>
     </div>
   )
