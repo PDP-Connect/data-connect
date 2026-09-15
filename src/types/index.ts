@@ -27,11 +27,11 @@ export interface PdppStaticSecretSetup {
   modality: "static_secret"
   credentialCapture: {
     fields: Array<{
-      name: "username" | "password"
+      name: string
       label?: string | null
       type?: "email" | "password" | string | null
-      required: true
-      secret: true
+      required: boolean
+      secret: boolean
       autocomplete?: string | null
     }>
   }
