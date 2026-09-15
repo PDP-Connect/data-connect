@@ -3,13 +3,13 @@
 
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome 2.5.5's built-in Node module registry does not yet recognize node:sqlite; Node's own resolver and tsc both resolve it (same pre-existing gap as packages/collector-runtime/src/local-device-outbox.ts and its sibling test files).
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import {
   // The concrete bundled-connector registry is assembled at the composition
   // root (the bin) from connector-owned definitions; the src runtime is
@@ -261,7 +261,7 @@ test("runner exports the durable local outbox substrate without private package 
 });
 
 test("local collector CLI resolves the installed package manifest version", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pdpp-local-collector-version-"));
+  const root = await createTempDir("pdpp-local-collector-version-");
   const binPath = join(root, "dist", "local-collector", "bin", "pdpp-local-collector.js");
   await mkdir(join(root, "dist", "local-collector", "bin"), { recursive: true });
   await writeFile(
@@ -3257,16 +3257,30 @@ async function startReferenceRouteServer({ body = '{"ok":true}', status }) {
   };
 }
 
+const tempDirs = new Set<string>();
+
+after(async () => {
+  await Promise.all([...tempDirs].map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function createTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
+}
+
 async function tempOutboxPath() {
   return join(await tempDir(), "outbox.sqlite");
 }
 
 function tempDir() {
-  return mkdtemp(join(tmpdir(), "pdpp-local-collector-test-"));
+  return createTempDir("pdpp-local-collector-test-");
 }
 
-function tempDirSync(): string {
-  return mkdtempSync(join(tmpdir(), "pdpp-local-collector-test-"));
+function tempDirSync(prefix = "pdpp-local-collector-test-"): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
 }
 
 /**
@@ -3312,7 +3326,7 @@ async function startSampleTestServer(): Promise<{ close: () => Promise<void>; ur
  * records, the same way a genuinely slow filesystem scan would.
  */
 async function writeCountingFixtureConnector(count: number): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "pdpp-local-collector-fixture-"));
+  const dir = await createTempDir("pdpp-local-collector-fixture-");
   const path = join(dir, "fixture.mjs");
   const emits = Array.from(
     { length: count },
@@ -3942,7 +3956,7 @@ test("runConnect never calls enroll when --source-roots fails local validation (
 
 test("runConnect expands a ~-relative --source-roots entry into the collection_scope request", async () => {
   const profileDir = tempDirSync();
-  const tempHome = mkdtempSync(join(tmpdir(), "pdpp-runner-test-home-"));
+  const tempHome = tempDirSync("pdpp-runner-test-home-");
   const previousHome = process.env.HOME;
   process.env.HOME = tempHome;
   try {

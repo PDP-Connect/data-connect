@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
@@ -941,7 +941,7 @@ test("runCollectorConnector refuses a connector that omits protocol_capabilities
   // throw proves the child never started.
   const harness = await startCollectorHarness({ priorState: {} });
   try {
-    const markerDir = await mkdtemp(join(tmpdir(), "pdpp-undeclared-capabilities-"));
+    const markerDir = await createTempDir("pdpp-undeclared-capabilities-");
     const markerPath = join(markerDir, "spawned.marker");
     const fixture = await writeFixtureConnector({
       script: `
@@ -1041,7 +1041,7 @@ test("runCollectorConnector rejects a connector declaring STREAM_EVIDENCE at pla
   // heartbeat or child process, so this test cannot imply current support.
   const harness = await startCollectorHarness({ priorState: {} });
   try {
-    const markerDir = await mkdtemp(join(tmpdir(), "pdpp-withdrawn-stream-evidence-"));
+    const markerDir = await createTempDir("pdpp-withdrawn-stream-evidence-");
     const markerPath = join(markerDir, "spawned.marker");
     const fixture = await writeFixtureConnector({
       script: `
@@ -1181,8 +1181,20 @@ test("runCollectorConnector rejects promptly when the connector command is missi
   }
 });
 
+const tempDirs = new Set<string>();
+
+after(async () => {
+  await Promise.all([...tempDirs].map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function createTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
+}
+
 async function tempQueuePath(): Promise<string> {
-  return join(await mkdtemp(join(tmpdir(), "pdpp-collector-runner-")), "queue.json");
+  return join(await createTempDir("pdpp-collector-runner-"), "queue.json");
 }
 
 function seedDeadLetteredRecordBatch(input: {
@@ -2582,7 +2594,7 @@ test("runCollectorConnector honors AbortSignal at the pre-spawn gate", async () 
 
 test("recoverAndSummarizeOutbox recovers expired leases and returns a fast summary", async () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
-  const dir = await mkdtemp(join(tmpdir(), "pdpp-recover-summary-"));
+  const dir = await createTempDir("pdpp-recover-summary-");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
     path: join(dir, "outbox.sqlite"),
@@ -4352,7 +4364,7 @@ async function startTogglableHarness(options: {
 }
 
 async function writeFixtureConnector(input: { script: string }): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "pdpp-fixture-connector-"));
+  const dir = await createTempDir("pdpp-fixture-connector-");
   const path = join(dir, "fixture.mjs");
   await writeFile(
     path,
