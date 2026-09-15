@@ -538,22 +538,37 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
     platforms
 }
 
-fn load_active_pdpp_platforms() -> Vec<Platform> {
+fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
     let Some(manifest) = read_active_connector_manifest() else {
         return Vec::new();
     };
-    load_pdpp_platforms(manifest.connectors.into_values())
+    let resource_dir = app.path().resource_dir().ok();
+    load_pdpp_platforms_with_resource_dir(
+        manifest.connectors.into_values(),
+        resource_dir.as_deref(),
+    )
 }
 
 pub(super) fn load_pdpp_platforms(
     installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+) -> Vec<Platform> {
+    load_pdpp_platforms_with_resource_dir(installs, None)
+}
+
+fn load_pdpp_platforms_with_resource_dir(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+    resource_dir: Option<&Path>,
 ) -> Vec<Platform> {
     let mut platforms = Vec::new();
     for install in installs {
         if install.artifact_kind.as_deref() != Some("pdpp-collection-profile") {
             continue;
         }
-        let Ok(content) = super::pdpp_installed_connector::read_admitted_pdpp_manifest(&install)
+        let Ok(content) =
+            super::pdpp_installed_connector::read_admitted_pdpp_manifest_with_resource_dir(
+                &install,
+                resource_dir,
+            )
         else {
             continue;
         };
@@ -660,7 +675,7 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
         }
     }
 
-    for platform in load_active_pdpp_platforms() {
+    for platform in load_active_pdpp_platforms(&app) {
         if !seen_ids.contains(&platform.id) {
             seen_ids.insert(platform.id.clone());
             platforms.push(platform);
@@ -2912,7 +2927,7 @@ mod tests {
             assert_eq!(
                 super::pdpp_streams_to_dataconnect_scopes(
                     manifest.connector_key.as_deref().unwrap(),
-                    manifest.connector_id.as_deref().unwrap(),
+                    &manifest.connector_id,
                     &manifest.streams,
                     false,
                 ),

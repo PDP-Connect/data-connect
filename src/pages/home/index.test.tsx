@@ -159,9 +159,7 @@ function mockManualUploadPlatform() {
 
 function openManualUpload() {
   renderHome()
-  fireEvent.click(
-    screen.getByRole("button", { name: /connect apple health/i })
-  )
+  fireEvent.click(screen.getByRole("button", { name: /connect apple health/i }))
 }
 
 describe("Home", () => {
