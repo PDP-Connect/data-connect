@@ -167,6 +167,34 @@ describe("classifyForCohort", () => {
     ).toEqual({ selected: false, reason: "excluded_tooling" })
   })
 
+  // The stryker-js#6210 repair is part of that same machinery: the setup file
+  // rewrites the coverage keys a trial is measured through, and the plugin
+  // rewrites the ids those keys are joined against. Mutating either one breaks
+  // the attribution every trial depends on -- the mutant loses its per-test
+  // filter, re-runs the whole suite and times out into `inconclusive`. Both
+  // live under the excluded prefix, so the existing carve-out covers them and
+  // no second exclusion list is needed.
+  it("carves the test-identity repair out with the rest of the harness", () => {
+    expect(
+      classifyForCohort(
+        {
+          status: "M",
+          path: "scripts/mutation-falsification/test-identity-setup.ts",
+        },
+        scriptsCohort
+      )
+    ).toEqual({ selected: false, reason: "excluded_tooling" })
+    expect(
+      classifyForCohort(
+        {
+          status: "M",
+          path: "scripts/mutation-falsification/vitest-runner-plugin.mjs",
+        },
+        scriptsCohort
+      )
+    ).toEqual({ selected: false, reason: "excluded_tooling" })
+  })
+
   it("leaves the existing cohorts unaffected by an absent exclusion list", () => {
     // The client cohort declares no `excludedPrefixes`; a file under its
     // production prefix must still be selected.
