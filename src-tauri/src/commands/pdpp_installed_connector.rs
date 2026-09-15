@@ -987,6 +987,47 @@ fn validate_relative_path(path: &str, label: &str) -> Result<PathBuf, String> {
     Ok(rel.to_path_buf())
 }
 
+// PR #125 adds scoped filesystem imports, so manual-upload connectors can run
+// without a network binding when the host provides their import directory.
+const HOST_BINDINGS: &[&str] = &["network", "browser", "filesystem"];
+
+pub(crate) fn host_unavailable_reason(
+    required_bindings: &[String],
+    setup_modality: Option<&str>,
+) -> Option<String> {
+    if let Some(binding) = required_bindings
+        .iter()
+        .find(|binding| !HOST_BINDINGS.contains(&binding.as_str()))
+    {
+        return Some(format!("Requires unavailable binding: {binding}"));
+    }
+    match setup_modality {
+        Some("static_secret") => {
+            if !required_bindings.iter().any(|binding| binding == "network") {
+                return Some("PDPP static-secret connector must require the network binding".into());
+            }
+        }
+        Some("manual_or_upload") => {
+            if !required_bindings.iter().any(|binding| binding == "filesystem") {
+                return Some(
+                    "PDPP manual/upload connector must require the filesystem binding".into(),
+                );
+            }
+        }
+        Some(modality) => return Some(format!("Requires unavailable setup: {modality}")),
+        None => {
+            if !required_bindings.iter().any(|binding| binding == "network") {
+                return Some("PDPP connector manifest must require the network binding".into());
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn host_can_run(required_bindings: &[String], setup_modality: Option<&str>) -> bool {
+    host_unavailable_reason(required_bindings, setup_modality).is_none()
+}
+
 fn validate_manifest(
     active_version: &str,
     installed_manifest_connector_id: Option<&str>,
@@ -1037,16 +1078,15 @@ fn validate_manifest(
         .runtime_requirements
         .as_ref()
         .and_then(|requirements| requirements.bindings.as_ref());
-    for (binding, requirement) in bindings.into_iter().flat_map(|bindings| bindings.iter()) {
-        if binding != "network"
-            && binding != "browser"
-            && binding != "filesystem"
-            && requirement.required.unwrap_or(false)
-        {
-            return Err(format!(
-                "PDPP connector requires unsupported binding {binding}"
-            ));
-        }
+    let required_bindings: Vec<String> = bindings
+        .into_iter()
+        .flat_map(|bindings| bindings.iter())
+        .filter(|(_, requirement)| requirement.required.unwrap_or(false))
+        .map(|(binding, _)| binding.clone())
+        .collect();
+    let setup_modality = manifest.setup.as_ref().map(|setup| setup.modality.as_str());
+    if !host_can_run(&required_bindings, setup_modality) {
+        return Err(host_unavailable_reason(&required_bindings, setup_modality).unwrap());
     }
     if is_manual_upload_connector(manifest) && manual_upload_import_env(manifest).is_none() {
         return Err(
@@ -3964,6 +4004,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             export["chatgpt.conversations"]["conversations"][0]["upstream_field"],
             json!("preserved")
         );
+    }
+
+    #[test]
+    fn spawn_validation_agrees_with_catalog_binding_predicate() {
+        for binding in ["desktop_session", "unknown"] {
+            let mut fixture = github_manifest();
+            fixture["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
+            let manifest: PdppConnectorManifest = serde_json::from_value(fixture).unwrap();
+            assert!(!host_can_run(&["network".into(), binding.into()], None));
+            assert!(validate_manifest("github-pdpp", "1.0.0", &manifest)
+                .unwrap_err()
+                .contains(binding));
+        }
     }
 
     #[test]

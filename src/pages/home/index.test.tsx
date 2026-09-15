@@ -122,9 +122,18 @@ vi.mock("react-redux", async () => {
   const actual = await vi.importActual<object>("react-redux")
   return {
     ...actual,
+    useDispatch: () => vi.fn(),
     useSelector: (
-      selector: (state: { app: { runs: typeof mockRuns } }) => unknown
-    ) => selector({ app: { runs: mockRuns } }),
+      selector: (state: {
+        app: {
+          runs: typeof mockRuns
+          connectorUpdates: never[]
+          isCheckingUpdates: boolean
+        }
+      }) => unknown
+    ) => selector({
+      app: { runs: mockRuns, connectorUpdates: [], isCheckingUpdates: false },
+    }),
   }
 })
 

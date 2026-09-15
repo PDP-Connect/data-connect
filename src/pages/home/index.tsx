@@ -19,6 +19,7 @@ import { PageContainer } from "@/components/elements/page-container"
 import { DebugTogglePanel } from "@/components/elements/debug-toggle-panel"
 import { Text } from "@/components/typography/text"
 import { ConnectedSourcesList } from "@/pages/home/components/connected-sources-list"
+import { ConnectorUpdates } from "@/pages/home/components/connector-updates"
 import { AvailableSourcesList } from "@/pages/home/components/available-sources-list"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -72,7 +73,7 @@ export function Home() {
 
   const location = useLocation()
   const navigate = useNavigate()
-  const { platforms, isPlatformConnected, refreshConnectedStatus } =
+  const { platforms, isPlatformConnected, refreshConnectedStatus, loadPlatforms } =
     usePlatforms()
   const { startImport, stopExport } = useConnector()
   const runs = useSelector((state: RootState) => state.app.runs)
@@ -483,6 +484,7 @@ export function Home() {
           onSyncSource={handleImportSource}
           onReconnectSource={handleReconnectSource}
         />
+        <ConnectorUpdates onReloadPlatforms={loadPlatforms} />
         <AvailableSourcesList
           platforms={homeImportSourcesDebug.platforms}
           runs={homeImportSourcesDebug.runs}

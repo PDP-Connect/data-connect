@@ -9,10 +9,11 @@ import { SettingsAbout } from "./settings-about"
 describe("SettingsAbout", () => {
   afterEach(() => {
     cleanup()
+    localStorage.clear()
     vi.useRealTimers()
   })
 
-  it("shows loading feedback when refreshing browser status", async () => {
+  it("persists development visibility and shows browser refresh feedback", async () => {
     vi.useFakeTimers()
     const onCheckBrowserStatus = vi.fn()
 
@@ -44,6 +45,20 @@ describe("SettingsAbout", () => {
         />
       </TooltipProvider>
     )
+
+    const developmentToggle = screen.getByRole("switch", {
+      name: "Show development connectors",
+    })
+    expect(developmentToggle.getAttribute("aria-checked")).toBe("false")
+    fireEvent.click(developmentToggle)
+    expect(developmentToggle.getAttribute("aria-checked")).toBe("true")
+    expect(localStorage.getItem("dataconnect_show_development_connectors")).toBe(
+      "true"
+    )
+    fireEvent.click(developmentToggle)
+    expect(
+      localStorage.getItem("dataconnect_show_development_connectors")
+    ).toBeNull()
 
     expect(screen.getByText("Bundled Chromium found")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }))

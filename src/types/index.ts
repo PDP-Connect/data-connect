@@ -157,6 +157,11 @@ export interface ExportCompleteEvent {
 }
 
 export interface ConnectorUpdateInfo {
+  tier: string
+  requiredBindings: string[]
+  setupModality: string | null
+  runnable: boolean
+  unavailableReason: string | null
   id: string
   name: string
   description: string
