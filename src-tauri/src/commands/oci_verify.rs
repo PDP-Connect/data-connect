@@ -78,12 +78,14 @@ pub(crate) async fn verify_cosign_signature(
 ) -> Result<(), String> {
     validate_reference(repository, expected_manifest_digest)?;
     if candidates.is_empty() {
-        return Err("OCI artifact has no usable cosign simple-signing layer".to_owned());
+        return Err(
+            "OCI_UNVERIFIABLE: artifact has no usable cosign simple-signing layer".to_owned(),
+        );
     }
 
-    let trust_root = SigstoreTrustRoot::new(None)
-        .await
-        .map_err(|error| format!("could not load the Sigstore trust root: {error}"))?;
+    let trust_root = SigstoreTrustRoot::new(None).await.map_err(|error| {
+        format!("OCI_UNVERIFIABLE: could not load the Sigstore trust root: {error}")
+    })?;
     verify_cosign_signature_with_trust_root(
         candidates,
         expected_manifest_digest,
@@ -102,12 +104,13 @@ async fn verify_cosign_signature_with_trust_root<R: TrustRoot>(
     validate_reference(repository, expected_manifest_digest)?;
     let rekor_keys = trust_root
         .rekor_keys()
-        .map_err(|error| format!("could not load trusted Rekor keys: {error}"))?
+        .map_err(|error| format!("OCI_UNVERIFIABLE: could not load trusted Rekor keys: {error}"))?
         .into_iter()
         .map(|(key_id, key)| (key_id, key.to_vec()))
         .collect::<BTreeMap<_, _>>();
-    let verifier = Verifier::new(Default::default(), trust_root)
-        .map_err(|error| format!("could not initialize Sigstore verification: {error}"))?;
+    let verifier = Verifier::new(Default::default(), trust_root).map_err(|error| {
+        format!("OCI_UNVERIFIABLE: could not initialize Sigstore verification: {error}")
+    })?;
     let policy = Identity::new(
         DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
         DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
@@ -130,8 +133,16 @@ async fn verify_cosign_signature_with_trust_root<R: TrustRoot>(
         }
     }
 
+    let error_class = if failures
+        .iter()
+        .any(|error| error.starts_with("OCI_MISIDENTIFIED:"))
+    {
+        "OCI_MISIDENTIFIED"
+    } else {
+        "OCI_UNVERIFIABLE"
+    };
     Err(format!(
-        "no cosign signature for {repository}@{expected_manifest_digest} verified: {}",
+        "{error_class}: no cosign signature for {repository}@{expected_manifest_digest} verified: {}",
         failures.join("; ")
     ))
 }
@@ -152,7 +163,7 @@ async fn verify_candidate(
         .and_then(serde_json::Value::as_str)
         != Some(format!("ghcr.io/{repository}").as_str())
     {
-        return Err("Cosign signature names a different repository".into());
+        return Err("OCI_MISIDENTIFIED: cosign signature names a different repository".into());
     }
     let rekor = parse_rekor_bundle(&candidate.bundle)?;
     let certificate_der = certificate_der(&candidate.certificate)?;
@@ -167,7 +178,15 @@ async fn verify_candidate(
     verifier
         .verify(Cursor::new(&candidate.payload), bundle, policy, true)
         .await
-        .map_err(|error| format!("Sigstore verification failed: {error}"))
+        .map_err(|error| {
+            let error = error.to_string();
+            let error_class = if error.contains("OIDCIssuer") || error.contains("SubjectAltName") {
+                "OCI_MISIDENTIFIED"
+            } else {
+                "OCI_UNVERIFIABLE"
+            };
+            format!("{error_class}: Sigstore verification failed: {error}")
+        })
 }
 
 fn assert_payload_names_digest(
@@ -182,7 +201,7 @@ fn assert_payload_names_digest(
         .ok_or_else(|| "cosign simple-signing payload names no manifest digest".to_owned())?;
     if actual != expected_manifest_digest {
         return Err(format!(
-            "cosign signature covers manifest {actual}, not {expected_manifest_digest}"
+            "OCI_MISIDENTIFIED: cosign signature covers manifest {actual}, not {expected_manifest_digest}"
         ));
     }
     Ok(())
@@ -402,8 +421,18 @@ mod tests {
     #[test]
     fn different_manifest_digest_is_refused_before_signature_verification() {
         let expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let payload = br#"{\"critical\":{\"image\":{\"docker-manifest-digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}"#;
-        assert!(assert_payload_names_digest(payload, expected).is_err());
+        let payload = serde_json::to_vec(&json!({
+            "critical": {
+                "image": {
+                    "docker-manifest-digest":
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+            }
+        }))
+        .unwrap();
+        let error = assert_payload_names_digest(&payload, expected).unwrap_err();
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
+        assert!(error.contains("covers manifest"));
     }
 
     #[test]
@@ -461,9 +490,10 @@ mod tests {
             DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY.replace("main", "main2"),
             DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
         );
-        assert!(verify_fixture_with_policy(&fixture, different_ref)
+        let error = verify_fixture_with_policy(&fixture, different_ref)
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
     }
 
     #[tokio::test]
@@ -476,6 +506,7 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
         assert!(error.contains("different repository"));
     }
 
@@ -501,9 +532,10 @@ mod tests {
             "https://github.com/attacker/connector-catalog/.github/workflows/publish.yml@refs/heads/main",
             DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
         );
-        assert!(verify_fixture_with_policy(&fixture, foreign_identity)
+        let error = verify_fixture_with_policy(&fixture, foreign_identity)
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
 
         let wrong_issuer = Identity::new(
             DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,

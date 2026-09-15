@@ -58,6 +58,7 @@ pub(crate) struct VerifiedArtifact {
     pub config: Value,
     pub profile: Vec<u8>,
     pub provenance: Vec<u8>,
+    pub entrypoint_path: PathBuf,
     /// Relative paths in the pre-existing installed collection-profile layout.
     pub files: Vec<(PathBuf, Vec<u8>)>,
     pub manifest_digest: String,
@@ -182,6 +183,11 @@ impl RegistryClient {
                 Err("OCI_UNKNOWN: manifest endpoint returned an unreadable 404".to_string())
             };
         }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(format!(
+                "OCI_DENIED: manifest endpoint returned HTTP {status}"
+            ));
+        }
         if status != StatusCode::OK {
             return Err(format!(
                 "OCI_UNKNOWN: manifest endpoint returned HTTP {status}"
@@ -221,6 +227,15 @@ impl RegistryClient {
             )
             .await?;
         if response.status() != StatusCode::OK {
+            if matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ) {
+                return Err(format!(
+                    "OCI_DENIED: blob endpoint returned HTTP {}",
+                    response.status()
+                ));
+            }
             return Err(format!(
                 "OCI_UNKNOWN: blob endpoint returned HTTP {}",
                 response.status()
@@ -262,7 +277,7 @@ impl RegistryClient {
             .headers()
             .get(header::WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
-            .ok_or("OCI_UNKNOWN: registry denied pull without a bearer challenge")?;
+            .ok_or("OCI_DENIED: registry denied pull without a bearer challenge")?;
         let token = self.fetch_token(challenge).await?;
         self.http
             .get(url)
@@ -294,7 +309,7 @@ impl RegistryClient {
                 .headers()
                 .get(header::WWW_AUTHENTICATE)
                 .and_then(|v| v.to_str().ok())
-                .ok_or("OCI_UNKNOWN: registry denied pull without a bearer challenge")?;
+                .ok_or("OCI_DENIED: registry denied pull without a bearer challenge")?;
             let token = self.fetch_token(header).await?;
             response = self
                 .http
@@ -372,6 +387,15 @@ impl RegistryClient {
                 continue;
             }
             if response.status() != StatusCode::OK {
+                if matches!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                ) {
+                    return Err(format!(
+                        "OCI_DENIED: token endpoint returned HTTP {}",
+                        response.status()
+                    ));
+                }
                 return Err(format!(
                     "OCI_UNKNOWN: token endpoint returned HTTP {}",
                     response.status()
@@ -494,6 +518,7 @@ async fn download_with_client(
         .find(|(path, _)| path == entrypoint)
         .map(|(_, bytes)| bytes.clone())
         .ok_or("OCI_TAMPERED: configured entrypoint is absent from code layer")?;
+    let entrypoint_path = Path::new("dist").join(entrypoint);
     let mut files = vec![
         (
             PathBuf::from("profile/collection-profile.json"),
@@ -528,6 +553,7 @@ async fn download_with_client(
         config,
         profile,
         provenance,
+        entrypoint_path,
         files,
         manifest_digest: reference.digest.clone(),
         config_digest: manifest.config.digest,
@@ -566,13 +592,20 @@ async fn verify_signature(
     let (_, bytes) = client
         .fetch_manifest(repository, &tag)
         .await
-        .map_err(|error| format!("OCI_UNVERIFIABLE: cannot fetch cosign signature: {error}"))?;
+        .map_err(|error| {
+            if error.starts_with("OCI_DENIED:") {
+                error
+            } else {
+                format!("OCI_UNVERIFIABLE: cannot fetch cosign signature: {error}")
+            }
+        })?;
     let manifest: SignatureManifest = serde_json::from_slice(&bytes)
         .map_err(|_| "OCI_UNVERIFIABLE: invalid cosign signature manifest")?;
     if manifest.layers.len() > 32 {
         return Err("OCI_UNVERIFIABLE: too many cosign signature candidates".into());
     }
     let mut candidates = Vec::new();
+    let mut denied_error = None;
     for layer in manifest
         .layers
         .into_iter()
@@ -602,6 +635,9 @@ async fn verify_signature(
             Ok(payload) => payload,
             Err(error) => {
                 log::debug!("Refused cosign candidate: {error}");
+                if error.starts_with("OCI_DENIED:") {
+                    denied_error = Some(error);
+                }
                 continue;
             }
         };
@@ -613,6 +649,9 @@ async fn verify_signature(
         });
     }
     if candidates.is_empty() {
+        if let Some(error) = denied_error {
+            return Err(error);
+        }
         return Err("OCI_UNVERIFIABLE: cosign signature has no complete candidates".to_string());
     }
     super::oci_verify::verify_cosign_signature(&candidates, manifest_digest, repository).await
@@ -1137,6 +1176,29 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn denied_manifest_and_blob_responses_keep_a_named_refusal() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let manifest_client = fixture(403, &[], Vec::new()).await;
+        let error = manifest_client
+            .fetch_manifest_by_digest("pdp-connect/connector/ynab", &digest)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("OCI_DENIED:"), "{error}");
+
+        let blob_client = fixture(401, &[], Vec::new()).await;
+        let descriptor = Descriptor {
+            media_type: OCI_CODE_MEDIA_TYPE.to_string(),
+            digest,
+            size: Some(0),
+        };
+        let error = blob_client
+            .fetch_blob("pdp-connect/connector/ynab", &descriptor)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("OCI_DENIED:"), "{error}");
+    }
+
     #[test]
     fn token_realms_pin_scheme_host_port_and_refuse_credentials() {
         let client = RegistryClient::ghcr().unwrap();
@@ -1333,11 +1395,16 @@ mod tests {
                 "fallback {name} drifted"
             );
         }
-        assert_eq!(signature_tag("sha256:ab"), "sha256-ab.sig");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert_eq!(
-            signature_tag("sha256:<hex>"),
-            fallback["signatureTagTemplate"]
+            signature_tag(digest),
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sig"
         );
+        assert_eq!(
+            signature_tag(digest),
+            format!("sha256-{}.sig", &digest[7..])
+        );
+        assert_eq!("sha256-<hex>.sig", fallback["signatureTagTemplate"]);
         assert_eq!(
             OCI_CATALOG_MEDIA_TYPE,
             "application/vnd.pdpp.connector-catalog.v1+json"
@@ -1355,12 +1422,62 @@ mod tests {
                 std::fs::read_to_string(registry).unwrap(),
                 std::fs::read_to_string(verifier).unwrap()
             );
-            for (_, value) in expected {
-                assert!(source.contains(value), "JS trust source is missing {value}");
+            for (name, value) in [
+                ("DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY", expected[0].1),
+                ("DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER", expected[1].1),
+                ("COSIGN_SIGNATURE_MEDIA_TYPE", expected[2].1),
+                ("COSIGN_SIGNATURE_ANNOTATION", expected[3].1),
+                ("COSIGN_CERTIFICATE_ANNOTATION", expected[4].1),
+                ("COSIGN_BUNDLE_ANNOTATION", expected[5].1),
+                ("OCI_CONFIG_MEDIA_TYPE", expected[6].1),
+            ] {
+                assert_eq!(
+                    js_exported_string(&source, name).as_deref(),
+                    Some(value),
+                    "JS trust constant {name} drifted"
+                );
             }
-            assert!(source.contains("replace(\":\", \"-\")") && source.contains(".sig"));
+            for (name, key, value) in [
+                ("OCI_LAYER_MEDIA_TYPES", "profile", expected[7].1),
+                ("OCI_LAYER_MEDIA_TYPES", "code", expected[8].1),
+                ("OCI_LAYER_MEDIA_TYPES", "assets", expected[9].1),
+                ("OCI_LAYER_MEDIA_TYPES", "licenses", expected[10].1),
+                ("OCI_LAYER_MEDIA_TYPES", "provenance", expected[11].1),
+            ] {
+                assert_eq!(
+                    js_exported_object_string(&source, name, key).as_deref(),
+                    Some(value),
+                    "JS trust constant {name}.{key} drifted"
+                );
+            }
+            assert!(source.contains("cosignSignatureTag"));
         } else {
             eprintln!("B2-T5 source: committed reference {}", fallback["source"]);
         }
+    }
+
+    fn js_exported_string(source: &str, name: &str) -> Option<String> {
+        let marker = format!("export const {name}");
+        let assignment = source
+            .split_once(&marker)?
+            .1
+            .split_once('=')?
+            .1
+            .split(';')
+            .next()?
+            .trim();
+        serde_json::from_str(assignment).ok()
+    }
+
+    fn js_exported_object_string(source: &str, name: &str, key: &str) -> Option<String> {
+        let marker = format!("export const {name}");
+        let object = source.split_once(&marker)?.1.split_once('=')?.1;
+        let value = object
+            .split_once(&format!("{key}:"))?
+            .1
+            .split(',')
+            .next()?
+            .trim();
+        serde_json::from_str(value).ok()
     }
 }
