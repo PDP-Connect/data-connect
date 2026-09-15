@@ -49,6 +49,7 @@ import {
   isHomeImportSourcesDebugEnabled,
   resolveHomeImportSourcesUiDebugState,
 } from "./home-import-sources-ui-debug"
+import { useHomeManualUpload } from "./use-home-manual-upload"
 
 type PendingPdppInteraction = {
   runId: string
@@ -87,7 +88,9 @@ export function Home() {
     useState<PendingPdppInteraction | null>(null)
   const [interactionInput, setInteractionInput] = useState("")
   const chatgptSetupFields =
-    chatgptSetupDialogPlatform?.setup?.credentialCapture.fields ?? []
+    chatgptSetupDialogPlatform?.setup?.modality === "static_secret"
+      ? chatgptSetupDialogPlatform.setup.credentialCapture.fields
+      : []
   const chatgptUsernameField = chatgptSetupFields.find(
     field => field.name === "username"
   )
@@ -164,6 +167,7 @@ export function Home() {
       options?: {
         githubToken?: string
         setupSecrets?: { username: string; password: string }
+        importDirectory?: string | null
       }
     ) => {
       try {
@@ -179,8 +183,17 @@ export function Home() {
     [startImport]
   )
 
+  const manualUpload = useHomeManualUpload((platform, importDirectory) => {
+    void runImportSource(platform, { importDirectory })
+  })
+  const { open: openManualUpload } = manualUpload
+
   const handleImportSource = useCallback(
     (platform: Platform) => {
+      if (platform.setup?.modality === "manual_or_upload") {
+        openManualUpload(platform)
+        return
+      }
       if (platform.id === "github-pdpp") {
         setGithubTokenInput("")
         setGithubTokenDialogPlatform(platform)
@@ -215,7 +228,7 @@ export function Home() {
 
       void runImportSource(platform)
     },
-    [runImportSource]
+    [openManualUpload, runImportSource]
   )
 
   const closeGithubTokenDialog = useCallback(() => {
@@ -595,6 +608,55 @@ export function Home() {
               </Button>
             </AlertDialogFooter>
           </form>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(manualUpload.platform)}
+        onOpenChange={open => {
+          if (!open) manualUpload.close()
+        }}
+      >
+        <AlertDialogContent size="sm" className="max-w-[380px]!">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="w-full text-left">
+              Import {manualUpload.platform?.name}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-left">
+              Choose the export file or folder you downloaded.
+            </AlertDialogDescription>
+            {manualUpload.error ? (
+              <AlertDialogDescription className="text-left text-destructive">
+                {manualUpload.error}
+              </AlertDialogDescription>
+            ) : null}
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              type="button"
+              size="sm"
+              disabled={manualUpload.isPreparing}
+              onClick={manualUpload.close}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              size="sm"
+              disabled={manualUpload.isPreparing}
+              onClick={() => void manualUpload.chooseImport(false)}
+            >
+              Choose file
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={manualUpload.isPreparing}
+              onClick={() => void manualUpload.chooseImport(true)}
+            >
+              Choose folder
+            </Button>
+          </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 

@@ -41,6 +41,17 @@ let mockRuns: Array<{
   statusMessage?: string
 }> = []
 
+const MANUAL_UPLOAD_PLATFORM = {
+  id: "apple-health-pdpp",
+  company: "Apple",
+  name: "Apple Health",
+  filename: "apple-health-pdpp",
+  description: "Apple Health export",
+  logoURL: "",
+  runtime: "pdpp-network",
+  setup: { modality: "manual_or_upload" },
+}
+
 vi.mock("react-router-dom", async () => {
   const actual =
     await vi.importActual<typeof import("react-router-dom")>("react-router-dom")
@@ -117,6 +128,21 @@ function renderHome() {
     ),
     router,
   }
+}
+
+function mockManualUploadPlatform() {
+  mockUsePlatforms.mockReturnValue({
+    platforms: [MANUAL_UPLOAD_PLATFORM],
+    refreshConnectedStatus: vi.fn(),
+    isPlatformConnected: vi.fn(() => false),
+  })
+}
+
+function openManualUpload() {
+  renderHome()
+  fireEvent.click(
+    screen.getByRole("button", { name: /connect apple health/i })
+  )
 }
 
 describe("Home", () => {
@@ -282,7 +308,26 @@ describe("Home", () => {
           runtime: "pdpp-network",
           setup: {
             modality: "static_secret",
-            credentialCapture: { fields: [] },
+            credentialCapture: {
+              fields: [
+                {
+                  name: "username",
+                  label: "ChatGPT email",
+                  type: "email",
+                  required: true,
+                  secret: true,
+                  autocomplete: "username",
+                },
+                {
+                  name: "password",
+                  label: "ChatGPT password",
+                  type: "password",
+                  required: true,
+                  secret: true,
+                  autocomplete: "current-password",
+                },
+              ],
+            },
           },
         },
       ],
@@ -298,6 +343,14 @@ describe("Home", () => {
     await waitFor(() => {
       expect(screen.getByLabelText(/chatgpt email/i)).toBeTruthy()
     })
+    expect(screen.getByLabelText(/chatgpt email/i)).toHaveProperty(
+      "autocomplete",
+      "username"
+    )
+    expect(screen.getByLabelText(/chatgpt password/i)).toHaveProperty(
+      "autocomplete",
+      "current-password"
+    )
     expect(mockStartImport).not.toHaveBeenCalled()
     fireEvent.change(screen.getByLabelText(/chatgpt email/i), {
       target: { value: "owner@example.com" },
@@ -323,6 +376,71 @@ describe("Home", () => {
       )
     })
     expect(screen.queryByLabelText(/chatgpt password/i)).toBeNull()
+  })
+
+  it("prepares a selected manual-upload folder before starting its import", async () => {
+    mockInvoke.mockImplementation(command =>
+      command === "prepare_installed_pdpp_import"
+        ? Promise.resolve("/private/imports/apple-health")
+        : Promise.resolve(false)
+    )
+    mockManualUploadPlatform()
+
+    openManualUpload()
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder" }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("prepare_installed_pdpp_import", {
+        connectorId: "apple-health-pdpp",
+        directory: true,
+      })
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "apple-health-pdpp" }),
+        { importDirectory: "/private/imports/apple-health" }
+      )
+    })
+  })
+
+  it("does not start a manual-upload import when selection is cancelled", async () => {
+    mockInvoke.mockImplementation(command =>
+      command === "prepare_installed_pdpp_import"
+        ? Promise.resolve(null)
+        : Promise.resolve(false)
+    )
+    mockManualUploadPlatform()
+
+    openManualUpload()
+    fireEvent.click(screen.getByRole("button", { name: "Choose file" }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("prepare_installed_pdpp_import", {
+        connectorId: "apple-health-pdpp",
+        directory: false,
+      })
+    })
+    expect(mockStartImport).not.toHaveBeenCalled()
+    expect(screen.queryByRole("button", { name: "Choose file" })).toBeNull()
+  })
+
+  it("keeps manual-upload selection open after preparation fails", async () => {
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined)
+    mockInvoke.mockImplementation(command =>
+      command === "prepare_installed_pdpp_import"
+        ? Promise.reject(new Error("copy failed"))
+        : Promise.resolve(false)
+    )
+    mockManualUploadPlatform()
+
+    openManualUpload()
+    fireEvent.click(screen.getByRole("button", { name: "Choose file" }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/could not prepare that export/i)).toBeTruthy()
+    })
+    expect(mockStartImport).not.toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 
   it("reuses a completed owner profile without asking for static secrets again", async () => {

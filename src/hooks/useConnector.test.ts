@@ -100,34 +100,37 @@ describe("useConnector.startImport", () => {
     expect(deleteRun).not.toHaveBeenCalled()
   })
 
-  it("uses the installed PDPP connector command for pdpp-network platforms", async () => {
+  it("passes a prepared manual import to the installed host without credentials", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")
     const { result } = renderHook(() => useConnector())
 
     await act(async () => {
-      await result.current.startImport({
-        ...TEST_PLATFORM,
-        id: "github-pdpp",
-        company: "GitHub",
-        name: "GitHub",
-        filename: "github-pdpp",
-        runtime: "pdpp-network",
-        scopes: ["github.profile", "github.repositories"],
-      })
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "apple-health-pdpp",
+          company: "Apple",
+          name: "Apple Health",
+          filename: "apple-health-pdpp",
+          runtime: "pdpp-network",
+        },
+        { importDirectory: "/private/imports/run-1" }
+      )
     })
 
     expect(mockInvoke).toHaveBeenCalledWith(
       "start_installed_pdpp_connector_run",
       {
         request: {
-          runId: "github-pdpp-1700000000000",
-          connectorId: "github-pdpp",
+          runId: "apple-health-pdpp-1700000000000",
+          connectorId: "apple-health-pdpp",
           collectionMode: "incremental",
           streams: [],
           githubToken: null,
           connectionId: null,
           setupSecrets: null,
+          importDirectory: "/private/imports/run-1",
         },
       }
     )
