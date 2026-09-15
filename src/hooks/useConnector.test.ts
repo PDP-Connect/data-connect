@@ -301,6 +301,46 @@ describe("useConnector.startImport", () => {
     )
   })
 
+  it("keeps a URI connector id while deriving safe stable host identifiers", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { installedPdppConnectionId, useConnector } =
+      await import("./useConnector")
+    const platform: Platform = {
+      ...TEST_PLATFORM,
+      id: "https://registry.pdpp.dev/connectors/not-bundled",
+      company: "Example",
+      name: "Unbundled connector",
+      filename: "not-bundled",
+      runtime: "pdpp-network",
+    }
+    const connectionId = installedPdppConnectionId(platform)
+
+    expect(connectionId).toMatch(/^pdpp-[0-9a-f]{8}-owner$/)
+    expect(installedPdppConnectionId(platform)).toBe(connectionId)
+
+    const { result } = renderHook(() => useConnector())
+    await act(async () => {
+      await result.current.startImport(platform)
+    })
+
+    expect(startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+        platformId: platform.id,
+      })
+    )
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: expect.objectContaining({
+          runId: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+          connectorId: platform.id,
+          connectionId,
+        }),
+      }
+    )
+  })
+
   it("passes generic static secrets to installed PDPP host invokes", async () => {
     mockInvoke.mockResolvedValue(undefined)
     const { useConnector } = await import("./useConnector")

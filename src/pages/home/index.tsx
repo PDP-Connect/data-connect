@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { useSelector } from "react-redux"
 import { usePlatforms } from "@/hooks/usePlatforms"
-import { useConnector } from "@/hooks/useConnector"
+import { installedPdppConnectionId, useConnector } from "@/hooks/useConnector"
 import type { Platform, RootState } from "@/types"
 import { PageContainer } from "@/components/elements/page-container"
 import { DebugTogglePanel } from "@/components/elements/debug-toggle-panel"
@@ -203,7 +203,7 @@ export function Home() {
       if (platform.setup?.modality === "static_secret") {
         void invoke<boolean>("is_installed_pdpp_browser_setup_complete", {
           connectorId: platform.id,
-          connectionId: `${platform.id}-owner`,
+          connectionId: installedPdppConnectionId(platform),
         })
           .then(setupComplete => {
             if (setupComplete) {
@@ -307,7 +307,7 @@ export function Home() {
       try {
         await invoke("reset_installed_pdpp_browser_profile", {
           connectorId: platform.id,
-          connectionId: "chatgpt-pdpp-owner",
+          connectionId: installedPdppConnectionId(platform),
         })
         // The reset clears the non-secret setup marker. Re-enter the normal
         // setup gate so an expired session gets owner-attended recovery.

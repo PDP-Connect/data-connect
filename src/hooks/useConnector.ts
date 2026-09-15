@@ -15,6 +15,27 @@ import { durationSince } from "@/lib/telemetry/client"
 
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = "DUPLICATE_ACTIVE_RUN"
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
+const URI_CONNECTOR_ID = /^https:\/\//
+
+function stableConnectorHash(value: string): string {
+  let hash = 2166136261
+  for (const character of value) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
+function localConnectorToken(connectorId: string): string {
+  return URI_CONNECTOR_ID.test(connectorId)
+    ? `pdpp-${stableConnectorHash(connectorId)}`
+    : connectorId
+}
+
+function runIdForPlatform(platform: Platform, timestamp: number): string {
+  return URI_CONNECTOR_ID.test(platform.id)
+    ? `${localConnectorToken(platform.id)}-${timestamp}`
+    : `${platform.id}-${timestamp}`
+}
 
 /**
  * The connection an installed PDPP connector runs under. The import picker
@@ -24,7 +45,7 @@ const PDPP_NETWORK_RUNTIME = "pdpp-network"
 export function installedPdppConnectionId(platform: Platform): string | null {
   return platform.runtime === PDPP_NETWORK_RUNTIME &&
     platform.id !== "github-pdpp"
-    ? `${platform.id}-owner`
+    ? `${localConnectorToken(platform.id)}-owner`
     : null
 }
 
@@ -80,7 +101,7 @@ export function useConnector() {
 
   const startImport = useCallback(
     async (platform: Platform, options: StartImportOptions = {}) => {
-      const runId = `${platform.id}-${Date.now()}`
+      const runId = runIdForPlatform(platform, Date.now())
       const source = getPlatformRegistryEntry(platform)?.id ?? platform.id
 
       const newRun: Run = {

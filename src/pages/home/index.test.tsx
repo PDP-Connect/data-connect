@@ -95,7 +95,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/hooks/useConnector", () => ({
   installedPdppConnectionId: (platform: { id: string; runtime?: string }) =>
     platform.runtime === "pdpp-network" && platform.id !== "github-pdpp"
-      ? `${platform.id}-owner`
+      ? platform.id.startsWith("https://")
+        ? "pdpp-uri-owner"
+        : `${platform.id}-owner`
       : null,
   useConnector: () => ({
     startImport: mockStartImport,
