@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+use super::{oci, oci_catalog};
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -256,6 +257,89 @@ where
 
 fn get_user_connectors_dir() -> Option<PathBuf> {
     get_legacy_user_connectors_dir()
+}
+
+fn read_bundled_lock(bundled_connectors_dir: &Path) -> Result<BundledConnectorLock, String> {
+    let bytes = fs::read(bundled_connectors_dir.join("lock.json"))
+        .map_err(|e| format!("Failed to read bundled connector lock: {e}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Failed to parse bundled connector lock: {e}"))
+}
+
+fn has_oci(connector: &IndexedConnector) -> bool {
+    matches!(connector, IndexedConnector::PdppCollectionProfile(profile) if profile.oci.is_some())
+}
+
+fn locked_oci_reference(profile: &PdppIndexedConnector) -> Result<oci::OciReference, String> {
+    let artifact = profile.oci.as_ref().ok_or("Missing OCI lock reference")?;
+    if artifact.registry != "ghcr.io" {
+        return Err("Untrusted OCI lock registry".into());
+    }
+    if artifact.repository.strip_prefix("pdp-connect/connector/")
+        != profile.connector_key.as_deref()
+    {
+        return Err("OCI lock repository does not match connectorKey".into());
+    }
+    let reference = oci::OciReference {
+        repository: artifact.repository.clone(),
+        digest: artifact.digest.clone(),
+        version: profile.common.version.clone(),
+        config_digest: Some(artifact.config_digest.clone()),
+    };
+    oci::validate_reference(&reference)?;
+    Ok(reference)
+}
+
+fn catalog_install_id<'a>(
+    entry: &'a oci_catalog::CatalogConnector,
+    lock: &'a BundledConnectorLock,
+) -> &'a str {
+    lock.connectors
+        .iter()
+        .find_map(|connector| match connector {
+            IndexedConnector::PdppCollectionProfile(profile)
+                if profile.connector_key.as_deref() == Some(entry.connector_key.as_str()) =>
+            {
+                Some(profile.common.connector_id.as_str())
+            }
+            _ => None,
+        })
+        .unwrap_or(&entry.connector_id)
+}
+
+fn catalog_excludes_legacy(
+    entry: &oci_catalog::CatalogConnector,
+    lock: &BundledConnectorLock,
+) -> bool {
+    lock.connectors
+        .iter()
+        .any(|connector| connector.connector_id() == entry.connector_id && !has_oci(connector))
+}
+
+fn catalog_entry_for_download<'a>(
+    id: &str,
+    lock: &BundledConnectorLock,
+    catalog: &'a oci_catalog::Catalog,
+) -> Result<&'a oci_catalog::CatalogConnector, String> {
+    catalog
+        .connectors
+        .iter()
+        .find(|entry| {
+            catalog_install_id(entry, lock) == id && !catalog_excludes_legacy(entry, lock)
+        })
+        .ok_or_else(|| {
+            format!(
+                "Connector {id} is not available in the signed catalog; refusing bundled fallback"
+            )
+        })
+}
+
+fn legacy_discovery_ids(lock: &BundledConnectorLock) -> std::collections::HashSet<&str> {
+    lock.connectors
+        .iter()
+        .filter(|entry| !has_oci(entry))
+        .map(|entry| entry.connector_id())
+        .collect()
 }
 
 fn bundled_pdpp_connector_installs(
@@ -907,13 +991,125 @@ pub async fn check_connector_updates(
     app: AppHandle,
     force: bool,
 ) -> Result<Vec<ConnectorUpdateInfo>, String> {
-    let index = fetch_index(force).await?;
-    let updates = connector_updates_from_index(&index, |common| {
-        (
-            is_connector_installed(&app, &common.connector_id, &common.company),
-            get_installed_connector_version(&app, &common.connector_id, &common.company),
-        )
-    })?;
+    let lock = read_bundled_lock(&get_bundled_connectors_dir(&app))?;
+    let catalog = match oci_catalog::fetch_catalog().await {
+        Ok(catalog) => Some(catalog),
+        Err(error) => {
+            log::warn!("OCI connector discovery unavailable: {error}");
+            None
+        }
+    };
+    let mut updates = Vec::new();
+    if let Some(catalog) = &catalog {
+        for connector in &catalog.connectors {
+            let id = catalog_install_id(connector, &lock);
+            // A collection profile must never replace a bundled Playwright connector.
+            if catalog_excludes_legacy(connector, &lock) {
+                continue;
+            }
+            let metadata = lock
+                .connectors
+                .iter()
+                .find(|entry| entry.connector_id() == id)
+                .map(|entry| entry.common());
+            let company = lock
+                .connectors
+                .iter()
+                .find(|entry| entry.connector_id() == id)
+                .map(|entry| entry.common().company.clone())
+                .unwrap_or_else(|| connector.connector_key.clone());
+            let required_bindings = metadata
+                .map(|common| common.required_bindings.clone())
+                .unwrap_or_else(legacy_required_bindings);
+            let setup_modality = metadata.and_then(|common| common.setup_modality.clone());
+            let current_version = get_installed_connector_version(&app, id, &company);
+            let has_update = current_version
+                .as_ref()
+                .is_some_and(|version| is_newer_version(version, &connector.latest.version));
+            let is_new = !is_connector_installed(&app, id, &company);
+            let runnable = host_can_run(&required_bindings, setup_modality.as_deref());
+            let unavailable_reason =
+                host_unavailable_reason(&required_bindings, setup_modality.as_deref());
+            if has_update || is_new || !runnable {
+                updates.push(ConnectorUpdateInfo {
+                    tier: metadata
+                        .map(|common| common.tier.clone())
+                        .unwrap_or_else(development_tier),
+                    required_bindings,
+                    setup_modality,
+                    runnable,
+                    unavailable_reason,
+                    id: id.to_string(),
+                    name: connector.display_name.clone(),
+                    description: metadata
+                        .map(|common| common.description.clone())
+                        .unwrap_or_default(),
+                    company,
+                    current_version,
+                    latest_version: connector.latest.version.clone(),
+                    has_update,
+                    is_new,
+                });
+            }
+        }
+    }
+    // The retired index may only update bundled entries that still use the tarball contract.
+    // This also prevents a catalog outage from downgrading OCI entries to index discovery.
+    let legacy_ids = legacy_discovery_ids(&lock);
+    let index = if legacy_ids.is_empty() {
+        None
+    } else {
+        match fetch_index(force).await {
+            Ok(index) => Some(index),
+            Err(error) => {
+                log::warn!("Legacy connector discovery unavailable: {error}");
+                None
+            }
+        }
+    };
+    for connector in index
+        .as_ref()
+        .map(latest_connectors)
+        .transpose()?
+        .unwrap_or_default()
+    {
+        if !legacy_ids.contains(connector.connector_id()) || has_oci(connector) {
+            continue;
+        }
+        let common = connector.common();
+        let is_installed = is_connector_installed(&app, &common.connector_id, &common.company);
+        let current_version =
+            get_installed_connector_version(&app, &common.connector_id, &common.company);
+        let has_update = if let Some(ref current) = current_version {
+            is_newer_version(current, &common.version)
+        } else {
+            false
+        };
+        let is_new = !is_installed;
+        let runnable = host_can_run(&common.required_bindings, common.setup_modality.as_deref());
+
+        if has_update || is_new || !runnable {
+            updates.push(ConnectorUpdateInfo {
+                tier: common.tier.clone(),
+                required_bindings: common.required_bindings.clone(),
+                setup_modality: common.setup_modality.clone(),
+                runnable,
+                unavailable_reason: host_unavailable_reason(
+                    &common.required_bindings,
+                    common.setup_modality.as_deref(),
+                ),
+                id: common.connector_id.clone(),
+                name: common.name.clone(),
+                description: common.description.clone(),
+                company: common.company.clone(),
+                current_version,
+                latest_version: common.version.clone(),
+                has_update,
+                is_new,
+            });
+        }
+    }
+
     log::info!("Found {} connector updates", updates.len());
     Ok(updates)
 }
@@ -961,14 +1157,65 @@ fn connector_updates_from_index(
 }
 
 #[tauri::command]
-pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), String> {
+pub async fn download_connector(app: AppHandle, id: String) -> Result<(), String> {
     log::info!("=== Starting connector download: {} ===", id);
+    let lock = read_bundled_lock(&get_bundled_connectors_dir(&app))?;
+    let bundled = lock
+        .connectors
+        .iter()
+        .find(|entry| entry.connector_id() == id);
+    let locked_profile = match bundled {
+        Some(IndexedConnector::PdppCollectionProfile(profile)) if profile.oci.is_some() => {
+            locked_oci_reference(profile)?;
+            Some(profile)
+        }
+        _ => None,
+    };
+    if bundled.map(has_oci).unwrap_or(true) {
+        // This command installs the latest advertised update. Never substitute the older
+        // bundled lock if discovery fails between checking updates and downloading one.
+        let catalog = oci_catalog::fetch_catalog().await?;
+        let entry = catalog_entry_for_download(&id, &lock, &catalog)?;
+        let matching_lock = locked_profile.filter(|profile| {
+            profile
+                .oci
+                .as_ref()
+                .is_some_and(|oci| oci.digest == entry.latest.digest)
+        });
+        let reference = oci::OciReference {
+            repository: format!("pdp-connect/connector/{}", entry.connector_key),
+            digest: entry.latest.digest.clone(),
+            version: entry.latest.version.clone(),
+            config_digest: matching_lock
+                .map(|profile| profile.oci.as_ref().unwrap().config_digest.clone()),
+        };
+        let artifact = oci::download_verified(&reference).await?;
+        if artifact.config["connector_id"].as_str() != Some(entry.connector_id.as_str()) {
+            return Err("Catalog connector identity does not match OCI artifact".into());
+        }
+        let company = bundled
+            .map(|entry| entry.common().company.as_str())
+            .unwrap_or(&entry.connector_key);
+        return install_oci_artifact(
+            &id,
+            company,
+            &entry.display_name,
+            &reference,
+            artifact,
+            matching_lock,
+        )
+        .await;
+    }
+    safe_store_segment(&id, "Connector id")?;
     let index = fetch_index(false).await?;
     let entries = index
         .connectors
         .get(&id)
         .ok_or_else(|| format!("Connector {} not found in connector index", id))?;
     let connector = select_latest_connector(entries, &id)?;
+    if has_oci(connector) {
+        return Err("OCI connector updates require the signed catalog".into());
+    }
     let common = connector.common();
 
     if let Some(reason) =
@@ -979,7 +1226,7 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
 
     let artifact_url = common.artifact_url.as_deref().ok_or_else(|| {
         format!(
-            "Connector {} has no artifactUrl; OCI OTA downloads are not supported",
+            "Connector {} is missing artifactUrl for its tarball download",
             id
         )
     })?;
@@ -1057,6 +1304,229 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
     install_verified_connector_artifact(connector, artifact_bytes.as_ref())
 }
 
+async fn install_oci_artifact(
+    id: &str,
+    company: &str,
+    name: &str,
+    reference: &oci::OciReference,
+    artifact: oci::VerifiedArtifact,
+    locked: Option<&PdppIndexedConnector>,
+) -> Result<(), String> {
+    let (id, company, name) = (id.to_owned(), company.to_owned(), name.to_owned());
+    let reference = reference.clone();
+    let locked = locked.cloned();
+    tokio::task::spawn_blocking(move || {
+        let store_dir =
+            get_connectors_store_dir().ok_or("Could not determine connectors store directory")?;
+        let install = install_oci_artifact_into(
+            &id,
+            &company,
+            &name,
+            &reference,
+            artifact,
+            locked.as_ref(),
+            &store_dir,
+        )?;
+        replace_active_connector_install(install)
+    })
+    .await
+    .map_err(|e| format!("OCI install task failed: {e}"))?
+}
+
+fn install_oci_artifact_into(
+    id: &str,
+    company: &str,
+    name: &str,
+    reference: &oci::OciReference,
+    artifact: oci::VerifiedArtifact,
+    locked: Option<&PdppIndexedConnector>,
+    store_dir: &Path,
+) -> Result<ActiveConnectorInstall, String> {
+    if artifact.manifest_digest != reference.digest {
+        return Err("Verified OCI artifact does not match requested manifest".into());
+    }
+    if artifact.config["connector_id"].as_str() != Some(id) {
+        return Err("OCI artifact connector id does not match install id".into());
+    }
+    // The registry key and desktop install id differ for bundled aliases such as github-pdpp.
+    // Bind the repository key to the profile while keeping the caller's connector_id as the store key.
+    let key = reference
+        .repository
+        .strip_prefix("pdp-connect/connector/")
+        .ok_or("Untrusted OCI repository")?;
+    if artifact.config["connector_key"].as_str() != Some(key) {
+        return Err("OCI connector key mismatch".into());
+    }
+    if let Some(locked) = locked {
+        if locked.connector_key.as_deref() != Some(key) {
+            return Err("OCI repository does not match locked connectorKey".into());
+        }
+        verify_named_checksum(
+            &artifact.profile,
+            &locked.common.manifest_sha256,
+            "locked OCI profile",
+        )?;
+        verify_named_checksum(
+            &artifact.provenance,
+            &locked.provenance_sha256,
+            "locked OCI provenance",
+        )?;
+    }
+    let entrypoint_path = normalize_nonempty_artifact_path(
+        &artifact.entrypoint_path.to_string_lossy(),
+        "OCI entrypoint path",
+    )?;
+    let entrypoint = artifact
+        .files
+        .iter()
+        .find(|(path, _)| path == &entrypoint_path)
+        .map(|(_, bytes)| bytes)
+        .ok_or("OCI entrypoint missing from install files")?;
+    if let Some(locked) = locked {
+        verify_named_checksum(
+            entrypoint,
+            &locked.entrypoint_sha256,
+            "locked OCI entrypoint",
+        )?;
+    }
+    let connector = PdppIndexedConnector {
+        common: IndexedConnectorCommon {
+            connector_id: id.to_string(),
+            company: company.to_string(),
+            version: reference.version.clone(),
+            name: name.to_string(),
+            description: String::new(),
+            manifest_sha256: calculate_checksum(&artifact.profile),
+            artifact_sha256: None,
+            artifact_url: None,
+            artifact_signature: None,
+        },
+        connector_key: Some(key.to_string()),
+        oci: Some(OciArtifact {
+            registry: "ghcr.io".into(),
+            repository: reference.repository.clone(),
+            digest: reference.digest.clone(),
+            config_digest: artifact.config_digest,
+        }),
+        artifact_kind: PdppArtifactKind::CollectionProfile,
+        manifest_path: "profile/collection-profile.json".into(),
+        entrypoint_path: entrypoint_path.to_string_lossy().into_owned(),
+        entrypoint_sha256: calculate_checksum(entrypoint),
+        provenance_path: "provenance.json".into(),
+        provenance_sha256: calculate_checksum(&artifact.provenance),
+    };
+    let version = safe_store_segment(&connector.common.version, "OCI connector version")?;
+    let connector_dir = store_dir.join(oci_store_segment(id)?);
+    fs::create_dir_all(&connector_dir)
+        .map_err(|e| format!("Create OCI connector directory: {e}"))?;
+    let install_root = connector_dir.join(version);
+    let parent = install_root.parent().ok_or("Missing OCI install parent")?;
+    // Serialize promotion of the same version; never overwrite an existing tree on Unix rename.
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join(".install.lock"))
+        .map_err(|e| format!("Open OCI install lock: {e}"))?;
+    fs2::FileExt::lock_exclusive(&lock_file).map_err(|e| format!("Lock OCI install: {e}"))?;
+    if !install_root.exists() {
+        promote_staged_install(parent, &install_root, |staged| {
+            for (path, bytes) in &artifact.files {
+                let path =
+                    normalize_nonempty_artifact_path(&path.to_string_lossy(), "OCI install path")?;
+                write_bytes(&staged.join(path), bytes)?;
+            }
+            verify_oci_install_files(staged, &artifact.files)?;
+            active_pdpp_install_at(&connector, staged)?;
+            Ok(())
+        })?;
+    } else {
+        verify_oci_install_files(&install_root, &artifact.files)?;
+    }
+    active_pdpp_install_at(&connector, &install_root)
+}
+
+fn verify_oci_install_files(
+    install_root: &Path,
+    files: &[(PathBuf, Vec<u8>)],
+) -> Result<(), String> {
+    let root_metadata = fs::symlink_metadata(install_root)
+        .map_err(|e| format!("Read OCI install root metadata: {e}"))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err("OCI install root is not a directory".into());
+    }
+
+    for (relative, expected) in files {
+        let relative = normalize_nonempty_artifact_path(
+            &relative.to_string_lossy(),
+            "OCI installed file path",
+        )?;
+        let mut current = install_root.to_path_buf();
+        let components = relative.components().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            current.push(component.as_os_str());
+            let metadata = fs::symlink_metadata(&current).map_err(|e| {
+                format!(
+                    "Read OCI installed file {} metadata: {e}",
+                    relative.display()
+                )
+            })?;
+            let is_last = index + 1 == components.len();
+            if is_last {
+                if !metadata.file_type().is_file() {
+                    return Err(format!(
+                        "OCI installed file {} is not a regular file",
+                        relative.display()
+                    ));
+                }
+                let actual = fs::read(&current)
+                    .map_err(|e| format!("Read OCI installed file {}: {e}", relative.display()))?;
+                if actual != *expected {
+                    return Err(format!(
+                        "OCI installed file {} does not match verified bytes",
+                        relative.display()
+                    ));
+                }
+            } else if !metadata.file_type().is_dir() {
+                return Err(format!(
+                    "OCI installed path component {} is not a directory",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn oci_store_segment(id: &str) -> Result<String, String> {
+    if safe_store_segment(id, "OCI connector id").is_ok() && !id.contains('%') {
+        return Ok(id.to_string());
+    }
+    // URI connector ids stay intact in connectors-active.json. Encode them only at the
+    // filesystem boundary, preserving the directory names of existing bundled aliases.
+    let uri = reqwest::Url::parse(id).map_err(|_| "Invalid OCI connector id")?;
+    if uri.scheme() != "https"
+        || uri.host_str().is_none()
+        || !uri.username().is_empty()
+        || uri.password().is_some()
+    {
+        return Err("Invalid OCI connector id".into());
+    }
+    let mut segment = String::new();
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            segment.push(byte as char);
+        } else {
+            segment.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    if segment.len() > 240 {
+        return Err("OCI connector id exceeds filesystem limit".into());
+    }
+    Ok(segment)
+}
+
 fn install_verified_connector_artifact(
     connector: &IndexedConnector,
     artifact_bytes: &[u8],
@@ -1105,6 +1575,9 @@ fn pdpp_connector_install_root(
 }
 
 fn safe_store_segment<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    if value.contains(['\\', '/', ':', '\0']) || matches!(value, "." | "..") {
+        return Err(format!("{} must be a single safe path segment", label));
+    }
     let mut components = Path::new(value).components();
     let segment = match (components.next(), components.next()) {
         (Some(Component::Normal(segment)), None) => segment,
@@ -1124,8 +1597,7 @@ fn promote_staged_install(
     let temp_dir = tempdir_in(connector_store_dir)
         .map_err(|e| format!("Failed to create connector staging directory: {}", e))?;
     write_staged(temp_dir.path())?;
-    let staged_root = temp_dir.keep();
-    fs::rename(&staged_root, install_root).map_err(|e| {
+    fs::rename(temp_dir.path(), install_root).map_err(|e| {
         format!(
             "Failed to promote staged connector artifact into {:?}: {}",
             install_root, e
@@ -1453,6 +1925,326 @@ mod tests {
     use std::path::PathBuf;
     use tar::{Builder, Header};
     use tempfile::tempdir;
+
+    fn oci_fixture(version: &str) -> (super::oci::OciReference, super::oci::VerifiedArtifact) {
+        oci_fixture_for(version, "github-pdpp")
+    }
+
+    fn oci_fixture_for(
+        version: &str,
+        connector_id: &str,
+    ) -> (super::oci::OciReference, super::oci::VerifiedArtifact) {
+        let profile = serde_json::to_vec(&json!({
+            "version": version,
+            "connector_key": "github",
+            "connector_id": connector_id,
+        }))
+        .unwrap();
+        let provenance = b"{}".to_vec();
+        (
+            super::oci::OciReference {
+                repository: "pdp-connect/connector/github".into(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                version: version.into(),
+                config_digest: None,
+            },
+            super::oci::VerifiedArtifact {
+                config: json!({"connector_key":"github", "connector_id":connector_id}),
+                profile: profile.clone(),
+                provenance: provenance.clone(),
+                entrypoint_path: PathBuf::from("dist/collection-profile.mjs"),
+                files: vec![
+                    ("profile/collection-profile.json".into(), profile),
+                    (
+                        "dist/collection-profile.mjs".into(),
+                        b"export default {};".to_vec(),
+                    ),
+                    ("provenance.json".into(), provenance),
+                    ("licenses/LICENSE".into(), b"Apache-2.0".to_vec()),
+                ],
+                manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+            },
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "manual read-only GHCR smoke; requires network"]
+    async fn live_ynab_oci_smoke() {
+        let reference = super::oci::OciReference {
+            repository: "pdp-connect/connector/ynab".into(),
+            digest: "sha256:9da6a382500368ef28a8c9f59351d1f3ab6871297bf27418c7c63e8d9e241fad"
+                .into(),
+            version: "0.3.0".into(),
+            config_digest: None,
+        };
+        let artifact = super::oci::download_verified(&reference)
+            .await
+            .expect("verify published YNAB artifact");
+        let root = tempdir().unwrap();
+        let count = artifact.files.len();
+        let install = super::install_oci_artifact_into(
+            "https://registry.pdpp.dev/connectors/ynab",
+            "ynab",
+            "YNAB",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .unwrap();
+        println!("Verified {}@{}; version {}; installed {} files under {}; manifest {}; entrypoint {}; provenance {}", reference.repository, reference.digest, install.version, count, root.path().display(), install.manifest_sha256.unwrap(), install.entrypoint_sha256.unwrap(), install.provenance_sha256.unwrap());
+    }
+
+    #[test]
+    fn b2_t4_oci_install_is_atomic_and_preserves_existing_and_user_trees() {
+        let root = tempdir().unwrap();
+        let store = root.path().join("connectors-store");
+        let user = root.path().join("connectors/github");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(user.join("github-pdpp.js"), b"user code").unwrap();
+        let (reference, artifact) = oci_fixture("1.0.0");
+        let install = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact.clone(),
+            None,
+            &store,
+        )
+        .unwrap();
+        assert_eq!(install.connector_id, "github-pdpp");
+        assert_eq!(
+            PathBuf::from(&install.root_path),
+            store.join("github-pdpp/1.0.0")
+        );
+        assert_eq!(
+            std::fs::read(store.join("github-pdpp/1.0.0/licenses/LICENSE")).unwrap(),
+            b"Apache-2.0"
+        );
+        let (next, mut broken) = oci_fixture("2.0.0");
+        broken
+            .files
+            .retain(|(path, _)| path != std::path::Path::new("provenance.json"));
+        assert!(super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &next,
+            broken,
+            None,
+            &store
+        )
+        .is_err());
+        assert!(!store.join("github-pdpp/2.0.0").exists());
+        assert_eq!(
+            std::fs::read(store.join("github-pdpp/1.0.0/dist/collection-profile.mjs")).unwrap(),
+            b"export default {};"
+        );
+        assert_eq!(
+            std::fs::read(user.join("github-pdpp.js")).unwrap(),
+            b"user code"
+        );
+        let entries = std::fs::read_dir(store.join("github-pdpp"))
+            .unwrap()
+            .count();
+        assert_eq!(entries, 2, "only completed version and install lock remain");
+
+        // Existing data is verified, never replaced, even when offered the same version again.
+        let script_path = store.join("github-pdpp/1.0.0/dist/collection-profile.mjs");
+        std::fs::write(&script_path, b"user modified store").unwrap();
+        assert!(super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            &store
+        )
+        .is_err());
+        assert_eq!(std::fs::read(script_path).unwrap(), b"user modified store");
+    }
+
+    #[test]
+    fn oci_install_rejects_artifact_with_a_different_connector_id() {
+        let root = tempdir().unwrap();
+        let (reference, mut artifact) = oci_fixture("1.0.0");
+        artifact.config["connector_id"] = json!("another-connector");
+        let profile = serde_json::to_vec(&json!({
+            "version": "1.0.0",
+            "connector_key": "github",
+            "connector_id": "another-connector",
+        }))
+        .unwrap();
+        artifact.profile = profile.clone();
+        artifact.files[0].1 = profile;
+
+        let error = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect_err("artifact identity must match the desktop install id");
+        assert!(error.contains("connector id"));
+    }
+
+    #[test]
+    fn oci_install_uses_the_declared_entrypoint_path() {
+        let root = tempdir().unwrap();
+        let (reference, mut artifact) = oci_fixture("1.0.0");
+        artifact.entrypoint_path = PathBuf::from("dist/nested/runner.mjs");
+        artifact.files[1].0 = artifact.entrypoint_path.clone();
+
+        let install = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect("declared entrypoint should be installed");
+        assert_eq!(
+            install.entrypoint_path.as_deref(),
+            Some("dist/nested/runner.mjs")
+        );
+        assert!(PathBuf::from(&install.root_path)
+            .join("dist/nested/runner.mjs")
+            .is_file());
+    }
+
+    #[test]
+    fn oci_reinstall_refuses_modified_auxiliary_files() {
+        let root = tempdir().unwrap();
+        let (reference, artifact) = oci_fixture("1.0.0");
+        super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact.clone(),
+            None,
+            root.path(),
+        )
+        .expect("initial OCI install");
+
+        let license = root.path().join("github-pdpp/1.0.0/licenses/LICENSE");
+        std::fs::remove_file(&license).unwrap();
+        let error = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect_err("reinstall must verify every OCI file");
+        assert!(error.contains("licenses/LICENSE"));
+        assert!(!license.exists());
+    }
+
+    #[test]
+    fn oci_uri_id_stays_the_activation_key_and_cannot_escape_store() {
+        let root = tempdir().unwrap();
+        let id = "https://registry.pdpp.dev/connectors/github";
+        let (reference, artifact) = oci_fixture_for("1.0.0", id);
+        let install = super::install_oci_artifact_into(
+            id,
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(install.connector_id, id);
+        assert_eq!(
+            PathBuf::from(install.root_path)
+                .strip_prefix(root.path())
+                .unwrap()
+                .components()
+                .count(),
+            2
+        );
+        for id in [
+            "../escape",
+            "a\\b",
+            "C:drive",
+            "https://user:secret@example.com/id",
+        ] {
+            assert!(super::oci_store_segment(id).is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn catalog_outage_never_routes_locked_oci_entries_to_index() {
+        let mut profile =
+            real_shaped_index(b"", b"", b"", b"")["connectors"]["github-pdpp"][0].clone();
+        profile["connectorKey"] = json!("github");
+        profile["oci"] = json!({"registry":"ghcr.io", "repository":"pdp-connect/connector/github", "digest":"sha256:test", "configDigest":"sha256:config"});
+        let profile: IndexedConnector = serde_json::from_value(profile).unwrap();
+        let lock = super::BundledConnectorLock {
+            _lock_version: "2.0".into(),
+            connectors: vec![profile, IndexedConnector::Legacy(nested_connector())],
+        };
+        let ids = super::legacy_discovery_ids(&lock);
+        assert!(!ids.contains("github-pdpp"));
+        assert!(ids.contains("goodreads-playwright"));
+        let entry: super::oci_catalog::CatalogConnector = serde_json::from_value(json!({
+            "connector_key":"github", "connector_id":"https://registry.pdpp.dev/connectors/github", "display_name":"GitHub",
+            "latest":{"version":"1.0.0","digest":"sha256:test"}, "versions":[]
+        })).unwrap();
+        assert_eq!(super::catalog_install_id(&entry, &lock), "github-pdpp");
+        let foreign: super::oci_catalog::CatalogConnector = serde_json::from_value(json!({
+            "connector_key":"goodreads", "connector_id":"goodreads-playwright", "display_name":"Goodreads",
+            "latest":{"version":"1.0.0","digest":"sha256:test"}, "versions":[]
+        })).unwrap();
+        assert!(super::catalog_excludes_legacy(&foreign, &lock));
+        let empty: super::oci_catalog::Catalog = serde_json::from_value(json!({
+            "catalog_version":"1.0", "generated_at":"2026-09-15T12:00:00Z", "source_commit":"test", "connectors":[]
+        })).unwrap();
+        assert!(
+            super::catalog_entry_for_download("github-pdpp", &lock, &empty)
+                .unwrap_err()
+                .contains("refusing bundled fallback")
+        );
+    }
+
+    #[test]
+    fn oci_lock_coordinates_are_checked_before_network_access() {
+        let mut value =
+            real_shaped_index(b"", b"", b"", b"")["connectors"]["github-pdpp"][0].clone();
+        value["connectorKey"] = json!("github");
+        value["oci"] = json!({
+            "registry":"ghcr.io", "repository":"pdp-connect/connector/github",
+            "digest":format!("sha256:{}", "a".repeat(64)), "configDigest":format!("sha256:{}", "b".repeat(64))
+        });
+        let mut profile: super::PdppIndexedConnector = serde_json::from_value(value).unwrap();
+        assert!(super::locked_oci_reference(&profile).is_ok());
+        profile.oci.as_mut().unwrap().registry = "attacker.example".into();
+        assert!(super::locked_oci_reference(&profile)
+            .unwrap_err()
+            .contains("registry"));
+        profile.oci.as_mut().unwrap().registry = "ghcr.io".into();
+        profile.oci.as_mut().unwrap().repository = "pdp-connect/connector/ynab".into();
+        assert!(super::locked_oci_reference(&profile)
+            .unwrap_err()
+            .contains("connectorKey"));
+        profile.oci.as_mut().unwrap().repository = "pdp-connect/connector/github".into();
+        profile.oci.as_mut().unwrap().config_digest = "not-a-digest".into();
+        assert!(super::locked_oci_reference(&profile)
+            .unwrap_err()
+            .contains("config digest"));
+    }
 
     fn nested_connector() -> LegacyIndexedConnector {
         LegacyIndexedConnector {
