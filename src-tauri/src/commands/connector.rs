@@ -2899,6 +2899,29 @@ mod tests {
     }
 
     #[test]
+    fn pdpp_streams_map_to_legacy_and_generic_scope_ids() {
+        for (fixture, expected) in [
+            (include_str!("../../tests/fixtures/github.collection-profile.origin-main.json"),
+             "github.profile pdpp.github.user_stats github.repositories github.starred pdpp.github.issues pdpp.github.pull_requests pdpp.github.gists"),
+            (include_str!("../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"),
+             "chatgpt.conversations chatgpt.messages chatgpt.memories chatgpt.custom_gpts chatgpt.custom_instructions chatgpt.shared_conversations"),
+            (include_str!("../../tests/fixtures/ynab.collection-profile.origin-main.json"),
+             "pdpp.ynab.budgets pdpp.ynab.accounts pdpp.ynab.account_stats pdpp.ynab.category_groups pdpp.ynab.categories pdpp.ynab.payees pdpp.ynab.payee_locations pdpp.ynab.transactions pdpp.ynab.scheduled_transactions pdpp.ynab.months pdpp.ynab.month_categories"),
+        ] {
+            let manifest: super::ActivePdppPlatformManifest = serde_json::from_str(fixture).unwrap();
+            assert_eq!(
+                super::pdpp_streams_to_dataconnect_scopes(
+                    manifest.connector_key.as_deref().unwrap(),
+                    manifest.connector_id.as_deref().unwrap(),
+                    &manifest.streams,
+                    false,
+                ),
+                expected.split_whitespace().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn manifest_filter_accepts_real_connector_manifest() {
         assert!(manifest_looks_like_connector(&connector_metadata()));
     }
