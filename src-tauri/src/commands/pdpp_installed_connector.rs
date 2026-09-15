@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 4 * 60 * 60;
 const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
@@ -2590,6 +2590,21 @@ mod tests {
             "secret"
         );
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let missing_secret_request = StartInstalledPdppConnectorRequest {
+            connector_id: "ynab-pdpp".into(),
+            streams: vec!["budgets".into()],
+            github_token: None,
+            setup_secrets: None,
+            ..request_with_token("")
+        };
+        let missing_secret_error = match resolve_child_secrets(&missing_secret_request, &resolved) {
+            Ok(_) => panic!("missing YNAB secret should be rejected before spawning"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            missing_secret_error,
+            "PDPP connector requires setupSecrets.secret for first setup or explicit recovery"
+        );
         let request = StartInstalledPdppConnectorRequest {
             connector_id: "ynab-pdpp".into(),
             streams: vec!["budgets".into()],
@@ -3064,7 +3079,8 @@ mod tests {
     }
 
     #[test]
-    fn runs_manual_upload_with_a_scoped_import_and_generic_export() {
+    fn prepares_then_starts_manual_upload_with_frontend_request_shape() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
         let manifest: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/apple-health.collection-profile.json"
         ))
@@ -3085,30 +3101,34 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let resolved = resolve_installed_pdpp_connector(&install).unwrap();
         let import = crate::commands::pdpp_manual_import::create_import_directory_for_test(
             "apple-health-pdpp",
-            "owner-a",
+            "apple-health-pdpp-owner",
         );
-        let request = StartInstalledPdppConnectorRequest {
+        let mut request = StartInstalledPdppConnectorRequest {
             run_id: "apple-health-import".into(),
             connector_id: "apple-health-pdpp".into(),
             collection_mode: "incremental".into(),
-            streams: vec!["records".into()],
-            connection_id: Some("owner-a".into()),
+            streams: vec![],
+            connection_id: Some("apple-health-pdpp-owner".into()),
             github_token: None,
             setup_secrets: None,
-            timeout_seconds: Some(5),
+            timeout_seconds: None,
             import_directory: Some(import.path().to_string_lossy().into_owned()),
         };
+        let prepared_run = prepare_run(&mut request).unwrap();
         let secrets = resolve_child_secrets(&request, &resolved).unwrap();
         let result = run_resolved_installed_pdpp_connector(
             &resolved,
             &request,
             CommandCustomization {
+                control: prepared_run.control,
                 max_retained_records: 8,
                 ..Default::default()
             },
             &secrets,
         )
         .unwrap();
+        unregister_run(&request.run_id);
+        drop(prepared_run.import);
         assert_eq!(result.status, PdppRunStatus::Succeeded);
         let export = build_export_data(
             &resolved,

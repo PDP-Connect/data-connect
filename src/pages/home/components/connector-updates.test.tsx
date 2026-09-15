@@ -58,6 +58,14 @@ afterEach(() => {
 })
 
 describe("ConnectorUpdates", () => {
+  it("shows availability when no connector updates are visible", () => {
+    panel([])
+
+    expect(
+      screen.getByText("No connector updates or new connectors available")
+    ).toBeTruthy()
+  })
+
   it("orders updates, installable, and unavailable groups and hides development entries", () => {
     panel([
       connector("Unavailable", {

@@ -92,6 +92,7 @@ const appSlice = createSlice({
         runId: string;
         status: Run['status'];
         endDate?: string;
+        statusMessage?: string;
         onlyIfRunning?: boolean;
       }>
     ) {
@@ -105,6 +106,9 @@ const appSlice = createSlice({
         run.status = action.payload.status;
         if (action.payload.endDate) {
           run.endDate = action.payload.endDate;
+        }
+        if (action.payload.statusMessage) {
+          run.statusMessage = action.payload.statusMessage;
         }
       }
     },

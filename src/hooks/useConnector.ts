@@ -16,6 +16,18 @@ import { durationSince } from "@/lib/telemetry/client"
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = "DUPLICATE_ACTIVE_RUN"
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
 
+/**
+ * The connection an installed PDPP connector runs under. The import picker
+ * (prepare) and the run start must derive the same value, or the staged copy
+ * lands in one connection scope and the run looks for it in another.
+ */
+export function installedPdppConnectionId(platform: Platform): string | null {
+  return platform.runtime === PDPP_NETWORK_RUNTIME &&
+    platform.id !== "github-pdpp"
+    ? `${platform.id}-owner`
+    : null
+}
+
 interface StartImportOptions {
   githubToken?: string | null
   setupSecrets?: Record<string, string> | null
@@ -23,13 +35,21 @@ interface StartImportOptions {
 }
 
 function isDuplicateStartError(error: unknown): boolean {
-  const message =
-    typeof error === "string"
-      ? error
-      : error instanceof Error
-        ? error.message
-        : String(error)
-  return message.includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+  return getErrorMessage(error).includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+}
+
+function getErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error
+  if (error instanceof Error) return error.message
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message
+  }
+  return String(error)
 }
 
 async function startInstalledPdppConnectorRun(
@@ -45,11 +65,7 @@ async function startInstalledPdppConnectorRun(
       streams: [],
       githubToken:
         platform.id === "github-pdpp" ? (options.githubToken ?? null) : null,
-      connectionId:
-        platform.runtime === PDPP_NETWORK_RUNTIME &&
-        platform.id !== "github-pdpp"
-          ? `${platform.id}-owner`
-          : null,
+      connectionId: installedPdppConnectionId(platform),
       setupSecrets: options.setupSecrets ?? null,
       ...(options.importDirectory !== undefined
         ? { importDirectory: options.importDirectory }
@@ -111,6 +127,7 @@ export function useConnector() {
                 runId,
                 status: "error",
                 endDate: new Date().toISOString(),
+                statusMessage: getErrorMessage(error),
                 onlyIfRunning: true,
               })
             )
@@ -147,6 +164,7 @@ export function useConnector() {
             runId,
             status: "error",
             endDate: new Date().toISOString(),
+            statusMessage: getErrorMessage(error),
           })
         )
         trackCollectionFailed({
