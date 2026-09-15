@@ -104,6 +104,29 @@ describe("ConnectorUpdates", () => {
     expect(screen.getByText("Development")).toBeTruthy()
   })
 
+  it("shows an unbundled supported URI and keeps unsupported desktop sessions unavailable", () => {
+    panel([
+      connector("https://registry.pdpp.dev/connectors/unbundled", {
+        name: "Unbundled connector",
+        requiredBindings: ["network"],
+      }),
+      connector("https://registry.pdpp.dev/connectors/desktop-only", {
+        name: "Desktop-only connector",
+        requiredBindings: ["network", "desktop_session"],
+        runnable: false,
+        unavailableReason: "Unsupported binding: desktop_session",
+      }),
+    ])
+
+    expect(screen.getByText("Unbundled connector")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Install" })).toBeTruthy()
+    const unavailable = screen.getByRole("region", {
+      name: "Not available on this device",
+    })
+    expect(within(unavailable).getByText(/desktop_session/)).toBeTruthy()
+    expect(within(unavailable).queryByRole("button")).toBeNull()
+  })
+
   it("installs by id, shows pending progress, and reloads platforms on success", async () => {
     let finish!: () => void
     invoke.mockReturnValue(

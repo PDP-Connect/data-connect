@@ -174,7 +174,9 @@ npm run connectors:check
 
 `connectors:resolve` resolves the pinned versions from the signed connector
 index and updates the bundled connector tree. `connectors:check` verifies the
-lockfile and bundled connector tree without changing them.
+lockfile and the integrity of each recorded profile, entrypoint, and provenance
+file without changing them. It does not attest to auxiliary files that are not
+part of those lock entries.
 
 ## Releasing
 

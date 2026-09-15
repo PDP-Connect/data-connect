@@ -25,12 +25,11 @@ const entriesComingSoon = PLATFORM_REGISTRY.filter(
 describe("PLATFORM_REGISTRY / connector registry alignment", () => {
   it("every requiresConnector entry references at least one bundled connector", () => {
     for (const entry of entriesWithConnectors) {
-      const playwrightIds =
-        entry.platformIds?.filter((id) => id.endsWith("-playwright")) ?? []
-      const hasMatch = playwrightIds.some((id) => connectorIds.includes(id))
+      const platformIds = entry.platformIds ?? []
+      const hasMatch = platformIds.some((id) => connectorIds.includes(id))
       expect(
         hasMatch,
-        `${entry.id}: no bundled connector for platformIds ${JSON.stringify(playwrightIds)}`
+        `${entry.id}: no bundled connector for platformIds ${JSON.stringify(platformIds)}`
       ).toBe(true)
     }
   })

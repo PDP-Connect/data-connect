@@ -166,6 +166,11 @@ function main() {
     if (!existsSync(profilePath)) continue
     const profile = readJson(profilePath)
     const key = entry.connectorKey ?? profile.connector_key
+    const firstStream = profile.streams?.find(
+      (stream) => typeof stream?.name === "string" && stream.name.trim() !== ""
+    )
+    const scopePrefix =
+      profile.setup?.modality === "manual_or_upload" ? "pdpp.manual" : "pdpp"
     // An overlay entry with this id already exists (e.g. the legacy ChatGPT
     // connector): attach the profile's connector id to it instead of adding a
     // second entry with the same id.
@@ -186,6 +191,11 @@ function main() {
       `availability: "requiresConnector"`,
       `showInConnectList: true`,
     ]
+    if (firstStream) {
+      fields.push(
+        `ingestScope: ${formatString(`${scopePrefix}.${key}.${firstStream.name}`)}`
+      )
+    }
     generatedEntries.push(`  {\n    ${fields.join(",\n    ")}\n  }`)
   }
 

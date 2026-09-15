@@ -137,13 +137,15 @@ export const PLATFORM_REGISTRY_GENERATED: PlatformRegistryEntry[] = [
     displayName: "Apple Health",
     platformIds: ["apple-health-pdpp", "apple-health"],
     availability: "requiresConnector",
-    showInConnectList: true
+    showInConnectList: true,
+    ingestScope: "pdpp.manual.apple-health.records"
   },
   {
     id: "ynab",
     displayName: "YNAB",
     platformIds: ["ynab-pdpp", "ynab"],
     availability: "requiresConnector",
-    showInConnectList: true
+    showInConnectList: true,
+    ingestScope: "pdpp.ynab.budgets"
   }
 ];
