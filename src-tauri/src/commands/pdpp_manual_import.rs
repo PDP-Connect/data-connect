@@ -223,11 +223,14 @@ impl ImportedDirectory {
 
 impl Drop for ImportedDirectory {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.path) {
-            log::warn!("Could not remove completed import copy: {error}");
-        }
-        if let Some(claim) = self.claim.take() {
-            remove_claim_marker(claim);
+        let removal = fs::remove_dir_all(&self.path);
+        match self.claim.take() {
+            Some(claim) => finish_import_cleanup(&self.path, claim, removal),
+            None => {
+                if let Err(error) = removal {
+                    log::warn!("Could not remove completed import copy: {error}");
+                }
+            }
         }
     }
 }
@@ -430,9 +433,19 @@ impl StagedCopy {
 
 impl Drop for StagedCopy {
     fn drop(&mut self) {
-        drop(self.directory.take());
-        if let Some(claim) = self.claim.take() {
-            remove_claim_marker(claim);
+        let Some(directory) = self.directory.take() else {
+            if let Some(claim) = self.claim.take() {
+                remove_claim_marker(claim);
+            }
+            return;
+        };
+        let path = directory.path().to_path_buf();
+        let removal = directory.close();
+        match self.claim.take() {
+            Some(claim) => finish_import_cleanup(&path, claim, removal),
+            None => {
+                let _ = removal;
+            }
         }
     }
 }
@@ -502,11 +515,26 @@ fn lock_import_marker(directory: &Path, create: bool) -> Result<ClaimedImport, S
 
 fn remove_claim_marker(claim: ClaimedImport) {
     let marker_path = claim.marker_path.clone();
-    let _ = FileExt::unlock(&claim.marker);
-    drop(claim);
+    release_claim_marker(claim);
     if let Err(error) = fs::remove_file(marker_path) {
         if error.kind() != io::ErrorKind::NotFound {
             log::warn!("Could not remove import claim: {error}");
+        }
+    }
+}
+
+fn release_claim_marker(claim: ClaimedImport) {
+    let _ = FileExt::unlock(&claim.marker);
+    drop(claim);
+}
+
+fn finish_import_cleanup(path: &Path, claim: ClaimedImport, removal: io::Result<()>) {
+    match removal {
+        Ok(()) => remove_claim_marker(claim),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => remove_claim_marker(claim),
+        Err(error) => {
+            log::warn!("Could not remove import copy {}: {error}", path.display());
+            release_claim_marker(claim);
         }
     }
 }
@@ -841,6 +869,39 @@ mod tests {
 
         assert!(claim_import_at(&root, &directory).is_err());
         assert!(directory.exists());
+    }
+
+    #[test]
+    fn retains_claim_marker_when_cleanup_fails_for_a_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("pdpp-imports");
+        let directory = root.join("connector/connection/import-retry");
+        fs::create_dir_all(&directory).unwrap();
+        let marker = claim_marker_path(&directory).unwrap();
+        let claim = lock_import_marker(&directory, true).unwrap();
+
+        finish_import_cleanup(
+            &directory,
+            claim,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected cleanup failure",
+            )),
+        );
+
+        assert!(directory.exists());
+        assert!(marker.exists());
+
+        let claim = lock_import_marker(&directory, false).unwrap();
+        claim
+            .marker
+            .set_modified(SystemTime::now() - STAGED_IMPORT_TTL - Duration::from_secs(1))
+            .unwrap();
+        drop(claim);
+        reap_abandoned_imports_at(&root, SystemTime::now()).unwrap();
+
+        assert!(!directory.exists());
+        assert!(!marker.exists());
     }
 
     #[test]
