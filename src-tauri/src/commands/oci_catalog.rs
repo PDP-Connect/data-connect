@@ -4,7 +4,7 @@
 use chrono::{DateTime, FixedOffset};
 use fs2::FileExt;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -17,19 +17,56 @@ pub(crate) struct Catalog {
     pub connectors: Vec<CatalogConnector>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub(crate) struct CatalogConnector {
     pub connector_key: String,
     pub connector_id: String,
     pub display_name: String,
+    pub tier: String,
+    pub runtime_requirements: CatalogRuntimeRequirements,
+    pub setup: Option<CatalogSetup>,
     pub latest: CatalogVersion,
     pub versions: Vec<CatalogVersion>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub(crate) struct CatalogVersion {
     pub version: String,
     pub digest: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub(crate) struct CatalogRuntimeRequirements {
+    #[serde(default)]
+    pub bindings: HashMap<String, CatalogBindingRequirement>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub(crate) struct CatalogBindingRequirement {
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub(crate) struct CatalogSetup {
+    pub modality: String,
+}
+
+impl CatalogConnector {
+    pub(crate) fn required_bindings(&self) -> Vec<String> {
+        let mut bindings = self
+            .runtime_requirements
+            .bindings
+            .iter()
+            .filter(|(_, requirement)| requirement.required.unwrap_or(false))
+            .map(|(binding, _)| binding.clone())
+            .collect::<Vec<_>>();
+        bindings.sort_unstable();
+        bindings
+    }
+
+    pub(crate) fn setup_modality(&self) -> Option<&str> {
+        self.setup.as_ref().map(|setup| setup.modality.as_str())
+    }
 }
 
 pub(crate) async fn fetch_catalog() -> Result<Catalog, String> {

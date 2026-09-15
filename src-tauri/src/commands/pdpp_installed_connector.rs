@@ -1108,6 +1108,16 @@ fn validate_manifest(
     Ok(())
 }
 
+pub(crate) fn validate_verified_manifest(
+    active_version: &str,
+    expected_connector_id: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let manifest: PdppConnectorManifest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Failed to parse verified PDPP connector manifest: {e}"))?;
+    validate_manifest(active_version, Some(expected_connector_id), &manifest)
+}
+
 fn required_static_secret_fields(
     manifest: &PdppConnectorManifest,
 ) -> Result<&[PdppStaticSecretField], String> {
