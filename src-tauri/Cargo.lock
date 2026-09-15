@@ -1191,6 +1191,7 @@ dependencies = [
  "libc",
  "log",
  "mime_guess",
+ "oci-client",
  "reqwest 0.13.5",
  "semver",
  "serde",
