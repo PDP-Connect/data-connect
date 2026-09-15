@@ -317,7 +317,7 @@ fn copy_import_with_limits(
         let staged = tempfile::Builder::new()
             .prefix("import-")
             .tempdir_in(scope)?;
-        let copy_claim = lock_import_marker(staged.path())?;
+        let copy_claim = lock_import_marker(staged.path(), true)?;
         let staged = StagedCopy {
             directory: Some(staged),
             claim: Some(copy_claim),
@@ -464,10 +464,10 @@ fn claim_import_at(root: &Path, directory: &Path) -> Result<ClaimedImport, Strin
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scope = directory.parent().ok_or("Import directory has no scope")?;
     let directory = validate_import_at(root, scope, directory)?;
-    lock_import_marker(&directory)
+    lock_import_marker(&directory, false)
 }
 
-fn lock_import_marker(directory: &Path) -> Result<ClaimedImport, String> {
+fn lock_import_marker(directory: &Path, create: bool) -> Result<ClaimedImport, String> {
     let marker_path = claim_marker_path(directory)?;
     match fs::symlink_metadata(&marker_path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -478,15 +478,19 @@ fn lock_import_marker(directory: &Path) -> Result<ClaimedImport, String> {
         Err(error) => return Err(format!("Could not inspect import claim: {error}")),
     }
     let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
+    options.create(create).read(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let marker = options
-        .open(&marker_path)
-        .map_err(|e| format!("Could not create import claim: {e}"))?;
+    let marker = options.open(&marker_path).map_err(|e| {
+        if !create && e.kind() == io::ErrorKind::NotFound {
+            "Import directory was not prepared by DataConnect".to_string()
+        } else {
+            format!("Could not create import claim: {e}")
+        }
+    })?;
     marker
         .try_lock_exclusive()
         .map_err(|_| "Import directory is already claimed by another run".to_string())?;
@@ -540,7 +544,7 @@ fn reap_abandoned_imports_at(root: &Path, now: SystemTime) -> Result<(), String>
                 if now.duration_since(modified).unwrap_or_default() < STAGED_IMPORT_TTL {
                     continue;
                 }
-                let Ok(claim) = lock_import_marker(&candidate) else {
+                let Ok(claim) = lock_import_marker(&candidate, true) else {
                     continue;
                 };
                 let refreshed = if marker_existed {
@@ -806,10 +810,10 @@ mod tests {
             .set_modified(old)
             .unwrap();
         fs::File::open(&claimed).unwrap().set_modified(old).unwrap();
-        let stale_claim = lock_import_marker(&stale_with_marker).unwrap();
+        let stale_claim = lock_import_marker(&stale_with_marker, true).unwrap();
         stale_claim.marker.set_modified(old).unwrap();
         drop(stale_claim);
-        let claim = claim_import_at(&root, &claimed).unwrap();
+        let claim = lock_import_marker(&claimed, true).unwrap();
         claim.marker.set_modified(old).unwrap();
 
         reap_abandoned_imports_at(&root, SystemTime::now()).unwrap();
@@ -822,12 +826,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_claiming_an_unprepared_import_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("pdpp-imports");
+        let directory = root.join("connector/connection/import-unprepared");
+        fs::create_dir_all(&directory).unwrap();
+
+        assert!(claim_import_at(&root, &directory).is_err());
+        assert!(directory.exists());
+    }
+
+    #[test]
     fn rejects_a_second_claim_without_deleting_the_active_import() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("pdpp-imports");
         let scope = root.join("connector/connection");
-        let directory = scope.join("import-active");
-        fs::create_dir_all(&directory).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&scope).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("export.xml"), "data").unwrap();
+        let directory =
+            copy_import_with_limits(&source, &root, &scope, CopyLimits::default()).unwrap();
         let claim = claim_import_at(&root, &directory).unwrap();
 
         assert!(claim_import_at(&root, &directory).is_err());
@@ -846,15 +865,15 @@ mod tests {
         let directory = temp.path().join("import-active");
         fs::create_dir(&directory).unwrap();
         let marker = claim_marker_path(&directory).unwrap();
-        let first = lock_import_marker(&directory).unwrap();
+        let first = lock_import_marker(&directory, true).unwrap();
 
         assert!(marker.exists());
-        assert!(lock_import_marker(&directory).is_err());
+        assert!(lock_import_marker(&directory, true).is_err());
         drop(first);
         assert!(marker.exists());
 
-        let second = lock_import_marker(&directory).unwrap();
-        assert!(lock_import_marker(&directory).is_err());
+        let second = lock_import_marker(&directory, true).unwrap();
+        assert!(lock_import_marker(&directory, true).is_err());
         fs::remove_dir(&directory).unwrap();
         remove_claim_marker(second);
         assert!(!marker.exists());
@@ -871,7 +890,7 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        let claim = lock_import_marker(&directory).unwrap();
+        let claim = lock_import_marker(&directory, true).unwrap();
         claim.marker.set_modified(SystemTime::now()).unwrap();
         drop(claim);
 
