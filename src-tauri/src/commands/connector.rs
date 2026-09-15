@@ -540,17 +540,19 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
     let Some(manifest) = read_active_connector_manifest() else {
         return Vec::new();
     };
+    load_pdpp_platforms(manifest.connectors.into_values())
+}
 
+pub(super) fn load_pdpp_platforms(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+) -> Vec<Platform> {
     let mut platforms = Vec::new();
-    for install in manifest.connectors.into_values() {
+    for install in installs {
         if install.artifact_kind.as_deref() != Some("pdpp-collection-profile") {
             continue;
         }
-        let Some(path) = active_install_path(&install.root_path, &install.metadata_relative_path)
+        let Ok(content) = super::pdpp_installed_connector::read_admitted_pdpp_manifest(&install)
         else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
@@ -571,8 +573,11 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
             .setup
             .as_ref()
             .is_some_and(|setup| setup.modality == "manual_or_upload");
-        let scopes =
-            pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams, manual_upload);
+        let scopes = pdpp_streams_to_dataconnect_scopes(
+            &connector_key,
+            &manifest.streams,
+            manual_upload,
+        );
         if scopes.is_empty() {
             continue;
         }
