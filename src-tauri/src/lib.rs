@@ -16,7 +16,8 @@ use commands::{
     load_run_export_data, load_runs, load_source_export_full_from_path,
     load_source_export_preview_from_path, login_reference_server, mark_export_synced, open_folder,
     open_personal_server_scope_folder, open_platform_export_folder, open_reference_server_view,
-    reset_installed_pdpp_browser_profile, resize_reference_server_view, set_app_config,
+    prepare_installed_pdpp_import, reset_installed_pdpp_browser_profile,
+    resize_reference_server_view, set_app_config,
     start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
     start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
     stop_personal_server, stop_reference_server, submit_installed_pdpp_interaction_response,
@@ -40,6 +41,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -83,6 +85,7 @@ pub fn run() {
             get_platforms,
             start_connector_run,
             start_installed_pdpp_connector_run,
+            prepare_installed_pdpp_import,
             stop_installed_pdpp_connector_run,
             reset_installed_pdpp_browser_profile,
             is_installed_pdpp_browser_setup_complete,
