@@ -83,7 +83,7 @@ describe("stryker-js#6210 repair", () => {
         "stryker-js#6210 appears to be fixed. Delete " +
         "scripts/mutation-falsification/vitest-runner-plugin.mjs, " +
         "scripts/mutation-falsification/test-identity-setup.ts, and their references in " +
-        "stryker.scripts.config.mjs and vite.mutation-scripts.config.ts."
+        "the scripts and client Stryker and Vitest mutation configurations."
     ).toContain("nameParts.join(' ').trim()")
     expect(STOCK_RUNNER_SEPARATOR).toBe(" ")
   })

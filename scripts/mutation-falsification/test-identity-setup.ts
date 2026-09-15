@@ -29,12 +29,12 @@
 // same join. Tests here name the phase they observe.
 //
 // This file is a Vitest setup file -- a documented extension point -- listed
-// under `test.setupFiles` in `vite.mutation-scripts.config.ts`. It is not a
-// patch of the runner.
+// under `test.setupFiles` in `vite.mutation-scripts.config.ts` and
+// `vite.mutation-client.config.ts`. It is not a patch of the runner.
 //
-// It is registered only there, and only the scripts mutation configuration
-// selects that file. The rewrite below is correct only for a run whose reported
-// test ids are rewritten to match it, which is what `testRunner: "vitest-6210"`
+// It is registered only in those mutation configurations. The rewrite below
+// is correct only for a run whose reported test ids are rewritten to match it,
+// which is what `testRunner: "vitest-6210"`
 // does. Registering this file in the shared `vite.config.ts` would rewrite the
 // coverage keys of every cohort, including those on the stock `vitest` runner,
 // whose reported ids would stay space-joined; Stryker's exact-string
@@ -55,7 +55,7 @@
 // default `sequence.setupFiles` is `"parallel"`, which imports the files with
 // `Promise.all` -- whichever finishes importing first registers first. If ours
 // won that race the runner's hook would run last and restore the space-joined
-// id. `vite.mutation-scripts.config.ts` sets `sequence.setupFiles: "list"` to
+// id. Both mutation Vitest configurations set `sequence.setupFiles: "list"` to
 // make registration follow the listed order; `setup-order.test.ts` drives the
 // scheduler's real policy against controlled import completion and shows both
 // outcomes.
