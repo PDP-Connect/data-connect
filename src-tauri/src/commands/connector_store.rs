@@ -23,6 +23,9 @@ pub struct ActiveConnectorManifest {
 #[serde(rename_all = "camelCase")]
 pub struct ActiveConnectorInstall {
     pub connector_id: String,
+    /// The `connector_id` declared by the hash-verified PDPP manifest.
+    #[serde(default)]
+    pub manifest_connector_id: Option<String>,
     pub company: String,
     pub version: String,
     pub root_path: String,
@@ -175,6 +178,7 @@ fn update_active_connector_install_at(
                 existing.manifest_path = install.manifest_path;
                 existing.entrypoint_path = install.entrypoint_path;
                 existing.provenance_path = install.provenance_path;
+                existing.manifest_connector_id = install.manifest_connector_id;
                 manifest.updated_at = chrono::Utc::now().to_rfc3339();
                 write_active_connector_manifest_to(manifest_path, &manifest)?;
                 return Ok(true);
@@ -237,6 +241,7 @@ mod tests {
     fn install(version: &str, root_path: &str) -> ActiveConnectorInstall {
         ActiveConnectorInstall {
             connector_id: "github-pdpp".to_string(),
+            manifest_connector_id: Some("https://registry.pdpp.org/connectors/github".to_string()),
             company: "github".to_string(),
             version: version.to_string(),
             root_path: root_path.to_string(),
