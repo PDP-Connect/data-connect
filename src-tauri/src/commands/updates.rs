@@ -1244,6 +1244,9 @@ fn install_oci_artifact_into(
     if artifact.manifest_digest != reference.digest {
         return Err("Verified OCI artifact does not match requested manifest".into());
     }
+    if artifact.config["connector_id"].as_str() != Some(id) {
+        return Err("OCI artifact connector id does not match install id".into());
+    }
     // The registry key and desktop install id differ for bundled aliases such as github-pdpp.
     // Bind the repository key to the profile while keeping the caller's connector_id as the store key.
     let key = reference
@@ -1268,10 +1271,14 @@ fn install_oci_artifact_into(
             "locked OCI provenance",
         )?;
     }
+    let entrypoint_path = normalize_nonempty_artifact_path(
+        &artifact.entrypoint_path.to_string_lossy(),
+        "OCI entrypoint path",
+    )?;
     let entrypoint = artifact
         .files
         .iter()
-        .find(|(path, _)| path == Path::new("dist/collection-profile.mjs"))
+        .find(|(path, _)| path == &entrypoint_path)
         .map(|(_, bytes)| bytes)
         .ok_or("OCI entrypoint missing from install files")?;
     if let Some(locked) = locked {
@@ -1302,7 +1309,7 @@ fn install_oci_artifact_into(
         }),
         artifact_kind: PdppArtifactKind::CollectionProfile,
         manifest_path: "profile/collection-profile.json".into(),
-        entrypoint_path: "dist/collection-profile.mjs".into(),
+        entrypoint_path: entrypoint_path.to_string_lossy().into_owned(),
         entrypoint_sha256: calculate_checksum(entrypoint),
         provenance_path: "provenance.json".into(),
         provenance_sha256: calculate_checksum(&artifact.provenance),
@@ -1329,11 +1336,66 @@ fn install_oci_artifact_into(
                     normalize_nonempty_artifact_path(&path.to_string_lossy(), "OCI install path")?;
                 write_bytes(&staged.join(path), bytes)?;
             }
+            verify_oci_install_files(staged, &artifact.files)?;
             active_pdpp_install_at(&connector, staged)?;
             Ok(())
         })?;
+    } else {
+        verify_oci_install_files(&install_root, &artifact.files)?;
     }
     active_pdpp_install_at(&connector, &install_root)
+}
+
+fn verify_oci_install_files(
+    install_root: &Path,
+    files: &[(PathBuf, Vec<u8>)],
+) -> Result<(), String> {
+    let root_metadata = fs::symlink_metadata(install_root)
+        .map_err(|e| format!("Read OCI install root metadata: {e}"))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err("OCI install root is not a directory".into());
+    }
+
+    for (relative, expected) in files {
+        let relative = normalize_nonempty_artifact_path(
+            &relative.to_string_lossy(),
+            "OCI installed file path",
+        )?;
+        let mut current = install_root.to_path_buf();
+        let components = relative.components().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            current.push(component.as_os_str());
+            let metadata = fs::symlink_metadata(&current).map_err(|e| {
+                format!(
+                    "Read OCI installed file {} metadata: {e}",
+                    relative.display()
+                )
+            })?;
+            let is_last = index + 1 == components.len();
+            if is_last {
+                if !metadata.file_type().is_file() {
+                    return Err(format!(
+                        "OCI installed file {} is not a regular file",
+                        relative.display()
+                    ));
+                }
+                let actual = fs::read(&current)
+                    .map_err(|e| format!("Read OCI installed file {}: {e}", relative.display()))?;
+                if actual != *expected {
+                    return Err(format!(
+                        "OCI installed file {} does not match verified bytes",
+                        relative.display()
+                    ));
+                }
+            } else if !metadata.file_type().is_dir() {
+                return Err(format!(
+                    "OCI installed path component {} is not a directory",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn oci_store_segment(id: &str) -> Result<String, String> {
@@ -1761,8 +1823,19 @@ mod tests {
     use tempfile::tempdir;
 
     fn oci_fixture(version: &str) -> (super::oci::OciReference, super::oci::VerifiedArtifact) {
-        let profile =
-            serde_json::to_vec(&json!({"version": version, "connector_key": "github"})).unwrap();
+        oci_fixture_for(version, "github-pdpp")
+    }
+
+    fn oci_fixture_for(
+        version: &str,
+        connector_id: &str,
+    ) -> (super::oci::OciReference, super::oci::VerifiedArtifact) {
+        let profile = serde_json::to_vec(&json!({
+            "version": version,
+            "connector_key": "github",
+            "connector_id": connector_id,
+        }))
+        .unwrap();
         let provenance = b"{}".to_vec();
         (
             super::oci::OciReference {
@@ -1772,9 +1845,10 @@ mod tests {
                 config_digest: None,
             },
             super::oci::VerifiedArtifact {
-                config: json!({"connector_key":"github"}),
+                config: json!({"connector_key":"github", "connector_id":connector_id}),
                 profile: profile.clone(),
                 provenance: provenance.clone(),
+                entrypoint_path: PathBuf::from("dist/collection-profile.mjs"),
                 files: vec![
                     ("profile/collection-profile.json".into(), profile),
                     (
@@ -1890,10 +1964,94 @@ mod tests {
     }
 
     #[test]
-    fn oci_uri_id_stays_the_activation_key_and_cannot_escape_store() {
+    fn oci_install_rejects_artifact_with_a_different_connector_id() {
+        let root = tempdir().unwrap();
+        let (reference, mut artifact) = oci_fixture("1.0.0");
+        artifact.config["connector_id"] = json!("another-connector");
+        let profile = serde_json::to_vec(&json!({
+            "version": "1.0.0",
+            "connector_key": "github",
+            "connector_id": "another-connector",
+        }))
+        .unwrap();
+        artifact.profile = profile.clone();
+        artifact.files[0].1 = profile;
+
+        let error = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect_err("artifact identity must match the desktop install id");
+        assert!(error.contains("connector id"));
+    }
+
+    #[test]
+    fn oci_install_uses_the_declared_entrypoint_path() {
+        let root = tempdir().unwrap();
+        let (reference, mut artifact) = oci_fixture("1.0.0");
+        artifact.entrypoint_path = PathBuf::from("dist/nested/runner.mjs");
+        artifact.files[1].0 = artifact.entrypoint_path.clone();
+
+        let install = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect("declared entrypoint should be installed");
+        assert_eq!(
+            install.entrypoint_path.as_deref(),
+            Some("dist/nested/runner.mjs")
+        );
+        assert!(PathBuf::from(&install.root_path)
+            .join("dist/nested/runner.mjs")
+            .is_file());
+    }
+
+    #[test]
+    fn oci_reinstall_refuses_modified_auxiliary_files() {
         let root = tempdir().unwrap();
         let (reference, artifact) = oci_fixture("1.0.0");
+        super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact.clone(),
+            None,
+            root.path(),
+        )
+        .expect("initial OCI install");
+
+        let license = root.path().join("github-pdpp/1.0.0/licenses/LICENSE");
+        std::fs::remove_file(&license).unwrap();
+        let error = super::install_oci_artifact_into(
+            "github-pdpp",
+            "github",
+            "GitHub",
+            &reference,
+            artifact,
+            None,
+            root.path(),
+        )
+        .expect_err("reinstall must verify every OCI file");
+        assert!(error.contains("licenses/LICENSE"));
+        assert!(!license.exists());
+    }
+
+    #[test]
+    fn oci_uri_id_stays_the_activation_key_and_cannot_escape_store() {
+        let root = tempdir().unwrap();
         let id = "https://registry.pdpp.dev/connectors/github";
+        let (reference, artifact) = oci_fixture_for("1.0.0", id);
         let install = super::install_oci_artifact_into(
             id,
             "github",
