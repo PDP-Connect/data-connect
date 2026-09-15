@@ -60,9 +60,14 @@ export const LOCKED_ARTIFACT_SOURCE = Object.freeze({
   doc: Object.freeze({}),
 })
 
-export function resolveIndexUrl({ checkMode, explicitIndexUrl, existingLock }) {
+// Absent an explicit `--index-url`, stay pinned to whatever the existing lock
+// already resolved against — for BOTH `--check` and a normal (re)generation.
+// A bare `node scripts/resolve-connectors.js` must not silently float the 12
+// legacy tarball entries to whatever the mutable "latest" release currently
+// contains; an operator who wants that passes `--index-url` explicitly.
+export function resolveIndexUrl({ explicitIndexUrl, existingLock }) {
   if (explicitIndexUrl) return explicitIndexUrl
-  if (checkMode && existingLock?.index?.mode === "remote") {
+  if (existingLock?.index?.mode === "remote") {
     return existingLock.index.url ?? null
   }
   return null
@@ -342,52 +347,107 @@ export async function installConnectorsAtomically({
   }
 }
 
-export async function resolveOciProfiles(lock, options = {}) {
-  const connectors = []
-  for (const entry of lock.connectors) {
-    if (entry.artifactKind !== "pdpp-collection-profile") {
-      connectors.push(entry)
-      continue
-    }
-    const connectorKey =
-      entry.connectorKey ??
-      { "chatgpt-pdpp": "chatgpt", "github-pdpp": "github" }[entry.connectorId]
-    if (!connectorKey)
-      throw new Error(`Unknown OCI connector key: ${entry.connectorId}`)
-    const candidate = {
-      ...entry,
-      connectorKey,
-      oci: entry.oci ?? {
-        registry: "ghcr.io",
-        repository: `pdp-connect/connector/${connectorKey}`,
-      },
-    }
-    const artifact = await fetchResolvedArtifact(
-      LOCKED_ARTIFACT_SOURCE,
-      candidate,
-      { allowTagResolution: true, ociCertificateIdentityResolver, ...options }
-    )
-    for (const [field, checksum] of [
-      ["manifestSha256", "manifest"],
-      ["entrypointSha256", "entrypoint"],
-      ["provenanceSha256", "provenance"],
-    ]) {
-      if (entry[field] !== artifact.checksums[checksum])
-        throw new Error(
-          `OCI bytes differ from locked ${entry.connectorId}: ${field}`
-        )
-    }
-    const { registry, repository, digest, configDigest } = artifact.oci
-    candidate.oci = { registry, repository, digest, configDigest }
-    for (const field of [
-      "artifactUrl",
-      "artifactPath",
-      "artifactSha256",
-      "artifactSignature",
-    ])
-      delete candidate[field]
-    connectors.push(candidate)
+// The two Collection Profile connectors get their v2 entries AUTHORED from a
+// fresh registry lookup, not migrated from the v1 tarball entry: the OCI
+// artifacts are built from today's `packages/polyfill-connectors` sources,
+// while the v1 tarballs were built from July pdpp pins, so the bytes
+// legitimately differ. Authoring never consults the signed index — the
+// registry, not the index, is the source of truth for these two connectors.
+export const OCI_CONNECTOR_KEYS = Object.freeze({
+  "chatgpt-pdpp": "chatgpt",
+  "github-pdpp": "github",
+})
+const OCI_DISPLAY_METADATA = Object.freeze({
+  "chatgpt-pdpp": Object.freeze({
+    company: "openai",
+    name: "ChatGPT (PDPP Collection Profile)",
+    description:
+      "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
+  }),
+  "github-pdpp": Object.freeze({
+    company: "github",
+    name: "GitHub (PDPP Collection Profile)",
+    description:
+      "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
+  }),
+})
+
+// `company`/`name`/`description` are display metadata the collection-profile
+// schema does not carry (there is no `company` or `description` field in
+// `profile/collection-profile.json`), but the Rust lock deserializer requires
+// them as non-optional strings (`IndexedConnectorCommon`). They are carried
+// forward from the existing lock entry rather than authored from the
+// registry — they label the connector, they are not part of its verified
+// artifact bytes.
+export async function authorOciProfile(
+  connectorId,
+  connectorKey,
+  version,
+  { company, name, description, ...options } = {}
+) {
+  if (!connectorKey)
+    throw new Error(`Unknown OCI connector key: ${connectorId}`)
+  const candidate = {
+    connectorId,
+    connectorKey,
+    artifactKind: "pdpp-collection-profile",
+    manifestPath: "profile/collection-profile.json",
+    entrypointPath: "dist/collection-profile.mjs",
+    provenancePath: "provenance.json",
+    version,
+    resolvedFrom: version,
+    oci: {
+      registry: "ghcr.io",
+      repository: `pdp-connect/connector/${connectorKey}`,
+    },
   }
+  const artifact = await fetchResolvedArtifact(
+    LOCKED_ARTIFACT_SOURCE,
+    candidate,
+    { allowTagResolution: true, ociCertificateIdentityResolver, ...options }
+  )
+  const { registry, repository, digest, configDigest } = artifact.oci
+  return {
+    ...candidate,
+    version: artifact.manifest.version ?? version,
+    resolvedFrom: artifact.manifest.version ?? version,
+    company,
+    name: name ?? artifact.manifest.display_name,
+    description,
+    oci: { registry, repository, digest, configDigest },
+    manifestSha256: artifact.checksums.manifest,
+    entrypointSha256: artifact.checksums.entrypoint,
+    provenanceSha256: artifact.checksums.provenance,
+  }
+}
+
+// Build a v2 lock by authoring the two OCI Collection Profile entries from
+// the registry and carrying every other (legacy tarball) entry through
+// unchanged. This is NOT a migration: an authored entry has no prior hashes
+// to preserve, so it never rejects on byte drift the way the old
+// `resolveOciProfiles` migration path did. `lock.connectors` is expected to
+// already exclude the OCI connectorIds (they are never requested from the
+// signed index), so this only adds them. `metadata` supplies the
+// non-registry display fields (see `authorOciProfile`) per connectorId.
+export async function authorOciLock(lock, versions, metadata = {}, options = {}) {
+  const connectors = lock.connectors.filter(
+    entry => !(entry.connectorId in OCI_CONNECTOR_KEYS)
+  )
+  for (const connectorId of Object.keys(versions)) {
+    const connectorKey = OCI_CONNECTOR_KEYS[connectorId]
+    if (!connectorKey)
+      throw new Error(`Unknown OCI connector key: ${connectorId}`)
+    const version = versions[connectorId]
+    if (!version) throw new Error(`Missing target version for ${connectorId}`)
+    connectors.push(
+      await authorOciProfile(connectorId, connectorKey, version, {
+        ...OCI_DISPLAY_METADATA[connectorId],
+        ...metadata[connectorId],
+        ...options,
+      })
+    )
+  }
+  connectors.sort((a, b) => a.connectorId.localeCompare(b.connectorId))
   return { ...lock, lockVersion: "2.0", connectors }
 }
 
@@ -473,6 +533,11 @@ async function main() {
     }),
     defaultIndexUrl: DEFAULT_CONNECTOR_INDEX_URL,
   })
+  // OCI-backed connectorIds are never requested from the signed index: their
+  // v2 entries are authored straight from the registry, below.
+  const requestedConnectorIds = Object.keys(dependencies.connectors ?? {}).filter(
+    connectorId => fromLocal || !(connectorId in OCI_CONNECTOR_KEYS)
+  )
   let lock = await generateLock({
     dependencies,
     source,
@@ -482,8 +547,26 @@ async function main() {
       checkMode && existingLock?.generatedAt
         ? existingLock.generatedAt
         : new Date().toISOString(),
-    requestedConnectorIds: Object.keys(dependencies.connectors ?? {}),
+    requestedConnectorIds,
   })
+  if (!fromLocal) {
+    const ociVersions = {}
+    const ociMetadata = {}
+    for (const connectorId of Object.keys(OCI_CONNECTOR_KEYS)) {
+      const requestedVersion = dependencies.connectors?.[connectorId]
+      if (!requestedVersion) continue
+      const existingEntry = existingLock?.connectors?.find(
+        entry => entry.connectorId === connectorId
+      )
+      ociVersions[connectorId] = requestedVersion
+      ociMetadata[connectorId] = {
+        company: existingEntry?.company,
+        name: existingEntry?.name,
+        description: existingEntry?.description,
+      }
+    }
+    lock = await authorOciLock(lock, ociVersions, ociMetadata)
+  }
   if (checkMode) {
     if (JSON.stringify(existingLock) !== JSON.stringify(lock)) {
       throw new Error(
@@ -502,7 +585,6 @@ async function main() {
     console.log("[resolve-connectors] connector bundle is up to date.")
     return
   }
-  if (!fromLocal) lock = await resolveOciProfiles(lock)
   const result = await installConnectorsAtomically({
     lock,
     source,

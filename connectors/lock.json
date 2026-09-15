@@ -1,7 +1,7 @@
 {
-  "lockVersion": "1.0",
+  "lockVersion": "2.0",
   "dependencyFile": "connectors/connector-dependencies.json",
-  "generatedAt": "2026-07-31T19:53:29.208Z",
+  "generatedAt": "2026-09-15T19:17:07.644Z",
   "sourceRepo": "https://github.com/PDP-Connect/data-connectors",
   "sourceTag": "mixed",
   "sourceCommit": "mixed",
@@ -31,30 +31,25 @@
   "connectors": [
     {
       "connectorId": "chatgpt-pdpp",
-      "company": "openai",
-      "version": "0.1.0",
-      "resolvedFrom": "0.1.0",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/chatgpt-pdpp-0.1.0.tgz",
-      "artifactPath": "artifacts/chatgpt-pdpp/chatgpt-pdpp-0.1.0.tgz",
-      "artifactSha256": "sha256:0188385dbb782cf23a5331f0b05a4dddbab422cc21113b0ba8b5c1f72b42772f",
-      "artifactSignature": {
-        "type": "sigstoreBundle",
-        "bundlePath": "chatgpt-pdpp-0.1.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/chatgpt-pdpp-0.1.0.tgz.sigstore.json"
-      },
-      "manifestSha256": "sha256:e2c66b9d584ff935b31790e3a698a5576168002988ccc8076ded327f189beff0",
+      "connectorKey": "chatgpt",
       "artifactKind": "pdpp-collection-profile",
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
-      "entrypointSha256": "sha256:2c813fb3ae7fb6cc94af327a17ea17347a43b78aa4a401718a660b2edd6a25cc",
       "provenancePath": "provenance.json",
-      "provenanceSha256": "sha256:95635fdd7865401deeecde499621d181397b301cc266a7fdf659c175ec04e4cf",
-      "sourceTag": "pdpp-cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
-      "sourceCommit": "cc07e3a896c2c0df7841da4ec6b2c660ffe1e792",
-      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
-      "publishedAt": "2026-07-31T00:00:00Z",
+      "version": "0.1.0",
+      "resolvedFrom": "0.1.0",
+      "oci": {
+        "registry": "ghcr.io",
+        "repository": "pdp-connect/connector/chatgpt",
+        "digest": "sha256:811daaf8f2a9a346f1ff5109c118ea404212c8e00790cc5d448e89ad9fa9c4a4",
+        "configDigest": "sha256:8f1bc246633ae908636d841f8cf737d17daf0144207a375b694d8eea9ee1e30d"
+      },
+      "company": "openai",
       "name": "ChatGPT (PDPP Collection Profile)",
-      "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol."
+      "description": "Collects ChatGPT conversations, messages, memories, custom GPTs, custom instructions, and shared conversations through the PDPP Collection Profile protocol.",
+      "manifestSha256": "sha256:eb491a782ba61925340c5334d3b35a6d0111757f63ccda72bc466f4f84b8f417",
+      "entrypointSha256": "sha256:e50f93dee4d48925f623f3be04acaed87f77783f1255579c0db7618fabe1a963",
+      "provenanceSha256": "sha256:d9695809c157e431a725aea21d1f65b48b652c5f9cc3b2b18ac925d122e2dbc5"
     },
     {
       "connectorId": "chatgpt-playwright",
@@ -110,30 +105,25 @@
     },
     {
       "connectorId": "github-pdpp",
-      "company": "github",
-      "version": "0.5.0",
-      "resolvedFrom": "0.5.0",
-      "artifactUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/github-pdpp-0.5.0.tgz",
-      "artifactPath": "artifacts/github-pdpp/github-pdpp-0.5.0.tgz",
-      "artifactSha256": "sha256:685b35ee84e84c287cf4bd6df548b984699de84db7bf69966b5bda54a94aa47b",
-      "artifactSignature": {
-        "type": "sigstoreBundle",
-        "bundlePath": "github-pdpp-0.5.0.tgz.sigstore.json",
-        "bundleUrl": "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-48440fead534/github-pdpp-0.5.0.tgz.sigstore.json"
-      },
-      "manifestSha256": "sha256:646c456f724e61306242a1a6f3dd61a629edcb27d9de75c2f3606b7cecfc0bf4",
+      "connectorKey": "github",
       "artifactKind": "pdpp-collection-profile",
       "manifestPath": "profile/collection-profile.json",
       "entrypointPath": "dist/collection-profile.mjs",
-      "entrypointSha256": "sha256:14b052111cfae375df2f2ec9a77f4e36699b56c582d2f352134d2517b883b673",
       "provenancePath": "provenance.json",
-      "provenanceSha256": "sha256:3a33cd545496a19508efd520fcf03de226d80ddbf1122fea61bc4bcfe5b0eca3",
-      "sourceTag": "pdpp-597cc012611df90d07edbed187ba3e3212dbf258",
-      "sourceCommit": "597cc012611df90d07edbed187ba3e3212dbf258",
-      "releaseId": "github-48440fead5343d568773594b20cfc9306f1d6255",
-      "publishedAt": "2026-07-30T00:00:00Z",
+      "version": "0.5.0",
+      "resolvedFrom": "0.5.0",
+      "oci": {
+        "registry": "ghcr.io",
+        "repository": "pdp-connect/connector/github",
+        "digest": "sha256:aebcc09484cdd0be265eb11a10b4cd74bcf63368d0045daae0d0ca178e7a17df",
+        "configDigest": "sha256:367199224c1a434c162e2e33009a25f19e594a58b4e432ccbd615c8f6324e7f2"
+      },
+      "company": "github",
       "name": "GitHub (PDPP Collection Profile)",
-      "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol."
+      "description": "Collects your GitHub profile, repositories, stars, issues, pull requests, and gists through the PDPP Collection Profile protocol.",
+      "manifestSha256": "sha256:7aa3b1c8d5eb7bb536582f458ad47a8a1d1679dc0e3fbd8c9cc4f373a79d92a3",
+      "entrypointSha256": "sha256:f880fca578983714b8b8c47a64e1339a133b5196788f25ca81ae6d2eff036be3",
+      "provenanceSha256": "sha256:c763c7f8f25cb451860c6430386651127525fc1ae511e1719e6f24b104e96248"
     },
     {
       "connectorId": "github-playwright",
