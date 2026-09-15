@@ -211,7 +211,11 @@ impl Default for PdppRunOptions {
             timeout: None,
             control: PdppRunControl::default(),
             scope_validators: PdppScopeValidators::default(),
-            max_stdout_line_bytes: 64 * 1024,
+            // One protocol line is one RECORD; chat and archive connectors emit
+            // records far above 64 KiB (a whole exported chat, an attachment).
+            // The collector runtime reads lines without a per-line cap, so keep
+            // this generous and rely on the retained-record and stderr caps.
+            max_stdout_line_bytes: 16 * 1024 * 1024,
             max_stderr_bytes: 64 * 1024,
             max_retained_records: 0,
             max_retained_events: 32,
