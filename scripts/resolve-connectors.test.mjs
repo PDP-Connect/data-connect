@@ -17,12 +17,13 @@ import { dirname, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   artifactCertificateIdentityResolver,
+  authorOciLock,
+  authorOciProfile,
   checkInstalledLock,
   installConnectorsAtomically,
   ociCertificateIdentityResolver,
   LOCKED_ARTIFACT_SOURCE,
   resolveIndexUrl,
-  resolveOciProfiles,
   recoverInterruptedInstall,
 } from "./resolve-connectors.js"
 
@@ -91,7 +92,7 @@ describe("connector index selection", () => {
     ).toBe(lock.index.url)
   })
 
-  it("honors an explicit index and uses latest only for an update", () => {
+  it("honors an explicit index, and otherwise stays pinned to the existing lock even outside --check", () => {
     const explicitIndexUrl = "https://example.com/connector-index.json"
     expect(
       resolveIndexUrl({
@@ -100,11 +101,20 @@ describe("connector index selection", () => {
         existingLock: lock,
       })
     ).toBe(explicitIndexUrl)
+    // A bare (re)generation must not float the legacy tarball entries to
+    // whatever "latest" currently contains; only an explicit --index-url does.
     expect(
       resolveIndexUrl({
         checkMode: false,
         explicitIndexUrl: null,
         existingLock: lock,
+      })
+    ).toBe(lock.index.url)
+    expect(
+      resolveIndexUrl({
+        checkMode: false,
+        explicitIndexUrl: null,
+        existingLock: null,
       })
     ).toBeNull()
   })
@@ -206,7 +216,7 @@ function fixture(root) {
     layers: [
       layer(profile, "application/vnd.pdpp.connector.profile.v1+json"),
       layer(
-        archive(root, "code", { "code/collection-profile.mjs": code }),
+        archive(root, "code", { "collection-profile.mjs": code }),
         "application/vnd.pdpp.connector.code.v1.tar+gzip"
       ),
       layer(
@@ -312,59 +322,74 @@ function fixture(root) {
 }
 
 describe("OCI consumer acceptance", () => {
-  it("B-T1 a v2 OCI lock installs byte-identical existing files to a v1 tarball lock", async () =>
+  it("does not reintroduce OCI entries that are absent from requested dependencies", async () =>
     temporary(async root => {
-      const f = fixture(root)
-      mkdirSync(join(root, "v1"))
-      mkdirSync(join(root, "v2"))
-      await installConnectorsAtomically({
-        lock: f.lockFor(f.tarball, "1.0"),
-        source: { mode: "local", rootDir: root },
-        installRoot: join(root, "v1"),
-      })
-      const migrated = await resolveOciProfiles(
-        f.lockFor(f.tarball, "1.0"),
+      const legacy = legacyArtifacts[0]
+      const lock = {
+        lockVersion: "1.0",
+        connectors: [
+          { connectorId: "chatgpt-pdpp", version: "0.1.0" },
+          legacy,
+        ],
+      }
+      const authored = await authorOciLock(lock, {})
+      expect(authored.lockVersion).toBe("2.0")
+      expect(authored.connectors).toEqual([legacy])
+    }))
+
+  it("B-T1 an authored v2 OCI entry installs a tree byte-identical to the registry artifact's own layers, with config/profile cross-checks passing", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "installed")
+      // Authoring is not migration: it never sees or compares against a prior
+      // v1 lock entry, so there are no stale hashes it could reject against.
+      const authored = await authorOciProfile(
+        f.oci.connectorId,
+        f.oci.connectorKey,
+        f.oci.version,
         f.options
       )
-      expect(migrated.lockVersion).toBe("2.0")
-      expect(migrated.connectors[0]).toEqual(f.oci)
+      expect(authored.oci).toEqual(f.oci.oci)
+      expect(authored.manifestSha256).toBe(f.oci.manifestSha256)
+      expect(authored.entrypointSha256).toBe(f.oci.entrypointSha256)
+      expect(authored.provenanceSha256).toBe(f.oci.provenanceSha256)
       await installConnectorsAtomically({
-        lock: migrated,
-        installRoot: join(root, "v2"),
+        lock: { lockVersion: "2.0", connectors: [authored] },
+        installRoot,
         ...f.options,
       })
-      for (const path of Object.keys(f.files)) {
+      for (const [path, bytes] of Object.entries(f.files)) {
         expect(
-          readFileSync(join(root, "v2/collection-profiles/ynab-pdpp", path))
-        ).toEqual(
-          readFileSync(join(root, "v1/collection-profiles/ynab-pdpp", path))
-        )
+          readFileSync(join(installRoot, "collection-profiles/ynab-pdpp", path))
+        ).toEqual(bytes)
       }
       expect(
         readFileSync(
-          join(root, "v2/collection-profiles/ynab-pdpp/licenses/LICENSE"),
+          join(installRoot, "collection-profiles/ynab-pdpp/licenses/LICENSE"),
           "utf8"
         )
       ).toBe("Apache-2.0\n")
     }))
 
-  it("migration retains legacy entries and refuses OCI bytes differing from the existing lock", async () =>
+  it("authoring never compares the fetched artifact against a prior lock entry's bytes", async () =>
     temporary(async root => {
-      const f = fixture(root),
-        previous = f.lockFor(f.tarball, "1.0")
-      previous.connectors.unshift(legacyArtifacts[0])
-      const migrated = await resolveOciProfiles(previous, f.options)
-      expect(migrated.connectors[0]).toEqual(legacyArtifacts[0])
-      expect(previous.lockVersion).toBe("1.0")
-      const drifted = {
-        ...f.tarball,
-        entrypointSha256: digest("different published bytes"),
-      }
-      await expect(
-        resolveOciProfiles(f.lockFor(drifted, "1.0"), f.options)
-      ).rejects.toThrow(
-        "OCI bytes differ from locked ynab-pdpp: entrypointSha256"
+      const f = fixture(root)
+      // A stale/drifted hash on a would-be "previous" entry is irrelevant:
+      // authoring only ever reads from the registry, so nothing here can
+      // trigger the old migration path's "OCI bytes differ" refusal.
+      const authored = await authorOciProfile(
+        f.oci.connectorId,
+        f.oci.connectorKey,
+        f.oci.version,
+        f.options
       )
+      expect(authored.entrypointSha256).not.toBe(
+        digest("different published bytes")
+      )
+      expect(authored).toMatchObject({
+        connectorId: f.oci.connectorId,
+        oci: f.oci.oci,
+      })
     }))
 
   it("B-T4 install root uses connectorId, never connectorKey", async () =>
