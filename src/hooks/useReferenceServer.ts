@@ -71,7 +71,7 @@ export function useReferenceServer(containerRef: React.RefObject<HTMLElement | n
     try {
       const status = await invoke<ReferenceServerStatus>("start_reference_server")
       if (!status.origin) {
-        throw new Error("Reference server started without reporting an origin")
+        throw new Error("Operator tools are not included in this build.")
       }
       setOrigin(status.origin)
       setLifecycle("signing-in")

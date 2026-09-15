@@ -9,6 +9,8 @@ import { Text } from "@/components/typography/text"
 import { Button } from "@/components/ui/button"
 import { useReferenceServer } from "@/hooks/useReferenceServer"
 
+const OPERATOR_TOOLS_UNAVAILABLE = "Operator tools are not included in this build."
+
 const LIFECYCLE_LABEL: Record<string, string> = {
   starting: "Starting the reference server…",
   "signing-in": "Signing in as owner…",
@@ -24,10 +26,9 @@ export function ServerRepairs() {
       <header className="space-y-2">
         <PageHeading>Server & Repairs</PageHeading>
         <Text as="p" intent="small" muted>
-          This tab embeds the PDPP reference server's own operator UI
-          directly. It is a separate application with its own styling —
-          that mismatch is expected. Data stays on the server; this app does
-          not copy or store anything it shows you here.
+          The shipped Personal Server does not include the PDPP reference
+          operator tools. Configure a reference checkout or URL to use this
+          tab during development.
         </Text>
         {origin ? (
           <Text as="p" intent="small" muted className="font-mono">
@@ -45,7 +46,7 @@ export function ServerRepairs() {
             {lifecycle === "error" ? (
               <>
                 <Text as="p" intent="small">
-                  {error ?? "Could not reach the reference server."}
+                  {error ?? OPERATOR_TOOLS_UNAVAILABLE}
                 </Text>
                 <Button size="sm" variant="outline" onClick={() => void retry()}>
                   <RefreshCwIcon className="size-4" aria-hidden />
