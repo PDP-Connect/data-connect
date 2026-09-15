@@ -89,7 +89,7 @@ export function useInitialize() {
         },
       });
 
-      const updatable = updates.filter(u => u.hasUpdate);
+      const updatable = updates.filter(u => u.hasUpdate && u.runnable);
       if (updatable.length === 0) {
         console.info('[Initialize] All connectors up to date');
         return;

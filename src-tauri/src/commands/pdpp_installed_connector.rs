@@ -853,6 +853,32 @@ fn validate_relative_path(path: &str, label: &str) -> Result<PathBuf, String> {
     Ok(rel.to_path_buf())
 }
 
+// PR #125 widens this set to include filesystem when scoped imports are available.
+const HOST_BINDINGS: &[&str] = &["network", "browser"];
+
+pub(crate) fn host_unavailable_reason(
+    required_bindings: &[String],
+    setup_modality: Option<&str>,
+) -> Option<String> {
+    if let Some(binding) = required_bindings
+        .iter()
+        .find(|binding| !HOST_BINDINGS.contains(&binding.as_str()))
+    {
+        return Some(format!("Requires unavailable binding: {binding}"));
+    }
+    if let Some(modality) = setup_modality.filter(|modality| *modality != "static_secret") {
+        return Some(format!("Requires unavailable setup: {modality}"));
+    }
+    if !required_bindings.iter().any(|binding| binding == "network") {
+        return Some("PDPP connector manifest must require the network binding".into());
+    }
+    None
+}
+
+pub(crate) fn host_can_run(required_bindings: &[String], setup_modality: Option<&str>) -> bool {
+    host_unavailable_reason(required_bindings, setup_modality).is_none()
+}
+
 fn validate_manifest(
     connector_id: &str,
     active_version: &str,
@@ -887,19 +913,15 @@ fn validate_manifest(
         .runtime_requirements
         .as_ref()
         .and_then(|requirements| requirements.bindings.as_ref());
-    let network_required = bindings
-        .and_then(|bindings| bindings.get("network"))
-        .and_then(|binding| binding.required)
-        .unwrap_or(false);
-    if !network_required {
-        return Err("PDPP connector manifest must require the network binding".into());
-    }
-    for (binding, requirement) in bindings.into_iter().flat_map(|bindings| bindings.iter()) {
-        if binding != "network" && binding != "browser" && requirement.required.unwrap_or(false) {
-            return Err(format!(
-                "PDPP connector requires unsupported binding {binding}"
-            ));
-        }
+    let required_bindings: Vec<String> = bindings
+        .into_iter()
+        .flat_map(|bindings| bindings.iter())
+        .filter(|(_, requirement)| requirement.required.unwrap_or(false))
+        .map(|(binding, _)| binding.clone())
+        .collect();
+    let setup_modality = manifest.setup.as_ref().map(|setup| setup.modality.as_str());
+    if !host_can_run(&required_bindings, setup_modality) {
+        return Err(host_unavailable_reason(&required_bindings, setup_modality).unwrap());
     }
     let mut stream_names = HashSet::new();
     for stream in &manifest.streams {
@@ -2901,6 +2923,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             export["chatgpt.conversations"]["conversations"][0]["upstream_field"],
             json!("preserved")
         );
+    }
+
+    #[test]
+    fn spawn_validation_agrees_with_catalog_binding_predicate() {
+        for binding in ["filesystem", "desktop_session", "unknown"] {
+            let mut fixture = github_manifest();
+            fixture["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
+            let manifest: PdppConnectorManifest = serde_json::from_value(fixture).unwrap();
+            assert!(!host_can_run(&["network".into(), binding.into()], None));
+            assert!(validate_manifest("github-pdpp", "1.0.0", &manifest)
+                .unwrap_err()
+                .contains(binding));
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ use super::connector_store::{
     get_legacy_user_connectors_dir, read_active_connector_manifest,
     replace_active_connector_install, ActiveConnectorInstall,
 };
+use super::pdpp_installed_connector::{host_can_run, host_unavailable_reason};
 
 const DEFAULT_INDEX_URL: &str =
     "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-latest/connector-index.json";
@@ -64,6 +65,11 @@ pub enum IndexedConnector {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedConnectorCommon {
+    #[serde(default = "development_tier")]
+    pub tier: String,
+    #[serde(default = "legacy_required_bindings")]
+    pub required_bindings: Vec<String>,
+    pub setup_modality: Option<String>,
     pub connector_id: String,
     pub company: String,
     pub version: String,
@@ -145,6 +151,14 @@ pub struct ConnectorFiles {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConnectorUpdateInfo {
+    pub tier: String,
+    #[serde(rename = "requiredBindings")]
+    pub required_bindings: Vec<String>,
+    #[serde(rename = "setupModality")]
+    pub setup_modality: Option<String>,
+    pub runnable: bool,
+    #[serde(rename = "unavailableReason")]
+    pub unavailable_reason: Option<String>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -164,6 +178,15 @@ struct LocalConnectorMetadata {
     id: Option<String>,
     version: Option<String>,
     name: String,
+}
+
+fn development_tier() -> String {
+    "development".into()
+}
+
+// The legacy index predates binding metadata; its existing connectors use network.
+fn legacy_required_bindings() -> Vec<String> {
+    vec!["network".into()]
 }
 
 struct ArtifactBundle {
@@ -840,22 +863,43 @@ pub async fn check_connector_updates(
     force: bool,
 ) -> Result<Vec<ConnectorUpdateInfo>, String> {
     let index = fetch_index(force).await?;
+    let updates = connector_updates_from_index(&index, |common| {
+        (
+            is_connector_installed(&app, &common.connector_id, &common.company),
+            get_installed_connector_version(&app, &common.connector_id, &common.company),
+        )
+    })?;
+    log::info!("Found {} connector updates", updates.len());
+    Ok(updates)
+}
+
+fn connector_updates_from_index(
+    index: &ConnectorIndex,
+    installed: impl Fn(&IndexedConnectorCommon) -> (bool, Option<String>),
+) -> Result<Vec<ConnectorUpdateInfo>, String> {
     let mut updates = Vec::new();
 
-    for connector in latest_connectors(&index)? {
+    for connector in latest_connectors(index)? {
         let common = connector.common();
-        let is_installed = is_connector_installed(&app, &common.connector_id, &common.company);
-        let current_version =
-            get_installed_connector_version(&app, &common.connector_id, &common.company);
+        let (is_installed, current_version) = installed(common);
         let has_update = if let Some(ref current) = current_version {
             is_newer_version(current, &common.version)
         } else {
             false
         };
         let is_new = !is_installed;
+        let runnable = host_can_run(&common.required_bindings, common.setup_modality.as_deref());
 
-        if has_update || is_new {
+        if has_update || is_new || !runnable {
             updates.push(ConnectorUpdateInfo {
+                tier: common.tier.clone(),
+                required_bindings: common.required_bindings.clone(),
+                setup_modality: common.setup_modality.clone(),
+                runnable,
+                unavailable_reason: host_unavailable_reason(
+                    &common.required_bindings,
+                    common.setup_modality.as_deref(),
+                ),
                 id: common.connector_id.clone(),
                 name: common.name.clone(),
                 description: common.description.clone(),
@@ -868,7 +912,6 @@ pub async fn check_connector_updates(
         }
     }
 
-    log::info!("Found {} connector updates", updates.len());
     Ok(updates)
 }
 
@@ -882,6 +925,12 @@ pub async fn download_connector(_app: AppHandle, id: String) -> Result<(), Strin
         .ok_or_else(|| format!("Connector {} not found in connector index", id))?;
     let connector = select_latest_connector(entries, &id)?;
     let common = connector.common();
+
+    if let Some(reason) =
+        host_unavailable_reason(&common.required_bindings, common.setup_modality.as_deref())
+    {
+        return Err(reason);
+    }
 
     log::info!(
         "Found connector in index: {} v{} (company: {})",
@@ -1346,6 +1395,9 @@ mod tests {
     fn nested_connector() -> LegacyIndexedConnector {
         LegacyIndexedConnector {
             common: IndexedConnectorCommon {
+                tier: super::development_tier(),
+                required_bindings: super::legacy_required_bindings(),
+                setup_modality: None,
                 connector_id: "goodreads-playwright".to_string(),
                 company: "amazon".to_string(),
                 version: "1.0.0".to_string(),
@@ -1429,6 +1481,71 @@ mod tests {
                 }]
             }
         })
+    }
+
+    #[test]
+    fn check_connector_updates_carries_catalog_metadata_and_preserves_update_flags() {
+        let mut fixture = real_shaped_index(b"artifact", b"manifest", b"entrypoint", b"provenance");
+        let pdpp = &mut fixture["connectors"]["github-pdpp"][0];
+        pdpp["tier"] = json!("preview");
+        pdpp["requiredBindings"] = json!(["network", "filesystem"]);
+        pdpp["setupModality"] = json!("manual_or_upload");
+        let index: ConnectorIndex = serde_json::from_value(fixture).unwrap();
+        let updates = super::connector_updates_from_index(&index, |common| {
+            if common.connector_id == "github-pdpp" {
+                (true, Some("0.4.0".into()))
+            } else {
+                (false, None)
+            }
+        })
+        .unwrap();
+        let pdpp = &updates[0];
+        assert_eq!(pdpp.tier, "preview");
+        assert_eq!(pdpp.required_bindings, ["network", "filesystem"]);
+        assert_eq!(pdpp.setup_modality.as_deref(), Some("manual_or_upload"));
+        assert!(!pdpp.runnable);
+        assert!(pdpp.has_update);
+        assert!(!pdpp.is_new);
+        assert!(pdpp
+            .unavailable_reason
+            .as_ref()
+            .unwrap()
+            .contains("filesystem"));
+        let legacy = &updates[1];
+        assert_eq!(legacy.tier, "development");
+        assert_eq!(legacy.required_bindings, ["network"]);
+        assert!(legacy.runnable && legacy.is_new && !legacy.has_update);
+        let wire = serde_json::to_value(pdpp).unwrap();
+        assert_eq!(wire["requiredBindings"], json!(["network", "filesystem"]));
+        assert_eq!(wire["setupModality"], "manual_or_upload");
+        let current = super::connector_updates_from_index(&index, |common| {
+            (true, Some(common.version.clone()))
+        })
+        .unwrap();
+        assert_eq!(current.len(), 1, "unavailable installed entries stay visible");
+        assert!(!current[0].runnable && !current[0].has_update && !current[0].is_new);
+    }
+
+    #[test]
+    fn host_binding_predicate_table() {
+        use super::host_can_run;
+        for (bindings, setup, runnable) in [
+            (vec!["network"], None, true),
+            (vec!["network", "browser"], Some("static_secret"), true),
+            (vec!["network", "filesystem"], None, false),
+            (vec!["network", "desktop_session"], None, false),
+            (vec!["network", "unknown"], None, false),
+            (vec!["network"], Some("manual_or_upload"), false),
+            (vec!["network"], Some("unknown_setup"), false),
+            (vec![], None, false),
+        ] {
+            let bindings: Vec<String> = bindings.into_iter().map(String::from).collect();
+            assert_eq!(
+                host_can_run(&bindings, setup),
+                runnable,
+                "{bindings:?}, {setup:?}"
+            );
+        }
     }
 
     #[test]
