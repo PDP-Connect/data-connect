@@ -27,7 +27,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }))
 
 vi.mock("./check-connector-updates", () => ({
-  checkConnectorUpdates: (...args: unknown[]) => mockCheckConnectorUpdates(...args),
+  checkConnectorUpdates: (...args: unknown[]) =>
+    mockCheckConnectorUpdates(...args),
 }))
 
 describe("useInitialize", () => {
@@ -64,5 +65,84 @@ describe("useInitialize", () => {
     rerender()
 
     expect(mockCheckConnectorUpdates).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves silent sequential startup updates and continues after an error", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    mockCheckConnectorUpdates.mockResolvedValue([
+      { id: "first", name: "First", hasUpdate: true, runnable: true },
+      { id: "failed", name: "Failed", hasUpdate: true, runnable: true },
+      { id: "last", name: "Last", hasUpdate: true, runnable: true },
+      { id: "new", isNew: true, hasUpdate: false, runnable: true },
+      { id: "current", hasUpdate: false, runnable: true },
+    ])
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "download_connector" && args.id === "failed") {
+        throw new Error("offline")
+      }
+      return []
+    })
+
+    const { rerender } = renderHook(() => useInitialize())
+    await waitFor(() =>
+      expect(mockDispatch).toHaveBeenCalledWith({
+        type: "app/removeConnectorUpdate",
+        payload: "last",
+      })
+    )
+    rerender()
+
+    expect(mockInvoke.mock.calls).toMatchInlineSnapshot(`
+      [
+        [
+          "load_runs",
+        ],
+        [
+          "download_connector",
+          {
+            "id": "first",
+          },
+        ],
+        [
+          "download_connector",
+          {
+            "id": "failed",
+          },
+        ],
+        [
+          "download_connector",
+          {
+            "id": "last",
+          },
+        ],
+      ]
+    `)
+    expect(
+      mockDispatch.mock.calls.filter(
+        ([action]) => action.type === "app/removeConnectorUpdate"
+      )
+    ).toEqual([
+      [{ type: "app/removeConnectorUpdate", payload: "first" }],
+      [{ type: "app/removeConnectorUpdate", payload: "last" }],
+    ])
+    expect(error).toHaveBeenCalledWith(
+      "[Initialize] Failed to update Failed:",
+      expect.any(Error)
+    )
+    error.mockRestore()
+  })
+
+  it("never auto-installs an update this host cannot run", async () => {
+    mockCheckConnectorUpdates.mockResolvedValue([
+      { id: "unsupported", hasUpdate: true, runnable: false },
+    ])
+    renderHook(() => useInitialize())
+    await waitFor(() =>
+      expect(mockCheckConnectorUpdates).toHaveBeenCalledTimes(1)
+    )
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "download_connector",
+      expect.anything()
+    )
   })
 })
