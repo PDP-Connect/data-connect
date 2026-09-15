@@ -8,6 +8,7 @@ import {
   hasOwningTestEvidence,
   type MutantObservation,
   projectOutcome,
+  readKnownTestIds,
   readObservations,
   type StrykerStatus,
   summarize,
@@ -28,6 +29,14 @@ function observation(overrides: Partial<MutantObservation> = {}): MutantObservat
     // count -- a reported zero, or a reporter that wrote no count at all --
     // say so explicitly in `overrides`.
     testsCompleted: 1,
+    // The default killer resolves: a fixture that asserts something OTHER than
+    // resolution should not be graded by the missing-table rule as a
+    // side-effect. Cases that turn on resolution, or on an absent table,
+    // override this explicitly.
+    knownTestIds: new Set<string>(["covers the boundary"]),
+    // Static is the exception, not the default: a static kill is held whatever
+    // its identity resolves to, so the ordinary fixture must not be one.
+    isStatic: false,
     ...overrides,
   }
 }
@@ -51,6 +60,36 @@ describe("hasOwningTestEvidence", () => {
   it("accepts a kill that names a killing test, in either runner's dialect", () => {
     expect(hasOwningTestEvidence("AssertionError [ERR_ASSERTION]: no", ["t1"])).toBe(true)
     expect(hasOwningTestEvidence("expected 'http:' to be 'https:'", ["38"])).toBe(true)
+  })
+
+  // A named test is not an attribution unless the name RESOLVES. Stryker
+  // renumbers the tests it observed when it writes the report and leaves an
+  // unrecognised id as the raw string it arrived as, so a killer that is still
+  // a raw identity names a test the run has no record of observing.
+  it("accepts a killer id that resolves to an observed test", () => {
+    expect(
+      hasOwningTestEvidence("expected 3 to equal 4", ["0"], new Set(["0", "1"]))
+    ).toBe(true)
+  })
+
+  it("refuses a killer id that resolves to nothing in the test table", () => {
+    expect(
+      hasOwningTestEvidence(
+        "expected 3 to equal 4",
+        ["f.test.ts#outer checks value"],
+        new Set(["0", "1"])
+      )
+    ).toBe(false)
+  })
+
+  // Without a test table there is nothing to resolve against, and refusing
+  // every kill on missing input would be refusing on absence of evidence
+  // rather than on evidence. Callers holding only mutant records keep the
+  // non-empty check.
+  it("does not require resolution when no test table was read", () => {
+    expect(
+      hasOwningTestEvidence("expected 3 to equal 4", ["t1"], new Set())
+    ).toBe(true)
   })
 
   it("accepts a real assertion kill whose retained text carries no assertion words", () => {
@@ -128,10 +167,81 @@ describe("projectOutcome", () => {
         failureOutput:
           '[{"code":"custom","path":["externalUrl"],"message":"externalUrl must use https://."}]',
         killedBy: ["38"],
+        knownTestIds: new Set(["38"]),
       })
     )
     expect(projected.outcome).toBe("killed")
     expect(projected.basis).toBe("owning_test_failed")
+  })
+
+  // A static mutant's trial is the whole suite, so a failure proves the suite
+  // noticed and not that a test owning this code did. Held whatever the killer
+  // resolves to: the resolution of a static killer is a function of how the run
+  // was scoped, not of the mutant, and grading on it makes the same head report
+  // different numbers at different concurrencies and different --mutate ranges.
+  it("holds a static kill inconclusive even when its killer resolves", () => {
+    const projected = projectOutcome(
+      observation({
+        isStatic: true,
+        killedBy: ["covers the boundary"],
+        knownTestIds: new Set(["covers the boundary"]),
+      })
+    )
+    expect(projected.outcome).toBe("inconclusive")
+    expect(projected.basis).toBe("static_whole_suite_kill")
+  })
+
+  // The other direction of the same rule: an unresolved static killer lands on
+  // the static basis too, not on the unresolved-identity one. Both scopings of
+  // the same mutant therefore report the same basis, which is the property the
+  // engine controls check.
+  it("holds a static kill whose killer does not resolve on the same basis", () => {
+    const projected = projectOutcome(
+      observation({
+        isStatic: true,
+        killedBy: ["scripts/a.test.ts#never renumbered"],
+        knownTestIds: new Set(["0", "1"]),
+      })
+    )
+    expect(projected.outcome).toBe("inconclusive")
+    expect(projected.basis).toBe("static_whole_suite_kill")
+  })
+
+  // Static is read off the report, not inferred. A report that does not carry
+  // the flag must not have every kill held: absent is not true.
+  it("does not treat a mutant without the static flag as static", () => {
+    const [projected] = readObservations(
+      {
+        files: {
+          "scripts/a.ts": {
+            mutants: [{ id: "1", status: "Killed", killedBy: ["0"], testsCompleted: 3 }],
+          },
+        },
+        testFiles: { "scripts/a.test.ts": { tests: [{ id: "0", name: "checks it" }] } },
+      },
+      { baselineComplete: true }
+    ).map(projectOutcome)
+    expect(projected).toMatchObject({ outcome: "killed", basis: "owning_test_failed" })
+  })
+
+  it("reads the static flag off the report", () => {
+    const [projected] = readObservations(
+      {
+        files: {
+          "scripts/a.ts": {
+            mutants: [
+              { id: "1", status: "Killed", static: true, killedBy: ["0"], testsCompleted: 3 },
+            ],
+          },
+        },
+        testFiles: { "scripts/a.test.ts": { tests: [{ id: "0", name: "checks it" }] } },
+      },
+      { baselineComplete: true }
+    ).map(projectOutcome)
+    expect(projected).toMatchObject({
+      outcome: "inconclusive",
+      basis: "static_whole_suite_kill",
+    })
   })
 
   it("projects Survived as survived, pending triage", () => {
@@ -270,6 +380,86 @@ describe("summarize", () => {
       inconclusive: 2,
       validDenominator: 2,
       rawStatusCounts: { Killed: 1, Survived: 1, Timeout: 1, NoCoverage: 1 },
+    })
+  })
+})
+
+// The report is where the two identity namespaces meet: the test table is keyed
+// by the ids the dry run reported, and `killedBy` is keyed by whatever the
+// mutant run returned. These drive a whole report through the reader and the
+// projector, both directions, rather than checking the predicate alone.
+describe("killer identity resolved against the report's test table", () => {
+  function report(killedBy: readonly string[]) {
+    return {
+      files: {
+        "scripts/a.ts": {
+          mutants: [
+            {
+              id: "1",
+              mutatorName: "ConditionalExpression",
+              status: "Killed",
+              killedBy,
+              statusReason: "expected 3 to equal 4",
+              testsCompleted: 6,
+            },
+          ],
+        },
+      },
+      testFiles: {
+        "scripts/a.test.ts": {
+          tests: [
+            { id: "0", name: "outer > checks value" },
+            { id: "1", name: "outer > checks other" },
+          ],
+        },
+      },
+    }
+  }
+
+  it("reads the test table the report names", () => {
+    expect([...readKnownTestIds(report(["0"]))]).toEqual(["0", "1"])
+  })
+
+  it("projects a kill whose killer resolves to the test table", () => {
+    const [observation] = readObservations(report(["0"]), { baselineComplete: true })
+
+    expect(observation.knownTestIds.has("0")).toBe(true)
+    expect(projectOutcome(observation)).toMatchObject({
+      outcome: "killed",
+      basis: "owning_test_failed",
+    })
+  })
+
+  // The negative control, and the whole point of P2-3: an unknown identity is
+  // non-empty, so the old predicate accepted it. It names a test the report has
+  // no record of, and cannot become an attributed kill.
+  it("refuses a kill whose killer is an unknown identity", () => {
+    const [observation] = readObservations(
+      report(["scripts/a.test.ts#outer checks value"]),
+      { baselineComplete: true }
+    )
+
+    expect(projectOutcome(observation)).toMatchObject({
+      outcome: "inconclusive",
+      basis: "killed_without_owning_test_identity",
+    })
+  })
+
+  // A report that carried kills and no test table is still readable -- nothing
+  // throws, and the mutant record survives. What it is not is gradable as a
+  // kill: there is no inventory for the killer to resolve against, so the
+  // resolution rule cannot run and the kill is held under its own basis rather
+  // than quietly falling back to the weaker pre-resolution non-empty rule.
+  it("holds a kill in a report with no test table under its own basis", () => {
+    const [observation] = readObservations(
+      { files: report(["0"]).files },
+      { baselineComplete: true }
+    )
+
+    expect(observation.knownTestIds.size).toBe(0)
+    expect(projectOutcome(observation)).toMatchObject({
+      outcome: "inconclusive",
+      basis: "killed_without_resolvable_test_table",
     })
   })
 })

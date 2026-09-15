@@ -43,6 +43,7 @@
     // have. Regenerate with `npm run derive:connector-sources` rather than
     // editing by hand.
     "../polyfill-connectors/src/artifact-capture-env.ts",
+    "../polyfill-connectors/src/artifact-capture.ts",
     "../polyfill-connectors/src/bounded-file-preview.ts",
     "../polyfill-connectors/src/browser-handoff.ts",
     "../polyfill-connectors/src/browser-launch.ts",

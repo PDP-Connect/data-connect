@@ -141,11 +141,26 @@ export function extractRolloutUuidFromFilename(name: string): string | null {
 
 // ─── Session record builders ────────────────────────────────────────────
 
+/**
+ * What durable state knows about a session's captured body, for a run that
+ * built no fresh aggregate for it.
+ *
+ * Supplied by the caller from the cursor this run is about to persist, which
+ * only ever carries a `captured_sha256` describing the CURRENT file generation
+ * (every path that writes one has just proved size and mtime match, or has just
+ * captured the bytes itself). This type is the reconciliation input, not a
+ * second place to re-derive that rule.
+ */
+export interface SessionCaptureState {
+	sha256: string;
+}
+
 export function buildThreadSessionRecord(
 	id: string,
 	t: ThreadRow,
 	agg: RolloutAggregate | undefined,
 	priorFingerprint?: ThreadFingerprint | null,
+	durableCapture?: SessionCaptureState | undefined,
 ): Record<string, unknown> {
 	// Counts source-of-truth precedence:
 	//   1. Aggregate from THIS run's rollout parse (most accurate).
@@ -180,12 +195,49 @@ export function buildThreadSessionRecord(
 		sandbox_policy: t.sandbox_policy || null,
 		approval_mode: t.approval_mode || null,
 		rollout_path: t.rollout_path || agg?.rolloutPath || null,
+		...artifactCaptureFields(agg, durableCapture),
 	};
+}
+
+/**
+ * The capture fields a session record carries.
+ *
+ * Precedence mirrors the counts above: this run's own capture outcome first,
+ * then what durable state still vouches for. The second source is what keeps a
+ * metadata-only re-emit from ERASING the body reference — the server upserts
+ * `record_json = excluded.record_json`, so a record rebuilt without these
+ * fields does not merely omit them, it drops the digest off the stored row.
+ *
+ * Omitted entirely (rather than written as nulls) when neither source has an
+ * answer — a run that never examined the file and holds no durable digest must
+ * not assert anything about its body, and the schema's `.optional()` is what
+ * makes that legal. A failed or unavailable capture this run is reported as
+ * itself and never papered over with a durable digest, since the digest would
+ * describe bytes this run could not confirm it still holds.
+ */
+function artifactCaptureFields(
+	agg: RolloutAggregate | undefined,
+	durableCapture?: SessionCaptureState | undefined,
+): Record<string, unknown> {
+	if (agg?.artifactCapture) {
+		return {
+			artifact_capture: agg.artifactCapture,
+			artifact_sha256: agg.artifactSha256 ?? null,
+		};
+	}
+	if (durableCapture) {
+		return {
+			artifact_capture: "captured",
+			artifact_sha256: durableCapture.sha256,
+		};
+	}
+	return {};
 }
 
 export function buildRolloutOnlySessionRecord(
 	id: string,
 	agg: RolloutAggregate,
+	durableCapture?: SessionCaptureState | undefined,
 ): Record<string, unknown> {
 	const meta = agg.meta || {};
 	return {
@@ -208,6 +260,7 @@ export function buildRolloutOnlySessionRecord(
 		sandbox_policy: null,
 		approval_mode: null,
 		rollout_path: agg.rolloutPath || null,
+		...artifactCaptureFields(agg, durableCapture),
 	};
 }
 

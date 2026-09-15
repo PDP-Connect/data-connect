@@ -35,6 +35,12 @@ import { createInterface as createFileReader } from "node:readline";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
+import {
+	type ArtifactCaptureContext,
+	ArtifactCaptureLedger,
+	captureFileArtifact,
+	openArtifactCapture,
+} from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
 import {
 	type EnumerationScope,
@@ -65,12 +71,6 @@ import {
 	listDirectoryInventory,
 	openInventoryFingerprintCursor,
 } from "../../src/local-source-inventory.ts";
-import {
-	type ArtifactCaptureContext,
-	ArtifactCaptureLedger,
-	captureFileArtifact,
-	openArtifactCapture,
-} from "./artifact-capture.ts";
 import {
 	ATTACHMENT_PREVIEW_CHARS,
 	applyProjectDirScope,
