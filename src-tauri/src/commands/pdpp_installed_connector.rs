@@ -278,7 +278,7 @@ fn prepare_run(
     request: &mut StartInstalledPdppConnectorRequest,
 ) -> Result<PreparedPdppRun, String> {
     let import = claim_request_import(request)?;
-    validate_request(request)?;
+    validate_request_metadata(request)?;
     let control = register_run(
         &request.run_id,
         &request.connector_id,
@@ -329,12 +329,13 @@ fn start_installed_pdpp_connector_run_impl(
     control: PdppRunControl,
     import: Option<super::pdpp_manual_import::ImportedDirectory>,
 ) -> Result<InstalledPdppRunCompletion, String> {
-    validate_request(&request)?;
+    validate_request_metadata(&request)?;
     let resource_dir = app.path().resource_dir().ok();
     let runtime_root = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
     let (resolved, _import) = resolve_connector_for_run(&request, import, || {
         resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)
     })?;
+    validate_request(&request, &resolved.manifest)?;
     let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
     let setup_complete = browser_setup_complete(&resolved, request.connection_id())?;
     let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
@@ -451,8 +452,7 @@ fn run_resolved_installed_pdpp_connector_with_state(
     resource_dir: Option<PathBuf>,
     runtime_root: PathBuf,
 ) -> Result<PdppRunResult, String> {
-    validate_request(request)?;
-    validate_requested_streams(request, &resolved.manifest)?;
+    validate_request(request, &resolved.manifest)?;
     let browser_lease = if requires_browser(&resolved.manifest) {
         let owner_id = request.connection_id.as_deref().filter(|owner| !owner.is_empty()).ok_or(
             "PDPP browser connector requires an explicit connectionId owner; the default owner is not permitted",
@@ -726,7 +726,26 @@ pub fn cleanup_installed_pdpp_connector_runs() {
     log::warn!("Timed out waiting for installed PDPP connector runs to stop");
 }
 
-fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
+fn validate_request(
+    request: &StartInstalledPdppConnectorRequest,
+    manifest: &PdppConnectorManifest,
+) -> Result<(), String> {
+    validate_request_metadata(request)?;
+    for stream in &request.streams {
+        if !manifest
+            .streams
+            .iter()
+            .any(|declared| &declared.name == stream)
+        {
+            return Err(format!(
+                "Requested PDPP stream {stream} is not in the connector manifest"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_metadata(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
     validate_run_id(&request.run_id)?;
     if !matches!(
         request.collection_mode.as_str(),
@@ -878,6 +897,7 @@ fn resolve_installed_pdpp_connector_with_runtime(
     })
 }
 
+// Discovery shares execution admission, including confined artifact hashes.
 pub(crate) fn read_admitted_pdpp_manifest(
     install: &ActiveConnectorInstall,
 ) -> Result<String, String> {
@@ -1118,7 +1138,7 @@ fn build_start(
     manifest: &PdppConnectorManifest,
     state: Option<Value>,
 ) -> Result<PdppStart, String> {
-    validate_requested_streams(request, manifest)?;
+    validate_request(request, manifest)?;
     let selected = selected_streams(request, manifest);
     let scope = json!({
         "streams": selected.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>()
@@ -1659,7 +1679,7 @@ fn build_export_data(
     collection_state: &PdppCollectionConnectionState,
     snapshot_reset_streams: &[String],
 ) -> Result<Value, String> {
-    validate_requested_streams(request, &resolved.manifest)?;
+    validate_request(request, &resolved.manifest)?;
     let connector_key = resolved
         .manifest
         .connector_key
@@ -1694,35 +1714,35 @@ fn build_export_data(
             );
             continue;
         }
-        let projection = match (connector_key, stream.as_str()) {
-            // The Personal Server's existing GitHub schemas deliberately use
-            // these shapes. This is a DataConnect storage projection, not a
-            // claim that the PDPP connector only supports three streams.
-            (GITHUB_CONNECTOR_KEY, "user") if !records.is_empty() => {
-                Some(("github.profile", project_github_profile(&records)?))
-            }
-            (GITHUB_CONNECTOR_KEY, "repositories") => Some((
-                "github.repositories",
-                project_github_repositories(&records)?,
-            )),
-            (GITHUB_CONNECTOR_KEY, "starred") => {
-                Some(("github.starred", project_github_starred(&records)?))
-            }
-            // Fixture contract: the ChatGPT Collection Profile emits one
-            // PDPP record per conversation. Preserve each record's data as
-            // supplied; schema-specific normalization belongs upstream.
-            (CHATGPT_CONNECTOR_KEY, "conversations") => Some((
-                "chatgpt.conversations",
-                json!({ "conversations": records.iter().map(|record| record.data.clone()).collect::<Vec<_>>() }),
-            )),
-            _ => None,
+        let scope = pdpp_stream_to_dataconnect_scope(connector_key, connector_id, stream);
+        let value = match scope.as_str() {
+            // Preserve the Personal Server's existing curated GitHub shapes.
+            "github.profile" if !records.is_empty() => project_github_profile(&records)?,
+            "github.profile" => continue,
+            "github.repositories" => project_github_repositories(&records)?,
+            "github.starred" => project_github_starred(&records)?,
+            // ChatGPT and namespaced streams preserve record data in a stream wrapper.
+            _ => json!({
+                stream: records.iter().map(|record| record.data.clone()).collect::<Vec<_>>()
+            }),
         };
-        if let Some((scope, value)) = projection {
-            projected_scopes.insert(scope.to_owned(), value);
-        }
+        projected_scopes.insert(scope, value);
     }
 
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let projection_kind = if projected_scopes
+        .keys()
+        .any(|scope| scope.starts_with("github."))
+    {
+        "github-v1"
+    } else if projected_scopes
+        .keys()
+        .any(|scope| scope.starts_with("chatgpt."))
+    {
+        "chatgpt-fixture-v1"
+    } else {
+        "manifest-namespaced-v1"
+    };
     let requested_scopes = projected_scopes.keys().cloned().collect::<Vec<_>>();
     let mut export = projected_scopes;
     // This is not a serving scope (see METADATA_KEYS in
@@ -1786,13 +1806,45 @@ fn build_export_data(
             "count": record_count,
             "label": format!("{record_count} {connector_key} records exported"),
             "details": {
-                "pdppStorageProjection": if is_manual_upload_connector(&resolved.manifest) { "manifest-generic-v1" } else if connector_key == GITHUB_CONNECTOR_KEY { "github-v1" } else { "chatgpt-fixture-v1" },
+                "pdppStorageProjection": projection_kind,
                 "pdppStreamRecords": stream_counts,
             }
         }),
     );
     export.insert("errors".into(), json!([]));
     Ok(Value::Object(export))
+}
+
+/// Generic streams use pdpp.<connector_key>.<stream>, outside curated scopes.
+/// Only the established registry identities retain the three GitHub and six
+/// ChatGPT scope names. This compatibility mapping never controls admission.
+pub(crate) fn pdpp_stream_to_dataconnect_scope(
+    connector_key: &str,
+    connector_identity: &str,
+    stream: &str,
+) -> String {
+    let curated_identity = ["org", "dev"].iter().any(|domain| {
+        connector_identity == format!("https://registry.pdpp.{domain}/connectors/{connector_key}")
+    });
+    if curated_identity {
+        match (connector_key, stream) {
+            ("github", "user") => return "github.profile".into(),
+            ("github", "repositories" | "starred")
+            | (
+                "chatgpt",
+                "conversations"
+                | "messages"
+                | "memories"
+                | "custom_gpts"
+                | "custom_instructions"
+                | "shared_conversations",
+            ) => {
+                return format!("{connector_key}.{stream}");
+            }
+            _ => {}
+        }
+    }
+    format!("pdpp.{connector_key}.{stream}")
 }
 
 /// An authoritative full refresh must carry an explicit, empty stream entry
@@ -3597,17 +3649,17 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     fn validates_request_bounds_before_spawning() {
         let mut request = request_with_token("token");
         request.run_id = "bad run id".into();
-        assert!(validate_request(&request).unwrap_err().contains("runId"));
+        assert!(validate_request_metadata(&request).unwrap_err().contains("runId"));
 
         let mut request = request_with_token("token");
         request.collection_mode = "streaming".into();
-        assert!(validate_request(&request)
+        assert!(validate_request_metadata(&request)
             .unwrap_err()
             .contains("collectionMode"));
 
         let mut request = request_with_token("token");
         request.timeout_seconds = Some(MAX_TIMEOUT_SECONDS + 1);
-        assert!(validate_request(&request)
+        assert!(validate_request_metadata(&request)
             .unwrap_err()
             .contains("timeoutSeconds"));
     }
@@ -3864,7 +3916,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let export = build_export_data(&resolved, &request, &collection_state, &[]).unwrap();
         assert_eq!(
             export["requestedScopes"],
-            json!(["github.profile", "github.repositories", "github.starred"])
+            json!(["github.profile", "github.repositories", "github.starred", "pdpp.github.gists", "pdpp.github.issues", "pdpp.github.pull_requests", "pdpp.github.user_stats"])
         );
         assert_eq!(
             export["github.profile"],

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use super::connector_store::{
     get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
 };
+use super::pdpp_installed_connector::pdpp_stream_to_dataconnect_scope;
 
 // Chromium download constants
 const CHROMIUM_REVISION: &str = "1200";
@@ -107,6 +108,7 @@ pub struct Platform {
 
 #[derive(Debug, Deserialize)]
 struct ActivePdppPlatformManifest {
+    connector_id: String,
     connector_key: Option<String>,
     display_name: Option<String>,
     name: Option<String>,
@@ -575,6 +577,7 @@ pub(super) fn load_pdpp_platforms(
             .is_some_and(|setup| setup.modality == "manual_or_upload");
         let scopes = pdpp_streams_to_dataconnect_scopes(
             &connector_key,
+            &manifest.connector_id,
             &manifest.streams,
             manual_upload,
         );
@@ -611,35 +614,19 @@ pub(super) fn load_pdpp_platforms(
 
 fn pdpp_streams_to_dataconnect_scopes(
     connector_key: &str,
+    connector_identity: &str,
     streams: &[ActivePdppStream],
     include_generic_streams: bool,
 ) -> Vec<String> {
     let mut scopes = Vec::new();
     for stream in streams {
         let scope = if include_generic_streams {
-            Some(format!("pdpp.manual.{connector_key}.{}", stream.name))
+            format!("pdpp.manual.{connector_key}.{}", stream.name)
         } else {
-            match (connector_key, stream.name.as_str()) {
-                ("github", "user") => Some("github.profile".to_owned()),
-                ("github", "repositories") => Some("github.repositories".to_owned()),
-                ("github", "starred") => Some("github.starred".to_owned()),
-                ("chatgpt", "conversations") => Some("chatgpt.conversations".to_owned()),
-                ("chatgpt", "messages") => Some("chatgpt.messages".to_owned()),
-                ("chatgpt", "memories") => Some("chatgpt.memories".to_owned()),
-                ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts".to_owned()),
-                ("chatgpt", "custom_instructions") => {
-                    Some("chatgpt.custom_instructions".to_owned())
-                }
-                ("chatgpt", "shared_conversations") => {
-                    Some("chatgpt.shared_conversations".to_owned())
-                }
-                _ => None,
-            }
+            pdpp_stream_to_dataconnect_scope(connector_key, connector_identity, &stream.name)
         };
-        if let Some(scope) = scope {
-            if !scopes.contains(&scope) {
-                scopes.push(scope);
-            }
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
         }
     }
     scopes
@@ -2900,7 +2887,12 @@ mod tests {
                 name: stream.into(),
             }];
             assert_eq!(
-                pdpp_streams_to_dataconnect_scopes(key, &streams, true),
+                pdpp_streams_to_dataconnect_scopes(
+                    key,
+                    &format!("https://registry.pdpp.org/connectors/{key}"),
+                    &streams,
+                    true,
+                ),
                 vec![format!("pdpp.manual.{key}.{stream}")]
             );
         }
