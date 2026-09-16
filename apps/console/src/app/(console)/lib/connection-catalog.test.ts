@@ -159,6 +159,33 @@ function ownerTemplate(
   };
 }
 
+test("owner catalog joins staged URI identities through explicit manifest keys", () => {
+  const catalog = buildOwnerConnectorCatalog(
+    [
+      {
+        connector_id: "https://registry.pdpp.dev/connectors/package-slug",
+        connector_key: "owner-key",
+        display_name: "Manifest display name",
+        external_docs: [{ label: "Provider docs", url: "https://provider.example/docs" }],
+      },
+    ],
+    [
+      {
+        ...ownerTemplate({ connectorKey: "owner-key" }),
+        connector_id: "https://registry.pdpp.dev/connectors/package-slug",
+        connector_key: null,
+        display_name: null,
+      },
+    ]
+  );
+
+  const entry = catalog[0];
+  assert.ok(entry);
+  assert.equal(entry.connectorKey, "owner-key");
+  assert.equal(entry.displayName, "Manifest display name");
+  assert.deepEqual(entry.externalDocs, [{ label: "Provider docs", url: "https://provider.example/docs" }]);
+});
+
 test("catalogModalityFromManifest mirrors the filesystem>browser>network precedence", () => {
   assert.equal(catalogModalityFromManifest({ connector_id: "x", runtime_requirements: { bindings: {} } }), "unknown");
   assert.equal(

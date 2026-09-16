@@ -1,9 +1,12 @@
+"use client";
+
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
+import { useSyncExternalStore } from "react";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 import { connectorInstallRowModel } from "../lib/connector-install-presentation.ts";
@@ -19,7 +22,59 @@ import {
   sourceSetupStatus,
 } from "../lib/source-setup-presentation.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
+import {
+  SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY,
+  filterCatalogForDevelopmentVisibility,
+  persistShowDevelopmentConnectors,
+  readShowDevelopmentConnectors,
+  type DevelopmentConnectorStorage,
+} from "../lib/source-setup-development.ts";
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
+
+function browserStorage(): DevelopmentConnectorStorage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+const developmentVisibilityListeners = new Set<() => void>();
+let developmentVisibilitySnapshot: boolean | undefined;
+
+function subscribeToDevelopmentVisibility(onChange: () => void): () => void {
+  developmentVisibilityListeners.add(onChange);
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key === SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY) {
+      developmentVisibilitySnapshot = undefined;
+      onChange();
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    developmentVisibilityListeners.delete(onChange);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function getDevelopmentVisibilitySnapshot(): boolean {
+  if (developmentVisibilitySnapshot === undefined) {
+    const storage = browserStorage();
+    developmentVisibilitySnapshot = storage ? readShowDevelopmentConnectors(storage) : false;
+  }
+  return developmentVisibilitySnapshot;
+}
+
+function setDevelopmentVisibility(show: boolean): void {
+  const storage = browserStorage();
+  if (storage) {
+    persistShowDevelopmentConnectors(storage, show);
+  }
+  developmentVisibilitySnapshot = show;
+  for (const listener of developmentVisibilityListeners) {
+    listener();
+  }
+}
 
 export interface ExistingSourceSetupLink {
   connectionId: string;
@@ -472,7 +527,13 @@ export function SourceSetupCatalog({
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   query: string;
 }) {
-  const filtered = filterSourceCatalog(catalog, query);
+  const showDevelopmentConnectors = useSyncExternalStore(
+    subscribeToDevelopmentVisibility,
+    getDevelopmentVisibilitySnapshot,
+    () => false,
+  );
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, showDevelopmentConnectors);
+  const filtered = filterSourceCatalog(visibleCatalog, query);
   const available = filtered.filter((entry) => entry.publicTier === "supported" && isRunnableAddOffer(entry));
   const experimental = filtered.filter((entry) => entry.publicTier === "preview" && isRunnableAddOffer(entry));
   // Every Development-tier entry belongs here -- real-but-unproven and known
@@ -487,6 +548,25 @@ export function SourceSetupCatalog({
   const anyMatch = actionable.length > 0 || development.length > 0;
   return (
     <Section description="Add sources this dashboard can set up now." title="Add data">
+      <div
+        className="mb-4 rounded-md border border-border/70 bg-muted/20 p-3"
+        data-testid="show-development-connectors-control"
+      >
+        <label className="pdpp-caption flex items-center gap-2 font-medium text-foreground">
+          <input
+            checked={showDevelopmentConnectors}
+            onChange={(event) => {
+              const show = event.currentTarget.checked;
+              setDevelopmentVisibility(show);
+            }}
+            type="checkbox"
+          />
+          Show development connectors
+        </label>
+        <p className="pdpp-caption mt-1 text-muted-foreground">
+          Include registered connectors that are not proven against a live account yet.
+        </p>
+      </div>
       <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label className="sr-only" htmlFor="source_q">
           Search data sources

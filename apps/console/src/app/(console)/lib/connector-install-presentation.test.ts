@@ -60,6 +60,31 @@ test("lifecycle join selects the latest target and matches installed status by s
   assert.equal(githubLifecycle.installed?.version, "1.0.0");
 });
 
+test("lifecycle join uses connector_key when catalog and status ids are registry URIs", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const status = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  const latest = catalog.find((candidate) => candidate.connector_id === "github" && candidate.latest);
+  const installed = status.find((candidate) => candidate.connector_id === "github");
+  assert.ok(latest);
+  assert.ok(installed);
+
+  const registryId = "https://registry.pdpp.dev/connectors/package-slug";
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [
+      {
+        ...latest,
+        catalog_connector_id: registryId,
+        connector_id: registryId,
+        connector_key: "owner-key",
+      },
+    ],
+    [{ ...installed, connector_id: registryId }]
+  );
+
+  assert.equal(lifecycle["owner-key"]?.catalog?.version, "1.1.0");
+  assert.equal(lifecycle["owner-key"]?.installed?.version, "1.0.0");
+});
+
 test("not-installed latest package exposes Install with the explicit target digest", () => {
   const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
   const github = connectorInstallRowModel(entry("github"), {
