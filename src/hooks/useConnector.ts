@@ -84,6 +84,11 @@ export function isAuthenticationFailure(error: unknown): boolean {
   if (errorClass === "auth_failed") return true
 
   const normalized = getErrorMessage(error).toLowerCase()
+  // A throttled request also answers 403/429 ("secondary rate limit"); the
+  // credential is fine and must not be evicted.
+  if (/\brate[\s_-]*limit|\bretry[\s_-]*after\b|\b429\b/.test(normalized)) {
+    return false
+  }
   return (
     /\b(?:401|403)\b/.test(normalized) ||
     /\bunauthori[sz]ed\b/.test(normalized) ||

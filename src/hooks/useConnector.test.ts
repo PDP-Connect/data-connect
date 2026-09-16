@@ -108,6 +108,18 @@ describe("useConnector.startImport", () => {
       error: new Error("Network request failed"),
       expected: false,
     },
+    {
+      label: "a secondary rate limit 403",
+      error: new Error(
+        'github_http_403: {"message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}'
+      ),
+      expected: false,
+    },
+    {
+      label: "a 429 with retry-after",
+      error: new Error("host returned 429 Too Many Requests (retry-after: 60)"),
+      expected: false,
+    },
   ])(
     "classifies $label as authentication failure: $expected",
     async ({ error, expected }) => {
