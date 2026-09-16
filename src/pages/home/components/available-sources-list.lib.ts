@@ -41,6 +41,7 @@ interface BuildAvailableCardsInput {
   connectorUpdates?: ConnectorUpdateInfo[]
   onInstall?: (id: string) => void
   isInstalling?: (id: string) => boolean
+  isApplying?: (id: string) => boolean
   downloadErrors?: Record<string, string>
   /** Retained by the component so an installed card keeps its grid position. */
   sourceOrder?: Map<string, number>
@@ -107,10 +108,12 @@ function sourceLabel(
   action: Exclude<AvailableSourceCardAction, "comingSoon">,
   displayName: string,
   platform: Platform | undefined,
-  collectionProfileAvailable: boolean
+  collectionProfileAvailable: boolean,
+  isApplying = false
 ) {
-  const actionLabel =
-    action === "install"
+  const actionLabel = isApplying
+    ? "Applying…"
+    : action === "install"
       ? "Install"
       : action === "update"
         ? "Update"
@@ -144,10 +147,7 @@ export function getPlatformSourceLabel(platform: Platform) {
     displayName,
     platform,
     hasCollectionProfileVariant(entry)
-  ).replace(
-    /^Connect /,
-    ""
-  )
+  ).replace(/^Connect /, "")
 }
 
 export function buildAvailableCards({
@@ -158,6 +158,7 @@ export function buildAvailableCards({
   connectorUpdates = [],
   onInstall,
   isInstalling = () => false,
+  isApplying = () => false,
   downloadErrors = {},
   sourceOrder,
 }: BuildAvailableCardsInput): AvailableSourceCard[] {
@@ -211,6 +212,7 @@ export function buildAvailableCards({
     const displayName = entry?.displayName ?? update.name
     const isUnavailable = action === "unavailable"
     const isCurrentlyInstalling = isInstalling(update.id)
+    const isCurrentlyApplying = isApplying(update.id)
     const reason =
       update.unavailableReason ??
       "This device does not provide the required capability"
@@ -223,7 +225,8 @@ export function buildAvailableCards({
         action,
         displayName,
         platform,
-        hasCollectionProfileVariant(entry, update)
+        hasCollectionProfileVariant(entry, update),
+        isCurrentlyApplying
       ),
       action,
       tier: getTier(update.tier),
@@ -231,11 +234,14 @@ export function buildAvailableCards({
         ? `Not available on this device · ${reason}`
         : undefined,
       actionError: downloadErrors[update.id] || undefined,
-      isInstalling: isCurrentlyInstalling,
+      isInstalling: isCurrentlyInstalling || isCurrentlyApplying,
       isAvailable: !isUnavailable && update.runnable,
       isConnecting: false,
       onClick:
-        isUnavailable || isCurrentlyInstalling || !onInstall
+        isUnavailable ||
+        isCurrentlyInstalling ||
+        isCurrentlyApplying ||
+        !onInstall
           ? undefined
           : () => onInstall(update.id),
       index: rememberOrder(sourceKey, index),
@@ -285,6 +291,9 @@ export function buildAvailableCards({
     const availability: CardAvailability = entry?.availability ?? "unknown"
     const isCardAvailable = availability !== "comingSoon"
     const isUpdating = Boolean(update && !update.isNew && update.hasUpdate)
+    const isCurrentlyApplying =
+      isApplying(platform.id) || (update ? isApplying(update.id) : false)
+    const isCurrentlyInstalling = update ? isInstalling(update.id) : false
     const cardAction: Exclude<
       AvailableSourceCardAction,
       "install" | "unavailable" | "comingSoon"
@@ -299,18 +308,19 @@ export function buildAvailableCards({
         cardAction,
         displayName,
         platform,
-        hasCollectionProfileVariant(entry, update)
+        hasCollectionProfileVariant(entry, update),
+        isCurrentlyApplying
       ),
       action: cardAction,
       tier: update ? getTier(update.tier) : undefined,
       actionError: update ? downloadErrors[update.id] || undefined : undefined,
-      isInstalling: update ? isInstalling(update.id) : false,
+      isInstalling: isCurrentlyInstalling || isCurrentlyApplying,
       isAvailable: isCardAvailable,
       isConnecting,
       connectingStatusMessage: connectingRun?.statusMessage,
       connectingRun,
       onClick:
-        update && isInstalling(update.id)
+        isCurrentlyInstalling || isCurrentlyApplying
           ? undefined
           : isUpdating && onInstall && update
             ? () => onInstall(update.id)

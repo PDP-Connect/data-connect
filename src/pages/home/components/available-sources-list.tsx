@@ -1,7 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowUpRight } from "lucide-react"
+import { useDispatch, useSelector } from "react-redux"
 import {
   ActionButton,
   ActionPanel,
@@ -22,6 +23,11 @@ import { buildRunningImportExpectationLine } from "./available-sources-estimator
 import { useConnectorUpdates } from "@/hooks/useConnectorUpdates"
 import { usePersonalServer } from "@/hooks/usePersonalServer"
 import { useShowDevelopmentConnectors } from "@/hooks/use-show-development-connectors"
+import {
+  clearConnectorChangePending,
+  markConnectorChangePending,
+} from "@/state/store"
+import type { RootState } from "@/state/store"
 import {
   getConnectingAccountLine,
   getConnectingStatusLine,
@@ -47,11 +53,18 @@ export function AvailableSourcesList({
   onReloadPlatforms,
   className,
 }: AvailableSourcesListProps) {
+  const dispatch = useDispatch()
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null)
   const [isApplyingConnectorChange, setIsApplyingConnectorChange] =
     useState(false)
+  const [localPendingConnectorChanges, setLocalPendingConnectorChanges] =
+    useState<Set<string>>(() => new Set())
+  const applyInFlightRef = useRef(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [sourceOrder] = useState(() => new Map<string, number>())
+  const pendingConnectorChanges = useSelector(
+    (state: RootState) => state.app.pendingConnectorChanges ?? []
+  )
   const {
     updates,
     isCheckingUpdates,
@@ -81,6 +94,16 @@ export function AvailableSourcesList({
   const hasBlockingRun = useMemo(() => {
     return runs.some(run => isBlockingRun(run))
   }, [runs])
+  const hasActiveRuns = useMemo(
+    () =>
+      runs.some(run => run.status === "running" || run.status === "pending"),
+    [runs]
+  )
+  const pendingConnectorIds = useMemo(
+    () =>
+      new Set([...pendingConnectorChanges, ...localPendingConnectorChanges]),
+    [localPendingConnectorChanges, pendingConnectorChanges]
+  )
 
   const visibleUpdates = useMemo(
     () =>
@@ -90,23 +113,73 @@ export function AvailableSourcesList({
     [showDevelopmentConnectors, updates]
   )
 
+  const markPending = useCallback(
+    (id: string) => {
+      setLocalPendingConnectorChanges(current => {
+        if (current.has(id)) return current
+        const next = new Set(current)
+        next.add(id)
+        return next
+      })
+      dispatch(markConnectorChangePending(id))
+    },
+    [dispatch]
+  )
+
+  const clearPending = useCallback(
+    (ids: string[]) => {
+      setLocalPendingConnectorChanges(current => {
+        const next = new Set(current)
+        ids.forEach(id => next.delete(id))
+        return next
+      })
+      ids.forEach(id => dispatch(clearConnectorChangePending(id)))
+    },
+    [dispatch]
+  )
+
+  const applyPendingConnectorChanges = useCallback(async () => {
+    if (
+      applyInFlightRef.current ||
+      hasActiveRuns ||
+      pendingConnectorIds.size === 0
+    ) {
+      return
+    }
+
+    applyInFlightRef.current = true
+    const idsToApply = [...pendingConnectorIds]
+    setIsApplyingConnectorChange(true)
+    try {
+      if (personalServerStatus === "running") {
+        await restartServer()
+      }
+      await onReloadPlatforms?.()
+    } finally {
+      clearPending(idsToApply)
+      applyInFlightRef.current = false
+      setIsApplyingConnectorChange(false)
+    }
+  }, [
+    clearPending,
+    hasActiveRuns,
+    onReloadPlatforms,
+    pendingConnectorIds,
+    personalServerStatus,
+    restartServer,
+  ])
+
   const installConnector = useCallback(
     async (id: string) => {
       const installed = await downloadConnector(id)
-      if (!installed) return
-
-      setIsApplyingConnectorChange(true)
-      try {
-        if (personalServerStatus === "running") {
-          await restartServer()
-        }
-        await onReloadPlatforms?.()
-      } finally {
-        setIsApplyingConnectorChange(false)
-      }
+      if (installed) markPending(id)
     },
-    [downloadConnector, onReloadPlatforms, personalServerStatus, restartServer]
+    [downloadConnector, markPending]
   )
+
+  useEffect(() => {
+    void applyPendingConnectorChanges()
+  }, [applyPendingConnectorChanges])
 
   useEffect(() => {
     const hasRunning = runs.some(run => run.status === "running")
@@ -132,7 +205,8 @@ export function AvailableSourcesList({
         onInstall: id => {
           void installConnector(id)
         },
-        isInstalling: isDownloading,
+        isInstalling: id => isDownloading(id) || pendingConnectorIds.has(id),
+        isApplying: id => pendingConnectorIds.has(id),
         downloadErrors,
         sourceOrder,
       }),
@@ -145,6 +219,7 @@ export function AvailableSourcesList({
       onExport,
       platforms,
       sourceOrder,
+      pendingConnectorIds,
       visibleUpdates,
     ]
   )
@@ -192,6 +267,10 @@ export function AvailableSourcesList({
       {isApplyingConnectorChange ? (
         <Text as="p" intent="fine" muted>
           Applying connector change…
+        </Text>
+      ) : pendingConnectorIds.size > 0 && hasActiveRuns ? (
+        <Text as="p" intent="fine" muted>
+          Will apply after the current import finishes
         </Text>
       ) : null}
       {updatesError ? <UpdateError message={updatesError} /> : null}

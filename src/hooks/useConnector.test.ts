@@ -7,6 +7,7 @@ import type { Platform } from "../types"
 const mockInvoke = vi.fn()
 const mockDispatch = vi.fn()
 let currentRuns: Array<Record<string, unknown>> = []
+let currentPendingConnectorChanges: string[] = []
 
 const startRun = vi.fn(payload => ({ type: "startRun", payload }))
 const updateRunStatus = vi.fn(payload => ({ type: "updateRunStatus", payload }))
@@ -20,7 +21,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("react-redux", () => ({
   useDispatch: () => mockDispatch,
   useSelector: (selector: (state: unknown) => unknown) =>
-    selector({ app: { runs: currentRuns } }),
+    selector({
+      app: {
+        runs: currentRuns,
+        pendingConnectorChanges: currentPendingConnectorChanges,
+      },
+    }),
 }))
 
 vi.mock("../state/store", () => ({
@@ -52,6 +58,7 @@ describe("useConnector.startImport", () => {
     mockInvoke.mockReset()
     mockDispatch.mockReset()
     currentRuns = []
+    currentPendingConnectorChanges = []
     startRun.mockClear()
     updateRunStatus.mockClear()
     stopRun.mockClear()
@@ -78,6 +85,21 @@ describe("useConnector.startImport", () => {
     )
     expect(deleteRun).toHaveBeenCalledWith("chatgpt-1700000000000")
     expect(updateRunStatus).not.toHaveBeenCalled()
+  })
+
+  it("blocks a new run while its connector change is pending", async () => {
+    currentPendingConnectorChanges = ["chatgpt"]
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    let returnedRunId: string | null | undefined
+    await act(async () => {
+      returnedRunId = await result.current.startImport(TEST_PLATFORM)
+    })
+
+    expect(returnedRunId).toBeNull()
+    expect(startRun).not.toHaveBeenCalled()
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 
   it("marks run as error for non-duplicate start failures", async () => {

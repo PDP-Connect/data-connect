@@ -20,12 +20,22 @@ const personalServerState = vi.hoisted(() => ({
   restartServer: vi.fn().mockResolvedValue(true),
 }))
 
+const reduxState = vi.hoisted(() => ({
+  pendingConnectorChanges: [] as string[],
+}))
+
 vi.mock("@/hooks/useConnectorUpdates", () => ({
   useConnectorUpdates: () => updateState,
 }))
 
 vi.mock("@/hooks/usePersonalServer", () => ({
   usePersonalServer: () => personalServerState,
+}))
+
+vi.mock("react-redux", () => ({
+  useDispatch: () => vi.fn(),
+  useSelector: (selector: (state: unknown) => unknown) =>
+    selector({ app: reduxState }),
 }))
 
 vi.mock("@/hooks/use-show-development-connectors", () => ({
@@ -58,6 +68,21 @@ function makeUpdate(
   }
 }
 
+function makeRun(overrides: Partial<Run> = {}): Run {
+  return {
+    id: "run-1",
+    platformId: "other-source",
+    filename: "other-source",
+    company: "Other",
+    name: "Other source",
+    startDate: new Date(0).toISOString(),
+    status: "running",
+    url: "",
+    isConnected: true,
+    ...overrides,
+  }
+}
+
 const emptyProps = {
   platforms: [] as Platform[],
   runs: [] as Run[],
@@ -72,6 +97,7 @@ afterEach(() => {
   updateState.downloadConnector.mockClear()
   updateState.checkForUpdates.mockClear()
   personalServerState.restartServer.mockClear()
+  reduxState.pendingConnectorChanges = []
 })
 
 describe("AvailableSourcesList catalog states", () => {
@@ -127,6 +153,95 @@ describe("AvailableSourcesList catalog states", () => {
       expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
       expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
       expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it.each(["running", "pending"] as const)(
+    "defers the serving restart while a %s import is active",
+    async status => {
+      updateState.updates = [makeUpdate("New source")]
+
+      render(
+        <AvailableSourcesList {...emptyProps} runs={[makeRun({ status })]} />
+      )
+
+      screen.getByRole("button", { name: /Install New source/i }).click()
+
+      await waitFor(() => {
+        expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
+      })
+
+      expect(personalServerState.restartServer).not.toHaveBeenCalled()
+      expect(
+        screen.getByText("Will apply after the current import finishes")
+      ).toBeTruthy()
+      expect(
+        screen.getByRole("button", { name: /Applying… New source/i })
+      ).toHaveProperty("disabled", true)
+    }
+  )
+
+  it("restarts and reloads platforms after the last active import ends", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    const onReloadPlatforms = vi.fn()
+    const { rerender } = render(
+      <AvailableSourcesList
+        {...emptyProps}
+        runs={[makeRun({ status: "running" })]}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Install New source/i }).click()
+    await waitFor(() => {
+      expect(
+        screen.getByText("Will apply after the current import finishes")
+      ).toBeTruthy()
+    })
+
+    rerender(
+      <AvailableSourcesList
+        {...emptyProps}
+        runs={[makeRun({ status: "success" })]}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    await waitFor(() => {
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+      expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("does not restart twice when the terminal run state rerenders", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    const onReloadPlatforms = vi.fn()
+    const { rerender } = render(
+      <AvailableSourcesList
+        {...emptyProps}
+        runs={[makeRun()]}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Install New source/i }).click()
+    await waitFor(() => {
+      expect(
+        screen.getByText("Will apply after the current import finishes")
+      ).toBeTruthy()
+    })
+
+    const terminalProps = {
+      ...emptyProps,
+      runs: [makeRun({ status: "partial" })],
+      onReloadPlatforms,
+    }
+    rerender(<AvailableSourcesList {...terminalProps} />)
+    rerender(<AvailableSourcesList {...terminalProps} />)
+
+    await waitFor(() => {
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+      expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
     })
   })
 

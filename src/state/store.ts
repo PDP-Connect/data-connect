@@ -30,6 +30,7 @@ const initialState: AppState = {
   isRunLayerVisible: false,
   breadcrumb: [{ text: 'Home', link: '/' }],
   runs: [],
+  pendingConnectorChanges: [],
   platforms: [],
   connectedPlatforms: {},
   connectorUpdates: [],
@@ -79,6 +80,16 @@ const appSlice = createSlice({
     },
     startRun(state, action: PayloadAction<Run>) {
       state.runs.push(action.payload);
+    },
+    markConnectorChangePending(state, action: PayloadAction<string>) {
+      if (!state.pendingConnectorChanges.includes(action.payload)) {
+        state.pendingConnectorChanges.push(action.payload);
+      }
+    },
+    clearConnectorChangePending(state, action: PayloadAction<string>) {
+      state.pendingConnectorChanges = state.pendingConnectorChanges.filter(
+        (id) => id !== action.payload
+      );
     },
     deleteRun(state, action: PayloadAction<string>) {
       state.runs = state.runs.filter((run) => run.id !== action.payload);
@@ -268,6 +279,8 @@ export const {
   setPlatforms,
   setConnectedPlatforms,
   setRuns,
+  markConnectorChangePending,
+  clearConnectorChangePending,
   startRun,
   deleteRun,
   updateRunStatus,

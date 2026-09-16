@@ -97,6 +97,7 @@ export interface AppState {
   isRunLayerVisible: boolean
   breadcrumb: { text: string; link: string }[]
   runs: Run[]
+  pendingConnectorChanges: string[]
   platforms: Platform[]
   connectedPlatforms: Record<string, boolean>
   connectorUpdates: ConnectorUpdateInfo[]

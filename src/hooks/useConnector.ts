@@ -98,11 +98,21 @@ async function startInstalledPdppConnectorRun(
 export function useConnector() {
   const dispatch = useDispatch()
   const runs = useSelector((state: RootState) => state.app.runs)
+  const pendingConnectorChanges = useSelector(
+    (state: RootState) => state.app.pendingConnectorChanges ?? []
+  )
 
   const startImport = useCallback(
     async (platform: Platform, options: StartImportOptions = {}) => {
-      const runId = runIdForPlatform(platform, Date.now())
       const source = getPlatformRegistryEntry(platform)?.id ?? platform.id
+      if (
+        pendingConnectorChanges.includes(platform.id) ||
+        pendingConnectorChanges.includes(source)
+      ) {
+        return null
+      }
+
+      const runId = runIdForPlatform(platform, Date.now())
 
       const newRun: Run = {
         id: runId,
@@ -198,7 +208,7 @@ export function useConnector() {
 
       return runId
     },
-    [dispatch]
+    [dispatch, pendingConnectorChanges]
   )
 
   const stopExport = useCallback(
