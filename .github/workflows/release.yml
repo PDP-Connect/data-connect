@@ -248,10 +248,10 @@ jobs:
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
-          stack_verification_args=()
           if [ "${{ matrix.verify_reference_stacks }}" = "true" ]; then
-            stack_verification_args+=(--verify-reference-stacks)
+            stack_verification_enabled=true
           else
+            stack_verification_enabled=false
             echo "::warning::reference-stack verification is deferred for ${{ matrix.target }}; the artifact will still be built."
           fi
           if [ "${{ matrix.os_family }}" = "macos" ]; then
@@ -292,7 +292,10 @@ jobs:
               ln -s /Applications "$staging_dir/Applications"
               node scripts/create-macos-dmg.mjs --volume-name DataConnect --source-folder "$staging_dir" --output "$dmg_path"
             done
-            verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root" "${stack_verification_args[@]}")
+            verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
+            if [ "$stack_verification_enabled" = "true" ]; then
+              verification_args+=(--verify-reference-stacks)
+            fi
             if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
               verification_args+=(--verify-code-signature)
             fi
@@ -301,11 +304,19 @@ jobs:
 
           if [ "${{ matrix.os_family }}" = "linux" ]; then
             node scripts/finalize-linux-appimage.js --appimage-dir "$bundle_root/appimage"
-            node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root" "${stack_verification_args[@]}"
+            if [ "$stack_verification_enabled" = "true" ]; then
+              node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root" --verify-reference-stacks
+            else
+              node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root"
+            fi
           fi
 
           if [ "${{ matrix.os_family }}" = "windows" ]; then
-            node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root" "${stack_verification_args[@]}"
+            if [ "$stack_verification_enabled" = "true" ]; then
+              node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root" --verify-reference-stacks
+            else
+              node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
+            fi
           fi
 
       - name: Stage verified release artifacts
