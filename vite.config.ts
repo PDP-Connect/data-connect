@@ -36,6 +36,7 @@ export default defineConfig({
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",
       "scripts/verify-bundled-personal-server.test.mjs",
+      "scripts/consumer-drift-signal.test.mjs",
       "playwright-runner/scripts/build.test.js",
     ],
     setupFiles: ["./src/test/setup.ts"],
