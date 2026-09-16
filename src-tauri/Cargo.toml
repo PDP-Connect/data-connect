@@ -51,6 +51,7 @@ tauri-plugin-mcp-bridge = "0.13.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 open = "5.3.3"
+uuid = { version = "1.22", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -7,8 +7,11 @@ mod processors;
 #[cfg(desktop)]
 mod unified;
 
+pub use commands::browser_surface_host_env_pairs;
+
 use commands::{
-    check_browser_available, check_connected_platforms, check_connector_updates,
+    cleanup_browser_surface_host, BrowserSurfaceHost, check_browser_available,
+    check_connected_platforms, check_connector_updates,
     cleanup_installed_pdpp_connector_runs, cleanup_personal_server, cleanup_playwright_processes,
     cleanup_reference_server, clear_browser_session, clear_personal_server_data,
     close_reference_server_view, debug_connector_paths, delete_exported_run, download_browser,
@@ -83,6 +86,12 @@ pub fn run() {
 
             #[cfg(desktop)]
             if unified::is_enabled() {
+                let app_data_dir = app.path().app_data_dir()?;
+                let resource_dir = app.path().resource_dir().ok();
+                let host = BrowserSurfaceHost::start(app_data_dir, resource_dir)
+                    .map_err(std::io::Error::other)?;
+                log::info!("Started unified browser surface host at {}", host.endpoint());
+                app.manage(host);
                 unified::setup(app)?;
             }
 
@@ -159,8 +168,9 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                cleanup_browser_surface_host(app);
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
