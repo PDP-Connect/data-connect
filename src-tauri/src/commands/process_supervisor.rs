@@ -75,8 +75,10 @@ pub struct StopPolicy {
     /// How long to wait after the graceful signal before escalating.
     pub grace: Duration,
     /// How long to wait after the forceful signal before using the platform
-    /// fallback (`Child::kill`) and waiting for the leader.
+    /// fallback (`Child::kill`).
     pub escalate: Duration,
+    /// The maximum time a stop request may wait for this process tree.
+    pub total: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +166,8 @@ struct SupervisorState {
     child: Mutex<Option<Child>>,
     finished: Mutex<bool>,
     finished_signal: Condvar,
+    stop_deadline: Mutex<Option<Instant>>,
+    stop_wait_expired: AtomicBool,
 }
 
 impl SupervisorState {
@@ -173,6 +177,8 @@ impl SupervisorState {
             child: Mutex::new(None),
             finished: Mutex::new(false),
             finished_signal: Condvar::new(),
+            stop_deadline: Mutex::new(None),
+            stop_wait_expired: AtomicBool::new(false),
         }
     }
 
@@ -214,6 +220,7 @@ impl Supervisor {
         let thread_state = Arc::clone(&state);
         let thread_sink = Arc::clone(&self.sink);
         let spec = self.spec;
+        let stop_budget = spec.stop.total;
 
         thread::Builder::new()
             .name(format!("{}-supervisor", spec.label))
@@ -223,7 +230,11 @@ impl Supervisor {
             .map_err(SupervisorError::Io)?;
 
         match ready_receiver.recv() {
-            Ok(Ok(())) => Ok(SupervisorHandle { state, port }),
+            Ok(Ok(())) => Ok(SupervisorHandle {
+                state,
+                port,
+                stop_budget,
+            }),
             Ok(Err(error)) => Err(SupervisorError::Message(error)),
             Err(_) => Err(SupervisorError::Message(
                 "supervisor stopped before reporting readiness".to_string(),
@@ -235,6 +246,7 @@ impl Supervisor {
 pub struct SupervisorHandle {
     state: Arc<SupervisorState>,
     port: u16,
+    stop_budget: Duration,
 }
 
 impl SupervisorHandle {
@@ -243,17 +255,60 @@ impl SupervisorHandle {
     }
 
     /// Request graceful shutdown and wait until the supervisor has reaped its
-    /// child and emitted `stopped`.
+    /// child and emitted `stopped`, bounded by the process stop policy.
     pub fn stop(&self) -> Result<(), SupervisorError> {
+        self.stop_until(Instant::now() + self.stop_budget)
+    }
+
+    /// Request shutdown and wait until the supervisor finishes or the supplied
+    /// deadline expires. The deadline is also shared with the supervisor so
+    /// its child and process-group waits use the same bound.
+    pub fn stop_until(&self, deadline: Instant) -> Result<(), SupervisorError> {
+        let deadline = deadline.min(Instant::now() + self.stop_budget);
+        if self.state.stop_wait_expired.load(Ordering::Acquire) {
+            return Err(SupervisorError::Message(
+                "supervisor stop budget expired".to_string(),
+            ));
+        }
+
+        if let Ok(mut stop_deadline) = self.state.stop_deadline.lock() {
+            *stop_deadline = Some(
+                stop_deadline
+                    .map(|existing| existing.min(deadline))
+                    .unwrap_or(deadline),
+            );
+        } else {
+            return Err(SupervisorError::Message(
+                "supervisor state was poisoned".to_string(),
+            ));
+        }
         self.state.stopping.store(true, Ordering::Release);
         let mut finished =
             self.state.finished.lock().map_err(|_| {
                 SupervisorError::Message("supervisor state was poisoned".to_string())
             })?;
         while !*finished {
-            finished = self.state.finished_signal.wait(finished).map_err(|_| {
-                SupervisorError::Message("supervisor state was poisoned".to_string())
-            })?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.state.stop_wait_expired.store(true, Ordering::Release);
+                return Err(SupervisorError::Message(
+                    "supervisor did not stop before its deadline".to_string(),
+                ));
+            }
+            let (next_finished, timeout) = self
+                .state
+                .finished_signal
+                .wait_timeout(finished, remaining)
+                .map_err(|_| {
+                    SupervisorError::Message("supervisor state was poisoned".to_string())
+                })?;
+            finished = next_finished;
+            if timeout.timed_out() && !*finished {
+                self.state.stop_wait_expired.store(true, Ordering::Release);
+                return Err(SupervisorError::Message(
+                    "supervisor did not stop before its deadline".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -717,17 +772,23 @@ fn stop_current_child(
         return Ok(None);
     };
     let pid = child.id();
+    let deadline = state
+        .stop_deadline
+        .lock()
+        .ok()
+        .and_then(|deadline| *deadline)
+        .unwrap_or_else(|| Instant::now() + spec.stop.total);
 
-    if let Some(status) = child.try_wait()? {
-        #[cfg(unix)]
-        if spec.process_group {
-            wait_for_process_group_exit(pid, spec.stop.grace);
-        }
-        return Ok(Some(status));
-    }
+    log::info!(
+        "[{}] stopping process tree pid={} with a {:?} budget",
+        spec.label,
+        pid,
+        deadline.saturating_duration_since(Instant::now())
+    );
 
     #[cfg(unix)]
     if spec.process_group {
+        log::info!("[{}] sending SIGTERM to process group {}", spec.label, pid);
         signal_process_group(pid, libc::SIGTERM);
     }
 
@@ -739,21 +800,20 @@ fn stop_current_child(
         );
     }
 
-    if wait_for_child_exit(&mut child, spec.stop.grace)? {
-        #[cfg(unix)]
-        if spec.process_group {
-            if wait_for_process_group_exit(pid, spec.stop.grace) {
-                return child.try_wait();
-            }
-        } else {
-            return child.try_wait();
-        }
-        #[cfg(not(unix))]
+    let graceful_deadline = deadline.min(Instant::now() + spec.stop.grace);
+    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, graceful_deadline)? {
+        log::info!("[{}] process tree exited after graceful stop", spec.label);
         return child.try_wait();
     }
 
+    log::warn!(
+        "[{}] graceful stop exceeded {:?}; forcing process tree termination",
+        spec.label,
+        spec.stop.grace
+    );
     #[cfg(unix)]
     if spec.process_group {
+        log::info!("[{}] sending SIGKILL to process group {}", spec.label, pid);
         signal_process_group(pid, libc::SIGKILL);
     } else {
         let _ = child.kill();
@@ -763,22 +823,50 @@ fn stop_current_child(
         let _ = child.kill();
     }
 
-    let _ = wait_for_child_exit(&mut child, spec.stop.escalate)?;
+    let escalate_deadline = deadline.min(Instant::now() + spec.stop.escalate);
+    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, escalate_deadline)? {
+        log::info!("[{}] process tree exited after force-kill", spec.label);
+        return child.try_wait();
+    }
+
+    log::error!(
+        "[{}] process tree did not exit within its {:?} shutdown budget",
+        spec.label,
+        spec.stop.total
+    );
     if child.try_wait()?.is_none() {
+        log::warn!(
+            "[{}] retrying direct leader kill without waiting",
+            spec.label
+        );
         let _ = child.kill();
     }
-    let status = child.wait()?;
     #[cfg(unix)]
     if spec.process_group {
-        let _ = wait_for_process_group_exit(pid, spec.stop.escalate);
+        signal_process_group(pid, libc::SIGKILL);
     }
-    Ok(Some(status))
+    child.try_wait()
 }
 
-fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<bool> {
-    let deadline = Instant::now() + timeout;
+fn wait_for_process_tree_exit(
+    child: &mut Child,
+    process_group: u32,
+    has_process_group: bool,
+    deadline: Instant,
+) -> io::Result<bool> {
     loop {
-        if child.try_wait()?.is_some() {
+        let leader_exited = child.try_wait()?.is_some();
+        let group_exited = {
+            #[cfg(unix)]
+            {
+                !has_process_group || !process_group_exists(process_group)
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        };
+        if leader_exited && group_exited {
             return Ok(true);
         }
         if Instant::now() >= deadline {
@@ -799,22 +887,6 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
     // this module creates the group with CommandExt::process_group(0).
     unsafe {
         libc::kill(-(pid as libc::pid_t), signal);
-    }
-}
-
-#[cfg(unix)]
-fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !process_group_exists(process_group) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(
-            READINESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-        );
     }
 }
 
@@ -880,6 +952,7 @@ pub fn personal_server_spec(
         stop: StopPolicy {
             grace: Duration::from_secs(5),
             escalate: Duration::from_secs(3),
+            total: Duration::from_secs(8),
         },
     }
 }
@@ -932,6 +1005,7 @@ mod tests {
             stop: StopPolicy {
                 grace: Duration::from_millis(300),
                 escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
             },
         }
     }
@@ -992,6 +1066,33 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[test]
+    fn prompt_sidecar_stop_returns_within_its_budget() {
+        let script =
+            node_script(r#"process.stdout.write('READY-MARKER\n'); setInterval(() => {}, 1000);"#);
+        let sink = Arc::new(RecordingSink::default());
+        let spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "READY-MARKER".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        let budget = spec.stop.total;
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        let started = Instant::now();
+        handle.stop().unwrap();
+
+        assert!(
+            started.elapsed() <= budget,
+            "prompt stop exceeded {:?}: {:?}",
+            budget,
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1184,6 +1285,65 @@ setInterval(() => {{}}, 1000);
             .unwrap();
         let result = unsafe { libc::kill(pid, 0) };
         assert_eq!(result, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_force_kill_terminates_signal_ignoring_descendant_within_budget() {
+        let child_pid = NamedTempFile::new().unwrap();
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{}}); setInterval(() => {{}}, 1000);"], {{ stdio: 'ignore' }});
+fs.writeFileSync({:?}, String(child.pid));
+process.on('SIGTERM', () => {{}});
+console.log('FORCE-READY');
+setInterval(() => {{}}, 1000);
+"#,
+            child_pid.path().to_string_lossy()
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "FORCE-READY".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.stop = StopPolicy {
+            grace: Duration::from_millis(100),
+            escalate: Duration::from_millis(300),
+            total: Duration::from_millis(750),
+        };
+        let budget = spec.stop.total;
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        let pid_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < pid_deadline
+            && fs::read_to_string(child_pid.path())
+                .unwrap()
+                .trim()
+                .is_empty()
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pid = fs::read_to_string(child_pid.path())
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+
+        let started = Instant::now();
+        handle.stop().unwrap();
+
+        assert!(
+            started.elapsed() <= budget + Duration::from_millis(250),
+            "force stop exceeded {:?}: {:?}",
+            budget,
+            started.elapsed()
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 

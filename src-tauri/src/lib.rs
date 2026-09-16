@@ -168,8 +168,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                #[cfg(desktop)]
+                if unified::is_enabled() && unified::request_shutdown(app, code.unwrap_or_default())
+                {
+                    api.prevent_exit();
+                }
+            }
+            tauri::RunEvent::Exit => {
                 #[cfg(desktop)]
                 if unified::is_enabled() {
                     unified::cleanup(app);
@@ -180,5 +187,6 @@ pub fn run() {
                 cleanup_installed_pdpp_connector_runs();
                 cleanup_playwright_processes();
             }
+            _ => {}
         });
 }

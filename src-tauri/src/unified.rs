@@ -9,7 +9,7 @@
 
 use crate::commands::process_supervisor::{
     EnvironmentSpec, EventSink, LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness,
-    RestartPolicy, StopPolicy, Supervisor, SupervisorHandle,
+    RestartPolicy, StopPolicy, Supervisor, SupervisorError, SupervisorHandle,
 };
 use crate::commands::{attach_reference_server, login_reference_server_with_password};
 use crate::owner_credential::{
@@ -37,6 +37,7 @@ const RI_LABEL: &str = "reference-implementation";
 const CONSOLE_LABEL: &str = "console";
 const RI_HEALTH_PATH: &str = "/.well-known/oauth-protected-resource";
 const UNIFIED_DB_DIRECTORY: &str = "unified";
+const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum UnifiedStatus {
@@ -67,6 +68,13 @@ struct UnifiedRuntimeState {
     session_cookie: Mutex<Option<String>>,
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
+    shutdown: Mutex<ShutdownState>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    requested: bool,
+    complete: bool,
 }
 
 struct UnifiedStack {
@@ -76,10 +84,37 @@ struct UnifiedStack {
 
 impl UnifiedStack {
     fn stop(&self) -> Result<(), String> {
-        let console_error = self.console.stop().err().map(|error| error.to_string());
-        let ri_error = self.ri.stop().err().map(|error| error.to_string());
+        self.stop_until(std::time::Instant::now() + UNIFIED_SHUTDOWN_BUDGET)
+    }
+
+    fn stop_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+        log::info!(
+            "Unified sidecar shutdown started with a {:?} budget",
+            UNIFIED_SHUTDOWN_BUDGET
+        );
+        let (console_error, ri_error) = std::thread::scope(|scope| {
+            let console = scope.spawn(|| self.console.stop_until(deadline));
+            let ri = scope.spawn(|| self.ri.stop_until(deadline));
+            (
+                console.join().unwrap_or_else(|_| {
+                    Err(SupervisorError::Message(
+                        "console stop thread panicked".to_string(),
+                    ))
+                }),
+                ri.join().unwrap_or_else(|_| {
+                    Err(SupervisorError::Message(
+                        "RI stop thread panicked".to_string(),
+                    ))
+                }),
+            )
+        });
+        let console_error = console_error.err().map(|error| error.to_string());
+        let ri_error = ri_error.err().map(|error| error.to_string());
         match (console_error, ri_error) {
-            (None, None) => Ok(()),
+            (None, None) => {
+                log::info!("Unified sidecar shutdown completed");
+                Ok(())
+            }
             (Some(error), None) | (None, Some(error)) => Err(error),
             (Some(console), Some(ri)) => Err(format!(
                 "console stop failed: {console}; RI stop failed: {ri}"
@@ -227,10 +262,7 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             }
         }
         TrayAction::Quit => {
-            if let Err(error) = stop_stack(app) {
-                log::error!("Failed to stop unified sidecars: {error}");
-            }
-            set_status(app, UnifiedStatus::Stopped);
+            log::info!("Unified tray quit requested; deferring shutdown to exit handler");
             app.exit(0);
         }
         TrayAction::Unknown => {}
@@ -402,6 +434,7 @@ fn ri_process_spec(
         stop: StopPolicy {
             grace: Duration::from_secs(5),
             escalate: Duration::from_secs(3),
+            total: Duration::from_secs(8),
         },
     }
 }
@@ -442,6 +475,7 @@ fn console_process_spec(
         stop: StopPolicy {
             grace: Duration::from_secs(5),
             escalate: Duration::from_secs(3),
+            total: Duration::from_secs(8),
         },
     }
 }
@@ -576,19 +610,111 @@ fn store_stack(app: &AppHandle, stack: UnifiedStack) -> Result<(), String> {
     Ok(())
 }
 
-fn stop_stack(app: &AppHandle) -> Result<(), String> {
+fn take_stack(app: &AppHandle) -> Result<Option<UnifiedStack>, String> {
     let state = app.state::<UnifiedRuntimeState>();
-    let stack = state
+    state
         .stack
         .lock()
-        .map_err(|_| "Unified runtime state is poisoned".to_string())?
-        .take();
+        .map_err(|_| "Unified runtime state is poisoned".to_string())
+        .map(|mut stack| stack.take())
+}
+
+fn stop_stack(app: &AppHandle) -> Result<(), String> {
+    let stack = take_stack(app)?;
     stack.map_or(Ok(()), |stack| stack.stop())
 }
 
+fn mark_shutdown_complete(app: &AppHandle) {
+    if let Ok(mut shutdown) = app.state::<UnifiedRuntimeState>().shutdown.lock() {
+        shutdown.complete = true;
+    } else {
+        log::error!("Unified shutdown state was poisoned before completion");
+    }
+}
+
+enum ShutdownRequest {
+    Start,
+    Pending,
+    Complete,
+}
+
+fn startup_is_in_progress(app: &AppHandle) -> bool {
+    app.state::<UnifiedRuntimeState>()
+        .status
+        .lock()
+        .map(|status| *status == UnifiedStatus::Starting)
+        .unwrap_or(false)
+}
+
+fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack>, exit_code: i32) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + UNIFIED_SHUTDOWN_BUDGET;
+        let stack = initial_stack.or_else(|| {
+            while std::time::Instant::now() < deadline && startup_is_in_progress(&app) {
+                if let Ok(Some(stack)) = take_stack(&app) {
+                    return Some(stack);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            take_stack(&app).ok().flatten()
+        });
+
+        let result = stack.map_or(Ok(()), |stack| stack.stop_until(deadline));
+        match result {
+            Ok(()) => log::info!("Unified shutdown finished within its budget"),
+            Err(error) => log::error!("Unified shutdown finished with errors: {error}"),
+        }
+        set_status(&app, UnifiedStatus::Stopped);
+        mark_shutdown_complete(&app);
+        log::info!("Unified app exit is now allowed");
+        app.exit(exit_code);
+    });
+}
+
+pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
+    let state = app.state::<UnifiedRuntimeState>();
+    let request = state
+        .shutdown
+        .lock()
+        .map(|mut shutdown| {
+            if shutdown.complete {
+                return ShutdownRequest::Complete;
+            }
+            if shutdown.requested {
+                return ShutdownRequest::Pending;
+            }
+            shutdown.requested = true;
+            ShutdownRequest::Start
+        })
+        .unwrap_or(ShutdownRequest::Pending);
+    match request {
+        ShutdownRequest::Complete => return false,
+        ShutdownRequest::Pending => return true,
+        ShutdownRequest::Start => {}
+    }
+
+    log::info!("Unified shutdown requested; stopping managed sidecars asynchronously");
+    let initial_stack = take_stack(app).ok().flatten();
+    if initial_stack.is_none() && !startup_is_in_progress(app) {
+        log::info!("No managed unified sidecars are running; allowing app exit");
+        mark_shutdown_complete(app);
+        return false;
+    }
+
+    begin_background_shutdown(app, initial_stack, exit_code);
+    true
+}
+
 pub(crate) fn cleanup(app: &AppHandle) {
-    if let Err(error) = stop_stack(app) {
-        log::error!("Failed to clean up unified sidecars: {error}");
+    let stack_still_registered = app
+        .state::<UnifiedRuntimeState>()
+        .stack
+        .lock()
+        .map(|stack| stack.is_some())
+        .unwrap_or(true);
+    if stack_still_registered {
+        log::error!("Unified exit reached before asynchronous sidecar shutdown completed");
     }
 }
 
@@ -939,6 +1065,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             stop: StopPolicy {
                 grace: Duration::from_millis(300),
                 escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
             },
         }
     }
