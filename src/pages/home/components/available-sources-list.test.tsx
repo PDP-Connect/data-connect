@@ -16,7 +16,8 @@ const updateState = vi.hoisted(() => ({
 }))
 
 const personalServerState = vi.hoisted(() => ({
-  status: "running" as const,
+  status: "running" as "running" | "starting" | "stopped" | "error",
+  statusRef: { current: "running" as "running" | "starting" | "stopped" | "error" },
   restartServer: vi.fn().mockResolvedValue(true),
 }))
 
@@ -97,6 +98,8 @@ afterEach(() => {
   updateState.downloadConnector.mockClear()
   updateState.checkForUpdates.mockClear()
   personalServerState.restartServer.mockClear()
+  personalServerState.status = "running"
+  personalServerState.statusRef.current = "running"
   reduxState.pendingConnectorChanges = []
 })
 
@@ -263,6 +266,76 @@ describe("AvailableSourcesList catalog states", () => {
     resolveRestart(true)
     await waitFor(() => {
       expect(screen.queryByText("Applying connector change…")).toBeNull()
+    })
+  })
+
+  it("recomposes once after an install completes across server startup", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    personalServerState.status = "starting" as const
+    personalServerState.statusRef.current = "starting"
+    let resolveDownload!: (installed: boolean) => void
+    updateState.downloadConnector.mockImplementationOnce(
+      () => new Promise(resolve => {
+        resolveDownload = resolve
+      })
+    )
+    const onReloadPlatforms = vi.fn()
+    const { rerender } = render(
+      <AvailableSourcesList
+        {...emptyProps}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Install New source/i }).click()
+    await waitFor(() => {
+      expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
+    })
+
+    personalServerState.status = "running" as const
+    personalServerState.statusRef.current = "running"
+    rerender(
+      <AvailableSourcesList
+        {...emptyProps}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+    resolveDownload(true)
+
+    await waitFor(() => {
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+      expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("keeps a failed restart unapplied and retries the recompose", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    const onReloadPlatforms = vi.fn()
+    personalServerState.restartServer
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+
+    render(
+      <AvailableSourcesList
+        {...emptyProps}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Install New source/i }).click()
+
+    const retryButton = await screen.findByRole("button", {
+      name: /Installed but not applied.*New source.*Retry/i,
+    })
+    expect(retryButton).toHaveProperty("disabled", false)
+    expect(screen.queryByText("Applying connector change…")).toBeNull()
+    expect(onReloadPlatforms).not.toHaveBeenCalled()
+
+    retryButton.click()
+
+    await waitFor(() => {
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(2)
+      expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
     })
   })
 })

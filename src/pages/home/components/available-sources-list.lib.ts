@@ -40,8 +40,10 @@ interface BuildAvailableCardsInput {
   onExport: (platform: Platform) => void
   connectorUpdates?: ConnectorUpdateInfo[]
   onInstall?: (id: string) => void
+  onRetry?: (id: string) => void
   isInstalling?: (id: string) => boolean
   isApplying?: (id: string) => boolean
+  isUnapplied?: (id: string) => boolean
   downloadErrors?: Record<string, string>
   /** Retained by the component so an installed card keeps its grid position. */
   sourceOrder?: Map<string, number>
@@ -109,22 +111,25 @@ function sourceLabel(
   displayName: string,
   platform: Platform | undefined,
   collectionProfileAvailable: boolean,
-  isApplying = false
+  isApplying = false,
+  isUnapplied = false
 ) {
-  const actionLabel = isApplying
-    ? "Applying…"
-    : action === "install"
-      ? "Install"
-      : action === "update"
-        ? "Update"
-        : "Connect"
+  const actionLabel = isUnapplied
+    ? "Installed but not applied"
+    : isApplying
+      ? "Applying…"
+      : action === "install"
+        ? "Install"
+        : action === "update"
+          ? "Update"
+          : "Connect"
   const legacyLabel =
     platform &&
     platform.runtime !== "pdpp-network" &&
     collectionProfileAvailable
       ? " (legacy)"
       : ""
-  return `${actionLabel} ${displayName}${legacyLabel}`
+  return `${actionLabel} ${displayName}${isUnapplied ? " · Retry" : ""}${legacyLabel}`
 }
 
 function createOrderTracker(sourceOrder?: Map<string, number>) {
@@ -157,8 +162,10 @@ export function buildAvailableCards({
   onExport,
   connectorUpdates = [],
   onInstall,
+  onRetry,
   isInstalling = () => false,
   isApplying = () => false,
+  isUnapplied = () => false,
   downloadErrors = {},
   sourceOrder,
 }: BuildAvailableCardsInput): AvailableSourceCard[] {
@@ -211,8 +218,11 @@ export function buildAvailableCards({
   }) => {
     const displayName = entry?.displayName ?? update.name
     const isUnavailable = action === "unavailable"
-    const isCurrentlyInstalling = isInstalling(update.id)
-    const isCurrentlyApplying = isApplying(update.id)
+    const isCurrentlyUnapplied = isUnapplied(update.id)
+    const isCurrentlyInstalling =
+      !isCurrentlyUnapplied && isInstalling(update.id)
+    const isCurrentlyApplying =
+      !isCurrentlyUnapplied && isApplying(update.id)
     const reason =
       update.unavailableReason ??
       "This device does not provide the required capability"
@@ -226,7 +236,8 @@ export function buildAvailableCards({
         displayName,
         platform,
         hasCollectionProfileVariant(entry, update),
-        isCurrentlyApplying
+        isCurrentlyApplying,
+        isCurrentlyUnapplied
       ),
       action,
       tier: getTier(update.tier),
@@ -238,12 +249,14 @@ export function buildAvailableCards({
       isAvailable: !isUnavailable && update.runnable,
       isConnecting: false,
       onClick:
-        isUnavailable ||
-        isCurrentlyInstalling ||
-        isCurrentlyApplying ||
-        !onInstall
-          ? undefined
-          : () => onInstall(update.id),
+        isCurrentlyUnapplied && onRetry
+          ? () => onRetry(update.id)
+          : isUnavailable ||
+              isCurrentlyInstalling ||
+              isCurrentlyApplying ||
+              !onInstall
+            ? undefined
+            : () => onInstall(update.id),
       index: rememberOrder(sourceKey, index),
       availability: entry?.availability ?? "unknown",
     })
@@ -291,9 +304,14 @@ export function buildAvailableCards({
     const availability: CardAvailability = entry?.availability ?? "unknown"
     const isCardAvailable = availability !== "comingSoon"
     const isUpdating = Boolean(update && !update.isNew && update.hasUpdate)
+    const isCurrentlyUnapplied =
+      isUnapplied(platform.id) || (update ? isUnapplied(update.id) : false)
     const isCurrentlyApplying =
-      isApplying(platform.id) || (update ? isApplying(update.id) : false)
-    const isCurrentlyInstalling = update ? isInstalling(update.id) : false
+      !isCurrentlyUnapplied &&
+      (isApplying(platform.id) || (update ? isApplying(update.id) : false))
+    const isCurrentlyInstalling =
+      !isCurrentlyUnapplied && (update ? isInstalling(update.id) : false)
+    const retryId = update && isUnapplied(update.id) ? update.id : platform.id
     const cardAction: Exclude<
       AvailableSourceCardAction,
       "install" | "unavailable" | "comingSoon"
@@ -309,7 +327,8 @@ export function buildAvailableCards({
         displayName,
         platform,
         hasCollectionProfileVariant(entry, update),
-        isCurrentlyApplying
+        isCurrentlyApplying,
+        isCurrentlyUnapplied
       ),
       action: cardAction,
       tier: update ? getTier(update.tier) : undefined,
@@ -320,13 +339,15 @@ export function buildAvailableCards({
       connectingStatusMessage: connectingRun?.statusMessage,
       connectingRun,
       onClick:
-        isCurrentlyInstalling || isCurrentlyApplying
-          ? undefined
-          : isUpdating && onInstall && update
-            ? () => onInstall(update.id)
-            : isCardAvailable
-              ? () => onExport(platform)
-              : undefined,
+        isCurrentlyUnapplied && onRetry
+          ? () => onRetry(retryId)
+          : isCurrentlyInstalling || isCurrentlyApplying
+            ? undefined
+            : isUpdating && onInstall && update
+              ? () => onInstall(update.id)
+              : isCardAvailable
+                ? () => onExport(platform)
+                : undefined,
       index: rememberOrder(sourceKey, index),
       availability,
     })

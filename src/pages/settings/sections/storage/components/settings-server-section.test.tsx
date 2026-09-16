@@ -19,6 +19,7 @@ function renderServerSection() {
     stopServer: vi.fn(),
     restartServer: vi.fn(),
     restartingRef: { current: false },
+      statusRef: { current: "running" as const },
   }
 
   return render(

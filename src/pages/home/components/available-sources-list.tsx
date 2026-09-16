@@ -59,6 +59,8 @@ export function AvailableSourcesList({
     useState(false)
   const [localPendingConnectorChanges, setLocalPendingConnectorChanges] =
     useState<Set<string>>(() => new Set())
+  const [unappliedConnectorChanges, setUnappliedConnectorChanges] =
+    useState<Set<string>>(() => new Set())
   const applyInFlightRef = useRef(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [sourceOrder] = useState(() => new Map<string, number>())
@@ -74,7 +76,11 @@ export function AvailableSourcesList({
     downloadConnector,
     isDownloading,
   } = useConnectorUpdates()
-  const { status: personalServerStatus, restartServer } = usePersonalServer()
+  const {
+    status: personalServerStatus,
+    statusRef: personalServerStatusRef,
+    restartServer,
+  } = usePersonalServer()
   const { showDevelopmentConnectors } = useShowDevelopmentConnectors()
   const connectedPlatformIdSet = useMemo(
     () => new Set(connectedPlatformIds),
@@ -103,6 +109,10 @@ export function AvailableSourcesList({
     () =>
       new Set([...pendingConnectorChanges, ...localPendingConnectorChanges]),
     [localPendingConnectorChanges, pendingConnectorChanges]
+  )
+  const isUnapplied = useCallback(
+    (id: string) => unappliedConnectorChanges.has(id),
+    [unappliedConnectorChanges]
   )
 
   const visibleUpdates = useMemo(
@@ -138,36 +148,91 @@ export function AvailableSourcesList({
     [dispatch]
   )
 
-  const applyPendingConnectorChanges = useCallback(async () => {
+  const markUnapplied = useCallback((ids: string[]) => {
+    setUnappliedConnectorChanges(current => {
+      const next = new Set(current)
+      ids.forEach(id => next.add(id))
+      return next
+    })
+  }, [])
+
+  const clearUnapplied = useCallback((ids: string[]) => {
+    setUnappliedConnectorChanges(current => {
+      const next = new Set(current)
+      ids.forEach(id => next.delete(id))
+      return next
+    })
+  }, [])
+
+  const applyPendingConnectorChanges = useCallback(
+    async (requestedIds?: string[], retryIds = new Set<string>()) => {
+      const idsToApply = (requestedIds ?? [...pendingConnectorIds]).filter(
+        id => !unappliedConnectorChanges.has(id) || retryIds.has(id)
+      )
+
     if (
       applyInFlightRef.current ||
       hasActiveRuns ||
-      pendingConnectorIds.size === 0
+      idsToApply.length === 0 ||
+      personalServerStatusRef.current === "starting"
     ) {
       return
     }
 
     applyInFlightRef.current = true
-    const idsToApply = [...pendingConnectorIds]
     setIsApplyingConnectorChange(true)
     try {
-      if (personalServerStatus === "running") {
-        await restartServer()
+      let applied = true
+      if (personalServerStatusRef.current === "running") {
+        try {
+          applied = await restartServer()
+        } catch {
+          applied = false
+        }
       }
-      await onReloadPlatforms?.()
+
+      if (!applied) {
+        markUnapplied(idsToApply)
+        return
+      }
+
+      try {
+        await onReloadPlatforms?.()
+        clearPending(idsToApply)
+        clearUnapplied(idsToApply)
+      } catch {
+        markUnapplied(idsToApply)
+      }
     } finally {
-      clearPending(idsToApply)
       applyInFlightRef.current = false
       setIsApplyingConnectorChange(false)
     }
-  }, [
-    clearPending,
-    hasActiveRuns,
-    onReloadPlatforms,
-    pendingConnectorIds,
-    personalServerStatus,
-    restartServer,
-  ])
+    },
+    [
+      clearPending,
+      clearUnapplied,
+      hasActiveRuns,
+      markUnapplied,
+      onReloadPlatforms,
+      pendingConnectorIds,
+      personalServerStatus,
+      personalServerStatusRef,
+      restartServer,
+      unappliedConnectorChanges,
+    ]
+  )
+
+  const retryConnectorChange = useCallback(
+    (id: string) => {
+      setUnappliedConnectorChanges(current => {
+        const next = new Set(current)
+        next.delete(id)
+        return next
+      })
+      void applyPendingConnectorChanges([id], new Set([id]))
+    },
+    [applyPendingConnectorChanges]
+  )
 
   const installConnector = useCallback(
     async (id: string) => {
@@ -205,8 +270,12 @@ export function AvailableSourcesList({
         onInstall: id => {
           void installConnector(id)
         },
-        isInstalling: id => isDownloading(id) || pendingConnectorIds.has(id),
-        isApplying: id => pendingConnectorIds.has(id),
+        onRetry: retryConnectorChange,
+        isInstalling: id =>
+          isDownloading(id) ||
+          (pendingConnectorIds.has(id) && !isUnapplied(id)),
+        isApplying: id => pendingConnectorIds.has(id) && !isUnapplied(id),
+        isUnapplied,
         downloadErrors,
         sourceOrder,
       }),
@@ -220,6 +289,8 @@ export function AvailableSourcesList({
       platforms,
       sourceOrder,
       pendingConnectorIds,
+      retryConnectorChange,
+      isUnapplied,
       visibleUpdates,
     ]
   )
