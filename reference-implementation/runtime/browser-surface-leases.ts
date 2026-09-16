@@ -16,6 +16,7 @@ import {
 } from "@opendatalabs/remote-surface/leases";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { BROWSER_BOUND_KEYS } from "../server/generated/connector-registry.generated.ts";
 import { connectorRetainsSurfaceProcess } from "./browser-surface/retained-surface-connectors.ts";
 
 export const DEFAULT_NEKO_READINESS_TIMEOUT_MS = 120_000;
@@ -37,8 +38,15 @@ export interface NekoDynamicBrowserSurfaceRuntimeConfig {
   readonly readinessTimeoutMs: number;
 }
 
+export interface HostBrowserSurfaceRuntimeConfig {
+  readonly endpoint: string;
+  readonly headless: boolean;
+  readonly token: string;
+}
+
 export interface NekoBrowserSurfaceRuntimeConfig {
   readonly dynamic?: NekoDynamicBrowserSurfaceRuntimeConfig;
+  readonly host?: HostBrowserSurfaceRuntimeConfig;
   readonly leaseConfig: BrowserSurfaceLeaseConfig;
   readonly leaseSweepIntervalMs: number;
 }
@@ -221,6 +229,13 @@ function buildLeaseConfig(shape: ParsedNekoEnvShape, leaseEnv: ParsedNekoLeaseEn
 export function parseNekoBrowserSurfaceRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env
 ): NekoBrowserSurfaceRuntimeConfig {
+  const browserSurfaceMode = emptyToUndefined(env.PDPP_BROWSER_SURFACE_MODE);
+  if (browserSurfaceMode) {
+    if (browserSurfaceMode !== "host") {
+      throw new Error("PDPP_BROWSER_SURFACE_MODE must be host when configured");
+    }
+    return parseHostBrowserSurfaceRuntimeConfig(env);
+  }
   const rawShape = readNekoEnvShape(env);
   enforceManagedSurfaceCapInvariant(rawShape);
   const shape = applyStaticProfileDefaults(rawShape);
@@ -240,6 +255,52 @@ export function parseNekoBrowserSurfaceRuntimeConfig(
   assertRetainedManagedConnectorReserve(shape.surfaceCap, shape.managedConnectorIds);
   return {
     dynamic,
+    leaseConfig,
+    leaseSweepIntervalMs,
+  };
+}
+
+function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrowserSurfaceRuntimeConfig {
+  const configuredConnectorIds = splitCsv(env.PDPP_NEKO_MANAGED_CONNECTORS);
+  const managedConnectorIds = configuredConnectorIds.length > 0 ? configuredConnectorIds : BROWSER_BOUND_KEYS;
+  const managedConnectors = new Set(managedConnectorIds.flatMap(managedConnectorAliases));
+  const defaultSurfaceCap =
+    managedConnectors.size === 0 ? 0 : Math.max(1, countRetainedManagedConnectors(managedConnectorIds) + 1);
+  const surfaceCap = parseIntegerEnv(env.PDPP_NEKO_SURFACE_CAP, "PDPP_NEKO_SURFACE_CAP", defaultSurfaceCap);
+  if (managedConnectors.size > 0 && surfaceCap < 1) {
+    throw new Error("PDPP_NEKO_SURFACE_CAP must be an integer >= 1 when browser host mode manages connectors");
+  }
+  assertRetainedManagedConnectorReserve(surfaceCap, managedConnectorIds);
+  const leaseEnv = readLeaseConfigEnv(env);
+  const leaseConfig = buildLeaseConfig(
+    {
+      configuredStaticProfileKey: undefined,
+      managedConnectorIds,
+      managedConnectors,
+      requestedSurfaceMode: "dynamic",
+      staticCdpHttpUrl: undefined,
+      staticProfileKey: undefined,
+      staticStreamBaseUrl: undefined,
+      surfaceCap,
+      surfaceMode: "dynamic",
+    },
+    leaseEnv
+  );
+  const leaseSweepIntervalMs = parsePositiveIntegerEnv(
+    env.PDPP_NEKO_LEASE_SWEEP_INTERVAL_MS,
+    "PDPP_NEKO_LEASE_SWEEP_INTERVAL_MS",
+    DEFAULT_NEKO_LEASE_SWEEP_INTERVAL_MS
+  );
+  const token = emptyToUndefined(env.PDPP_BROWSER_SURFACE_HOST_TOKEN);
+  if (!token) {
+    throw new Error("PDPP_BROWSER_SURFACE_HOST_TOKEN is required when PDPP_BROWSER_SURFACE_MODE=host");
+  }
+  return {
+    host: {
+      endpoint: parseHostEndpoint(env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT),
+      headless: env.PDPP_BROWSER_HEADLESS?.trim() === "1",
+      token,
+    },
     leaseConfig,
     leaseSweepIntervalMs,
   };
@@ -366,6 +427,22 @@ function parseDynamicRuntimeConfig(env: NodeJS.ProcessEnv): NekoDynamicBrowserSu
       DEFAULT_NEKO_READINESS_TIMEOUT_MS
     ),
   };
+}
+
+function parseHostEndpoint(value: string | undefined): string {
+  const trimmed = emptyToUndefined(value);
+  if (!trimmed) {
+    throw new Error("PDPP_BROWSER_SURFACE_HOST_ENDPOINT is required when PDPP_BROWSER_SURFACE_MODE=host");
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    // Fall through to the consistent validation error below.
+  }
+  throw new Error("PDPP_BROWSER_SURFACE_HOST_ENDPOINT must be a valid http(s) URL");
 }
 
 function parseProfileStoragePolicy(value: string | undefined): NekoProfileStoragePolicy {
