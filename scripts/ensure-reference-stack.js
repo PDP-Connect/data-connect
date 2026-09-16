@@ -38,6 +38,27 @@ function fail(message) {
   throw new Error(`[ensure-reference-stack] ${message}`)
 }
 
+function validateProfile(profile) {
+  if (typeof profile !== "string" || !/^[A-Za-z0-9._-]+$/.test(profile)) {
+    fail(`invalid Tauri profile: ${JSON.stringify(profile)}`)
+  }
+  return profile
+}
+
+export function referenceStackRoot(
+  projectRoot = DEFAULT_PROJECT_ROOT,
+  profile = DEFAULT_PROFILE
+) {
+  return join(
+    resolve(projectRoot),
+    "src-tauri",
+    "target",
+    validateProfile(profile),
+    "reference-stack",
+    "ri"
+  )
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -123,33 +144,12 @@ function manifestTarget(target) {
   )
 }
 
-function validateProfile(profile) {
-  if (typeof profile !== "string" || !/^[A-Za-z0-9._-]+$/.test(profile)) {
-    fail(`invalid Tauri profile: ${JSON.stringify(profile)}`)
-  }
-  return profile
-}
-
 function manifestProfile(profile) {
   return validateProfile(
     profile ||
       process.env.TAURI_PROFILE ||
       process.env.PROFILE ||
       DEFAULT_PROFILE
-  )
-}
-
-export function referenceStackRoot(
-  projectRoot = DEFAULT_PROJECT_ROOT,
-  profile
-) {
-  return join(
-    resolve(projectRoot),
-    "src-tauri",
-    "target",
-    manifestProfile(profile),
-    "reference-stack",
-    "ri"
   )
 }
 
@@ -523,11 +523,11 @@ export function stageReferenceStack({
   profile,
 } = {}) {
   const resolvedProjectRoot = resolve(projectRoot)
+  const resolvedTarget = manifestTarget(target)
   const resolvedProfile = manifestProfile(profile)
   const resolvedOutputRoot = resolve(
     outputRoot || referenceStackRoot(resolvedProjectRoot, resolvedProfile)
   )
-  const resolvedTarget = manifestTarget(target)
   if (
     !existsSync(
       join(
@@ -588,7 +588,7 @@ export function stageReferenceStack({
     assertNativeFiles(temporaryRoot)
     const manifest = buildManifest({
       nodeBinary,
-      profile,
+      profile: resolvedProfile,
       projectRoot: resolvedProjectRoot,
       stageRoot: temporaryRoot,
       target,
