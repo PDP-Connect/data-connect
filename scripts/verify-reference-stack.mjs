@@ -5,16 +5,28 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { verifyReferenceStackRoot } from "./ensure-reference-stack.js"
+import {
+  referenceStackRoot,
+  verifyReferenceStackRoot,
+} from "./ensure-reference-stack.js"
 
-function parseRoot(argv) {
-  const rootIndex = argv.indexOf("--root")
-  if (rootIndex === -1 || !argv[rootIndex + 1]) {
-    throw new Error(
-      "Usage: node scripts/verify-reference-stack.mjs --root <staged-ri-root>"
-    )
+const PROJECT_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)))
+
+function parseArgs(argv) {
+  let root
+  let profile
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument === "--root") {
+      root = argv[++index]
+      if (!root) throw new Error("--root requires a staged RI root")
+    } else if (argument === "--profile") {
+      profile = argv[++index]
+      if (!profile) throw new Error("--profile requires a Tauri profile")
+    } else throw new Error(`unknown argument: ${argument}`)
   }
-  return resolve(argv[rootIndex + 1])
+  if (root) return resolve(root)
+  return referenceStackRoot(PROJECT_ROOT, profile)
 }
 
 if (
@@ -22,7 +34,7 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   try {
-    const root = parseRoot(process.argv.slice(2))
+    const root = parseArgs(process.argv.slice(2))
     const manifest = verifyReferenceStackRoot(root)
     const launcher = readFileSync(resolve(root, "launch.mjs"), "utf8")
     if (

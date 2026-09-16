@@ -179,6 +179,17 @@ jobs:
       - name: Install PDPP runtime dependencies
         run: node scripts/ensure-pdpp-runtime.js
 
+      - name: Stage and verify reference stack
+        shell: bash
+        env:
+          PDPP_NODE_BINARY: ${{ github.workspace }}/src-tauri/binaries/pdpp-node-${{ matrix.target }}
+          TAURI_PROFILE: release
+        run: |
+          set -euo pipefail
+          node scripts/ensure-console-stack.js --profile "$TAURI_PROFILE"
+          node scripts/ensure-reference-stack.js --profile "$TAURI_PROFILE" --target "${{ matrix.target }}" --node-binary "$PDPP_NODE_BINARY"
+          node scripts/verify-reference-stack.mjs --profile "$TAURI_PROFILE"
+
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:

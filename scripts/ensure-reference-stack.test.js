@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   launchScript,
+  referenceStackRoot,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
 
@@ -60,6 +61,18 @@ afterEach(() => {
 })
 
 describe("reference stack staging contract", () => {
+  it("derives a profile-scoped output root", () => {
+    expect(referenceStackRoot("/workspace/data-connect", "release")).toBe(
+      "/workspace/data-connect/src-tauri/target/release/reference-stack/ri"
+    )
+    expect(referenceStackRoot("/workspace/data-connect", "debug")).toBe(
+      "/workspace/data-connect/src-tauri/target/debug/reference-stack/ri"
+    )
+    expect(() =>
+      referenceStackRoot("/workspace/data-connect", "../release")
+    ).toThrow(/invalid Tauri profile/)
+  })
+
   it("emits deterministic complete hashes and launcher inputs", () => {
     const first = fixtureRoot()
     const second = fixtureRoot()

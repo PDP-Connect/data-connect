@@ -61,11 +61,11 @@ describe("tauri manual-install config", () => {
       ]
     ).toBeUndefined()
 
-    expect(document.bundle?.resources?.["target/reference-stack/ri/"]).toBe(
-      "reference-stack/ri/"
-    )
     expect(
-      document.bundle?.resources?.["target/reference-stack/ri/**/*"]
+      document.bundle?.resources?.["target/release/reference-stack/ri/"]
+    ).toBe("reference-stack/ri/")
+    expect(
+      document.bundle?.resources?.["target/release/reference-stack/ri/**/*"]
     ).toBeUndefined()
   })
 
