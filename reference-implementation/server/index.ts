@@ -58,9 +58,11 @@ import {
   createBrowserSurfaceLeaseSweepTimer,
 } from "../runtime/browser-surface-lease-sweep-timer.ts";
 import {
+  DEFAULT_NEKO_READINESS_TIMEOUT_MS,
   DEFAULT_NEKO_LEASE_SWEEP_INTERVAL_MS,
   parseNekoBrowserSurfaceRuntimeConfig,
 } from "../runtime/browser-surface-leases.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
@@ -9090,6 +9092,24 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceAllocatorScopeId = runtimeConfig.dynamic.allocatorUrl;
     options.browserSurfaceReadinessTimeoutMs = runtimeConfig.dynamic.readinessTimeoutMs;
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+  }
+
+  if (runtimeConfig.host) {
+    const hostAllocator = createHostBrowserSurfaceAllocator({
+      endpoint: runtimeConfig.host.endpoint,
+      headless: runtimeConfig.host.headless,
+      token: runtimeConfig.host.token,
+    });
+    options.browserSurfaceAllocator = hostAllocator;
+    options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
+    options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
+    options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+    options.beforeBrowserSurfaceLeaseEnsure = (args: { readonly runId: string; readonly surfaceId: string }) => {
+      hostAllocator.bindRunToSurface(args);
+    };
+    options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
+      return hostAllocator.releaseRun(args.runId);
+    };
   }
 
   return options;

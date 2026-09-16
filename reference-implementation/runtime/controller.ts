@@ -509,6 +509,11 @@ export interface ControllerOptions {
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
   asPublicUrl?: string;
+  /** Binds a host-provided browser lease to the run before the host is asked to allocate it. */
+  beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly runId: string;
+    readonly surfaceId: string;
+  }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
   /**
@@ -2772,6 +2777,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
   const browserSurface = createBrowserSurfaceManager({
     activeRunInteractions,
     browserSurfaceAllocator: browserSurfaceAllocator ?? null,
+    ...(opts.beforeBrowserSurfaceLeaseEnsure
+      ? { beforeBrowserSurfaceLeaseEnsure: opts.beforeBrowserSurfaceLeaseEnsure }
+      : {}),
     browserSurfaceLeaseManager: browserSurfaceLeaseManager ?? null,
     browserSurfaceLeaseStore: browserSurfaceLeaseStore ?? null,
     browserSurfaceMidWaitPollIntervalMs,
@@ -3356,7 +3364,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
     clearStreamingNonceForRun(input.runId);
     if (input.browserSurfaceLease) {
-      await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+      try {
+        await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+      }
       await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
     }
     resolveCancelledInteraction(input.runId);
