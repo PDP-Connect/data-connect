@@ -5,6 +5,8 @@ import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
+import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
+import { connectorInstallRowModel } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   sourceSetupAction,
@@ -17,6 +19,7 @@ import {
   sourceSetupStatus,
 } from "../lib/source-setup-presentation.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
+import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
 
 export interface ExistingSourceSetupLink {
   connectionId: string;
@@ -301,9 +304,11 @@ function SourceSetupDetails({ entry }: { entry: ConnectorCatalogEntry }) {
 function SourceSetupCard({
   entry,
   existingSources,
+  installLifecycle,
 }: {
   entry: ConnectorCatalogEntry;
   existingSources: readonly ExistingSourceSetupLink[];
+  installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
   const action = sourceSetupAction(entry);
@@ -328,6 +333,7 @@ function SourceSetupCard({
         <SourceSetupContext entry={entry} />
         <ExistingSourceLinks connectorKey={entry.connectorKey} sources={existingSources} />
         <SourceSetupDetails entry={entry} />
+        {installLifecycle ? <ConnectorInstallRow model={connectorInstallRowModel(entry, installLifecycle)} /> : null}
       </div>
       <div className="flex flex-col items-end justify-start gap-1">
         {action ? (
@@ -351,9 +357,11 @@ function SourceSetupCard({
 function ExperimentalSetupSummary({
   entries,
   existingSourcesByConnector,
+  installLifecycleByConnector,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
   if (entries.length === 0) {
     return null;
@@ -365,7 +373,11 @@ function ExperimentalSetupSummary({
         <p className="pdpp-caption text-muted-foreground">
           These setup paths are implemented but have not completed live validation. Test them with non-critical data.
         </p>
-        <SourceSetupCardList entries={entries} existingSourcesByConnector={existingSourcesByConnector} />
+        <SourceSetupCardList
+          entries={entries}
+          existingSourcesByConnector={existingSourcesByConnector}
+          installLifecycleByConnector={installLifecycleByConnector}
+        />
       </div>
     </details>
   );
@@ -384,9 +396,11 @@ function ExperimentalSetupSummary({
 function DevelopmentSetupSummary({
   entries,
   existingSourcesByConnector,
+  installLifecycleByConnector,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
   if (entries.length === 0) {
     return null;
@@ -400,7 +414,11 @@ function DevelopmentSetupSummary({
           setup path with no live-account run yet -- test them with non-critical data. Others are scaffolds with no
           collection code yet and have no add action here.
         </p>
-        <SourceSetupCardList entries={entries} existingSourcesByConnector={existingSourcesByConnector} />
+        <SourceSetupCardList
+          entries={entries}
+          existingSourcesByConnector={existingSourcesByConnector}
+          installLifecycleByConnector={installLifecycleByConnector}
+        />
       </div>
     </details>
   );
@@ -409,9 +427,11 @@ function DevelopmentSetupSummary({
 function SourceSetupCardList({
   entries,
   existingSourcesByConnector,
+  installLifecycleByConnector,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
   return (
     <ul className="grid gap-3">
@@ -419,6 +439,11 @@ function SourceSetupCardList({
         <SourceSetupCard
           entry={entry}
           existingSources={existingSourcesByConnector?.[entry.connectorKey] ?? []}
+          installLifecycle={
+            installLifecycleByConnector === null
+              ? null
+              : (installLifecycleByConnector?.[entry.connectorKey] ?? { catalog: null, installed: null })
+          }
           key={entry.connectorKey}
         />
       ))}
@@ -430,6 +455,7 @@ export function SourceSetupCatalog({
   action,
   catalog,
   existingSourcesByConnector,
+  installLifecycleByConnector = null,
   query,
 }: {
   action: string;
@@ -442,6 +468,8 @@ export function SourceSetupCatalog({
    * connector's existing-sources list is exact by construction.
    */
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  /** Null means the install route is not available on this server. */
+  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   query: string;
 }) {
   const filtered = filterSourceCatalog(catalog, query);
@@ -471,15 +499,27 @@ export function SourceSetupCatalog({
       {anyMatch ? (
         <div className="grid gap-5">
           {available.length > 0 ? (
-            <SourceSetupCardList entries={available} existingSourcesByConnector={existingSourcesByConnector} />
+            <SourceSetupCardList
+              entries={available}
+              existingSourcesByConnector={existingSourcesByConnector}
+              installLifecycleByConnector={installLifecycleByConnector}
+            />
           ) : (
             <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
               No add-now sources match <span className="font-medium text-foreground">{query}</span>.
             </p>
           )}
 
-          <ExperimentalSetupSummary entries={experimental} existingSourcesByConnector={existingSourcesByConnector} />
-          <DevelopmentSetupSummary entries={development} existingSourcesByConnector={existingSourcesByConnector} />
+          <ExperimentalSetupSummary
+            entries={experimental}
+            existingSourcesByConnector={existingSourcesByConnector}
+            installLifecycleByConnector={installLifecycleByConnector}
+          />
+          <DevelopmentSetupSummary
+            entries={development}
+            existingSourcesByConnector={existingSourcesByConnector}
+            installLifecycleByConnector={installLifecycleByConnector}
+          />
         </div>
       ) : (
         <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
