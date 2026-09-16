@@ -76,6 +76,7 @@
       "../personal-server/dist/personal-server*": "personal-server/dist/",
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/",
       "../pdpp-runtime/": "pdpp-runtime/",
+      "target/release/reference-stack/console/": "reference-stack/console/",
       "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE"
     },
     "linux": {
