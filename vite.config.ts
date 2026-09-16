@@ -10,11 +10,39 @@ import tailwindcss from "@tailwindcss/vite"
 const commitHash = execSync("git rev-parse --short HEAD").toString().trim()
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      ...(mode === "legacy"
+        ? {
+            "@tauri-apps/api/core": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+            "@tauri-apps/api/event": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+            "@tauri-apps/api/app": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+            "@tauri-apps/plugin-http": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+            "@tauri-apps/plugin-shell": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+            "@tauri-apps/plugin-clipboard-manager": path.resolve(
+              __dirname,
+              "./src/legacy-harness/mock-tauri.ts"
+            ),
+          }
+        : {}),
     },
   },
   test: {
@@ -43,4 +71,4 @@ export default defineConfig({
   define: {
     __COMMIT_HASH__: JSON.stringify(commitHash),
   },
-})
+}))
