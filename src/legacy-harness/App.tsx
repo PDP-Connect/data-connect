@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useState, type ComponentType } from "react"
 import { HashRouter, Link, Route, Routes, useLocation } from "react-router-dom"
-import { Provider } from "react-redux"
+import { Provider, useSelector } from "react-redux"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
 import { PageContainer } from "@/components/elements/page-container"
 import { PageHeading } from "@/components/typography/page-heading"
 import { TopNav } from "@/components/navigation/top-nav"
 import { dotPatternStyle } from "@/components/elements/dot-pattern"
-import { ConnectorUpdates } from "@/pages/home/components/connector-updates"
+import { ConnectorUpdatesRefreshButton } from "@/pages/home/components/connector-updates"
+import type { RootState } from "@/state/store"
 import { Home } from "@/pages/home"
 import { DataApps } from "@/pages/data-apps"
 import { Timeline } from "@/pages/timeline"
@@ -38,13 +39,34 @@ export interface LegacyHarnessRoute {
 }
 
 function InstallPanelRoute() {
+  const connectorUpdates = useSelector(
+    (state: RootState) => state.app.connectorUpdates
+  )
+
   return (
     <PageContainer>
       <PageHeading>Connector install panel</PageHeading>
       <p className="mb-6 text-sm text-muted-foreground">
         Existing connector install and update surface, backed by fixture data.
       </p>
-      <ConnectorUpdates />
+      <ConnectorUpdatesRefreshButton
+        isCheckingUpdates={false}
+        onRefresh={() => undefined}
+      />
+      <ul aria-label="Connector updates">
+        {connectorUpdates.map(update => (
+          <li key={update.id}>
+            <span>{update.name}</span>{" "}
+            <span>
+              {update.isNew
+                ? `Install ${update.latestVersion}`
+                : update.hasUpdate
+                  ? `Update ${update.currentVersion} → ${update.latestVersion}`
+                  : `Current ${update.currentVersion ?? update.latestVersion}`}
+            </span>
+          </li>
+        ))}
+      </ul>
     </PageContainer>
   )
 }

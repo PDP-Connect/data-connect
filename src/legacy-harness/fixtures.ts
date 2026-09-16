@@ -227,6 +227,11 @@ const completedAt = new Date(Date.now() - 20 * 60_000).toISOString()
 const connectorUpdates: ConnectorUpdateInfo[] = [
   {
     id: "github-pdpp",
+    tier: "supported",
+    requiredBindings: [],
+    setupModality: "static_secret",
+    runnable: true,
+    unavailableReason: null,
     name: "GitHub",
     description: "GitHub collection profile",
     company: "GitHub",
@@ -237,6 +242,11 @@ const connectorUpdates: ConnectorUpdateInfo[] = [
   },
   {
     id: "chatgpt-playwright",
+    tier: "supported",
+    requiredBindings: ["browser_session"],
+    setupModality: "browser_session",
+    runnable: true,
+    unavailableReason: null,
     name: "ChatGPT",
     description: "ChatGPT browser connector",
     company: "OpenAI",
