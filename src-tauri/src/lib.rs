@@ -3,7 +3,10 @@
 mod commands;
 mod processors;
 
+pub use commands::browser_surface_host_env_pairs;
+
 use commands::{
+    cleanup_browser_surface_host, unified_stack_enabled, BrowserSurfaceHost,
     check_browser_available, check_connected_platforms, check_connector_updates,
     cleanup_installed_pdpp_connector_runs, cleanup_personal_server, cleanup_playwright_processes,
     cleanup_reference_server, clear_browser_session, clear_personal_server_data,
@@ -61,6 +64,15 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+
+            if unified_stack_enabled() {
+                let app_data_dir = app.path().app_data_dir()?;
+                let resource_dir = app.path().resource_dir().ok();
+                let host = BrowserSurfaceHost::start(app_data_dir, resource_dir)
+                    .map_err(std::io::Error::other)?;
+                log::info!("Started unified browser surface host at {}", host.endpoint());
+                app.manage(host);
+            }
 
             // Listen for close window events from connectors
             let app_handle = app.handle().clone();
@@ -134,8 +146,9 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                cleanup_browser_surface_host(app);
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
