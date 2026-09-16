@@ -13,6 +13,7 @@
  */
 
 import type { ManualUploadValidationResult } from "@pdpp/polyfill-connectors/manual-upload-validation";
+import type { ParsedCoverageDiagnosticsStateSnapshot } from "@pdpp/polyfill-connectors/local-source-inventory";
 
 export type { ManualUploadValidationResult };
 
@@ -331,9 +332,22 @@ export async function resolveProviderAuthAdapter(kind: string): Promise<Provider
   return typeof resolve === "function" ? ((await resolve(kind)) as ProviderAuthAdapter | null) : null;
 }
 
-export function parseCoverageDiagnosticsStateSnapshot(connectorId: string, state: unknown): Record<string, unknown> {
+export function parseCoverageDiagnosticsStateSnapshot(
+  connectorId: string,
+  state: unknown
+): ParsedCoverageDiagnosticsStateSnapshot {
   const parse = optionalModules.coverage?.parseCoverageDiagnosticsStateSnapshot;
-  return typeof parse === "function" ? (parse(connectorId, state) as Record<string, unknown>) : {};
+  return typeof parse === "function"
+    ? (parse(connectorId, state) as ParsedCoverageDiagnosticsStateSnapshot)
+    : {
+        duplicateStores: [],
+        hasAuthoritativeInventory: false,
+        hasCommittedSnapshot: false,
+        malformed: state !== null && state !== undefined,
+        missingStores: [],
+        rows: [],
+        unexpectedStores: [],
+      };
 }
 
 export async function loadStaticSecretInjectionHelpers(): Promise<{
