@@ -68,7 +68,8 @@ fn configured_checkout_dir() -> Option<PathBuf> {
 }
 
 fn configured_server_url() -> String {
-    std::env::var("PDPP_REFERENCE_SERVER_URL")
+    std::env::var("DATACONNECT_RI_URL")
+        .or_else(|_| std::env::var("PDPP_REFERENCE_SERVER_URL"))
         .unwrap_or_else(|_| DEFAULT_REFERENCE_SERVER_URL.to_string())
 }
 
@@ -97,6 +98,22 @@ async fn wait_for_health(origin: String) -> bool {
 /// `reference-server-error` on failure to become healthy.
 #[tauri::command]
 pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, true).await
+}
+
+/// Attach to an already-running reference server without consulting the
+/// legacy checkout-spawn setting. The unified tray uses this until the A3
+/// supervisor owns sidecar startup.
+pub(crate) async fn attach_reference_server(
+    app: AppHandle,
+) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, false).await
+}
+
+async fn start_reference_server_internal(
+    app: AppHandle,
+    allow_spawn: bool,
+) -> Result<ReferenceServerStatus, String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -132,7 +149,11 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
         }
     };
 
-    let checkout_dir = configured_checkout_dir();
+    let checkout_dir = if allow_spawn {
+        configured_checkout_dir()
+    } else {
+        None
+    };
 
     let Some(checkout_dir) = checkout_dir else {
         // Dev-mode fallback: no local pdpp checkout configured. Health-check
@@ -519,6 +540,13 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
             .to_string()
     })?;
 
+    login_reference_server_with_password(origin, &password).await
+}
+
+pub(crate) async fn login_reference_server_with_password(
+    origin: String,
+    password: &str,
+) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
     // setting pdpp_owner_session on THAT response, not on whatever it
@@ -555,8 +583,7 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("pdpp_owner_session="))
-        .map(|v| v.to_string());
+        .find_map(extract_owner_session_cookie);
 
     let Some(raw_cookie) = set_cookie_header else {
         return Err(
@@ -565,14 +592,42 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         );
     };
 
-    // Extract just the cookie value (between '=' and the first ';').
-    let value = raw_cookie
-        .split_once('=')
-        .map(|(_, rest)| rest.split(';').next().unwrap_or("").to_string())
-        .ok_or_else(|| "Malformed Set-Cookie header from reference server".to_string())?;
-
     Ok(ReferenceServerLoginResult {
-        session_cookie: value,
+        session_cookie: raw_cookie,
         origin,
     })
+}
+
+fn extract_owner_session_cookie(header: &str) -> Option<String> {
+    let value = header
+        .strip_prefix("pdpp_owner_session=")?
+        .split(';')
+        .next()?
+        .trim();
+    (!value.is_empty()).then_some(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_owner_session_cookie_value_without_attributes() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=abc123; Path=/; HttpOnly"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_other_or_empty_cookie_headers() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_csrf=abc123; Path=/"),
+            None
+        );
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=; Path=/"),
+            None
+        );
+    }
 }
