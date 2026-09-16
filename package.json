@@ -15,6 +15,7 @@
   "scripts": {
     "dev": "vite",
     "dev:app": "vite --port 5173 --strictPort",
+    "legacy:ui": "vite --mode legacy --open /legacy.html",
     "build": "tsc -b && vite build",
     "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
     "connectors:resolve": "node scripts/resolve-connectors.js",
