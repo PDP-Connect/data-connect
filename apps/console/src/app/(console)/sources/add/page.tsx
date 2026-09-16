@@ -15,6 +15,7 @@ import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
+import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   let catalog: ConnectorCatalogEntry[] = [];
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
+  let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./add-source-demo-data.ts");
     ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
@@ -65,6 +67,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;
+      localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
       // EXACT per-connector existing-sources lookup — one `GET
       // /_ref/connections?connector_id=` call per catalog entry (bounded by
       // the registered connector-type catalog size, a few dozen, never by
@@ -118,6 +121,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         installLifecycleByConnector={installLifecycleByConnector}
         query={sourceQuery}
       />
+      <LocalConnectorSourcesPanel sources={localSources} />
     </RecordroomShellWithPalette>
   );
 }

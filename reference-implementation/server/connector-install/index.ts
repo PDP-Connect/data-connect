@@ -23,6 +23,11 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { canonicalConnectorKey } from "../connector-key.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  type LocalConnectorSourceRecord,
+  type LocalConnectorSourceStore,
+} from "./local-source.ts";
 
 const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -667,6 +672,11 @@ async function installStagedEntry(options: {
 export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
+  addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
+  listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
+  reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
+  removeLocalSource?: (sourceId: string) => Promise<void>;
+  selectLocalSource?: (connectorKey: string, sourceId: string | null) => Promise<void>;
   status: () => Promise<readonly ConnectorInstallRecord[]>;
   update: (connectorId: string) => Promise<ConnectorInstallRecord>;
 }
@@ -677,6 +687,7 @@ export function createConnectorInstallService(options: {
   readonly catalogLoader?: () => Promise<readonly ConnectorCatalogEntry[] | ConnectorCatalogSnapshot>;
   /** Test seam; production always delegates OCI verification to the pinned core. */
   readonly installArtifact?: InstallArtifact;
+  readonly localSourceStore?: LocalConnectorSourceStore;
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
 }): ConnectorInstallService {
   const dataDir =
@@ -687,6 +698,7 @@ export function createConnectorInstallService(options: {
   const store =
     options.store ||
     (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
+  const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(dataDir);
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const previousHighWater = await store.getCatalogHighWater();
     const loaded = options.catalogLoader
@@ -779,8 +791,13 @@ export function createConnectorInstallService(options: {
     return installEntry(connectorId, entry);
   };
   return {
+    addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
     install,
+    listLocalSources: () => localSourceStore.list(),
+    reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
+    removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
+    selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     status: async () => {
       const records = await store.listActive();
       return records.map((record) => verifyStoredRecord(record.root, record, dataDir));

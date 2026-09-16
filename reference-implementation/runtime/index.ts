@@ -520,6 +520,15 @@ export interface RuntimeRunConnectorOptions {
   connectorId: string;
   connectorInstanceId?: string | null;
   connectorPath: string;
+  /** Non-secret executable-source provenance stamped into run timeline events. */
+  runSource?: {
+    readonly connector_key?: string;
+    readonly connector_id?: string;
+    readonly id: string;
+    readonly kind: string;
+    readonly source_id?: string;
+    readonly source_kind?: string;
+  };
   /**
    * Detail-gap store override for tests and integration seams. Defaults to
    * `getDefaultConnectorDetailGapStore()` when omitted.
@@ -798,8 +807,11 @@ function recordMatchesScopeResource(
   return allowed.has(resourceKey);
 }
 
-function buildRunSourceDescriptor(connectorId: string): { id: string; kind: string } {
-  return { id: connectorId, kind: "connector" };
+function buildRunSourceDescriptor(
+  connectorId: string,
+  source?: RuntimeRunConnectorOptions["runSource"]
+): NonNullable<RuntimeRunConnectorOptions["runSource"]> {
+  return source ? { ...source, id: connectorId } : { id: connectorId, kind: "connector" };
 }
 
 function buildRunConnectionIdentity(connectorInstanceId: string | null): Record<string, string> {
@@ -2680,6 +2692,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     ownerSubjectId = null,
     ownerToken,
     manifest,
+    runSource: requestedRunSource,
     scope: providedScope = null,
     state = null,
     collectionMode = "incremental",
@@ -3008,7 +3021,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // omitted optional property, and `createTraceContext` defaults on absence.
   const traceContext = opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
   const runId = spawnRunId;
-  const runSource = buildRunSourceDescriptor(connectorId);
+  const runSource = buildRunSourceDescriptor(connectorId, requestedRunSource);
   const runConnectionIdentity = buildRunConnectionIdentity(normalizedConnectorInstanceId);
 
   // We do NOT use readline.createInterface here. Node 24+ readline treats
