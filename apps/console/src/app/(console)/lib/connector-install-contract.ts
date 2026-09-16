@@ -40,6 +40,20 @@ export interface ConnectorInstallStatus {
   readonly version: string;
 }
 
+export interface ConnectorLocalSource {
+  readonly connector_id: string;
+  readonly connector_key: string;
+  readonly display_name: string;
+  readonly entrypoint_path: string;
+  readonly manifest_path: string;
+  readonly provenance: "developer-local-unsigned";
+  readonly selected: boolean;
+  readonly source_id: string;
+  readonly source_path: string;
+  readonly updated_at: string;
+  readonly version: string;
+}
+
 export interface ConnectorInstallCatalogResponse {
   readonly data: readonly ConnectorInstallCatalogEntry[];
   readonly object: "connector_install_catalog";
@@ -52,6 +66,7 @@ export interface ConnectorInstallStatusResponse {
 
 export interface ConnectorInstallSnapshot {
   readonly catalog: readonly ConnectorInstallCatalogEntry[];
+  readonly localSources?: readonly ConnectorLocalSource[];
   readonly status: readonly ConnectorInstallStatus[];
 }
 
@@ -162,6 +177,31 @@ function readStatus(value: unknown, index: number): ConnectorInstallStatus {
   };
 }
 
+function readLocalSource(value: unknown, index: number): ConnectorLocalSource {
+  const context = `connector_install_local_sources.data[${index}]`;
+  const record = asRecord(value, context);
+  const provenance = readString(record, "provenance", context);
+  if (provenance !== "developer-local-unsigned") {
+    throw new ConnectorInstallContractError(`${context}.provenance must identify an unsigned developer-local source.`);
+  }
+  if (typeof record.selected !== "boolean") {
+    throw new ConnectorInstallContractError(`${context}.selected must be a boolean.`);
+  }
+  return {
+    connector_id: readString(record, "connector_id", context),
+    connector_key: readString(record, "connector_key", context),
+    display_name: readString(record, "display_name", context),
+    entrypoint_path: readString(record, "entrypoint_path", context),
+    manifest_path: readString(record, "manifest_path", context),
+    provenance: "developer-local-unsigned",
+    selected: record.selected,
+    source_id: readString(record, "source_id", context),
+    source_path: readString(record, "source_path", context),
+    updated_at: readString(record, "updated_at", context),
+    version: readString(record, "version", context),
+  };
+}
+
 function readData(payload: unknown, objectName: string): readonly unknown[] {
   const record = asRecord(payload, objectName);
   if (record.object !== objectName) {
@@ -181,4 +221,8 @@ export function parseConnectorInstallCatalogResponse(payload: unknown): Connecto
 export function parseConnectorInstallStatusResponse(payload: unknown): ConnectorInstallStatusResponse {
   const data = readData(payload, "connector_install_status").map(readStatus);
   return { data, object: "connector_install_status" };
+}
+
+export function parseConnectorLocalSourcesResponse(payload: unknown): readonly ConnectorLocalSource[] {
+  return readData(payload, "connector_install_local_sources").map(readLocalSource);
 }

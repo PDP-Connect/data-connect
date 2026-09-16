@@ -6,6 +6,7 @@ import type {
   ConnectorInstallRecord,
   ConnectorInstallService,
 } from "../connector-install/index.ts";
+import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 interface Request {
@@ -54,6 +55,27 @@ function projectStatus(record: ConnectorInstallRecord): Record<string, unknown> 
     tier: record.tier,
     version: record.version,
   };
+}
+
+function projectLocalSource(record: LocalConnectorSourceRecord): Record<string, unknown> {
+  return {
+    connector_id: record.connectorId,
+    connector_key: record.connectorKey,
+    display_name: record.displayName,
+    entrypoint_path: record.entrypointPath,
+    manifest_path: record.manifestPath,
+    provenance: record.trust,
+    selected: record.selected,
+    source_id: record.sourceId,
+    source_path: record.root,
+    updated_at: record.updatedAt,
+    version: record.version,
+  };
+}
+
+function bodyString(req: Request, key: string): string | null {
+  const value = req.body?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 export function mountOwnerConnectorInstall(
@@ -115,8 +137,95 @@ export function mountOwnerConnectorInstall(
       options.handleError(res, error);
     }
   };
+  const localSourcesHandler: Handler = async (_req, res) => {
+    try {
+      const records = options.service.listLocalSources ? await options.service.listLocalSources() : [];
+      res.json({ data: records.map(projectLocalSource), object: "connector_install_local_sources" });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
+  const localAddHandler: Handler = async (req, res) => {
+    try {
+      const sourcePath = bodyString(req, "source_path");
+      if (!sourcePath) {
+        options.pdppError(res, 400, "invalid_request", "source_path is required", "source_path");
+        return;
+      }
+      if (!options.service.addLocalSource) {
+        options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "source_path");
+        return;
+      }
+      res.status(201).json({
+        data: projectLocalSource(await options.service.addLocalSource(sourcePath)),
+        object: "connector_install_local_source",
+      });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
+  const localReloadHandler: Handler = async (req, res) => {
+    try {
+      const sourceId = bodyString(req, "source_id");
+      if (!sourceId) {
+        options.pdppError(res, 400, "invalid_request", "source_id is required", "source_id");
+        return;
+      }
+      if (!options.service.reloadLocalSource) {
+        options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "source_id");
+        return;
+      }
+      res.json({
+        data: projectLocalSource(await options.service.reloadLocalSource(sourceId)),
+        object: "connector_install_local_source",
+      });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
+  const localRemoveHandler: Handler = async (req, res) => {
+    try {
+      const sourceId = bodyString(req, "source_id");
+      if (!sourceId) {
+        options.pdppError(res, 400, "invalid_request", "source_id is required", "source_id");
+        return;
+      }
+      if (!options.service.removeLocalSource) {
+        options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "source_id");
+        return;
+      }
+      await options.service.removeLocalSource(sourceId);
+      res.json({ data: { removed: true, source_id: sourceId }, object: "connector_install_local_source" });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
+  const localSelectHandler: Handler = async (req, res) => {
+    try {
+      const connectorKey = bodyString(req, "connector_key");
+      const rawSourceId = req.body?.source_id;
+      const sourceId = rawSourceId === null ? null : typeof rawSourceId === "string" ? rawSourceId.trim() : undefined;
+      if (!connectorKey || sourceId === undefined) {
+        options.pdppError(res, 400, "invalid_request", "connector_key and source_id are required", "connector_key");
+        return;
+      }
+      if (!options.service.selectLocalSource) {
+        options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "connector_key");
+        return;
+      }
+      await options.service.selectLocalSource(connectorKey, sourceId || null);
+      res.json({ data: { connector_key: connectorKey, selected_source_id: sourceId || null }, object: "connector_install_local_source" });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
   app.get("/v1/owner/connector-install/catalog", ...guarded, catalogHandler);
   app.get("/v1/owner/connector-install/status", ...guarded, statusHandler);
+  app.get("/v1/owner/connector-install/local-sources", ...guarded, localSourcesHandler);
   app.post("/v1/owner/connector-install/install", ...guarded, installHandler);
   app.post("/v1/owner/connector-install/update", ...guarded, updateHandler);
+  app.post("/v1/owner/connector-install/local-sources/add", ...guarded, localAddHandler);
+  app.post("/v1/owner/connector-install/local-sources/reload", ...guarded, localReloadHandler);
+  app.post("/v1/owner/connector-install/local-sources/remove", ...guarded, localRemoveHandler);
+  app.post("/v1/owner/connector-install/local-sources/select", ...guarded, localSelectHandler);
 }

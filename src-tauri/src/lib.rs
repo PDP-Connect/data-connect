@@ -24,6 +24,9 @@ use commands::{
     load_source_export_preview_from_path, login_reference_server, mark_export_synced, open_folder,
     open_personal_server_scope_folder, open_platform_export_folder, open_reference_server_view,
     prepare_installed_pdpp_import, reset_installed_pdpp_browser_profile,
+    add_developer_connector_source, list_developer_connector_sources,
+    reload_developer_connector_source, remove_developer_connector_source,
+    select_developer_connector_source,
     resize_reference_server_view, set_app_config,
     start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
     start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
@@ -114,6 +117,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platforms,
+            add_developer_connector_source,
+            list_developer_connector_sources,
+            reload_developer_connector_source,
+            remove_developer_connector_source,
+            select_developer_connector_source,
             start_connector_run,
             start_installed_pdpp_connector_run,
             prepare_installed_pdpp_import,

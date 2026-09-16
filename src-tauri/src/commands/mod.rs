@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod connector;
 pub mod connector_store;
+pub mod developer_connector_sources;
 pub mod browser_surface_host;
 pub mod download;
 pub mod file_ops;
@@ -20,6 +21,7 @@ pub mod server;
 pub mod updates;
 
 pub use connector::*;
+pub use developer_connector_sources::*;
 pub use download::*;
 pub use browser_surface_host::*;
 pub use file_ops::*;

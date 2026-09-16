@@ -79,6 +79,7 @@ import {
   resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
 import { createConnectorInstallService } from "./connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -8187,6 +8188,7 @@ export async function startServer(opts: ServerOpts = {}) {
       return { connectorId: namespace.connectorId, connectorInstanceId: namespace.connectorInstanceId };
     },
     ownerSubjectId: ownerAuthSubjectId,
+    localConnectorSourceStore: createFileLocalConnectorSourceStore(),
     resolveOwnerSubjectIdForConnectorInstance: async (connectorInstanceId) =>
       (await createRequestConnectorInstanceStore().get(connectorInstanceId))?.ownerSubjectId ?? null,
     ...(opts.connectorPathResolver === null

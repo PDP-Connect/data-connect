@@ -47,6 +47,11 @@ import {
 } from "../server/connector-summary-read-model.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
 import { getSyncState } from "../server/records.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
+  type LocalConnectorSourceStore,
+} from "../server/connector-install/local-source.ts";
 import type { BrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
 import {
   type BrowserSurfaceReplacementReceiptStore,
@@ -477,6 +482,15 @@ export type ConnectorPathResolver = (
   options?: RunNowOptions
 ) => Promise<string | null> | string | null;
 
+export interface ConnectorRunSource {
+  readonly connector_key?: string;
+  readonly connector_id?: string;
+  readonly id: string;
+  readonly kind: string;
+  readonly source_id?: string;
+  readonly source_kind?: string;
+}
+
 interface ControllerLogger {
   error?: (message: string) => void;
   warn?: (message: string) => void;
@@ -569,6 +583,8 @@ export interface ControllerOptions {
   /** Injectable sleep for the reclaim retry delay. Defaults to setTimeout. Tests inject a synchronous no-op. */
   browserSurfaceSleep?: (ms: number) => Promise<void>;
   connectorPathResolver?: ConnectorPathResolver;
+  /** Separate developer-local source selection store. */
+  localConnectorSourceStore?: LocalConnectorSourceStore;
   // Optional durable detail-gap store override; defaults to the configured
   // storage-backed singleton. The controller reads pending *source-pressure*
   // gaps from it so the schedule projection can surface `cooling_off` honestly
@@ -1484,10 +1500,20 @@ export function resolveDefaultConnectorPath(connectorId: string, manifest?: Conn
 // record falls through to the vendored package/seed resolver; a corrupt or
 // path-escaping active record stops resolution instead of being bypassed.
 const activeConnectorInstallStore = createConnectorInstallStore();
+const localConnectorSourceStore = createFileLocalConnectorSourceStore();
 export async function resolveActiveInstallFirstConnectorPath(
   connectorId: string,
-  manifest?: ConnectorManifest
+  manifest?: ConnectorManifest,
+  _options?: RunNowOptions,
+  localStore: LocalConnectorSourceStore = localConnectorSourceStore
 ): Promise<string | null> {
+  const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
+  if (local.status === "invalid") {
+    throw new Error("Active developer-local connector source is invalid for " + connectorId + ": " + local.reason);
+  }
+  if (local.status === "active") {
+    return local.path;
+  }
   const active = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
   if (active.status === "invalid") {
     throw new Error("Active connector install is invalid for " + connectorId + ": " + active.reason);
@@ -2499,7 +2525,11 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // the durable bounds. This only smooths bursts within one controller's life.
   const recoveryContinuationLastStartedAt = new Map<string, number>();
   const log: ControllerLogger = opts.logger || console;
-  const resolveConnectorPath = opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath;
+  const localSourceStore = opts.localConnectorSourceStore ?? localConnectorSourceStore;
+  const resolveConnectorPath =
+    opts.connectorPathResolver ||
+    ((connectorId: string, manifest?: ConnectorManifest, options?: RunNowOptions) =>
+      resolveActiveInstallFirstConnectorPath(connectorId, manifest, options, localSourceStore));
   const ownerClientId = opts.ownerClientId || "cli_longview";
   const ownerSubjectId = opts.ownerSubjectId || "owner_local";
   const schedulerStore = opts.schedulerStore || getDefaultSchedulerStore();
@@ -3865,18 +3895,28 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     options: RunNowOptions,
     key: string
-  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest }> {
+  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest; readonly runSource?: ConnectorRunSource }> {
     await assertNotSourcePressureCoolingOff(connectorId, options);
 
-    const activeInstall = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
-    if (activeInstall.status === "invalid") {
+    const activeLocalSource = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
+    if (activeLocalSource.status === "invalid") {
+      throw new ControllerError(
+        "Active developer-local connector source is invalid for " + connectorId + ": " + activeLocalSource.reason,
+        "connector_install_invalid"
+      );
+    }
+    const activeInstall =
+      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+    if (activeInstall?.status === "invalid") {
       throw new ControllerError(
         "Active connector install is invalid for " + connectorId + ": " + activeInstall.reason,
         "connector_install_invalid"
       );
     }
     const manifest =
-      activeInstall.status === "active"
+      activeLocalSource.status === "active"
+        ? (activeLocalSource.record.manifest as ConnectorManifest)
+        : activeInstall?.status === "active"
         ? activeInstall.record.manifest as ConnectorManifest
         : options.manifest ?? (await getConnectorManifest(connectorId));
     if (!manifest) {
@@ -3891,13 +3931,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // through the resolver could combine a pre-update manifest with a
     // post-update entrypoint.
     const connectorPath =
-      activeInstall.status === "active"
+      activeLocalSource.status === "active"
+        ? activeLocalSource.path
+        : activeInstall?.status === "active"
         ? activeInstall.path
         : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
       throw new ControllerError(`No runnable connector implementation is available for ${connectorId}`, "not_found");
     }
-    return { connectorPath, manifest };
+    return {
+      connectorPath,
+      manifest,
+      ...(activeLocalSource.status === "active" ? { runSource: activeLocalSource.source } : {}),
+    };
   }
 
   /**
@@ -4033,7 +4079,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     const { connectorId: admittedConnectorId, connectorInstanceId } = admittedConnection;
     const key = runtimeKey(admittedConnectorId, connectorInstanceId);
     const sourceWebhookEvent = validatedSourceWebhookRunEvent(options);
-    const { manifest, connectorPath } = await validateRunNowPreconditions(
+    const { manifest, connectorPath, runSource } = await validateRunNowPreconditions(
       admittedConnectorId,
       { ...options, connectorInstanceId },
       key
@@ -4240,6 +4286,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           referenceBaseUrl: currentReferenceBaseUrl(),
           rsUrl: currentRsUrl(options.rsUrl),
           runId,
+          ...(runSource ? { runSource } : {}),
           staticSecretEnv,
           // Mode-A streaming registration env. Both fields must be present
           // for runConnector to thread them into the spawn env; either
