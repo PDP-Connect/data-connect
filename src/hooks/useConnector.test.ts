@@ -88,15 +88,34 @@ describe("useConnector.startImport", () => {
   })
 
   it.each([
-    [{ errorClass: "auth_failed" }, true],
-    [new Error("host returned 401 Unauthorized"), true],
-    [new Error("invalid token"), true],
-    [new Error("Network request failed"), false],
-  ])("classifies terminal host error %j as authentication failure: %s", async (error, expected) => {
-    const { isAuthenticationFailure } = await import("./useConnector")
+    {
+      label: "a structured auth_failed error class",
+      error: { errorClass: "auth_failed" },
+      expected: true,
+    },
+    {
+      label: "a 401 Unauthorized message",
+      error: new Error("host returned 401 Unauthorized"),
+      expected: true,
+    },
+    {
+      label: "an invalid token message",
+      error: new Error("invalid token"),
+      expected: true,
+    },
+    {
+      label: "a network failure message",
+      error: new Error("Network request failed"),
+      expected: false,
+    },
+  ])(
+    "classifies $label as authentication failure: $expected",
+    async ({ error, expected }) => {
+      const { isAuthenticationFailure } = await import("./useConnector")
 
-    expect(isAuthenticationFailure(error)).toBe(expected)
-  })
+      expect(isAuthenticationFailure(error)).toBe(expected)
+    }
+  )
 
   it("blocks a new run while its connector change is pending", async () => {
     currentPendingConnectorChanges = ["chatgpt"]
