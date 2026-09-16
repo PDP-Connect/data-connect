@@ -258,7 +258,7 @@ function buildRecord(
     manifest: profile.manifest,
     manifestPath: MANIFEST_PATH,
     manifestSha256: sha256(manifestFile),
-    ...(provenancePath ? { provenancePath, provenanceSha256 } : {}),
+    ...(provenancePath && provenanceSha256 ? { provenancePath, provenanceSha256 } : {}),
     root,
     selected,
     sourceId: sourceIdFor(root),

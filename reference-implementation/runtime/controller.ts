@@ -3921,7 +3921,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return {
       connectorPath,
       manifest,
-      ...(activeLocalSource.status === "active" ? { runSource: activeLocalSource.source } : {}),
+      ...(activeLocalSource.status === "active"
+        ? { runSource: { ...activeLocalSource.source, id: connectorId } }
+        : {}),
     };
   }
 
