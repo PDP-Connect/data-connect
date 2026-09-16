@@ -9,6 +9,8 @@
 
 use serde::Serialize;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
@@ -16,6 +18,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +27,12 @@ use tauri::{AppHandle, Emitter};
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[cfg(unix)]
+type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
+
+#[cfg(unix)]
+static PROCESS_GROUP_REGISTRY: OnceLock<Result<ProcessGroupRegistry, String>> = OnceLock::new();
 
 /// The complete environment policy for a supervised process.
 ///
@@ -75,8 +85,10 @@ pub struct StopPolicy {
     /// How long to wait after the graceful signal before escalating.
     pub grace: Duration,
     /// How long to wait after the forceful signal before using the platform
-    /// fallback (`Child::kill`) and waiting for the leader.
+    /// fallback (`Child::kill`).
     pub escalate: Duration,
+    /// The maximum time a stop request may wait for this process tree.
+    pub total: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,8 +174,12 @@ impl From<io::Error> for SupervisorError {
 struct SupervisorState {
     stopping: AtomicBool,
     child: Mutex<Option<Child>>,
+    #[cfg(unix)]
+    process_group_id: Mutex<Option<libc::pid_t>>,
     finished: Mutex<bool>,
     finished_signal: Condvar,
+    stop_deadline: Mutex<Option<Instant>>,
+    stop_wait_expired: AtomicBool,
 }
 
 impl SupervisorState {
@@ -171,8 +187,12 @@ impl SupervisorState {
         Self {
             stopping: AtomicBool::new(false),
             child: Mutex::new(None),
+            #[cfg(unix)]
+            process_group_id: Mutex::new(None),
             finished: Mutex::new(false),
             finished_signal: Condvar::new(),
+            stop_deadline: Mutex::new(None),
+            stop_wait_expired: AtomicBool::new(false),
         }
     }
 
@@ -180,6 +200,76 @@ impl SupervisorState {
         if let Ok(mut finished) = self.finished.lock() {
             *finished = true;
             self.finished_signal.notify_all();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
+    let result = PROCESS_GROUP_REGISTRY.get_or_init(|| {
+        let registry = Arc::new(Mutex::new(BTreeSet::new()));
+        let signal_registry = Arc::clone(&registry);
+        let mut signals =
+            signal_hook::iterator::Signals::new([libc::SIGTERM, libc::SIGINT, libc::SIGHUP])
+                .map_err(|error| format!("failed to register shutdown signals: {error}"))?;
+        thread::Builder::new()
+            .name("sidecar-signal-handler".to_string())
+            .spawn(move || {
+                if let Some(signal) = signals.forever().next() {
+                    if let Ok(process_groups) = signal_registry.lock() {
+                        for process_group in process_groups.iter().copied() {
+                            signal_process_group_direct(process_group as u32, libc::SIGKILL);
+                        }
+                    }
+                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+                }
+            })
+            .map_err(|error| format!("failed to start shutdown signal handler: {error}"))?;
+        Ok(registry)
+    });
+    result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| SupervisorError::Message(error.clone()))
+}
+
+#[cfg(unix)]
+fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
+    let registry = PROCESS_GROUP_REGISTRY
+        .get()
+        .and_then(|result| result.as_ref().ok())
+        .ok_or_else(|| {
+            SupervisorError::Message("parent signal handlers are not installed".to_string())
+        })?;
+    registry
+        .lock()
+        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?
+        .insert(process_group as libc::pid_t);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unregister_process_group(process_group: libc::pid_t) {
+    if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
+        if let Ok(mut process_groups) = registry.lock() {
+            process_groups.remove(&process_group);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn take_process_group_id(state: &SupervisorState) -> Option<libc::pid_t> {
+    state.process_group_id.lock().ok()?.take()
+}
+
+#[cfg(unix)]
+struct ProcessGroupRegistration(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl Drop for ProcessGroupRegistration {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.take() {
+            unregister_process_group(slot);
         }
     }
 }
@@ -208,12 +298,17 @@ impl Supervisor {
     /// Readiness and a `{port}` environment value both resolve from this same
     /// allocation.
     pub fn start(self) -> Result<SupervisorHandle, SupervisorError> {
+        #[cfg(unix)]
+        if self.spec.process_group {
+            install_parent_signal_handlers()?;
+        }
         let port = allocate_loopback_port(spec_requires_adjacent_port(&self.spec))?;
         let state = Arc::new(SupervisorState::new());
         let (ready_sender, ready_receiver) = mpsc::channel();
         let thread_state = Arc::clone(&state);
         let thread_sink = Arc::clone(&self.sink);
         let spec = self.spec;
+        let stop_budget = spec.stop.total;
 
         thread::Builder::new()
             .name(format!("{}-supervisor", spec.label))
@@ -223,7 +318,11 @@ impl Supervisor {
             .map_err(SupervisorError::Io)?;
 
         match ready_receiver.recv() {
-            Ok(Ok(())) => Ok(SupervisorHandle { state, port }),
+            Ok(Ok(())) => Ok(SupervisorHandle {
+                state,
+                port,
+                stop_budget,
+            }),
             Ok(Err(error)) => Err(SupervisorError::Message(error)),
             Err(_) => Err(SupervisorError::Message(
                 "supervisor stopped before reporting readiness".to_string(),
@@ -235,6 +334,7 @@ impl Supervisor {
 pub struct SupervisorHandle {
     state: Arc<SupervisorState>,
     port: u16,
+    stop_budget: Duration,
 }
 
 impl SupervisorHandle {
@@ -243,17 +343,60 @@ impl SupervisorHandle {
     }
 
     /// Request graceful shutdown and wait until the supervisor has reaped its
-    /// child and emitted `stopped`.
+    /// child and emitted `stopped`, bounded by the process stop policy.
     pub fn stop(&self) -> Result<(), SupervisorError> {
+        self.stop_until(Instant::now() + self.stop_budget)
+    }
+
+    /// Request shutdown and wait until the supervisor finishes or the supplied
+    /// deadline expires. The deadline is also shared with the supervisor so
+    /// its child and process-group waits use the same bound.
+    pub fn stop_until(&self, deadline: Instant) -> Result<(), SupervisorError> {
+        let deadline = deadline.min(Instant::now() + self.stop_budget);
+        if self.state.stop_wait_expired.load(Ordering::Acquire) {
+            return Err(SupervisorError::Message(
+                "supervisor stop budget expired".to_string(),
+            ));
+        }
+
+        if let Ok(mut stop_deadline) = self.state.stop_deadline.lock() {
+            *stop_deadline = Some(
+                stop_deadline
+                    .map(|existing| existing.min(deadline))
+                    .unwrap_or(deadline),
+            );
+        } else {
+            return Err(SupervisorError::Message(
+                "supervisor state was poisoned".to_string(),
+            ));
+        }
         self.state.stopping.store(true, Ordering::Release);
         let mut finished =
             self.state.finished.lock().map_err(|_| {
                 SupervisorError::Message("supervisor state was poisoned".to_string())
             })?;
         while !*finished {
-            finished = self.state.finished_signal.wait(finished).map_err(|_| {
-                SupervisorError::Message("supervisor state was poisoned".to_string())
-            })?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.state.stop_wait_expired.store(true, Ordering::Release);
+                return Err(SupervisorError::Message(
+                    "supervisor did not stop before its deadline".to_string(),
+                ));
+            }
+            let (next_finished, timeout) = self
+                .state
+                .finished_signal
+                .wait_timeout(finished, remaining)
+                .map_err(|_| {
+                    SupervisorError::Message("supervisor state was poisoned".to_string())
+                })?;
+            finished = next_finished;
+            if timeout.timed_out() && !*finished {
+                self.state.stop_wait_expired.store(true, Ordering::Release);
+                return Err(SupervisorError::Message(
+                    "supervisor did not stop before its deadline".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -309,6 +452,10 @@ fn run_supervisor(
 
         if let Ok(mut child) = state.child.lock() {
             *child = Some(spawned.child);
+            #[cfg(unix)]
+            if let Ok(mut process_group_id) = state.process_group_id.lock() {
+                *process_group_id = spawned.process_group_id;
+            }
         } else {
             let _ = ready_sender.send(Err("supervisor state was poisoned".to_string()));
             state.finish();
@@ -484,6 +631,8 @@ fn emit_stopped(spec: &ProcessSpec, state: &SupervisorState, sink: &Arc<dyn Even
 struct SpawnedProcess {
     child: Child,
     stdout_lines: mpsc::Receiver<String>,
+    #[cfg(unix)]
+    process_group_id: Option<libc::pid_t>,
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
@@ -511,11 +660,28 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     }
 
     let mut child = command.spawn()?;
+    #[cfg(unix)]
+    let process_group_id = if spec.process_group {
+        match register_process_group(child.id()) {
+            Ok(()) => Some(child.id() as libc::pid_t),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            #[cfg(unix)]
+            if let Some(process_group) = process_group_id {
+                unregister_process_group(process_group);
+            }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stdout".to_string(),
             ));
@@ -526,6 +692,10 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            #[cfg(unix)]
+            if let Some(process_group) = process_group_id {
+                unregister_process_group(process_group);
+            }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stderr".to_string(),
             ));
@@ -565,6 +735,8 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     Ok(SpawnedProcess {
         child,
         stdout_lines,
+        #[cfg(unix)]
+        process_group_id,
     })
 }
 
@@ -699,6 +871,12 @@ fn take_exited_child(state: &SupervisorState) -> io::Result<Option<ExitStatus>> 
     match child.try_wait()? {
         Some(status) => {
             let _ = child_slot.take();
+            #[cfg(unix)]
+            if let Ok(mut process_group_id) = state.process_group_id.lock() {
+                if let Some(process_group) = process_group_id.take() {
+                    unregister_process_group(process_group);
+                }
+            }
             Ok(Some(status))
         }
         None => Ok(None),
@@ -716,18 +894,26 @@ fn stop_current_child(
     let Some(mut child) = child_slot.take() else {
         return Ok(None);
     };
+    #[cfg(unix)]
+    let _process_group_registration = ProcessGroupRegistration(take_process_group_id(state));
     let pid = child.id();
+    let deadline = state
+        .stop_deadline
+        .lock()
+        .ok()
+        .and_then(|deadline| *deadline)
+        .unwrap_or_else(|| Instant::now() + spec.stop.total);
 
-    if let Some(status) = child.try_wait()? {
-        #[cfg(unix)]
-        if spec.process_group {
-            wait_for_process_group_exit(pid, spec.stop.grace);
-        }
-        return Ok(Some(status));
-    }
+    log::info!(
+        "[{}] stopping process tree pid={} with a {:?} budget",
+        spec.label,
+        pid,
+        deadline.saturating_duration_since(Instant::now())
+    );
 
     #[cfg(unix)]
     if spec.process_group {
+        log::info!("[{}] sending SIGTERM to process group {}", spec.label, pid);
         signal_process_group(pid, libc::SIGTERM);
     }
 
@@ -739,21 +925,20 @@ fn stop_current_child(
         );
     }
 
-    if wait_for_child_exit(&mut child, spec.stop.grace)? {
-        #[cfg(unix)]
-        if spec.process_group {
-            if wait_for_process_group_exit(pid, spec.stop.grace) {
-                return child.try_wait();
-            }
-        } else {
-            return child.try_wait();
-        }
-        #[cfg(not(unix))]
+    let graceful_deadline = deadline.min(Instant::now() + spec.stop.grace);
+    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, graceful_deadline)? {
+        log::info!("[{}] process tree exited after graceful stop", spec.label);
         return child.try_wait();
     }
 
+    log::warn!(
+        "[{}] graceful stop exceeded {:?}; forcing process tree termination",
+        spec.label,
+        spec.stop.grace
+    );
     #[cfg(unix)]
     if spec.process_group {
+        log::info!("[{}] sending SIGKILL to process group {}", spec.label, pid);
         signal_process_group(pid, libc::SIGKILL);
     } else {
         let _ = child.kill();
@@ -763,22 +948,50 @@ fn stop_current_child(
         let _ = child.kill();
     }
 
-    let _ = wait_for_child_exit(&mut child, spec.stop.escalate)?;
+    let escalate_deadline = deadline.min(Instant::now() + spec.stop.escalate);
+    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, escalate_deadline)? {
+        log::info!("[{}] process tree exited after force-kill", spec.label);
+        return child.try_wait();
+    }
+
+    log::error!(
+        "[{}] process tree did not exit within its {:?} shutdown budget",
+        spec.label,
+        spec.stop.total
+    );
     if child.try_wait()?.is_none() {
+        log::warn!(
+            "[{}] retrying direct leader kill without waiting",
+            spec.label
+        );
         let _ = child.kill();
     }
-    let status = child.wait()?;
     #[cfg(unix)]
     if spec.process_group {
-        let _ = wait_for_process_group_exit(pid, spec.stop.escalate);
+        signal_process_group(pid, libc::SIGKILL);
     }
-    Ok(Some(status))
+    child.try_wait()
 }
 
-fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<bool> {
-    let deadline = Instant::now() + timeout;
+fn wait_for_process_tree_exit(
+    child: &mut Child,
+    process_group: u32,
+    has_process_group: bool,
+    deadline: Instant,
+) -> io::Result<bool> {
     loop {
-        if child.try_wait()?.is_some() {
+        let leader_exited = child.try_wait()?.is_some();
+        let group_exited = {
+            #[cfg(unix)]
+            {
+                !has_process_group || !process_group_exists(process_group)
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        };
+        if leader_exited && group_exited {
             return Ok(true);
         }
         if Instant::now() >= deadline {
@@ -797,24 +1010,13 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
     // If the leader has already exited, getpgid(pid) can fail even while a
     // descendant remains in the group. The direct group id is stable because
     // this module creates the group with CommandExt::process_group(0).
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), signal);
-    }
+    signal_process_group_direct(pid, signal);
 }
 
 #[cfg(unix)]
-fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !process_group_exists(process_group) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(
-            READINESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-        );
+fn signal_process_group_direct(pid: u32, signal: libc::c_int) {
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), signal);
     }
 }
 
@@ -880,6 +1082,7 @@ pub fn personal_server_spec(
         stop: StopPolicy {
             grace: Duration::from_secs(5),
             escalate: Duration::from_secs(3),
+            total: Duration::from_secs(8),
         },
     }
 }
@@ -891,7 +1094,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::Mutex;
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -932,6 +1135,7 @@ mod tests {
             stop: StopPolicy {
                 grace: Duration::from_millis(300),
                 escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
             },
         }
     }
@@ -992,6 +1196,121 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn unix_parent_signal_helper() {
+        if std::env::var_os("DATACONNECT_PARENT_SIGNAL_HELPER").is_none() {
+            return;
+        }
+        let pid_file = PathBuf::from(
+            std::env::var_os("DATACONNECT_PARENT_SIGNAL_PID_FILE")
+                .expect("parent-signal PID file path"),
+        );
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000);'], {{ stdio: 'ignore' }});
+fs.writeFileSync({:?}, JSON.stringify({{ leader: process.pid, child: child.pid }}));
+console.log('PARENT-SIGNAL-READY');
+setInterval(() => {{}}, 1000);
+"#,
+            pid_file
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let handle = Supervisor::new(
+            base_spec(
+                script.path(),
+                Readiness::StdoutMarker {
+                    marker: "PARENT-SIGNAL-READY".to_string(),
+                    deadline: Duration::from_secs(3),
+                },
+            ),
+            ArcSink(sink),
+        )
+        .start()
+        .expect("parent-signal helper supervisor should start");
+        std::mem::forget(handle);
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_parent_signal_terminates_sidecar_process_group() {
+        let directory = tempdir().unwrap();
+        let pid_file = directory.path().join("sidecar-pids.json");
+        let mut helper = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::process_supervisor::tests::unix_parent_signal_helper",
+                "--nocapture",
+                "--ignored",
+            ])
+            .env("DATACONNECT_PARENT_SIGNAL_HELPER", "1")
+            .env("DATACONNECT_PARENT_SIGNAL_PID_FILE", &pid_file)
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < deadline {
+            if let Some(status) = helper.try_wait().unwrap() {
+                panic!("parent-signal helper exited before spawning sidecar: {status}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Value = serde_json::from_str(&fs::read_to_string(&pid_file).unwrap()).unwrap();
+        let leader = pids["leader"].as_i64().unwrap() as libc::pid_t;
+        let child = pids["child"].as_i64().unwrap() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(leader, 0) }, 0);
+        assert_eq!(unsafe { libc::kill(child, 0) }, 0);
+
+        unsafe { libc::kill(helper.id() as libc::pid_t, libc::SIGTERM) };
+        let _ = helper.wait().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && (unsafe { libc::kill(leader, 0) } == 0 || unsafe { libc::kill(child, 0) } == 0)
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let leader_alive = unsafe { libc::kill(leader, 0) } == 0;
+        let child_alive = unsafe { libc::kill(child, 0) } == 0;
+        if leader_alive || child_alive {
+            unsafe { libc::kill(-(leader as libc::pid_t), libc::SIGKILL) };
+        }
+        assert!(!leader_alive, "sidecar leader survived parent SIGTERM");
+        assert!(!child_alive, "sidecar descendant survived parent SIGTERM");
+    }
+
+    #[test]
+    fn prompt_sidecar_stop_returns_within_its_budget() {
+        let script =
+            node_script(r#"process.stdout.write('READY-MARKER\n'); setInterval(() => {}, 1000);"#);
+        let sink = Arc::new(RecordingSink::default());
+        let spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "READY-MARKER".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        let budget = spec.stop.total;
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        let started = Instant::now();
+        handle.stop().unwrap();
+
+        assert!(
+            started.elapsed() <= budget,
+            "prompt stop exceeded {:?}: {:?}",
+            budget,
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1184,6 +1503,65 @@ setInterval(() => {{}}, 1000);
             .unwrap();
         let result = unsafe { libc::kill(pid, 0) };
         assert_eq!(result, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_force_kill_terminates_signal_ignoring_descendant_within_budget() {
+        let child_pid = NamedTempFile::new().unwrap();
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{}}); setInterval(() => {{}}, 1000);"], {{ stdio: 'ignore' }});
+fs.writeFileSync({:?}, String(child.pid));
+process.on('SIGTERM', () => {{}});
+console.log('FORCE-READY');
+setInterval(() => {{}}, 1000);
+"#,
+            child_pid.path().to_string_lossy()
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "FORCE-READY".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.stop = StopPolicy {
+            grace: Duration::from_millis(100),
+            escalate: Duration::from_millis(300),
+            total: Duration::from_millis(750),
+        };
+        let budget = spec.stop.total;
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        let pid_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < pid_deadline
+            && fs::read_to_string(child_pid.path())
+                .unwrap()
+                .trim()
+                .is_empty()
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pid = fs::read_to_string(child_pid.path())
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+
+        let started = Instant::now();
+        handle.stop().unwrap();
+
+        assert!(
+            started.elapsed() <= budget + Duration::from_millis(250),
+            "force stop exceeded {:?}: {:?}",
+            budget,
+            started.elapsed()
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 
