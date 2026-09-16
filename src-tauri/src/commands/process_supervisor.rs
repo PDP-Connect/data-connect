@@ -208,7 +208,7 @@ impl Supervisor {
     /// Readiness and a `{port}` environment value both resolve from this same
     /// allocation.
     pub fn start(self) -> Result<SupervisorHandle, SupervisorError> {
-        let port = allocate_loopback_port()?;
+        let port = allocate_loopback_port(spec_requires_adjacent_port(&self.spec))?;
         let state = Arc::new(SupervisorState::new());
         let (ready_sender, ready_receiver) = mpsc::channel();
         let thread_state = Arc::clone(&state);
@@ -286,9 +286,6 @@ fn run_supervisor(
         }
 
         emit(&spec, &sink, LifecycleState::Starting);
-        #[cfg(unix)]
-        kill_stale_server_on_port(port);
-
         let spawned = match spawn_process(&spec, port) {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -575,7 +572,26 @@ fn render_port(value: &OsStr, port: u16) -> OsString {
     let Some(value) = value.to_str() else {
         return value.to_os_string();
     };
-    OsString::from(value.replace("{port}", &port.to_string()))
+    OsString::from(render_port_string(value, port))
+}
+
+fn render_port_string(value: &str, port: u16) -> String {
+    let adjacent_port = port.saturating_add(1).to_string();
+    value
+        .replace("{port+1}", &adjacent_port)
+        .replace("{port}", &port.to_string())
+}
+
+fn spec_requires_adjacent_port(spec: &ProcessSpec) -> bool {
+    spec.env
+        .vars
+        .values()
+        .any(|value| value.to_string_lossy().contains("{port+1}"))
+        || matches!(
+            &spec.readiness,
+            Readiness::HttpGet { url_from_port, .. }
+                if url_from_port.contains("{port+1}")
+        )
 }
 
 enum ReadinessOutcome {
@@ -624,9 +640,10 @@ fn wait_for_readiness(
             }
         },
         Readiness::HttpGet { url_from_port, .. } => {
-            let url = url_from_port.replace("{port}", &port.to_string());
+            let url = render_port_string(url_from_port, port);
             let client = match reqwest::blocking::Client::builder()
                 .timeout(READINESS_POLL_INTERVAL)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
             {
                 Ok(client) => client,
@@ -651,7 +668,9 @@ fn wait_for_readiness(
                 if client
                     .get(&url)
                     .send()
-                    .map(|response| response.status().is_success())
+                    .map(|response| {
+                        response.status().is_success() || response.status().is_redirection()
+                    })
                     .unwrap_or(false)
                 {
                     return ReadinessOutcome::Ready;
@@ -808,53 +827,27 @@ fn process_group_exists(process_group: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Keep the stale-port behavior aligned with `server.rs` without refactoring
-/// that existing module in this lane.
-#[cfg(unix)]
-fn kill_stale_server_on_port(port: u16) {
-    let output = match Command::new("lsof")
-        .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) => {
-            log::warn!("Failed to check stale port {port}: {error}");
-            return;
-        }
-    };
-
-    if !output.status.success() || output.stdout.is_empty() {
-        return;
-    }
-    for pid in String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|pid| pid.parse::<libc::pid_t>().ok())
-    {
-        log::warn!("Found stale process {pid} on port {port}, sending SIGKILL");
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-fn allocate_loopback_port() -> io::Result<u16> {
-    #[cfg(unix)]
-    for port in [8080_u16, 8081, 8082, 8083, 8084, 8085] {
-        kill_stale_server_on_port(port);
-    }
-
-    for port in [8080_u16, 8081, 8082, 8083, 8084, 8085] {
-        let ipv4_free = TcpListener::bind(("127.0.0.1", port)).is_ok();
-        let ipv6_free = TcpListener::bind(("::1", port)).is_ok();
-        if ipv4_free && ipv6_free {
+fn allocate_loopback_port(adjacent: bool) -> io::Result<u16> {
+    let required_ports = if adjacent { 2 } else { 1 };
+    for _ in 0..64 {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        if (0..required_ports).all(|offset| {
+            port.checked_add(offset)
+                .is_some_and(|candidate| loopback_port_is_free(candidate))
+        }) {
             return Ok(port);
         }
     }
+    Err(io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "could not allocate the required loopback port range",
+    ))
+}
 
-    TcpListener::bind(("127.0.0.1", 0))?
-        .local_addr()
-        .map(|address| address.port())
+fn loopback_port_is_free(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok() && TcpListener::bind(("::1", port)).is_ok()
 }
 
 /// Build the new typed equivalent of the current Personal Server launch.
@@ -1006,7 +999,7 @@ mod tests {
         let script = node_script(
             r#"const http = require('node:http');
 const server = http.createServer((request, response) => {
-  response.writeHead(request.url === '/ready' ? 200 : 404);
+	response.writeHead(request.url === '/ready' ? 302 : 404, { location: '/login' });
   response.end('ok');
 });
 server.listen(Number(process.env.PORT), '127.0.0.1');

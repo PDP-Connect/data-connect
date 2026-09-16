@@ -8,8 +8,10 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   launchScript,
+  referenceStackRoot,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
+import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
 
 const temporaryRoots = []
 
@@ -60,6 +62,37 @@ afterEach(() => {
 })
 
 describe("reference stack staging contract", () => {
+  it("uses the profile-scoped Tauri target root", () => {
+    expect(referenceStackRoot("/workspace", "debug")).toBe(
+      "/workspace/src-tauri/target/debug/reference-stack/ri"
+    )
+    expect(referenceStackRoot("/workspace", "release")).toBe(
+      "/workspace/src-tauri/target/release/reference-stack/ri"
+    )
+  })
+
+  it("requires the verifier root to use the same profile-scoped contract", () => {
+    expect(
+      parseVerifyArgs([
+        "--profile",
+        "release",
+        "--root",
+        "/workspace/src-tauri/target/release/reference-stack/ri",
+      ])
+    ).toEqual({
+      profile: "release",
+      root: "/workspace/src-tauri/target/release/reference-stack/ri",
+    })
+    expect(() =>
+      parseVerifyArgs([
+        "--profile",
+        "release",
+        "--root",
+        "/workspace/src-tauri/target/reference-stack/ri",
+      ])
+    ).toThrow(/profile-scoped/)
+  })
+
   it("emits deterministic complete hashes and launcher inputs", () => {
     const first = fixtureRoot()
     const second = fixtureRoot()

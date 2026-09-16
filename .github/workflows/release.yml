@@ -179,6 +179,12 @@ jobs:
       - name: Install PDPP runtime dependencies
         run: node scripts/ensure-pdpp-runtime.js
 
+      - name: Stage and verify unified sidecars
+        run: |
+          node scripts/ensure-reference-stack.js --profile release
+          node scripts/ensure-console-stack.js --profile release
+          node scripts/verify-reference-stack.mjs --profile release --root src-tauri/target/release/reference-stack/ri
+
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:

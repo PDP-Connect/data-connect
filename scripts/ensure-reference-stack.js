@@ -20,13 +20,6 @@ import { fileURLToPath } from "node:url"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PROJECT_ROOT = resolve(SCRIPT_DIR, "..")
-const DEFAULT_OUTPUT_ROOT = join(
-  DEFAULT_PROJECT_ROOT,
-  "src-tauri",
-  "target",
-  "reference-stack",
-  "ri"
-)
 const LOCAL_PACKAGES = [
   ["@pdpp/collector-runtime", "packages/collector-runtime"],
   ["@pdpp/connector-protocol", "packages/connector-protocol"],
@@ -130,7 +123,22 @@ function manifestTarget(target) {
 }
 
 function manifestProfile(profile) {
-  return profile || process.env.PROFILE || "release"
+  const value = profile || process.env.PROFILE || "release"
+  if (typeof value !== "string" || !/^[A-Za-z0-9._-]+$/.test(value)) {
+    fail(`invalid Tauri profile: ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+export function referenceStackRoot(projectRoot, profile) {
+  return join(
+    resolve(projectRoot),
+    "src-tauri",
+    "target",
+    manifestProfile(profile),
+    "reference-stack",
+    "ri"
+  )
 }
 
 function stagedFileHashes(root) {
@@ -497,15 +505,17 @@ export function verifyReferenceStackRoot(stageRoot) {
 
 export function stageReferenceStack({
   projectRoot = DEFAULT_PROJECT_ROOT,
-  outputRoot = DEFAULT_OUTPUT_ROOT,
+  outputRoot,
   nodeBinary = defaultNodeBinary(projectRoot),
   target,
   profile,
 } = {}) {
   const resolvedProjectRoot = resolve(projectRoot)
-  const resolvedOutputRoot = resolve(outputRoot)
   const resolvedTarget = manifestTarget(target)
   const resolvedProfile = manifestProfile(profile)
+  const resolvedOutputRoot = resolve(
+    outputRoot || referenceStackRoot(resolvedProjectRoot, resolvedProfile)
+  )
   if (
     !existsSync(
       join(

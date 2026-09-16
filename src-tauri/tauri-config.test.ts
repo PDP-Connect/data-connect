@@ -61,11 +61,13 @@ describe("tauri manual-install config", () => {
       ]
     ).toBeUndefined()
 
-    expect(document.bundle?.resources?.["target/reference-stack/ri/"]).toBe(
+    expect(
+      document.bundle?.resources?.["target/release/reference-stack/ri/"]
+    ).toBe(
       "reference-stack/ri/"
     )
     expect(
-      document.bundle?.resources?.["target/reference-stack/ri/**/*"]
+      document.bundle?.resources?.["target/release/reference-stack/ri/**/*"]
     ).toBeUndefined()
   })
 
@@ -97,6 +99,20 @@ describe("tauri manual-install config", () => {
     )
     expect(document.build?.beforeBuildCommand).toContain(
       "node scripts/ensure-reference-stack.js"
+    )
+    expect(document.build?.beforeBuildCommand).toContain(
+      "node scripts/ensure-console-stack.js"
+    )
+  })
+
+  it("declares the Linux tray runtime dependency for Debian bundles", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { linux?: { deb?: { depends?: string[] } } }
+    }
+
+    expect(document.bundle?.linux?.deb?.depends).toContain(
+      "libayatana-appindicator3-1"
     )
   })
 

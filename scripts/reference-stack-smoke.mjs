@@ -7,6 +7,7 @@ import { createServer } from "node:http"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
+import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
 import { verifyReferenceStackRoot } from "./ensure-reference-stack.js"
 
 function freePort() {
@@ -49,13 +50,7 @@ async function waitForHealth(asPort, rsPort, child) {
 }
 
 function parseRoot(argv) {
-  const rootIndex = argv.indexOf("--root")
-  if (rootIndex === -1 || !argv[rootIndex + 1]) {
-    throw new Error(
-      "Usage: node scripts/reference-stack-smoke.mjs --root <staged-ri-root>"
-    )
-  }
-  return resolve(argv[rootIndex + 1])
+  return parseVerifyArgs(argv).root
 }
 
 async function runSmoke(root) {

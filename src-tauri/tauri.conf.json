@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "node scripts/ensure-connectors.js && npm run dev",
-    "beforeBuildCommand": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-reference-stack.js && npm run build"
+    "beforeDevCommand": "node scripts/ensure-connectors.js && node scripts/ensure-reference-stack.js --profile debug && node scripts/ensure-console-stack.js --profile debug && npm run dev",
+    "beforeBuildCommand": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-reference-stack.js --profile release && node scripts/ensure-console-stack.js --profile release && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -77,11 +77,14 @@
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/",
       "../pdpp-runtime/": "pdpp-runtime/",
       "target/release/reference-stack/console/": "reference-stack/console/",
-      "target/reference-stack/ri/": "reference-stack/ri/",
+      "target/release/reference-stack/ri/": "reference-stack/ri/",
       "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE"
     },
     "linux": {
       "deb": {
+        "depends": [
+          "libayatana-appindicator3-1"
+        ],
         "desktopTemplate": "desktop-template.desktop",
         "postInstallScript": "scripts/post-install.sh",
         "postRemoveScript": "scripts/post-remove.sh"
