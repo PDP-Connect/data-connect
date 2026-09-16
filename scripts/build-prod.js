@@ -22,6 +22,7 @@ import { existsSync, cpSync, readdirSync, mkdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { stageConsoleStack } from './ensure-console-stack.js';
 import { nativeTauriTarget, stagePdppNode } from './stage-pdpp-node.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,7 @@ const ROOT = join(__dirname, '..');
 const PLAYWRIGHT_RUNNER = join(ROOT, 'playwright-runner');
 const PERSONAL_SERVER = join(ROOT, 'personal-server');
 const PLAT = platform();
+const TAURI_PROFILE = process.env.TAURI_PROFILE || 'release';
 
 function log(msg) {
   console.log(`\n🔨 ${msg}`);
@@ -112,6 +114,10 @@ async function build() {
   // 6. Build frontend
   log('Building frontend...');
   exec('npm run build');
+
+  // 7. Build and stage the operator console before Tauri collects resources.
+  log(`Building and staging operator console (${TAURI_PROFILE})...`);
+  stageConsoleStack({ profile: TAURI_PROFILE, projectRoot: ROOT });
 
   if (PLAT === 'linux') {
     log('Building Tauri AppImage...');
