@@ -16,16 +16,15 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { canonicalConnectorKey } from "../connector-key.ts";
 
 const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
-const CATALOG_IDENTITY =
-  "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main";
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
@@ -74,6 +73,7 @@ export interface ConnectorCatalogSnapshot {
 }
 
 interface InstallerCore {
+  DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
   fetchCatalog?: (options: Record<string, unknown>) => Promise<unknown>;
   fetchResolvedArtifact?: (
     source: Record<string, unknown>,
@@ -433,12 +433,15 @@ function confinedFile(root: string, path: string): string | null {
   ) {
     return null;
   }
-  const candidate = resolve(root, path);
-  if (relative(root, candidate).startsWith(`..${sep}`) || relative(root, candidate) === "..") {
-    return null;
-  }
   try {
-    let current = resolve(root);
+    const realRoot = realpathSync(root);
+    const candidate = resolve(realRoot, path);
+    if (candidate !== realRoot && !candidate.startsWith(`${realRoot}/`)) {
+      if (sep === "/" || !candidate.startsWith(`${realRoot}${sep}`)) {
+        throw new Error("Path escapes its root.");
+      }
+    }
+    let current = realRoot;
     for (const part of path.split("/")) {
       current = join(current, part);
       const stat = lstatSync(current);
@@ -452,10 +455,10 @@ function confinedFile(root: string, path: string): string | null {
     if (!lstatSync(candidate).isFile()) {
       return null;
     }
+    return candidate;
   } catch {
     return null;
   }
-  return candidate;
 }
 
 export async function inspectActiveConnector(
@@ -795,7 +798,7 @@ async function loadCatalogFromPinnedCore(lastAcceptedGeneratedAt: string | null)
     throw new Error("Pinned connector installer core does not expose fetchCatalog.");
   }
   const value = (await core.fetchCatalog({
-    identity: CATALOG_IDENTITY,
+    identity: core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
     registry: "ghcr.io",
     ...(lastAcceptedGeneratedAt ? { lastAcceptedGeneratedAt } : {}),
   })) as { catalog?: { generated_at?: string; connectors?: unknown[] } };
@@ -940,7 +943,9 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
     throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
   }
   const identityResolver = ({ registry, repository }: { registry: string; repository: string }) =>
-    registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}` ? CATALOG_IDENTITY : null;
+    registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
+      ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
+      : null;
   const preflightTransport = createConfigLimitedFetch(fetch);
   const preflight = await core.fetchResolvedArtifact(
     { doc: {}, mode: "locked" },
@@ -998,7 +1003,7 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
     maxConfigBytes: MAX_CONFIG_BYTES,
     ociCertificateIdentityResolver: ({ registry, repository }: { registry: string; repository: string }) =>
       registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
-        ? "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main"
+        ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
         : null,
     source: { doc: {}, mode: "locked" },
   });

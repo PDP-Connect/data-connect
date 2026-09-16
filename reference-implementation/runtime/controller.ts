@@ -3866,6 +3866,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     key: string
   ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest }> {
+    await assertNotSourcePressureCoolingOff(connectorId, options);
+
     const activeInstall = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
     if (activeInstall.status === "invalid") {
       throw new ControllerError(
@@ -3884,8 +3886,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
       assertNoConflictingActiveRun(key);
       await assertNoConflictingDurableActiveRun(key);
     }
-
-    await assertNotSourcePressureCoolingOff(connectorId, options);
 
     // Use the same inspection result as the manifest. Re-reading active state
     // through the resolver could combine a pre-update manifest with a
