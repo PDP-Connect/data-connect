@@ -116,6 +116,34 @@ pub(crate) fn is_enabled() -> bool {
     enabled_for_value(std::env::var("DATACONNECT_UNIFIED_STACK").ok().as_deref())
 }
 
+fn browser_url_from_runtime_origin(console_origin: Option<&str>) -> Result<String, String> {
+    console_origin
+        .filter(|origin| !origin.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "Console is not ready".to_string())
+}
+
+fn browser_console_url(app: &AppHandle) -> Result<String, String> {
+    let runtime_origin = {
+        let state = app
+            .try_state::<UnifiedRuntimeState>()
+            .ok_or_else(|| "Unified runtime state is unavailable".to_string())?;
+        let console_origin = state
+            .console_origin
+            .lock()
+            .map_err(|_| "Unified runtime state is poisoned".to_string())?
+            .clone();
+        console_origin
+    };
+    if runtime_origin.is_some() {
+        return browser_url_from_runtime_origin(runtime_origin.as_deref());
+    }
+    if attach_mode() {
+        return configured_console_url();
+    }
+    browser_url_from_runtime_origin(None)
+}
+
 fn configured_console_url() -> Result<String, String> {
     let raw = std::env::var("DATACONNECT_CONSOLE_URL")
         .unwrap_or_else(|_| DEFAULT_CONSOLE_URL.to_string());
@@ -148,7 +176,7 @@ where
         manager,
         "open-browser",
         "Open in browser",
-        true,
+        status == UnifiedStatus::Ready,
         None::<&str>,
     )?;
     let show_logs = MenuItem::with_id(manager, "show-logs", "Show logs", true, None::<&str>)?;
@@ -208,7 +236,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
 fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match tray_action_for_menu_id(event.id().as_ref()) {
         TrayAction::OpenConsole => focus_or_bootstrap(app.clone()),
-        TrayAction::OpenBrowser => match configured_console_url() {
+        TrayAction::OpenBrowser => match browser_console_url(app) {
             Ok(url) => {
                 if let Err(error) = open::that_detached(url) {
                     log::error!("Failed to open console in the browser: {error}");
@@ -1033,6 +1061,18 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(tray_action_for_menu_id("show-logs"), TrayAction::ShowLogs);
         assert_eq!(tray_action_for_menu_id("quit"), TrayAction::Quit);
         assert_eq!(tray_action_for_menu_id("status"), TrayAction::Unknown);
+    }
+
+    #[test]
+    fn browser_open_uses_the_bootstrapped_console_origin() {
+        assert_eq!(
+            browser_url_from_runtime_origin(Some("http://127.0.0.1:43127")),
+            Ok("http://127.0.0.1:43127".to_string())
+        );
+        assert_eq!(
+            browser_url_from_runtime_origin(None),
+            Err("Console is not ready".to_string())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

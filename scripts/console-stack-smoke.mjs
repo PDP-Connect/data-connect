@@ -37,29 +37,61 @@ async function freePort() {
   return port
 }
 
+function isOwnerLoginRedirect(location) {
+  if (!location) return false
+  try {
+    return new URL(location, "http://127.0.0.1").pathname === "/owner/login"
+  } catch {
+    return false
+  }
+}
+
+async function assertConsoleRootResponse(response) {
+  const location = response.headers.get("location") || ""
+  if (response.status >= 300 && response.status < 400) {
+    if (!isOwnerLoginRedirect(location)) {
+      throw new Error(
+        `console root redirected outside the owner console: ${response.status} ${location}`
+      )
+    }
+    return { location, status: response.status }
+  }
+  if (response.status !== 200) return null
+
+  const contentType = response.headers.get("content-type") || ""
+  const body = await response.text()
+  if (
+    !contentType.toLowerCase().includes("text/html") ||
+    !/<(?:!doctype\s+html|html\b)/i.test(body)
+  ) {
+    throw new Error(
+      `console root must be HTML, not JSON or another API response: ${response.status} ${contentType}`
+    )
+  }
+  return { location, status: response.status }
+}
+
 async function waitForConsole(port, child) {
   const url = `http://127.0.0.1:${port}/`
   let lastError = "console did not answer"
   for (let attempt = 0; attempt < 60; attempt += 1) {
     if (child.exitCode !== null) break
+    let response
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         headers: { accept: "text/html" },
         redirect: "manual",
       })
-      const location = response.headers.get("location") || ""
-      if (
-        response.status === 200 ||
-        (response.status >= 300 &&
-          response.status < 400 &&
-          location.includes("/owner/login"))
-      ) {
-        return { location, status: response.status }
-      }
-      lastError = `unexpected console response: ${response.status} ${location}`
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 250))
+      continue
     }
+
+    const root = await assertConsoleRootResponse(response)
+    const location = response.headers.get("location") || ""
+    if (root) return root
+    lastError = `unexpected console response: ${response.status} ${location}`
     await new Promise(resolveDelay => setTimeout(resolveDelay, 250))
   }
   throw new Error(lastError)
