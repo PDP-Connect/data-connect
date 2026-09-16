@@ -82,12 +82,16 @@ function runConsoleBuild({
   spawn = spawnSync,
   env = process.env,
 }) {
-  const result = spawn("npm", ["run", "build", "--workspace=apps/console"], {
-    cwd: projectRoot,
-    env: { ...env, NODE_ENV: "production" },
-    shell: false,
-    stdio: "inherit",
-  })
+  const result = spawn(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    ["run", "build", "--workspace=apps/console"],
+    {
+      cwd: projectRoot,
+      env: { ...env, NODE_ENV: "production" },
+      shell: process.platform === "win32",
+      stdio: "inherit",
+    }
+  )
   if (result.error) {
     throw result.error
   }
