@@ -46,7 +46,7 @@ describe("tauri manual-install config", () => {
     expect(document.bundle?.resources?.["../pdpp-runtime/**/*"]).toBeUndefined()
   })
 
-  it("preserves the staged operator console directory tree", () => {
+  it("preserves both staged reference-stack directory trees", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
       bundle?: { resources?: Record<string, string> }
@@ -59,6 +59,13 @@ describe("tauri manual-install config", () => {
       document.bundle?.resources?.[
         "target/release/reference-stack/console/**/*"
       ]
+    ).toBeUndefined()
+
+    expect(document.bundle?.resources?.["target/reference-stack/ri/"]).toBe(
+      "reference-stack/ri/"
+    )
+    expect(
+      document.bundle?.resources?.["target/reference-stack/ri/**/*"]
     ).toBeUndefined()
   })
 
@@ -87,6 +94,9 @@ describe("tauri manual-install config", () => {
 
     expect(document.build?.beforeBuildCommand).toContain(
       "node scripts/ensure-pdpp-runtime.js"
+    )
+    expect(document.build?.beforeBuildCommand).toContain(
+      "node scripts/ensure-reference-stack.js"
     )
   })
 

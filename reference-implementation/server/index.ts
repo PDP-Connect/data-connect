@@ -10131,7 +10131,10 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
   process.on("SIGTERM", exitOnSignal("SIGTERM"));
   process.on("SIGINT", exitOnSignal("SIGINT"));
 
-  startServer({ logger: cliLogger })
+  startServer({
+    ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
+    logger: cliLogger,
+  })
     .then((result) => {
       server.asServer = result.asServer;
       server.rsServer = result.rsServer;
