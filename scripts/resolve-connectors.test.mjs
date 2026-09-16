@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto"
 import { execFileSync, spawnSync } from "node:child_process"
+import { createRequire } from "node:module"
 import {
   existsSync,
   mkdirSync,
@@ -14,7 +15,9 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
+import { installFromLock } from "@opendatalabs/data-connectors-tools/installer-core"
 import {
   artifactCertificateIdentityResolver,
   authorOciLock,
@@ -27,10 +30,24 @@ import {
   recoverInterruptedInstall,
 } from "./resolve-connectors.js"
 
+const require = createRequire(import.meta.url)
+const installerCorePath =
+  require.resolve("@opendatalabs/data-connectors-tools/installer-core")
+const { readTarGzEntries } = await import(
+  pathToFileURL(join(dirname(installerCorePath), "tar-stream.mjs")).href
+)
+
 const lock = JSON.parse(readFileSync("connectors/lock.json", "utf8"))
+const npmPackage = JSON.parse(readFileSync("package.json", "utf8"))
+const npmLock = JSON.parse(readFileSync("package-lock.json", "utf8"))
 const legacyArtifacts = lock.connectors.filter(connector =>
   connector.artifactUrl?.startsWith("https://github.com/vana-com/")
 )
+
+// This is the reviewed data-connectors main commit containing the duplicate
+// normalized-member guard. Keep the ancestry check local and deterministic;
+// acceptance must not turn into a live git or network lookup.
+const DATA_CONNECTORS_MAIN_ANCESTOR = "8803c30c31f6d514bdc237df2f224b5ff77fa232"
 
 describe("connector artifact signer identities", () => {
   it("trusts only the six exact legacy artifact URLs retained by the lock", () => {
@@ -143,6 +160,15 @@ function archive(root, name, files) {
   execFileSync("tar", ["-czf", output, "-C", input, "."])
   return readFileSync(output)
 }
+function archiveMembers(root, name, members) {
+  const raw = join(root, `${name}.tar`)
+  members.forEach(({ path, bytes }, index) => {
+    const input = join(root, `${name}-input-${index}`)
+    put(input, path, bytes)
+    execFileSync("tar", [index === 0 ? "-cf" : "-rf", raw, "-C", input, path])
+  })
+  return execFileSync("gzip", ["-c", raw])
+}
 function tree(root) {
   return readdirSync(root, { recursive: true, withFileTypes: true })
     .filter(entry => entry.isFile())
@@ -160,6 +186,110 @@ async function temporary(run) {
     rmSync(root, { recursive: true, force: true })
   }
 }
+
+describe("resolved connector-installer archive acceptance", () => {
+  it("requires package and lock commits to be a data-connectors-main ancestor without git ls-remote", () => {
+    const dependency = "@opendatalabs/data-connectors-tools"
+    const packageSpec = npmPackage.devDependencies[dependency]
+    const lockResolution =
+      npmLock.packages[`node_modules/${dependency}`].resolved
+    const packageCommit = packageSpec.match(/#([0-9a-f]{40})$/)?.[1]
+    const lockCommit = lockResolution.match(/#([0-9a-f]{40})$/)?.[1]
+
+    expect(installerCorePath).toContain(
+      join("node_modules", "@opendatalabs", "data-connectors-tools")
+    )
+    expect(packageCommit).toBe(DATA_CONNECTORS_MAIN_ANCESTOR)
+    expect(lockCommit).toBe(DATA_CONNECTORS_MAIN_ANCESTOR)
+  })
+
+  it("refuses two differing collection-profile.mjs archive members through the resolved reader", async () => {
+    await temporary(async root => {
+      const archive = archiveMembers(root, "duplicate-entrypoint", [
+        {
+          path: "collection-profile.mjs",
+          bytes: Buffer.from("export const value = 1\n"),
+        },
+        {
+          path: "collection-profile.mjs",
+          bytes: Buffer.from("export const value = 2\n"),
+        },
+      ])
+
+      await expect(
+        readTarGzEntries(archive, { maxUnpackedBytes: 1024 })
+      ).rejects.toThrow("duplicate member destination")
+    })
+  })
+
+  it("refuses x and ./x aliases through the resolved reader", async () => {
+    await temporary(async root => {
+      const archive = archiveMembers(root, "duplicate-alias", [
+        { path: "x", bytes: Buffer.from("first") },
+        { path: "./x", bytes: Buffer.from("second") },
+      ])
+
+      await expect(
+        readTarGzEntries(archive, { maxUnpackedBytes: 1024 })
+      ).rejects.toThrow("duplicate member destination")
+    })
+  })
+
+  it("installs and loads a unique collection-profile.mjs member through the resolved installer", async () => {
+    await temporary(async root => {
+      const manifest = Buffer.from('{"name":"fixture","version":"1.0.0"}\n')
+      const entrypoint = Buffer.from('export const fixtureBytes = "expected"\n')
+      const provenance = Buffer.from('{"source":"acceptance"}\n')
+      const artifact = archiveMembers(root, "unique-entrypoint", [
+        { path: "profile/collection-profile.json", bytes: manifest },
+        { path: "dist/collection-profile.mjs", bytes: entrypoint },
+        { path: "provenance.json", bytes: provenance },
+      ])
+      const artifactPath = "unique-entrypoint.tgz"
+      writeFileSync(join(root, artifactPath), artifact)
+      const entry = {
+        connectorId: "fixture-pdpp",
+        artifactKind: "pdpp-collection-profile",
+        artifactPath,
+        version: "1.0.0",
+        manifestPath: "profile/collection-profile.json",
+        entrypointPath: "dist/collection-profile.mjs",
+        provenancePath: "provenance.json",
+        artifactSha256: digest(artifact),
+        manifestSha256: digest(manifest),
+        entrypointSha256: digest(entrypoint),
+        provenanceSha256: digest(provenance),
+      }
+      const installRoot = join(root, "installed")
+
+      await installFromLock({
+        lock: { connectors: [entry] },
+        source: { mode: "local", rootDir: root, doc: {} },
+        installRoot,
+        layout: "source",
+      })
+
+      const installedEntrypoint = join(
+        installRoot,
+        "collection-profiles",
+        "fixture-pdpp",
+        "dist",
+        "collection-profile.mjs"
+      )
+      expect(readFileSync(installedEntrypoint)).toEqual(entrypoint)
+      const loadedBytes = execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `const loaded = await import(${JSON.stringify(pathToFileURL(installedEntrypoint).href)}); console.log(loaded.fixtureBytes);`,
+        ],
+        { encoding: "utf8" }
+      ).trim()
+      expect(loadedBytes).toBe("expected")
+    })
+  })
+})
 
 // Reproduce PR A's OCI wire fixture. The core still parses manifests, checks
 // digests, extracts archives and assembles the cosign bundle. Only registry I/O

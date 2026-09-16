@@ -27,7 +27,7 @@ use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 4 * 60 * 60;
@@ -2117,8 +2117,8 @@ fn emit_running_status(app: &AppHandle, run_id: &str, message: &str) {
     );
 }
 
-fn emit_terminal_status(
-    app: &AppHandle,
+fn emit_terminal_status<R: Runtime>(
+    app: &AppHandle<R>,
     response: &InstalledPdppConnectorRunResponse,
     export: Option<&Value>,
 ) {
@@ -2210,7 +2210,7 @@ fn terminal_status(response: &InstalledPdppConnectorRunResponse) -> TerminalStat
     }
 }
 
-fn emit_failed_terminal_status(app: &AppHandle, run_id: &str, error: &str) {
+fn emit_failed_terminal_status<R: Runtime>(app: &AppHandle<R>, run_id: &str, error: &str) {
     let _ = app.emit(
         "connector-status",
         json!({
@@ -4741,6 +4741,120 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         assert!(serialized.contains("[REDACTED]"));
         assert_eq!(response.event_summary.records, 1);
         assert!(response.stderr_bytes > 0);
+    }
+
+    fn secret_stderr_result(stderr: &str, max_stderr_bytes: usize) -> PdppRunResult {
+        let command = PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+input.once('line', () => {
+  process.stderr.write(`${process.env.FIXTURE_STDERR}\n`);
+  process.exit(0);
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::from([("FIXTURE_STDERR".into(), stderr.into())]),
+            clear_env: false,
+        };
+        let start = PdppStart::new(
+            "secret-redaction",
+            "incremental",
+            json!({
+                "streams": [{
+                    "name": "items",
+                    "resources": ["item-1"],
+                    "fields": ["id"]
+                }]
+            }),
+            None,
+        )
+        .unwrap();
+        let mut options = PdppRunOptions {
+            timeout: Some(Duration::from_secs(2)),
+            max_retained_records: 1,
+            ..Default::default()
+        };
+        options.max_stderr_bytes = max_stderr_bytes;
+        supervise_pdpp_connector(&command, &start, &options).unwrap()
+    }
+
+    fn assert_no_secret_fragment(value: &str, secret: &str) {
+        for fragment in secret.as_bytes().windows(4) {
+            let fragment = std::str::from_utf8(fragment).unwrap();
+            assert!(
+                !value.contains(fragment),
+                "public diagnostic contains secret fragment {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_secret_before_tail_cut_in_command_response_and_terminal_event() {
+        let secret = format!("ghp_{}", "A".repeat(40));
+        let stderr = format!("{secret}{}", "x".repeat(2005));
+        let result = secret_stderr_result(&stderr, 2050);
+        assert_eq!(result.stderr.len(), 2049);
+        assert!(!result.stderr_truncated);
+
+        // Mutation control: temporarily cutting the raw stderr tail before the
+        // redact_secrets calls makes this test fail with the 43-byte suffix of
+        // SECRET in the 2,048-byte tail. That mutation was run and restored;
+        // do not leave it in the production path.
+        let response = to_response(
+            "run-secret-boundary".into(),
+            "fixture-pdpp".into(),
+            result,
+            std::slice::from_ref(&secret),
+        );
+        let failure = response.failure.as_deref().expect("failure response");
+        assert!(failure.contains("[REDACTED]"));
+        assert_no_secret_fragment(failure, &secret);
+
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let listener = app.listen("connector-status", move |event: tauri::Event| {
+            sender.send(event.payload().to_owned()).unwrap();
+        });
+        emit_terminal_status(app.handle(), &response, None);
+        let payload = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal connector-status event");
+        app.unlisten(listener);
+        let payload = serde_json::from_str::<Value>(&payload).unwrap();
+        let event_message = payload["status"]["message"]
+            .as_str()
+            .expect("terminal status message");
+        assert_no_secret_fragment(event_message, &secret);
+        assert!(event_message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_intact_and_multiline_known_secrets_in_public_failure() {
+        let secret = format!("ghp_{}", "B".repeat(40));
+        let result = secret_stderr_result(&format!("prefix {secret} suffix"), 2050);
+        let response = to_response(
+            "run-secret-intact".into(),
+            "fixture-pdpp".into(),
+            result,
+            std::slice::from_ref(&secret),
+        );
+        let failure = response.failure.expect("failure response");
+        assert!(failure.contains("prefix [REDACTED] suffix"));
+        assert!(!failure.contains(&secret));
+        assert_eq!(
+            redact_secrets(
+                "prefix line-one\nline-two suffix",
+                &["line-one\nline-two".into()]
+            ),
+            "prefix [REDACTED] suffix"
+        );
     }
 
     #[test]

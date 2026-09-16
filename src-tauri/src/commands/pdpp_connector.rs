@@ -187,9 +187,9 @@ impl PdppInteractionResponder {
 
 #[derive(Clone)]
 pub struct PdppRunOptions {
-    /// Maximum time without a valid connector message. Progress and other
-    /// valid protocol messages re-arm this idle watchdog; an owner interaction
-    /// pauses it until the response is sent.
+    /// Idle timeout: bounds inactivity between valid messages, not total
+    /// runtime. Progress and other valid messages reset the watchdog; an owner
+    /// interaction pauses it until the response is sent.
     pub timeout: Option<Duration>,
     pub control: PdppRunControl,
     pub scope_validators: PdppScopeValidators,
@@ -211,10 +211,10 @@ impl Default for PdppRunOptions {
             timeout: None,
             control: PdppRunControl::default(),
             scope_validators: PdppScopeValidators::default(),
-            // One protocol line is one RECORD; chat and archive connectors emit
-            // records far above 64 KiB (a whole exported chat, an attachment).
-            // The collector runtime reads lines without a per-line cap, so keep
-            // this generous and rely on the retained-record and stderr caps.
+            // This 16 MiB allowance applies per protocol line, not per run.
+            // Kernel-retained records and events are bounded by the caps below;
+            // downstream sinks and export accumulators need their own aggregate
+            // bound or backpressure policy.
             max_stdout_line_bytes: 16 * 1024 * 1024,
             max_stderr_bytes: 64 * 1024,
             max_retained_records: 0,

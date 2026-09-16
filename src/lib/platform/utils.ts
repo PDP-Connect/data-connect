@@ -17,7 +17,7 @@ const entryMatchesToken = (entry: PlatformRegistryEntry, token: string) => {
 // registry, which is built from the lock at build time. The platform loader
 // registers an entry for each installed Collection Profile the registry does
 // not already cover, so they get a source route and a place on Home.
-const RUNTIME_REGISTRY: PlatformRegistryEntry[] = []
+let RUNTIME_REGISTRY: PlatformRegistryEntry[] = []
 
 const slugFor = (platform: Platform) => {
   const fromUri = platform.id.match(/\/connectors\/([a-z0-9][a-z0-9-]*)\/?$/i)?.[1]
@@ -26,19 +26,35 @@ const slugFor = (platform: Platform) => {
 }
 
 export const registerRuntimePlatformEntries = (platforms: Platform[]) => {
+  const runtimePlatforms = new Map<string, Platform>()
   for (const platform of platforms) {
     if (platform.runtime !== "pdpp-network") continue
     const token = normalizeToken(platform.id)
-    if (PLATFORM_REGISTRY.some(entry => entryMatchesToken(entry, token))) continue
-    if (RUNTIME_REGISTRY.some(entry => entryMatchesToken(entry, token))) continue
-    RUNTIME_REGISTRY.push({
-      id: slugFor(platform),
+    if (PLATFORM_REGISTRY.some(entry => entryMatchesToken(entry, token)))
+      continue
+    runtimePlatforms.set(token, platform)
+  }
+
+  const routeBases = new Map<string, number>()
+  for (const platform of runtimePlatforms.values()) {
+    const base = slugFor(platform)
+    routeBases.set(base, (routeBases.get(base) ?? 0) + 1)
+  }
+
+  RUNTIME_REGISTRY = [...runtimePlatforms.values()].map(platform => {
+    const base = slugFor(platform)
+    const id =
+      routeBases.get(base) === 1
+        ? base
+        : `${base}-${encodeURIComponent(normalizeToken(platform.id))}`
+    return {
+      id,
       displayName: platform.name,
       platformIds: [platform.id],
       availability: "requiresConnector",
       showInConnectList: true,
-    })
-  }
+    }
+  })
 }
 
 const findRegistryEntryByToken = (token: string) =>
