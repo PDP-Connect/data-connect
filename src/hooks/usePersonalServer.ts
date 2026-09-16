@@ -294,7 +294,8 @@ export function usePersonalServer() {
       _restartCount = 0;
 
       try {
-        if (!(await stopServer())) return false;
+        const wasAlreadyInError = _sharedStatus === 'error';
+        if (!(await stopServer()) && !wasAlreadyInError) return false;
 
         // Brief wait for port release (stop_personal_server already waits up to 3s,
         // but add a small buffer for OS-level cleanup)

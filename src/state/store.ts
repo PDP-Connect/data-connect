@@ -104,6 +104,7 @@ const appSlice = createSlice({
         status: Run['status'];
         endDate?: string;
         statusMessage?: string;
+        errorClass?: string;
         onlyIfRunning?: boolean;
       }>
     ) {
@@ -120,6 +121,9 @@ const appSlice = createSlice({
         }
         if (action.payload.statusMessage) {
           run.statusMessage = action.payload.statusMessage;
+        }
+        if (action.payload.errorClass) {
+          run.errorClass = action.payload.errorClass;
         }
       }
     },

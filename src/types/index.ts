@@ -69,6 +69,7 @@ export interface Run {
   currentStep?: string
   logs?: string
   statusMessage?: string
+  errorClass?: string
   itemsExported?: number
   itemLabel?: string // e.g., "posts", "conversations"
   exportData?: ExportedData

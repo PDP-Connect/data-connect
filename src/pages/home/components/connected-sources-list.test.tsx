@@ -120,4 +120,49 @@ describe("ConnectedSourcesList sync click guard", () => {
     expect(onSyncSource).toHaveBeenCalledTimes(2)
     errorSpy.mockRestore()
   })
+
+  it("offers credential replacement for static-secret connections", () => {
+    const platform = {
+      ...PLATFORM,
+      id: "ynab-pdpp",
+      company: "YNAB",
+      name: "YNAB",
+      filename: "ynab-pdpp",
+      runtime: "pdpp-network" as const,
+      setup: {
+        modality: "static_secret" as const,
+        credentialCapture: {
+          fields: [
+            {
+              name: "secret",
+              label: "YNAB personal access token",
+              type: "password" as const,
+              required: true,
+              secret: true,
+            },
+          ],
+        },
+      },
+    }
+    const onReplaceCredentials = vi.fn()
+
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[platform]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+            onReplaceCredentials={onReplaceCredentials}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credentials for YNAB" })
+    )
+    expect(onReplaceCredentials).toHaveBeenCalledWith(platform)
+  })
 })

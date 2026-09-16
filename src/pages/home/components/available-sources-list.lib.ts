@@ -44,6 +44,8 @@ interface BuildAvailableCardsInput {
   isInstalling?: (id: string) => boolean
   isApplying?: (id: string) => boolean
   isUnapplied?: (id: string) => boolean
+  pendingConnectorIds?: Set<string>
+  unappliedConnectorIds?: Set<string>
   downloadErrors?: Record<string, string>
   /** Retained by the component so an installed card keeps its grid position. */
   sourceOrder?: Map<string, number>
@@ -175,6 +177,8 @@ export function buildAvailableCards({
   isInstalling = () => false,
   isApplying = () => false,
   isUnapplied = () => false,
+  pendingConnectorIds = new Set(),
+  unappliedConnectorIds = new Set(),
   downloadErrors = {},
   sourceOrder,
 }: BuildAvailableCardsInput): AvailableSourceCard[] {
@@ -306,21 +310,42 @@ export function buildAvailableCards({
       continue
     }
 
-    if (connectedCanonicalKeys.has(sourceKey)) continue
+    const unappliedId =
+      [update?.id, platform.id, sourceKey].find(
+        id => id !== undefined && isUnapplied(id)
+      ) ??
+      [...unappliedConnectorIds].find(
+        id => canonicalPlatformKey({ id }) === sourceKey
+      )
+    const pendingId =
+      [update?.id, platform.id, sourceKey].find(
+        id => id !== undefined && pendingConnectorIds.has(id)
+      ) ??
+      [...pendingConnectorIds].find(
+        id => canonicalPlatformKey({ id }) === sourceKey
+      )
+    if (
+      connectedCanonicalKeys.has(sourceKey) &&
+      unappliedId === undefined &&
+      pendingId === undefined
+    ) {
+      continue
+    }
 
     const connectingRun = connectingByCanonicalKey.get(sourceKey)
     const isConnecting = connectingByCanonicalKey.has(sourceKey)
     const availability = effectiveAvailability(entry, update)
     const isCardAvailable = availability !== "comingSoon"
     const isUpdating = Boolean(update && !update.isNew && update.hasUpdate)
-    const isCurrentlyUnapplied =
-      isUnapplied(platform.id) || (update ? isUnapplied(update.id) : false)
+    const isCurrentlyUnapplied = unappliedId !== undefined
     const isCurrentlyApplying =
       !isCurrentlyUnapplied &&
-      (isApplying(platform.id) || (update ? isApplying(update.id) : false))
+      (pendingId !== undefined ||
+        isApplying(platform.id) ||
+        (update ? isApplying(update.id) : false))
     const isCurrentlyInstalling =
       !isCurrentlyUnapplied && (update ? isInstalling(update.id) : false)
-    const retryId = update && isUnapplied(update.id) ? update.id : platform.id
+    const retryId = unappliedId ?? platform.id
     const cardAction: Exclude<
       AvailableSourceCardAction,
       "install" | "unavailable" | "comingSoon"

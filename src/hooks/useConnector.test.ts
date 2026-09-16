@@ -87,6 +87,48 @@ describe("useConnector.startImport", () => {
     expect(updateRunStatus).not.toHaveBeenCalled()
   })
 
+  it.each([
+    {
+      label: "a structured auth_failed error class",
+      error: { errorClass: "auth_failed" },
+      expected: true,
+    },
+    {
+      label: "a 401 Unauthorized message",
+      error: new Error("host returned 401 Unauthorized"),
+      expected: true,
+    },
+    {
+      label: "an invalid token message",
+      error: new Error("invalid token"),
+      expected: true,
+    },
+    {
+      label: "a network failure message",
+      error: new Error("Network request failed"),
+      expected: false,
+    },
+    {
+      label: "a secondary rate limit 403",
+      error: new Error(
+        'github_http_403: {"message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}'
+      ),
+      expected: false,
+    },
+    {
+      label: "a 429 with retry-after",
+      error: new Error("host returned 429 Too Many Requests (retry-after: 60)"),
+      expected: false,
+    },
+  ])(
+    "classifies $label as authentication failure: $expected",
+    async ({ error, expected }) => {
+      const { isAuthenticationFailure } = await import("./useConnector")
+
+      expect(isAuthenticationFailure(error)).toBe(expected)
+    }
+  )
+
   it("blocks a new run while its connector change is pending", async () => {
     currentPendingConnectorChanges = ["chatgpt"]
     const { useConnector } = await import("./useConnector")

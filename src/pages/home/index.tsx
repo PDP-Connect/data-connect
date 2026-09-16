@@ -13,8 +13,12 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { useSelector } from "react-redux"
 import { usePlatforms } from "@/hooks/usePlatforms"
-import { installedPdppConnectionId, useConnector } from "@/hooks/useConnector"
-import type { Platform, RootState } from "@/types"
+import {
+  installedPdppConnectionId,
+  isAuthenticationFailure,
+  useConnector,
+} from "@/hooks/useConnector"
+import type { Platform, RootState, Run } from "@/types"
 import { PageContainer } from "@/components/elements/page-container"
 import { DebugTogglePanel } from "@/components/elements/debug-toggle-panel"
 import { Text } from "@/components/typography/text"
@@ -65,10 +69,20 @@ type SessionCredential = {
   setupSecrets?: Record<string, string>
 }
 
+type SessionCredentialEntry = {
+  credential: SessionCredential
+  runId: string
+  usable: boolean
+}
+
 // PDPP credentials are invocation inputs. Keeping this cache in the renderer
 // gives refreshes in one app session a usable connection without writing a
 // secret to disk; closing the app clears it with the process.
-const sessionCredentialsByConnection = new Map<string, SessionCredential>()
+const sessionCredentialsByConnection = new Map<
+  string,
+  SessionCredentialEntry
+>()
+const credentialPromptRequiredByConnection = new Set<string>()
 
 function sessionCredentialKey(platform: Platform) {
   return `${platform.id}:${installedPdppConnectionId(platform) ?? "default"}`
@@ -76,23 +90,63 @@ function sessionCredentialKey(platform: Platform) {
 
 function rememberSessionCredential(
   platform: Platform,
-  credential: SessionCredential
+  credential: SessionCredential,
+  runId: string
 ) {
-  const current = sessionCredentialsByConnection.get(
-    sessionCredentialKey(platform)
-  )
   sessionCredentialsByConnection.set(sessionCredentialKey(platform), {
-    ...current,
-    ...credential,
+    credential,
+    runId,
+    usable: false,
   })
 }
 
 function getSessionCredential(platform: Platform) {
-  return sessionCredentialsByConnection.get(sessionCredentialKey(platform))
+  const entry = sessionCredentialsByConnection.get(sessionCredentialKey(platform))
+  return entry?.usable ? entry.credential : undefined
+}
+
+function requiresSessionCredentialPrompt(platform: Platform) {
+  const key = sessionCredentialKey(platform)
+  return (
+    credentialPromptRequiredByConnection.has(key) ||
+    sessionCredentialsByConnection.get(key)?.usable === false
+  )
+}
+
+function clearSessionCredentialByKey(key: string) {
+  sessionCredentialsByConnection.delete(key)
+  credentialPromptRequiredByConnection.delete(key)
+}
+
+export function clearSessionCredential(platform: Platform) {
+  clearSessionCredentialByKey(sessionCredentialKey(platform))
+}
+
+function settleSessionCredentialRun(run: Run) {
+  if (run.status === "pending" || run.status === "running") return
+
+  for (const [key, entry] of sessionCredentialsByConnection) {
+    if (entry.runId !== run.id || entry.usable) continue
+
+    if (run.status === "error" && isAuthenticationFailure(run)) {
+      sessionCredentialsByConnection.delete(key)
+      credentialPromptRequiredByConnection.add(key)
+      continue
+    }
+
+    if (run.status === "stopped") continue
+
+    sessionCredentialsByConnection.set(key, {
+      ...entry,
+      usable: true,
+    })
+    credentialPromptRequiredByConnection.delete(key)
+  }
 }
 
 export function clearSessionCredentialCache() {
   sessionCredentialsByConnection.clear()
+  credentialPromptRequiredByConnection.clear()
 }
 
 export function Home() {
@@ -214,18 +268,27 @@ export function Home() {
         setupSecrets?: Record<string, string>
         importDirectory?: string | null
       }
-    ) => {
+    ): Promise<string | null> => {
       try {
         if (options === undefined) {
-          await startImport(platform)
+          return (await startImport(platform)) ?? null
         } else {
-          await startImport(platform, options)
+          return (await startImport(platform, options)) ?? null
         }
       } catch (error) {
         console.error("Import failed:", error)
+        return null
       }
     },
     [startImport]
+  )
+
+  const runImportWithCredential = useCallback(
+    async (platform: Platform, credential: SessionCredential) => {
+      const runId = await runImportSource(platform, credential)
+      if (runId) rememberSessionCredential(platform, credential, runId)
+    },
+    [runImportSource]
   )
 
   const manualUpload = useHomeManualUpload((platform, importDirectory) => {
@@ -239,8 +302,14 @@ export function Home() {
         openManualUpload(platform)
         return
       }
+      runs.forEach(settleSessionCredentialRun)
       const sessionCredential = getSessionCredential(platform)
       if (platform.setup?.modality === "static_secret") {
+        if (requiresSessionCredentialPrompt(platform)) {
+          setSetupSecretInputs({})
+          setStaticSecretDialogPlatform(platform)
+          return
+        }
         if (sessionCredential?.setupSecrets) {
           void runImportSource(platform, {
             setupSecrets: sessionCredential.setupSecrets,
@@ -282,8 +351,12 @@ export function Home() {
 
       void runImportSource(platform)
     },
-    [openManualUpload, runImportSource]
+    [openManualUpload, runImportSource, runs]
   )
+
+  useEffect(() => {
+    runs.forEach(settleSessionCredentialRun)
+  }, [runs])
 
   const closeGithubTokenDialog = useCallback(() => {
     setGithubTokenDialogPlatform(null)
@@ -297,15 +370,14 @@ export function Home() {
       const githubToken = githubTokenInput.trim()
       if (!platform || !githubToken) return
 
-      rememberSessionCredential(platform, { githubToken })
       closeGithubTokenDialog()
-      void runImportSource(platform, { githubToken })
+      void runImportWithCredential(platform, { githubToken })
     },
     [
       closeGithubTokenDialog,
       githubTokenDialogPlatform,
       githubTokenInput,
-      runImportSource,
+      runImportWithCredential,
     ]
   )
 
@@ -335,16 +407,13 @@ export function Home() {
         return
       }
 
-      rememberSessionCredential(platform, { setupSecrets })
       closeStaticSecretDialog()
-      void runImportSource(platform, {
-        setupSecrets,
-      })
+      void runImportWithCredential(platform, { setupSecrets })
     },
     [
       staticSecretDialogPlatform,
       closeStaticSecretDialog,
-      runImportSource,
+      runImportWithCredential,
       setupSecretInputs,
       staticSecretSetupFields,
     ]
@@ -378,6 +447,19 @@ export function Home() {
     },
     [handleImportSource]
   )
+
+  const handleReplaceCredentials = useCallback((platform: Platform) => {
+    clearSessionCredential(platform)
+    if (platform.id === "github-pdpp") {
+      setGithubTokenInput("")
+      setGithubTokenDialogPlatform(platform)
+      return
+    }
+    if (platform.setup?.modality === "static_secret") {
+      setSetupSecretInputs({})
+      setStaticSecretDialogPlatform(platform)
+    }
+  }, [])
 
   const respondToPendingInteraction = useCallback(
     async (status: "success" | "cancelled") => {
@@ -490,6 +572,19 @@ export function Home() {
     () => connectedPlatformsList.map(platform => platform.id),
     [connectedPlatformsList]
   )
+  const previousConnectedCredentialKeysRef = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    const connectedCredentialKeys = new Set(
+      connectedPlatformsList.map(sessionCredentialKey)
+    )
+    const previousKeys = previousConnectedCredentialKeysRef.current
+    if (previousKeys) {
+      for (const key of previousKeys) {
+        if (!connectedCredentialKeys.has(key)) clearSessionCredentialByKey(key)
+      }
+    }
+    previousConnectedCredentialKeysRef.current = connectedCredentialKeys
+  }, [connectedPlatformsList])
   const homeImportSourcesDebug = useMemo(
     () =>
       resolveHomeImportSourcesUiDebugState({
@@ -543,6 +638,7 @@ export function Home() {
           onOpenRuns={handleOpenRuns}
           onSyncSource={handleImportSource}
           onReconnectSource={handleReconnectSource}
+          onReplaceCredentials={handleReplaceCredentials}
         />
         <AvailableSourcesList
           platforms={homeImportSourcesDebug.platforms}

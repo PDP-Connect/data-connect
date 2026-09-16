@@ -48,11 +48,9 @@ export function useConnectorUpdates() {
         // Keep new connectors in the list until the platform reload completes.
         // AvailableSourcesList uses the retained entry to keep the source's
         // stable card order while the newly installed platform is discovered.
-        const update = updates.find(candidate => candidate.id === id);
-        if (!update?.isNew) {
-          dispatch(removeConnectorUpdate(id));
-        }
-        // Note: Caller is responsible for reloading platforms after successful download
+        // Keep the catalog entry until the serving restart and platform reload
+        // complete. The caller removes it only after the new profile is active.
+        // Note: Caller is responsible for reloading platforms after successful download.
         return true;
       } catch (err) {
         const errorMsg =
@@ -76,6 +74,11 @@ export function useConnectorUpdates() {
     [downloadingIds]
   );
 
+  const removeDownloadedConnectorUpdate = useCallback(
+    (id: string) => dispatch(removeConnectorUpdate(id)),
+    [dispatch]
+  );
+
   const hasUpdates = updates.length > 0;
 
   // Memoize count calculations to avoid recomputing on every render
@@ -97,6 +100,7 @@ export function useConnectorUpdates() {
     updateableCount,
     checkForUpdates,
     downloadConnector,
+    removeConnectorUpdate: removeDownloadedConnectorUpdate,
     isDownloading,
   };
 }
