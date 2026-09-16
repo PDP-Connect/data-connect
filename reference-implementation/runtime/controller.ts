@@ -82,6 +82,10 @@ import {
 import type { ConnectorEnvironmentBinding } from "./connector-child-environment.ts";
 import { runConnector } from "./index.ts";
 import {
+  createConnectorInstallStore,
+  inspectActiveConnector,
+} from "../server/connector-install/index.ts";
+import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
@@ -1476,6 +1480,23 @@ export function resolveDefaultConnectorPath(connectorId: string, manifest?: Conn
   return null;
 }
 
+// OCI installs are an additive, fail-closed overlay. Only an absent active
+// record falls through to the vendored package/seed resolver; a corrupt or
+// path-escaping active record stops resolution instead of being bypassed.
+const activeConnectorInstallStore = createConnectorInstallStore();
+export async function resolveActiveInstallFirstConnectorPath(
+  connectorId: string,
+  manifest?: ConnectorManifest
+): Promise<string | null> {
+  const active = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
+  if (active.status === "invalid") {
+    throw new Error("Active connector install is invalid for " + connectorId + ": " + active.reason);
+  }
+  return active.status === "active"
+    ? active.path
+    : resolveDefaultConnectorPath(connectorId, manifest);
+}
+
 // Reset cached manifest/path discovery. Tests rewrite manifest files on
 // disk during setup; without a reset hook the first test's cached maps
 // would mask later ones.
@@ -2478,7 +2499,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // the durable bounds. This only smooths bursts within one controller's life.
   const recoveryContinuationLastStartedAt = new Map<string, number>();
   const log: ControllerLogger = opts.logger || console;
-  const resolveConnectorPath = opts.connectorPathResolver || resolveDefaultConnectorPath;
+  const resolveConnectorPath = opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath;
   const ownerClientId = opts.ownerClientId || "cli_longview";
   const ownerSubjectId = opts.ownerSubjectId || "owner_local";
   const schedulerStore = opts.schedulerStore || getDefaultSchedulerStore();
@@ -3845,7 +3866,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     key: string
   ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest }> {
-    const manifest = options.manifest ?? (await getConnectorManifest(connectorId));
+    const activeInstall = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
+    if (activeInstall.status === "invalid") {
+      throw new ControllerError(
+        "Active connector install is invalid for " + connectorId + ": " + activeInstall.reason,
+        "connector_install_invalid"
+      );
+    }
+    const manifest =
+      activeInstall.status === "active"
+        ? activeInstall.record.manifest as ConnectorManifest
+        : options.manifest ?? (await getConnectorManifest(connectorId));
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
@@ -3856,7 +3887,13 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
     await assertNotSourcePressureCoolingOff(connectorId, options);
 
-    const connectorPath = await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+    // Use the same inspection result as the manifest. Re-reading active state
+    // through the resolver could combine a pre-update manifest with a
+    // post-update entrypoint.
+    const connectorPath =
+      activeInstall.status === "active"
+        ? activeInstall.path
+        : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
       throw new ControllerError(`No runnable connector implementation is available for ${connectorId}`, "not_found");
     }

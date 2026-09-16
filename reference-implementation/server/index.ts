@@ -76,8 +76,9 @@ import {
   type Controller,
   createController,
   getScheduleIneligibilityReason,
-  resolveDefaultConnectorPath,
+  resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
+import { createConnectorInstallService } from "./connector-install/index.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -336,6 +337,7 @@ import { mountOwnerConnectionRun } from "./routes/owner-connection-run.ts";
 import { mountOwnerConnectionSchedule } from "./routes/owner-connection-schedule.ts";
 import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/owner-connections.ts";
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
+import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import {
   mountRefApprovals,
@@ -7724,6 +7726,17 @@ function buildRsApp(opts: ServerOpts = {}) {
     uatExposeUnlistedConnectors: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
   } as unknown as Parameters<typeof mountOwnerConnectorTemplates>[1]);
 
+  // OCI artifact mutation is intentionally separate from connector-instance
+  // setup. The service records executable artifact identity under PDPP_DATA_DIR
+  // and registers only a verified installed manifest.
+  mountOwnerConnectorInstall(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    service: createConnectorInstallService({ registerManifest: registerConnector }),
+  } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
   // action family, marks supported vs owner-mediated vs unsupported, and links
@@ -8706,7 +8719,7 @@ export async function startServer(opts: ServerOpts = {}) {
   schedulerManager = createReferenceSchedulerManager({
     connectionScopedRunEnvResolver,
     connectorEnvironmentPolicy,
-    connectorPathResolver: opts.connectorPathResolver || resolveDefaultConnectorPath,
+    connectorPathResolver: opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath,
     controller,
     logger,
     ownerSubjectId: ownerAuthSubjectId,
@@ -9227,7 +9240,7 @@ function createReferenceSchedulerManager({
   logger,
   runtimeContext,
   schedulerStore = getDefaultSchedulerStore(),
-  connectorPathResolver = resolveDefaultConnectorPath,
+  connectorPathResolver = resolveActiveInstallFirstConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
   webPushConfig = resolveWebPushConfig(),
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
