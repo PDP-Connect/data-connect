@@ -100,34 +100,64 @@ describe("useConnector.startImport", () => {
     expect(deleteRun).not.toHaveBeenCalled()
   })
 
-  it("uses the installed PDPP connector command for pdpp-network platforms", async () => {
-    mockInvoke.mockResolvedValue(undefined)
+  it("keeps the installed host error in the run status message", async () => {
+    mockInvoke.mockRejectedValue(
+      new Error("Import directory does not belong to this connection")
+    )
     const { useConnector } = await import("./useConnector")
     const { result } = renderHook(() => useConnector())
 
     await act(async () => {
       await result.current.startImport({
         ...TEST_PLATFORM,
-        id: "github-pdpp",
-        company: "GitHub",
-        name: "GitHub",
-        filename: "github-pdpp",
+        id: "apple-health-pdpp",
         runtime: "pdpp-network",
-        scopes: ["github.profile", "github.repositories"],
       })
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(updateRunStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "apple-health-pdpp-1700000000000",
+        status: "error",
+        statusMessage: "Import directory does not belong to this connection",
+      })
+    )
+  })
+
+  it("passes a prepared manual import to the installed host without credentials", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "apple-health-pdpp",
+          company: "Apple",
+          name: "Apple Health",
+          filename: "apple-health-pdpp",
+          runtime: "pdpp-network",
+        },
+        { importDirectory: "/private/imports/run-1" }
+      )
     })
 
     expect(mockInvoke).toHaveBeenCalledWith(
       "start_installed_pdpp_connector_run",
       {
         request: {
-          runId: "github-pdpp-1700000000000",
-          connectorId: "github-pdpp",
+          runId: "apple-health-pdpp-1700000000000",
+          connectorId: "apple-health-pdpp",
           collectionMode: "incremental",
           streams: [],
           githubToken: null,
-          connectionId: null,
+          connectionId: "apple-health-pdpp-owner",
           setupSecrets: null,
+          importDirectory: "/private/imports/run-1",
         },
       }
     )
@@ -236,6 +266,116 @@ describe("useConnector.startImport", () => {
           setupSecrets: {
             username: "owner@example.com",
             password: "transient-password",
+          },
+        }),
+      }
+    )
+    expect(startRun).toHaveBeenCalledWith(
+      expect.not.objectContaining({ setupSecrets: expect.anything() })
+    )
+  })
+
+  it("assigns an owner connection to a browser PDPP connector without setup fields", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport({
+        ...TEST_PLATFORM,
+        id: "anthropic-pdpp",
+        filename: "anthropic-pdpp",
+        runtime: "pdpp-network",
+        setup: null,
+      })
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      expect.objectContaining({
+        request: expect.objectContaining({
+          connectorId: "anthropic-pdpp",
+          connectionId: "anthropic-pdpp-owner",
+        }),
+      })
+    )
+  })
+
+  it("keeps a URI connector id while deriving safe stable host identifiers", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { installedPdppConnectionId, useConnector } =
+      await import("./useConnector")
+    const platform: Platform = {
+      ...TEST_PLATFORM,
+      id: "https://registry.pdpp.dev/connectors/not-bundled",
+      company: "Example",
+      name: "Unbundled connector",
+      filename: "not-bundled",
+      runtime: "pdpp-network",
+    }
+    const connectionId = installedPdppConnectionId(platform)
+
+    expect(connectionId).toMatch(/^pdpp-[0-9a-f]{8}-owner$/)
+    expect(installedPdppConnectionId(platform)).toBe(connectionId)
+
+    const { result } = renderHook(() => useConnector())
+    await act(async () => {
+      await result.current.startImport(platform)
+    })
+
+    expect(startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+        platformId: platform.id,
+      })
+    )
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: expect.objectContaining({
+          runId: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+          connectorId: platform.id,
+          connectionId,
+        }),
+      }
+    )
+  })
+
+  it("passes generic static secrets to installed PDPP host invokes", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+
+    await act(async () => {
+      await result.current.startImport(
+        {
+          ...TEST_PLATFORM,
+          id: "ynab-pdpp",
+          filename: "ynab-pdpp",
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: {
+              fields: [{ name: "secret", required: true, secret: true }],
+            },
+          },
+        },
+        {
+          setupSecrets: {
+            secret: "ynab_transient_pat",
+          },
+        }
+      )
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      {
+        request: expect.objectContaining({
+          connectorId: "ynab-pdpp",
+          connectionId: "ynab-pdpp-owner",
+          setupSecrets: {
+            secret: "ynab_transient_pat",
           },
         }),
       }

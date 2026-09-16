@@ -32,6 +32,10 @@ switch (mode) {
   case "missing-done":
     emit(record)
     break
+  case "missing-done-with-stderr":
+    process.stderr.write("GitHub API request failed: 401 Unauthorized\nrequest id: fixture-1\n")
+    emit(record)
+    break
   case "counter-mismatch":
     emit(record)
     emit({ type: "DONE", status: "succeeded", records_emitted: 2 })

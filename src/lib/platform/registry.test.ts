@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest"
 import { PLATFORM_REGISTRY } from "./registry"
+import { getPlatformRegistryEntryById } from "./utils"
+import { getPlatformIconComponentForKey } from "./icons"
 import connectorLock from "../../../connectors/lock.json"
 
 /**
@@ -25,22 +27,18 @@ const entriesComingSoon = PLATFORM_REGISTRY.filter(
 describe("PLATFORM_REGISTRY / connector registry alignment", () => {
   it("every requiresConnector entry references at least one bundled connector", () => {
     for (const entry of entriesWithConnectors) {
-      const playwrightIds =
-        entry.platformIds?.filter((id) => id.endsWith("-playwright")) ?? []
-      const hasMatch = playwrightIds.some((id) => connectorIds.includes(id))
+      const platformIds = entry.platformIds ?? []
+      const hasMatch = platformIds.some((id) => connectorIds.includes(id))
       expect(
         hasMatch,
-        `${entry.id}: no bundled connector for platformIds ${JSON.stringify(playwrightIds)}`
+        `${entry.id}: no bundled connector for platformIds ${JSON.stringify(platformIds)}`
       ).toBe(true)
     }
   })
 
   it("every requiresConnector entry has an ingestScope", () => {
     for (const entry of entriesWithConnectors) {
-      expect(
-        entry.ingestScope,
-        `${entry.id}: missing ingestScope`
-      ).toBeTruthy()
+      expect(entry.ingestScope, `${entry.id}: missing ingestScope`).toBeTruthy()
     }
   })
 
@@ -109,5 +107,30 @@ describe("Legacy metadata fallback connectors", () => {
     expect(wholeFoods?.brandDomain).toBe("wholefoodsmarket.com")
     expect(wholeFoods?.ingestScope).toBe("wholefoods.orders")
     expect(wholeFoods?.showInConnectList).toBe(true)
+  })
+})
+
+describe("Source aliases", () => {
+  it("resolves Twitter as the single X source", () => {
+    const twitterEntries = PLATFORM_REGISTRY.filter(
+      entry =>
+        entry.id === "twitter" ||
+        entry.aliases?.some(alias => alias === "twitter")
+    )
+
+    expect(twitterEntries).toHaveLength(1)
+    expect(twitterEntries[0].id).toBe("x")
+    expect(getPlatformRegistryEntryById("twitter")?.id).toBe("x")
+  })
+})
+
+describe("Platform icon keys", () => {
+  it("maps iCloud Notes to the existing Apple icon", () => {
+    const iCloudNotes = PLATFORM_REGISTRY.find(
+      entry => entry.id === "icloud_notes"
+    )
+
+    expect(iCloudNotes?.iconKey).toBe("icloud_notes")
+    expect(getPlatformIconComponentForKey("icloud_notes")).toBeTruthy()
   })
 })

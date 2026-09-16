@@ -15,20 +15,62 @@ import { durationSince } from "@/lib/telemetry/client"
 
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = "DUPLICATE_ACTIVE_RUN"
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
+const URI_CONNECTOR_ID = /^https:\/\//
+
+function stableConnectorHash(value: string): string {
+  let hash = 2166136261
+  for (const character of value) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
+function localConnectorToken(connectorId: string): string {
+  return URI_CONNECTOR_ID.test(connectorId)
+    ? `pdpp-${stableConnectorHash(connectorId)}`
+    : connectorId
+}
+
+function runIdForPlatform(platform: Platform, timestamp: number): string {
+  return URI_CONNECTOR_ID.test(platform.id)
+    ? `${localConnectorToken(platform.id)}-${timestamp}`
+    : `${platform.id}-${timestamp}`
+}
+
+/**
+ * The connection an installed PDPP connector runs under. The import picker
+ * (prepare) and the run start must derive the same value, or the staged copy
+ * lands in one connection scope and the run looks for it in another.
+ */
+export function installedPdppConnectionId(platform: Platform): string | null {
+  return platform.runtime === PDPP_NETWORK_RUNTIME &&
+    platform.id !== "github-pdpp"
+    ? `${localConnectorToken(platform.id)}-owner`
+    : null
+}
 
 interface StartImportOptions {
   githubToken?: string | null
-  setupSecrets?: { username: string; password: string } | null
+  setupSecrets?: Record<string, string> | null
+  importDirectory?: string | null
 }
 
 function isDuplicateStartError(error: unknown): boolean {
-  const message =
-    typeof error === "string"
-      ? error
-      : error instanceof Error
-        ? error.message
-        : String(error)
-  return message.includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+  return getErrorMessage(error).includes(DUPLICATE_ACTIVE_RUN_ERROR_CODE)
+}
+
+function getErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error
+  if (error instanceof Error) return error.message
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message
+  }
+  return String(error)
 }
 
 async function startInstalledPdppConnectorRun(
@@ -44,10 +86,11 @@ async function startInstalledPdppConnectorRun(
       streams: [],
       githubToken:
         platform.id === "github-pdpp" ? (options.githubToken ?? null) : null,
-      connectionId:
-        platform.id === "chatgpt-pdpp" ? "chatgpt-pdpp-owner" : null,
-      setupSecrets:
-        platform.id === "chatgpt-pdpp" ? (options.setupSecrets ?? null) : null,
+      connectionId: installedPdppConnectionId(platform),
+      setupSecrets: options.setupSecrets ?? null,
+      ...(options.importDirectory !== undefined
+        ? { importDirectory: options.importDirectory }
+        : {}),
     },
   })
 }
@@ -58,7 +101,7 @@ export function useConnector() {
 
   const startImport = useCallback(
     async (platform: Platform, options: StartImportOptions = {}) => {
-      const runId = `${platform.id}-${Date.now()}`
+      const runId = runIdForPlatform(platform, Date.now())
       const source = getPlatformRegistryEntry(platform)?.id ?? platform.id
 
       const newRun: Run = {
@@ -105,6 +148,7 @@ export function useConnector() {
                 runId,
                 status: "error",
                 endDate: new Date().toISOString(),
+                statusMessage: getErrorMessage(error),
                 onlyIfRunning: true,
               })
             )
@@ -141,6 +185,7 @@ export function useConnector() {
             runId,
             status: "error",
             endDate: new Date().toISOString(),
+            statusMessage: getErrorMessage(error),
           })
         )
         trackCollectionFailed({

@@ -32,6 +32,61 @@ let _lastStartedCredentialKey: string | null = null;
 let _lastMasterKeySignature: string | null = null;
 const FALLBACK_START_ERROR = 'Failed to start Personal Server';
 
+type ReadyWaiter = {
+  resolve: (port: number) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const _readyWaiters = new Set<ReadyWaiter>();
+
+function waitForPersonalServerReady(timeoutMs = 10_000): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const waiter: ReadyWaiter = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        _readyWaiters.delete(waiter);
+        reject(new Error('Personal Server did not become ready'));
+      }, timeoutMs),
+    };
+    _readyWaiters.add(waiter);
+  });
+}
+
+function resolveReadyWaiters(port: number) {
+  for (const waiter of _readyWaiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(port);
+  }
+  _readyWaiters.clear();
+}
+
+function rejectReadyWaiters(error: Error) {
+  for (const waiter of _readyWaiters) {
+    clearTimeout(waiter.timer);
+    waiter.reject(error);
+  }
+  _readyWaiters.clear();
+}
+
+async function waitForPersonalServerHealth(port: number, timeoutMs = 10_000) {
+  const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await tauriFetch(`http://localhost:${port}/health`);
+      if (response.ok) return true;
+    } catch {
+      // The listener can be ready a moment before the health route is reachable.
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  return false;
+}
+
 function cancelScheduledRestart() {
   if (_restartTimer !== null) {
     clearTimeout(_restartTimer);
@@ -196,11 +251,28 @@ export function usePersonalServer() {
   const restartServer = useCallback(async (wallet?: string | null) => {
     console.log('[PersonalServer] Restarting with wallet:', wallet ?? 'none');
     _restartCount = 0;
-    if (!(await stopServer())) return;
+    restartingRef.current = true;
+    const ready = waitForPersonalServerReady();
+    if (!(await stopServer())) {
+      restartingRef.current = false;
+      rejectReadyWaiters(new Error('Failed to stop Personal Server'));
+      await ready.catch(() => undefined);
+      return false;
+    }
     // Brief wait for port release (stop_personal_server already waits up to 3s,
     // but add a small buffer for OS-level cleanup)
     await new Promise((r) => setTimeout(r, 500));
     await startServerRef.current(wallet);
+    try {
+      const port = await ready;
+      const healthy = await waitForPersonalServerHealth(port);
+      restartingRef.current = false;
+      return healthy;
+    } catch (error) {
+      restartingRef.current = false;
+      console.error('[PersonalServer] Failed to wait for restarted server:', error);
+      return false;
+    }
   }, [stopServer]);
 
   // Listen for server events
@@ -210,6 +282,7 @@ export function usePersonalServer() {
 
     listen<{ port: number }>('personal-server-ready', (event) => {
       console.log('[PersonalServer] Ready on port', event.payload.port);
+      resolveReadyWaiters(event.payload.port);
       _sharedStatus = 'running';
       _sharedPort = event.payload.port;
       _restartCount = 0;
@@ -223,6 +296,7 @@ export function usePersonalServer() {
 
     listen<{ message: string }>('personal-server-error', (event) => {
       console.error('[PersonalServer] Error:', event.payload.message);
+      rejectReadyWaiters(new Error(event.payload.message));
       cancelScheduledRestart();
       running.current = false;
       _sharedStatus = 'error';
@@ -235,6 +309,10 @@ export function usePersonalServer() {
     listen<{ exitCode: number | null; crashed: boolean }>('personal-server-exited', (event) => {
       const { exitCode, crashed } = event.payload;
       console.log('[PersonalServer] Exited:', { exitCode, crashed });
+
+      if (crashed) {
+        rejectReadyWaiters(new Error('Personal Server exited before becoming ready'));
+      }
 
       running.current = false;
       _sharedPort = null;

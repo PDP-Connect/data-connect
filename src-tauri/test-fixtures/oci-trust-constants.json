@@ -1,0 +1,16 @@
+{
+  "source": "data-connectors origin/feat/installer-oci-consumer ac0bad39c779bf7108f7ce42f548c6859f92abff",
+  "identity": "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "signatureMediaType": "application/vnd.dev.cosign.simplesigning.v1+json",
+  "signatureAnnotation": "dev.cosignproject.cosign/signature",
+  "certificateAnnotation": "dev.sigstore.cosign/certificate",
+  "bundleAnnotation": "dev.sigstore.cosign/bundle",
+  "configMediaType": "application/vnd.pdpp.connector.config.v1+json",
+  "profileMediaType": "application/vnd.pdpp.connector.profile.v1+json",
+  "codeMediaType": "application/vnd.pdpp.connector.code.v1.tar+gzip",
+  "assetsMediaType": "application/vnd.pdpp.connector.assets.v1.tar+gzip",
+  "licensesMediaType": "application/vnd.pdpp.connector.licenses.v1.tar+gzip",
+  "provenanceMediaType": "application/vnd.pdpp.connector.provenance.v1+json",
+  "signatureTagTemplate": "sha256-<hex>.sig"
+}

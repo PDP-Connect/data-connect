@@ -17,22 +17,28 @@ export interface Platform {
   runtime?: string | null
   /** Scopes this connector can export (e.g. ["chatgpt.conversations", "chatgpt.memories"]) */
   scopes?: string[] | null
-  /** Exact static-secret setup shape currently supported for chatgpt-pdpp. */
-  setup?: PdppStaticSecretSetup | null
+  /** Declarative setup shape for installed PDPP connectors. */
+  setup?: PdppSetup | null
 }
+
+export type PdppSetup = PdppStaticSecretSetup | PdppManualOrUploadSetup
 
 export interface PdppStaticSecretSetup {
   modality: "static_secret"
   credentialCapture: {
     fields: Array<{
-      name: "username" | "password"
+      name: string
       label?: string | null
       type?: "email" | "password" | string | null
-      required: true
-      secret: true
+      required: boolean
+      secret: boolean
       autocomplete?: string | null
     }>
   }
+}
+
+export interface PdppManualOrUploadSetup {
+  modality: "manual_or_upload"
 }
 
 export interface ProgressPhase {
@@ -151,6 +157,11 @@ export interface ExportCompleteEvent {
 }
 
 export interface ConnectorUpdateInfo {
+  tier: string
+  requiredBindings: string[]
+  setupModality: string | null
+  runnable: boolean
+  unavailableReason: string | null
   id: string
   name: string
   description: string

@@ -27,10 +27,10 @@ use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const PDPP_ARTIFACT_KIND: &str = "pdpp-collection-profile";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 4 * 60 * 60;
 const MAX_TIMEOUT_SECONDS: u64 = 900;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MINIMUM_NODE_MAJOR: u64 = 22;
@@ -42,8 +42,10 @@ const BUNDLED_NODE_NAME: &str = if cfg!(windows) {
 const CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const GITHUB_CONNECTOR_KEY: &str = "github";
 const GITHUB_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/github";
+const GITHUB_PUBLISHED_CONNECTOR_ID: &str = "https://registry.pdpp.dev/connectors/github";
 const CHATGPT_CONNECTOR_KEY: &str = "chatgpt";
 const CHATGPT_CONNECTOR_ID: &str = "https://registry.pdpp.org/connectors/chatgpt";
+const CHATGPT_PUBLISHED_CONNECTOR_ID: &str = "https://registry.pdpp.dev/connectors/chatgpt";
 const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
 static ACTIVE_PDPP_RUNS: LazyLock<Mutex<HashMap<String, ActivePdppRun>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -74,11 +76,14 @@ pub struct StartInstalledPdppConnectorRequest {
     pub connection_id: Option<String>,
     #[serde(default)]
     pub github_token: Option<String>,
-    /// The pinned ChatGPT profile declares exactly two static-secret fields.
+    /// Static-secret fields are declared by the installed manifest.
     /// They are accepted for this invocation only and never enter run state,
     /// export data, or a command response.
     #[serde(default)]
     pub setup_secrets: Option<HashMap<String, String>>,
+    /// A host-created, connection-scoped directory for manual-upload connectors.
+    #[serde(default)]
+    pub import_directory: Option<String>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
 }
@@ -149,14 +154,22 @@ struct PdppConnectorManifest {
     display_name: Option<String>,
     version: Option<String>,
     runtime_requirements: Option<RuntimeRequirements>,
-    setup: Option<PdppStaticSecretSetup>,
+    setup: Option<PdppConnectorSetup>,
     streams: Vec<PdppManifestStream>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PdppStaticSecretSetup {
+struct PdppConnectorSetup {
     modality: String,
-    credential_capture: PdppCredentialCapture,
+    #[serde(default)]
+    credential_capture: Option<PdppCredentialCapture>,
+    #[serde(default)]
+    manual_or_upload: Option<PdppManualOrUploadSetup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdppManualOrUploadSetup {
+    import_dir_env_var: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,15 +249,15 @@ fn default_collection_mode() -> String {
 #[tauri::command]
 pub async fn start_installed_pdpp_connector_run(
     app: AppHandle,
-    request: StartInstalledPdppConnectorRequest,
+    mut request: StartInstalledPdppConnectorRequest,
 ) -> Result<InstalledPdppConnectorRunResponse, String> {
-    validate_request(&request)?;
+    let prepared = prepare_run(&mut request)?;
+    let PreparedPdppRun { control, import } = prepared;
     let run_id = request.run_id.clone();
-    let control = register_run(&run_id, &request.connector_id, request.connection_id())?;
     emit_running_status(&app, &run_id, "Starting PDPP connector...");
     let app_for_task = app.clone();
     let result = tokio::task::spawn_blocking(move || {
-        start_installed_pdpp_connector_run_impl(app_for_task, request, control)
+        start_installed_pdpp_connector_run_impl(app_for_task, request, control, import)
     })
     .await
     .map_err(|e| format!("PDPP connector host task failed: {e}"));
@@ -261,17 +274,75 @@ pub async fn start_installed_pdpp_connector_run(
     }
 }
 
+struct PreparedPdppRun {
+    control: PdppRunControl,
+    import: Option<super::pdpp_manual_import::ImportedDirectory>,
+}
+
+fn prepare_run(
+    request: &mut StartInstalledPdppConnectorRequest,
+) -> Result<PreparedPdppRun, String> {
+    let import = claim_request_import(request)?;
+    validate_request_metadata(request)?;
+    let control = register_run(
+        &request.run_id,
+        &request.connector_id,
+        request.connection_id(),
+    )?;
+    Ok(PreparedPdppRun { control, import })
+}
+
+fn claim_request_import(
+    request: &mut StartInstalledPdppConnectorRequest,
+) -> Result<Option<super::pdpp_manual_import::ImportedDirectory>, String> {
+    let import = request
+        .import_directory
+        .as_deref()
+        .map(|path| {
+            super::pdpp_manual_import::ImportedDirectory::claim(
+                &request.connector_id,
+                request.connection_id(),
+                path,
+            )
+        })
+        .transpose()?;
+    if let Some(import) = &import {
+        request.import_directory = Some(import.path().to_string_lossy().into_owned());
+    }
+    Ok(import)
+}
+
+fn resolve_connector_for_run(
+    request: &StartInstalledPdppConnectorRequest,
+    import: Option<super::pdpp_manual_import::ImportedDirectory>,
+    resolve: impl FnOnce() -> Result<ResolvedInstalledPdppConnector, String>,
+) -> Result<
+    (
+        ResolvedInstalledPdppConnector,
+        Option<super::pdpp_manual_import::ImportedDirectory>,
+    ),
+    String,
+> {
+    let resolved = resolve()?;
+    validate_requested_streams(request, &resolved.manifest)?;
+    Ok((resolved, import))
+}
+
 fn start_installed_pdpp_connector_run_impl(
     app: AppHandle,
     request: StartInstalledPdppConnectorRequest,
     control: PdppRunControl,
+    import: Option<super::pdpp_manual_import::ImportedDirectory>,
 ) -> Result<InstalledPdppRunCompletion, String> {
-    validate_request(&request)?;
+    validate_request_metadata(&request)?;
     let resource_dir = app.path().resource_dir().ok();
     let runtime_root = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
-    let resolved = resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)?;
+    let (resolved, _import) = resolve_connector_for_run(&request, import, || {
+        resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)
+    })?;
+    validate_request(&request, &resolved.manifest)?;
     let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
-    let setup_complete = chatgpt_setup_complete(&resolved, request.connection_id())?;
+    let setup_complete = browser_setup_complete(&resolved, request.connection_id())?;
     let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
     let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
@@ -341,7 +412,7 @@ fn start_installed_pdpp_connector_run_impl(
         // Mark setup only after the credentialed run and its export/state
         // commit have succeeded. A failed launch, login, cancellation, or
         // timeout must leave the next attempt in owner-attended setup.
-        if should_mark_chatgpt_setup_complete(&resolved, &request, &result.status) {
+        if should_mark_browser_setup_complete(&resolved, &request, &result.status) {
             mark_connection_setup_complete(&resolved.connector_id, request.connection_id())?;
         }
         Some(export)
@@ -386,7 +457,7 @@ fn run_resolved_installed_pdpp_connector_with_state(
     resource_dir: Option<PathBuf>,
     runtime_root: PathBuf,
 ) -> Result<PdppRunResult, String> {
-    validate_request(request)?;
+    validate_request(request, &resolved.manifest)?;
     let browser_lease = if requires_browser(&resolved.manifest) {
         let owner_id = request.connection_id.as_deref().filter(|owner| !owner.is_empty()).ok_or(
             "PDPP browser connector requires an explicit connectionId owner; the default owner is not permitted",
@@ -607,11 +678,15 @@ pub fn submit_installed_pdpp_interaction_response(
 /// has a live lease, so a reset can never race a collection run.
 #[tauri::command]
 pub fn reset_installed_pdpp_browser_profile(
+    app: AppHandle,
     connector_id: String,
     connection_id: String,
 ) -> Result<(), String> {
-    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
-        return Err("PDPP browser profile reset is only available for ChatGPT".into());
+    let resource_dir = app.path().resource_dir().ok();
+    let runtime = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
+    let resolved = resolve_active_installed_pdpp_connector(&connector_id, &runtime)?;
+    if !requires_browser(&resolved.manifest) {
+        return Err("PDPP connector does not declare a browser profile".into());
     }
     validate_connection_id(&connection_id)?;
     PdppBrowserLease::reset_profile(&connector_id, &connection_id)?;
@@ -619,14 +694,18 @@ pub fn reset_installed_pdpp_browser_profile(
 }
 
 /// A non-secret marker and its durable owner profile are both required before
-/// the UI may omit recovery credentials for a scheduled ChatGPT run.
+/// the UI may omit recovery credentials for a scheduled browser run.
 #[tauri::command]
 pub fn is_installed_pdpp_browser_setup_complete(
+    app: AppHandle,
     connector_id: String,
     connection_id: String,
 ) -> Result<bool, String> {
-    if connector_id != CHATGPT_CONNECTOR_INSTALL_ID {
-        return Err("PDPP browser setup state is only available for ChatGPT".into());
+    let resource_dir = app.path().resource_dir().ok();
+    let runtime = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
+    let resolved = resolve_active_installed_pdpp_connector(&connector_id, &runtime)?;
+    if !requires_browser(&resolved.manifest) {
+        return Ok(false);
     }
     validate_connection_id(&connection_id)?;
     Ok(is_connection_setup_complete(&connector_id, &connection_id)?
@@ -656,7 +735,26 @@ pub fn cleanup_installed_pdpp_connector_runs() {
     log::warn!("Timed out waiting for installed PDPP connector runs to stop");
 }
 
-fn validate_request(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
+fn validate_request(
+    request: &StartInstalledPdppConnectorRequest,
+    manifest: &PdppConnectorManifest,
+) -> Result<(), String> {
+    validate_request_metadata(request)?;
+    for stream in &request.streams {
+        if !manifest
+            .streams
+            .iter()
+            .any(|declared| &declared.name == stream)
+        {
+            return Err(format!(
+                "Requested PDPP stream {stream} is not in the connector manifest"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_metadata(request: &StartInstalledPdppConnectorRequest) -> Result<(), String> {
     validate_run_id(&request.run_id)?;
     if !matches!(
         request.collection_mode.as_str(),
@@ -777,7 +875,6 @@ fn resolve_installed_pdpp_connector_with_runtime(
     let provenance_path =
         confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
     let manifest_sha256 = required_hash(install.manifest_sha256.as_deref(), "manifestSha256")?;
-    verify_file_hash(&manifest_path, Some(manifest_sha256), "PDPP manifest")?;
     verify_file_hash(
         &entrypoint_path,
         Some(required_hash(
@@ -794,12 +891,18 @@ fn resolve_installed_pdpp_connector_with_runtime(
         )?),
         "PDPP provenance",
     )?;
-    let manifest: PdppConnectorManifest = serde_json::from_str(
-        &fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("Failed to read PDPP connector manifest: {e}"))?,
-    )
-    .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
-    validate_manifest(&install.connector_id, &install.version, &manifest)?;
+    let manifest_content = read_verified_manifest(&manifest_path, manifest_sha256)?;
+    let manifest: PdppConnectorManifest = serde_json::from_str(&manifest_content)
+        .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
+    // Older active-install records predate manifestConnectorId. Their recorded
+    // digest still authenticates the complete manifest, so use that verified
+    // identity as the migration value before applying the same exact-match
+    // check used for records that already persist it.
+    let recorded_manifest_connector_id = install
+        .manifest_connector_id
+        .as_deref()
+        .or(manifest.connector_id.as_deref());
+    validate_manifest(&install.version, recorded_manifest_connector_id, &manifest)?;
     validate_chatgpt_runtime_requirements(&provenance_path, &manifest, runtime_root)?;
     Ok(ResolvedInstalledPdppConnector {
         connector_id: install.connector_id.clone(),
@@ -809,6 +912,63 @@ fn resolve_installed_pdpp_connector_with_runtime(
         entrypoint_path,
         manifest,
     })
+}
+
+// Discovery shares execution admission, including confined artifact hashes.
+pub(crate) fn read_admitted_pdpp_manifest(
+    install: &ActiveConnectorInstall,
+) -> Result<String, String> {
+    let runtime_root = resolve_pdpp_runtime_root(None)?;
+    read_admitted_pdpp_manifest_with_runtime(install, &runtime_root)
+}
+
+pub(crate) fn read_admitted_pdpp_manifest_with_resource_dir(
+    install: &ActiveConnectorInstall,
+    resource_dir: Option<&Path>,
+) -> Result<String, String> {
+    let runtime_root = resolve_pdpp_runtime_root(resource_dir)?;
+    read_admitted_pdpp_manifest_with_runtime(install, &runtime_root)
+}
+
+pub(crate) fn read_admitted_pdpp_asset_with_resource_dir(
+    install: &ActiveConnectorInstall,
+    resource_dir: Option<&Path>,
+    asset_path: &str,
+) -> Result<Vec<u8>, String> {
+    let runtime_root = resolve_pdpp_runtime_root(resource_dir)?;
+    let resolved = resolve_installed_pdpp_connector_with_runtime(install, &runtime_root)?;
+    let asset_path = Path::new(asset_path);
+    let asset_relative = if asset_path.starts_with("assets") {
+        asset_path.to_path_buf()
+    } else {
+        Path::new("assets").join(asset_path)
+    };
+    let asset_path = confined_existing_file(
+        &resolved.root,
+        &asset_relative.to_string_lossy(),
+        "PDPP asset path",
+    )?;
+    fs::read(&asset_path).map_err(|e| format!("Failed to read PDPP asset: {e}"))
+}
+
+fn read_admitted_pdpp_manifest_with_runtime(
+    install: &ActiveConnectorInstall,
+    runtime_root: &Path,
+) -> Result<String, String> {
+    let resolved = resolve_installed_pdpp_connector_with_runtime(install, runtime_root)?;
+    read_verified_manifest(&resolved.manifest_path, &resolved.manifest_sha256)
+}
+
+fn read_verified_manifest(path: &Path, expected: &str) -> Result<String, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read PDPP connector manifest: {e}"))?;
+    let actual = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+    if actual != expected {
+        return Err(format!(
+            "PDPP manifest checksum mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(content)
 }
 
 fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -853,32 +1013,94 @@ fn validate_relative_path(path: &str, label: &str) -> Result<PathBuf, String> {
     Ok(rel.to_path_buf())
 }
 
+// PR #125 adds scoped filesystem imports, so manual-upload connectors can run
+// without a network binding when the host provides their import directory.
+const HOST_BINDINGS: &[&str] = &["network", "browser", "filesystem"];
+
+pub(crate) fn host_unavailable_reason(
+    required_bindings: &[String],
+    setup_modality: Option<&str>,
+) -> Option<String> {
+    if let Some(binding) = required_bindings
+        .iter()
+        .find(|binding| !HOST_BINDINGS.contains(&binding.as_str()))
+    {
+        return Some(format!("Requires unavailable binding: {binding}"));
+    }
+    match setup_modality {
+        Some("static_secret") => {
+            if !required_bindings.iter().any(|binding| binding == "network") {
+                return Some("PDPP static-secret connector must require the network binding".into());
+            }
+        }
+        Some("manual_or_upload") => {
+            if !required_bindings.iter().any(|binding| binding == "filesystem") {
+                return Some(
+                    "PDPP manual/upload connector must require the filesystem binding".into(),
+                );
+            }
+        }
+        Some(modality) => return Some(format!("Requires unavailable setup: {modality}")),
+        None => {
+            // Without a setup modality the host has no way to hand a filesystem
+            // connector its input (no picker, no managed import directory), so a
+            // connector that reads local files directly is not runnable here yet.
+            if !required_bindings.iter().any(|binding| binding == "network") {
+                return Some(
+                    "Reads local files directly; the desktop can only run file-based connectors that use a manual upload".into(),
+                );
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn host_can_run(required_bindings: &[String], setup_modality: Option<&str>) -> bool {
+    host_unavailable_reason(required_bindings, setup_modality).is_none()
+}
+
 fn validate_manifest(
-    connector_id: &str,
     active_version: &str,
+    installed_manifest_connector_id: Option<&str>,
     manifest: &PdppConnectorManifest,
 ) -> Result<(), String> {
     if manifest.streams.is_empty() {
         return Err("PDPP connector manifest must declare at least one stream".into());
     }
-    let identity_matches = match manifest.connector_key.as_deref() {
-        Some(GITHUB_CONNECTOR_KEY) => {
-            connector_id == "github-pdpp"
-                && manifest.connector_id.as_deref() == Some(GITHUB_CONNECTOR_ID)
-                && !requires_browser(manifest)
-        }
-        Some(CHATGPT_CONNECTOR_KEY) => {
-            connector_id == CHATGPT_CONNECTOR_INSTALL_ID
-                && manifest.connector_id.as_deref() == Some(CHATGPT_CONNECTOR_ID)
-                && requires_browser(manifest)
-                && required_chatgpt_static_secret_fields(manifest).is_ok()
-        }
-        _ => false,
-    };
-    if !identity_matches {
-        return Err(format!(
-            "PDPP connector manifest does not match active install id {connector_id}"
-        ));
+    // The active install records the URI only after verifying the manifest
+    // digest supplied by the lock. Its connectorId remains a package ID.
+    let identity = manifest.connector_id.as_deref().unwrap_or_default();
+    if !identity.starts_with("https://")
+        || identity
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        || !reqwest::Url::parse(identity)
+            .is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+    {
+        return Err("PDPP connector_id must be a valid https:// URI".into());
+    }
+    if installed_manifest_connector_id != Some(identity) {
+        return Err("PDPP connector manifest identity does not match active install".into());
+    }
+    let key = manifest.connector_key.as_deref().unwrap_or_default();
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        return Err("PDPP connector manifest must declare a safe connector_key".into());
+    }
+    if is_manual_upload_connector(manifest)
+        && matches!(key, GITHUB_CONNECTOR_KEY | CHATGPT_CONNECTOR_KEY)
+    {
+        return Err("PDPP manual/upload connector_key is reserved".into());
+    }
+    if manifest
+        .setup
+        .as_ref()
+        .is_some_and(|setup| setup.modality == "static_secret")
+    {
+        required_static_secret_fields(manifest)?;
     }
     if manifest.version.as_deref() != Some(active_version) {
         return Err("PDPP connector manifest version does not match active install".into());
@@ -887,19 +1109,21 @@ fn validate_manifest(
         .runtime_requirements
         .as_ref()
         .and_then(|requirements| requirements.bindings.as_ref());
-    let network_required = bindings
-        .and_then(|bindings| bindings.get("network"))
-        .and_then(|binding| binding.required)
-        .unwrap_or(false);
-    if !network_required {
-        return Err("PDPP connector manifest must require the network binding".into());
+    let required_bindings: Vec<String> = bindings
+        .into_iter()
+        .flat_map(|bindings| bindings.iter())
+        .filter(|(_, requirement)| requirement.required.unwrap_or(false))
+        .map(|(binding, _)| binding.clone())
+        .collect();
+    let setup_modality = manifest.setup.as_ref().map(|setup| setup.modality.as_str());
+    if !host_can_run(&required_bindings, setup_modality) {
+        return Err(host_unavailable_reason(&required_bindings, setup_modality).unwrap());
     }
-    for (binding, requirement) in bindings.into_iter().flat_map(|bindings| bindings.iter()) {
-        if binding != "network" && binding != "browser" && requirement.required.unwrap_or(false) {
-            return Err(format!(
-                "PDPP connector requires unsupported binding {binding}"
-            ));
-        }
+    if is_manual_upload_connector(manifest) && manual_upload_import_env(manifest).is_none() {
+        return Err(
+            "PDPP manual/upload connector must declare setup.manual_or_upload.import_dir_env_var"
+                .into(),
+        );
     }
     let mut stream_names = HashSet::new();
     for stream in &manifest.streams {
@@ -910,36 +1134,61 @@ fn validate_manifest(
     Ok(())
 }
 
-fn required_chatgpt_static_secret_fields(
+pub(crate) fn validate_verified_manifest(
+    active_version: &str,
+    expected_connector_id: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let manifest: PdppConnectorManifest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Failed to parse verified PDPP connector manifest: {e}"))?;
+    validate_manifest(active_version, Some(expected_connector_id), &manifest)
+}
+
+fn required_static_secret_fields(
     manifest: &PdppConnectorManifest,
-) -> Result<Vec<(&str, &str)>, String> {
-    let setup = manifest
-        .setup
-        .as_ref()
-        .ok_or("ChatGPT PDPP connector must declare setup")?;
+) -> Result<&[PdppStaticSecretField], String> {
+    let Some(setup) = &manifest.setup else {
+        return Ok(&[]);
+    };
     if setup.modality != "static_secret" {
-        return Err("ChatGPT PDPP connector must use setup.modality static_secret".into());
+        return Err("PDPP connector setup modality is not supported".into());
     }
-    let fields = &setup.credential_capture.fields;
-    if fields.len() != 2
-        || fields[0].name != "username"
-        || !fields[0].required
-        || !fields[0].secret
-        || fields[0].env != ["CHATGPT_USERNAME"]
-        || fields[1].name != "password"
-        || !fields[1].required
-        || !fields[1].secret
-        || fields[1].env != ["CHATGPT_PASSWORD"]
-    {
-        return Err(
-            "ChatGPT PDPP setup must declare only required secret username and password fields"
-                .into(),
-        );
+    let fields = &setup
+        .credential_capture
+        .as_ref()
+        .ok_or("PDPP static-secret setup must declare credential_capture")?
+        .fields;
+    if fields.is_empty() {
+        return Err("PDPP static-secret setup must declare fields".into());
     }
-    Ok(vec![
-        ("username", "CHATGPT_USERNAME"),
-        ("password", "CHATGPT_PASSWORD"),
-    ])
+    let mut names = HashSet::new();
+    let mut environment = HashSet::new();
+    for field in fields {
+        if field.name.is_empty() || !names.insert(&field.name) || field.env.is_empty() {
+            return Err("PDPP static-secret fields must have unique names and declare env".into());
+        }
+        for env in &field.env {
+            if !valid_credential_env(env) || !environment.insert(env) {
+                return Err("PDPP static-secret env names must be safe and unique".into());
+            }
+        }
+    }
+    Ok(fields)
+}
+
+fn valid_credential_env(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with("PDPP_")
+        && !name.starts_with("DATACONNECT_")
+        && !name.starts_with("LD_")
+        && !name.starts_with("DYLD_")
+        && !matches!(
+            name,
+            "NODE_OPTIONS" | "NODE_PATH" | "PATH" | "HOME" | "HOMEDRIVE" | "HOMEPATH"
+        )
+        && name.bytes().enumerate().all(|(index, c)| {
+            c == b'_' || c.is_ascii_uppercase() || (index > 0 && c.is_ascii_digit())
+        })
 }
 
 fn validate_chatgpt_runtime_requirements(
@@ -1009,19 +1258,8 @@ fn build_start(
     manifest: &PdppConnectorManifest,
     state: Option<Value>,
 ) -> Result<PdppStart, String> {
-    let available: HashSet<&str> = manifest
-        .streams
-        .iter()
-        .map(|stream| stream.name.as_str())
-        .collect();
+    validate_request(request, manifest)?;
     let selected = selected_streams(request, manifest);
-    for stream in &selected {
-        if !available.contains(stream.as_str()) {
-            return Err(format!(
-                "Requested PDPP stream {stream} is not in the connector manifest"
-            ));
-        }
-    }
     let scope = json!({
         "streams": selected.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>()
     });
@@ -1038,8 +1276,44 @@ fn requires_browser(manifest: &PdppConnectorManifest) -> bool {
         .unwrap_or(false)
 }
 
-fn is_chatgpt_connector(manifest: &PdppConnectorManifest) -> bool {
-    manifest.connector_key.as_deref() == Some(CHATGPT_CONNECTOR_KEY)
+fn is_manual_upload_connector(manifest: &PdppConnectorManifest) -> bool {
+    manifest
+        .setup
+        .as_ref()
+        .is_some_and(|setup| setup.modality == "manual_or_upload")
+}
+
+fn manual_upload_import_env(manifest: &PdppConnectorManifest) -> Option<&str> {
+    let env = manifest
+        .setup
+        .as_ref()?
+        .manual_or_upload
+        .as_ref()?
+        .import_dir_env_var
+        .as_deref()?;
+    let valid = env.len() > 1
+        && env.ends_with("_DIR")
+        && !env.starts_with("PDPP_")
+        && !env.starts_with("LD_")
+        && !env.starts_with("DYLD_")
+        && !matches!(
+            env,
+            "NODE_OPTIONS" | "NODE_PATH" | "PATH" | "HOME" | "HOMEDRIVE" | "HOMEPATH"
+        )
+        && env.chars().enumerate().all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_uppercase()
+                || (index > 0 && character.is_ascii_digit())
+        });
+    valid.then_some(env)
+}
+
+fn permits_network(manifest: &PdppConnectorManifest) -> bool {
+    manifest
+        .runtime_requirements
+        .as_ref()
+        .and_then(|requirements| requirements.bindings.as_ref())
+        .is_some_and(|bindings| bindings.contains_key("network"))
 }
 
 fn selected_streams(
@@ -1054,6 +1328,25 @@ fn selected_streams(
         .iter()
         .map(|stream| stream.name.clone())
         .collect()
+}
+
+fn validate_requested_streams(
+    request: &StartInstalledPdppConnectorRequest,
+    manifest: &PdppConnectorManifest,
+) -> Result<(), String> {
+    let available = manifest
+        .streams
+        .iter()
+        .map(|stream| stream.name.as_str())
+        .collect::<HashSet<_>>();
+    for stream in &request.streams {
+        if !available.contains(stream.as_str()) {
+            return Err(format!(
+                "Requested PDPP stream {stream} is not in the connector manifest"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_reset_streams(
@@ -1126,77 +1419,97 @@ fn resolve_child_secrets_for_connection(
     resolved: &ResolvedInstalledPdppConnector,
     setup_complete: bool,
 ) -> Result<PdppChildSecrets, String> {
-    let manifest_key = resolved.manifest.connector_key.as_deref().unwrap_or("");
-    if manifest_key == CHATGPT_CONNECTOR_KEY {
-        if request.github_token.is_some() {
-            return Err("githubToken can only be passed to the GitHub PDPP connector".into());
+    if is_manual_upload_connector(&resolved.manifest) {
+        if request.github_token.is_some() || request.setup_secrets.is_some() {
+            return Err("manual/upload PDPP connectors do not accept credentials".into());
         }
-        let expected = required_chatgpt_static_secret_fields(&resolved.manifest)?;
-        let Some(provided) = request.setup_secrets.as_ref() else {
-            return if setup_complete {
-                Ok(PdppChildSecrets::default())
-            } else {
-                Err("ChatGPT PDPP connector requires setupSecrets.username and setupSecrets.password for first setup or explicit recovery".into())
-            };
-        };
-        if provided.len() != expected.len()
-            || expected.iter().any(|(field, _)| {
-                provided
-                    .get(*field)
-                    .is_none_or(|value| value.trim().is_empty())
-            })
+        let import_directory = request
+            .import_directory
+            .as_deref()
+            .ok_or("manual/upload PDPP connector requires importDirectory")?;
+        let import_directory = super::pdpp_manual_import::validate_import_directory(
+            &resolved.connector_id,
+            request.connection_id(),
+            import_directory,
+        )?;
+        let import_env = manual_upload_import_env(&resolved.manifest).ok_or(
+            "PDPP manual/upload connector must declare setup.manual_or_upload.import_dir_env_var",
+        )?;
+        let mut environment = HashMap::new();
+        environment.insert(
+            import_env.to_owned(),
+            import_directory.to_string_lossy().into_owned(),
+        );
+        return Ok(PdppChildSecrets {
+            environment,
+            values: Vec::new(),
+        });
+    }
+    let fields = required_static_secret_fields(&resolved.manifest)?;
+    let mut provided = request.setup_secrets.clone().unwrap_or_default();
+    // Retain the existing GitHub request/debug-token API. The manifest still
+    // selects the field and every child environment variable receiving it.
+    if request.github_token.is_some()
+        || (resolved.manifest.connector_key.as_deref() == Some(GITHUB_CONNECTOR_KEY)
+            && request.setup_secrets.is_none())
+    {
+        if resolved.manifest.connector_key.as_deref() != Some(GITHUB_CONNECTOR_KEY)
+            || request.setup_secrets.is_some()
+            || fields.len() != 1
         {
-            return Err(
-                "ChatGPT PDPP connector requires only non-empty setupSecrets.username and setupSecrets.password"
-                    .into(),
-            );
+            return Err("githubToken requires a single-field GitHub setup and cannot be combined with setupSecrets".into());
         }
-        let mut secrets = PdppChildSecrets::default();
-        for (field, environment_key) in expected {
-            let value = provided[field].clone();
-            secrets.values.push(value.clone());
-            secrets
-                .environment
-                .insert(environment_key.to_owned(), value);
-        }
-        return Ok(secrets);
+        provided.insert(fields[0].name.clone(), resolve_github_credential(request)?);
     }
-
-    if request.setup_secrets.is_some() {
-        return Err("setupSecrets can only be passed to the ChatGPT PDPP connector".into());
+    if provided.is_empty() && request.setup_secrets.is_none() && setup_complete {
+        return Ok(PdppChildSecrets::default());
     }
-    if manifest_key != GITHUB_CONNECTOR_KEY {
-        return Err("DataConnect does not support this PDPP connector identity".into());
+    if provided
+        .keys()
+        .any(|name| !fields.iter().any(|field| &field.name == name))
+    {
+        return Err("PDPP setupSecrets contains an undeclared field".into());
     }
-
-    let token = resolve_github_credential(request)?;
     let mut secrets = PdppChildSecrets::default();
-    secrets.values.push(token.clone());
-    secrets
-        .environment
-        .insert("GITHUB_TOKEN".into(), token.clone());
-    secrets
-        .environment
-        .insert("GITHUB_PERSONAL_ACCESS_TOKEN".into(), token);
+    for field in fields {
+        let value = provided
+            .get(&field.name)
+            .filter(|value| !value.trim().is_empty());
+        let Some(value) = value else {
+            if field.required {
+                return Err(format!(
+                    "PDPP connector requires setupSecrets.{} for first setup or explicit recovery",
+                    field.name
+                ));
+            }
+            continue;
+        };
+        if field.secret {
+            secrets.values.push(value.clone());
+        }
+        for env in &field.env {
+            secrets.environment.insert(env.clone(), value.clone());
+        }
+    }
     Ok(secrets)
 }
 
-fn chatgpt_setup_complete(
+fn browser_setup_complete(
     resolved: &ResolvedInstalledPdppConnector,
     connection_id: &str,
 ) -> Result<bool, String> {
-    if !is_chatgpt_connector(&resolved.manifest) {
+    if !requires_browser(&resolved.manifest) {
         return Ok(false);
     }
     is_connection_setup_complete(&resolved.connector_id, connection_id)
 }
 
-fn should_mark_chatgpt_setup_complete(
+fn should_mark_browser_setup_complete(
     resolved: &ResolvedInstalledPdppConnector,
     request: &StartInstalledPdppConnectorRequest,
     status: &PdppRunStatus,
 ) -> bool {
-    is_chatgpt_connector(&resolved.manifest)
+    requires_browser(&resolved.manifest)
         && request.setup_secrets.is_some()
         && *status == PdppRunStatus::Succeeded
 }
@@ -1237,18 +1550,28 @@ fn build_command(
 ) -> Result<PdppConnectorCommand, String> {
     let mut env = secrets.environment.clone();
     if let Some(binding) = browser_binding {
-        if resolved.manifest.connector_key.as_deref() != Some(CHATGPT_CONNECTOR_KEY) {
-            return Err("PDPP browser binding is only available to the ChatGPT connector".into());
+        if !requires_browser(&resolved.manifest) {
+            return Err("PDPP browser binding requires a declared browser capability".into());
         }
         // The pinned runtime resolves this documented compatibility seam before it
         // considers an isolated local browser. It is a PDPP runtime concern,
         // unrelated to DataConnect's legacy Playwright page API.
         env.insert(
-            "PDPP_CHATGPT_REMOTE_CDP_URL".into(),
+            format!(
+                "PDPP_{}_REMOTE_CDP_URL",
+                resolved
+                    .manifest
+                    .connector_key
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase()
+            ),
             binding.cdp_http_url.clone(),
         );
     }
-    env.insert("PDPP_CONNECTOR_NETWORK".into(), "1".into());
+    if permits_network(&resolved.manifest) {
+        env.insert("PDPP_CONNECTOR_NETWORK".into(), "1".into());
+    }
     env.insert(
         "PDPP_CONNECTOR_MANIFEST_PATH".into(),
         resolved.manifest_path.to_string_lossy().into_owned(),
@@ -1471,6 +1794,7 @@ fn build_export_data(
     collection_state: &PdppCollectionConnectionState,
     snapshot_reset_streams: &[String],
 ) -> Result<Value, String> {
+    validate_request(request, &resolved.manifest)?;
     let connector_key = resolved
         .manifest
         .connector_key
@@ -1481,11 +1805,6 @@ fn build_export_data(
         .connector_id
         .as_deref()
         .ok_or("PDPP connector manifest is missing connector_id")?;
-    if connector_key != GITHUB_CONNECTOR_KEY && connector_key != CHATGPT_CONNECTOR_KEY {
-        return Err(
-            "DataConnect does not yet have a storage projection for this PDPP connector".into(),
-        );
-    }
     let selected_streams = selected_streams(request, &resolved.manifest);
     let records_by_stream = &collection_state.snapshot_by_stream;
     let mut stream_counts = serde_json::Map::new();
@@ -1496,35 +1815,51 @@ fn build_export_data(
         let records = records_by_stream.get(stream).cloned().unwrap_or_default();
         record_count += records.len();
         stream_counts.insert(stream.clone(), json!(records.len()));
-        let projection = match (connector_key, stream.as_str()) {
-            // The Personal Server's existing GitHub schemas deliberately use
-            // these shapes. This is a DataConnect storage projection, not a
-            // claim that the PDPP connector only supports three streams.
-            (GITHUB_CONNECTOR_KEY, "user") if !records.is_empty() => {
-                Some(("github.profile", project_github_profile(&records)?))
+        if is_manual_upload_connector(&resolved.manifest) {
+            let scope = format!("pdpp.manual.{connector_key}.{stream}");
+            if scope.starts_with("github.") || scope.starts_with("chatgpt.") {
+                return Err("PDPP manual projection collides with a curated storage scope".into());
             }
-            (GITHUB_CONNECTOR_KEY, "repositories") => Some((
-                "github.repositories",
-                project_github_repositories(&records)?,
-            )),
-            (GITHUB_CONNECTOR_KEY, "starred") => {
-                Some(("github.starred", project_github_starred(&records)?))
-            }
-            // Fixture contract: the ChatGPT Collection Profile emits one
-            // PDPP record per conversation. Preserve each record's data as
-            // supplied; schema-specific normalization belongs upstream.
-            (CHATGPT_CONNECTOR_KEY, "conversations") => Some((
-                "chatgpt.conversations",
-                json!({ "conversations": records.iter().map(|record| record.data.clone()).collect::<Vec<_>>() }),
-            )),
-            _ => None,
-        };
-        if let Some((scope, value)) = projection {
-            projected_scopes.insert(scope.to_owned(), value);
+            projected_scopes.insert(
+                scope,
+                json!(records
+                    .iter()
+                    .map(|record| record.data.clone())
+                    .collect::<Vec<_>>()),
+            );
+            continue;
         }
+        let scope = pdpp_stream_to_dataconnect_scope(connector_key, connector_id, stream);
+        let value = match scope.as_str() {
+            // Preserve the Personal Server's existing curated GitHub shapes.
+            "github.profile" if !records.is_empty() => project_github_profile(&records)?,
+            "github.profile" => continue,
+            "github.repositories" => project_github_repositories(&records)?,
+            "github.starred" => project_github_starred(&records)?,
+            // ChatGPT and namespaced streams preserve record data in a stream wrapper.
+            _ => json!({
+                stream: records.iter().map(|record| record.data.clone()).collect::<Vec<_>>()
+            }),
+        };
+        projected_scopes.insert(scope, value);
     }
 
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let projection_kind = if is_manual_upload_connector(&resolved.manifest) {
+        "manifest-generic-v1"
+    } else if projected_scopes
+        .keys()
+        .any(|scope| scope.starts_with("github."))
+    {
+        "github-v1"
+    } else if projected_scopes
+        .keys()
+        .any(|scope| scope.starts_with("chatgpt."))
+    {
+        "chatgpt-fixture-v1"
+    } else {
+        "manifest-namespaced-v1"
+    };
     let requested_scopes = projected_scopes.keys().cloned().collect::<Vec<_>>();
     let mut export = projected_scopes;
     // This is not a serving scope (see METADATA_KEYS in
@@ -1588,13 +1923,46 @@ fn build_export_data(
             "count": record_count,
             "label": format!("{record_count} {connector_key} records exported"),
             "details": {
-                "pdppStorageProjection": if connector_key == GITHUB_CONNECTOR_KEY { "github-v1" } else { "chatgpt-fixture-v1" },
+                "pdppStorageProjection": projection_kind,
                 "pdppStreamRecords": stream_counts,
             }
         }),
     );
     export.insert("errors".into(), json!([]));
     Ok(Value::Object(export))
+}
+
+/// Generic streams use `pdpp.<connector_key>.<stream>`, outside curated scopes.
+/// Only the established registry identity and stream pairs retain the three
+/// GitHub and six ChatGPT scope names. This compatibility mapping never
+/// controls admission.
+pub(crate) fn pdpp_stream_to_dataconnect_scope(
+    connector_key: &str,
+    connector_identity: &str,
+    stream: &str,
+) -> String {
+    let curated_identity = ["org", "dev"].iter().any(|domain| {
+        connector_identity == format!("https://registry.pdpp.{domain}/connectors/{connector_key}")
+    });
+    if curated_identity {
+        match (connector_key, stream) {
+            ("github", "user") => return "github.profile".into(),
+            ("github", "repositories" | "starred")
+            | (
+                "chatgpt",
+                "conversations"
+                | "messages"
+                | "memories"
+                | "custom_gpts"
+                | "custom_instructions"
+                | "shared_conversations",
+            ) => {
+                return format!("{connector_key}.{stream}");
+            }
+            _ => {}
+        }
+    }
+    format!("pdpp.{connector_key}.{stream}")
 }
 
 /// An authoritative full refresh must carry an explicit, empty stream entry
@@ -1749,8 +2117,8 @@ fn emit_running_status(app: &AppHandle, run_id: &str, message: &str) {
     );
 }
 
-fn emit_terminal_status(
-    app: &AppHandle,
+fn emit_terminal_status<R: Runtime>(
+    app: &AppHandle<R>,
     response: &InstalledPdppConnectorRunResponse,
     export: Option<&Value>,
 ) {
@@ -1842,7 +2210,7 @@ fn terminal_status(response: &InstalledPdppConnectorRunResponse) -> TerminalStat
     }
 }
 
-fn emit_failed_terminal_status(app: &AppHandle, run_id: &str, error: &str) {
+fn emit_failed_terminal_status<R: Runtime>(app: &AppHandle<R>, run_id: &str, error: &str) {
     let _ = app.emit(
         "connector-status",
         json!({
@@ -2004,7 +2372,17 @@ fn to_response(
         progress,
         records_truncated: result.records_truncated,
         events_truncated: result.events_truncated,
-        failure: failure.map(|failure| redact_secrets(&failure, secrets)),
+        failure: failure.map(|failure| {
+            let failure = redact_secrets(&failure, secrets);
+            if result.attach_stderr_tail {
+                // Redact the whole stderr first, then cut the tail, so a
+                // secret can never be split across the cut.
+                let stderr = redact_secrets(&result.stderr, secrets);
+                super::pdpp_connector::failure_with_stderr_tail(&failure, &stderr, result.stderr_truncated)
+            } else {
+                failure
+            }
+        }),
         stderr_bytes: result.stderr.len(),
         stderr_truncated: result.stderr_truncated,
         exit_code: result.exit_code,
@@ -2066,6 +2444,249 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
+
+    #[test]
+    fn registry_identity_is_bound_to_the_install_record_not_package_name_or_domain() {
+        for key in ["github", "chatgpt"] {
+            for domain in ["org", "dev"] {
+                let mut manifest = if key == "github" {
+                    github_manifest()
+                } else {
+                    chatgpt_browser_manifest()
+                };
+                manifest["connector_id"] =
+                    json!(format!("https://registry.pdpp.{domain}/connectors/{key}"));
+                let (temp, mut install) = install_fixture(manifest.clone(), success_script());
+                install.root_path = temp.path().to_string_lossy().into_owned();
+                install.connector_id = format!("{key}-pdpp");
+                install.version = manifest["version"].as_str().unwrap().into();
+                assert!(read_admitted_pdpp_manifest(&install).is_ok());
+                install.connector_id = "different-pdpp".into();
+                assert!(read_admitted_pdpp_manifest(&install).is_ok());
+                install.connector_id = format!("{key}-pdpp");
+                manifest["connector_id"] = json!("https://other.example/connector");
+                fs::write(
+                    temp.path().join("profile/collection-profile.json"),
+                    serde_json::to_vec_pretty(&manifest).unwrap(),
+                )
+                .unwrap();
+                assert!(read_admitted_pdpp_manifest(&install)
+                    .unwrap_err()
+                    .contains("checksum mismatch"));
+                assert!(super::super::connector::load_pdpp_platforms([install]).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_active_install_record_uses_verified_manifest_identity() {
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.manifest_connector_id = None;
+
+        let mut legacy_record = serde_json::to_value(&install).unwrap();
+        legacy_record
+            .as_object_mut()
+            .unwrap()
+            .remove("manifestConnectorId");
+        let legacy_record: ActiveConnectorInstall = serde_json::from_value(legacy_record).unwrap();
+
+        assert!(resolve_installed_pdpp_connector(&legacy_record).is_ok());
+    }
+
+    #[test]
+    fn admitted_manifest_can_use_a_packaged_runtime_resource_directory() {
+        let (install_temp, mut install) = install_fixture(github_manifest(), success_script());
+        install.root_path = install_temp.path().to_string_lossy().into_owned();
+        let resource_temp = tempfile::tempdir().unwrap();
+        let runtime = resource_temp.path().join("pdpp-runtime");
+        fs::create_dir_all(runtime.join("node_modules/p-queue")).unwrap();
+        fs::create_dir_all(runtime.join("node_modules/patchright")).unwrap();
+        fs::write(runtime.join("connector-loader.mjs"), "export {};").unwrap();
+        fs::write(runtime.join("connector-loader-bootstrap.mjs"), "export {};").unwrap();
+        fs::write(runtime.join("node_modules/p-queue/package.json"), "{}").unwrap();
+        fs::write(runtime.join("node_modules/patchright/package.json"), "{}").unwrap();
+
+        let content =
+            read_admitted_pdpp_manifest_with_resource_dir(&install, Some(resource_temp.path()))
+                .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&content).unwrap()["connector_key"],
+            "github"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_https_identity_and_unsafe_static_secret_fields() {
+        for identity in [
+            "",
+            "http://registry.pdpp.dev/connectors/github",
+            "https://",
+            "https:example.com",
+            "https://example.com/a b",
+        ] {
+            let mut manifest = github_manifest();
+            manifest["connector_id"] = json!(identity);
+            assert!(validate_manifest(
+                "1.0.0",
+                Some(identity),
+                &serde_json::from_value(manifest).unwrap()
+            )
+            .is_err());
+        }
+        for env in [
+            "NODE_OPTIONS",
+            "PDPP_CONNECTOR_NETWORK",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BAD=ENV",
+        ] {
+            let mut manifest = github_manifest();
+            manifest["setup"]["credential_capture"]["fields"][0]["env"] = json!([env]);
+            assert!(validate_manifest(
+                "1.0.0",
+                Some("https://registry.pdpp.org/connectors/github"),
+                &serde_json::from_value(manifest).unwrap()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn generic_projection_cannot_forge_curated_scope_keys() {
+        for (key, stream, identity) in [
+            (
+                "github",
+                "repositories",
+                "https://evil.example/connectors/github",
+            ),
+            (
+                "chatgpt",
+                "conversations",
+                "https://evil.example/connectors/chatgpt",
+            ),
+            (
+                "github",
+                "profile",
+                "https://registry.pdpp.dev/connectors/github",
+            ),
+        ] {
+            let mut manifest = github_manifest();
+            manifest["connector_key"] = json!(key);
+            manifest["connector_id"] = json!(identity);
+            manifest["streams"] = json!([{ "name": stream }]);
+            let (temp, mut install) = install_fixture(manifest, success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            install.connector_id = format!("{key}-pdpp");
+            let platforms = super::super::connector::load_pdpp_platforms([install.clone()]);
+            let scope = format!("pdpp.{key}.{stream}");
+            assert_eq!(platforms[0].scopes, Some(vec![scope.clone()]));
+            let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+            let mut request = request_with_token("fixture");
+            request.connector_id = install.connector_id;
+            request.streams = vec![stream.into()];
+            let record: PdppRecord = serde_json::from_value(json!({
+                "stream": stream, "key": "forged", "data": {"full_name": "attacker/backdoor"}, "emitted_at": "2026-09-15T00:00:00Z"
+            })).unwrap();
+            let state = PdppCollectionConnectionState {
+                snapshot_by_stream: HashMap::from([(stream.into(), vec![record])]),
+                ..Default::default()
+            };
+            let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+            assert_eq!(export["requestedScopes"], json!([scope]));
+            assert!(!export
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with("github.") || key.starts_with("chatgpt.")));
+            request.streams = vec!["undeclared".into()];
+            assert!(validate_request(&request, &resolved.manifest)
+                .unwrap_err()
+                .contains("not in the connector manifest"));
+            assert!(build_export_data(&resolved, &request, &state, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn ynab_is_discovered_scoped_run_and_exported_from_its_manifest() {
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ynab.collection-profile.origin-main.json"
+        ))
+        .unwrap();
+        let script = success_script()
+            .replace("GITHUB_TOKEN", "YNAB_PAT")
+            .replace("GITHUB_PERSONAL_ACCESS_TOKEN", "YNAB_PERSONAL_ACCESS_TOKEN")
+            .replace("{ id: 'repo-1' }", "{ id: 'budget-1', name: 'Household' }");
+        let (temp, mut install) = install_fixture(manifest.clone(), &script);
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = "ynab-pdpp".into();
+        install.version = manifest["version"].as_str().unwrap().into();
+        let platforms = super::super::connector::load_pdpp_platforms([install.clone()]);
+        assert_eq!(platforms.len(), 1);
+        assert_eq!(platforms[0].id, "ynab-pdpp");
+        assert_eq!(
+            platforms[0].scopes.as_ref().unwrap().len(),
+            manifest["streams"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            serde_json::to_value(&platforms[0]).unwrap()["setup"]["credentialCapture"]["fields"][0]
+                ["name"],
+            "secret"
+        );
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let missing_secret_request = StartInstalledPdppConnectorRequest {
+            connector_id: "ynab-pdpp".into(),
+            streams: vec!["budgets".into()],
+            github_token: None,
+            setup_secrets: None,
+            ..request_with_token("")
+        };
+        let missing_secret_error = match resolve_child_secrets(&missing_secret_request, &resolved) {
+            Ok(_) => panic!("missing YNAB secret should be rejected before spawning"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            missing_secret_error,
+            "PDPP connector requires setupSecrets.secret for first setup or explicit recovery"
+        );
+        let request = StartInstalledPdppConnectorRequest {
+            connector_id: "ynab-pdpp".into(),
+            streams: vec!["budgets".into()],
+            github_token: None,
+            setup_secrets: Some(HashMap::from([("secret".into(), "ynab-fixture".into())])),
+            ..request_with_token("")
+        };
+        let secrets = resolve_child_secrets(&request, &resolved).unwrap();
+        assert_eq!(
+            sorted_env_bytes(&secrets.environment),
+            b"YNAB_PAT=ynab-fixture\nYNAB_PERSONAL_ACCESS_TOKEN=ynab-fixture"
+        );
+        let result = run_resolved_installed_pdpp_connector(
+            &resolved,
+            &request,
+            CommandCustomization {
+                max_retained_records: 8,
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.record_count, 1);
+        let state = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([("budgets".into(), result.records)]),
+            ..Default::default()
+        };
+        let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+        assert_eq!(export["requestedScopes"], json!(["pdpp.ynab.budgets"]));
+        assert_eq!(
+            export["pdpp.ynab.budgets"]["budgets"][0]["name"],
+            "Household"
+        );
+    }
+
     // The production registry is process-global. Serialize the small set of
     // tests that intentionally exercise its lifecycle so cleanup cannot race
     // an unrelated registry assertion under Rust's parallel test runner.
@@ -2095,7 +2716,9 @@ mod tests {
         fs::write(temp.path().join("provenance.json"), &provenance_bytes).unwrap();
         let manifest_sha = format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
+            hex::encode(Sha256::digest(
+                serde_json::to_vec_pretty(&manifest).unwrap()
+            ))
         );
         let entrypoint_sha = format!("sha256:{}", hex::encode(Sha256::digest(script.as_bytes())));
         let provenance_sha = format!("sha256:{}", hex::encode(Sha256::digest(&provenance_bytes)));
@@ -2103,12 +2726,14 @@ mod tests {
             temp,
             ActiveConnectorInstall {
                 connector_id: "github-pdpp".into(),
+                manifest_connector_id: manifest["connector_id"].as_str().map(str::to_owned),
                 company: "GitHub".into(),
                 version: "1.0.0".into(),
                 root_path: String::new(),
                 metadata_relative_path: "legacy.json".into(),
                 script_relative_path: "legacy.js".into(),
                 artifact_kind: Some(PDPP_ARTIFACT_KIND.into()),
+                artifact_digest: None,
                 manifest_path: Some("profile/collection-profile.json".into()),
                 entrypoint_path: Some("dist/profile.cjs".into()),
                 entrypoint_sha256: Some(entrypoint_sha),
@@ -2119,11 +2744,38 @@ mod tests {
         )
     }
 
+    fn manual_import_request(
+        run_id: &str,
+        connector_id: &str,
+        import_directory: &Path,
+    ) -> StartInstalledPdppConnectorRequest {
+        StartInstalledPdppConnectorRequest {
+            run_id: run_id.into(),
+            connector_id: connector_id.into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["records".into()],
+            connection_id: None,
+            github_token: None,
+            setup_secrets: None,
+            import_directory: Some(import_directory.to_string_lossy().into_owned()),
+            timeout_seconds: None,
+        }
+    }
+
+    fn github_setup() -> Value {
+        serde_json::from_str::<Value>(include_str!(
+            "../../tests/fixtures/github.collection-profile.origin-main.json"
+        ))
+        .unwrap()["setup"]
+            .clone()
+    }
+
     fn github_manifest() -> Value {
         json!({
-            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
+            "setup": github_setup(),
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 {
@@ -2141,9 +2793,10 @@ mod tests {
 
     fn github_all_streams_manifest() -> Value {
         json!({
-            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
+            "setup": github_setup(),
             "runtime_requirements": { "bindings": { "network": { "required": true } } },
             "streams": [
                 { "name": "user" },
@@ -2164,12 +2817,470 @@ mod tests {
         .unwrap()
     }
 
+    fn validate_fixture_manifest(manifest: &PdppConnectorManifest) -> Result<(), String> {
+        validate_manifest(
+            manifest.version.as_deref().unwrap(),
+            manifest.connector_id.as_deref(),
+            manifest,
+        )
+    }
+
+    #[test]
+    fn installed_collection_profiles_expose_manifest_brand_icons() {
+        let apple_manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        let whatsapp_manifest = json!({
+            "connector_id": "https://registry.pdpp.dev/connectors/whatsapp",
+            "connector_key": "whatsapp",
+            "version": "0.2.0",
+            "display_name": "WhatsApp (chat export)",
+            "brand": { "icon": "icons/whatsapp.svg" },
+            "runtime_requirements": {
+                "bindings": { "filesystem": { "required": true } }
+            },
+            "setup": {
+                "modality": "manual_or_upload",
+                "manual_or_upload": {
+                    "import_dir_env_var": "WHATSAPP_EXPORT_DIR"
+                }
+            },
+            "streams": [{ "name": "chats" }]
+        });
+
+        let (apple_temp, mut apple_install) =
+            install_fixture(apple_manifest.clone(), success_script());
+        let (whatsapp_temp, mut whatsapp_install) =
+            install_fixture(whatsapp_manifest.clone(), success_script());
+        for (temp, icon_name, icon_bytes) in [
+            (
+                &apple_temp,
+                "apple_health.svg",
+                b"apple-health-icon".as_slice(),
+            ),
+            (&whatsapp_temp, "whatsapp.svg", b"whatsapp-icon".as_slice()),
+        ] {
+            let icon_path = temp.path().join("assets/icons").join(icon_name);
+            fs::create_dir_all(icon_path.parent().unwrap()).unwrap();
+            fs::write(icon_path, icon_bytes).unwrap();
+        }
+        apple_install.root_path = apple_temp.path().to_string_lossy().into_owned();
+        apple_install.connector_id = "apple-health-pdpp".into();
+        apple_install.company = "Apple".into();
+        apple_install.version = apple_manifest["version"].as_str().unwrap().into();
+        whatsapp_install.root_path = whatsapp_temp.path().to_string_lossy().into_owned();
+        whatsapp_install.connector_id = "whatsapp-pdpp".into();
+        whatsapp_install.company = "WhatsApp".into();
+        whatsapp_install.version = whatsapp_manifest["version"].as_str().unwrap().into();
+
+        let resource_temp = tempfile::tempdir().unwrap();
+        let runtime = resource_temp.path().join("pdpp-runtime");
+        fs::create_dir_all(runtime.join("node_modules/p-queue")).unwrap();
+        fs::create_dir_all(runtime.join("node_modules/patchright")).unwrap();
+        fs::write(runtime.join("connector-loader.mjs"), "export {};\n").unwrap();
+        fs::write(
+            runtime.join("connector-loader-bootstrap.mjs"),
+            "export {};\n",
+        )
+        .unwrap();
+        fs::write(runtime.join("node_modules/p-queue/package.json"), "{}\n").unwrap();
+        fs::write(runtime.join("node_modules/patchright/package.json"), "{}\n").unwrap();
+
+        let platforms = super::super::connector::load_pdpp_platforms_with_resource_dir(
+            [apple_install, whatsapp_install],
+            Some(resource_temp.path()),
+        );
+
+        assert_eq!(platforms.len(), 2);
+        assert!(platforms
+            .iter()
+            .all(|platform| platform.logo_url.starts_with("data:image/svg+xml;base64,")));
+        assert!(platforms[0].logo_url.contains("YXBwbGUtaGVhbHRoLWljb24="));
+        assert!(platforms[1].logo_url.contains("d2hhdHNhcHAtaWNvbg=="));
+    }
+
+    #[test]
+    fn accepts_the_apple_health_manual_upload_manifest_fixture() {
+        let manifest: PdppConnectorManifest = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+
+        validate_fixture_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn manual_upload_rejects_reserved_identities_and_namespaces_projection() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        for reserved_key in [GITHUB_CONNECTOR_KEY, CHATGPT_CONNECTOR_KEY] {
+            let mut candidate = fixture.clone();
+            candidate["connector_key"] = json!(reserved_key);
+            candidate["connector_id"] =
+                json!(format!("https://evil.example/connectors/{reserved_key}"));
+            candidate["streams"] = json!([{ "name": "repositories" }]);
+            let manifest: PdppConnectorManifest = serde_json::from_value(candidate).unwrap();
+            assert!(
+                validate_fixture_manifest(&manifest).is_err()
+            );
+        }
+        let mut reserved_key = fixture.clone();
+        reserved_key["connector_key"] = json!(GITHUB_CONNECTOR_KEY);
+        reserved_key["connector_id"] = json!("https://evil.example/connectors/github");
+        reserved_key["streams"] = json!([{ "name": "repositories" }]);
+        let manifest: PdppConnectorManifest = serde_json::from_value(reserved_key).unwrap();
+
+        let resolved = ResolvedInstalledPdppConnector {
+            connector_id: "github-pdpp".into(),
+            manifest_sha256: "sha256:test".into(),
+            root: PathBuf::new(),
+            manifest_path: PathBuf::new(),
+            entrypoint_path: PathBuf::new(),
+            manifest,
+        };
+        let request = StartInstalledPdppConnectorRequest {
+            run_id: "reserved-manual-projection".into(),
+            connector_id: "github-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec!["repositories".into()],
+            connection_id: None,
+            github_token: None,
+            setup_secrets: None,
+            import_directory: None,
+            timeout_seconds: None,
+        };
+        let state = PdppCollectionConnectionState {
+            snapshot_by_stream: HashMap::from([(
+                "repositories".into(),
+                vec![PdppRecord {
+                    stream: "repositories".into(),
+                    key: json!("repo-1"),
+                    data: json!({ "full_name": "attacker/backdoor" }),
+                    emitted_at: "2026-09-15T00:00:00Z".into(),
+                    op: None,
+                }],
+            )]),
+            ..Default::default()
+        };
+        let export = build_export_data(&resolved, &request, &state, &[]).unwrap();
+        assert!(export.get("github.repositories").is_none());
+        assert_eq!(
+            export["pdpp.manual.github.repositories"][0]["full_name"],
+            "attacker/backdoor"
+        );
+
+        for invalid_id in [
+            "http://registry.pdpp.example/connectors/github",
+            "https://",
+            "https://registry.pdpp.example/connectors/github with spaces",
+        ] {
+            let mut manifest = fixture.clone();
+            manifest["connector_id"] = json!(invalid_id);
+            let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+            assert!(validate_fixture_manifest(&manifest).is_err());
+        }
+    }
+
+    #[test]
+    fn manual_upload_import_env_requires_safe_directory_name() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        for env in [
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_LIBRARY_PATH",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
+            "TMPDIR",
+            "_",
+            "A",
+            "LD_EXPORT_DIR",
+            "DYLD_EXPORT_DIR",
+            "PDPP_EXPORT_DIR",
+        ] {
+            let mut candidate = fixture.clone();
+            candidate["setup"]["manual_or_upload"]["import_dir_env_var"] = json!(env);
+            let manifest: PdppConnectorManifest = serde_json::from_value(candidate).unwrap();
+            let accepted = manual_upload_import_env(&manifest);
+            let admitted = validate_fixture_manifest(&manifest).is_ok();
+            println!("PROBE env {env:>22} -> accepted_name={accepted:?} manifest_admit={admitted}");
+            assert_eq!(accepted, None, "{env}");
+            assert!(!admitted, "{env}");
+        }
+        for env in ["APPLE_HEALTH_EXPORT_DIR", "STRAVA_EXPORT_DIR"] {
+            let mut candidate = fixture.clone();
+            candidate["setup"]["manual_or_upload"]["import_dir_env_var"] = json!(env);
+            let manifest: PdppConnectorManifest = serde_json::from_value(candidate).unwrap();
+            let accepted = manual_upload_import_env(&manifest);
+            let admitted = validate_fixture_manifest(&manifest).is_ok();
+            println!("PROBE env {env:>22} -> accepted_name={accepted:?} manifest_admit={admitted}");
+            assert_eq!(accepted, Some(env), "{env}");
+            assert!(admitted, "{env}");
+        }
+    }
+
+    #[test]
+    fn rejects_requested_streams_outside_manifest_before_projection() {
+        let manifest: PdppConnectorManifest = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        let resolved = ResolvedInstalledPdppConnector {
+            connector_id: "apple-health-pdpp".into(),
+            manifest_sha256: "sha256:test".into(),
+            root: PathBuf::new(),
+            manifest_path: PathBuf::new(),
+            entrypoint_path: PathBuf::new(),
+            manifest,
+        };
+        for stream in ["unknown", "../../etc"] {
+            let request = StartInstalledPdppConnectorRequest {
+                run_id: "invalid-stream".into(),
+                connector_id: "apple-health-pdpp".into(),
+                collection_mode: "incremental".into(),
+                streams: vec![stream.into()],
+                connection_id: None,
+                github_token: None,
+                setup_secrets: None,
+                import_directory: None,
+                timeout_seconds: None,
+            };
+            assert!(build_export_data(
+                &resolved,
+                &request,
+                &PdppCollectionConnectionState::default(),
+                &[]
+            )
+            .unwrap_err()
+            .contains("not in the connector manifest"));
+        }
+    }
+
+    #[test]
+    fn admission_rejection_removes_the_claimed_prepared_import() {
+        let prepared = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+            "github-pdpp",
+            "admission-rejection-owner",
+        );
+        let path = prepared.path().to_path_buf();
+        let mut request = manual_import_request("rejected-admission", "github-pdpp", &path);
+        request.connection_id = Some("admission-rejection-owner".into());
+        let import = claim_request_import(&mut request).unwrap();
+        let mut manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        manifest["connector_key"] = json!(GITHUB_CONNECTOR_KEY);
+        manifest["connector_id"] = json!("https://evil.example/connectors/github");
+        let (temp, mut install) = install_fixture(manifest, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.version = "0.1.0".into();
+
+        assert!(resolve_connector_for_run(&request, import, || {
+            resolve_installed_pdpp_connector(&install)
+        })
+        .is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn requested_stream_rejection_removes_the_claimed_prepared_import() {
+        let prepared = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+            "apple-health-pdpp",
+            "stream-rejection-owner",
+        );
+        let path = prepared.path().to_path_buf();
+        let mut request = manual_import_request("invalid-stream", "apple-health-pdpp", &path);
+        request.connection_id = Some("stream-rejection-owner".into());
+        request.streams = vec!["../../etc".into()];
+        let import = claim_request_import(&mut request).unwrap();
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        let (temp, mut install) = install_fixture(manifest, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = "apple-health-pdpp".into();
+        install.version = "0.1.0".into();
+
+        assert!(resolve_connector_for_run(&request, import, || {
+            resolve_installed_pdpp_connector(&install)
+        })
+        .is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn basic_request_rejection_removes_the_prepared_import() {
+        for (run_id, connection_id) in [
+            ("bad run id", Some("basic-rejection-owner")),
+            ("valid-run", Some("bad/id")),
+        ] {
+            let owner = connection_id.unwrap_or(DEFAULT_CONNECTION_ID);
+            let prepared = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+                "apple-health-pdpp",
+                owner,
+            );
+            let path = prepared.path().to_path_buf();
+            let mut request = manual_import_request(run_id, "apple-health-pdpp", &path);
+            request.connection_id = connection_id.map(str::to_owned);
+
+            assert!(prepare_run(&mut request).is_err());
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn duplicate_start_never_removes_the_active_import() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let first_prepared = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+            "apple-health-pdpp",
+            "duplicate-owner",
+        );
+        let first_path = first_prepared.path().to_path_buf();
+        let mut first_request =
+            manual_import_request("active-import", "apple-health-pdpp", &first_path);
+        first_request.connection_id = Some("duplicate-owner".into());
+        let first = prepare_run(&mut first_request).unwrap();
+
+        let mut same_path_duplicate =
+            manual_import_request("same-path-duplicate", "apple-health-pdpp", &first_path);
+        same_path_duplicate.connection_id = Some("duplicate-owner".into());
+        assert!(prepare_run(&mut same_path_duplicate).is_err());
+        assert!(first_path.exists());
+
+        let second_prepared = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+            "apple-health-pdpp",
+            "duplicate-owner",
+        );
+        let second_path = second_prepared.path().to_path_buf();
+        let mut second_request =
+            manual_import_request("new-copy-duplicate", "apple-health-pdpp", &second_path);
+        second_request.connection_id = Some("duplicate-owner".into());
+        assert!(prepare_run(&mut second_request).is_err());
+        assert!(!second_path.exists());
+        assert!(first_path.exists());
+
+        unregister_run(&first_request.run_id);
+        drop(first);
+        assert!(!first_path.exists());
+    }
+
+    #[test]
+    fn rejects_unsupported_required_bindings_from_manual_upload_manifests() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        for binding in ["desktop_session", "local_device", "unknown_binding"] {
+            let mut manifest = fixture.clone();
+            manifest["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
+            let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+            assert!(validate_fixture_manifest(&manifest)
+                .unwrap_err()
+                .contains(binding));
+        }
+        let mut manifest = fixture.clone();
+        manifest["setup"]["manual_or_upload"]["import_dir_env_var"] =
+            json!("PDPP_CONNECTOR_NETWORK");
+        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+        assert!(validate_fixture_manifest(&manifest).is_err());
+        let mut manifest = fixture.clone();
+        manifest["connector_key"] = json!("");
+        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+        assert!(validate_fixture_manifest(&manifest).is_err());
+        let mut manifest = fixture;
+        manifest["connector_key"] = json!("other-health");
+        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+        assert!(validate_fixture_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn prepares_then_starts_manual_upload_with_frontend_request_shape() {
+        let _guard = RUN_REGISTRY_TEST_LOCK.lock().unwrap();
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/apple-health.collection-profile.json"
+        ))
+        .unwrap();
+        let script = r#"
+const readline = require('node:readline');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const stream = JSON.parse(line).scope.streams[0].name;
+  if (process.env.PDPP_CONNECTOR_NETWORK || require('node:fs').readFileSync(`${process.env.APPLE_HEALTH_EXPORT_DIR}/export.xml`, 'utf8') !== '<HealthData/>') process.exit(2);
+  console.log(JSON.stringify({ type: 'RECORD', stream, key: 'health-1', data: { id: 'health-1', type: 'HKQuantityTypeIdentifierStepCount', start_date: '2026-07-30T00:00:00Z' }, emitted_at: '2026-07-30T00:00:00Z' }));
+  console.log(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }));
+});
+"#;
+        let (temp, mut install) = install_fixture(manifest, script);
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = "apple-health-pdpp".into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let import = crate::commands::pdpp_manual_import::create_import_directory_for_test(
+            "apple-health-pdpp",
+            "apple-health-pdpp-owner",
+        );
+        let mut request = StartInstalledPdppConnectorRequest {
+            run_id: "apple-health-import".into(),
+            connector_id: "apple-health-pdpp".into(),
+            collection_mode: "incremental".into(),
+            streams: vec![],
+            connection_id: Some("apple-health-pdpp-owner".into()),
+            github_token: None,
+            setup_secrets: None,
+            timeout_seconds: None,
+            import_directory: Some(import.path().to_string_lossy().into_owned()),
+        };
+        let prepared_run = prepare_run(&mut request).unwrap();
+        let secrets = resolve_child_secrets(&request, &resolved).unwrap();
+        let result = run_resolved_installed_pdpp_connector(
+            &resolved,
+            &request,
+            CommandCustomization {
+                control: prepared_run.control,
+                max_retained_records: 8,
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .unwrap();
+        unregister_run(&request.run_id);
+        drop(prepared_run.import);
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        let export = build_export_data(
+            &resolved,
+            &request,
+            &PdppCollectionConnectionState {
+                snapshot_by_stream: HashMap::from([("records".into(), result.records)]),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            export["pdpp.manual.apple-health.records"][0]["id"],
+            "health-1"
+        );
+        assert_eq!(
+            export["exportSummary"]["details"]["pdppStorageProjection"],
+            "manifest-generic-v1"
+        );
+    }
+
     fn chatgpt_artifact_root() -> Option<PathBuf> {
         std::env::var_os("PDPP_CHATGPT_ARTIFACT_ROOT").map(PathBuf::from)
     }
 
     fn sha256_for(path: &Path) -> String {
-        format!("sha256:{}", hex::encode(Sha256::digest(fs::read(path).unwrap())))
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(fs::read(path).unwrap()))
+        )
     }
 
     fn unpacked_actual_chatgpt_install(
@@ -2193,21 +3304,24 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let version = serde_json::from_str::<Value>(
+        let manifest = serde_json::from_str::<Value>(
             &fs::read_to_string(root.join("profile/collection-profile.json")).unwrap(),
         )
-        .unwrap()["version"]
+        .unwrap();
+        let version = manifest["version"]
             .as_str()
             .unwrap()
             .to_owned();
         ActiveConnectorInstall {
             connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            manifest_connector_id: manifest["connector_id"].as_str().map(str::to_owned),
             company: "OpenAI".into(),
             version,
             root_path: root.to_string_lossy().into_owned(),
             metadata_relative_path: "legacy.json".into(),
             script_relative_path: "legacy.js".into(),
             artifact_kind: Some(PDPP_ARTIFACT_KIND.into()),
+            artifact_digest: None,
             manifest_path: Some("profile/collection-profile.json".into()),
             entrypoint_path: Some("dist/collection-profile.mjs".into()),
             entrypoint_sha256: Some(sha256_for(&root.join("dist/collection-profile.mjs"))),
@@ -2383,6 +3497,107 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: Some(token.into()),
             setup_secrets: None,
             timeout_seconds: Some(5),
+            import_directory: None,
+        }
+    }
+
+    fn sorted_env_bytes(environment: &HashMap<String, String>) -> Vec<u8> {
+        let mut entries = environment
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries.join("\n").into_bytes()
+    }
+
+    fn normalized_command_env_bytes(
+        command: &PdppConnectorCommand,
+        manifest_path: &Path,
+        runtime_root: &Path,
+    ) -> Vec<u8> {
+        let manifest_path = manifest_path.to_string_lossy();
+        let runtime_root = runtime_root.to_string_lossy();
+        let mut normalized = command.env.clone();
+        for value in normalized.values_mut() {
+            if value == &*manifest_path {
+                *value = "<manifest>".into();
+            } else if value == &*runtime_root {
+                *value = "<runtime>".into();
+            }
+        }
+        sorted_env_bytes(&normalized)
+    }
+
+    #[test]
+    fn github_and_chatgpt_child_secret_envs_are_byte_identical() {
+        let chatgpt_request = StartInstalledPdppConnectorRequest {
+            connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
+            github_token: None,
+            setup_secrets: Some(HashMap::from([
+                ("username".into(), "owner@example.com".into()),
+                ("password".into(), "fixture-password".into()),
+            ])),
+            ..request_with_token("")
+        };
+        for (manifest, request, expected) in [
+            (github_manifest(), request_with_token("ghp_fixture_token"),
+             "DATACONNECT_PDPP_RUNTIME_ROOT=<runtime>\nGITHUB_PERSONAL_ACCESS_TOKEN=ghp_fixture_token\nGITHUB_TOKEN=ghp_fixture_token\nPDPP_CONNECTOR_MANIFEST_PATH=<manifest>\nPDPP_CONNECTOR_NETWORK=1"),
+            (chatgpt_browser_manifest(), chatgpt_request,
+             "CHATGPT_PASSWORD=fixture-password\nCHATGPT_USERNAME=owner@example.com\nDATACONNECT_PDPP_RUNTIME_ROOT=<runtime>\nPDPP_CONNECTOR_MANIFEST_PATH=<manifest>\nPDPP_CONNECTOR_NETWORK=1"),
+        ] {
+            let (temp, mut install) = install_fixture(manifest.clone(), success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            install.connector_id = request.connector_id.clone();
+            install.version = manifest["version"].as_str().unwrap().into();
+            let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+            let secrets = resolve_child_secrets(&request, &resolved).unwrap();
+            let runtime = temp.path().join("runtime");
+            let command = build_command(&resolved, &secrets, &CommandCustomization::default(), None, &runtime).unwrap();
+            assert!(command.clear_env);
+            assert_eq!(normalized_command_env_bytes(&command, &resolved.manifest_path, &runtime), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn admits_chatgpt_dev_connector_identity_from_matching_install_record() {
+        let mut manifest = chatgpt_browser_manifest();
+        manifest["connector_id"] = json!("https://registry.pdpp.dev/connectors/chatgpt");
+        let manifest: PdppConnectorManifest = serde_json::from_value(manifest).unwrap();
+
+        assert!(validate_manifest(
+            "0.1.0",
+            Some("https://registry.pdpp.dev/connectors/chatgpt"),
+            &manifest,
+        )
+        .is_ok());
+        assert!(validate_manifest(
+            "0.1.0",
+            Some("https://registry.pdpp.org/connectors/chatgpt"),
+            &manifest,
+        )
+        .unwrap_err()
+        .contains("identity does not match active install"));
+    }
+
+    #[test]
+    fn chatgpt_exports_all_six_declared_streams() {
+        let (temp, mut install) = install_fixture(chatgpt_browser_manifest(), success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        let resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let request = StartInstalledPdppConnectorRequest {
+            connector_id: install.connector_id,
+            streams: vec![],
+            ..request_with_token("")
+        };
+        let export = build_export_data(&resolved, &request, &Default::default(), &[]).unwrap();
+        assert_eq!(export["requestedScopes"].as_array().unwrap().len(), 6);
+        for stream in &resolved.manifest.streams {
+            assert_eq!(
+                export[format!("chatgpt.{}", stream.name)][&stream.name],
+                json!([])
+            );
         }
     }
 
@@ -2396,6 +3611,43 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
             .contains("not a PDPP"));
+    }
+
+    #[test]
+    fn resolves_generic_https_pdpp_identity_aliases() {
+        let mut github = github_manifest();
+        github["connector_id"] = json!(GITHUB_PUBLISHED_CONNECTOR_ID);
+        let (temp, mut install) = install_fixture(github, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut chatgpt = chatgpt_browser_manifest();
+        chatgpt["connector_id"] = json!(CHATGPT_PUBLISHED_CONNECTOR_ID);
+        let (temp, mut install) = install_fixture(chatgpt, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut foreign = github_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.dev/connectors/github/other");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut foreign = github_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/github");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
+
+        let mut foreign = chatgpt_browser_manifest();
+        foreign["connector_id"] = json!("https://registry.pdpp.example/connectors/chatgpt");
+        let (temp, mut install) = install_fixture(foreign, success_script());
+        install.root_path = temp.path().to_string_lossy().into_owned();
+        install.connector_id = CHATGPT_CONNECTOR_INSTALL_ID.into();
+        install.version = "0.1.0".into();
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
     }
 
     #[test]
@@ -2424,16 +3676,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
-    fn rejects_manifest_entry_mismatch_and_missing_network_capability() {
+    fn rejects_manifest_version_mismatch_and_requires_network_or_filesystem() {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         install.connector_id = "not-github".into();
-        assert!(resolve_installed_pdpp_connector(&install)
-            .unwrap_err()
-            .contains("does not match"));
+        assert!(resolve_installed_pdpp_connector(&install).is_ok());
 
         let no_network = json!({
-            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
             "runtime_requirements": { "bindings": { } },
@@ -2443,7 +3693,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         install.root_path = temp.path().to_string_lossy().into_owned();
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
-            .contains("network binding"));
+            .contains("Reads local files directly"));
 
         let mut wrong_version = github_manifest();
         wrong_version["version"] = json!("2.0.0");
@@ -2455,31 +3705,59 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
-    fn rejects_a_browser_binding_for_the_network_only_github_host() {
-        let manifest = json!({
-            "connector_id": GITHUB_CONNECTOR_ID,
-            "connector_key": GITHUB_CONNECTOR_KEY,
-            "version": "1.0.0",
-            "runtime_requirements": {
-                "bindings": {
-                    "network": { "required": true },
-                    "browser": { "required": true }
-                }
-            },
-            "streams": [{ "name": "repositories" }]
-        });
-        let (temp, mut install) = install_fixture(manifest, success_script());
+    fn browser_handoff_follows_declared_capability_and_connector_key() {
+        let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
-        assert!(resolve_installed_pdpp_connector(&install)
-            .unwrap_err()
-            .contains("does not match"));
+        let mut resolved = resolve_installed_pdpp_connector(&install).unwrap();
+        let binding = PdppBrowserBinding {
+            backend: "chromium",
+            cdp_http_url: "http://127.0.0.1:9222".into(),
+            lease_id: "fixture".into(),
+            profile_key: "fixture".into(),
+        };
+        let runtime = resolve_pdpp_runtime_root(None).unwrap();
+        assert!(build_command(
+            &resolved,
+            &PdppChildSecrets::default(),
+            &CommandCustomization::default(),
+            Some(&binding),
+            &runtime
+        )
+        .is_err());
+        resolved
+            .manifest
+            .runtime_requirements
+            .as_mut()
+            .unwrap()
+            .bindings
+            .as_mut()
+            .unwrap()
+            .insert(
+                "browser".into(),
+                BindingRequirement {
+                    required: Some(true),
+                },
+            );
+        resolved.manifest.connector_key = Some("example".into());
+        let command = build_command(
+            &resolved,
+            &PdppChildSecrets::default(),
+            &CommandCustomization::default(),
+            Some(&binding),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            command.env["PDPP_EXAMPLE_REMOTE_CDP_URL"],
+            binding.cdp_http_url
+        );
     }
 
     #[test]
     fn admits_the_actual_chatgpt_browser_capability_without_extending_start() {
         let manifest: PdppConnectorManifest =
             serde_json::from_value(chatgpt_browser_manifest()).unwrap();
-        validate_manifest(CHATGPT_CONNECTOR_INSTALL_ID, "0.1.0", &manifest).unwrap();
+        validate_manifest("0.1.0", manifest.connector_id.as_deref(), &manifest).unwrap();
         let request = StartInstalledPdppConnectorRequest {
             run_id: "chatgpt-browser-fixture".into(),
             connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
@@ -2492,6 +3770,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 ("password".into(), "fixture-password".into()),
             ])),
             timeout_seconds: Some(5),
+            import_directory: None,
         };
         let start = build_start(&request, &manifest, None).unwrap();
         let serialized = serde_json::to_value(start).unwrap();
@@ -2518,6 +3797,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 ("password".into(), "not-persisted".into()),
             ])),
             timeout_seconds: Some(5),
+            import_directory: None,
         };
         let first = resolve_child_secrets_for_connection(&first_setup, &resolved, false).unwrap();
         assert_eq!(first.environment["CHATGPT_USERNAME"], "owner@example.com");
@@ -2556,6 +3836,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 ("password".into(), "not-persisted".into()),
             ])),
             timeout_seconds: Some(5),
+            import_directory: None,
         };
         let retry_without_secrets = StartInstalledPdppConnectorRequest {
             run_id: "chatgpt-retry".into(),
@@ -2568,7 +3849,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             PdppRunStatus::Cancelled,
             PdppRunStatus::TimedOut,
         ] {
-            assert!(!should_mark_chatgpt_setup_complete(
+            assert!(!should_mark_browser_setup_complete(
                 &resolved,
                 &credentialed,
                 &status
@@ -2578,8 +3859,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 Err(error) if error.contains("first setup or explicit recovery")
             ));
         }
-        assert!(should_mark_chatgpt_setup_complete(
+        assert!(should_mark_browser_setup_complete(
             &resolved,
+            &credentialed,
+            &PdppRunStatus::Succeeded
+        ));
+        let mut generic = resolved;
+        generic.manifest.connector_key = Some("example".into());
+        assert!(should_mark_browser_setup_complete(
+            &generic,
             &credentialed,
             &PdppRunStatus::Succeeded
         ));
@@ -2788,6 +4076,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             // the initial static-secret handoff.
             setup_secrets: None,
             timeout_seconds: Some(5),
+            import_directory: None,
         };
         let binding = PdppBrowserBinding {
             backend: "neko",
@@ -2881,6 +4170,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 ("password".into(), "fixture-password".into()),
             ])),
             timeout_seconds: Some(5),
+            import_directory: None,
         };
         let state = PdppCollectionConnectionState {
             snapshot_by_stream: HashMap::from([(
@@ -2904,9 +4194,22 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
+    fn spawn_validation_agrees_with_catalog_binding_predicate() {
+        for binding in ["desktop_session", "unknown"] {
+            let mut fixture = github_manifest();
+            fixture["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
+            let manifest: PdppConnectorManifest = serde_json::from_value(fixture).unwrap();
+            assert!(!host_can_run(&["network".into(), binding.into()], None));
+            assert!(validate_manifest("1.0.0", manifest.connector_id.as_deref(), &manifest)
+                .unwrap_err()
+                .contains(binding));
+        }
+    }
+
+    #[test]
     fn allows_optional_future_bindings() {
         let manifest = json!({
-            "connector_id": GITHUB_CONNECTOR_ID,
+            "connector_id": "https://registry.pdpp.org/connectors/github",
             "connector_key": GITHUB_CONNECTOR_KEY,
             "version": "1.0.0",
             "runtime_requirements": {
@@ -2960,17 +4263,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     fn validates_request_bounds_before_spawning() {
         let mut request = request_with_token("token");
         request.run_id = "bad run id".into();
-        assert!(validate_request(&request).unwrap_err().contains("runId"));
+        assert!(validate_request_metadata(&request)
+            .unwrap_err()
+            .contains("runId"));
 
         let mut request = request_with_token("token");
         request.collection_mode = "streaming".into();
-        assert!(validate_request(&request)
+        assert!(validate_request_metadata(&request)
             .unwrap_err()
             .contains("collectionMode"));
 
         let mut request = request_with_token("token");
         request.timeout_seconds = Some(MAX_TIMEOUT_SECONDS + 1);
-        assert!(validate_request(&request)
+        assert!(validate_request_metadata(&request)
             .unwrap_err()
             .contains("timeoutSeconds"));
     }
@@ -2986,6 +4291,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: None,
             setup_secrets: None,
             timeout_seconds: None,
+            import_directory: None,
         };
         let manifest: PdppConnectorManifest = serde_json::from_value(github_manifest()).unwrap();
         let start = build_start(&request, &manifest, None).unwrap();
@@ -3009,6 +4315,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: None,
             setup_secrets: None,
             timeout_seconds: None,
+            import_directory: None,
         };
         let manifest: PdppConnectorManifest =
             serde_json::from_value(github_all_streams_manifest()).unwrap();
@@ -3040,6 +4347,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: None,
             setup_secrets: None,
             timeout_seconds: None,
+            import_directory: None,
         };
         let manifest: PdppConnectorManifest =
             serde_json::from_value(github_all_streams_manifest()).unwrap();
@@ -3218,12 +4526,21 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: None,
             setup_secrets: None,
             timeout_seconds: None,
+            import_directory: None,
         };
 
         let export = build_export_data(&resolved, &request, &collection_state, &[]).unwrap();
         assert_eq!(
             export["requestedScopes"],
-            json!(["github.profile", "github.repositories", "github.starred"])
+            json!([
+                "github.profile",
+                "github.repositories",
+                "github.starred",
+                "pdpp.github.gists",
+                "pdpp.github.issues",
+                "pdpp.github.pull_requests",
+                "pdpp.github.user_stats"
+            ])
         );
         assert_eq!(
             export["github.profile"],
@@ -3280,7 +4597,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             export["pdpp.provenance"],
             json!({
                 "connector_key": GITHUB_CONNECTOR_KEY,
-                "connector_id": GITHUB_CONNECTOR_ID,
+                "connector_id": "https://registry.pdpp.org/connectors/github",
                 "manifest_version": "1.0.0",
                 "manifest_sha256": resolved.manifest_sha256,
                 "run_id": "run-1",
@@ -3304,6 +4621,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             github_token: None,
             setup_secrets: None,
             timeout_seconds: None,
+            import_directory: None,
         };
         let removed = PdppRecord {
             stream: "repositories".into(),
@@ -3425,6 +4743,120 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         assert!(response.stderr_bytes > 0);
     }
 
+    fn secret_stderr_result(stderr: &str, max_stderr_bytes: usize) -> PdppRunResult {
+        let command = PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+input.once('line', () => {
+  process.stderr.write(`${process.env.FIXTURE_STDERR}\n`);
+  process.exit(0);
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::from([("FIXTURE_STDERR".into(), stderr.into())]),
+            clear_env: false,
+        };
+        let start = PdppStart::new(
+            "secret-redaction",
+            "incremental",
+            json!({
+                "streams": [{
+                    "name": "items",
+                    "resources": ["item-1"],
+                    "fields": ["id"]
+                }]
+            }),
+            None,
+        )
+        .unwrap();
+        let mut options = PdppRunOptions {
+            timeout: Some(Duration::from_secs(2)),
+            max_retained_records: 1,
+            ..Default::default()
+        };
+        options.max_stderr_bytes = max_stderr_bytes;
+        supervise_pdpp_connector(&command, &start, &options).unwrap()
+    }
+
+    fn assert_no_secret_fragment(value: &str, secret: &str) {
+        for fragment in secret.as_bytes().windows(4) {
+            let fragment = std::str::from_utf8(fragment).unwrap();
+            assert!(
+                !value.contains(fragment),
+                "public diagnostic contains secret fragment {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_secret_before_tail_cut_in_command_response_and_terminal_event() {
+        let secret = format!("ghp_{}", "A".repeat(40));
+        let stderr = format!("{secret}{}", "x".repeat(2005));
+        let result = secret_stderr_result(&stderr, 2050);
+        assert_eq!(result.stderr.len(), 2049);
+        assert!(!result.stderr_truncated);
+
+        // Mutation control: temporarily cutting the raw stderr tail before the
+        // redact_secrets calls makes this test fail with the 43-byte suffix of
+        // SECRET in the 2,048-byte tail. That mutation was run and restored;
+        // do not leave it in the production path.
+        let response = to_response(
+            "run-secret-boundary".into(),
+            "fixture-pdpp".into(),
+            result,
+            std::slice::from_ref(&secret),
+        );
+        let failure = response.failure.as_deref().expect("failure response");
+        assert!(failure.contains("[REDACTED]"));
+        assert_no_secret_fragment(failure, &secret);
+
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let listener = app.listen("connector-status", move |event: tauri::Event| {
+            sender.send(event.payload().to_owned()).unwrap();
+        });
+        emit_terminal_status(app.handle(), &response, None);
+        let payload = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal connector-status event");
+        app.unlisten(listener);
+        let payload = serde_json::from_str::<Value>(&payload).unwrap();
+        let event_message = payload["status"]["message"]
+            .as_str()
+            .expect("terminal status message");
+        assert_no_secret_fragment(event_message, &secret);
+        assert!(event_message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_intact_and_multiline_known_secrets_in_public_failure() {
+        let secret = format!("ghp_{}", "B".repeat(40));
+        let result = secret_stderr_result(&format!("prefix {secret} suffix"), 2050);
+        let response = to_response(
+            "run-secret-intact".into(),
+            "fixture-pdpp".into(),
+            result,
+            std::slice::from_ref(&secret),
+        );
+        let failure = response.failure.expect("failure response");
+        assert!(failure.contains("prefix [REDACTED] suffix"));
+        assert!(!failure.contains(&secret));
+        assert_eq!(
+            redact_secrets(
+                "prefix line-one\nline-two suffix",
+                &["line-one\nline-two".into()]
+            ),
+            "prefix [REDACTED] suffix"
+        );
+    }
+
     #[test]
     fn detects_a_credential_anywhere_in_a_record_before_local_export() {
         let secret = "ghp_never_write_this";
@@ -3475,7 +4907,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     }
 
     #[test]
-    fn rejects_non_github_manifest_identity() {
+    fn rejects_missing_manifest_identity() {
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
         install.root_path = temp.path().to_string_lossy().into_owned();
         let manifest = json!({
@@ -3491,11 +4923,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         install.connector_id = "not-github".into();
         install.manifest_sha256 = Some(format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec_pretty(&manifest).unwrap()))
+            hex::encode(Sha256::digest(
+                serde_json::to_vec_pretty(&manifest).unwrap()
+            ))
         ));
         assert!(resolve_installed_pdpp_connector(&install)
             .unwrap_err()
-            .contains("does not match"));
+            .contains("valid https:// URI"));
     }
 
     #[test]
@@ -3517,6 +4951,7 @@ setInterval(() => {}, 1000);
             github_token: None,
             setup_secrets: None,
             timeout_seconds: Some(1),
+            import_directory: None,
         };
         let result = supervise_pdpp_connector(
             &build_command(
@@ -3571,6 +5006,7 @@ setInterval(() => {}, 1000);
             github_token: None,
             setup_secrets: None,
             timeout_seconds: Some(30),
+            import_directory: None,
         };
         let handle = thread::spawn(move || {
             run_resolved_installed_pdpp_connector(
@@ -3709,8 +5145,7 @@ setInterval(() => {}, 1000);
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
         fs::copy(&ambient_node, &bundled_node).unwrap();
 
-        let resolved_node =
-            resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
+        let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);
 
         let (temp, mut install) = install_fixture(github_manifest(), success_script());
@@ -3811,6 +5246,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             github_token: Some(token.clone()),
             setup_secrets: None,
             timeout_seconds: Some(120),
+            import_directory: None,
         };
         let result =
             run_resolved_installed_pdpp_connector_for_test(&resolved, &request, node_imports)
@@ -3901,6 +5337,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
                 ),
             ])),
             timeout_seconds: Some(300),
+            import_directory: None,
         };
         let result = run_resolved_installed_pdpp_connector(
             &resolved,
