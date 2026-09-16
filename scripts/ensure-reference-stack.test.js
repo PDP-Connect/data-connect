@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   launchScript,
+  npmCommand,
   referenceStackRoot,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
@@ -62,6 +63,15 @@ afterEach(() => {
 })
 
 describe("reference stack staging contract", () => {
+  it("uses real npm when invoked through pnpm", () => {
+    expect(
+      npmCommand("/node", {
+        npm_config_user_agent: "pnpm/10.4.1 npm/? node/v24.21.0 linux x64",
+        npm_execpath: "/opt/pnpm/pnpm.cjs",
+      })
+    ).toEqual(["npm"])
+  })
+
   it("derives one output root for every Tauri profile", () => {
     expect(referenceStackRoot("/workspace/data-connect", "release")).toBe(
       "/workspace/data-connect/src-tauri/target/reference-stack/ri"

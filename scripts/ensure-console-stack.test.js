@@ -4,10 +4,12 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import {
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -163,6 +165,37 @@ describe("ensure console stack", () => {
         projectRoot: root,
       })
       expect(release.stageDirectory).toBe(debug.stageDirectory)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("materializes a standalone node_modules symlink in the staged console", () => {
+    const root = createConsoleBuildFixture()
+    const standaloneRoot = join(root, "apps", "console", ".next", "standalone")
+    const dependencyRoot = join(root, "standalone-dependencies")
+    mkdirSync(join(dependencyRoot, "example-package"), { recursive: true })
+    writeFileSync(
+      join(dependencyRoot, "example-package", "package.json"),
+      '{"name":"example-package"}\n'
+    )
+    symlinkSync(
+      dependencyRoot,
+      join(standaloneRoot, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
+
+    try {
+      const result = stageConsoleStack({ build: false, projectRoot: root })
+      const stagedNodeModules = join(result.stageDirectory, "node_modules")
+
+      expect(lstatSync(stagedNodeModules).isSymbolicLink()).toBe(false)
+      expect(
+        readFileSync(
+          join(stagedNodeModules, "example-package", "package.json"),
+          "utf8"
+        )
+      ).toContain("example-package")
     } finally {
       rmSync(root, { force: true, recursive: true })
     }

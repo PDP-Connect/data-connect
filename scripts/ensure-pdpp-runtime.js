@@ -6,6 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { isMainModule } from "./is-main-module.js"
+import { resolveNpmCommand } from "./resolve-npm-command.js"
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const runtimeRoot = join(root, "pdpp-runtime")
@@ -18,21 +19,24 @@ function runtimeStamp(root) {
 }
 
 export function npmInstallCommand(options = {}) {
-  const {
-    platformName = process.platform,
-    nodePath = process.execPath,
-  } = options
-  const npmCliPath = Object.hasOwn(options, "npmCliPath")
+  const { platformName = process.platform, nodePath = process.execPath } =
+    options
+  const npmExecPath = Object.hasOwn(options, "npmCliPath")
     ? options.npmCliPath
     : process.env.npm_execpath
+  const userAgent = Object.hasOwn(options, "userAgent")
+    ? options.userAgent
+    : process.env.npm_config_user_agent
+  const npmCommand = resolveNpmCommand({
+    nodePath,
+    npmExecPath: npmExecPath ?? null,
+    platformName,
+    userAgent: userAgent ?? null,
+  })
   return {
-    command: npmCliPath
-      ? nodePath
-      : platformName === "win32"
-        ? "npm.cmd"
-        : "npm",
-    args: [...(npmCliPath ? [npmCliPath] : []), "ci", "--ignore-scripts"],
-    shell: !npmCliPath && platformName === "win32",
+    command: npmCommand.command,
+    args: [...npmCommand.prefixArgs, "ci", "--ignore-scripts"],
+    shell: npmCommand.shell,
   }
 }
 

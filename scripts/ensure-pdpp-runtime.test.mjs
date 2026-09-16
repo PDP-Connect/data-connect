@@ -1,6 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -18,21 +24,25 @@ function createRuntimeFixture() {
 
 describe("ensure PDPP runtime dependencies", () => {
   it("runs npm through Node on Windows when npm_execpath is available", () => {
-    expect(
-      npmInstallCommand({
-        platformName: "win32",
-        nodePath: "C:\\hostedtoolcache\\node.exe",
-        npmCliPath: "C:\\hostedtoolcache\\npm\\bin\\npm-cli.js",
+    const root = mkdtempSync(join(tmpdir(), "pdpp-runtime-npm-cli-"))
+    const npmCliPath = join(root, "npm-cli.js")
+    writeFileSync(npmCliPath, "")
+    try {
+      expect(
+        npmInstallCommand({
+          platformName: "win32",
+          nodePath: "C:\\hostedtoolcache\\node.exe",
+          npmCliPath,
+          userAgent: "npm/11.0.0 node/v24.21.0 win32 x64",
+        })
+      ).toEqual({
+        command: "C:\\hostedtoolcache\\node.exe",
+        args: [npmCliPath, "ci", "--ignore-scripts"],
+        shell: false,
       })
-    ).toEqual({
-      command: "C:\\hostedtoolcache\\node.exe",
-      args: [
-        "C:\\hostedtoolcache\\npm\\bin\\npm-cli.js",
-        "ci",
-        "--ignore-scripts",
-      ],
-      shell: false,
-    })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("falls back to npm.cmd on Windows without shell injection inputs", () => {
@@ -46,6 +56,20 @@ describe("ensure PDPP runtime dependencies", () => {
       command: "npm.cmd",
       args: ["ci", "--ignore-scripts"],
       shell: true,
+    })
+  })
+
+  it("pins the install to npm when invoked through pnpm", () => {
+    expect(
+      npmInstallCommand({
+        npmCliPath: "/opt/pnpm/pnpm.cjs",
+        platformName: "linux",
+        userAgent: "pnpm/10.4.1 npm/? node/v24.21.0 linux x64",
+      })
+    ).toEqual({
+      command: "npm",
+      args: ["ci", "--ignore-scripts"],
+      shell: false,
     })
   })
 

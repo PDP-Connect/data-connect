@@ -19,6 +19,7 @@ import {
 import { spawnSync } from "node:child_process"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { resolveNpmCommand } from "./resolve-npm-command.js"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PROJECT_ROOT = resolve(SCRIPT_DIR, "..")
@@ -255,10 +256,14 @@ function defaultNodeBinary(projectRoot) {
   )
 }
 
-function npmCommand(nodeBinary) {
-  const npmCli = process.env.npm_execpath
-  if (npmCli && existsSync(npmCli)) return [nodeBinary, npmCli]
-  return [process.platform === "win32" ? "npm.cmd" : "npm"]
+export function npmCommand(nodeBinary, env = process.env) {
+  const command = resolveNpmCommand({
+    nodePath: nodeBinary,
+    npmExecPath: env.npm_execpath ?? null,
+    platformName: process.platform,
+    userAgent: env.npm_config_user_agent ?? null,
+  })
+  return [command.command, ...command.prefixArgs]
 }
 
 function runNpm(nodeBinary, args, options) {

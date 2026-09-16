@@ -6,6 +6,7 @@ import { createHash } from "node:crypto"
 import {
   chmodSync,
   cpSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -14,6 +15,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs"
 import { spawnSync } from "node:child_process"
@@ -118,6 +120,24 @@ function findServer(standaloneDirectory) {
 
 function toPosixPath(value) {
   return value.split(sep).join("/")
+}
+
+function copyDereferencedTree(source, destination) {
+  const sourceStats = statSync(source)
+  if (sourceStats.isDirectory()) {
+    mkdirSync(destination, { recursive: true })
+    for (const entry of readdirSync(source)) {
+      copyDereferencedTree(join(source, entry), join(destination, entry))
+    }
+    return
+  }
+  if (sourceStats.isFile()) {
+    mkdirSync(dirname(destination), { recursive: true })
+    copyFileSync(source, destination)
+    chmodSync(destination, sourceStats.mode)
+    return
+  }
+  fail(`unsupported staged entry: ${source}`)
 }
 
 function walkFiles(directory, prefix = "") {
@@ -230,7 +250,9 @@ export function stageConsoleStack({
   const temporaryDirectory = mkdtempSync(join(targetParent, ".console-stage-"))
 
   try {
-    cpSync(standaloneDirectory, temporaryDirectory, { recursive: true })
+    // Standalone output may link node_modules back into the workspace. The
+    // staged console must be self-contained for Tauri resources and packaging.
+    copyDereferencedTree(standaloneDirectory, temporaryDirectory)
     const stagedRuntimeDirectory = join(
       temporaryDirectory,
       runtimeRelativeDirectory
