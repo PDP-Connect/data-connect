@@ -15,8 +15,17 @@ const updateState = vi.hoisted(() => ({
   isDownloading: vi.fn(() => false),
 }))
 
+const personalServerState = vi.hoisted(() => ({
+  status: "running" as const,
+  restartServer: vi.fn().mockResolvedValue(true),
+}))
+
 vi.mock("@/hooks/useConnectorUpdates", () => ({
   useConnectorUpdates: () => updateState,
+}))
+
+vi.mock("@/hooks/usePersonalServer", () => ({
+  usePersonalServer: () => personalServerState,
 }))
 
 vi.mock("@/hooks/use-show-development-connectors", () => ({
@@ -62,6 +71,7 @@ afterEach(() => {
   updateState.updates = []
   updateState.downloadConnector.mockClear()
   updateState.checkForUpdates.mockClear()
+  personalServerState.restartServer.mockClear()
 })
 
 describe("AvailableSourcesList catalog states", () => {
@@ -116,6 +126,28 @@ describe("AvailableSourcesList catalog states", () => {
     await waitFor(() => {
       expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
       expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("shows the serving restart state until the connector change is applied", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    let resolveRestart!: (value: boolean) => void
+    personalServerState.restartServer.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveRestart = resolve
+        })
+    )
+
+    render(<AvailableSourcesList {...emptyProps} />)
+    screen.getByRole("button", { name: /Install New source/i }).click()
+
+    expect(await screen.findByText("Applying connector change…")).toBeTruthy()
+
+    resolveRestart(true)
+    await waitFor(() => {
+      expect(screen.queryByText("Applying connector change…")).toBeNull()
     })
   })
 })

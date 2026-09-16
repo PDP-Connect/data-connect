@@ -20,6 +20,7 @@ import { ConfirmAction } from "@/components/elements/confirm-action"
 import { buttonVariants } from "@/components/ui/button"
 import { buildRunningImportExpectationLine } from "./available-sources-estimator"
 import { useConnectorUpdates } from "@/hooks/useConnectorUpdates"
+import { usePersonalServer } from "@/hooks/usePersonalServer"
 import { useShowDevelopmentConnectors } from "@/hooks/use-show-development-connectors"
 import {
   getConnectingAccountLine,
@@ -47,6 +48,8 @@ export function AvailableSourcesList({
   className,
 }: AvailableSourcesListProps) {
   const [stoppingRunId, setStoppingRunId] = useState<string | null>(null)
+  const [isApplyingConnectorChange, setIsApplyingConnectorChange] =
+    useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [sourceOrder] = useState(() => new Map<string, number>())
   const {
@@ -58,6 +61,7 @@ export function AvailableSourcesList({
     downloadConnector,
     isDownloading,
   } = useConnectorUpdates()
+  const { status: personalServerStatus, restartServer } = usePersonalServer()
   const { showDevelopmentConnectors } = useShowDevelopmentConnectors()
   const connectedPlatformIdSet = useMemo(
     () => new Set(connectedPlatformIds),
@@ -89,9 +93,19 @@ export function AvailableSourcesList({
   const installConnector = useCallback(
     async (id: string) => {
       const installed = await downloadConnector(id)
-      if (installed) await onReloadPlatforms?.()
+      if (!installed) return
+
+      setIsApplyingConnectorChange(true)
+      try {
+        if (personalServerStatus === "running") {
+          await restartServer()
+        }
+        await onReloadPlatforms?.()
+      } finally {
+        setIsApplyingConnectorChange(false)
+      }
     },
-    [downloadConnector, onReloadPlatforms]
+    [downloadConnector, onReloadPlatforms, personalServerStatus, restartServer]
   )
 
   useEffect(() => {
@@ -175,6 +189,11 @@ export function AvailableSourcesList({
           void checkForUpdates(true)
         }}
       />
+      {isApplyingConnectorChange ? (
+        <Text as="p" intent="fine" muted>
+          Applying connector change…
+        </Text>
+      ) : null}
       {updatesError ? <UpdateError message={updatesError} /> : null}
       <div className="grid grid-cols-2 gap-3 action-outset">
         {availableCards.map(
@@ -362,7 +381,12 @@ export function AvailableSourcesList({
               <ActionButton
                 key={cardId}
                 onClick={onClick}
-                disabled={!isAvailable || hasBlockingRun || isInstalling}
+                disabled={
+                  !isAvailable ||
+                  hasBlockingRun ||
+                  isInstalling ||
+                  isApplyingConnectorChange
+                }
                 selected={false}
                 size="xl"
                 className={cn("h-auto p-0 disabled:opacity-100")}
