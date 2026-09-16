@@ -85,7 +85,6 @@ export async function smokeConsoleStack({
     projectRoot,
     "src-tauri",
     "target",
-    profile,
     "reference-stack",
     "console"
   )

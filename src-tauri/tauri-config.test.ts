@@ -52,11 +52,11 @@ describe("tauri manual-install config", () => {
       bundle?: { resources?: Record<string, string> }
     }
 
+    expect(document.bundle?.resources?.["target/reference-stack/ri/"]).toBe(
+      "reference-stack/ri/"
+    )
     expect(
-      document.bundle?.resources?.["target/release/reference-stack/ri/"]
-    ).toBe("reference-stack/ri/")
-    expect(
-      document.bundle?.resources?.["target/release/reference-stack/ri/**/*"]
+      document.bundle?.resources?.["target/reference-stack/ri/**/*"]
     ).toBeUndefined()
   })
 
@@ -67,18 +67,16 @@ describe("tauri manual-install config", () => {
     }
 
     expect(
-      document.bundle?.resources?.["target/release/reference-stack/console/"]
+      document.bundle?.resources?.["target/reference-stack/console/"]
     ).toBe("reference-stack/console/")
     expect(
-      document.bundle?.resources?.[
-        "target/release/reference-stack/console/**/*"
-      ]
+      document.bundle?.resources?.["target/reference-stack/console/**/*"]
     ).toBeUndefined()
+    expect(document.bundle?.resources?.["target/reference-stack/ri/"]).toBe(
+      "reference-stack/ri/"
+    )
     expect(
-      document.bundle?.resources?.["target/release/reference-stack/ri/"]
-    ).toBe("reference-stack/ri/")
-    expect(
-      document.bundle?.resources?.["target/release/reference-stack/ri/**/*"]
+      document.bundle?.resources?.["target/reference-stack/ri/**/*"]
     ).toBeUndefined()
   })
 
@@ -113,6 +111,23 @@ describe("tauri manual-install config", () => {
     )
     expect(document.build?.beforeBuildCommand).toContain(
       "node scripts/ensure-console-stack.js --profile release"
+    )
+  })
+
+  it("stages legacy resources before development Tauri validation", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      build?: { beforeDevCommand?: string }
+    }
+
+    expect(document.build?.beforeDevCommand).toContain(
+      "node scripts/ensure-pdpp-runtime.js"
+    )
+    expect(document.build?.beforeDevCommand).toContain(
+      "node scripts/ensure-playwright-runner.js"
+    )
+    expect(document.build?.beforeDevCommand).toContain(
+      "node scripts/ensure-personal-server.js"
     )
   })
 

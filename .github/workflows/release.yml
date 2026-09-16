@@ -211,8 +211,8 @@ jobs:
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
           for stack_root in \
-            src-tauri/target/release/reference-stack/ri \
-            src-tauri/target/release/reference-stack/console; do
+            src-tauri/target/reference-stack/ri \
+            src-tauri/target/reference-stack/console; do
             find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
               -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
             node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
@@ -261,8 +261,8 @@ jobs:
               reference_destination="$app/Contents/Resources/reference-stack"
               rm -rf "$reference_destination"
               mkdir -p "$reference_destination"
-              cp -R src-tauri/target/release/reference-stack/ri "$reference_destination/ri"
-              cp -R src-tauri/target/release/reference-stack/console "$reference_destination/console"
+              cp -R src-tauri/target/reference-stack/ri "$reference_destination/ri"
+              cp -R src-tauri/target/reference-stack/console "$reference_destination/console"
 
               destination="$app/Contents/Resources/personal-server/dist/node_modules"
               mkdir -p "$destination"

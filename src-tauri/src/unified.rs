@@ -31,8 +31,6 @@ const TRAY_ICON_ID: &str = "dataconnect-tray";
 const DEFAULT_CONSOLE_URL: &str = "http://localhost:3001";
 const CONSOLE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const CONSOLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const UNIFIED_PROFILE_ENV: &str = "TAURI_PROFILE";
-const DEFAULT_PROFILE: &str = "release";
 const RI_LABEL: &str = "reference-implementation";
 const CONSOLE_LABEL: &str = "console";
 const RI_HEALTH_PATH: &str = "/.well-known/oauth-protected-resource";
@@ -247,46 +245,15 @@ fn attach_mode() -> bool {
         })
 }
 
-fn unified_profile() -> String {
-    let fallback = || {
-        if cfg!(debug_assertions) {
-            "debug".to_string()
-        } else {
-            DEFAULT_PROFILE.to_string()
-        }
-    };
-    std::env::var(UNIFIED_PROFILE_ENV)
-        .ok()
-        .filter(|profile| is_valid_profile(profile))
-        .unwrap_or_else(fallback)
-}
-
-fn is_valid_profile(profile: &str) -> bool {
-    !profile.is_empty()
-        && profile
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn resolve_staged_root(resource_dir: &Path, profile: &str, sidecar: &str) -> Option<PathBuf> {
+fn resolve_staged_root(resource_dir: &Path, sidecar: &str) -> Option<PathBuf> {
     [
         resource_dir.join("reference-stack").join(sidecar),
         resource_dir
             .join("_up_")
             .join("reference-stack")
             .join(sidecar),
-        resource_dir
-            .join(profile)
-            .join("reference-stack")
-            .join(sidecar),
-        resource_dir
-            .join("_up_")
-            .join(profile)
-            .join("reference-stack")
-            .join(sidecar),
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
-            .join(profile)
             .join("reference-stack")
             .join(sidecar),
     ]
@@ -506,20 +473,18 @@ fn start_managed_stack(app: &AppHandle, owner_password: &str) -> Result<ManagedS
         .path()
         .resource_dir()
         .map_err(|error| format!("Failed to resolve DataConnect resource directory: {error}"))?;
-    let profile = unified_profile();
-    let ri_root = resolve_staged_root(&resource_dir, &profile, "ri").ok_or_else(|| {
+    let ri_root = resolve_staged_root(&resource_dir, "ri").ok_or_else(|| {
         format!(
-            "Staged RI root not found under {:?} for profile {profile}",
+            "Staged RI root not found under {:?} at the shared reference-stack root",
             resource_dir
         )
     })?;
-    let console_root =
-        resolve_staged_root(&resource_dir, &profile, "console").ok_or_else(|| {
-            format!(
-                "Staged console root not found under {:?} for profile {profile}",
-                resource_dir
-            )
-        })?;
+    let console_root = resolve_staged_root(&resource_dir, "console").ok_or_else(|| {
+        format!(
+            "Staged console root not found under {:?} at the shared reference-stack root",
+            resource_dir
+        )
+    })?;
     let node_binary = resolve_node_binary(&resource_dir).ok_or_else(|| {
         format!(
             "Bundled pdpp-node not found under resource directory {:?}",
@@ -1002,22 +967,13 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
-    fn staged_roots_resolve_the_profile_scoped_dev_layout() {
+    fn staged_roots_resolve_the_shared_dev_layout() {
         let directory = tempdir().expect("staged root temp directory");
-        let root = directory
-            .path()
-            .join("debug")
-            .join("reference-stack")
-            .join("ri");
+        let root = directory.path().join("reference-stack").join("ri");
         fs::create_dir_all(&root).expect("staged root directory");
         fs::write(root.join("launch.mjs"), "// fake launcher").expect("staged launcher");
 
-        assert_eq!(
-            resolve_staged_root(directory.path(), "debug", "ri"),
-            Some(root)
-        );
-        assert!(is_valid_profile("release"));
-        assert!(!is_valid_profile("../release"));
+        assert_eq!(resolve_staged_root(directory.path(), "ri"), Some(root));
     }
 
     #[test]

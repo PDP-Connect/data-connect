@@ -63,6 +63,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/stage-pdpp-node.test.mjs",
       "scripts/ensure-reference-stack.test.js",
       "scripts/ensure-console-stack.test.js",
+      "scripts/ensure-connectors.test.js",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",
       "scripts/verify-bundled-personal-server.test.mjs",

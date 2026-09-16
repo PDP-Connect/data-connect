@@ -144,4 +144,27 @@ describe("ensure console stack", () => {
       rmSync(root, { force: true, recursive: true })
     }
   })
+
+  it("uses the shared staging root for debug and release profiles", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      const debug = stageConsoleStack({
+        build: false,
+        profile: "debug",
+        projectRoot: root,
+      })
+      expect(debug.stageDirectory).toBe(
+        join(root, "src-tauri", "target", "reference-stack", "console")
+      )
+
+      const release = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      expect(release.stageDirectory).toBe(debug.stageDirectory)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
 })

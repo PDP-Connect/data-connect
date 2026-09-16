@@ -86,7 +86,6 @@ function copyReferenceStacksIntoApp(appPath) {
     ROOT,
     "src-tauri",
     "target",
-    TAURI_PROFILE,
     "reference-stack"
   )
   const destinationRoot = join(

@@ -62,38 +62,38 @@ afterEach(() => {
 })
 
 describe("reference stack staging contract", () => {
-  it("derives a profile-scoped output root", () => {
+  it("derives one output root for every Tauri profile", () => {
     expect(referenceStackRoot("/workspace/data-connect", "release")).toBe(
-      "/workspace/data-connect/src-tauri/target/release/reference-stack/ri"
+      "/workspace/data-connect/src-tauri/target/reference-stack/ri"
     )
     expect(referenceStackRoot("/workspace/data-connect", "debug")).toBe(
-      "/workspace/data-connect/src-tauri/target/debug/reference-stack/ri"
+      "/workspace/data-connect/src-tauri/target/reference-stack/ri"
     )
     expect(() =>
       referenceStackRoot("/workspace/data-connect", "../release")
     ).toThrow(/invalid Tauri profile/)
   })
 
-  it("requires the verifier root to use the same profile-scoped contract", () => {
+  it("requires the verifier root to use the shared staging contract", () => {
     expect(
-      parseVerifyArgs([
-        "--profile",
-        "release",
-        "--root",
-        "/workspace/src-tauri/target/release/reference-stack/ri",
-      ])
-    ).toMatchObject({
-      profile: "release",
-      root: "/workspace/src-tauri/target/release/reference-stack/ri",
-    })
-    expect(() =>
       parseVerifyArgs([
         "--profile",
         "release",
         "--root",
         "/workspace/src-tauri/target/reference-stack/ri",
       ])
-    ).toThrow(/profile-scoped/)
+    ).toMatchObject({
+      profile: "release",
+      root: "/workspace/src-tauri/target/reference-stack/ri",
+    })
+    expect(() =>
+      parseVerifyArgs([
+        "--profile",
+        "release",
+        "--root",
+        "/workspace/src-tauri/target/release/reference-stack/ri",
+      ])
+    ).toThrow(/shared staging root/)
   })
 
   it("emits deterministic complete hashes and launcher inputs", () => {

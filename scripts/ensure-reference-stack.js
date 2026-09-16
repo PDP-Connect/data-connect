@@ -51,11 +51,11 @@ export function referenceStackRoot(
   projectRoot = DEFAULT_PROJECT_ROOT,
   profile = DEFAULT_PROFILE
 ) {
+  validateProfile(profile)
   return join(
     resolve(projectRoot),
     "src-tauri",
     "target",
-    validateProfile(profile),
     "reference-stack",
     "ri"
   )

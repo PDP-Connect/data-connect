@@ -223,7 +223,6 @@ export function stageConsoleStack({
   const targetDirectory = join(
     root,
     ...STAGE_DIRECTORY.slice(0, 2),
-    validatedProfile,
     ...STAGE_DIRECTORY.slice(2)
   )
   const targetParent = dirname(targetDirectory)

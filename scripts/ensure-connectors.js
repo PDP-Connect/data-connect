@@ -20,6 +20,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
 import { homedir } from "os";
+import { isMainModule } from "./is-main-module.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -32,6 +33,13 @@ function log(message) {
   console.log(`[ensure-connectors] ${message}`);
 }
 
+export function connectorDirectoryFromResourceKey(key) {
+  const match = key.match(
+    /^\.\.\/connectors\/([^/*]+)\/(?:\*\*\/\*)?$/,
+  );
+  return match?.[1];
+}
+
 function readRequiredConnectorDirs() {
   const raw = readFileSync(TAURI_CONFIG, "utf8");
   const config = JSON.parse(raw);
@@ -40,9 +48,8 @@ function readRequiredConnectorDirs() {
 
   const required = new Set();
   for (const key of keys) {
-    const match = key.match(/^\.\.\/connectors\/([^/*]+)\/\*\*\/\*$/);
-    if (!match) continue;
-    required.add(match[1]);
+    const connectorDirectory = connectorDirectoryFromResourceKey(key);
+    if (connectorDirectory) required.add(connectorDirectory);
   }
 
   return [...required];
@@ -136,4 +143,4 @@ function main() {
   log("connectors missing -> resolved from signed index");
 }
 
-main();
+if (isMainModule(import.meta.url, process.argv[1])) main();

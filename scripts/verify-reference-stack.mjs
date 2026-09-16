@@ -17,6 +17,7 @@ const PROJECT_ROOT = (() => {
     ? resolve(fileURLToPath(projectUrl))
     : resolve(process.cwd())
 })()
+const DEFAULT_PROFILE = "release"
 
 export function parseArgs(argv) {
   let root
@@ -39,24 +40,14 @@ export function parseArgs(argv) {
   const resolvedRoot = root
     ? resolve(root)
     : referenceStackRoot(PROJECT_ROOT, profile)
-  const profileScopedSuffix = profile
-    ? `src-tauri/target/${profile}/reference-stack/ri`
-    : "src-tauri/target/"
-  if (
-    !resolvedRoot.replaceAll("\\", "/").includes(profileScopedSuffix) ||
-    !resolvedRoot.replaceAll("\\", "/").endsWith("/reference-stack/ri")
-  ) {
+  const sharedStagingSuffix = "/src-tauri/target/reference-stack/ri"
+  if (!resolvedRoot.replaceAll("\\", "/").endsWith(sharedStagingSuffix)) {
     throw new Error(
-      `Reference stack must use the profile-scoped root src-tauri/${profileScopedSuffix}; got ${resolvedRoot}`
+      `Reference stack must use the shared staging root ${sharedStagingSuffix.slice(1)}; got ${resolvedRoot}`
     )
   }
   return {
-    profile:
-      profile ||
-      resolvedRoot.replace(
-        /^.*\/src-tauri\/target\/([^/]+)\/reference-stack\/ri$/,
-        "$1"
-      ),
+    profile: profile || DEFAULT_PROFILE,
     root: resolvedRoot,
     refresh,
   }
