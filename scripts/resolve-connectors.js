@@ -213,6 +213,23 @@ function assertInstalled(result) {
     )
 }
 
+function reportInstalledCheck(result, { checkForInstall }) {
+  if (result.ok) return true
+  // A clean checkout has no ignored connector bundle yet; postinstall uses
+  // this result to choose the locked install path below.
+  if (
+    checkForInstall &&
+    result.missing.length > 0 &&
+    result.mismatched.length === 0
+  ) {
+    console.log(
+      "[resolve-connectors] connector bundle is not installed; installation required."
+    )
+    return false
+  }
+  assertInstalled(result)
+}
+
 export function recoverInterruptedInstall(installRoot) {
   const hasInstall = existsSync(installRoot)
   const parent = dirname(installRoot)
@@ -478,6 +495,7 @@ export async function authorOciLock(
 function parseArgs() {
   const out = {
     checkMode: false,
+    checkForInstall: false,
     fromLocal: process.env.CONNECTORS_PATH || null,
     indexUrl: process.env.CONNECTOR_INDEX_URL || null,
     installLocked: false,
@@ -487,6 +505,10 @@ function parseArgs() {
     const arg = args[i]
     if (arg === "--check") {
       out.checkMode = true
+      continue
+    }
+    if (arg === "--check-for-install") {
+      out.checkForInstall = true
       continue
     }
     if (arg === "--install-locked") {
@@ -507,7 +529,8 @@ function parseArgs() {
 }
 
 async function main() {
-  const { checkMode, fromLocal, indexUrl, installLocked } = parseArgs()
+  const { checkMode, checkForInstall, fromLocal, indexUrl, installLocked } =
+    parseArgs()
   if (process.env.SKIP_CONNECTOR_FETCH) {
     console.log("[resolve-connectors] SKIP_CONNECTOR_FETCH set — skipping")
     return
@@ -520,13 +543,19 @@ async function main() {
   if (checkMode && !fromLocal && !indexUrl) {
     if (!existingLock)
       throw new Error("Cannot check connectors without connectors/lock.json")
-    assertInstalled(
-      checkInstalledLock({
-        lock: existingLock,
-        dependencies,
-        installRoot: CONNECTORS_DIR,
-      })
-    )
+    if (
+      !reportInstalledCheck(
+        checkInstalledLock({
+          lock: existingLock,
+          dependencies,
+          installRoot: CONNECTORS_DIR,
+        }),
+        { checkForInstall }
+      )
+    ) {
+      process.exitCode = 1
+      return
+    }
     console.log("[resolve-connectors] connector bundle is up to date.")
     return
   }
@@ -599,15 +628,21 @@ async function main() {
         "Connector lock drift detected. Run `node scripts/resolve-connectors.js`."
       )
     }
-    assertInstalled(
-      await verifyInstalled({
-        lock,
-        source,
-        installRoot: CONNECTORS_DIR,
-        layout: "source",
-        artifactCertificateIdentityResolver,
-      })
-    )
+    if (
+      !reportInstalledCheck(
+        await verifyInstalled({
+          lock,
+          source,
+          installRoot: CONNECTORS_DIR,
+          layout: "source",
+          artifactCertificateIdentityResolver,
+        }),
+        { checkForInstall }
+      )
+    ) {
+      process.exitCode = 1
+      return
+    }
     console.log("[resolve-connectors] connector bundle is up to date.")
     return
   }

@@ -457,10 +457,7 @@ describe("OCI consumer acceptance", () => {
       const legacy = legacyArtifacts[0]
       const lock = {
         lockVersion: "1.0",
-        connectors: [
-          { connectorId: "chatgpt-pdpp", version: "0.1.0" },
-          legacy,
-        ],
+        connectors: [{ connectorId: "chatgpt-pdpp", version: "0.1.0" }, legacy],
       }
       const authored = await authorOciLock(lock, {})
       expect(authored.lockVersion).toBe("2.0")
@@ -542,6 +539,42 @@ describe("OCI consumer acceptance", () => {
       expect(existsSync(join(installRoot, "collection-profiles/ynab"))).toBe(
         false
       )
+    }))
+
+  it("verifies an OCI install at connectorId when connectorKey differs and reports a missing file", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "installed")
+      await installConnectorsAtomically({
+        lock: f.lockFor(f.oci),
+        installRoot,
+        ...f.options,
+      })
+      expect(f.oci.connectorId).not.toBe(f.oci.connectorKey)
+      expect(
+        checkInstalledLock({ lock: f.lockFor(f.oci), installRoot })
+      ).toEqual({
+        ok: true,
+        missing: [],
+        mismatched: [],
+      })
+
+      const missingPath = join(
+        installRoot,
+        "collection-profiles",
+        f.oci.connectorId,
+        f.oci.entrypointPath
+      )
+      rmSync(missingPath)
+      expect(
+        checkInstalledLock({ lock: f.lockFor(f.oci), installRoot })
+      ).toEqual({
+        ok: false,
+        missing: [
+          `collection-profiles/${f.oci.connectorId}/${f.oci.entrypointPath}`,
+        ],
+        mismatched: [],
+      })
     }))
 
   it("B-T5 a failed install at connector 2 of 3 leaves the previous tree byte-identical", async () =>
@@ -678,6 +711,43 @@ describe("OCI consumer acceptance", () => {
       expect(() => checkInstalledLock({ lock: mixed, installRoot })).toThrow(
         "Refusing installed symlink"
       )
+    }))
+
+  it("preinstall check reports a missing bundle without labeling it an error", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        bundle = f.lockFor(f.oci)
+      put(root, "connectors/lock.json", json(bundle))
+      put(
+        root,
+        "connectors/connector-dependencies.json",
+        json({ connectors: bundle.dependencies })
+      )
+      for (const script of ["resolve-connectors.js", "is-main-module.js"])
+        put(root, `scripts/${script}`, readFileSync(`scripts/${script}`))
+      put(root, "package.json", '{"type":"module"}')
+      symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir")
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(root, "scripts/resolve-connectors.js"),
+          "--check",
+          "--check-for-install",
+        ],
+        {
+          env: {
+            ...process.env,
+            CONNECTORS_PATH: "",
+            CONNECTOR_INDEX_URL: "",
+            SKIP_CONNECTOR_FETCH: "",
+          },
+          encoding: "utf8",
+        }
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toContain("installation required")
     }))
 
   it("B-T7 an entry naming a non-GHCR registry is refused before fetching", async () =>

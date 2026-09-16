@@ -25,11 +25,15 @@ const run = (script, args = []) => {
 }
 
 try {
-  const check = spawnSync(process.execPath, [resolveScript, "--check"], {
-    cwd: join(__dirname, ".."),
-    stdio: "inherit",
-    env: process.env,
-  })
+  const check = spawnSync(
+    process.execPath,
+    [resolveScript, "--check", "--check-for-install"],
+    {
+      cwd: join(__dirname, ".."),
+      stdio: "inherit",
+      env: process.env,
+    }
+  )
   if (check.error) throw check.error
   if (check.status !== 0) {
     run(resolveScript, ["--install-locked"])
