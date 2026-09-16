@@ -1,7 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
+#[cfg(desktop)]
+mod owner_credential;
 mod processors;
+#[cfg(desktop)]
+mod unified;
 
 use commands::{
     check_browser_available, check_connected_platforms, check_connector_updates,
@@ -36,8 +40,21 @@ pub fn run() {
             // Focus the existing window when a second instance is intercepted.
             // The deep-link URL is forwarded automatically via the `deep-link`
             // cargo feature — no manual arg parsing needed.
-            if let Some(window) = app.get_webview_window("main") {
+            #[cfg(desktop)]
+            let window = if unified::is_enabled() {
+                app.get_webview_window(unified::CONSOLE_WINDOW_LABEL)
+            } else {
+                app.get_webview_window("main")
+            };
+            #[cfg(not(desktop))]
+            let window = app.get_webview_window("main");
+            if let Some(window) = window {
                 let _ = window.set_focus();
+            } else {
+                #[cfg(desktop)]
+                if unified::is_enabled() {
+                    unified::focus_or_bootstrap(app.clone());
+                }
             }
         }))
         .plugin(tauri_plugin_fs::init())
@@ -63,6 +80,11 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+
+            #[cfg(desktop)]
+            if unified::is_enabled() {
+                unified::setup(app)?;
+            }
 
             // Listen for close window events from connectors
             let app_handle = app.handle().clone();
