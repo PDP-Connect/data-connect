@@ -162,6 +162,10 @@ interface HighWaterRow {
 
 /** The production durable store. Startup schemas create these same tables. */
 export function createConnectorInstallStore(): ConnectorInstallStore {
+  const preloadDir = process.env.PDPP_CONNECTOR_PRELOAD_DIR?.trim();
+  if (preloadDir) {
+    return createFileConnectorInstallStore(preloadDir);
+  }
   const dataDir = process.env.PDPP_DATA_DIR || join(process.cwd(), "data");
   const sqlite = async () => {
     const db = await import("../../lib/db.ts");
@@ -675,8 +679,14 @@ export function createConnectorInstallService(options: {
   readonly installArtifact?: InstallArtifact;
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
 }): ConnectorInstallService {
-  const dataDir = options.dataDir || process.env.PDPP_DATA_DIR || join(process.cwd(), "data");
-  const store = options.store || createConnectorInstallStore();
+  const dataDir =
+    options.dataDir ||
+    process.env.PDPP_CONNECTOR_PRELOAD_DIR ||
+    process.env.PDPP_DATA_DIR ||
+    join(process.cwd(), "data");
+  const store =
+    options.store ||
+    (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const previousHighWater = await store.getCatalogHighWater();
     const loaded = options.catalogLoader

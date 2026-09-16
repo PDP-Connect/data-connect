@@ -21,8 +21,12 @@ import {
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
 } from "../vendor/cli/src/package-info.ts";
-import type { ProviderAuthManifestLike } from "@pdpp/polyfill-connectors/provider-auth-adapter";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import type { ProviderAuthManifestLike } from "./polyfill-connectors-runtime.ts";
+import {
+  loadCredentialProbeHelpers,
+  loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
+  readPolyfillManifests,
+} from "./polyfill-connectors-runtime.ts";
 import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
@@ -2108,17 +2112,12 @@ function createRequestRecordRejectionStore() {
   return createRecordRejectionStore();
 }
 
-// Lazily loads the pure static-secret injection helpers from the
-// polyfill-connectors runner slice. The reference server reaches connector
-// code by relative path (it does not declare the package as a dependency), so
-// this mirrors the controller's `await import("../../packages/...")` idiom and
-// caches the resolved module after the first run.
-let staticSecretInjectionModulePromise: Promise<Record<string, unknown>> | null = null;
+// Lazily loads the pure static-secret injection helpers through the optional
+// connector-runtime boundary. Development and conformance runs may provide
+// the polyfill package; the production image does not, so the boundary's
+// empty/fail-closed behavior remains explicit before catalog installation.
 function loadStaticSecretInjectionHelpers() {
-  if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
-  }
-  return staticSecretInjectionModulePromise;
+  return loadOptionalStaticSecretInjectionHelpers();
 }
 
 // Build the route-facing static-secret credential prober. The reference-only
@@ -2130,13 +2129,12 @@ function loadStaticSecretInjectionHelpers() {
 // or grant-scoped reads. Resolved once at startup and injected, so the route
 // stays synchronous and tests inject a deterministic double instead.
 async function buildStaticSecretCredentialProber() {
-  const [probe, transport, adapter] = await Promise.all([
-    import("@pdpp/polyfill-connectors/credential-probe"),
-    import("@pdpp/polyfill-connectors/credential-probe-transport"),
+  const [probe, adapter] = await Promise.all([
+    loadCredentialProbeHelpers(),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return (adapter.createStaticSecretCredentialProber as unknown as (args: Record<string, unknown>) => unknown)({
-    createLiveCredentialProbeTransport: transport.createLiveCredentialProbeTransport,
+    createLiveCredentialProbeTransport: probe.createLiveCredentialProbeTransport,
     hasCredentialProbe: probe.hasCredentialProbe,
     probeCredential: probe.probeCredential,
   });
