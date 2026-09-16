@@ -72,7 +72,7 @@ describe("useConnectorUpdates", () => {
     )
   })
 
-  it("removes an existing connector update after a successful download", async () => {
+  it("retains an existing update until the caller confirms activation", async () => {
     state.app.connectorUpdates = [
       makeUpdate({
         isNew: false,
@@ -86,6 +86,12 @@ describe("useConnectorUpdates", () => {
       await result.current.downloadConnector("new-source")
     })
 
+    expect(dispatch).not.toHaveBeenCalledWith({
+      type: "app/removeConnectorUpdate",
+      payload: "new-source",
+    })
+
+    act(() => result.current.removeConnectorUpdate("new-source"))
     expect(dispatch).toHaveBeenCalledWith({
       type: "app/removeConnectorUpdate",
       payload: "new-source",

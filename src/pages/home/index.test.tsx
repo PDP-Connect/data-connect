@@ -102,6 +102,12 @@ vi.mock("@/hooks/useConnector", () => ({
         ? "pdpp-uri-owner"
         : `${platform.id}-owner`
       : null,
+  isAuthenticationFailure: (error: unknown) =>
+    /(?:401|403|unauthorized|forbidden|invalid token|auth(?:entication)? failed)/i.test(
+      typeof error === "object" && error !== null && "statusMessage" in error
+        ? String(error.statusMessage)
+        : String(error)
+    ),
   useConnector: () => ({
     startImport: mockStartImport,
     stopExport: mockStopExport,
@@ -326,6 +332,170 @@ describe("Home", () => {
     expect(screen.queryByLabelText(/personal access token/i)).toBeNull()
   })
 
+  it("requires a replacement GitHub PAT after a terminal authentication failure", async () => {
+    mockRuns = [
+      {
+        id: "run-1",
+        platformId: "github-pdpp",
+        filename: "github-pdpp",
+        isConnected: false,
+        startDate: new Date().toISOString(),
+        status: "error",
+        statusMessage: "GitHub API request failed: 401 Unauthorized",
+        url: "",
+        company: "GitHub",
+        name: "GitHub",
+        logs: "",
+      },
+    ]
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          description: "GitHub PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: false,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+    fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      target: { value: "wrong-token" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp" }),
+        { githubToken: "wrong-token" }
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    mockStartImport.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+    expect(screen.getByLabelText(/personal access token/i)).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      target: { value: "replacement-token" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp" }),
+        { githubToken: "replacement-token" }
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    mockRuns[0].status = "success"
+    mockRuns[0].statusMessage = undefined
+    mockStartImport.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp" }),
+        { githubToken: "replacement-token" }
+      )
+    })
+    expect(mockStartImport).not.toHaveBeenCalledWith(
+      expect.anything(),
+      { githubToken: "wrong-token" }
+    )
+  })
+
+  it("keeps a cached GitHub PAT after a retryable import failure", async () => {
+    mockRuns = [
+      {
+        id: "run-1",
+        platformId: "github-pdpp",
+        filename: "github-pdpp",
+        isConnected: false,
+        startDate: new Date().toISOString(),
+        status: "error",
+        statusMessage: "Network request failed",
+        url: "",
+        company: "GitHub",
+        name: "GitHub",
+        logs: "",
+      },
+    ]
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "github-pdpp",
+          company: "GitHub",
+          name: "GitHub",
+          filename: "github-pdpp",
+          description: "GitHub PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: false,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+    fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      target: { value: "retryable-token" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp" }),
+        { githubToken: "retryable-token" }
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    mockStartImport.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect github/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "github-pdpp" }),
+        { githubToken: "retryable-token" }
+      )
+    })
+    expect(screen.queryByLabelText(/personal access token/i)).toBeNull()
+  })
+
   it("captures the manifest-declared ChatGPT static secrets before launching", async () => {
     mockUsePlatforms.mockReturnValue({
       platforms: [
@@ -474,6 +644,20 @@ describe("Home", () => {
   })
 
   it("captures generic manifest-declared static secrets before launching", async () => {
+    mockRuns = [
+      {
+        id: "run-1",
+        platformId: "ynab-pdpp",
+        filename: "ynab-pdpp",
+        isConnected: true,
+        startDate: new Date().toISOString(),
+        status: "success",
+        url: "",
+        company: "YNAB",
+        name: "YNAB",
+        logs: "",
+      },
+    ]
     mockUsePlatforms.mockReturnValue({
       platforms: [
         {
@@ -546,6 +730,116 @@ describe("Home", () => {
       expect(mockStartImport).toHaveBeenCalledWith(
         expect.objectContaining({ id: "ynab-pdpp" }),
         { setupSecrets: { secret: "ynab_transient_pat" } }
+      )
+    })
+    expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
+  it("requires replacement static secrets after a terminal authentication failure", async () => {
+    mockRuns = [
+      {
+        id: "run-1",
+        platformId: "ynab-pdpp",
+        filename: "ynab-pdpp",
+        isConnected: false,
+        startDate: new Date().toISOString(),
+        status: "error",
+        statusMessage: "Connector rejected the credential: 403 Forbidden",
+        url: "",
+        company: "YNAB",
+        name: "YNAB",
+        logs: "",
+      },
+    ]
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "ynab-pdpp",
+          company: "YNAB",
+          name: "YNAB",
+          filename: "ynab-pdpp",
+          description: "YNAB PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          setup: {
+            modality: "static_secret",
+            credentialCapture: {
+              fields: [
+                {
+                  name: "secret",
+                  label: "YNAB personal access token",
+                  type: "password",
+                  required: true,
+                  secret: true,
+                  autocomplete: "off",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      connectedPlatforms: {},
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: /connect ynab/i }))
+    const tokenInput = await screen.findByLabelText(
+      /ynab personal access token/i
+    )
+    fireEvent.change(tokenInput, { target: { value: "wrong-secret" } })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "ynab-pdpp" }),
+        { setupSecrets: { secret: "wrong-secret" } }
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    mockInvoke.mockResolvedValue(true)
+    mockInvoke.mockClear()
+    mockStartImport.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect ynab/i }))
+    expect(screen.getByLabelText(/ynab personal access token/i)).toBeTruthy()
+    expect(mockInvoke).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText(/ynab personal access token/i), {
+      target: { value: "replacement-secret" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start import/i }))
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "ynab-pdpp" }),
+        { setupSecrets: { secret: "replacement-secret" } }
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    mockRuns[0].status = "success"
+    mockRuns[0].statusMessage = undefined
+    mockStartImport.mockClear()
+    mockInvoke.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect ynab/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "ynab-pdpp" }),
+        { setupSecrets: { secret: "replacement-secret" } }
       )
     })
     expect(mockInvoke).not.toHaveBeenCalled()

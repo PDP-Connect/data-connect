@@ -73,6 +73,29 @@ function getErrorMessage(error: unknown): string {
   return String(error)
 }
 
+export function isAuthenticationFailure(error: unknown): boolean {
+  const errorClass =
+    typeof error === "object" &&
+    error !== null &&
+    "errorClass" in error &&
+    typeof error.errorClass === "string"
+      ? error.errorClass.toLowerCase()
+      : ""
+  if (errorClass === "auth_failed") return true
+
+  const normalized = getErrorMessage(error).toLowerCase()
+  return (
+    /\b(?:401|403)\b/.test(normalized) ||
+    /\bunauthori[sz]ed\b/.test(normalized) ||
+    /\bforbidden\b/.test(normalized) ||
+    /\binvalid[\s_-]+token\b/.test(normalized) ||
+    /\b(?:authentication|auth)[\s_-]+(?:failed|error|rejected)\b/.test(
+      normalized
+    ) ||
+    /\bcredential[\s_-]+reject(?:ed|ion)\b/.test(normalized)
+  )
+}
+
 async function startInstalledPdppConnectorRun(
   runId: string,
   platform: Platform,

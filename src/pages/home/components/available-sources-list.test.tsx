@@ -13,6 +13,7 @@ const updateState = vi.hoisted(() => ({
   downloadConnector: vi.fn().mockResolvedValue(true),
   checkForUpdates: vi.fn().mockResolvedValue([]),
   isDownloading: vi.fn(() => false),
+  removeConnectorUpdate: vi.fn(),
 }))
 
 const personalServerState = vi.hoisted(() => ({
@@ -94,11 +95,28 @@ const emptyProps = {
   connectedPlatformIds: [] as string[],
 }
 
+const CONNECTED_PLATFORM: Platform = {
+  id: "connected-source",
+  company: "Connected",
+  name: "Connected source",
+  filename: "connected-source",
+  description: "Connected source",
+  isUpdated: false,
+  logoURL: "",
+  needsConnection: true,
+  connectURL: null,
+  connectSelector: null,
+  exportFrequency: null,
+  vectorize_config: null,
+  runtime: "playwright",
+}
+
 afterEach(() => {
   cleanup()
   updateState.updates = []
   updateState.downloadConnector.mockClear()
   updateState.checkForUpdates.mockClear()
+  updateState.removeConnectorUpdate.mockClear()
   personalServerState.restartServer.mockClear()
   personalServerState.status = "running"
   personalServerState.statusRef.current = "running"
@@ -342,5 +360,78 @@ describe("AvailableSourcesList catalog states", () => {
       expect(personalServerState.restartServer).toHaveBeenCalledTimes(2)
       expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it("retries a failed restart when the Personal Server is already in error", async () => {
+    updateState.updates = [makeUpdate("New source")]
+    personalServerState.status = "error"
+    personalServerState.statusRef.current = "error"
+    personalServerState.restartServer
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const onReloadPlatforms = vi.fn()
+
+    render(
+      <AvailableSourcesList
+        {...emptyProps}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Add New source/i }).click()
+    const retryButton = await screen.findByRole("button", {
+      name: /Installed but not applied.*New source.*Retry/i,
+    })
+    expect(personalServerState.restartServer).toHaveBeenCalledTimes(1)
+    expect(onReloadPlatforms).not.toHaveBeenCalled()
+
+    retryButton.click()
+    await waitFor(() => {
+      expect(personalServerState.restartServer).toHaveBeenCalledTimes(2)
+      expect(onReloadPlatforms).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("keeps a connected source retryable after its catalog update disappears", async () => {
+    const platform = CONNECTED_PLATFORM
+    updateState.updates = [
+      makeUpdate("connected-source", {
+        isNew: false,
+        hasUpdate: true,
+        currentVersion: "0.9.0",
+      }),
+    ]
+    personalServerState.restartServer.mockResolvedValueOnce(false)
+    const onReloadPlatforms = vi.fn()
+    const { rerender } = render(
+      <AvailableSourcesList
+        {...emptyProps}
+        platforms={[platform]}
+        connectedPlatformIds={[platform.id]}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    screen.getByRole("button", { name: /Update connected-source/i }).click()
+    await screen.findByRole("button", {
+      name: /Installed but not applied.*Connected source.*Retry/i,
+    })
+
+    updateState.updates = []
+    rerender(
+      <AvailableSourcesList
+        {...emptyProps}
+        platforms={[platform]}
+        connectedPlatformIds={[platform.id]}
+        onReloadPlatforms={onReloadPlatforms}
+      />
+    )
+
+    expect(
+      screen.getByRole("button", {
+        name: /Installed but not applied.*Connected source.*Retry/i,
+      })
+    ).toBeTruthy()
+    expect(onReloadPlatforms).not.toHaveBeenCalled()
   })
 })

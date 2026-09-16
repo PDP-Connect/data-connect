@@ -297,6 +297,45 @@ describe("useEvents", () => {
     expect(trackCollectionFailed).not.toHaveBeenCalled()
   })
 
+  it("preserves the host authentication error class on terminal failures", async () => {
+    const useEvents = await importHook()
+    currentRuns = [
+      {
+        id: "github-pdpp-run-1",
+        platformId: "github-pdpp",
+        company: "GitHub",
+        name: "GitHub",
+        startDate: "2026-04-14T12:00:00.000Z",
+        status: "running",
+      },
+    ]
+
+    renderHook(() => useEvents())
+
+    await act(async () => {
+      emit("connector-status", {
+        runId: "github-pdpp-run-1",
+        status: {
+          type: "ERROR",
+          message: "The GitHub token was rejected",
+          errorClass: "auth_failed",
+        },
+        timestamp: Date.now(),
+      })
+      await Promise.resolve()
+    })
+
+    expect(mockDispatch).toHaveBeenCalledWith({
+      type: "app/updateRunStatus",
+      payload: {
+        runId: "github-pdpp-run-1",
+        status: "error",
+        endDate: expect.any(String),
+        errorClass: "auth_failed",
+      },
+    })
+  })
+
   it("persists PDPP COMPLETE status payloads through the normal export path", async () => {
     const useEvents = await importHook()
     const exportPath = "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run-1"

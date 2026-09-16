@@ -75,6 +75,7 @@ export function AvailableSourcesList({
     downloadErrors,
     checkForUpdates,
     downloadConnector,
+    removeConnectorUpdate,
     isDownloading,
   } = useConnectorUpdates()
   const {
@@ -183,8 +184,11 @@ export function AvailableSourcesList({
       applyInFlightRef.current = true
       setIsApplyingConnectorChange(true)
       try {
-        let applied = true
-        if (personalServerStatusRef.current === "running") {
+        let applied = false
+        if (
+          personalServerStatusRef.current === "running" ||
+          personalServerStatusRef.current === "error"
+        ) {
           try {
             applied = await restartServer()
           } catch {
@@ -201,6 +205,7 @@ export function AvailableSourcesList({
           await onReloadPlatforms?.()
           clearPending(idsToApply)
           clearUnapplied(idsToApply)
+          idsToApply.forEach(id => removeConnectorUpdate(id))
         } catch {
           markUnapplied(idsToApply)
         }
@@ -218,6 +223,7 @@ export function AvailableSourcesList({
       pendingConnectorIds,
       personalServerStatus,
       personalServerStatusRef,
+      removeConnectorUpdate,
       restartServer,
       unappliedConnectorChanges,
     ]
@@ -268,6 +274,8 @@ export function AvailableSourcesList({
         connectingPlatforms,
         onExport,
         connectorUpdates: visibleUpdates,
+        pendingConnectorIds,
+        unappliedConnectorIds: unappliedConnectorChanges,
         onInstall: id => {
           void installConnector(id)
         },
@@ -292,6 +300,7 @@ export function AvailableSourcesList({
       pendingConnectorIds,
       retryConnectorChange,
       isUnapplied,
+      unappliedConnectorChanges,
       visibleUpdates,
     ]
   )

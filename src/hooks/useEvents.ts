@@ -649,6 +649,9 @@ export function useEvents() {
             runId,
             status: isPartial ? 'partial' : 'error',
             endDate: new Date().toISOString(),
+            ...(!isPartial && terminalErrorClass
+              ? { errorClass: terminalErrorClass }
+              : {}),
           })
         );
         if (isPartial) {
