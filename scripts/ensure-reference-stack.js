@@ -4,9 +4,11 @@
 
 import { createHash } from "node:crypto"
 import {
+  chmodSync,
   cpSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -90,13 +92,42 @@ function copyTree(source, destination) {
   })
 }
 
+function copyDereferencedTree(source, destination) {
+  const sourceStats = statSync(source)
+  if (sourceStats.isDirectory()) {
+    mkdirSync(destination, { recursive: true })
+    for (const entry of readdirSync(source)) {
+      copyDereferencedTree(join(source, entry), join(destination, entry))
+    }
+    return
+  }
+  if (sourceStats.isFile()) {
+    mkdirSync(dirname(destination), { recursive: true })
+    copyFileSync(source, destination)
+    chmodSync(destination, sourceStats.mode)
+    return
+  }
+  fail(`unsupported staged entry: ${source}`)
+}
+
+function assertNoSymlinks(root, current = root) {
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const filePath = join(current, entry.name)
+    if (lstatSync(filePath).isSymbolicLink()) {
+      fail(`staged RI contains a symbolic link: ${relative(root, filePath)}`)
+    }
+    if (entry.isDirectory()) assertNoSymlinks(root, filePath)
+  }
+}
+
 function walkFiles(root, current = root, output = []) {
   for (const entry of readdirSync(current, { withFileTypes: true }).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   )) {
     const filePath = join(current, entry.name)
-    if (entry.isDirectory()) walkFiles(root, filePath, output)
-    else if (entry.isFile()) output.push(filePath)
+    const fileStats = statSync(filePath)
+    if (fileStats.isDirectory()) walkFiles(root, filePath, output)
+    else if (fileStats.isFile()) output.push(filePath)
   }
   return output
 }
@@ -226,7 +257,7 @@ function defaultNodeBinary(projectRoot) {
 function npmCommand(nodeBinary) {
   const npmCli = process.env.npm_execpath
   if (npmCli && existsSync(npmCli)) return [nodeBinary, npmCli]
-  return ["npm"]
+  return [process.platform === "win32" ? "npm.cmd" : "npm"]
 }
 
 function runNpm(nodeBinary, args, options) {
@@ -599,10 +630,8 @@ export function stageReferenceStack({
     )
     rmSync(resolvedOutputRoot, { force: true, recursive: true })
     mkdirSync(parent, { recursive: true })
-    cpSync(temporaryRoot, resolvedOutputRoot, {
-      dereference: true,
-      recursive: true,
-    })
+    copyDereferencedTree(temporaryRoot, resolvedOutputRoot)
+    assertNoSymlinks(resolvedOutputRoot)
     verifyReferenceStackRoot(resolvedOutputRoot)
     return { manifest, reused: false, root: resolvedOutputRoot }
   } finally {
