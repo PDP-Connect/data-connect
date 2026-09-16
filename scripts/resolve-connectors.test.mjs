@@ -47,7 +47,7 @@ const legacyArtifacts = lock.connectors.filter(connector =>
 // This is the reviewed data-connectors main commit containing the duplicate
 // normalized-member guard. Keep the ancestry check local and deterministic;
 // acceptance must not turn into a live git or network lookup.
-const DATA_CONNECTORS_MAIN_ANCESTOR = "8803c30c31f6d514bdc237df2f224b5ff77fa232"
+const DATA_CONNECTORS_MAIN_ANCESTOR = "ee11b09dc4e4c3acb1a1e0606ced0429f761be27"
 
 describe("connector artifact signer identities", () => {
   it("trusts only the six exact legacy artifact URLs retained by the lock", () => {
