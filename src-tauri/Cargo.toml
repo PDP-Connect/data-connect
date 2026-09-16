@@ -55,3 +55,4 @@ uuid = { version = "1.22", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = "0.4.4"

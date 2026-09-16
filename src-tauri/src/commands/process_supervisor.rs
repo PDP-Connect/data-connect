@@ -9,6 +9,8 @@
 
 use serde::Serialize;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
@@ -16,6 +18,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +27,12 @@ use tauri::{AppHandle, Emitter};
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[cfg(unix)]
+type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
+
+#[cfg(unix)]
+static PROCESS_GROUP_REGISTRY: OnceLock<Result<ProcessGroupRegistry, String>> = OnceLock::new();
 
 /// The complete environment policy for a supervised process.
 ///
@@ -164,6 +174,8 @@ impl From<io::Error> for SupervisorError {
 struct SupervisorState {
     stopping: AtomicBool,
     child: Mutex<Option<Child>>,
+    #[cfg(unix)]
+    process_group_id: Mutex<Option<libc::pid_t>>,
     finished: Mutex<bool>,
     finished_signal: Condvar,
     stop_deadline: Mutex<Option<Instant>>,
@@ -175,6 +187,8 @@ impl SupervisorState {
         Self {
             stopping: AtomicBool::new(false),
             child: Mutex::new(None),
+            #[cfg(unix)]
+            process_group_id: Mutex::new(None),
             finished: Mutex::new(false),
             finished_signal: Condvar::new(),
             stop_deadline: Mutex::new(None),
@@ -186,6 +200,76 @@ impl SupervisorState {
         if let Ok(mut finished) = self.finished.lock() {
             *finished = true;
             self.finished_signal.notify_all();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn install_parent_signal_handlers() -> Result<(), SupervisorError> {
+    let result = PROCESS_GROUP_REGISTRY.get_or_init(|| {
+        let registry = Arc::new(Mutex::new(BTreeSet::new()));
+        let signal_registry = Arc::clone(&registry);
+        let mut signals =
+            signal_hook::iterator::Signals::new([libc::SIGTERM, libc::SIGINT, libc::SIGHUP])
+                .map_err(|error| format!("failed to register shutdown signals: {error}"))?;
+        thread::Builder::new()
+            .name("sidecar-signal-handler".to_string())
+            .spawn(move || {
+                if let Some(signal) = signals.forever().next() {
+                    if let Ok(process_groups) = signal_registry.lock() {
+                        for process_group in process_groups.iter().copied() {
+                            signal_process_group_direct(process_group as u32, libc::SIGKILL);
+                        }
+                    }
+                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+                }
+            })
+            .map_err(|error| format!("failed to start shutdown signal handler: {error}"))?;
+        Ok(registry)
+    });
+    result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| SupervisorError::Message(error.clone()))
+}
+
+#[cfg(unix)]
+fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
+    let registry = PROCESS_GROUP_REGISTRY
+        .get()
+        .and_then(|result| result.as_ref().ok())
+        .ok_or_else(|| {
+            SupervisorError::Message("parent signal handlers are not installed".to_string())
+        })?;
+    registry
+        .lock()
+        .map_err(|_| SupervisorError::Message("process-group registry was poisoned".to_string()))?
+        .insert(process_group as libc::pid_t);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unregister_process_group(process_group: libc::pid_t) {
+    if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
+        if let Ok(mut process_groups) = registry.lock() {
+            process_groups.remove(&process_group);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn take_process_group_id(state: &SupervisorState) -> Option<libc::pid_t> {
+    state.process_group_id.lock().ok()?.take()
+}
+
+#[cfg(unix)]
+struct ProcessGroupRegistration(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl Drop for ProcessGroupRegistration {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.take() {
+            unregister_process_group(slot);
         }
     }
 }
@@ -214,6 +298,10 @@ impl Supervisor {
     /// Readiness and a `{port}` environment value both resolve from this same
     /// allocation.
     pub fn start(self) -> Result<SupervisorHandle, SupervisorError> {
+        #[cfg(unix)]
+        if self.spec.process_group {
+            install_parent_signal_handlers()?;
+        }
         let port = allocate_loopback_port(spec_requires_adjacent_port(&self.spec))?;
         let state = Arc::new(SupervisorState::new());
         let (ready_sender, ready_receiver) = mpsc::channel();
@@ -364,6 +452,10 @@ fn run_supervisor(
 
         if let Ok(mut child) = state.child.lock() {
             *child = Some(spawned.child);
+            #[cfg(unix)]
+            if let Ok(mut process_group_id) = state.process_group_id.lock() {
+                *process_group_id = spawned.process_group_id;
+            }
         } else {
             let _ = ready_sender.send(Err("supervisor state was poisoned".to_string()));
             state.finish();
@@ -539,6 +631,8 @@ fn emit_stopped(spec: &ProcessSpec, state: &SupervisorState, sink: &Arc<dyn Even
 struct SpawnedProcess {
     child: Child,
     stdout_lines: mpsc::Receiver<String>,
+    #[cfg(unix)]
+    process_group_id: Option<libc::pid_t>,
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
@@ -566,11 +660,28 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     }
 
     let mut child = command.spawn()?;
+    #[cfg(unix)]
+    let process_group_id = if spec.process_group {
+        match register_process_group(child.id()) {
+            Ok(()) => Some(child.id() as libc::pid_t),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            #[cfg(unix)]
+            if let Some(process_group) = process_group_id {
+                unregister_process_group(process_group);
+            }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stdout".to_string(),
             ));
@@ -581,6 +692,10 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            #[cfg(unix)]
+            if let Some(process_group) = process_group_id {
+                unregister_process_group(process_group);
+            }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stderr".to_string(),
             ));
@@ -620,6 +735,8 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     Ok(SpawnedProcess {
         child,
         stdout_lines,
+        #[cfg(unix)]
+        process_group_id,
     })
 }
 
@@ -754,6 +871,12 @@ fn take_exited_child(state: &SupervisorState) -> io::Result<Option<ExitStatus>> 
     match child.try_wait()? {
         Some(status) => {
             let _ = child_slot.take();
+            #[cfg(unix)]
+            if let Ok(mut process_group_id) = state.process_group_id.lock() {
+                if let Some(process_group) = process_group_id.take() {
+                    unregister_process_group(process_group);
+                }
+            }
             Ok(Some(status))
         }
         None => Ok(None),
@@ -771,6 +894,8 @@ fn stop_current_child(
     let Some(mut child) = child_slot.take() else {
         return Ok(None);
     };
+    #[cfg(unix)]
+    let _process_group_registration = ProcessGroupRegistration(take_process_group_id(state));
     let pid = child.id();
     let deadline = state
         .stop_deadline
@@ -885,6 +1010,11 @@ fn signal_process_group(pid: u32, signal: libc::c_int) {
     // If the leader has already exited, getpgid(pid) can fail even while a
     // descendant remains in the group. The direct group id is stable because
     // this module creates the group with CommandExt::process_group(0).
+    signal_process_group_direct(pid, signal);
+}
+
+#[cfg(unix)]
+fn signal_process_group_direct(pid: u32, signal: libc::c_int) {
     unsafe {
         libc::kill(-(pid as libc::pid_t), signal);
     }
@@ -964,7 +1094,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::Mutex;
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -1066,6 +1196,94 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn unix_parent_signal_helper() {
+        if std::env::var_os("DATACONNECT_PARENT_SIGNAL_HELPER").is_none() {
+            return;
+        }
+        let pid_file = PathBuf::from(
+            std::env::var_os("DATACONNECT_PARENT_SIGNAL_PID_FILE")
+                .expect("parent-signal PID file path"),
+        );
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000);'], {{ stdio: 'ignore' }});
+fs.writeFileSync({:?}, JSON.stringify({{ leader: process.pid, child: child.pid }}));
+console.log('PARENT-SIGNAL-READY');
+setInterval(() => {{}}, 1000);
+"#,
+            pid_file
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let handle = Supervisor::new(
+            base_spec(
+                script.path(),
+                Readiness::StdoutMarker {
+                    marker: "PARENT-SIGNAL-READY".to_string(),
+                    deadline: Duration::from_secs(3),
+                },
+            ),
+            ArcSink(sink),
+        )
+        .start()
+        .expect("parent-signal helper supervisor should start");
+        std::mem::forget(handle);
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_parent_signal_terminates_sidecar_process_group() {
+        let directory = tempdir().unwrap();
+        let pid_file = directory.path().join("sidecar-pids.json");
+        let mut helper = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::process_supervisor::tests::unix_parent_signal_helper",
+                "--nocapture",
+                "--ignored",
+            ])
+            .env("DATACONNECT_PARENT_SIGNAL_HELPER", "1")
+            .env("DATACONNECT_PARENT_SIGNAL_PID_FILE", &pid_file)
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < deadline {
+            if let Some(status) = helper.try_wait().unwrap() {
+                panic!("parent-signal helper exited before spawning sidecar: {status}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Value = serde_json::from_str(&fs::read_to_string(&pid_file).unwrap()).unwrap();
+        let leader = pids["leader"].as_i64().unwrap() as libc::pid_t;
+        let child = pids["child"].as_i64().unwrap() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(leader, 0) }, 0);
+        assert_eq!(unsafe { libc::kill(child, 0) }, 0);
+
+        unsafe { libc::kill(helper.id() as libc::pid_t, libc::SIGTERM) };
+        let _ = helper.wait().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && (unsafe { libc::kill(leader, 0) } == 0 || unsafe { libc::kill(child, 0) } == 0)
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let leader_alive = unsafe { libc::kill(leader, 0) } == 0;
+        let child_alive = unsafe { libc::kill(child, 0) } == 0;
+        if leader_alive || child_alive {
+            unsafe { libc::kill(-(leader as libc::pid_t), libc::SIGKILL) };
+        }
+        assert!(!leader_alive, "sidecar leader survived parent SIGTERM");
+        assert!(!child_alive, "sidecar descendant survived parent SIGTERM");
     }
 
     #[test]
