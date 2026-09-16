@@ -109,6 +109,8 @@ export interface CatalogManifestLike {
  * for that separate API capability.
  */
 export interface OwnerConnectorTemplateLike {
+  /** Staged deployments may expose only the canonical connector URI identity. */
+  connector_id?: string | null;
   connector_key?: string | null;
   connector_modality?: string | null;
   display_name?: string | null;
@@ -512,14 +514,18 @@ export function buildOwnerConnectorCatalog(
 ): ConnectorCatalogEntry[] {
   const manifestsByKey = new Map<string, CatalogManifestLike>();
   for (const manifest of manifests) {
-    if (manifest.connector_id) {
-      manifestsByKey.set(canonicalConnectorKey(manifest.connector_id), manifest);
+    for (const identity of [manifest.connector_key, manifest.connector_id]) {
+      const cleanIdentity = cleanManifestText(identity);
+      if (cleanIdentity) {
+        manifestsByKey.set(canonicalConnectorKey(cleanIdentity), manifest);
+      }
     }
   }
 
   const entries: ConnectorCatalogEntry[] = [];
   for (const template of templates) {
-    const connectorKey = cleanManifestText(template.connector_key);
+    const templateConnectorKey = cleanManifestText(template.connector_key);
+    const templateIdentity = templateConnectorKey ?? cleanManifestText(template.connector_id);
     const setupPlan = template.setup_plan;
     // Development-tier entries flow through as catalog entries so the owner
     // running this instance can see what exists and self-test it -- they are
@@ -534,7 +540,7 @@ export function buildOwnerConnectorCatalog(
     // the other development connectors on his own instance. The flag remains
     // authoritative for the owner-actionable/disposition decisions above; it is
     // only its use as a LISTING gate here that this replaces.
-    if (!connectorKey || template.registration_status !== "registered") {
+    if (!templateIdentity || template.registration_status !== "registered") {
       continue;
     }
     const disposition = setupPlan?.catalog_disposition;
@@ -557,7 +563,8 @@ export function buildOwnerConnectorCatalog(
       continue;
     }
 
-    const localManifest = manifestsByKey.get(canonicalConnectorKey(connectorKey));
+    const localManifest = manifestsByKey.get(canonicalConnectorKey(templateIdentity));
+    const connectorKey = templateConnectorKey ?? cleanManifestText(localManifest?.connector_key) ?? canonicalConnectorKey(templateIdentity);
     const manifestForCopy = localManifest ?? { connector_id: connectorKey };
     const proofGate = typeof setupPlan.proof_gate === "string" ? setupPlan.proof_gate : null;
     const enrollmentKey = cleanManifestText(setupPlan.enrollment_key) ?? undefined;

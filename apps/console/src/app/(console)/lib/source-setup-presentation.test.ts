@@ -30,6 +30,34 @@ import {
   sourceSetupGuidance,
   sourceSetupStatus,
 } from "./source-setup-presentation.ts";
+import {
+  SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY,
+  filterCatalogForDevelopmentVisibility,
+  persistShowDevelopmentConnectors,
+  readShowDevelopmentConnectors,
+} from "./source-setup-development.ts";
+
+test("development visibility uses desktop storage semantics and tier-only filtering", () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    removeItem: (key: string) => values.delete(key),
+    setItem: (key: string, value: string) => values.set(key, value),
+  };
+  const catalog = [{ publicTier: "supported" as const }, { publicTier: "development" as const }];
+
+  assert.equal(readShowDevelopmentConnectors(storage), false);
+  assert.deepEqual(filterCatalogForDevelopmentVisibility(catalog, false), [catalog[0]]);
+
+  persistShowDevelopmentConnectors(storage, true);
+  assert.equal(values.get(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY), "true");
+  assert.equal(readShowDevelopmentConnectors(storage), true);
+  assert.deepEqual(filterCatalogForDevelopmentVisibility(catalog, true), catalog);
+
+  persistShowDevelopmentConnectors(storage, false);
+  assert.equal(values.has(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY), false);
+  assert.equal(readShowDevelopmentConnectors(storage), false);
+});
 
 /**
  * A complete, valid catalog entry fixture. Every field a real

@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { canonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
 import type { ConnectorCatalogEntry, PublicConnectorTier } from "./connection-catalog.ts";
 import type { ConnectorInstallCatalogEntry, ConnectorInstallStatus } from "./connector-install-contract.ts";
 
@@ -27,6 +28,10 @@ export interface ConnectorInstallRowModel {
   readonly installedVersion: string | null;
   readonly targetVersion: string | null;
   readonly tier: PublicConnectorTier;
+}
+
+function connectorLookupKey(value: string): string {
+  return canonicalConnectorKey(value.trim());
 }
 
 function displayBindingName(binding: string): string {
@@ -77,19 +82,32 @@ export function buildConnectorInstallLifecycleByConnector(
   catalog: readonly ConnectorInstallCatalogEntry[],
   status: readonly ConnectorInstallStatus[]
 ): Readonly<Record<string, ConnectorInstallLifecycle>> {
+  const keyByIdentity = new Map<string, string>();
+  for (const catalogEntry of catalog) {
+    const connectorKey = connectorLookupKey(catalogEntry.connector_key);
+    for (const identity of [catalogEntry.connector_key, catalogEntry.connector_id, catalogEntry.catalog_connector_id]) {
+      if (identity) {
+        keyByIdentity.set(connectorLookupKey(identity), connectorKey);
+      }
+    }
+  }
+
   const lifecycleByConnector = new Map<string, ConnectorInstallLifecycle>();
   for (const catalogEntry of catalog) {
-    const previous = lifecycleByConnector.get(catalogEntry.connector_id);
+    const connectorKey = connectorLookupKey(catalogEntry.connector_key);
+    const previous = lifecycleByConnector.get(connectorKey);
     if (!previous || catalogEntry.latest || !previous.catalog) {
-      lifecycleByConnector.set(catalogEntry.connector_id, {
+      lifecycleByConnector.set(connectorKey, {
         catalog: catalogEntry,
         installed: previous?.installed ?? null,
       });
     }
   }
   for (const installed of status) {
-    const previous = lifecycleByConnector.get(installed.connector_id);
-    lifecycleByConnector.set(installed.connector_id, {
+    const installedIdentity = connectorLookupKey(installed.connector_id);
+    const connectorKey = keyByIdentity.get(installedIdentity) ?? installedIdentity;
+    const previous = lifecycleByConnector.get(connectorKey);
+    lifecycleByConnector.set(connectorKey, {
       catalog: previous?.catalog ?? null,
       installed,
     });
