@@ -66,6 +66,7 @@ function run(command, args, options = {}) {
     cwd: options.cwd,
     encoding: "utf8",
     env: options.env,
+    shell: options.shell ?? false,
     stdio: options.stdio || "inherit",
   })
   if (result.error) throw result.error
@@ -262,7 +263,10 @@ function npmCommand(nodeBinary) {
 
 function runNpm(nodeBinary, args, options) {
   const [command, ...prefix] = npmCommand(nodeBinary)
-  return run(command, [...prefix, ...args], options)
+  return run(command, [...prefix, ...args], {
+    ...options,
+    shell: process.platform === "win32" && command === "npm.cmd",
+  })
 }
 
 function ensureHostDependencies(projectRoot, nodeBinary) {
