@@ -14,21 +14,21 @@ import connectorLock from "../../../connectors/lock.json"
  * BUI-297: Shop connector must exist and define shop.orders
  */
 
-const connectorIds = connectorLock.connectors.map((c) => c.connectorId)
+const connectorIds = connectorLock.connectors.map(c => c.connectorId)
 
 const entriesWithConnectors = PLATFORM_REGISTRY.filter(
-  (entry) => entry.availability === "requiresConnector"
+  entry => entry.availability === "requiresConnector"
 )
 
 const entriesComingSoon = PLATFORM_REGISTRY.filter(
-  (entry) => entry.availability === "comingSoon"
+  entry => entry.availability === "comingSoon"
 )
 
 describe("PLATFORM_REGISTRY / connector registry alignment", () => {
   it("every requiresConnector entry references at least one bundled connector", () => {
     for (const entry of entriesWithConnectors) {
       const platformIds = entry.platformIds ?? []
-      const hasMatch = platformIds.some((id) => connectorIds.includes(id))
+      const hasMatch = platformIds.some(id => connectorIds.includes(id))
       expect(
         hasMatch,
         `${entry.id}: no bundled connector for platformIds ${JSON.stringify(platformIds)}`
@@ -56,14 +56,14 @@ describe("PLATFORM_REGISTRY / connector registry alignment", () => {
   })
 
   it("no duplicate registry ids", () => {
-    const ids = PLATFORM_REGISTRY.map((e) => e.id)
+    const ids = PLATFORM_REGISTRY.map(e => e.id)
     expect(ids).toEqual([...new Set(ids)])
   })
 })
 
 describe("BUI-296: Spotify connector supports spotify.savedTracks", () => {
   it("spotify entry has ingestScope spotify.savedTracks", () => {
-    const spotify = PLATFORM_REGISTRY.find((e) => e.id === "spotify")
+    const spotify = PLATFORM_REGISTRY.find(e => e.id === "spotify")
     expect(spotify).toBeDefined()
     expect(spotify!.ingestScope).toBe("spotify.savedTracks")
   })
@@ -75,7 +75,7 @@ describe("BUI-296: Spotify connector supports spotify.savedTracks", () => {
 
 describe("BUI-297: Shop connector supports shop.orders", () => {
   it("shop entry has ingestScope shop.orders", () => {
-    const shop = PLATFORM_REGISTRY.find((e) => e.id === "shop")
+    const shop = PLATFORM_REGISTRY.find(e => e.id === "shop")
     expect(shop).toBeDefined()
     expect(shop!.ingestScope).toBe("shop.orders")
   })
@@ -85,14 +85,14 @@ describe("BUI-297: Shop connector supports shop.orders", () => {
   })
 
   it("there is no amazon entry in PLATFORM_REGISTRY (no frontend support yet)", () => {
-    const amazon = PLATFORM_REGISTRY.find((e) => e.id === "amazon")
+    const amazon = PLATFORM_REGISTRY.find(e => e.id === "amazon")
     expect(amazon).toBeUndefined()
   })
 })
 
 describe("Legacy metadata fallback connectors", () => {
   it("includes H-E-B with the expected connect surface metadata", () => {
-    const heb = PLATFORM_REGISTRY.find((entry) => entry.id === "heb")
+    const heb = PLATFORM_REGISTRY.find(entry => entry.id === "heb")
     expect(heb).toBeDefined()
     expect(heb?.brandDomain).toBe("heb.com")
     expect(heb?.ingestScope).toBe("heb.orders")
@@ -101,12 +101,23 @@ describe("Legacy metadata fallback connectors", () => {
 
   it("includes Whole Foods Market with the expected connect surface metadata", () => {
     const wholeFoods = PLATFORM_REGISTRY.find(
-      (entry) => entry.id === "wholefoods"
+      entry => entry.id === "wholefoods"
     )
     expect(wholeFoods).toBeDefined()
     expect(wholeFoods?.brandDomain).toBe("wholefoodsmarket.com")
     expect(wholeFoods?.ingestScope).toBe("wholefoods.orders")
     expect(wholeFoods?.showInConnectList).toBe(true)
+  })
+})
+
+describe("Collection Profile source identity", () => {
+  it("keeps GitHub legacy and Collection Profile runtimes on one source", () => {
+    const github = PLATFORM_REGISTRY.find(entry => entry.id === "github")
+    expect(github?.platformIds).toEqual([
+      "github-pdpp",
+      "github-playwright",
+      "github",
+    ])
   })
 })
 

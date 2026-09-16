@@ -119,7 +119,7 @@ function sourceLabel(
     : isApplying
       ? "Applying…"
       : action === "install"
-        ? "Install"
+        ? "Add"
         : action === "update"
           ? "Update"
           : "Connect"
@@ -130,6 +130,15 @@ function sourceLabel(
       ? " (legacy)"
       : ""
   return `${actionLabel} ${displayName}${isUnapplied ? " · Retry" : ""}${legacyLabel}`
+}
+
+function effectiveAvailability(
+  entry: ReturnType<typeof getPlatformRegistryEntry>,
+  update?: ConnectorUpdateInfo
+): CardAvailability {
+  // The signed catalog is the current source of truth for a connector that
+  // it advertises. A stale static comingSoon flag must not hide an install.
+  return update ? "available" : (entry?.availability ?? "unknown")
 }
 
 function createOrderTracker(sourceOrder?: Map<string, number>) {
@@ -221,8 +230,8 @@ export function buildAvailableCards({
     const isCurrentlyUnapplied = isUnapplied(update.id)
     const isCurrentlyInstalling =
       !isCurrentlyUnapplied && isInstalling(update.id)
-    const isCurrentlyApplying =
-      !isCurrentlyUnapplied && isApplying(update.id)
+    const isCurrentlyApplying = !isCurrentlyUnapplied && isApplying(update.id)
+    const availability = effectiveAvailability(entry, update)
     const reason =
       update.unavailableReason ??
       "This device does not provide the required capability"
@@ -258,7 +267,7 @@ export function buildAvailableCards({
             ? undefined
             : () => onInstall(update.id),
       index: rememberOrder(sourceKey, index),
-      availability: entry?.availability ?? "unknown",
+      availability,
     })
     handledUpdateSources.add(sourceKey)
   }
@@ -301,7 +310,7 @@ export function buildAvailableCards({
 
     const connectingRun = connectingByCanonicalKey.get(sourceKey)
     const isConnecting = connectingByCanonicalKey.has(sourceKey)
-    const availability: CardAvailability = entry?.availability ?? "unknown"
+    const availability = effectiveAvailability(entry, update)
     const isCardAvailable = availability !== "comingSoon"
     const isUpdating = Boolean(update && !update.isNew && update.hasUpdate)
     const isCurrentlyUnapplied =

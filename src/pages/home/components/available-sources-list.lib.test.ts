@@ -38,6 +38,20 @@ vi.mock("@/lib/platform/utils", () => ({
         brandDomain: "x.com",
         platformIds: ["x", "twitter"],
       },
+      reddit: {
+        id: "reddit",
+        displayName: "Reddit",
+        availability: "comingSoon",
+        brandDomain: "reddit.com",
+        platformIds: ["reddit"],
+      },
+      "reddit-pdpp": {
+        id: "reddit",
+        displayName: "Reddit",
+        availability: "comingSoon",
+        brandDomain: "reddit.com",
+        platformIds: ["reddit"],
+      },
       twitter: {
         id: "x",
         displayName: "X (Twitter)",
@@ -95,6 +109,20 @@ vi.mock("@/lib/platform/logo-provider", () => ({
 
 vi.mock("@/lib/platform/registry", () => ({
   PLATFORM_REGISTRY: [
+    {
+      id: "x",
+      displayName: "X (Twitter)",
+      brandDomain: "x.com",
+      platformIds: ["x", "twitter"],
+      availability: "comingSoon",
+    },
+    {
+      id: "reddit",
+      displayName: "Reddit",
+      brandDomain: "reddit.com",
+      platformIds: ["reddit"],
+      availability: "comingSoon",
+    },
     {
       id: "test-coming-soon",
       displayName: "Test Coming Soon",
@@ -193,6 +221,26 @@ describe("buildAvailableCards — availability", () => {
     expect(card?.availability).toBe("available")
     expect(card?.isAvailable).toBe(true)
     expect(card?.onClick).toBeDefined()
+  })
+
+  it("lets a runnable catalog connector override a static coming-soon flag", () => {
+    const cards = buildAvailableCards({
+      platforms: [],
+      connectedPlatformIdSet: emptyConnected,
+      connectingPlatforms: emptyConnecting,
+      onExport,
+      connectorUpdates: [makeUpdate("reddit-pdpp", { name: "Reddit" })],
+      onInstall: vi.fn(),
+    })
+
+    const reddit = cards.find(card => card.sourceKey === "reddit")
+    const x = cards.find(card => card.sourceKey === "x")
+    expect(reddit?.action).toBe("install")
+    expect(reddit?.availability).toBe("available")
+    expect(reddit?.isAvailable).toBe(true)
+    expect(reddit?.label).toBe("Add Reddit")
+    expect(x?.action).toBe("comingSoon")
+    expect(cards.indexOf(reddit!)).toBeLessThan(cards.indexOf(x!))
   })
 
   it('sets availability to "unknown" for platforms without a registry entry', () => {
@@ -431,7 +479,7 @@ describe("buildAvailableCards — availability", () => {
       connectorUpdates: [makeUpdate("heb-pdpp", { name: "H-E-B" })],
     }).find(source => source.cardId === "heb-playwright")
 
-    expect(card?.label).toBe("Install H-E-B (legacy)")
+    expect(card?.label).toBe("Add H-E-B (legacy)")
   })
 
   it("does not label an unrelated legacy source", () => {

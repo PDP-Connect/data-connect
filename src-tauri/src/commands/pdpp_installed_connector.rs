@@ -1030,11 +1030,16 @@ pub(crate) fn host_unavailable_reason(
     match setup_modality {
         Some("static_secret") => {
             if !required_bindings.iter().any(|binding| binding == "network") {
-                return Some("PDPP static-secret connector must require the network binding".into());
+                return Some(
+                    "PDPP static-secret connector must require the network binding".into(),
+                );
             }
         }
         Some("manual_or_upload") => {
-            if !required_bindings.iter().any(|binding| binding == "filesystem") {
+            if !required_bindings
+                .iter()
+                .any(|binding| binding == "filesystem")
+            {
                 return Some(
                     "PDPP manual/upload connector must require the filesystem binding".into(),
                 );
@@ -2378,7 +2383,11 @@ fn to_response(
                 // Redact the whole stderr first, then cut the tail, so a
                 // secret can never be split across the cut.
                 let stderr = redact_secrets(&result.stderr, secrets);
-                super::pdpp_connector::failure_with_stderr_tail(&failure, &stderr, result.stderr_truncated)
+                super::pdpp_connector::failure_with_stderr_tail(
+                    &failure,
+                    &stderr,
+                    result.stderr_truncated,
+                )
             } else {
                 failure
             }
@@ -2865,11 +2874,24 @@ mod tests {
             fs::create_dir_all(icon_path.parent().unwrap()).unwrap();
             fs::write(icon_path, icon_bytes).unwrap();
         }
+        let store_root = whatsapp_temp
+            .path()
+            .join("connectors-store/https%3A%2F%2Fregistry.pdpp.dev%2Fconnectors%2Fwhatsapp/0.2.0");
+        for relative in [
+            "profile/collection-profile.json",
+            "dist/profile.cjs",
+            "provenance.json",
+            "assets/icons/whatsapp.svg",
+        ] {
+            let target = store_root.join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(whatsapp_temp.path().join(relative), target).unwrap();
+        }
         apple_install.root_path = apple_temp.path().to_string_lossy().into_owned();
         apple_install.connector_id = "apple-health-pdpp".into();
         apple_install.company = "Apple".into();
         apple_install.version = apple_manifest["version"].as_str().unwrap().into();
-        whatsapp_install.root_path = whatsapp_temp.path().to_string_lossy().into_owned();
+        whatsapp_install.root_path = store_root.to_string_lossy().into_owned();
         whatsapp_install.connector_id = "whatsapp-pdpp".into();
         whatsapp_install.company = "WhatsApp".into();
         whatsapp_install.version = whatsapp_manifest["version"].as_str().unwrap().into();
@@ -2923,9 +2945,7 @@ mod tests {
                 json!(format!("https://evil.example/connectors/{reserved_key}"));
             candidate["streams"] = json!([{ "name": "repositories" }]);
             let manifest: PdppConnectorManifest = serde_json::from_value(candidate).unwrap();
-            assert!(
-                validate_fixture_manifest(&manifest).is_err()
-            );
+            assert!(validate_fixture_manifest(&manifest).is_err());
         }
         let mut reserved_key = fixture.clone();
         reserved_key["connector_key"] = json!(GITHUB_CONNECTOR_KEY);
@@ -3308,10 +3328,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             &fs::read_to_string(root.join("profile/collection-profile.json")).unwrap(),
         )
         .unwrap();
-        let version = manifest["version"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let version = manifest["version"].as_str().unwrap().to_owned();
         ActiveConnectorInstall {
             connector_id: CHATGPT_CONNECTOR_INSTALL_ID.into(),
             manifest_connector_id: manifest["connector_id"].as_str().map(str::to_owned),
@@ -4200,9 +4217,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             fixture["runtime_requirements"]["bindings"][binding] = json!({ "required": true });
             let manifest: PdppConnectorManifest = serde_json::from_value(fixture).unwrap();
             assert!(!host_can_run(&["network".into(), binding.into()], None));
-            assert!(validate_manifest("1.0.0", manifest.connector_id.as_deref(), &manifest)
-                .unwrap_err()
-                .contains(binding));
+            assert!(
+                validate_manifest("1.0.0", manifest.connector_id.as_deref(), &manifest)
+                    .unwrap_err()
+                    .contains(binding)
+            );
         }
     }
 

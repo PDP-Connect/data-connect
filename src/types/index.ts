@@ -25,10 +25,15 @@ export type PdppSetup = PdppStaticSecretSetup | PdppManualOrUploadSetup
 
 export interface PdppStaticSecretSetup {
   modality: "static_secret"
+  description?: string | null
   credentialCapture: {
+    description?: string | null
     fields: Array<{
       name: string
       label?: string | null
+      description?: string | null
+      helpText?: string | null
+      helpUrl?: string | null
       type?: "email" | "password" | string | null
       required: boolean
       secret: boolean

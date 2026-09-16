@@ -17,7 +17,9 @@ const updateState = vi.hoisted(() => ({
 
 const personalServerState = vi.hoisted(() => ({
   status: "running" as "running" | "starting" | "stopped" | "error",
-  statusRef: { current: "running" as "running" | "starting" | "stopped" | "error" },
+  statusRef: {
+    current: "running" as "running" | "starting" | "stopped" | "error",
+  },
   restartServer: vi.fn().mockResolvedValue(true),
 }))
 
@@ -128,15 +130,16 @@ describe("AvailableSourcesList catalog states", () => {
 
     render(<AvailableSourcesList {...emptyProps} />)
 
-    expect(
-      screen.getByText(
-        "Not available on this device · Requires unavailable binding: desktop_session"
-      )
-    ).toBeTruthy()
+    const reason = screen.getByText(
+      "Not available on this device · Requires unavailable binding: desktop_session"
+    )
+    expect(reason).toBeTruthy()
+    expect(reason.className).toContain("whitespace-normal")
+    expect(reason.className).not.toContain("truncate")
     expect(
       screen.getByRole("button", { name: /Connect Desktop-only/ })
     ).toHaveProperty("disabled", true)
-    expect(screen.queryByRole("button", { name: /Install/ })).toBeNull()
+    expect(screen.queryByRole("button", { name: /Add/ })).toBeNull()
   })
 
   it("installs a catalog source and reloads installed platforms", async () => {
@@ -150,7 +153,7 @@ describe("AvailableSourcesList catalog states", () => {
       />
     )
 
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
 
     await waitFor(() => {
       expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
@@ -168,7 +171,7 @@ describe("AvailableSourcesList catalog states", () => {
         <AvailableSourcesList {...emptyProps} runs={[makeRun({ status })]} />
       )
 
-      screen.getByRole("button", { name: /Install New source/i }).click()
+      screen.getByRole("button", { name: /Add New source/i }).click()
 
       await waitFor(() => {
         expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
@@ -195,7 +198,7 @@ describe("AvailableSourcesList catalog states", () => {
       />
     )
 
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
     await waitFor(() => {
       expect(
         screen.getByText("Will apply after the current import finishes")
@@ -227,7 +230,7 @@ describe("AvailableSourcesList catalog states", () => {
       />
     )
 
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
     await waitFor(() => {
       expect(
         screen.getByText("Will apply after the current import finishes")
@@ -259,9 +262,10 @@ describe("AvailableSourcesList catalog states", () => {
     )
 
     render(<AvailableSourcesList {...emptyProps} />)
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
 
-    expect(await screen.findByText("Applying connector change…")).toBeTruthy()
+    const applyingNotice = await screen.findByText("Applying connector change…")
+    expect(applyingNotice.className).toContain("fixed")
 
     resolveRestart(true)
     await waitFor(() => {
@@ -275,9 +279,10 @@ describe("AvailableSourcesList catalog states", () => {
     personalServerState.statusRef.current = "starting"
     let resolveDownload!: (installed: boolean) => void
     updateState.downloadConnector.mockImplementationOnce(
-      () => new Promise(resolve => {
-        resolveDownload = resolve
-      })
+      () =>
+        new Promise(resolve => {
+          resolveDownload = resolve
+        })
     )
     const onReloadPlatforms = vi.fn()
     const { rerender } = render(
@@ -287,7 +292,7 @@ describe("AvailableSourcesList catalog states", () => {
       />
     )
 
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
     await waitFor(() => {
       expect(updateState.downloadConnector).toHaveBeenCalledWith("New source")
     })
@@ -322,7 +327,7 @@ describe("AvailableSourcesList catalog states", () => {
       />
     )
 
-    screen.getByRole("button", { name: /Install New source/i }).click()
+    screen.getByRole("button", { name: /Add New source/i }).click()
 
     const retryButton = await screen.findByRole("button", {
       name: /Installed but not applied.*New source.*Retry/i,

@@ -22,6 +22,7 @@ import { ConnectedSourcesList } from "@/pages/home/components/connected-sources-
 import { AvailableSourcesList } from "@/pages/home/components/available-sources-list"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { OpenExternalLink } from "@/components/typography/link-open-external"
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -57,6 +58,41 @@ type PendingPdppInteraction = {
   kind: string
   message: string
   schema?: { properties?: Record<string, unknown> } | null
+}
+
+type SessionCredential = {
+  githubToken?: string
+  setupSecrets?: Record<string, string>
+}
+
+// PDPP credentials are invocation inputs. Keeping this cache in the renderer
+// gives refreshes in one app session a usable connection without writing a
+// secret to disk; closing the app clears it with the process.
+const sessionCredentialsByConnection = new Map<string, SessionCredential>()
+
+function sessionCredentialKey(platform: Platform) {
+  return `${platform.id}:${installedPdppConnectionId(platform) ?? "default"}`
+}
+
+function rememberSessionCredential(
+  platform: Platform,
+  credential: SessionCredential
+) {
+  const current = sessionCredentialsByConnection.get(
+    sessionCredentialKey(platform)
+  )
+  sessionCredentialsByConnection.set(sessionCredentialKey(platform), {
+    ...current,
+    ...credential,
+  })
+}
+
+function getSessionCredential(platform: Platform) {
+  return sessionCredentialsByConnection.get(sessionCredentialKey(platform))
+}
+
+export function clearSessionCredentialCache() {
+  sessionCredentialsByConnection.clear()
 }
 
 export function Home() {
@@ -98,6 +134,11 @@ export function Home() {
       ? staticSecretSetup.credentialCapture.fields
       : []
   const staticSecretSetupFields = declaredStaticSecretFields
+  const staticSecretSetupDescription =
+    staticSecretSetup?.modality === "static_secret"
+      ? (staticSecretSetup.description ??
+        staticSecretSetup.credentialCapture.description)
+      : null
   const setupSubmitDisabled = staticSecretSetupFields.some(
     field => field.required && !setupSecretInputs[field.name]?.trim()
   )
@@ -198,12 +239,14 @@ export function Home() {
         openManualUpload(platform)
         return
       }
-      if (platform.id === "github-pdpp") {
-        setGithubTokenInput("")
-        setGithubTokenDialogPlatform(platform)
-        return
-      }
+      const sessionCredential = getSessionCredential(platform)
       if (platform.setup?.modality === "static_secret") {
+        if (sessionCredential?.setupSecrets) {
+          void runImportSource(platform, {
+            setupSecrets: sessionCredential.setupSecrets,
+          })
+          return
+        }
         void invoke<boolean>("is_installed_pdpp_browser_setup_complete", {
           connectorId: platform.id,
           connectionId: installedPdppConnectionId(platform),
@@ -225,6 +268,18 @@ export function Home() {
         return
       }
 
+      if (platform.id === "github-pdpp") {
+        if (sessionCredential?.githubToken) {
+          void runImportSource(platform, {
+            githubToken: sessionCredential.githubToken,
+          })
+          return
+        }
+        setGithubTokenInput("")
+        setGithubTokenDialogPlatform(platform)
+        return
+      }
+
       void runImportSource(platform)
     },
     [openManualUpload, runImportSource]
@@ -242,6 +297,7 @@ export function Home() {
       const githubToken = githubTokenInput.trim()
       if (!platform || !githubToken) return
 
+      rememberSessionCredential(platform, { githubToken })
       closeGithubTokenDialog()
       void runImportSource(platform, { githubToken })
     },
@@ -279,6 +335,7 @@ export function Home() {
         return
       }
 
+      rememberSessionCredential(platform, { setupSecrets })
       closeStaticSecretDialog()
       void runImportSource(platform, {
         setupSecrets,
@@ -513,8 +570,8 @@ export function Home() {
               </AlertDialogTitle>
               <AlertDialogDescription className="text-left">
                 Enter a GitHub personal access token with the permissions needed
-                for this import. DataConnect uses it for this run and does not
-                save it.
+                for this import. Session-only: DataConnect keeps it in memory
+                for this app session and does not write it to disk.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="grid gap-1.5">
@@ -566,9 +623,15 @@ export function Home() {
                 Connect {staticSecretDialogPlatform?.name ?? "source"}
               </AlertDialogTitle>
               <AlertDialogDescription className="text-left">
-                {staticSecretDialogPlatform?.id === "chatgpt-pdpp"
-                  ? "Use these only for initial setup or owner-mediated recovery. DataConnect passes them only to this run and does not save them."
-                  : "DataConnect passes these credentials only to this run and does not save them."}
+                {staticSecretSetupDescription ? (
+                  <span>{staticSecretSetupDescription}</span>
+                ) : null}
+                {staticSecretSetupDescription ? <br /> : null}
+                <span>
+                  Session-only: DataConnect keeps these credentials in memory
+                  for this app session and passes them only to each run. They
+                  are not written to disk.
+                </span>
               </AlertDialogDescription>
             </AlertDialogHeader>
             {staticSecretSetupFields.map((field, index) => {
@@ -581,6 +644,21 @@ export function Home() {
                   >
                     {field.label ?? field.name}
                   </label>
+                  {field.helpText ? (
+                    <Text as="p" intent="small" muted>
+                      {field.helpText}
+                    </Text>
+                  ) : null}
+                  {field.description ? (
+                    <Text as="p" intent="small" muted>
+                      {field.description}
+                    </Text>
+                  ) : null}
+                  {field.helpUrl ? (
+                    <OpenExternalLink href={field.helpUrl} intent="small">
+                      How to get this
+                    </OpenExternalLink>
+                  ) : null}
                   <Input
                     id={inputId}
                     type={field.type ?? "password"}

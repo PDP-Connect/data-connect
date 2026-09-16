@@ -16,7 +16,7 @@ import {
 } from "react-router-dom"
 import { ROUTES } from "@/config/routes"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { Home } from "./index"
+import { clearSessionCredentialCache, Home } from "./index"
 
 const mockUsePlatforms = vi.fn()
 const mockStartImport = vi.fn()
@@ -60,6 +60,8 @@ const chatgptStaticSecretFields = [
     required: true,
     secret: true,
     autocomplete: "username",
+    helpText: "Use the email address for the ChatGPT account.",
+    helpUrl: "https://help.example.com/chatgpt-email",
   },
   {
     name: "password",
@@ -68,6 +70,7 @@ const chatgptStaticSecretFields = [
     required: true,
     secret: true,
     autocomplete: "current-password",
+    description: "Use the account password, not an API key.",
   },
 ]
 
@@ -137,9 +140,10 @@ vi.mock("react-redux", async () => {
           isCheckingUpdates: boolean
         }
       }) => unknown
-    ) => selector({
-      app: { runs: mockRuns, connectorUpdates: [], isCheckingUpdates: false },
-    }),
+    ) =>
+      selector({
+        app: { runs: mockRuns, connectorUpdates: [], isCheckingUpdates: false },
+      }),
   }
 })
 
@@ -179,6 +183,7 @@ function openManualUpload() {
 
 describe("Home", () => {
   beforeEach(() => {
+    clearSessionCredentialCache()
     mockStartImport.mockReset()
     mockStopExport.mockReset()
     mockNavigate.mockReset()
@@ -340,6 +345,7 @@ describe("Home", () => {
           runtime: "pdpp-network",
           setup: {
             modality: "static_secret",
+            description: "Connect the ChatGPT account used for this source.",
             credentialCapture: { fields: chatgptStaticSecretFields },
           },
         },
@@ -364,6 +370,15 @@ describe("Home", () => {
       "autocomplete",
       "current-password"
     )
+    expect(
+      screen.getByText("Connect the ChatGPT account used for this source.")
+    ).toBeTruthy()
+    expect(
+      screen.getByText("Use the email address for the ChatGPT account.")
+    ).toBeTruthy()
+    expect(
+      screen.getByRole("link", { name: "How to get this" }).getAttribute("href")
+    ).toBe("https://help.example.com/chatgpt-email")
     expect(mockStartImport).not.toHaveBeenCalled()
     fireEvent.change(screen.getByLabelText(/chatgpt email/i), {
       target: { value: "owner@example.com" },
@@ -522,6 +537,18 @@ describe("Home", () => {
       )
     })
     expect(screen.queryByLabelText(/ynab personal access token/i)).toBeNull()
+
+    mockStartImport.mockClear()
+    mockInvoke.mockClear()
+    fireEvent.click(screen.getByRole("button", { name: /connect ynab/i }))
+
+    await waitFor(() => {
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "ynab-pdpp" }),
+        { setupSecrets: { secret: "ynab_transient_pat" } }
+      )
+    })
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 
   it.each(["chatgpt-pdpp", "example-pdpp"])(

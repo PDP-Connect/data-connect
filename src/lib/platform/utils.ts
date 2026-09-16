@@ -19,20 +19,32 @@ const entryMatchesToken = (entry: PlatformRegistryEntry, token: string) => {
 // not already cover, so they get a source route and a place on Home.
 let RUNTIME_REGISTRY: PlatformRegistryEntry[] = []
 
+const findStaticRegistryEntry = (token: string) =>
+  PLATFORM_REGISTRY.find(entry => entryMatchesToken(entry, token)) ?? null
+
+const findRuntimeRegistryEntry = (token: string) =>
+  RUNTIME_REGISTRY.find(entry => entryMatchesToken(entry, token)) ?? null
+
 const slugFor = (platform: Platform) => {
-  const fromUri = platform.id.match(/\/connectors\/([a-z0-9][a-z0-9-]*)\/?$/i)?.[1]
+  const fromUri = platform.id.match(
+    /\/connectors\/([a-z0-9][a-z0-9-]*)\/?$/i
+  )?.[1]
   const base = fromUri ?? platform.filename ?? platform.name ?? platform.id
-  return base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
 }
 
 export const registerRuntimePlatformEntries = (platforms: Platform[]) => {
   const runtimePlatforms = new Map<string, Platform>()
   for (const platform of platforms) {
     if (platform.runtime !== "pdpp-network") continue
-    const token = normalizeToken(platform.id)
-    if (PLATFORM_REGISTRY.some(entry => entryMatchesToken(entry, token)))
-      continue
-    runtimePlatforms.set(token, platform)
+    const hasStaticSource = [platform.id, platform.name, platform.company]
+      .filter((value): value is string => Boolean(value))
+      .some(value => findStaticRegistryEntry(normalizeToken(value)))
+    if (hasStaticSource) continue
+    runtimePlatforms.set(normalizeToken(platform.id), platform)
   }
 
   const routeBases = new Map<string, number>()
@@ -58,9 +70,7 @@ export const registerRuntimePlatformEntries = (platforms: Platform[]) => {
 }
 
 const findRegistryEntryByToken = (token: string) =>
-  PLATFORM_REGISTRY.find(entry => entryMatchesToken(entry, token)) ??
-  RUNTIME_REGISTRY.find(entry => entryMatchesToken(entry, token)) ??
-  null
+  findStaticRegistryEntry(token) ?? findRuntimeRegistryEntry(token)
 
 export const getPlatformRegistryEntryById = (platformId: string) =>
   findRegistryEntryByToken(normalizeToken(platformId))
@@ -74,16 +84,22 @@ export const getPlatformRegistryEntry = (platform: {
   company?: string
 }) => {
   if (platform.id) {
-    const byId = getPlatformRegistryEntryById(platform.id)
+    const byId = findStaticRegistryEntry(normalizeToken(platform.id))
     if (byId) return byId
   }
-  if (platform.name) {
-    const byName = getPlatformRegistryEntryByName(platform.name)
+  for (const identity of [platform.name, platform.company]) {
+    if (!identity) continue
+    const byName = findStaticRegistryEntry(normalizeToken(identity))
     if (byName) return byName
   }
-  if (platform.company) {
-    const byCompany = getPlatformRegistryEntryByName(platform.company)
-    if (byCompany) return byCompany
+  if (platform.id) {
+    const byId = findRuntimeRegistryEntry(normalizeToken(platform.id))
+    if (byId) return byId
+  }
+  for (const identity of [platform.name, platform.company]) {
+    if (!identity) continue
+    const byName = findRuntimeRegistryEntry(normalizeToken(identity))
+    if (byName) return byName
   }
   return null
 }
@@ -96,9 +112,9 @@ export const getAllAvailableScopes = (platforms?: Platform[]): string[] => {
     const scopes = platforms.flatMap(p => p.scopes ?? [])
     if (scopes.length > 0) return [...new Set(scopes)]
   }
-  return PLATFORM_REGISTRY
-    .map(entry => entry.ingestScope)
-    .filter((scope): scope is string => Boolean(scope))
+  return PLATFORM_REGISTRY.map(entry => entry.ingestScope).filter(
+    (scope): scope is string => Boolean(scope)
+  )
 }
 
 export const resolvePlatformForEntry = (
@@ -107,20 +123,18 @@ export const resolvePlatformForEntry = (
 ) => {
   const entryPlatformIds = entry.platformIds?.map(normalizeToken) ?? []
   const entryTokens = [entry.id, ...(entry.aliases ?? [])].map(normalizeToken)
-  const matchingPlatformById = platforms.filter(platform =>
-    entryPlatformIds.includes(normalizeToken(platform.id))
-  )
+  const matchingPlatforms = platforms.filter(platform => {
+    const platformTokens = [platform.id, platform.name, platform.company]
+      .filter((value): value is string => Boolean(value))
+      .map(normalizeToken)
+    return (
+      entryPlatformIds.includes(normalizeToken(platform.id)) ||
+      entryTokens.some(token => platformTokens.includes(token))
+    )
+  })
   return (
-    matchingPlatformById.find(platform => platform.runtime === "pdpp-network") ??
-    matchingPlatformById[0] ??
-    platforms.find(platform =>
-      entryTokens.some(token =>
-        [platform.id, platform.name, platform.company]
-          .filter(Boolean)
-          .map(value => normalizeToken(value))
-          .includes(token)
-      )
-    ) ??
+    matchingPlatforms.find(platform => platform.runtime === "pdpp-network") ??
+    matchingPlatforms[0] ??
     null
   )
 }

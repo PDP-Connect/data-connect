@@ -16,6 +16,8 @@ import {
 import { ROUTES } from "@/config/routes"
 import { cn } from "@/lib/classes"
 import { getLastRunLabel } from "@/lib/platform/ui"
+import { getPlatformRegistryEntry } from "@/lib/platform/utils"
+import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import type { Platform, Run } from "@/types"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
 import { Link } from "react-router-dom"
@@ -185,7 +187,10 @@ export function ConnectedSourcesList({
             <SourceRowWithActions
               key={platform.id}
               iconName={platform.name}
-              iconImageSrc={platform.logoURL}
+              iconImageSrc={resolvePlatformLogo(
+                platform,
+                getPlatformRegistryEntry(platform)
+              )}
               label={getPlatformSourceLabel(platform)}
               meta={meta}
               rowAction={{
@@ -244,7 +249,9 @@ export function ConnectedSourcesList({
                         />
                       </SourceRowActionButton>
                     </TooltipTrigger>
-                    <TooltipContent side="top">{syncTooltipCopy}</TooltipContent>
+                    <TooltipContent side="top">
+                      {syncTooltipCopy}
+                    </TooltipContent>
                   </Tooltip>
                 </div>
               }

@@ -59,8 +59,9 @@ export function AvailableSourcesList({
     useState(false)
   const [localPendingConnectorChanges, setLocalPendingConnectorChanges] =
     useState<Set<string>>(() => new Set())
-  const [unappliedConnectorChanges, setUnappliedConnectorChanges] =
-    useState<Set<string>>(() => new Set())
+  const [unappliedConnectorChanges, setUnappliedConnectorChanges] = useState<
+    Set<string>
+  >(() => new Set())
   const applyInFlightRef = useRef(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [sourceOrder] = useState(() => new Map<string, number>())
@@ -170,43 +171,43 @@ export function AvailableSourcesList({
         id => !unappliedConnectorChanges.has(id) || retryIds.has(id)
       )
 
-    if (
-      applyInFlightRef.current ||
-      hasActiveRuns ||
-      idsToApply.length === 0 ||
-      personalServerStatusRef.current === "starting"
-    ) {
-      return
-    }
-
-    applyInFlightRef.current = true
-    setIsApplyingConnectorChange(true)
-    try {
-      let applied = true
-      if (personalServerStatusRef.current === "running") {
-        try {
-          applied = await restartServer()
-        } catch {
-          applied = false
-        }
-      }
-
-      if (!applied) {
-        markUnapplied(idsToApply)
+      if (
+        applyInFlightRef.current ||
+        hasActiveRuns ||
+        idsToApply.length === 0 ||
+        personalServerStatusRef.current === "starting"
+      ) {
         return
       }
 
+      applyInFlightRef.current = true
+      setIsApplyingConnectorChange(true)
       try {
-        await onReloadPlatforms?.()
-        clearPending(idsToApply)
-        clearUnapplied(idsToApply)
-      } catch {
-        markUnapplied(idsToApply)
+        let applied = true
+        if (personalServerStatusRef.current === "running") {
+          try {
+            applied = await restartServer()
+          } catch {
+            applied = false
+          }
+        }
+
+        if (!applied) {
+          markUnapplied(idsToApply)
+          return
+        }
+
+        try {
+          await onReloadPlatforms?.()
+          clearPending(idsToApply)
+          clearUnapplied(idsToApply)
+        } catch {
+          markUnapplied(idsToApply)
+        }
+      } finally {
+        applyInFlightRef.current = false
+        setIsApplyingConnectorChange(false)
       }
-    } finally {
-      applyInFlightRef.current = false
-      setIsApplyingConnectorChange(false)
-    }
     },
     [
       clearPending,
@@ -329,17 +330,14 @@ export function AvailableSourcesList({
 
   return (
     <section className={cn("space-y-gap", className)}>
+      {isApplyingConnectorChange ? <ApplyingConnectorChangeNotice /> : null}
       <Header
         isCheckingUpdates={isCheckingUpdates}
         onRefresh={() => {
           void checkForUpdates(true)
         }}
       />
-      {isApplyingConnectorChange ? (
-        <Text as="p" intent="fine" muted>
-          Applying connector change…
-        </Text>
-      ) : pendingConnectorIds.size > 0 && hasActiveRuns ? (
+      {pendingConnectorIds.size > 0 && hasActiveRuns ? (
         <Text as="p" intent="fine" muted>
           Will apply after the current import finishes
         </Text>
@@ -437,8 +435,8 @@ export function AvailableSourcesList({
                     as="p"
                     intent="fine"
                     muted
-                    truncate
                     align="right"
+                    className="w-full min-w-0 whitespace-normal break-words"
                     title={availabilityReason}
                   >
                     {availabilityReason}
@@ -449,8 +447,8 @@ export function AvailableSourcesList({
                     as="p"
                     intent="fine"
                     muted
-                    truncate
                     align="right"
+                    className="w-full min-w-0 whitespace-normal break-words"
                     title={actionError}
                   >
                     Installation failed · {actionError}
@@ -548,6 +546,24 @@ export function AvailableSourcesList({
         )}
       </div>
     </section>
+  )
+}
+
+function ApplyingConnectorChangeNotice() {
+  return (
+    <Text
+      as="p"
+      intent="small"
+      muted
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "fixed bottom-4 right-4 z-50",
+        "rounded-md border bg-background px-3 py-2 shadow-lg"
+      )}
+    >
+      Applying connector change…
+    </Text>
   )
 }
 

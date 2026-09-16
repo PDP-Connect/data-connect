@@ -129,6 +129,8 @@ struct ActivePdppBrand {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ActivePdppSetup {
     modality: String,
+    #[serde(default, alias = "setup_description")]
+    description: Option<String>,
     #[serde(
         default,
         rename = "credentialCapture",
@@ -147,6 +149,8 @@ pub(crate) struct ActivePdppSetup {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ActivePdppCredentialCapture {
+    #[serde(default)]
+    description: Option<String>,
     fields: Vec<ActivePdppCredentialField>,
 }
 
@@ -154,6 +158,12 @@ struct ActivePdppCredentialCapture {
 struct ActivePdppCredentialField {
     name: String,
     label: Option<String>,
+    #[serde(default, rename = "description")]
+    description: Option<String>,
+    #[serde(default, rename = "helpText", alias = "help_text")]
+    help_text: Option<String>,
+    #[serde(default, rename = "helpUrl", alias = "help_url")]
+    help_url: Option<String>,
     #[serde(rename = "type")]
     field_type: Option<String>,
     required: bool,
@@ -2879,6 +2889,7 @@ mod tests {
         resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
         ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
     };
+    use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -2943,6 +2954,57 @@ mod tests {
             assert!(setup.get("credential_capture").is_none());
             assert!(setup.get("manual_or_upload").is_none());
         }
+    }
+
+    #[test]
+    fn active_pdpp_setup_preserves_credential_guidance_for_frontend() {
+        let manifest = json!({
+            "connector_id": "https://registry.pdpp.dev/connectors/example",
+            "setup": {
+                "modality": "static_secret",
+                "description": "Connect this source with its API credential.",
+                "credential_capture": {
+                    "description": "Create the credential before you start.",
+                    "fields": [{
+                        "name": "secret",
+                        "label": "API key",
+                        "description": "Use the key for this account.",
+                        "help_text": "Create a key in the provider settings.",
+                        "help_url": "https://example.com/settings",
+                        "required": true,
+                        "secret": true
+                    }]
+                }
+            },
+            "streams": [{ "name": "records" }]
+        });
+
+        let parsed: ActivePdppPlatformManifest = serde_json::from_value(manifest).unwrap();
+        let setup = serde_json::to_value(parsed.setup.unwrap()).unwrap();
+        expect_json_string(
+            &setup["description"],
+            "Connect this source with its API credential.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["description"],
+            "Create the credential before you start.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["helpText"],
+            "Create a key in the provider settings.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["helpUrl"],
+            "https://example.com/settings",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["description"],
+            "Use the key for this account.",
+        );
+    }
+
+    fn expect_json_string(value: &serde_json::Value, expected: &str) {
+        assert_eq!(value.as_str(), Some(expected));
     }
 
     #[test]

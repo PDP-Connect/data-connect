@@ -46,6 +46,27 @@ describe("ConnectedSourcesList sync click guard", () => {
     expect(container.querySelector("img")?.getAttribute("src")).toBe(logoURL)
   })
 
+  it("uses the registry logo while an installed platform has no logo URL", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[
+              { ...PLATFORM, id: "github-pdpp", name: "GitHub", logoURL: "" },
+            ]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(container.querySelector("img")?.getAttribute("src")).toContain(
+      "github.com"
+    )
+  })
+
   it("describes the local Personal Server without linking to its legacy page", () => {
     render(
       <MemoryRouter>
