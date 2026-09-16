@@ -33,6 +33,8 @@ export default defineConfig({
       "scripts/forced-release.test.ts",
       "scripts/release-atomicity.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
+      "scripts/ensure-console-stack.test.js",
+      "scripts/ensure-reference-stack.test.js",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",
       "scripts/verify-bundled-personal-server.test.mjs",

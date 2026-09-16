@@ -32,6 +32,7 @@ jobs:
           - platform: macos-15
             os_family: macos
             target: aarch64-apple-darwin
+            verify_reference_stacks: true
             artifact_key: macos-arm64
             expected_arch: arm64
             node_platform: darwin
@@ -42,6 +43,7 @@ jobs:
           - platform: macos-15-intel
             os_family: macos
             target: x86_64-apple-darwin
+            verify_reference_stacks: false
             artifact_key: macos-x64
             expected_arch: x86_64
             node_platform: darwin
@@ -52,6 +54,7 @@ jobs:
           - platform: ubuntu-22.04
             os_family: linux
             target: x86_64-unknown-linux-gnu
+            verify_reference_stacks: true
             artifact_key: linux-x64
             node_platform: linux
             node_arch: x64
@@ -69,6 +72,7 @@ jobs:
           - platform: windows-2022
             os_family: windows
             target: x86_64-pc-windows-msvc
+            verify_reference_stacks: false
             artifact_key: windows-x64
             node_platform: win32
             node_arch: x64
@@ -162,6 +166,20 @@ jobs:
       - name: Install PDPP runtime dependencies
         run: node scripts/ensure-pdpp-runtime.js
 
+      - name: Stage reference-stack roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_binary="src-tauri/binaries/pdpp-node-${{ matrix.target }}"
+          if [ "${{ matrix.os_family }}" = "windows" ]; then
+            node_binary="${node_binary}.exe"
+          fi
+          node scripts/ensure-reference-stack.js \
+            --node-binary "$node_binary" \
+            --target "${{ matrix.target }}" \
+            --profile release
+          node scripts/ensure-console-stack.js --profile release
+
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:
@@ -172,6 +190,13 @@ jobs:
           codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+          for stack_root in \
+            src-tauri/target/release/reference-stack/ri \
+            src-tauri/target/release/reference-stack/console; do
+            find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
+              -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+            node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
+          done
 
       # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
       # below deletes every Tauri-produced .dmg and rebuilds it with
@@ -203,9 +228,22 @@ jobs:
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          stack_verification_args=()
+          if [ "${{ matrix.verify_reference_stacks }}" = "true" ]; then
+            stack_verification_args+=(--verify-reference-stacks)
+          else
+            echo "::warning::reference-stack verification is deferred for ${{ matrix.target }}; the artifact will still be built."
+          fi
           if [ "${{ matrix.os_family }}" = "macos" ]; then
             for app in "$bundle_root"/macos/*.app; do
               [ -e "$app" ] || { echo "No macOS app bundle found"; exit 1; }
+
+              reference_destination="$app/Contents/Resources/reference-stack"
+              rm -rf "$reference_destination"
+              mkdir -p "$reference_destination"
+              cp -R src-tauri/target/release/reference-stack/ri "$reference_destination/ri"
+              cp -R src-tauri/target/release/reference-stack/console "$reference_destination/console"
+
               destination="$app/Contents/Resources/personal-server/dist/node_modules"
               mkdir -p "$destination"
               cp -R personal-server/dist/node_modules/. "$destination/"
@@ -214,6 +252,11 @@ jobs:
                 ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
                 codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
                 find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
+                  find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
+                    -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+                  node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
+                done
                 codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
               fi
 
@@ -229,7 +272,7 @@ jobs:
               ln -s /Applications "$staging_dir/Applications"
               node scripts/create-macos-dmg.mjs --volume-name DataConnect --source-folder "$staging_dir" --output "$dmg_path"
             done
-            verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
+            verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root" "${stack_verification_args[@]}")
             if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
               verification_args+=(--verify-code-signature)
             fi
@@ -238,11 +281,11 @@ jobs:
 
           if [ "${{ matrix.os_family }}" = "linux" ]; then
             node scripts/finalize-linux-appimage.js --appimage-dir "$bundle_root/appimage"
-            node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root"
+            node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root" "${stack_verification_args[@]}"
           fi
 
           if [ "${{ matrix.os_family }}" = "windows" ]; then
-            node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
+            node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root" "${stack_verification_args[@]}"
           fi
 
       - name: Stage verified release artifacts

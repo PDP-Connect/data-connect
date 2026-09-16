@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "node scripts/ensure-connectors.js && npm run dev",
-    "beforeBuildCommand": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && npm run build"
+    "beforeBuildCommand": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-reference-stack.js && node scripts/ensure-console-stack.js --profile release && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -33,25 +33,15 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": [
-          "vana"
-        ]
+        "schemes": ["vana"]
       }
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
-    "externalBin": [
-      "binaries/pdpp-node"
-    ],
-    "targets": [
-      "dmg",
-      "app",
-      "nsis",
-      "appimage",
-      "deb"
-    ],
+    "externalBin": ["binaries/pdpp-node"],
+    "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -76,6 +66,8 @@
       "../personal-server/dist/personal-server*": "personal-server/dist/",
       "../personal-server/dist/node_modules/": "personal-server/dist/node_modules/",
       "../pdpp-runtime/": "pdpp-runtime/",
+      "target/release/reference-stack/ri/": "reference-stack/ri/",
+      "target/release/reference-stack/console/": "reference-stack/console/",
       "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE"
     },
     "linux": {

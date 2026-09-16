@@ -2,10 +2,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, resolve } from "node:path"
+import { basename, join, relative, resolve } from "node:path"
 import { createInterface } from "node:readline"
 import { isMainModule } from "./is-main-module.js"
 
@@ -166,6 +168,19 @@ export function listDebEntries(artifact) {
   }).split("\n")
 }
 
+function extractDebArtifact(artifact) {
+  const root = mkdtempSync(
+    join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-deb-")
+  )
+  try {
+    run("dpkg-deb", ["--extract", artifact, root])
+    return root
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
 function listDirectoryEntries(root, relative = "") {
   const entries = []
   for (const entry of readdirSync(join(root, relative), {
@@ -178,21 +193,130 @@ function listDirectoryEntries(root, relative = "") {
   return entries
 }
 
-function listAppImageEntries(artifact) {
+function findResourceRoots(root, resourcePath) {
+  const segments = resourcePath.split("/").filter(Boolean)
+  const normalizedSegments = segments.map(segment => segment.toLowerCase())
+  const matches = []
+
+  function visit(current) {
+    const candidate = join(current, ...segments)
+    if (existsSync(candidate) && statSync(candidate).isDirectory()) {
+      matches.push(candidate)
+    }
+
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory()) visit(join(current, entry.name))
+    }
+  }
+
+  visit(root)
+  if (matches.length === 0) return []
+
+  return matches.filter(candidate => {
+    const suffix = relative(root, candidate)
+      .split(/[/\\]/)
+      .slice(-segments.length)
+      .map(segment => segment.toLowerCase())
+    return JSON.stringify(suffix) === JSON.stringify(normalizedSegments)
+  })
+}
+
+function hashFile(filePath, prefixed = true) {
+  const digest = createHash("sha256")
+    .update(readFileSync(filePath))
+    .digest("hex")
+  return prefixed ? `sha256:${digest}` : digest
+}
+
+function packagedManifestFiles(root, prefixed) {
+  const files = []
+  function visit(current) {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort(
+      (left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0
+    )) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile() && entry.name !== "manifest.json") {
+        files.push({
+          path: relative(root, path).split("\\").join("/"),
+          sha256: hashFile(path, prefixed),
+          size: statSync(path).size,
+        })
+      }
+    }
+  }
+  visit(root)
+  return files
+}
+
+export function assertPackagedReferenceStacks(root, artifactName) {
+  for (const stack of ["ri", "console"]) {
+    const matches = findResourceRoots(root, `reference-stack/${stack}`)
+    if (matches.length !== 1) {
+      fail(
+        `${artifactName} must contain exactly one packaged reference-stack/${stack} root`
+      )
+    }
+
+    const stackRoot = matches[0]
+    const manifestPath = join(stackRoot, "manifest.json")
+    if (!existsSync(manifestPath)) {
+      fail(`${artifactName} is missing reference-stack/${stack}/manifest.json`)
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+
+    if (Array.isArray(manifest.files)) {
+      const prefixed = manifest.files[0]?.sha256?.startsWith("sha256:") ?? false
+      const actual = packagedManifestFiles(stackRoot, prefixed)
+      if (JSON.stringify(manifest.files) !== JSON.stringify(actual)) {
+        fail(
+          `${artifactName} reference-stack/${stack} manifest hashes do not match`
+        )
+      }
+      continue
+    }
+
+    if (manifest.hashes && typeof manifest.hashes === "object") {
+      const actual = packagedManifestFiles(stackRoot, true)
+      const expected = Object.fromEntries(
+        actual.map(file => [file.path, file.sha256])
+      )
+      if (JSON.stringify(manifest.hashes) !== JSON.stringify(expected)) {
+        fail(
+          `${artifactName} reference-stack/${stack} manifest hashes do not match`
+        )
+      }
+      continue
+    }
+
+    fail(
+      `${artifactName} reference-stack/${stack}/manifest.json has no supported hash collection`
+    )
+  }
+}
+
+function extractAppImage(artifact) {
   const extractionRoot = mkdtempSync(
     join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-appimage-")
   )
+  run(artifact, ["--appimage-extract"], {
+    cwd: extractionRoot,
+    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
+  })
+  return extractionRoot
+}
+
+function extractWindowsInstaller(artifact) {
+  const root = mkdtempSync(
+    join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-nsis-")
+  )
   try {
-    run(artifact, ["--appimage-extract"], {
-      cwd: extractionRoot,
-      env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
-    })
-    const appDir = join(extractionRoot, "squashfs-root")
-    if (!existsSync(appDir))
-      fail(`${basename(artifact)} did not extract an AppDir`)
-    return listDirectoryEntries(appDir)
-  } finally {
-    rmSync(extractionRoot, { recursive: true, force: true })
+    run("7z", ["x", "-y", `-o${root}`, artifact])
+    return root
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true })
+    throw error
   }
 }
 
@@ -314,12 +438,21 @@ export function selectMacAppExecutables(
   }
 }
 
-function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
+function verifyMacApp(
+  app,
+  expectedArch,
+  artifactName,
+  verifyCodeSignature,
+  verifyReferenceStacks
+) {
   if (verifyCodeSignature) {
     run("codesign", ["--verify", "--deep", "--strict", app])
   }
   const entries = listDirectoryEntries(app)
   assertPackagedRuntime(entries, artifactName)
+  if (verifyReferenceStacks) {
+    assertPackagedReferenceStacks(app, artifactName)
+  }
   assertPackagedNode(entries, artifactName, "macos")
   assertPackagedBrowser(entries, artifactName, "macos")
 
@@ -381,7 +514,12 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   }
 }
 
-function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
+function verifyMacArtifacts(
+  bundleRoot,
+  expectedArch,
+  verifyCodeSignature,
+  verifyReferenceStacks
+) {
   const sourceApps = findAppBundles(join(bundleRoot, "macos"))
   const dmgArtifacts = listArtifacts(join(bundleRoot, "dmg"), name =>
     name.endsWith(".dmg")
@@ -393,7 +531,8 @@ function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
     sourceApps[0],
     expectedArch,
     basename(sourceApps[0]),
-    verifyCodeSignature
+    verifyCodeSignature,
+    verifyReferenceStacks
   )
 
   const mountRoot = mkdtempSync(
@@ -418,7 +557,8 @@ function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
       mountedApps[0],
       expectedArch,
       basename(dmgArtifacts[0]),
-      verifyCodeSignature
+      verifyCodeSignature,
+      verifyReferenceStacks
     )
   } finally {
     if (attached) run("hdiutil", ["detach", mountRoot])
@@ -433,7 +573,7 @@ function listArtifacts(directory, matcher) {
     .map(filename => join(directory, filename))
 }
 
-function verifyLinuxArtifacts(bundleRoot) {
+function verifyLinuxArtifacts(bundleRoot, verifyReferenceStacks) {
   const debArtifacts = listArtifacts(join(bundleRoot, "deb"), name =>
     name.endsWith(".deb")
   )
@@ -447,17 +587,37 @@ function verifyLinuxArtifacts(bundleRoot) {
   assertPackagedRuntime(debEntries, basename(debArtifacts[0]))
   assertPackagedNode(debEntries, basename(debArtifacts[0]), "linux")
   assertPackagedBrowser(debEntries, basename(debArtifacts[0]), "linux")
-  const appImageEntries = listAppImageEntries(appImageArtifacts[0])
-  assertPackagedRuntime(appImageEntries, basename(appImageArtifacts[0]))
-  assertPackagedNode(appImageEntries, basename(appImageArtifacts[0]), "linux")
-  assertPackagedBrowser(
-    appImageEntries,
-    basename(appImageArtifacts[0]),
-    "linux"
-  )
+  if (verifyReferenceStacks) {
+    const debRoot = extractDebArtifact(debArtifacts[0])
+    try {
+      assertPackagedReferenceStacks(debRoot, basename(debArtifacts[0]))
+    } finally {
+      rmSync(debRoot, { recursive: true, force: true })
+    }
+  }
+
+  const appImageRoot = extractAppImage(appImageArtifacts[0])
+  try {
+    const appDir = join(appImageRoot, "squashfs-root")
+    if (!existsSync(appDir))
+      fail(`${basename(appImageArtifacts[0])} did not extract an AppDir`)
+    const appImageEntries = listDirectoryEntries(appDir)
+    assertPackagedRuntime(appImageEntries, basename(appImageArtifacts[0]))
+    if (verifyReferenceStacks) {
+      assertPackagedReferenceStacks(appDir, basename(appImageArtifacts[0]))
+    }
+    assertPackagedNode(appImageEntries, basename(appImageArtifacts[0]), "linux")
+    assertPackagedBrowser(
+      appImageEntries,
+      basename(appImageArtifacts[0]),
+      "linux"
+    )
+  } finally {
+    rmSync(appImageRoot, { recursive: true, force: true })
+  }
 }
 
-async function verifyWindowsArtifacts(bundleRoot) {
+async function verifyWindowsArtifacts(bundleRoot, verifyReferenceStacks) {
   const installers = listArtifacts(join(bundleRoot, "nsis"), name =>
     name.endsWith(".exe")
   )
@@ -466,6 +626,14 @@ async function verifyWindowsArtifacts(bundleRoot) {
   assertPackagedRuntime(entries, basename(installers[0]))
   assertPackagedNode(entries, basename(installers[0]), "windows")
   assertPackagedBrowser(entries, basename(installers[0]), "windows")
+  if (verifyReferenceStacks) {
+    const extractedRoot = extractWindowsInstaller(installers[0])
+    try {
+      assertPackagedReferenceStacks(extractedRoot, basename(installers[0]))
+    } finally {
+      rmSync(extractedRoot, { recursive: true, force: true })
+    }
+  }
 }
 
 export function parseArgs(argv) {
@@ -474,6 +642,7 @@ export function parseArgs(argv) {
     expectedArch: "",
     platform: "",
     verifyCodeSignature: false,
+    verifyReferenceStacks: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
@@ -483,11 +652,13 @@ export function parseArgs(argv) {
     else if (token === "--platform") args.platform = argv[++index] ?? ""
     else if (token === "--verify-code-signature")
       args.verifyCodeSignature = true
+    else if (token === "--verify-reference-stacks")
+      args.verifyReferenceStacks = true
     else fail(`Unknown argument: ${token}`)
   }
   if (!args.bundleRoot || !args.platform) {
     fail(
-      "Usage: --bundle-root <path> --platform <macos|linux|windows> [--expected-arch <arm64|x86_64>] [--verify-code-signature]"
+      "Usage: --bundle-root <path> --platform <macos|linux|windows> [--expected-arch <arm64|x86_64>] [--verify-code-signature] [--verify-reference-stacks]"
     )
   }
   if (
@@ -500,14 +671,24 @@ export function parseArgs(argv) {
 }
 
 async function main() {
-  const { bundleRoot, expectedArch, platform, verifyCodeSignature } = parseArgs(
-    process.argv.slice(2)
-  )
+  const {
+    bundleRoot,
+    expectedArch,
+    platform,
+    verifyCodeSignature,
+    verifyReferenceStacks,
+  } = parseArgs(process.argv.slice(2))
   if (platform === "macos") {
-    verifyMacArtifacts(resolve(bundleRoot), expectedArch, verifyCodeSignature)
-  } else if (platform === "linux") verifyLinuxArtifacts(resolve(bundleRoot))
+    verifyMacArtifacts(
+      resolve(bundleRoot),
+      expectedArch,
+      verifyCodeSignature,
+      verifyReferenceStacks
+    )
+  } else if (platform === "linux")
+    verifyLinuxArtifacts(resolve(bundleRoot), verifyReferenceStacks)
   else if (platform === "windows")
-    await verifyWindowsArtifacts(resolve(bundleRoot))
+    await verifyWindowsArtifacts(resolve(bundleRoot), verifyReferenceStacks)
   else fail(`Unsupported platform: ${platform}`)
   console.log(
     `[verify-bundled-personal-server] ${platform} artifact contents verified`

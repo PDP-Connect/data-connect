@@ -46,3 +46,34 @@ test("configured redirects resolve correctly", async () => {
   const redirects = await nextConfig.redirects();
   assert.equal(resolve(redirects, "/favicon.ico")?.destination, "/brand/pdpp-favicon.svg");
 });
+
+test("configured reference rewrites resolve correctly", async () => {
+  assert.ok(nextConfig.rewrites, "next.config.mjs must declare rewrites()");
+  const rewrites = await nextConfig.rewrites();
+  assert.ok(Array.isArray(rewrites), "next.config.mjs rewrites() must return an array");
+  assert.deepEqual(
+    rewrites.map(({ source, destination }) => ({ destination, source })),
+    [
+      {
+        destination: "/well-known/oauth-authorization-server",
+        source: "/.well-known/oauth-authorization-server",
+      },
+      {
+        destination: "/well-known/oauth-protected-resource/:path*",
+        source: "/.well-known/oauth-protected-resource/:path*",
+      },
+      {
+        destination: "/well-known/oauth-protected-resource",
+        source: "/.well-known/oauth-protected-resource",
+      },
+      {
+        destination: "/well-known/skills/:path*",
+        source: "/.well-known/skills/:path*",
+      },
+      {
+        destination: "/llms.txt",
+        source: "/.well-known/llms.txt",
+      },
+    ]
+  );
+});

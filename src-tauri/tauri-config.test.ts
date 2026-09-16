@@ -46,6 +46,36 @@ describe("tauri manual-install config", () => {
     expect(document.bundle?.resources?.["../pdpp-runtime/**/*"]).toBeUndefined()
   })
 
+  it("bundles the reference implementation as one non-flattened resource root", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { resources?: Record<string, string> }
+    }
+
+    expect(
+      document.bundle?.resources?.["target/release/reference-stack/ri/"]
+    ).toBe("reference-stack/ri/")
+    expect(
+      document.bundle?.resources?.["target/release/reference-stack/ri/**/*"]
+    ).toBeUndefined()
+  })
+
+  it("preserves the staged operator console directory tree", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { resources?: Record<string, string> }
+    }
+
+    expect(
+      document.bundle?.resources?.["target/release/reference-stack/console/"]
+    ).toBe("reference-stack/console/")
+    expect(
+      document.bundle?.resources?.[
+        "target/release/reference-stack/console/**/*"
+      ]
+    ).toBeUndefined()
+  })
+
   it("bundles the pinned GitHub and ChatGPT PDPP profiles", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
@@ -71,6 +101,12 @@ describe("tauri manual-install config", () => {
 
     expect(document.build?.beforeBuildCommand).toContain(
       "node scripts/ensure-pdpp-runtime.js"
+    )
+    expect(document.build?.beforeBuildCommand).toContain(
+      "node scripts/ensure-reference-stack.js"
+    )
+    expect(document.build?.beforeBuildCommand).toContain(
+      "node scripts/ensure-console-stack.js --profile release"
     )
   })
 
