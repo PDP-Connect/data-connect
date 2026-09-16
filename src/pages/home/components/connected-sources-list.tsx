@@ -16,10 +16,13 @@ import {
 import { ROUTES } from "@/config/routes"
 import { cn } from "@/lib/classes"
 import { getLastRunLabel } from "@/lib/platform/ui"
+import { getPlatformRegistryEntry } from "@/lib/platform/utils"
+import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import type { Platform, Run } from "@/types"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
 import { Link } from "react-router-dom"
 import { isBlockingRun } from "./available-sources-list.policy"
+import { getPlatformSourceLabel } from "./available-sources-list.lib"
 
 interface ConnectedSourcesListProps {
   platforms: Platform[]
@@ -184,7 +187,11 @@ export function ConnectedSourcesList({
             <SourceRowWithActions
               key={platform.id}
               iconName={platform.name}
-              label={platform.name}
+              iconImageSrc={resolvePlatformLogo(
+                platform,
+                getPlatformRegistryEntry(platform)
+              )}
+              label={getPlatformSourceLabel(platform)}
               meta={meta}
               rowAction={{
                 onClick: onOpenRuns ? () => onOpenRuns(platform) : undefined,
@@ -242,7 +249,9 @@ export function ConnectedSourcesList({
                         />
                       </SourceRowActionButton>
                     </TooltipTrigger>
-                    <TooltipContent side="top">{syncTooltipCopy}</TooltipContent>
+                    <TooltipContent side="top">
+                      {syncTooltipCopy}
+                    </TooltipContent>
                   </Tooltip>
                 </div>
               }

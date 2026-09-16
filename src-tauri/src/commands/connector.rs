@@ -10,6 +10,9 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use super::connector_store::{
     get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
 };
+use super::pdpp_installed_connector::{
+    pdpp_stream_to_dataconnect_scope, read_admitted_pdpp_asset_with_resource_dir,
+};
 
 // Chromium download constants
 const CHROMIUM_REVISION: &str = "1200";
@@ -102,28 +105,52 @@ pub struct Platform {
     pub runtime: Option<String>,
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
-    pub setup: Option<ActivePdppStaticSecretSetup>,
+    pub setup: Option<ActivePdppSetup>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ActivePdppPlatformManifest {
+    connector_id: String,
     connector_key: Option<String>,
     display_name: Option<String>,
     name: Option<String>,
     description: Option<String>,
-    setup: Option<ActivePdppStaticSecretSetup>,
+    brand: Option<ActivePdppBrand>,
+    setup: Option<ActivePdppSetup>,
     streams: Vec<ActivePdppStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivePdppBrand {
+    icon: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ActivePdppStaticSecretSetup {
+pub(crate) struct ActivePdppSetup {
     modality: String,
-    credential_capture: ActivePdppCredentialCapture,
+    #[serde(default, alias = "setup_description")]
+    description: Option<String>,
+    #[serde(
+        default,
+        rename = "credentialCapture",
+        alias = "credential_capture",
+        skip_serializing_if = "Option::is_none"
+    )]
+    credential_capture: Option<ActivePdppCredentialCapture>,
+    #[serde(
+        default,
+        rename = "manualOrUpload",
+        alias = "manual_or_upload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    manual_or_upload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ActivePdppCredentialCapture {
+    #[serde(default)]
+    description: Option<String>,
     fields: Vec<ActivePdppCredentialField>,
 }
 
@@ -131,6 +158,12 @@ struct ActivePdppCredentialCapture {
 struct ActivePdppCredentialField {
     name: String,
     label: Option<String>,
+    #[serde(default, rename = "description")]
+    description: Option<String>,
+    #[serde(default, rename = "helpText", alias = "help_text")]
+    help_text: Option<String>,
+    #[serde(default, rename = "helpUrl", alias = "help_url")]
+    help_url: Option<String>,
     #[serde(rename = "type")]
     field_type: Option<String>,
     required: bool,
@@ -523,21 +556,38 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
     platforms
 }
 
-fn load_active_pdpp_platforms() -> Vec<Platform> {
+fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
     let Some(manifest) = read_active_connector_manifest() else {
         return Vec::new();
     };
+    let resource_dir = app.path().resource_dir().ok();
+    load_pdpp_platforms_with_resource_dir(
+        manifest.connectors.into_values(),
+        resource_dir.as_deref(),
+    )
+}
 
+pub(super) fn load_pdpp_platforms(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+) -> Vec<Platform> {
+    load_pdpp_platforms_with_resource_dir(installs, None)
+}
+
+pub(super) fn load_pdpp_platforms_with_resource_dir(
+    installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
+    resource_dir: Option<&Path>,
+) -> Vec<Platform> {
     let mut platforms = Vec::new();
-    for install in manifest.connectors.into_values() {
+    for install in installs {
         if install.artifact_kind.as_deref() != Some("pdpp-collection-profile") {
             continue;
         }
-        let Some(path) = active_install_path(&install.root_path, &install.metadata_relative_path)
+        let Ok(content) =
+            super::pdpp_installed_connector::read_admitted_pdpp_manifest_with_resource_dir(
+                &install,
+                resource_dir,
+            )
         else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
@@ -554,10 +604,43 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
         } else {
             install.company.clone()
         };
-        let scopes = pdpp_streams_to_dataconnect_scopes(&connector_key, &manifest.streams);
+        let manual_upload = manifest
+            .setup
+            .as_ref()
+            .is_some_and(|setup| setup.modality == "manual_or_upload");
+        let scopes = pdpp_streams_to_dataconnect_scopes(
+            &connector_key,
+            &manifest.connector_id,
+            &manifest.streams,
+            manual_upload,
+        );
         if scopes.is_empty() {
             continue;
         }
+
+        let logo_url = manifest
+            .brand
+            .as_ref()
+            .and_then(|brand| brand.icon.as_deref())
+            .and_then(|icon_path| {
+                let bytes = match read_admitted_pdpp_asset_with_resource_dir(
+                    &install,
+                    resource_dir,
+                    icon_path,
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        log::warn!(
+                            "Could not load the {} PDPP brand icon: {}",
+                            connector_key,
+                            error
+                        );
+                        return None;
+                    }
+                };
+                Some(image_data_url(icon_path, &bytes))
+            })
+            .unwrap_or_default();
 
         platforms.push(Platform {
             id: install.connector_id,
@@ -571,7 +654,7 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
                 .description
                 .unwrap_or_else(|| format!("{} PDPP connector", connector_key)),
             is_updated: false,
-            logo_url: connector_key,
+            logo_url,
             needs_connection: true,
             connect_url: None,
             connect_selector: None,
@@ -586,29 +669,39 @@ fn load_active_pdpp_platforms() -> Vec<Platform> {
     platforms
 }
 
+fn image_data_url(path: &str, bytes: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let mime_type = match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    };
+    format!("data:{mime_type};base64,{}", STANDARD.encode(bytes))
+}
+
 fn pdpp_streams_to_dataconnect_scopes(
     connector_key: &str,
+    connector_identity: &str,
     streams: &[ActivePdppStream],
+    include_generic_streams: bool,
 ) -> Vec<String> {
     let mut scopes = Vec::new();
     for stream in streams {
-        let scope = match (connector_key, stream.name.as_str()) {
-            ("github", "user") => Some("github.profile"),
-            ("github", "repositories") => Some("github.repositories"),
-            ("github", "starred") => Some("github.starred"),
-            ("chatgpt", "conversations") => Some("chatgpt.conversations"),
-            ("chatgpt", "messages") => Some("chatgpt.messages"),
-            ("chatgpt", "memories") => Some("chatgpt.memories"),
-            ("chatgpt", "custom_gpts") => Some("chatgpt.custom_gpts"),
-            ("chatgpt", "custom_instructions") => Some("chatgpt.custom_instructions"),
-            ("chatgpt", "shared_conversations") => Some("chatgpt.shared_conversations"),
-            _ => None,
+        let scope = if include_generic_streams {
+            format!("pdpp.manual.{connector_key}.{}", stream.name)
+        } else {
+            pdpp_stream_to_dataconnect_scope(connector_key, connector_identity, &stream.name)
         };
-        if let Some(scope) = scope {
-            let scope = scope.to_string();
-            if !scopes.contains(&scope) {
-                scopes.push(scope);
-            }
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
         }
     }
     scopes
@@ -642,7 +735,7 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
         }
     }
 
-    for platform in load_active_pdpp_platforms() {
+    for platform in load_active_pdpp_platforms(&app) {
         if !seen_ids.contains(&platform.id) {
             seen_ids.insert(platform.id.clone());
             platforms.push(platform);
@@ -2792,9 +2885,11 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, resolve_automation_browser_path_from,
-        resolve_browser_status, resolve_icon_path, ConnectorMetadata,
+        manifest_looks_like_connector, pdpp_streams_to_dataconnect_scopes,
+        resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
+        ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
     };
+    use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -2833,6 +2928,123 @@ mod tests {
             }]),
             runtime_requirements: None,
             capabilities: None,
+        }
+    }
+
+    #[test]
+    fn active_pdpp_setup_decodes_snake_case_and_serializes_frontend_shape() {
+        for (fixture, field) in [
+            (
+                include_str!("../../tests/fixtures/apple-health.collection-profile.json"),
+                "manualOrUpload",
+            ),
+            (
+                include_str!("../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"),
+                "credentialCapture",
+            ),
+        ] {
+            let manifest: ActivePdppPlatformManifest = serde_json::from_str(fixture).unwrap();
+            let setup = serde_json::to_value(manifest.setup.unwrap()).unwrap();
+            assert!(setup.get(field).is_some());
+            if field == "credentialCapture" {
+                assert!(setup[field]["fields"]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty()));
+            }
+            assert!(setup.get("credential_capture").is_none());
+            assert!(setup.get("manual_or_upload").is_none());
+        }
+    }
+
+    #[test]
+    fn active_pdpp_setup_preserves_credential_guidance_for_frontend() {
+        let manifest = json!({
+            "connector_id": "https://registry.pdpp.dev/connectors/example",
+            "setup": {
+                "modality": "static_secret",
+                "description": "Connect this source with its API credential.",
+                "credential_capture": {
+                    "description": "Create the credential before you start.",
+                    "fields": [{
+                        "name": "secret",
+                        "label": "API key",
+                        "description": "Use the key for this account.",
+                        "help_text": "Create a key in the provider settings.",
+                        "help_url": "https://example.com/settings",
+                        "required": true,
+                        "secret": true
+                    }]
+                }
+            },
+            "streams": [{ "name": "records" }]
+        });
+
+        let parsed: ActivePdppPlatformManifest = serde_json::from_value(manifest).unwrap();
+        let setup = serde_json::to_value(parsed.setup.unwrap()).unwrap();
+        expect_json_string(
+            &setup["description"],
+            "Connect this source with its API credential.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["description"],
+            "Create the credential before you start.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["helpText"],
+            "Create a key in the provider settings.",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["helpUrl"],
+            "https://example.com/settings",
+        );
+        expect_json_string(
+            &setup["credentialCapture"]["fields"][0]["description"],
+            "Use the key for this account.",
+        );
+    }
+
+    fn expect_json_string(value: &serde_json::Value, expected: &str) {
+        assert_eq!(value.as_str(), Some(expected));
+    }
+
+    #[test]
+    fn manual_scope_discovery_never_reaches_curated_projection_arms() {
+        for (key, stream) in [("github", "repositories"), ("chatgpt", "conversations")] {
+            let streams = vec![ActivePdppStream {
+                name: stream.into(),
+            }];
+            assert_eq!(
+                pdpp_streams_to_dataconnect_scopes(
+                    key,
+                    &format!("https://registry.pdpp.org/connectors/{key}"),
+                    &streams,
+                    true,
+                ),
+                vec![format!("pdpp.manual.{key}.{stream}")]
+            );
+        }
+    }
+
+    #[test]
+    fn pdpp_streams_map_to_legacy_and_generic_scope_ids() {
+        for (fixture, expected) in [
+            (include_str!("../../tests/fixtures/github.collection-profile.origin-main.json"),
+             "github.profile pdpp.github.user_stats github.repositories github.starred pdpp.github.issues pdpp.github.pull_requests pdpp.github.gists"),
+            (include_str!("../../tests/fixtures/chatgpt-pdpp-browser.collection-profile.json"),
+             "chatgpt.conversations chatgpt.messages chatgpt.memories chatgpt.custom_gpts chatgpt.custom_instructions chatgpt.shared_conversations"),
+            (include_str!("../../tests/fixtures/ynab.collection-profile.origin-main.json"),
+             "pdpp.ynab.budgets pdpp.ynab.accounts pdpp.ynab.account_stats pdpp.ynab.category_groups pdpp.ynab.categories pdpp.ynab.payees pdpp.ynab.payee_locations pdpp.ynab.transactions pdpp.ynab.scheduled_transactions pdpp.ynab.months pdpp.ynab.month_categories"),
+        ] {
+            let manifest: super::ActivePdppPlatformManifest = serde_json::from_str(fixture).unwrap();
+            assert_eq!(
+                super::pdpp_streams_to_dataconnect_scopes(
+                    manifest.connector_key.as_deref().unwrap(),
+                    &manifest.connector_id,
+                    &manifest.streams,
+                    false,
+                ),
+                expected.split_whitespace().collect::<Vec<_>>()
+            );
         }
     }
 

@@ -6,6 +6,7 @@ import { useDispatch, useSelector } from "react-redux"
 import { setPlatforms, setConnectedPlatforms } from "../state/store"
 import type { RootState } from "../state/store"
 import type { Platform } from "../types"
+import { registerRuntimePlatformEntries } from "@/lib/platform/utils"
 
 export function usePlatforms() {
   const dispatch = useDispatch()
@@ -23,6 +24,7 @@ export function usePlatforms() {
     setPlatformLoadError(null)
     try {
       const loadedPlatforms = await invoke<Platform[]>("get_platforms")
+      registerRuntimePlatformEntries(loadedPlatforms)
       dispatch(setPlatforms(loadedPlatforms))
 
       // Check which platforms are connected

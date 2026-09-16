@@ -143,6 +143,62 @@ function main() {
     generatedEntries.push(generateEntry(connectorManifest, overlayEntry))
   }
 
+  // Collection Profile connectors installed from the registry have no overlay
+  // entry; generate one from the installed profile so they get a source route
+  // and appear on Home like every other connector.
+  const covered = new Set(
+    generatedEntries.flatMap((entry) =>
+      [...entry.matchAll(/platformIds: \[([^\]]*)\]/g)].flatMap((m) =>
+        m[1].split(",").map((v) => v.trim().replace(/^"|"$/g, ""))
+      )
+    )
+  )
+  for (const entry of connectorLock.connectors) {
+    if (entry.artifactKind !== "pdpp-collection-profile") continue
+    if (covered.has(entry.connectorId)) continue
+    const profilePath = join(
+      ROOT,
+      "connectors",
+      "collection-profiles",
+      entry.connectorId,
+      entry.manifestPath ?? "profile/collection-profile.json"
+    )
+    if (!existsSync(profilePath)) continue
+    const profile = readJson(profilePath)
+    const key = entry.connectorKey ?? profile.connector_key
+    const firstStream = profile.streams?.find(
+      (stream) => typeof stream?.name === "string" && stream.name.trim() !== ""
+    )
+    const scopePrefix =
+      profile.setup?.modality === "manual_or_upload" ? "pdpp.manual" : "pdpp"
+    // An overlay entry with this id already exists (e.g. the legacy ChatGPT
+    // connector): attach the profile's connector id to it instead of adding a
+    // second entry with the same id.
+    const existingIndex = generatedEntries.findIndex((text) =>
+      text.includes(`id: ${formatString(key)}`)
+    )
+    if (existingIndex !== -1) {
+      generatedEntries[existingIndex] = generatedEntries[existingIndex].replace(
+        /platformIds: \[([^\]]*)\]/,
+        (m, list) => `platformIds: [${formatString(entry.connectorId)}, ${list}]`
+      )
+      continue
+    }
+    const fields = [
+      `id: ${formatString(key)}`,
+      `displayName: ${formatString(profile.display_name ?? entry.name ?? key)}`,
+      `platformIds: [${unique([entry.connectorId, key]).map(formatString).join(", ")}]`,
+      `availability: "requiresConnector"`,
+      `showInConnectList: true`,
+    ]
+    if (firstStream) {
+      fields.push(
+        `ingestScope: ${formatString(`${scopePrefix}.${key}.${firstStream.name}`)}`
+      )
+    }
+    generatedEntries.push(`  {\n    ${fields.join(",\n    ")}\n  }`)
+  }
+
   const output =
     HEADER +
     `import type { PlatformRegistryEntry } from "./registry";\n\n` +

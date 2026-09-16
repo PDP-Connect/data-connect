@@ -28,16 +28,11 @@ const PLATFORM_REGISTRY_COMING_SOON: PlatformRegistryEntry[] = [
     brandDomain: "x.com",
     iconKey: "x",
     platformIds: ["x"],
-    aliases: ["x (twitter)"],
+    aliases: ["x (twitter)", "twitter"],
     availability: "comingSoon",
   },
-  {
-    id: "twitter",
-    displayName: "Twitter",
-    brandDomain: "twitter.com",
-    platformIds: ["twitter"],
-    availability: "comingSoon",
-  },
+  // Twitter is an alias of X. Keep the legacy token resolvable without
+  // rendering a second source card for the same source.
   {
     id: "reddit",
     displayName: "Reddit",
@@ -68,7 +63,21 @@ const PLATFORM_REGISTRY_COMING_SOON: PlatformRegistryEntry[] = [
   },
 ]
 
+const PLATFORM_REGISTRY_ADDITIONAL: PlatformRegistryEntry[] = [
+  {
+    id: "icloud_notes",
+    displayName: "iCloud Notes",
+    brandDomain: "icloud.com",
+    iconKey: "icloud_notes",
+    platformIds: ["icloud-notes-playwright", "icloud_notes"],
+    aliases: ["icloud notes"],
+    showInConnectList: true,
+    ingestScope: "icloud_notes.notes",
+  },
+]
+
 export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
   ...PLATFORM_REGISTRY_GENERATED,
+  ...PLATFORM_REGISTRY_ADDITIONAL,
   ...PLATFORM_REGISTRY_COMING_SOON,
 ]

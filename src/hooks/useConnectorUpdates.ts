@@ -19,6 +19,7 @@ export function useConnectorUpdates() {
     (state: RootState) => state.app.isCheckingUpdates
   );
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const checkForUpdates = useCallback(
@@ -39,19 +40,24 @@ export function useConnectorUpdates() {
 
   const downloadConnector = useCallback(
     async (id: string) => {
-      setError(null);
+      setDownloadErrors(prev => ({ ...prev, [id]: '' }));
       setDownloadingIds((prev) => new Set(prev).add(id));
 
       try {
         await invoke('download_connector', { id });
-        // Remove from updates list after successful download
-        dispatch(removeConnectorUpdate(id));
+        // Keep new connectors in the list until the platform reload completes.
+        // AvailableSourcesList uses the retained entry to keep the source's
+        // stable card order while the newly installed platform is discovered.
+        const update = updates.find(candidate => candidate.id === id);
+        if (!update?.isNew) {
+          dispatch(removeConnectorUpdate(id));
+        }
         // Note: Caller is responsible for reloading platforms after successful download
         return true;
       } catch (err) {
         const errorMsg =
-          err instanceof Error ? err.message : 'Failed to download connector';
-        setError(errorMsg);
+          err instanceof Error ? err.message : String(err || 'Failed to download connector');
+        setDownloadErrors(prev => ({ ...prev, [id]: errorMsg }));
         console.error('Failed to download connector:', err);
         return false;
       } finally {
@@ -62,7 +68,7 @@ export function useConnectorUpdates() {
         });
       }
     },
-    [dispatch]
+    [dispatch, updates]
   );
 
   const isDownloading = useCallback(
@@ -84,6 +90,7 @@ export function useConnectorUpdates() {
     lastUpdateCheck,
     isCheckingUpdates,
     error,
+    downloadErrors,
     hasUpdates,
     updateCount,
     newConnectorCount,
