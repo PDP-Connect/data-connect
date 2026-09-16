@@ -11,6 +11,7 @@ import {
   referenceStackRoot,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
+import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
 
 const temporaryRoots = []
 
@@ -71,6 +72,28 @@ describe("reference stack staging contract", () => {
     expect(() =>
       referenceStackRoot("/workspace/data-connect", "../release")
     ).toThrow(/invalid Tauri profile/)
+  })
+
+  it("requires the verifier root to use the same profile-scoped contract", () => {
+    expect(
+      parseVerifyArgs([
+        "--profile",
+        "release",
+        "--root",
+        "/workspace/src-tauri/target/release/reference-stack/ri",
+      ])
+    ).toMatchObject({
+      profile: "release",
+      root: "/workspace/src-tauri/target/release/reference-stack/ri",
+    })
+    expect(() =>
+      parseVerifyArgs([
+        "--profile",
+        "release",
+        "--root",
+        "/workspace/src-tauri/target/reference-stack/ri",
+      ])
+    ).toThrow(/profile-scoped/)
   })
 
   it("emits deterministic complete hashes and launcher inputs", () => {

@@ -170,6 +170,10 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                #[cfg(desktop)]
+                if unified::is_enabled() {
+                    unified::cleanup(app);
+                }
                 cleanup_browser_surface_host(app);
                 cleanup_personal_server();
                 cleanup_reference_server();

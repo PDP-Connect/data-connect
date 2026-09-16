@@ -116,6 +116,17 @@ describe("tauri manual-install config", () => {
     )
   })
 
+  it("declares the Linux tray runtime dependency for Debian bundles", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { linux?: { deb?: { depends?: string[] } } }
+    }
+
+    expect(document.bundle?.linux?.deb?.depends).toContain(
+      "libayatana-appindicator3-1"
+    )
+  })
+
   it("disables updater artifacts and ships no updater endpoint", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {

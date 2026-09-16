@@ -7,12 +7,8 @@ import { createServer } from "node:http"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
-import {
-  referenceStackRoot,
-  verifyReferenceStackRoot,
-} from "./ensure-reference-stack.js"
-
-const PROJECT_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)))
+import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
+import { verifyReferenceStackRoot } from "./ensure-reference-stack.js"
 
 function freePort() {
   return new Promise((resolvePort, reject) => {
@@ -53,21 +49,8 @@ async function waitForHealth(asPort, rsPort, child) {
   throw lastError || new Error("RI health route did not respond")
 }
 
-function parseArgs(argv) {
-  let root
-  let profile
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (argument === "--root") {
-      root = argv[++index]
-      if (!root) throw new Error("--root requires a staged RI root")
-    } else if (argument === "--profile") {
-      profile = argv[++index]
-      if (!profile) throw new Error("--profile requires a Tauri profile")
-    } else throw new Error(`unknown argument: ${argument}`)
-  }
-  if (root) return resolve(root)
-  return referenceStackRoot(PROJECT_ROOT, profile)
+function parseRoot(argv) {
+  return parseVerifyArgs(argv).root
 }
 
 async function runSmoke(root) {
@@ -108,7 +91,7 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  runSmoke(parseArgs(process.argv.slice(2))).catch(error => {
+  runSmoke(parseRoot(process.argv.slice(2))).catch(error => {
     console.error(error instanceof Error ? error.message : error)
     process.exitCode = 1
   })

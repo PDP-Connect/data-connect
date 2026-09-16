@@ -17,7 +17,7 @@
     "dev:app": "vite --port 5173 --strictPort",
     "legacy:ui": "vite --mode legacy --open /legacy.html",
     "build": "tsc -b && vite build",
-    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
+    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js && node scripts/ensure-reference-stack.js --profile debug && node scripts/ensure-console-stack.js --profile debug",
     "connectors:resolve": "node scripts/resolve-connectors.js",
     "connectors:install": "npm run connectors:resolve",
     "connectors:upgrade": "npm run connectors:resolve",

@@ -11,9 +11,14 @@ import {
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
 
-const PROJECT_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)))
+const PROJECT_ROOT = (() => {
+  const projectUrl = new URL("..", import.meta.url)
+  return projectUrl.protocol === "file:"
+    ? resolve(fileURLToPath(projectUrl))
+    : resolve(process.cwd())
+})()
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   let root
   let profile
   let refresh = false
@@ -28,8 +33,31 @@ function parseArgs(argv) {
     } else if (argument === "--refresh-manifest") refresh = true
     else throw new Error(`unknown argument: ${argument}`)
   }
+  if (profile && !/^[A-Za-z0-9._-]+$/.test(profile)) {
+    throw new Error(`Invalid profile: ${JSON.stringify(profile)}`)
+  }
+  const resolvedRoot = root
+    ? resolve(root)
+    : referenceStackRoot(PROJECT_ROOT, profile)
+  const profileScopedSuffix = profile
+    ? `src-tauri/target/${profile}/reference-stack/ri`
+    : "src-tauri/target/"
+  if (
+    !resolvedRoot.replaceAll("\\", "/").includes(profileScopedSuffix) ||
+    !resolvedRoot.replaceAll("\\", "/").endsWith("/reference-stack/ri")
+  ) {
+    throw new Error(
+      `Reference stack must use the profile-scoped root src-tauri/${profileScopedSuffix}; got ${resolvedRoot}`
+    )
+  }
   return {
-    root: root ? resolve(root) : referenceStackRoot(PROJECT_ROOT, profile),
+    profile:
+      profile ||
+      resolvedRoot.replace(
+        /^.*\/src-tauri\/target\/([^/]+)\/reference-stack\/ri$/,
+        "$1"
+      ),
+    root: resolvedRoot,
     refresh,
   }
 }
