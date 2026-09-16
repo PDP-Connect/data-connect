@@ -19,6 +19,7 @@ import test from "node:test";
 import {
   type ConnectorCatalogEntry,
   createConfigLimitedFetch,
+  createConnectorInstallStore,
   createConnectorInstallService,
   createFileConnectorInstallStore,
   inspectActiveConnector,
@@ -47,6 +48,22 @@ const entry: ConnectorCatalogEntry = {
   tier: "supported",
   version: "1.0.0",
 };
+
+test("PDPP_CONNECTOR_PRELOAD_DIR selects the file-backed install store", () => {
+  const previous = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-preload-"));
+  process.env.PDPP_CONNECTOR_PRELOAD_DIR = dataDir;
+  try {
+    assert.equal(createConnectorInstallStore().dataDir, dataDir);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    } else {
+      process.env.PDPP_CONNECTOR_PRELOAD_DIR = previous;
+    }
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
 
 function writeFixture(root: string): void {
   mkdirSync(join(root, "profile"), { recursive: true });
@@ -520,4 +537,65 @@ test("owner install route rejects missing installation fields", async () => {
   assert.deepEqual(body, { code: "invalid_request", message: "connector_id is required", param: "connector_id" });
   assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[0], tokenGuard);
   assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[1], ownerGuard);
+});
+
+test("owner catalog route returns the verified catalog projection", async () => {
+  type RegisteredHandler = (
+    req: Record<string, never>,
+    res: { json: (value: unknown) => unknown }
+  ) => Promise<void>;
+  const routes = new Map<string, RegisteredHandler>();
+  const app = {
+    get(path: string, ...args: unknown[]) {
+      routes.set(`GET ${path}`, args.at(-1) as RegisteredHandler);
+      return this;
+    },
+    post() {
+      return this;
+    },
+  };
+  mountOwnerConnectorInstall(app as never, {
+    handleError: () => assert.fail("unexpected error"),
+    pdppError: () => assert.fail("unexpected error"),
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      catalog: async () => [
+        {
+          ...entry,
+          display_name: "GitHub",
+          latest: true,
+          published_at: "2026-09-16T12:00:00Z",
+          setup_modality: "oauth",
+        },
+      ],
+      install: async () => assert.fail("should not install"),
+      status: async () => [],
+      update: async () => assert.fail("should not update"),
+    },
+  });
+  let body: unknown;
+  await routes.get("GET /v1/owner/connector-install/catalog")?.({}, {
+    json(value: unknown) {
+      body = value;
+      return this;
+    },
+  });
+  assert.deepEqual(body, {
+    data: [
+      {
+        bindings: { browser: "optional" },
+        connector_id: "github",
+        connector_key: "github",
+        digest,
+        display_name: "GitHub",
+        latest: true,
+        published_at: "2026-09-16T12:00:00Z",
+        setup_modality: "oauth",
+        tier: "supported",
+        version: "1.0.0",
+      },
+    ],
+    object: "connector_install_catalog",
+  });
 });

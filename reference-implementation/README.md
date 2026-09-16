@@ -506,6 +506,34 @@ Persistent mounts are defined for:
   with `PDPP_DB_PATH` at `/var/lib/pdpp/pdpp.sqlite`
 - `PDPP_EMBEDDING_CACHE_DIR` at `/var/cache/pdpp/transformers`
 
+### Connector catalog and air-gapped preload
+
+The reference Docker image does not bundle `@pdpp/polyfill-connectors` or a
+default connector source list. A new instance starts with an empty installed
+connector state. The owner console reads the verified catalog at
+`GET /v1/owner/connector-install/catalog`; an owner can install a selected
+digest, after which the server activates the verified immutable root and adds
+its manifest to the source catalog.
+
+For an air-gapped deployment, set `PDPP_CONNECTOR_PRELOAD_DIR` to a mounted
+directory containing connector-install state prepared by the normal verified
+installer. The directory uses the install module's layout:
+
+```text
+$PDPP_CONNECTOR_PRELOAD_DIR/
+├── connector-install-state.json
+└── connectors/<connector-id>/<sha256:digest>/
+    ├── profile/collection-profile.json
+    ├── dist/collection-profile.mjs
+    └── provenance.json
+```
+
+The state file must contain the installer-produced hashes, provenance, digest,
+and entrypoint metadata. Do not hand-edit it or copy an unverified connector
+tree. The preload directory is used as the file-backed install store, so it
+must be writable when the service updates catalog high-water state; mount it
+read-only only when no catalog refresh or install operation is needed.
+
 Durable connector artifacts — the Slack workspace archive, downloaded
 statement PDFs — resolve under `PDPP_CONNECTOR_ARTIFACT_ROOT`, which Core
 pins to `/var/lib/pdpp/connector-artifacts`. They are on the volume above; no
@@ -560,6 +588,8 @@ pnpm docker:reference:quick
 To build from the current local checkout instead of pulling public images:
 
 ```bash
+docker build -f deploy/docker/Dockerfile .
+
 pnpm docker:reference:up
 ```
 

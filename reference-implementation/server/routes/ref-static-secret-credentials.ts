@@ -11,7 +11,7 @@
 import {
   isBundledStaticSecretCredentialKind,
   isFullyBundledStaticSecretCredentialKind,
-} from "@pdpp/polyfill-connectors/static-secret-credential-capture";
+} from "../polyfill-connectors-runtime.ts";
 
 import {
   type ConnectorManifestLike,
