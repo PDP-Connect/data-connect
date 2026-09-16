@@ -11,10 +11,9 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-const repositoryRoot = fileURLToPath(new URL("..", import.meta.url))
+const repositoryRoot = process.cwd()
 const comparatorPath = join(
   repositoryRoot,
   ".github/scripts/cross-repo-integrity/check-pin-freshness.mjs"
