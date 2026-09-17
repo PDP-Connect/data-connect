@@ -42,6 +42,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getRsInternalUrl, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
+import { listConnectorManifests } from "../lib/rs-client.ts";
 import { verifyDashboardSession } from "../lib/verify-session.ts";
 import { ExploreCanvas } from "./explore-canvas.tsx";
 import { buildPeekRelationships, type PeekRelationships } from "./explore-peek-relationships.ts";
@@ -127,6 +128,12 @@ export default async function RecordsExplorerPage({
 
   try {
     const data = await assembleExplorerData(params, liveDashboardDataSource, getRsInternalUrl());
+    const connectorIcons = Object.fromEntries(
+      (await listConnectorManifests().catch(() => [])).flatMap((manifest) => [
+        [manifest.connector_id, manifest.icon] as const,
+        ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+      ])
+    );
     const order = data.supportsTimelineDirection && requestedOrder === "oldest" ? "oldest" : "newest";
     // Relationships for the inspected record come from declared metadata via the
     // SAME `records/lib/relationships.ts` helpers the records detail page uses —
@@ -148,6 +155,7 @@ export default async function RecordsExplorerPage({
     return (
       <RecordroomShellWithPalette host="this server">
         <ExploreCanvas
+          connectorIcons={connectorIcons}
           data={data}
           explorePath={dashboardRoutes.section.explore}
           order={order}

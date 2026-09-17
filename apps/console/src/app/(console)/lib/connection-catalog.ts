@@ -65,6 +65,11 @@ export interface CatalogManifestLike {
   connector_id: string;
   connector_key?: string | null;
   display_name?: string | null;
+  icon?: {
+    color?: string | null;
+    kind?: string | null;
+    svg?: string | null;
+  } | null;
   external_docs?: readonly { label?: string | null; url?: string | null }[] | null;
   name?: string | null;
   runtime_requirements?: { bindings?: Record<string, unknown> | null } | null;
@@ -379,6 +384,7 @@ export function buildConnectorCatalog(
       displayName: displayNameFor(manifest, connectorKey),
       disposition: plan.catalogDisposition,
       externalDocs: externalDocsFromManifest(manifest),
+      icon: manifest.icon ?? null,
       isKnownScaffold: isKnownScaffoldConnector(connectorKey),
       listingNote: listingNoteFromPublicListing(manifest.capabilities?.public_listing),
       modality: plan.connectorModality,
@@ -591,7 +597,7 @@ export function buildOwnerConnectorCatalog(
       displayName: cleanManifestText(template.display_name) ?? displayNameFor(manifestForCopy, connectorKey),
       disposition,
       externalDocs: externalDocsFromManifest(manifestForCopy),
-      icon: template.icon ?? null,
+      icon: template.icon ?? localManifest?.icon ?? null,
       isKnownScaffold:
         typeof template.is_known_scaffold === "boolean"
           ? template.is_known_scaffold

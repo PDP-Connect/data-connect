@@ -7,7 +7,10 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { isBrowserBoundConnector } from "../../../../lib/connection-modality.ts";
+import { findManifestForConnectorId } from "../../../../sources/lib/relationships.ts";
+import { listConnectorManifests } from "../../../../lib/rs-client.ts";
 import { BrowserSessionLaunchPanel } from "./launch-panel.tsx";
 
 export const dynamic = "force-dynamic";
@@ -43,6 +46,7 @@ export default async function BrowserSessionLaunchPage({
   }
 
   const displayName = formatConnectorKeyForDisplay(connectorId);
+  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), connectorId)?.icon;
 
   return (
     <RecordroomShellWithPalette>
@@ -60,7 +64,12 @@ export default async function BrowserSessionLaunchPage({
           },
           { label: "Starting browser" },
         ]}
-        description={`DataConnect is starting a secure browser session for ${displayName}.`}
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <span>DataConnect is starting a secure browser session for {displayName}.</span>
+          </span>
+        }
         title="Starting secure browser"
       />
 

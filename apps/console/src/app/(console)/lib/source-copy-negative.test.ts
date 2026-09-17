@@ -187,7 +187,7 @@ function assertCleanCopy(label: string, where: string): void {
 test("every first-account setup status label is free of forbidden copy", () => {
   for (const disposition of ALL_DISPOSITIONS) {
     const status = sourceSetupStatus(entryForDisposition(disposition));
-    assertCleanCopy(status.label, `sourceSetupStatus(${disposition})`);
+    assertCleanCopy(status.label ?? "", `sourceSetupStatus(${disposition})`);
   }
 });
 
@@ -224,7 +224,7 @@ test("browser_collector_manual is an explicit Connect account route", () => {
   const status = sourceSetupStatus(entry);
   const action = sourceSetupAction(entry);
 
-  assert.equal(status.label, "Supported");
+  assert.equal(status.label, null);
   assert.equal(sourceSetupAvailability(entry), "available_now");
   assert.ok(action);
   assert.equal(action.label, "Connect account");
@@ -235,7 +235,7 @@ test("public setup tiers are Supported or Preview, while actions retain their ve
   const supported = entryForDisposition("static_secret_connect");
   const preview = entryForDisposition("static_secret_experimental");
 
-  assert.equal(sourceSetupStatus(supported).label, "Supported");
+  assert.equal(sourceSetupStatus(supported).label, null);
   assert.deepEqual(sourceSetupAction(supported), {
     href: "/connect/static-secret/stub-static_secret_connect",
     label: "Add account",

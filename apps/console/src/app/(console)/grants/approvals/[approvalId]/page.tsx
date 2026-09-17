@@ -8,6 +8,7 @@ import {
   getPendingApprovalReview,
   RefNotFoundError,
 } from "../../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { approveReviewedPendingApprovalAction, denyPendingApprovalAction } from "../../pending-actions.ts";
 import { ApprovalReview } from "./approval-review.tsx";
 
@@ -22,6 +23,13 @@ export default async function ApprovalReviewPage({
 }) {
   const [{ approvalId }, query] = await Promise.all([params, searchParams]);
   let detail: ApprovalReviewData;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap((manifest) => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+    ])
+  );
   try {
     detail = await getPendingApprovalReview(approvalId);
   } catch (err) {
@@ -35,6 +43,7 @@ export default async function ApprovalReviewPage({
       <ApprovalReview
         approveAction={approveReviewedPendingApprovalAction}
         confirm={!query.approval_error && query.confirm === "1"}
+        connectorIcons={connectorIcons}
         denyAction={denyPendingApprovalAction}
         detail={detail}
         error={query.approval_error}

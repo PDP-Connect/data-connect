@@ -60,7 +60,6 @@
 "use client";
 
 import {
-  ConnectorIcon,
   CopyMono,
   Endorse,
   IcButton,
@@ -80,6 +79,7 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
+import { ConnectorMark } from "../components/connector-mark.tsx";
 import { type RunNowResult, runConnectorNowAction } from "./actions.ts";
 import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
 import {
@@ -393,7 +393,7 @@ function InstanceListItem({
   const inner = (
     <>
       <span className="rr-s-item__identity">
-        <ConnectorIcon className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
+        <ConnectorMark className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
         <span className="rr-s-item__name">{instance.displayName}</span>
       </span>
       {/* Keep list rows comparable: connector kind lives in the selected detail
