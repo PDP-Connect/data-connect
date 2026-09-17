@@ -74,7 +74,7 @@ const DEPLOYMENT_SEMANTICS_COPY = /pnpm --dir|packages\/[a-z]|connector_instance
 const IMPORT_COMPLETE_COPY = /Import complete/;
 const VALIDATED_AND_COMMITTED_COPY = /validated and committed/;
 const COVERAGE_PREVIEW_COPY = /Coverage preview/;
-const WHAT_PDPP_FOUND_COPY = /What PDPP found/;
+const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
 const PARSED_RECORDS_COPY = /Parsed records/;
 const ACCEPTED_COUNT_COPY = /Accepted/;
 const DUPLICATE_COUNT_COPY = /Duplicates/;
@@ -181,7 +181,7 @@ test("status page uses import/receipt language for manual_upload", async () => {
   assert.match(src, IMPORT_COMPLETE_COPY);
   assert.match(src, VALIDATED_AND_COMMITTED_COPY);
   assert.match(src, COVERAGE_PREVIEW_COPY);
-  assert.match(src, WHAT_PDPP_FOUND_COPY);
+  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
   assert.match(src, PARSED_RECORDS_COPY);
   assert.match(src, ACCEPTED_COUNT_COPY);
   assert.match(src, DUPLICATE_COUNT_COPY);

@@ -5,7 +5,7 @@
  * RecordroomShell — the Ink Carbon owner-console frame.
  *
  * (Component/CSS identifiers keep the internal `Recordroom`/`rr-*` names; the
- * owner-visible wordmark is `PDPP` with the PDPP split-P mark.)
+ * owner-visible product identity is DataConnect.)
  *
  * The dependency root of the redesigned console: a left sidebar (brand mark +
  * grouped nav + footer host block) and a main column with a sticky header
@@ -52,6 +52,7 @@ import {
   IcDialogPortal,
   IcDialogTrigger,
 } from "./dialog.tsx";
+import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
 import "./shell.css";
 
 // SYNCS_NOTE: the owner-facing "Syncs" group item has no dedicated real route;
@@ -154,34 +155,31 @@ export function isNavItemActive(href: string, pathname: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-// ─── Brand mark — the PDPP split-P ────────────────────────────────
-//
-// The owner-visible mark is the actual PDPP logo (the split-P): a warm
-// human/holder left half and a cool protocol/issuer right half, seamed on the
-// optical vertical with a counter in the upper bowl. The geometry is the
-// canonical mark from the identity handoff (identity/logo_study.html), the same
-// construction operator-ui's `PdppLogo` renders.
+// ─── DataConnect mark ───────────────────────────────────────────
 //
 // It is inlined here rather than imported so `@pdpp/brand-react` stays a leaf
 // brand package with no dependency on `@pdpp/operator-ui` (the console → shared
 // dependency direction is one-way). This keeps the package-boundary contract
-// intact while still shipping the real logo, not a placeholder shape. The hues
-// are CSS custom properties so the mark tracks the active Ink Carbon surface.
+// intact while still shipping the real logo, not a placeholder shape.
 function BrandMark() {
   return (
-    <svg aria-hidden="true" className="rr-side__mark" height="18" role="presentation" viewBox="0 0 200 200" width="18">
-      {/* Left half — warm (human/holder) */}
+    <svg aria-hidden="true" className="rr-side__mark" height="18" role="presentation" viewBox="0 0 832 832" width="18">
+      <rect fill="url(#rr-dataconnect-mark-bg)" height="832" rx="183" width="832" />
       <path
-        d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z"
-        fill="var(--pdpp-mark-warm)"
+        d="M188.955 197.596C309.404 197.596 407.047 295.552 407.047 416C407.047 536.449 309.404 634.405 188.955 634.405C187.051 634.405 185.153 634.38 183.262 634.332C161.511 633.772 150.635 633.492 140.716 623.315C130.797 613.137 130.797 599.88 130.797 573.367V258.633C130.797 232.12 130.797 218.864 140.716 208.686C150.636 198.508 161.511 198.229 183.262 197.669C185.154 197.621 187.051 197.596 188.955 197.596Z"
+        fill="white"
       />
-      {/* Right half — cool (protocol/issuer) */}
       <path
-        d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z"
-        fill="var(--pdpp-mark-cool)"
+        d="M657.638 634.404C537.19 634.404 439.547 536.449 439.547 416.001C439.547 295.552 537.19 197.596 657.638 197.596C659.542 197.596 661.44 197.621 663.332 197.669C685.082 198.229 695.958 198.509 705.877 208.686C715.797 218.864 715.797 232.121 715.797 258.634L715.797 573.368C715.797 599.88 715.797 613.136 705.877 623.314C695.957 633.492 685.082 633.772 663.331 634.331C661.44 634.379 659.542 634.404 657.638 634.404Z"
+        fill="white"
       />
-      {/* Counter — optically centered in the upper bowl */}
-      <circle cx="105" cy="73" fill="var(--pdpp-mark-counter)" r="18" />
+      <defs>
+        <linearGradient id="rr-dataconnect-mark-bg" x1="416" x2="416" y1="0" y2="832" gradientUnits="userSpaceOnUse">
+          <stop offset="0.100024" stopColor="#304DC0" />
+          <stop offset="0.578171" stopColor="#121265" />
+          <stop offset="0.956731" stopColor="#090939" />
+        </linearGradient>
+      </defs>
     </svg>
   );
 }
@@ -288,7 +286,7 @@ function useThemeToggle(): [Theme, () => void] {
 // ─── RecordroomShell ──────────────────────────────────────────────
 
 interface RecordroomShellProps {
-  /** Build crumb, e.g. "pdpp 0.1.0". */
+  /** Optional build override for development or a downstream distribution. */
   build?: string;
   children: ReactNode;
   /** Host line for the header crumb + sidebar foot, e.g. "rs.owner.example.net". */
@@ -300,9 +298,11 @@ interface RecordroomShellProps {
 export function RecordroomShell({
   children,
   host = "this server",
-  build = "pdpp 0.1.0",
   onJump,
+  build,
 }: RecordroomShellProps) {
+  const identity = DATACONNECT_PRODUCT_IDENTITY;
+  const resolvedBuild = build ?? `${identity.name} ${identity.version}`;
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -315,13 +315,13 @@ export function RecordroomShell({
         <aside className="rr-side">
           <div className="rr-side__brand">
             <BrandMark />
-            <span className="rr-side__name">PDPP</span>
+            <span className="rr-side__name">{identity.name}</span>
           </div>
           <nav aria-label="Primary" className="rr-side__nav">
             <NavList pathname={pathname} />
           </nav>
           <div className="rr-side__spacer" />
-          <FootBlock build={build} host={host} />
+          <FootBlock build={resolvedBuild} host={host} />
         </aside>
 
         {/* ─── Main column ─── */}
@@ -329,7 +329,7 @@ export function RecordroomShell({
           <header className="rr-head">
             <span className="rr-head__brand">
               <BrandMark />
-              <span>PDPP</span>
+              <span>{identity.name}</span>
             </span>
             {/* The `{host} · {build}` crumb renders in exactly ONE owner-facing
               place: the sidebar/drawer FootBlock. It used to also render here in
@@ -360,7 +360,7 @@ export function RecordroomShell({
             <nav aria-label="Primary">
               <div className="rr-side__brand">
                 <BrandMark />
-                <span className="rr-side__name">PDPP</span>
+                <span className="rr-side__name">{identity.name}</span>
                 <IcDialogClose aria-label="Close navigation" className="rr-drawer__close rr-chrome-btn" type="button">
                   Close
                 </IcDialogClose>
@@ -368,7 +368,7 @@ export function RecordroomShell({
               <div className="rr-drawer__nav">
                 <NavList onNavigate={closeDrawer} pathname={pathname} />
               </div>
-              <FootBlock build={build} host={host} />
+              <FootBlock build={resolvedBuild} host={host} />
             </nav>
           </IcDialogPopup>
         </IcDialogPortal>

@@ -82,6 +82,10 @@ export { Sheet, SheetBody, SheetFoot, SheetHead, SheetSerial, SheetTitle } from 
 // ─── Shell frame (RecordroomShell + nav data) ─────────────────────
 export type { NavGroup, NavItem } from "./shell-frame.tsx";
 export { isNavItemActive, NAV_GROUPS, NAV_ITEMS, RecordroomShell } from "./shell-frame.tsx";
+export {
+  DATACONNECT_PRODUCT_IDENTITY,
+} from "./product-identity.ts";
+export type { ProductIdentity } from "./product-identity.ts";
 // ─── Surface wrappers ─────────────────────────────────────────────
 export { HumanSurface, ProtocolSurface } from "./surface.tsx";
 // ─── Table ────────────────────────────────────────────────────────

@@ -58,7 +58,7 @@ export default async function ProviderAuthPage({
           </p>
         ) : null}
         <p className="pdpp-body text-muted-foreground">
-          Continue to the provider to grant access for this account. Credentials stay with the provider. PDPP activates
+          Continue to the provider to grant access for this account. Credentials stay with the provider. DataConnect activates
           the source after the provider confirms access.
         </p>
         <form action={`/connect/provider-auth/${encodeURIComponent(connectorId)}/start`} method="post">

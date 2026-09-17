@@ -15,9 +15,8 @@
   "scripts": {
     "dev": "vite",
     "dev:app": "vite --port 5173 --strictPort",
-    "legacy:ui": "vite --mode legacy --open /legacy.html",
     "build": "tsc -b && vite build",
-    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js && node scripts/ensure-reference-stack.js --profile debug && node scripts/ensure-console-stack.js --profile debug",
+    "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
     "connectors:resolve": "node scripts/resolve-connectors.js",
     "connectors:install": "npm run connectors:resolve",
     "connectors:upgrade": "npm run connectors:resolve",
@@ -35,7 +34,6 @@
     "test:pdpp-interop": "node --test scripts/pdpp-interoperability-e2e.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:prod": "node scripts/build-prod.js",
     "tauri:icon": "tauri icon ./public/data_connect_1024_1x.png",
     "tauri:icon:refresh-cache": "sh -c 'tauri icon ./public/data_connect_1024_1x.png && rm -rf \"$HOME/Library/Caches/com.apple.iconservices\" \"$HOME/Library/Caches/com.apple.iconservices.store\" && (qlmanage -r cache || true) && (killall iconservicesagent || true) && (killall Dock || true) && (killall Finder || true)'",
     "tauri:icon:rebuild": "sh -c 'tauri icon ./public/data_connect_1024_1x.png && npm run tauri:build && rm -rf \"$HOME/Library/Caches/com.apple.iconservices\" \"$HOME/Library/Caches/com.apple.iconservices.store\" && (qlmanage -r cache || true) && (killall iconservicesagent || true) && (killall Dock || true) && (killall Finder || true)'",
@@ -79,7 +77,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#8803c30c31f6d514bdc237df2f224b5ff77fa232",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#ee11b09dc4e4c3acb1a1e0606ced0429f761be27",
     "@semantic-release/exec": "^7.1.0",
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/vitest-runner": "10.0.0",

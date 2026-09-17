@@ -105,7 +105,7 @@ export default async function RecordsExplorerPage({
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./explore-demo-data.ts");
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+      <RecordroomShellWithPalette host="this server">
         <ExploreCanvas
           data={demo.buildExploreDemoData()}
           explorePath={dashboardRoutes.section.explore}
@@ -153,7 +153,7 @@ export default async function RecordsExplorerPage({
       );
     }
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+      <RecordroomShellWithPalette host="this server">
         <ExploreCanvas
           connectorIcons={connectorIcons}
           data={data}
@@ -167,7 +167,7 @@ export default async function RecordsExplorerPage({
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
-        <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+        <RecordroomShellWithPalette host="this server">
           <ServerUnreachable />
         </RecordroomShellWithPalette>
       );

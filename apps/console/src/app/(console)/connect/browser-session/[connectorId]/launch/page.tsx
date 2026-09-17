@@ -67,7 +67,7 @@ export default async function BrowserSessionLaunchPage({
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
-            <span>PDPP is starting a secure browser session for {displayName}.</span>
+            <span>DataConnect is starting a secure browser session for {displayName}.</span>
           </span>
         }
         title="Starting secure browser"

@@ -44,7 +44,7 @@ function resolve(redirects: RedirectRule[], pathname: string) {
 test("configured redirects resolve correctly", async () => {
   assert.ok(nextConfig.redirects, "next.config.mjs must declare redirects()");
   const redirects = await nextConfig.redirects();
-  assert.equal(resolve(redirects, "/favicon.ico")?.destination, "/brand/pdpp-favicon.svg");
+  assert.equal(resolve(redirects, "/favicon.ico")?.destination, "/icon");
 });
 
 test("configured reference rewrites resolve correctly", async () => {
