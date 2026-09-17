@@ -506,7 +506,9 @@ function actionableOwnerActionFromTemplate(
 /**
  * Build the live catalog from the authenticated server projection. A template
  * with missing authority fields is dropped rather than reconstructed from a
- * local manifest. Local data is a display/help/docs join only.
+ * local manifest. When the authenticated server has no registered templates,
+ * the manifest catalog is the fresh-instance listing fallback; no template is
+ * synthesized, and the install snapshot remains a separate lifecycle input.
  */
 export function buildOwnerConnectorCatalog(
   manifests: readonly CatalogManifestLike[],
@@ -520,6 +522,10 @@ export function buildOwnerConnectorCatalog(
         manifestsByKey.set(canonicalConnectorKey(cleanIdentity), manifest);
       }
     }
+  }
+
+  if (templates.length === 0) {
+    return buildConnectorCatalog(manifests);
   }
 
   const entries: ConnectorCatalogEntry[] = [];

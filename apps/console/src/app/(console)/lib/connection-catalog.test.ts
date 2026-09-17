@@ -715,6 +715,34 @@ test("Google Maps Timeline keeps its import/API distinction visible in the catal
   assert.match(sourceSetupContext(entry) ?? "", TIMELINE_NO_SIGN_IN_RE);
 });
 
+test("owner catalog lists every manifest-known connector when templates are empty", () => {
+  const manifests: CatalogManifestLike[] = [
+    {
+      capabilities: { public_listing: { tier: "supported" } },
+      connector_id: "https://registry.pdpp.dev/connectors/alpha",
+      connector_key: "alpha",
+      display_name: "Alpha",
+    },
+    {
+      capabilities: { public_listing: { tier: "preview" } },
+      connector_id: "https://registry.pdpp.dev/connectors/beta",
+      connector_key: "beta",
+      display_name: "Beta",
+    },
+  ];
+
+  const catalog = buildOwnerConnectorCatalog(manifests, []);
+
+  assert.equal(catalog.length, manifests.length);
+  assert.deepEqual(
+    catalog.map((entry) => entry.connectorKey),
+    ["alpha", "beta"],
+    "an empty owner-template response must not hide manifest-known connectors"
+  );
+  assert.equal(catalog[0]?.ownerActionable, undefined, "the fallback must not invent owner authorization");
+  assert.equal(catalog[0]?.registrationStatus, undefined, "the fallback must not invent registration state");
+});
+
 test("configured Google provider readiness exposes the existing owner authorization action", async () => {
   // "Configured" means the manifest's declared deployment settings are
   // actually present in the environment — readiness is measured, not asserted
@@ -744,15 +772,7 @@ test("configured Google provider readiness exposes the existing owner authorizat
   assert.deepEqual(providerAuthConnectEntries(catalog), [entry]);
 });
 
-test("owner catalog fails closed for local-only, listed-unproven, and proof-gated static-secret entries", () => {
-  const staleLocalManifest: CatalogManifestLike = {
-    capabilities: { public_listing: { tier: "supported" } },
-    connector_id: "stale-local-only",
-    display_name: "Stale local-only",
-    runtime_requirements: { bindings: { network: {} } },
-  };
-  assert.deepEqual(buildOwnerConnectorCatalog([staleLocalManifest], []), [], "local-only entries are not listed");
-
+test("owner catalog keeps server-authorized gates for listed-unproven and proof-gated entries", () => {
   const listedUnproven = buildOwnerConnectorCatalog(
     [],
     [
