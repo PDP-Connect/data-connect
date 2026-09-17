@@ -13,6 +13,7 @@
 
 import { isIP } from "node:net";
 import { validateProviderNativeDiscoveryMetadata } from "@pdpp/reference-contract";
+import { getReachabilityRequestContext } from "./reachability-contract.ts";
 
 // Lightweight Express-like accessors. We don't import express types
 // directly here because the helper is also called from Fastify and
@@ -206,6 +207,10 @@ export function resolveRequestPublicUrl(req: ResolvePublicUrlRequest): string {
 }
 
 export function resolvePublicUrl(req: ResolvePublicUrlRequest, explicitUrl?: string | null): string {
+  const reachability = getReachabilityRequestContext(req);
+  if (reachability?.hosted && reachability.referenceOrigin) {
+    return reachability.referenceOrigin;
+  }
   const forwardedOrigin = forwardedPublicOrigin(req);
   if (explicitUrl) {
     const parsedExplicit = parseUrl(explicitUrl);
@@ -234,6 +239,10 @@ export function protectedResourceMetadataUrlForResource(resource: string): strin
 }
 
 export function shouldUseDirectRequestOrigin(req: ResolvePublicUrlRequest, explicitUrl?: string | null): boolean {
+  const reachability = getReachabilityRequestContext(req);
+  if (reachability?.hosted && reachability.referenceOrigin) {
+    return false;
+  }
   if (!explicitUrl || forwardedPublicOrigin(req)) {
     return false;
   }
@@ -248,6 +257,10 @@ export function shouldUseDirectRequestOrigin(req: ResolvePublicUrlRequest, expli
 }
 
 function explicitUrlUsesRequestOrigin(req: ResolvePublicUrlRequest, explicitUrl?: string | null): boolean {
+  const reachability = getReachabilityRequestContext(req);
+  if (reachability?.hosted && reachability.referenceOrigin) {
+    return false;
+  }
   if (!explicitUrl) {
     return true;
   }
@@ -285,6 +298,10 @@ export function isTrustedMetadataRequestOrigin(
 }
 
 export function resolveSiblingPublicUrl(req: ResolvePublicUrlRequest, explicitUrl?: string | null): string | null {
+  const reachability = getReachabilityRequestContext(req);
+  if (reachability?.hosted && reachability.referenceOrigin) {
+    return reachability.referenceOrigin;
+  }
   if (!explicitUrl) {
     return null;
   }
