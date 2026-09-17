@@ -99,7 +99,7 @@ async function startBrowserRun(connectorId: string, connectionId: string, draft:
 function launchErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : "The browser session could not start.";
   return isLostTransportError(err)
-    ? "PDPP may have started the browser run, but this page could not confirm it after the network changed. Open Syncs, or try again if no new run appears."
+    ? "DataConnect may have started the browser run, but this page could not confirm it after the network changed. Open Syncs, or try again if no new run appears."
     : message;
 }
 
@@ -150,7 +150,7 @@ export function BrowserSessionLaunchPanel({
         </h2>
         <p className="pdpp-body text-muted-foreground">
           {state.starting
-            ? "Keep this page open. PDPP is preparing the run and will open the secure browser when it is ready."
+            ? "Keep this page open. DataConnect is preparing the run and will open the secure browser when it is ready."
             : state.error}
         </p>
       </div>

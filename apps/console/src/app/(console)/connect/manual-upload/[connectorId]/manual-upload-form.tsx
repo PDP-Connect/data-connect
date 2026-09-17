@@ -110,7 +110,7 @@ function countRows(preview: ManualUploadPreview) {
     ["Estimated participants", preview.estimatedParticipants],
     ["Estimated attachments", preview.estimatedAttachments],
     ["Media coverage", formatMediaCoverage(preview.mediaCoverage)],
-    ["Source PDPP will use", preview.sourceDisplayName],
+    ["Source DataConnect will use", preview.sourceDisplayName],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "");
 }
 
@@ -151,7 +151,7 @@ function PreviewCard({ preview }: { preview: ManualUploadPreview }) {
     <div className="rounded-md border border-border/80 bg-background px-4 py-3" data-testid="manual-upload-preview">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="pdpp-eyebrow text-muted-foreground">What PDPP found</p>
+          <p className="pdpp-eyebrow text-muted-foreground">What DataConnect found</p>
           <p className="pdpp-body mt-1 font-medium text-foreground">{preview.uploadedFileName}</p>
         </div>
         <span className="pdpp-caption rounded-sm bg-muted px-2 py-1 text-muted-foreground">
@@ -777,7 +777,7 @@ export function ManualUploadForm({
       </label>
       {hasValidator ? (
         <div className="pdpp-caption rounded-md border border-border/80 bg-background px-3 py-2 text-muted-foreground">
-          PDPP validates before committing anything: {setup.validation_expectations.join(", ")}. Only files that pass
+          DataConnect validates before committing anything: {setup.validation_expectations.join(", ")}. Only files that pass
           are imported.
         </div>
       ) : null}

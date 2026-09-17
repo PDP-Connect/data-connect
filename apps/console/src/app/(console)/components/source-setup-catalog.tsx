@@ -7,6 +7,7 @@ import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { useSyncExternalStore } from "react";
+import { ConnectorMark } from "./connector-mark.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 import { connectorInstallRowModel } from "../lib/connector-install-presentation.ts";
@@ -16,7 +17,6 @@ import {
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
-  isRunnableAddOffer,
   sourceSetupRank,
   sourceSetupSecondaryAction,
   sourceSetupStatus,
@@ -253,9 +253,11 @@ function sourceRecordsHref(connectionId: string): string {
 
 function ExistingSourceLinks({
   connectorKey,
+  icon,
   sources,
 }: {
   connectorKey: string;
+  icon: ConnectorCatalogEntry["icon"];
   sources: readonly ExistingSourceSetupLink[];
 }) {
   if (sources.length === 0) {
@@ -273,7 +275,10 @@ function ExistingSourceLinks({
               key={source.connectionId}
             >
               <div className="min-w-0">
-                <p className="pdpp-caption font-medium text-foreground">{source.displayName}</p>
+                <p className="flex items-center gap-2 pdpp-caption font-medium text-foreground">
+                  <ConnectorMark className="size-5 shrink-0" icon={icon} name={source.displayName} />
+                  {source.displayName}
+                </p>
                 <p className="pdpp-caption text-muted-foreground">
                   {formatTotalRecordsLabel(source.totalRecords, source.totalRecordsState, "records")}
                   {latestFact ? ` · ${latestFact}` : ""}
@@ -369,34 +374,47 @@ function SourceSetupCard({
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
-      className="grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4"
+      className="grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4 sm:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] sm:items-start"
       data-testid={`source-setup-${entry.connectorKey}`}
+      data-install-state={installModel?.activationState ?? "unknown"}
+      data-tier={entry.publicTier}
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
+          <ConnectorMark className="size-8 shrink-0" icon={entry.icon} name={entry.displayName} />
           <h3 className="pdpp-title text-foreground">{entry.displayName}</h3>
           {/* Current support / blocked fact, kept distinct from the next action. */}
-          <span
-            className={`pdpp-eyebrow rounded border px-1.5 py-0.5 ${status.tone}`}
-            data-testid="source-support-fact"
-          >
-            {status.label}
-          </span>
+          {status.label ? (
+            <span
+              aria-label={`${status.label}: ${status.description}`}
+              className={`pdpp-eyebrow rounded border px-1.5 py-0.5 ${status.tone}`}
+              data-testid="source-support-fact"
+              title={status.description}
+            >
+              {status.label}
+            </span>
+          ) : null}
         </div>
         <p className="pdpp-caption mt-1 text-muted-foreground">{sourceMethodLine(entry, existingSources.length)}</p>
         <SourceSetupContext entry={entry} />
-        <ExistingSourceLinks connectorKey={entry.connectorKey} sources={existingSources} />
+        <ExistingSourceLinks connectorKey={entry.connectorKey} icon={entry.icon} sources={existingSources} />
         <SourceSetupDetails entry={entry} />
-        {installModel ? <ConnectorInstallRow model={installModel} /> : null}
+      </div>
+      <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
+        <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
+        {installModel ? (
+          <ConnectorInstallRow compact model={installModel} />
+        ) : (
+          <span className="pdpp-caption text-muted-foreground">Package status unavailable</span>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3 sm:border-t-0 sm:justify-end sm:pt-0">
         {packageNeedsInstall && installModel?.action ? (
-          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
-            <span className="pdpp-eyebrow text-muted-foreground">Next step</span>
-            <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
-              Install package above
-            </span>
-          </div>
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
+            Install package first
+          </span>
         ) : action ? (
-          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+          <>
             <Link className={buttonVariants({ size: "sm", variant: "default" })} href={action.href}>
               {action.label}
             </Link>
@@ -405,82 +423,14 @@ function SourceSetupCard({
                 {secondaryAction.label}
               </Link>
             ) : null}
-          </div>
+          </>
         ) : null}
       </div>
     </li>
   );
 }
 
-function ExperimentalSetupSummary({
-  entries,
-  existingSourcesByConnector,
-  installLifecycleByConnector,
-}: {
-  entries: readonly ConnectorCatalogEntry[];
-  existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
-  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
-}) {
-  if (entries.length === 0) {
-    return null;
-  }
-  return (
-    <details className="rounded-sm border border-border/80 bg-muted/20 p-3" data-testid="experimental-setup-summary">
-      <summary className="pdpp-caption cursor-pointer text-muted-foreground">Preview ({entries.length})</summary>
-      <div className="mt-3 grid gap-3">
-        <p className="pdpp-caption text-muted-foreground">
-          These setup paths are implemented but have not completed live validation. Test them with non-critical data.
-        </p>
-        <SourceSetupCardList
-          entries={entries}
-          existingSourcesByConnector={existingSourcesByConnector}
-          installLifecycleByConnector={installLifecycleByConnector}
-        />
-      </div>
-    </details>
-  );
-}
-
-/**
- * Development-tier connectors are registered and shipped, but this dashboard
- * does not offer them in the main list or the Preview disclosure above --
- * either no live run has proven the setup path yet (real, self-testable), or
- * the connector is a scaffold with no real collection code yet (never gets
- * an add action). Collapsed by default, same precedent as Preview, one tier
- * more cautious: an owner running their own instance can see everything that
- * exists and tell "not proven yet" apart from "not built yet", instead of a
- * connector silently vanishing between "shipped" and "visible".
- */
-function DevelopmentSetupSummary({
-  entries,
-  existingSourcesByConnector,
-  installLifecycleByConnector,
-}: {
-  entries: readonly ConnectorCatalogEntry[];
-  existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
-  installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
-}) {
-  if (entries.length === 0) {
-    return null;
-  }
-  return (
-    <details className="rounded-sm border border-border/80 border-dashed bg-muted/10 p-3" data-testid="development-setup-summary">
-      <summary className="pdpp-caption cursor-pointer text-muted-foreground">Development ({entries.length})</summary>
-      <div className="mt-3 grid gap-3">
-        <p className="pdpp-caption text-muted-foreground">
-          These connectors are registered on this instance but not yet offered above. Some have a real, implemented
-          setup path with no live-account run yet -- test them with non-critical data. Others are scaffolds with no
-          collection code yet and have no add action here.
-        </p>
-        <SourceSetupCardList
-          entries={entries}
-          existingSourcesByConnector={existingSourcesByConnector}
-          installLifecycleByConnector={installLifecycleByConnector}
-        />
-      </div>
-    </details>
-  );
-}
+/* Preview and development are row properties; they are never nested groups. */
 
 function SourceSetupCardList({
   entries,
@@ -492,7 +442,7 @@ function SourceSetupCardList({
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
   return (
-    <ul className="grid gap-3">
+    <ul className="grid gap-3" data-testid="source-setup-list">
       {entries.map((entry) => (
         <SourceSetupCard
           entry={entry}
@@ -542,20 +492,15 @@ export function SourceSetupCatalog({
   );
   const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode && showDevelopmentConnectors);
   const filtered = filterSourceCatalog(visibleCatalog, query);
-  const available = filtered.filter((entry) => entry.publicTier === "supported" && isRunnableAddOffer(entry));
-  const experimental = filtered.filter((entry) => entry.publicTier === "preview" && isRunnableAddOffer(entry));
-  // Every Development-tier entry belongs here -- real-but-unproven and known
-  // scaffolds alike. Visibility is the point: an owner running this instance
-  // must be able to tell a scaffold apart from a connector nobody has tested
-  // yet, not have either one silently omitted. `SourceSetupCard` itself
-  // already withholds the add action for a scaffold (`sourceSetupAction`
-  // returns null), so listing every Development entry here cannot render a
-  // dead-end "Add" button.
-  const development = filtered.filter((entry) => entry.publicTier === "development");
-  const actionable = [...available, ...experimental];
-  const anyMatch = actionable.length > 0 || development.length > 0;
+  // Every visible connector is one row. Tier, lifecycle exceptions, and
+  // package activation are row properties, so Preview and In development do
+  // not create nested containers or disappear from the scan path.
+  const anyMatch = filtered.length > 0;
   return (
-    <Section description="Add sources this dashboard can set up now." title="Add data">
+    <Section
+      description="Choose a connector to add data. Supported is the default; exception labels explain preview, in-development, and setup limits."
+      title="Add data"
+    >
       {developerMode ? (
         <div className="mb-5" data-testid="show-development-connectors-control">
           <label className="pdpp-caption flex cursor-pointer items-start gap-2">
@@ -569,7 +514,7 @@ export function SourceSetupCatalog({
               type="checkbox"
             />
             <span>
-              <span className="font-medium text-foreground">Show development connectors</span>
+              <span className="font-medium text-foreground">Show in-development connectors</span>
               <span className="mt-0.5 block text-muted-foreground">
                 Include registered connectors that are not proven against a live account yet.
               </span>
@@ -587,26 +532,14 @@ export function SourceSetupCatalog({
         </IcButton>
       </form>
       {anyMatch ? (
-        <div className="grid gap-5">
-          {available.length > 0 ? (
-            <SourceSetupCardList
-              entries={available}
-              existingSourcesByConnector={existingSourcesByConnector}
-              installLifecycleByConnector={installLifecycleByConnector}
-            />
-          ) : (
-            <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
-              No add-now sources match <span className="font-medium text-foreground">{query}</span>.
-            </p>
-          )}
-
-          <ExperimentalSetupSummary
-            entries={experimental}
-            existingSourcesByConnector={existingSourcesByConnector}
-            installLifecycleByConnector={installLifecycleByConnector}
-          />
-          <DevelopmentSetupSummary
-            entries={development}
+        <div className="grid gap-3">
+          <div className="hidden grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] gap-4 px-4 sm:grid">
+            <span className="pdpp-eyebrow text-muted-foreground">Connector</span>
+            <span className="pdpp-eyebrow text-muted-foreground">Package state</span>
+            <span className="pdpp-eyebrow text-muted-foreground">Action</span>
+          </div>
+          <SourceSetupCardList
+            entries={filtered}
             existingSourcesByConnector={existingSourcesByConnector}
             installLifecycleByConnector={installLifecycleByConnector}
           />

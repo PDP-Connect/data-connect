@@ -243,7 +243,7 @@ test("development + real (non-scaffold) self-testable disposition gets a self-te
     sourceSetupAction(imessage),
     "a real (non-scaffold) development entry with a self-testable disposition gets a self-test action"
   );
-  assert.equal(sourceSetupStatus(imessage).label, "Development");
+  assert.equal(sourceSetupStatus(imessage).label, "In development");
 });
 
 test("development + known scaffold gets no action and a distinct 'Not implemented' status", () => {
@@ -295,7 +295,7 @@ test("development + a disposition with no safe action gets honest fallback guida
   assert.equal(sourceSetupAction(localCollectorUnproven), null);
   assert.match(
     sourceSetupGuidance(localCollectorUnproven),
-    /Development/,
+    /In development/,
     "a real development entry without a safe action still gets development-framed guidance, not the unclassified dead-end"
   );
 });

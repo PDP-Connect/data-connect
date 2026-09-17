@@ -14,10 +14,14 @@ const NEW_TAB_TITLE = /title="Opens in a new tab"/;
 const NEW_TAB_COPY = /\(opens in a new tab\)/;
 const NOREFERRER = /rel="noreferrer"/;
 
-test("source cards keep one surface and place the action after the content", async () => {
+test("source cards keep one flat surface with identity, package, and action columns", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
-  assert.match(src, /className="grid gap-4 rounded-sm border border-border\/80 bg-card px-4 py-4"/);
-  assert.match(src, /className="mt-4 flex flex-wrap items-center gap-2 border-t border-border\/60 pt-3"/);
+  assert.match(src, /data-testid="source-setup-list"/);
+  assert.match(src, /data-tier=\{entry\.publicTier\}/);
+  assert.match(src, /data-install-state=\{installModel\?\.activationState \?\? "unknown"\}/);
+  assert.match(src, /<ConnectorMark[\s\S]*icon=\{entry\.icon\}[\s\S]*name=\{entry\.displayName\}/);
+  assert.doesNotMatch(src, /experimental-setup-summary|development-setup-summary|ExperimentalSetupSummary|DevelopmentSetupSummary/);
+  assert.match(src, /Package status unavailable/);
   assert.doesNotMatch(src, /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/);
   assert.doesNotMatch(src, /data-testid="show-development-connectors-control"[\s\S]{0,240}rounded-md border/);
 });

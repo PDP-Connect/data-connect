@@ -105,7 +105,7 @@ export default async function RecordsIndexPage({
     // screenshot-able without a live version-stats route.
     const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+      <RecordroomShellWithPalette host={host}>
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
@@ -123,7 +123,7 @@ export default async function RecordsIndexPage({
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
-        <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+        <RecordroomShellWithPalette host={host}>
           <SourcesHeader />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
@@ -134,7 +134,7 @@ export default async function RecordsIndexPage({
 
   if (page.kind === "error") {
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+      <RecordroomShellWithPalette host={host}>
         <SourcesHeader error={params.error} message={params.message} />
         <ConnectorSummaryPageError basePath={SOURCES_PATH} currentParams={params} message={page.message} />
       </RecordroomShellWithPalette>
@@ -152,7 +152,7 @@ export default async function RecordsIndexPage({
   ).length;
 
   return (
-    <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+    <RecordroomShellWithPalette host={host}>
       <SourcesHeader error={params.error} message={params.message} />
       <SourcesView
         instances={instances}
