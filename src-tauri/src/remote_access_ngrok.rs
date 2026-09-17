@@ -158,6 +158,7 @@ pub(crate) struct NgrokProvider<R> {
     config: RemoteAccessContractConfig,
     credential_resolver: R,
     endpoint_mode: NgrokEndpointMode,
+    reserved_domain: Option<String>,
     resources: Option<OwnedNgrokResources>,
 }
 
@@ -166,6 +167,17 @@ impl<R> NgrokProvider<R> {
         config: RemoteAccessContractConfig,
         credential_resolver: R,
         endpoint_mode: NgrokEndpointMode,
+    ) -> Result<Self, String> {
+        Self::with_reserved_domain(config, credential_resolver, endpoint_mode, None)
+    }
+
+    /// Request a reserved domain the owner holds on a paid ngrok plan. `None`
+    /// keeps ngrok's randomly assigned hostname, which the owner accepts.
+    pub(crate) fn with_reserved_domain(
+        config: RemoteAccessContractConfig,
+        credential_resolver: R,
+        endpoint_mode: NgrokEndpointMode,
+        reserved_domain: Option<String>,
     ) -> Result<Self, String> {
         if config.provider_id != NGROK_PROVIDER_ID {
             return Err("ngrok provider received a different provider id".to_string());
@@ -176,11 +188,16 @@ impl<R> NgrokProvider<R> {
         if config.user_supplied_origin.is_some() {
             return Err("ngrok cannot use a user-supplied origin".to_string());
         }
+        let reserved_domain = match reserved_domain {
+            Some(domain) => Some(validate_reserved_domain(&domain, endpoint_mode)?),
+            None => None,
+        };
 
         Ok(Self {
             config,
             credential_resolver,
             endpoint_mode,
+            reserved_domain,
             resources: None,
         })
     }
@@ -271,14 +288,15 @@ impl<R> NgrokProvider<R> {
 
         let resources = OwnedNgrokResources::new()?;
         let mode = self.endpoint_mode;
+        let domain = self.reserved_domain.clone();
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::spawn(move || {
-                start_on_runtime(resources, target, mode, token, cancellation)
+                start_on_runtime(resources, target, mode, domain, token, cancellation)
             })
             .join()
             .map_err(|_| "ngrok start thread panicked".to_string())?
         } else {
-            start_on_runtime(resources, target, mode, token, cancellation)
+            start_on_runtime(resources, target, mode, domain, token, cancellation)
         }?;
 
         let (resources, origin) = result;
@@ -359,6 +377,7 @@ fn start_on_runtime(
     mut resources: OwnedNgrokResources,
     target: LoopbackTarget,
     mode: NgrokEndpointMode,
+    reserved_domain: Option<String>,
     token: String,
     cancellation: CancellationToken,
 ) -> Result<(OwnedNgrokResources, String), String> {
@@ -366,8 +385,14 @@ fn start_on_runtime(
     let result = resources.runtime.block_on(async move {
         let listen_cancellation = cancellation.clone();
         let session = connect_session(token, cancellation).await?;
-        let tunnel =
-            listen_and_forward(session.clone(), mode, target_url, listen_cancellation).await;
+        let tunnel = listen_and_forward(
+            session.clone(),
+            mode,
+            reserved_domain,
+            target_url,
+            listen_cancellation,
+        )
+        .await;
         match tunnel {
             Ok(tunnel) => Ok((session, tunnel)),
             Err(error) => {
@@ -419,25 +444,41 @@ async fn wait_for_cancellation(cancellation: CancellationToken) {
 async fn listen_and_forward(
     session: Session,
     mode: NgrokEndpointMode,
+    reserved_domain: Option<String>,
     target: Url,
     cancellation: CancellationToken,
 ) -> Result<NgrokTunnel, String> {
     let listen = async move {
         match mode {
-            NgrokEndpointMode::HttpsEdgeTermination => session
-                .http_endpoint()
-                .listen_and_forward(target)
-                .await
-                .map(NgrokTunnel::Http)
-                .map_err(|error| format!("ngrok HTTPS endpoint failed: {error}")),
-            NgrokEndpointMode::TlsPassthrough => session
+            NgrokEndpointMode::HttpsEdgeTermination => {
+                let mut endpoint = session.http_endpoint();
+                // ngrok 0.19's `domain()` requests a reserved domain. Omitting
+                // it leaves the hostname to ngrok.
+                if let Some(domain) = reserved_domain.as_deref() {
+                    endpoint.domain(domain);
+                }
+                endpoint
+                    .listen_and_forward(target)
+                    .await
+                    .map(NgrokTunnel::Http)
+                    .map_err(|error| format!("ngrok HTTPS endpoint failed: {error}"))
+            }
+            NgrokEndpointMode::TlsPassthrough => {
                 // Deliberately omit `termination()`: ngrok 0.19 emits no
                 // TLSTermination option, then marks the connection PassthroughTLS.
-                .tls_endpoint()
-                .listen_and_forward(target)
-                .await
-                .map(NgrokTunnel::Tls)
-                .map_err(|error| format!("ngrok TLS endpoint failed: {error}")),
+                let mut endpoint = session.tls_endpoint();
+                if let Some(domain) = reserved_domain.as_deref() {
+                    endpoint.domain(domain);
+                }
+                endpoint
+                    .listen_and_forward(target)
+                    .await
+                    .map(NgrokTunnel::Tls)
+                    .map_err(|error| format!("ngrok TLS endpoint failed: {error}"))
+            }
+            // `TcpTunnelBuilder` has no domain concept in ngrok 0.19; it
+            // reserves an address, not a hostname. `with_reserved_domain`
+            // refuses the combination before reaching this point.
             NgrokEndpointMode::TcpPassthrough => session
                 .tcp_endpoint()
                 .listen_and_forward(target)
@@ -474,6 +515,36 @@ fn validate_loopback_target(target: &LoopbackTarget) -> Result<(), String> {
         return Err("ngrok loopback target must be localhost".to_string());
     }
     Ok(())
+}
+
+/// A reserved domain is a bare hostname. ngrok 0.19's `domain()` takes a host,
+/// so a URL, port, or path here would be sent verbatim and rejected by the edge
+/// with a far less obvious error.
+fn validate_reserved_domain(domain: &str, mode: NgrokEndpointMode) -> Result<String, String> {
+    if matches!(mode, NgrokEndpointMode::TcpPassthrough) {
+        return Err("ngrok TCP endpoints reserve an address, not a domain".to_string());
+    }
+    let domain = domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return Err("ngrok reserved domain cannot be empty".to_string());
+    }
+    if domain.contains(['/', ':', '?', '#', '@', ' ']) {
+        return Err("ngrok reserved domain must be a bare hostname".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("ngrok reserved domain must be fully qualified".to_string());
+    }
+    if domain.split('.').any(|label| {
+        label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return Err("ngrok reserved domain has an invalid label".to_string());
+    }
+    Ok(domain)
 }
 
 fn verify_discovered_origin(origin: &str) -> Result<String, String> {
@@ -649,5 +720,57 @@ mod tests {
         assert_eq!(health_from_state(true, true), NgrokHealth::ProviderDown);
         assert_eq!(health_from_state(true, false), NgrokHealth::Connected);
         assert_eq!(health_from_state(false, false), NgrokHealth::Stopped);
+    }
+
+    #[test]
+    fn a_reserved_domain_is_optional_and_normalized() {
+        let provider = NgrokProvider::with_reserved_domain(
+            config(),
+            StaticResolver {
+                value: Ok(Some(CredentialReference::Stored("token".to_string()))),
+            },
+            NgrokEndpointMode::HttpsEdgeTermination,
+            Some("  Vault.NGROK.app ".to_string()),
+        )
+        .expect("provider");
+        assert_eq!(provider.reserved_domain.as_deref(), Some("vault.ngrok.app"));
+
+        // Omitting the domain keeps ngrok's randomly assigned hostname.
+        let random = NgrokProvider::with_reserved_domain(
+            config(),
+            StaticResolver {
+                value: Ok(Some(CredentialReference::Stored("token".to_string()))),
+            },
+            NgrokEndpointMode::HttpsEdgeTermination,
+            None,
+        )
+        .expect("provider");
+        assert_eq!(random.reserved_domain, None);
+    }
+
+    #[test]
+    fn a_reserved_domain_must_be_a_bare_hostname() {
+        for invalid in [
+            "https://vault.ngrok.app",
+            "vault.ngrok.app:443",
+            "vault.ngrok.app/mcp",
+            "vault",
+            "-vault.ngrok.app",
+            "vault..ngrok.app",
+            "  ",
+        ] {
+            assert!(
+                validate_reserved_domain(invalid, NgrokEndpointMode::HttpsEdgeTermination).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_endpoints_refuse_a_reserved_domain() {
+        // ngrok 0.19's TcpTunnelBuilder exposes remote_addr, not domain.
+        assert!(
+            validate_reserved_domain("vault.ngrok.app", NgrokEndpointMode::TcpPassthrough).is_err()
+        );
     }
 }

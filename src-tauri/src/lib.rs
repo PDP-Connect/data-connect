@@ -7,6 +7,10 @@ mod processors;
 #[cfg(desktop)]
 mod remote_access;
 #[cfg(desktop)]
+mod remote_access_ngrok;
+#[cfg(desktop)]
+mod remote_access_providers;
+#[cfg(desktop)]
 mod unified;
 
 pub use commands::browser_surface_host_env_pairs;
@@ -38,7 +42,7 @@ use commands::{
 #[cfg(desktop)]
 use remote_access::{
     configure_remote_access, get_remote_access_config, inspect_remote_access,
-    set_remote_access_config,
+    inspect_remote_access_provider, set_remote_access_config,
 };
 use tauri::{Listener, Manager};
 
@@ -188,6 +192,8 @@ pub fn run() {
             set_remote_access_config,
             #[cfg(desktop)]
             configure_remote_access,
+            #[cfg(desktop)]
+            inspect_remote_access_provider,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
