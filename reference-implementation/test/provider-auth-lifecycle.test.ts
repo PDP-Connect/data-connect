@@ -257,12 +257,17 @@ async function withDeploymentEnv<T>(values: Record<string, string>, operation: (
 // so connection-setup-plan.ts's manifest-driven deployment readiness reads
 // ready for test_provider — pass false for a test that specifically wants
 // needs_config (deployment config missing).
+// `trustedProxies` declares which peers may set x-forwarded-* headers. The
+// reachability contract discards those headers from any other peer, so a test
+// that needs a forwarded host to reach the request boundary must declare the
+// loopback address the test client connects from.
 async function withServer(
   exchanger: ProviderAuthExchanger,
   {
     configuredKeys = ["test_provider"],
     deploymentConfigured = true,
-  }: { configuredKeys?: string[]; deploymentConfigured?: boolean },
+    trustedProxies,
+  }: { configuredKeys?: string[]; deploymentConfigured?: boolean; trustedProxies?: string },
   fn: (handles: { asUrl: string; rsUrl: string; server: TestServer }) => Promise<void>
 ): Promise<void> {
   await withDeploymentEnv(deploymentConfigured ? TEST_PROVIDER_DEPLOYMENT_ENV : {}, async () => {
@@ -270,6 +275,7 @@ async function withServer(
       asPort: 0,
       autoEnrollEligibleSchedules: false,
       configuredProviderAuthConnectorKeys: configuredKeys,
+      ...(trustedProxies === undefined ? {} : { trustedProxies }),
       dbPath: ":memory:",
       ownerAuthPassword: "",
       ownerAuthSubjectId: OWNER_SUBJECT_ID,
@@ -452,7 +458,11 @@ test("callback with unrecognized state does not create a connection", async () =
 
 test("callback whose recomputed redirect_uri differs from the one used at initiate is rejected before code exchange", async () => {
   const exchanger = buildTestExchanger();
-  await withServer(exchanger, {}, async ({ asUrl }) => {
+  // Declare the loopback peer this test connects from as a trusted proxy.
+  // Without it the reachability contract discards the spoofed x-forwarded-host
+  // below, the callback recomputes the legitimate redirect_uri, and the
+  // mismatch branch under test is never reached.
+  await withServer(exchanger, { trustedProxies: "127.0.0.1/32,::1/128" }, async ({ asUrl }) => {
     const session = OPEN_SESSION_COOKIE;
     const { body: initBody } = await initiateProviderAuth(asUrl, session, "test_provider");
     assert.equal(initBody.object, "provider_auth_initiate");
