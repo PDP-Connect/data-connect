@@ -109,6 +109,10 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: "Event subscriptions", href: "/event-subscriptions" },
     ],
   },
+  {
+    heading: "Workspace",
+    items: [{ label: "Settings", href: "/settings" }],
+  },
 ];
 
 /** Flat list of every nav item, for ⌘K palettes and tests. */

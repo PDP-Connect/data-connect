@@ -465,6 +465,20 @@ test("static-secret setup descriptor is manifest-authored and readiness-gated", 
   });
 });
 
+test("YNAB add-account setup endpoint is registered and does not return 404", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, "ynab");
+      const cookie = await login(asUrl);
+      const { status, body, text } = await getSetup(asUrl, cookie, "ynab");
+      assert.notEqual(status, 404, text);
+      assert.equal(status, 200, text);
+      assert.equal(body.object, "static_secret_setup");
+      assert.equal(body.connector_id, "ynab");
+    });
+  });
+});
+
 test("owner-selected display name is stored on the static-secret draft", async () => {
   await withCredentialKey(TEST_KEY, async () => {
     await withServer(async ({ asUrl }) => {

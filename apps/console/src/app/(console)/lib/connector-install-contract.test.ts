@@ -31,6 +31,33 @@ test("connector-install client contract parses installed status fixtures", () =>
   assert.equal(response.data[1]?.version, "0.1.0");
 });
 
+test("connector-install status accepts an installed package without an activation timestamp", () => {
+  const withNull = parseConnectorInstallStatusResponse({
+    ...connectorInstallStatusFixture,
+    data: [{ ...connectorInstallStatusFixture.data[0], activated_at: null }],
+  });
+  assert.equal(withNull.data[0]?.activated_at, null);
+
+  const withoutTimestamp = { ...connectorInstallStatusFixture.data[0] };
+  delete (withoutTimestamp as { activated_at?: string }).activated_at;
+  const withoutValue = parseConnectorInstallStatusResponse({
+    ...connectorInstallStatusFixture,
+    data: [withoutTimestamp],
+  });
+  assert.equal(withoutValue.data[0]?.activated_at, null);
+});
+
+test("connector-install status rejects an empty activation timestamp", () => {
+  assert.throws(
+    () =>
+      parseConnectorInstallStatusResponse({
+        ...connectorInstallStatusFixture,
+        data: [{ ...connectorInstallStatusFixture.data[0], activated_at: "" }],
+      }),
+    /activated_at must be a non-empty string or null/
+  );
+});
+
 test("connector-install client rejects an untrusted digest shape", () => {
   assert.throws(
     () =>
