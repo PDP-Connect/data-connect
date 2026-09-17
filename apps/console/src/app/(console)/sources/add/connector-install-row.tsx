@@ -6,18 +6,8 @@
 import { IcButton } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
-import { type ConnectorInstallRowModel, connectorInstallTierLabel } from "../../lib/connector-install-presentation.ts";
+import type { ConnectorInstallRowModel } from "../../lib/connector-install-presentation.ts";
 import { installConnectorAction, updateConnectorAction } from "./connector-install-actions.ts";
-
-function tierTone(tier: ConnectorInstallRowModel["tier"]): string {
-  if (tier === "supported") {
-    return "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg";
-  }
-  if (tier === "preview") {
-    return "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg";
-  }
-  return "border-border bg-muted/30 text-muted-foreground";
-}
 
 function activationTone(state: ConnectorInstallRowModel["activationState"]): string {
   if (state === "active") {
@@ -70,32 +60,40 @@ export function ConnectorInstallRow({ model }: { model: ConnectorInstallRowModel
   const feedbackRole = message?.tone === "error" ? "alert" : "status";
   return (
     <div
-      className="mt-3 grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-2"
+      className="mt-4 grid gap-2 border-t border-border/60 pt-3"
       data-connector-id={connectorId}
       data-testid="connector-install-row"
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span
-          className={`pdpp-eyebrow rounded border px-1.5 py-0.5 ${tierTone(model.tier)}`}
-          data-testid="connector-tier"
-        >
-          {connectorInstallTierLabel(model.tier)}
+        <span className={`pdpp-caption font-medium ${activationTone(model.activationState)}`} data-testid="connector-package-status">
+          {model.activationLabel}
         </span>
-        <span className={`pdpp-caption font-medium ${activationTone(model.activationState)}`}>
-          Package: {model.activationLabel}
-        </span>
+        {model.installedVersion ? (
+          <span className="pdpp-caption text-muted-foreground">Installed v{model.installedVersion}</span>
+        ) : null}
+        {model.activationState === "update_available" && model.targetVersion ? (
+          <span className="pdpp-caption text-status-warning-fg">Update to v{model.targetVersion}</span>
+        ) : null}
+        {model.activationState === "not_installed" && model.targetVersion ? (
+          <span className="pdpp-caption text-muted-foreground">Available v{model.targetVersion}</span>
+        ) : null}
       </div>
-      <div className="pdpp-caption flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-        <span>
-          Installed: {model.installedVersion ?? "—"}
-          {model.installedDigest ? (
-            <code className="ml-1 font-mono text-foreground" title="Installed package digest">
-              {model.installedDigest}
-            </code>
-          ) : null}
-        </span>
-        {model.targetVersion ? <span>Target: {model.targetVersion}</span> : null}
-      </div>
+      {model.installedDigest ? (
+        <details className="group">
+          <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
+            Package details
+          </summary>
+          <div className="pdpp-caption mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+            <span>
+              Installed digest{" "}
+              <code className="font-mono text-foreground" title={model.installedDigestFull ?? undefined}>
+                {model.installedDigest}
+              </code>
+            </span>
+            {model.targetVersion ? <span>Target v{model.targetVersion}</span> : null}
+          </div>
+        </details>
+      ) : null}
       {model.hostBlockReason ? (
         <p className="pdpp-caption text-status-warning-fg" data-testid="connector-host-block">
           Host blocked: {model.hostBlockReason}

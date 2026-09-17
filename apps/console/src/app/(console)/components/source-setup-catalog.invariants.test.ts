@@ -14,6 +14,14 @@ const NEW_TAB_TITLE = /title="Opens in a new tab"/;
 const NEW_TAB_COPY = /\(opens in a new tab\)/;
 const NOREFERRER = /rel="noreferrer"/;
 
+test("source cards keep one surface and place the action after the content", async () => {
+  const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
+  assert.match(src, /className="grid gap-4 rounded-sm border border-border\/80 bg-card px-4 py-4"/);
+  assert.match(src, /className="mt-4 flex flex-wrap items-center gap-2 border-t border-border\/60 pt-3"/);
+  assert.doesNotMatch(src, />Next step</);
+  assert.doesNotMatch(src, /data-testid="show-development-connectors-control"[\s\S]{0,240}rounded-md border/);
+});
+
 test("source-setup-catalog renders external documentation links with new-tab forewarning", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(src, EXTERNAL_DOCS, "must render externalDocs links");

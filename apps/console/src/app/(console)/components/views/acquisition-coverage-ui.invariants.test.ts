@@ -110,8 +110,10 @@ test("source card keeps the support fact distinct from the recommended next acti
   const src = await readFile(CATALOG_FILE, "utf8");
   // Current support/blocked fact is its own labelled element…
   assert.match(src, SUPPORT_FACT_TEST_ID);
-  // …and the action is a compact next step, not a repeated card heading.
-  assert.match(src, NEXT_COPY);
+  // …and the action is compact and placed after the card's content, without
+  // an extra label that repeats what the button already says.
+  assert.match(src, /sourceSetupAction/);
+  assert.doesNotMatch(src, NEXT_COPY);
   // The old generic disclosure repeated on every row and made the picker noisy.
   assert.doesNotMatch(src, GENERIC_SUPPORT_DETAIL_COPY);
   // Import-specific detail is still available, but behind explicit import intent.

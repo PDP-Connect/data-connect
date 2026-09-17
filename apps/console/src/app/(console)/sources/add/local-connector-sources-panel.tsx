@@ -158,9 +158,9 @@ export function LocalConnectorSourcesPanel({
     })
   }
   return (
-    <section className="mt-6 grid gap-3" data-testid="local-connector-sources">
+    <section className="mt-10 grid gap-3 border-t border-border/80 pt-6" data-testid="local-connector-sources">
       <div>
-        <h2 className="pdpp-title text-foreground">
+        <h2 className="pdpp-caption font-medium text-muted-foreground">
           Developer connector sources
         </h2>
         <p className="pdpp-caption mt-1 max-w-2xl text-muted-foreground">
@@ -169,7 +169,7 @@ export function LocalConnectorSourcesPanel({
           separate from verified registry packages.
         </p>
       </div>
-      <div className="grid gap-2 rounded-md border border-border/70 bg-card px-3 py-3 md:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
         <label className="grid gap-1" htmlFor="developer-connector-source-path">
           <span className="pdpp-caption font-medium text-foreground">
             Absolute source directory
@@ -187,6 +187,7 @@ export function LocalConnectorSourcesPanel({
           onClick={addSource}
           size="sm"
           type="button"
+          variant="ghost"
         >
           Add local source
         </IcButton>
@@ -207,7 +208,7 @@ export function LocalConnectorSourcesPanel({
           ))}
         </ul>
       ) : (
-        <p className="pdpp-caption rounded-md border border-dashed border-border px-3 py-3 text-muted-foreground">
+        <p className="pdpp-caption text-muted-foreground">
           No local connector sources configured.
         </p>
       )}
