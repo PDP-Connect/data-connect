@@ -15,6 +15,9 @@ use crate::commands::{attach_reference_server, login_reference_server_with_passw
 use crate::owner_credential::{
     configured_owner_password, load_or_create_owner_credential, owner_credential_path,
 };
+use crate::remote_access::{
+    load_remote_access_config, off_remote_access_config, RemoteAccessConfig,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
@@ -149,6 +152,10 @@ pub(crate) fn enabled_for_value(value: Option<&str>) -> bool {
 
 pub(crate) fn is_enabled() -> bool {
     enabled_for_value(std::env::var("DATACONNECT_UNIFIED_STACK").ok().as_deref())
+}
+
+pub(crate) fn remote_access_configuration_supported() -> bool {
+    is_enabled() && !attach_mode()
 }
 
 fn browser_url_from_runtime_origin(console_origin: Option<&str>) -> Result<String, String> {
@@ -410,6 +417,7 @@ fn ri_process_spec(
     root: &Path,
     data_dir: &Path,
     owner_password: &str,
+    remote_access: &RemoteAccessConfig,
 ) -> ProcessSpec {
     let mut env = env_map(vec![
         (OsString::from("AS_PORT"), OsString::from("{port}")),
@@ -443,6 +451,7 @@ fn ri_process_spec(
             OsString::from("1"),
         ),
     ]);
+    env.extend(remote_access.fields.environment());
     add_browser_host_environment(app, &mut env);
     ProcessSpec {
         label: RI_LABEL.to_string(),
@@ -473,8 +482,9 @@ fn console_process_spec(
     ri_origin: &str,
     rs_origin: &str,
     owner_password: &str,
+    remote_access: &RemoteAccessConfig,
 ) -> ProcessSpec {
-    let env = env_map(vec![
+    let mut env = env_map(vec![
         (OsString::from("NODE_ENV"), OsString::from("production")),
         (OsString::from("HOSTNAME"), OsString::from("127.0.0.1")),
         (OsString::from("PORT"), OsString::from("{port}")),
@@ -485,6 +495,7 @@ fn console_process_spec(
             OsString::from(owner_password),
         ),
     ]);
+    env.extend(remote_access.fields.environment());
     ProcessSpec {
         label: CONSOLE_LABEL.to_string(),
         program: node_binary.to_path_buf(),
@@ -563,7 +574,11 @@ struct ManagedStackStart {
     console_url: String,
 }
 
-fn start_managed_stack(app: &AppHandle, owner_password: &str) -> Result<ManagedStackStart, String> {
+fn start_managed_stack(
+    app: &AppHandle,
+    owner_password: &str,
+    remote_access: &RemoteAccessConfig,
+) -> Result<ManagedStackStart, String> {
     let resource_dir = app
         .path()
         .resource_dir()
@@ -598,7 +613,14 @@ fn start_managed_stack(app: &AppHandle, owner_password: &str) -> Result<ManagedS
 
     let sink = UnifiedEventSink { app: app.clone() };
     let ri = Supervisor::new(
-        ri_process_spec(app, &node_binary, &ri_root, &data_dir, owner_password),
+        ri_process_spec(
+            app,
+            &node_binary,
+            &ri_root,
+            &data_dir,
+            owner_password,
+            remote_access,
+        ),
         sink.clone(),
     )
     .start()
@@ -612,6 +634,7 @@ fn start_managed_stack(app: &AppHandle, owner_password: &str) -> Result<ManagedS
             &ri_origin,
             &rs_origin,
             owner_password,
+            remote_access,
         ),
         sink,
     )
@@ -775,6 +798,11 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
     let credential_path = owner_credential_path(&app)?;
     let stored_credential = load_or_create_owner_credential(&credential_path)?;
     let password = configured_owner_password().unwrap_or(stored_credential);
+    let remote_access = if attach_mode() {
+        off_remote_access_config()
+    } else {
+        load_remote_access_config(&app)?
+    };
 
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
@@ -785,8 +813,13 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
     } else {
         let password_for_sidecar = password.clone();
         let app_for_sidecars = app.clone();
+        let remote_access_for_sidecars = remote_access.clone();
         let result = tokio::task::spawn_blocking(move || {
-            start_managed_stack(&app_for_sidecars, &password_for_sidecar)
+            start_managed_stack(
+                &app_for_sidecars,
+                &password_for_sidecar,
+                &remote_access_for_sidecars,
+            )
         })
         .await
         .map_err(|error| format!("Unified sidecar startup task failed: {error}"))??;
@@ -850,6 +883,20 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
     }
     set_status(&app, UnifiedStatus::Ready);
     Ok(())
+}
+
+pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
+    if !remote_access_configuration_supported() {
+        return Err("Remote access requires the managed desktop stack".into());
+    }
+    set_status(&app, UnifiedStatus::Restarting);
+    tokio::task::spawn_blocking({
+        let app = app.clone();
+        move || stop_stack(&app)
+    })
+    .await
+    .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
+    bootstrap_and_open_console(app).await
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {

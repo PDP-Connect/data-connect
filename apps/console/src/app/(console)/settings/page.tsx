@@ -5,6 +5,7 @@ import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
+import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -15,7 +16,7 @@ export default function SettingsPage() {
     <RecordroomShellWithPalette>
       <main className="mx-auto grid w-full max-w-5xl gap-6 px-4 py-6">
         <PageHeader
-          description="Control optional features for this browser. These settings do not change Personal Server data or protocol permissions."
+          description="Control optional features for this browser and the way this Personal Server can be reached."
           title="Settings"
         />
         <Section
@@ -23,6 +24,12 @@ export default function SettingsPage() {
           title="Developer mode"
         >
           <DeveloperModeSetting />
+        </Section>
+        <Section
+          description="Choose a local-only posture or configure a proxy you control. Remote access always keeps the Personal Server on loopback."
+          title="Remote access"
+        >
+          <RemoteAccessSetting />
         </Section>
       </main>
     </RecordroomShellWithPalette>
