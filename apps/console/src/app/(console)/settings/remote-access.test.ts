@@ -40,13 +40,54 @@ test("origin validation refuses paths, non-HTTPS values, credentials, and loopba
   }
 })
 
-test("every posture carries an explicit non-unknown privacy badge", () => {
-  for (const posture of ["off", "my_devices_only", "public_url"] as const) {
-    assert.match(
+const ALL_POSTURES = ["off", "my_devices_only", "public_url"] as const
+
+test("every posture carries an explicit, non-blank privacy badge", () => {
+  for (const posture of ALL_POSTURES) {
+    const badge = privacyBadgeForPosture(posture)
+    assert.equal(typeof badge, "string", posture)
+    assert.ok(badge.trim().length > 0, `${posture} must never render blank`)
+    assert.doesNotMatch(badge, /unknown/i, `${posture} must not read as unknown`)
+    // Short enough to sit in a row beside the posture label.
+    assert.ok(badge.length <= 80, `${posture} badge is too long for a row`)
+  }
+})
+
+test("no posture claims a provider cannot read the owner's data", () => {
+  // The regression that shipped: a uniformly reassuring badge. We cannot verify
+  // an endpoint we do not operate, so this negative must never be asserted.
+  for (const posture of ALL_POSTURES) {
+    assert.doesNotMatch(
       privacyBadgeForPosture(posture),
-      /^Provider (cannot|can) read your data$/
+      /cannot read your data/i,
+      `${posture} must not assert an unverifiable privacy guarantee`
     )
   }
+})
+
+test("each posture reports a distinct property rather than one blanket claim", () => {
+  const badges = ALL_POSTURES.map(privacyBadgeForPosture)
+  assert.equal(new Set(badges).size, badges.length)
+})
+
+test("public_url says the answer depends on the owner's proxy", () => {
+  const badge = privacyBadgeForPosture("public_url")
+  assert.match(badge, /depends on your proxy/i)
+  // The concrete risk must be visible at choice time, not buried in prose.
+  assert.match(badge, /can read your data/i)
+  assert.match(badge, /TLS/i)
+})
+
+test("off does not imply a provider exists", () => {
+  const badge = privacyBadgeForPosture("off")
+  assert.match(badge, /no provider/i)
+  assert.doesNotMatch(badge, /\bproxy\b/i)
+})
+
+test("my_devices_only asserts no privacy property while it cannot be selected", () => {
+  const badge = privacyBadgeForPosture("my_devices_only")
+  assert.match(badge, /unavailable/i)
+  assert.doesNotMatch(badge, /read your data/i)
 })
 
 test("remote posture selection requires an owner password in either remote direction", () => {

@@ -115,16 +115,35 @@ export function offRemoteAccessConfig(): RemoteAccessConfig {
   }
 }
 
+/**
+ * The badge states only what we can actually verify about who can read
+ * plaintext. We never assert a negative we cannot prove: a user-supplied proxy
+ * terminates TLS unless the owner configures passthrough, and we have no way to
+ * inspect an endpoint we do not operate. A uniformly reassuring badge is worse
+ * than none, so each posture reports its real, distinct property.
+ */
+export type PrivacyBadge =
+  | "No provider - this device only"
+  | "Unavailable - no provider yet"
+  | "Depends on your proxy - it can read your data unless it passes TLS through"
+
 export function privacyBadgeForPosture(
   posture: RemoteAccessPosture
-): "Provider cannot read your data" | "Provider can read your data" {
-  // Off has no provider, but retaining the explicit safe badge keeps the
-  // property visible in every selectable row and prevents an unknown state.
+): PrivacyBadge {
   switch (posture) {
+    // No provider exists in this posture, so any provider-privacy claim would
+    // imply a third party that is not there.
     case "off":
+      return "No provider - this device only"
+    // Not selectable (no embedded provider ships yet). Asserting a privacy
+    // property for something that cannot be chosen would be a claim about
+    // software that does not exist.
     case "my_devices_only":
+      return "Unavailable - no provider yet"
+    // The owner supplies this endpoint. Whether the operator reads plaintext
+    // depends on that proxy's TLS termination, which we cannot verify.
     case "public_url":
-      return "Provider cannot read your data"
+      return "Depends on your proxy - it can read your data unless it passes TLS through"
   }
 }
 

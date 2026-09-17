@@ -106,6 +106,12 @@ export function RemoteAccessSetting({
   const [config, setConfig] = useState<RemoteAccessConfig>(
     offRemoteAccessConfig
   )
+  // The default config above is a placeholder, not state we have read. Until a
+  // load succeeds, we must not paint it as the real posture: rendering "Off"
+  // for an unknown state is what let the dishonest badge go unnoticed.
+  const [loadState, setLoadState] = useState<
+    "loading" | "loaded" | "bridge_absent" | "failed"
+  >(() => (invoke ? "loading" : "bridge_absent"))
   const [inspection, setInspection] = useState<RemoteAccessInspection | null>(
     null
   )
@@ -119,10 +125,12 @@ export function RemoteAccessSetting({
   useEffect(() => {
     if (!invoke) {
       setInspection(asInspection(null))
+      setLoadState("bridge_absent")
       return
     }
 
     let cancelled = false
+    setLoadState("loading")
     void Promise.all([
       invoke("get_remote_access_config"),
       invoke("inspect_remote_access"),
@@ -133,9 +141,14 @@ export function RemoteAccessSetting({
         setConfig(resolved)
         setInspection(asInspection(nextInspection))
         setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
+        setLoadState("loaded")
       })
       .catch(reason => {
-        if (!cancelled) setError(String(reason))
+        if (cancelled) return
+        // The command exists but this build could not answer it. Report the
+        // failure instead of falling back to a default that looks real.
+        setError(String(reason))
+        setLoadState("failed")
       })
 
     return () => {
@@ -143,7 +156,8 @@ export function RemoteAccessSetting({
     }
   }, [invoke])
 
-  const desktopUnavailable = inspection?.availability === "unavailable"
+  const stateIsKnown = loadState === "loaded"
+  const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
@@ -218,7 +232,24 @@ export function RemoteAccessSetting({
           Choose how this Personal Server can be reached. Remote access keeps
           the server bound to 127.0.0.1 and requires an owner password.
         </p>
-        {desktopUnavailable ? (
+        {loadState === "loading" ? (
+          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+            Reading the current remote access state…
+          </p>
+        ) : null}
+        {loadState === "bridge_absent" ? (
+          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+            Remote access is unavailable here. Open the DataConnect desktop app
+            to view or change it.
+          </p>
+        ) : null}
+        {loadState === "failed" ? (
+          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
+            The current remote access state could not be read, so it is not
+            shown. The setting below is unavailable rather than assumed off.
+          </p>
+        ) : null}
+        {loadState === "loaded" && inspection?.availability === "unavailable" ? (
           <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
             {inspection?.reason ??
               "Remote access is only available in the DataConnect desktop app."}
@@ -232,7 +263,8 @@ export function RemoteAccessSetting({
         role="radiogroup"
       >
         {postureRows.map(row => {
-          const selected = config.posture === row.posture
+          // No row is selected until a real config has been read.
+          const selected = stateIsKnown && config.posture === row.posture
           const unavailable = row.posture === "my_devices_only"
           return (
             <label
@@ -275,19 +307,21 @@ export function RemoteAccessSetting({
         })}
       </div>
 
-      {config.posture === "public_url" ? (
+      {stateIsKnown && config.posture === "public_url" ? (
         <div className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="pdpp-caption font-medium text-foreground">
               User-supplied origin
             </span>
             <span className="pdpp-caption rounded-full border border-border/80 px-2 py-0.5 text-muted-foreground">
-              Provider cannot read your data
+              {privacyBadgeForPosture("public_url")}
             </span>
           </div>
           <p className="pdpp-caption text-muted-foreground">
-            DataConnect does not operate this proxy. Your proxy must forward the
-            root origin to the loopback Personal Server.
+            DataConnect does not operate this proxy and cannot verify how it
+            handles TLS. Unless it passes TLS through to the loopback Personal
+            Server, its operator can read your traffic in plaintext. Your proxy
+            must forward the root origin to the loopback Personal Server.
           </p>
           <p className="break-all font-mono text-xs text-foreground/80">
             {activeOrigin}
