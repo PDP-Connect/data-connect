@@ -61,7 +61,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
           </Link>
         }
         breadcrumbs={[{ href: "/deployment", label: "Deployment" }, { label: "Provider authorization" }]}
-        description="Credentials that let this PDPP instance start a provider's consent flow on the owner's behalf. Values are encrypted at rest and never displayed again once saved."
+        description="Credentials that let this DataConnect instance start a provider's consent flow on the owner's behalf. Values are encrypted at rest and never displayed again once saved."
         title="Set up provider access"
       />
 

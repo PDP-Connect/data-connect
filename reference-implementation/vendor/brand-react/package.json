@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./components.css": "./src/components.css",
+    "./product-identity": "./src/product-identity.ts",
     "./shell.css": "./src/shell.css"
   },
   "scripts": {

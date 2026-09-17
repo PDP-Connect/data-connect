@@ -307,7 +307,7 @@ export default async function BrowserSessionConnectPage({
         <div className="rounded-md border border-border/50 bg-muted/20 px-4 py-3">
           <p className="pdpp-caption text-muted-foreground">
             <strong className="text-foreground">Browser did not open?</strong> Try again, or return to Sources and retry
-            from this source. If PDPP cannot start the secure browser, it will show the reason before any data is
+            from this source. If DataConnect cannot start the secure browser, it will show the reason before any data is
             changed.
           </p>
         </div>
