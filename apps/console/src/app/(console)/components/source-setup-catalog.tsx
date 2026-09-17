@@ -235,10 +235,7 @@ function SourceSetupContext({ entry }: { entry: ConnectorCatalogEntry }) {
     return null;
   }
   return (
-    <p
-      className="pdpp-caption mt-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2 text-muted-foreground"
-      data-testid="source-setup-context"
-    >
+    <p className="pdpp-caption mt-2 text-muted-foreground" data-testid="source-setup-context">
       {context}
     </p>
   );
@@ -265,17 +262,14 @@ function ExistingSourceLinks({
     return null;
   }
   return (
-    <div
-      className="mt-3 grid gap-2 rounded-md border border-border/70 bg-muted/20 p-3"
-      data-testid="existing-source-links"
-    >
+    <div className="mt-4 border-t border-border/60 pt-3" data-testid="existing-source-links">
       <p className="pdpp-eyebrow text-muted-foreground">Existing accounts</p>
-      <ul className="grid gap-2">
+      <ul className="mt-2 divide-y divide-border/60">
         {sources.map((source) => {
           const latestFact = source.latestImportStatus ?? source.status ?? null;
           return (
             <li
-              className="grid gap-2 rounded-sm border border-border/60 bg-background/70 p-2 sm:grid-cols-[minmax(0,1fr)_auto]"
+              className="grid gap-2 py-2 first:pt-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_auto]"
               key={source.connectionId}
             >
               <div className="min-w-0">
@@ -375,7 +369,7 @@ function SourceSetupCard({
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
-      className="grid gap-3 rounded-sm border border-border/80 bg-card px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto]"
+      className="grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4"
       data-testid={`source-setup-${entry.connectorKey}`}
     >
       <div className="min-w-0">
@@ -394,18 +388,15 @@ function SourceSetupCard({
         <ExistingSourceLinks connectorKey={entry.connectorKey} sources={existingSources} />
         <SourceSetupDetails entry={entry} />
         {installModel ? <ConnectorInstallRow model={installModel} /> : null}
-      </div>
-      <div className="flex flex-col items-end justify-start gap-1">
         {packageNeedsInstall && installModel?.action ? (
-          <>
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
             <span className="pdpp-eyebrow text-muted-foreground">Next step</span>
             <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
               Install package above
             </span>
-          </>
+          </div>
         ) : action ? (
-          <>
-            <span className="pdpp-eyebrow text-muted-foreground">Next step</span>
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
             <Link className={buttonVariants({ size: "sm", variant: "default" })} href={action.href}>
               {action.label}
             </Link>
@@ -414,7 +405,7 @@ function SourceSetupCard({
                 {secondaryAction.label}
               </Link>
             ) : null}
-          </>
+          </div>
         ) : null}
       </div>
     </li>
@@ -566,24 +557,24 @@ export function SourceSetupCatalog({
   return (
     <Section description="Add sources this dashboard can set up now." title="Add data">
       {developerMode ? (
-        <div
-          className="mb-4 rounded-md border border-border/70 bg-muted/20 p-3"
-          data-testid="show-development-connectors-control"
-        >
-          <label className="pdpp-caption flex items-center gap-2 font-medium text-foreground">
+        <div className="mb-5" data-testid="show-development-connectors-control">
+          <label className="pdpp-caption flex cursor-pointer items-start gap-2">
             <input
               checked={showDevelopmentConnectors}
+              className="mt-0.5 shrink-0"
               onChange={(event) => {
                 const show = event.currentTarget.checked;
                 setDevelopmentVisibility(show);
               }}
               type="checkbox"
             />
-            Show development connectors
+            <span>
+              <span className="font-medium text-foreground">Show development connectors</span>
+              <span className="mt-0.5 block text-muted-foreground">
+                Include registered connectors that are not proven against a live account yet.
+              </span>
+            </span>
           </label>
-          <p className="pdpp-caption mt-1 text-muted-foreground">
-            Include registered connectors that are not proven against a live account yet.
-          </p>
         </div>
       ) : null}
       <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">

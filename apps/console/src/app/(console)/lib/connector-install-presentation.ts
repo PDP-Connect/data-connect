@@ -25,6 +25,7 @@ export interface ConnectorInstallRowModel {
   readonly connectorId: string;
   readonly hostBlockReason: string | null;
   readonly installedDigest: string | null;
+  readonly installedDigestFull: string | null;
   readonly installedVersion: string | null;
   readonly targetVersion: string | null;
   readonly tier: PublicConnectorTier;
@@ -147,6 +148,7 @@ export function connectorInstallRowModel(
     connectorId: target?.connector_id ?? installed?.connector_id ?? entry.connectorKey,
     hostBlockReason,
     installedDigest: shortConnectorDigest(installed?.digest ?? null),
+    installedDigestFull: installed?.digest ?? null,
     installedVersion: installed?.version ?? null,
     targetVersion: target?.latest === true ? target.version : null,
     tier: tierFor(entry, lifecycle),

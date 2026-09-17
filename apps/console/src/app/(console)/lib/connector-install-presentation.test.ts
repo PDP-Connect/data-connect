@@ -116,6 +116,7 @@ test("matching installed digest is Active and has no mutation action", () => {
   assert.equal(github.activationState, "active");
   assert.equal(github.action, null);
   assert.match(github.installedDigest ?? "", INSTALLED_DIGEST_RE);
+  assert.equal(github.installedDigestFull, CONNECTOR_INSTALL_FIXTURE_DIGESTS.githubCurrent);
   assert.equal(shortConnectorDigest(null), null);
 });
 

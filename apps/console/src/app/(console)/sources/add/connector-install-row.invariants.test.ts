@@ -14,6 +14,9 @@ const FEEDBACK_ROLE_RE = /const feedbackRole = message\?\.tone === "error" \? "a
 const FEEDBACK_ROLE_PROP_RE = /role=\{feedbackRole\}/;
 const REFRESH_RE = /router\.refresh\(\)/;
 const ACTION_RE = /installConnectorAction|updateConnectorAction/;
+const SINGLE_LIFECYCLE_STATUS_RE = /data-testid="connector-package-status"/;
+const NO_DUPLICATE_TIER_RE = /data-testid="connector-tier"/;
+const DIGEST_DISCLOSURE_RE = /Package details/;
 
 test("connector install row keeps mutation feedback inline and non-optimistic", async () => {
   const source = await readFile(ROW_FILE, "utf8");
@@ -24,4 +27,7 @@ test("connector install row keeps mutation feedback inline and non-optimistic", 
   assert.match(source, FEEDBACK_ROLE_PROP_RE);
   assert.match(source, REFRESH_RE);
   assert.match(source, ACTION_RE);
+  assert.match(source, SINGLE_LIFECYCLE_STATUS_RE);
+  assert.match(source, DIGEST_DISCLOSURE_RE);
+  assert.doesNotMatch(source, NO_DUPLICATE_TIER_RE);
 });
