@@ -39,6 +39,7 @@ import { LivePoller } from "../components/live-poller.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { type ListResponse, listConnectorSummaries, listRuns, type RunSummary } from "../lib/ref-client.ts";
+import { listConnectorManifests } from "../lib/rs-client.ts";
 import { DEMO_SYNCS_MODEL } from "./syncs-demo.ts";
 import { buildSyncsViewModel } from "./syncs-model.ts";
 import { SyncsView } from "./syncs-view.tsx";
@@ -139,10 +140,12 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   const pageState = parseConnectorSummaryPageState(params);
   let runsResult: ListResponse<RunSummary>;
   let connectorsPage: Awaited<ReturnType<typeof fetchSyncsConnectorsPage>>;
+  let connectorManifests: Awaited<ReturnType<typeof listConnectorManifests>>;
   try {
-    [runsResult, connectorsPage] = await Promise.all([
+    [runsResult, connectorsPage, connectorManifests] = await Promise.all([
       listRuns(runListQuery(params)),
       fetchSyncsConnectorsPage(pageState),
+      listConnectorManifests().catch(() => []),
     ]);
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
@@ -169,11 +172,18 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
   });
 
   const liveRunCount = runsResult.data.filter(isLiveRun).length;
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap((manifest) => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+    ])
+  );
 
   return (
     <RecordroomShellWithPalette>
       <LivePoller enabled={liveRunCount > 0} />
       <SyncsView
+        connectorIcons={connectorIcons}
         model={model}
         recentSyncsPaging={{
           connectorOptions: connectorFilterOptions(connectorsPage.items, params.connector_id),

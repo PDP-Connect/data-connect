@@ -5,6 +5,7 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
@@ -44,6 +45,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
   let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
+  let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./add-source-demo-data.ts");
     ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
@@ -63,6 +65,12 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         listOwnerConnectorTemplates(),
         installSnapshotPromise,
       ]);
+      connectorIcons = Object.fromEntries(
+        manifests.flatMap((manifest) => [
+          [manifest.connector_id, manifest.icon] as const,
+          ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+        ])
+      );
       catalog = buildOwnerConnectorCatalog(manifests, templates);
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
@@ -121,7 +129,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         installLifecycleByConnector={installLifecycleByConnector}
         query={sourceQuery}
       />
-      <LocalConnectorSourcesPanel sources={localSources} />
+      <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />
     </RecordroomShellWithPalette>
   );
 }

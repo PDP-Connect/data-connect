@@ -50,7 +50,7 @@ test("public connector tiers use the manifest declaration and exact public label
   assert.deepEqual(["supported", "preview", "development"].map((tier) => publicTierLabel(tier as "supported" | "preview" | "development")), [
     "Supported",
     "Preview",
-    "Development",
+    "In development",
   ]);
 });
 
@@ -353,7 +353,7 @@ test("non-browser static-secret connectors keep the existing single capture path
   assert.equal(entry.isKnownScaffold, false);
   assert.equal(sourceSetupAction(entry) !== null, true, "a real development entry gets a self-test action");
   assert.equal(sourceSetupSecondaryAction(entry), null);
-  assert.equal(sourceSetupStatus(entry).label, "Development");
+  assert.equal(sourceSetupStatus(entry).label, "In development");
 });
 
 test("YNAB static-secret entry shows as actionable with draft-create path", async () => {
@@ -367,7 +367,7 @@ test("YNAB static-secret entry shows as actionable with draft-create path", asyn
   assert.equal(ynab.enrollmentKey, undefined);
   assert.equal(ynab.supportState, "supported");
   assert.equal(ynab.proofGate, null);
-  assert.equal(sourceSetupStatus(ynab).label, "Supported");
+  assert.equal(sourceSetupStatus(ynab).label, null);
   assert.equal(sourceSetupAction(ynab)?.href, "/connect/static-secret/ynab");
   assert.equal(sourceSetupSecondaryAction(ynab), null);
   assert.equal(sourceSetupAvailability(ynab), "available_now");
@@ -781,7 +781,7 @@ test("configured Google provider readiness exposes the existing owner authorizat
   assert.equal(entry.nextStepKind, "open_provider_auth");
   assert.equal(entry.supportState, "supported");
   assert.equal(entry.disposition, "provider_auth_connect");
-  assert.equal(sourceSetupStatus(entry).label, "Development");
+  assert.equal(sourceSetupStatus(entry).label, "In development");
   // google-maps-data-portability is real, not a known scaffold (its own
   // manifest documents exactly what is and is not implemented via
   // public_listing.proof_gate), and provider_auth_connect IS in the

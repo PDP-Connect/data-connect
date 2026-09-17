@@ -8,6 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
@@ -17,6 +18,8 @@ import {
   type SpineEvent,
   type TimelineEnvelope,
 } from "../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../lib/rs-client.ts";
+import { findManifestForConnectorId } from "../../sources/lib/relationships.ts";
 import {
   type CurrentRunAssistance,
   getCurrentRunAssistance,
@@ -107,6 +110,9 @@ export default async function RunDetailPage({
 
   const { events } = envelope;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
+  const connectorName = connectorManifest?.display_name ?? connectorId ?? "connector";
 
   const checkpoints = summarizeCheckpoints(events);
   const progress = summarizeProgress(events);
@@ -183,6 +189,7 @@ export default async function RunDetailPage({
             className="font-mono text-foreground underline underline-offset-2"
             href={`/sources/${encodeURIComponent(connectorId)}`}
           >
+            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorManifest?.icon} name={connectorName} />
             {connectorId}
           </Link>
           {" · "}

@@ -3,9 +3,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { IcButton } from "@pdpp/brand-react"
+import { IcButton, type ConnectorIconLike } from "@pdpp/brand-react"
 import { useRouter } from "next/navigation"
 import { useCallback, useState, useSyncExternalStore, useTransition } from "react"
+import { ConnectorMark } from "../../components/connector-mark.tsx"
 import type { ConnectorLocalSource } from "../../lib/connector-install-contract.ts"
 import {
   getDeveloperModeServerSnapshot,
@@ -25,7 +26,13 @@ function actionError(result: { ok: boolean; message?: string }): string | null {
     : (result.message ?? "Developer local source action failed.")
 }
 
-function LocalSourceRow({ source }: { source: ConnectorLocalSource }) {
+function LocalSourceRow({
+  connectorIcons,
+  source,
+}: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>
+  source: ConnectorLocalSource
+}) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
   const [message, setMessage] = useState<string | null>(null)
@@ -53,7 +60,11 @@ function LocalSourceRow({ source }: { source: ConnectorLocalSource }) {
         <span className="pdpp-eyebrow rounded border border-status-warning-fg/30 bg-status-warning-bg px-1.5 py-0.5 text-status-warning-fg">
           Local
         </span>
-        <span className="pdpp-caption font-medium text-foreground">
+        <span className="flex min-w-0 items-center gap-2 pdpp-caption font-medium text-foreground">
+          <ConnectorMark
+            icon={connectorIcons[source.connector_id] ?? connectorIcons[source.connector_key]}
+            name={source.display_name}
+          />
           {source.display_name}
         </span>
         <span className="pdpp-caption text-muted-foreground">
@@ -141,8 +152,10 @@ function LocalSourceRow({ source }: { source: ConnectorLocalSource }) {
 }
 
 export function LocalConnectorSourcesPanel({
+  connectorIcons = {},
   sources,
 }: {
+  connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>
   sources: readonly ConnectorLocalSource[]
 }) {
   const developerMode = useSyncExternalStore(
@@ -217,7 +230,7 @@ export function LocalConnectorSourcesPanel({
       {sources.length > 0 ? (
         <ul className="grid gap-2" data-testid="local-source-list">
           {sources.map(source => (
-            <LocalSourceRow key={source.source_id} source={source} />
+            <LocalSourceRow connectorIcons={connectorIcons} key={source.source_id} source={source} />
           ))}
         </ul>
       ) : (

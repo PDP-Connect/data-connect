@@ -29,8 +29,11 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { isBrowserBoundConnector, isSupportedBrowserCollectorConnector } from "../../../lib/connection-modality.ts";
 import { getStaticSecretSetup, type StaticSecretSetupField } from "../../../lib/ref-client.ts";
+import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import {
   type BrowserOptionalCredentialContract,
   browserSessionFormContract,
@@ -177,6 +180,7 @@ export default async function BrowserSessionConnectPage({
     : null;
   const browserFormContract = browserSessionFormContract(storedCredentialSetup);
   const displayName = formatConnectorKeyForDisplay(connectorId);
+  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), connectorId)?.icon;
   const connectionName = connectionNameFieldContract(displayName);
   const pageTitle = repairMode ? `Reconnect ${displayName}` : `Connect ${displayName}`;
   const primaryActionLabel = repairMode ? `Reconnect ${displayName}` : "Connect account";
@@ -244,11 +248,21 @@ export default async function BrowserSessionConnectPage({
         }
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
         description={
-          repairMode
-            ? `Log in to ${displayName} in the secure browser to restore collection. Your existing records and history are preserved.`
-            : setupDescription
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <span>
+              {repairMode
+                ? `Log in to ${displayName} in the secure browser to restore collection. Your existing records and history are preserved.`
+                : setupDescription}
+            </span>
+          </span>
         }
-        title={pageTitle}
+        title={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            {pageTitle}
+          </span>
+        }
       />
 
       <div className="mx-auto max-w-lg space-y-6 px-4 py-8">

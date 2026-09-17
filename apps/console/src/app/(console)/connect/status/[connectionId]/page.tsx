@@ -7,6 +7,7 @@ import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primi
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { LivePoller } from "../../../components/live-poller.tsx";
 import {
   type ConnectionSetupStatus,
@@ -14,6 +15,8 @@ import {
   RefNotFoundError,
   type StaticSecretSetupStateValue,
 } from "../../../lib/ref-client.ts";
+import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export const dynamic = "force-dynamic";
@@ -699,6 +702,7 @@ export default async function ConnectionSetupStatusPage({
   const described = describeState(status);
   const importPhases = importPhaseProgress(status);
   const displayName = deriveSetupStatusDisplayName(status);
+  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id)?.icon;
   const title = accountIdentity ? `${displayName} · ${accountIdentity}` : displayName;
   return (
     <RecordroomShellWithPalette>
@@ -710,8 +714,18 @@ export default async function ConnectionSetupStatusPage({
           </Link>
         }
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: "Setup status" }]}
-        description="Durable status for the account or import you just submitted. Bookmark it and come back any time."
-        title={title}
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <span>Durable status for the account or import you just submitted. Bookmark it and come back any time.</span>
+          </span>
+        }
+        title={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            {title}
+          </span>
+        }
       />
 
       <Section description={described.detail} title={described.headline}>

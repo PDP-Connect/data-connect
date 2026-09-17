@@ -19,7 +19,7 @@ function activationTone(state: ConnectorInstallRowModel["activationState"]): str
   return "text-muted-foreground";
 }
 
-export function ConnectorInstallRow({ model }: { model: ConnectorInstallRowModel }) {
+export function ConnectorInstallRow({ compact = false, model }: { compact?: boolean; model: ConnectorInstallRowModel }) {
   const { action, connectorId } = model;
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -60,7 +60,7 @@ export function ConnectorInstallRow({ model }: { model: ConnectorInstallRowModel
   const feedbackRole = message?.tone === "error" ? "alert" : "status";
   return (
     <div
-      className="mt-4 grid gap-2 border-t border-border/60 pt-3"
+      className={compact ? "grid gap-2" : "mt-4 grid gap-2 border-t border-border/60 pt-3"}
       data-connector-id={connectorId}
       data-testid="connector-install-row"
     >
