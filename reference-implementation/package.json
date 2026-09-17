@@ -48,6 +48,7 @@
     "provision:test-database": "node --experimental-strip-types scripts/provision-test-database.ts",
     "server": "sh -c 'PDPP_REFERENCE_OPERATIONAL_DEFAULTS=${PDPP_REFERENCE_OPERATIONAL_DEFAULTS:-1} node --env-file-if-exists=../.env.local server/index.ts'",
     "test": "node --import tsx ../scripts/test-scratch/run-command.ts -- node scripts/run-tests.ts",
+    "test:sqlite-encryption-matrix": "node --test test/sqlite-encryption-vector-matrix.test.mjs",
     "test:live-cdp": "PDPP_TEST_LIVE_CDP=1 node --import tsx ../scripts/test-scratch/run-command.ts -- node --test test/run-interaction-stream-cdp-live.test.ts",
     "test:live-neko": "PDPP_TEST_LIVE_NEKO=1 node --import tsx ../scripts/test-scratch/run-command.ts -- node --test --import tsx test/run-interaction-stream-neko-live.test.ts",
     "test:manual-upload-no-whole-file-read": "node --import tsx ../scripts/test-scratch/run-command.ts -- node --experimental-test-module-mocks --expose-gc --test --import tsx test/manual-upload-whatsapp-no-whole-file-read.test.ts",
