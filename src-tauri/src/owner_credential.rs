@@ -16,17 +16,35 @@ const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
 const OWNER_CREDENTIAL_BYTES: usize = 32;
 const KEYRING_SERVICE: &str = "com.vana.dataconnect";
 const KEYRING_USERNAME: &str = "owner";
+const PROVIDER_CREDENTIAL_USERNAME_PREFIX: &str = "remote-access-provider:";
 
 trait CredentialStore {
     fn load(&mut self) -> Result<Option<String>, String>;
     fn save(&mut self, credential: &str) -> Result<(), String>;
 }
 
-struct SystemKeyring;
+struct SystemKeyring {
+    username: String,
+}
+
+impl SystemKeyring {
+    fn owner() -> Self {
+        Self {
+            username: KEYRING_USERNAME.to_string(),
+        }
+    }
+
+    fn provider_credential_reference(provider_id: &str) -> Result<Self, String> {
+        let provider_id = validated_provider_id(provider_id)?;
+        Ok(Self {
+            username: format!("{PROVIDER_CREDENTIAL_USERNAME_PREFIX}{provider_id}"),
+        })
+    }
+}
 
 impl CredentialStore for SystemKeyring {
     fn load(&mut self) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
             .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
@@ -36,7 +54,7 @@ impl CredentialStore for SystemKeyring {
     }
 
     fn save(&mut self, credential: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
             .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
         entry
             .set_password(credential)
@@ -66,8 +84,70 @@ pub(crate) fn configured_owner_password() -> Option<String> {
 
 /// Load the one credential for this app-data path, or create it once.
 pub(crate) fn load_or_create_owner_credential(path: &Path) -> Result<String, String> {
-    let mut store = SystemKeyring;
+    let mut store = SystemKeyring::owner();
     load_or_create_owner_credential_with_store(path, &mut store)
+}
+
+/// Replace the owner password in the OS keychain, with the protected app-data
+/// file as the same headless fallback used by initial credential creation.
+pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result<(), String> {
+    let path = owner_credential_path(app)?;
+    let mut store = SystemKeyring::owner();
+    save_owner_credential_with_store(&path, &mut store, credential)
+}
+
+/// Load the opaque provider credential reference for a native remote-access provider.
+pub(crate) fn load_provider_credential_reference(
+    provider_id: &str,
+) -> Result<Option<String>, String> {
+    let mut store = SystemKeyring::provider_credential_reference(provider_id)?;
+    load_provider_credential_reference_with_store(&mut store)
+}
+
+/// Store the opaque provider credential reference for a native remote-access provider.
+pub(crate) fn store_provider_credential_reference(
+    provider_id: &str,
+    credential_reference: &str,
+) -> Result<(), String> {
+    let mut store = SystemKeyring::provider_credential_reference(provider_id)?;
+    store_provider_credential_reference_with_store(&mut store, credential_reference)
+}
+
+fn load_provider_credential_reference_with_store(
+    store: &mut impl CredentialStore,
+) -> Result<Option<String>, String> {
+    Ok(store
+        .load()?
+        .map(|reference| reference.trim().to_string())
+        .filter(|reference| !reference.is_empty()))
+}
+
+fn store_provider_credential_reference_with_store(
+    store: &mut impl CredentialStore,
+    credential_reference: &str,
+) -> Result<(), String> {
+    let credential_reference = credential_reference.trim();
+    if credential_reference.is_empty() {
+        return Err("Provider credential reference cannot be empty".to_string());
+    }
+    store.save(credential_reference)
+}
+
+fn validated_provider_id(provider_id: &str) -> Result<&str, String> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        return Err("Provider id cannot be empty".to_string());
+    }
+    if !provider_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "Provider id must contain only ASCII letters, digits, dots, dashes, or underscores"
+                .to_string(),
+        );
+    }
+    Ok(provider_id)
 }
 
 fn load_or_create_owner_credential_with_store(
@@ -134,6 +214,40 @@ fn load_or_create_owner_credential_with_store(
         }
         Err(error) => Err(format!("Failed to create owner credential: {error}")),
     }
+}
+
+fn save_owner_credential_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    credential: &str,
+) -> Result<(), String> {
+    if credential.trim().is_empty() {
+        return Err("Owner credential cannot be empty".to_string());
+    }
+
+    if store.save(credential).is_ok() {
+        // Keep an existing fallback synchronized so a later keychain outage
+        // cannot silently revert to an old owner password.
+        if path.exists() {
+            write_owner_credential_file(path, credential)?;
+        }
+        return Ok(());
+    }
+
+    write_owner_credential_file(path, credential)
+}
+
+fn write_owner_credential_file(path: &Path, credential: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create owner credential directory: {error}"))?;
+    }
+    fs::write(path, credential)
+        .map_err(|error| format!("Failed to write owner credential: {error}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("Failed to protect owner credential: {error}"))?;
+    Ok(())
 }
 
 fn log_fallback_store(keyring_error: Option<&str>) {
@@ -233,5 +347,56 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn saves_owner_password_to_the_keyring() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        let mut store = MockKeyring {
+            available: true,
+            ..Default::default()
+        };
+
+        save_owner_credential_with_store(&path, &mut store, "chosen-owner-password")
+            .expect("saved owner password");
+
+        assert_eq!(store.value.as_deref(), Some("chosen-owner-password"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stores_and_loads_provider_credential_reference() {
+        let mut store = MockKeyring {
+            available: true,
+            ..Default::default()
+        };
+
+        store_provider_credential_reference_with_store(&mut store, "native-secret-slot")
+            .expect("stored provider credential reference");
+
+        assert_eq!(
+            load_provider_credential_reference_with_store(&mut store)
+                .expect("loaded provider credential reference")
+                .as_deref(),
+            Some("native-secret-slot")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_provider_credential_reference() {
+        let mut store = MockKeyring {
+            available: true,
+            ..Default::default()
+        };
+
+        assert!(store_provider_credential_reference_with_store(&mut store, "  ").is_err());
+    }
+
+    #[test]
+    fn validates_provider_ids_used_for_keychain_usernames() {
+        assert!(validated_provider_id("user-origin").is_ok());
+        assert!(validated_provider_id("../user-origin").is_err());
+        assert!(validated_provider_id(" ").is_err());
     }
 }

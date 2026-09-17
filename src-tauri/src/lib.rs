@@ -5,6 +5,8 @@ mod commands;
 mod owner_credential;
 mod processors;
 #[cfg(desktop)]
+mod remote_access;
+#[cfg(desktop)]
 mod unified;
 
 pub use commands::browser_surface_host_env_pairs;
@@ -32,6 +34,11 @@ use commands::{
     start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
     stop_personal_server, stop_reference_server, submit_installed_pdpp_interaction_response,
     test_nodejs, write_export_data,
+};
+#[cfg(desktop)]
+use remote_access::{
+    configure_remote_access, get_remote_access_config, inspect_remote_access,
+    set_remote_access_config,
 };
 use tauri::{Listener, Manager};
 
@@ -173,6 +180,14 @@ pub fn run() {
             resize_reference_server_view,
             hide_reference_server_view,
             close_reference_server_view,
+            #[cfg(desktop)]
+            inspect_remote_access,
+            #[cfg(desktop)]
+            get_remote_access_config,
+            #[cfg(desktop)]
+            set_remote_access_config,
+            #[cfg(desktop)]
+            configure_remote_access,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
