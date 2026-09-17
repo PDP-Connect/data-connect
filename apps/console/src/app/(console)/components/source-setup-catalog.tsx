@@ -23,6 +23,9 @@ import {
 } from "../lib/source-setup-presentation.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
 import {
+  getDeveloperModeServerSnapshot,
+  getDeveloperModeSnapshot,
+  subscribeToDeveloperMode,
   SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY,
   filterCatalogForDevelopmentVisibility,
   persistShowDevelopmentConnectors,
@@ -366,7 +369,9 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
-  const action = sourceSetupAction(entry);
+  const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
+  const packageNeedsInstall = installModel?.activationState === "not_installed";
+  const action = packageNeedsInstall ? null : sourceSetupAction(entry);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
@@ -388,10 +393,17 @@ function SourceSetupCard({
         <SourceSetupContext entry={entry} />
         <ExistingSourceLinks connectorKey={entry.connectorKey} sources={existingSources} />
         <SourceSetupDetails entry={entry} />
-        {installLifecycle ? <ConnectorInstallRow model={connectorInstallRowModel(entry, installLifecycle)} /> : null}
+        {installModel ? <ConnectorInstallRow model={installModel} /> : null}
       </div>
       <div className="flex flex-col items-end justify-start gap-1">
-        {action ? (
+        {packageNeedsInstall && installModel?.action ? (
+          <>
+            <span className="pdpp-eyebrow text-muted-foreground">Next step</span>
+            <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
+              Install package above
+            </span>
+          </>
+        ) : action ? (
           <>
             <span className="pdpp-eyebrow text-muted-foreground">Next step</span>
             <Link className={buttonVariants({ size: "sm", variant: "default" })} href={action.href}>
@@ -527,12 +539,17 @@ export function SourceSetupCatalog({
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   query: string;
 }) {
+  const developerMode = useSyncExternalStore(
+    subscribeToDeveloperMode,
+    getDeveloperModeSnapshot,
+    getDeveloperModeServerSnapshot,
+  );
   const showDevelopmentConnectors = useSyncExternalStore(
     subscribeToDevelopmentVisibility,
     getDevelopmentVisibilitySnapshot,
     () => false,
   );
-  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, showDevelopmentConnectors);
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode && showDevelopmentConnectors);
   const filtered = filterSourceCatalog(visibleCatalog, query);
   const available = filtered.filter((entry) => entry.publicTier === "supported" && isRunnableAddOffer(entry));
   const experimental = filtered.filter((entry) => entry.publicTier === "preview" && isRunnableAddOffer(entry));
@@ -548,25 +565,27 @@ export function SourceSetupCatalog({
   const anyMatch = actionable.length > 0 || development.length > 0;
   return (
     <Section description="Add sources this dashboard can set up now." title="Add data">
-      <div
-        className="mb-4 rounded-md border border-border/70 bg-muted/20 p-3"
-        data-testid="show-development-connectors-control"
-      >
-        <label className="pdpp-caption flex items-center gap-2 font-medium text-foreground">
-          <input
-            checked={showDevelopmentConnectors}
-            onChange={(event) => {
-              const show = event.currentTarget.checked;
-              setDevelopmentVisibility(show);
-            }}
-            type="checkbox"
-          />
-          Show development connectors
-        </label>
-        <p className="pdpp-caption mt-1 text-muted-foreground">
-          Include registered connectors that are not proven against a live account yet.
-        </p>
-      </div>
+      {developerMode ? (
+        <div
+          className="mb-4 rounded-md border border-border/70 bg-muted/20 p-3"
+          data-testid="show-development-connectors-control"
+        >
+          <label className="pdpp-caption flex items-center gap-2 font-medium text-foreground">
+            <input
+              checked={showDevelopmentConnectors}
+              onChange={(event) => {
+                const show = event.currentTarget.checked;
+                setDevelopmentVisibility(show);
+              }}
+              type="checkbox"
+            />
+            Show development connectors
+          </label>
+          <p className="pdpp-caption mt-1 text-muted-foreground">
+            Include registered connectors that are not proven against a live account yet.
+          </p>
+        </div>
+      ) : null}
       <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label className="sr-only" htmlFor="source_q">
           Search data sources

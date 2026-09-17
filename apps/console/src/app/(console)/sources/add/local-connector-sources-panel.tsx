@@ -5,8 +5,13 @@
 
 import { IcButton } from "@pdpp/brand-react"
 import { useRouter } from "next/navigation"
-import { useCallback, useState, useTransition } from "react"
+import { useCallback, useState, useSyncExternalStore, useTransition } from "react"
 import type { ConnectorLocalSource } from "../../lib/connector-install-contract.ts"
+import {
+  getDeveloperModeServerSnapshot,
+  getDeveloperModeSnapshot,
+  subscribeToDeveloperMode,
+} from "../../lib/source-setup-development.ts"
 import {
   addConnectorLocalSourceAction,
   reloadConnectorLocalSourceAction,
@@ -140,10 +145,18 @@ export function LocalConnectorSourcesPanel({
 }: {
   sources: readonly ConnectorLocalSource[]
 }) {
+  const developerMode = useSyncExternalStore(
+    subscribeToDeveloperMode,
+    getDeveloperModeSnapshot,
+    getDeveloperModeServerSnapshot,
+  )
   const router = useRouter()
   const [sourcePath, setSourcePath] = useState("")
   const [isPending, startTransition] = useTransition()
   const [message, setMessage] = useState<string | null>(null)
+  if (!developerMode) {
+    return null
+  }
   const addSource = () => {
     setMessage(null)
     startTransition(async () => {

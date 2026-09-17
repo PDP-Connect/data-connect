@@ -26,7 +26,8 @@ export interface ConnectorInstallCatalogEntry {
 }
 
 export interface ConnectorInstallStatus {
-  readonly activated_at: string;
+  /** A package may be installed before its first activation/run. */
+  readonly activated_at: string | null;
   readonly bindings: Readonly<Record<string, unknown>>;
   readonly config_digest: string;
   readonly connector_id: string;
@@ -91,6 +92,17 @@ function readString(record: UnknownRecord, key: string, context: string): string
   const value = record[key];
   if (typeof value !== "string" || value.trim() === "") {
     throw new ConnectorInstallContractError(`${context}.${key} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function readNullableString(record: UnknownRecord, key: string, context: string): string | null {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new ConnectorInstallContractError(`${context}.${key} must be a non-empty string or null.`);
   }
   return value.trim();
 }
@@ -162,7 +174,7 @@ function readStatus(value: unknown, index: number): ConnectorInstallStatus {
   const record = asRecord(value, context);
   const tier = readTier(record, "tier", context);
   return {
-    activated_at: readString(record, "activated_at", context),
+    activated_at: readNullableString(record, "activated_at", context),
     bindings: readBindings(record, context),
     config_digest: readDigest(record, "config_digest", context),
     connector_id: readString(record, "connector_id", context),
