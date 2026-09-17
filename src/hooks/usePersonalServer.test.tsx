@@ -6,6 +6,7 @@ import { renderHook, act } from "@testing-library/react"
 // --- Tauri mocks ---
 
 const mockInvoke = vi.fn()
+const mockFetch = vi.fn()
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -24,7 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }))
 
 vi.mock("@tauri-apps/plugin-http", () => ({
-  fetch: vi.fn(() => Promise.reject(new Error("not ready"))),
+  fetch: (...args: unknown[]) => mockFetch(...args),
 }))
 
 // --- Redux mock ---
@@ -64,6 +65,8 @@ describe("usePersonalServer", () => {
     vi.resetModules()
     listeners.clear()
     mockInvoke.mockReset()
+    mockFetch.mockReset()
+    mockFetch.mockRejectedValue(new Error("not ready"))
     authState = { walletAddress: null, masterKeySignature: null }
     // Simulate Tauri runtime so isTauriRuntime() returns true
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -507,6 +510,190 @@ describe("usePersonalServer", () => {
 
     expect(result.current.restartingRef.current).toBe(false)
     expect(result.current.port).toBe(9090)
+  })
+
+  it("waits for the restarted server health check before resolving", async () => {
+    const usePersonalServer = await importHook()
+
+    const { result } = renderHook(() => usePersonalServer())
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+    act(() => {
+      emit("personal-server-ready", { port: 8080 })
+    })
+
+    mockFetch.mockResolvedValue({ ok: true })
+    let restartPromise: Promise<boolean>
+    await act(async () => {
+      restartPromise = result.current.restartServer()
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith("stop_personal_server")
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_personal_server",
+      expect.any(Object)
+    )
+
+    let settled = false
+    restartPromise!.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    act(() => {
+      emit("personal-server-ready", { port: 9090 })
+    })
+    await act(async () => {
+      await restartPromise!
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:9090/health",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(settled).toBe(true)
+    expect(result.current.restartingRef.current).toBe(false)
+  })
+
+  it("restarts from an error state even when the stop command fails", async () => {
+    const usePersonalServer = await importHook()
+
+    const { result } = renderHook(() => usePersonalServer())
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+    act(() => {
+      emit("personal-server-ready", { port: 8080 })
+      emit("personal-server-error", { message: "previous restart failed" })
+    })
+    expect(result.current.status).toBe("error")
+
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "stop_personal_server") {
+        return Promise.reject(new Error("stop failed"))
+      }
+      if (command === "start_personal_server") {
+        return Promise.resolve({ running: true, port: 9090 })
+      }
+      return Promise.resolve()
+    })
+    mockFetch.mockResolvedValue({ ok: true })
+
+    let restartPromise!: Promise<boolean>
+    await act(async () => {
+      restartPromise = result.current.restartServer()
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_personal_server",
+      expect.any(Object)
+    )
+
+    act(() => {
+      emit("personal-server-ready", { port: 9090 })
+    })
+    await expect(restartPromise).resolves.toBe(true)
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:9090/health",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it("aborts a hung health request at the restart deadline", async () => {
+    const usePersonalServer = await importHook()
+
+    const { result } = renderHook(() => usePersonalServer())
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+    act(() => {
+      emit("personal-server-ready", { port: 8080 })
+    })
+
+    let healthSignal!: AbortSignal
+    mockFetch.mockImplementationOnce(
+      (_url: string, options: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          healthSignal = options.signal
+          options.signal.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"))
+          })
+        })
+    )
+
+    let restartPromise!: Promise<boolean>
+    await act(async () => {
+      restartPromise = result.current.restartServer()
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    act(() => {
+      emit("personal-server-ready", { port: 9090 })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+      await restartPromise
+    })
+
+    expect(healthSignal.aborted).toBe(true)
+    await expect(restartPromise).resolves.toBe(false)
+    expect(result.current.restartingRef.current).toBe(false)
+  })
+
+  it("serializes concurrent restarts by generation", async () => {
+    const usePersonalServer = await importHook()
+
+    const { result } = renderHook(() => usePersonalServer())
+
+    await act(async () => {
+      await vi.runAllTimersAsync()
+    })
+    act(() => {
+      emit("personal-server-ready", { port: 8080 })
+    })
+    mockFetch.mockResolvedValue({ ok: true })
+
+    let firstRestart!: Promise<boolean>
+    let secondRestart!: Promise<boolean>
+    await act(async () => {
+      firstRestart = result.current.restartServer()
+      secondRestart = result.current.restartServer()
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "stop_personal_server")
+    ).toHaveLength(1)
+
+    act(() => {
+      emit("personal-server-ready", { port: 9090 })
+    })
+    await act(async () => {
+      await firstRestart
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "stop_personal_server")
+    ).toHaveLength(2)
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "start_personal_server")
+    ).toHaveLength(3)
+
+    act(() => {
+      emit("personal-server-ready", { port: 9091 })
+    })
+    await expect(secondRestart).resolves.toBe(true)
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:9091/health",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
   })
 
   it("stopServer failure does not prevent subsequent startServer", async () => {

@@ -71,24 +71,11 @@ impl PdppBrowserLease {
         // A stale port file must never point a new owner lease at an old
         // browser. Authentication data remains in the durable profile.
         let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
-        let mut command = Command::new(browser);
+        let mut command = browser_command(&browser, &profile_dir, false);
         command
-            .arg(format!("--user-data-dir={}", profile_dir.display()))
-            .args([
-                "--remote-debugging-address=127.0.0.1",
-                "--remote-debugging-port=0",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -371,7 +358,7 @@ struct BrowserLaunchFailure {
     terminated: bool,
 }
 
-fn terminate_browser(child: &mut Child) -> bool {
+pub(crate) fn terminate_browser(child: &mut Child) -> bool {
     #[cfg(unix)]
     {
         let process_group = child.id();
@@ -408,6 +395,28 @@ fn terminate_browser(child: &mut Child) -> bool {
         }
         wait_for_child_exit(child, BROWSER_STOP_WAIT)
     }
+}
+
+pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool) -> Command {
+    let mut command = Command::new(browser);
+    command
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .args([
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=0",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]);
+    if headless {
+        command.arg("--headless=new");
+    }
+    command.arg("about:blank");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
 }
 
 #[cfg(unix)]

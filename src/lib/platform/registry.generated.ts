@@ -11,7 +11,7 @@ export const PLATFORM_REGISTRY_GENERATED: PlatformRegistryEntry[] = [
     displayName: "ChatGPT",
     brandDomain: "chatgpt.com",
     iconKey: "chatgpt",
-    platformIds: ["chatgpt-playwright", "chatgpt"],
+    platformIds: ["chatgpt-pdpp", "chatgpt-playwright", "chatgpt"],
     aliases: ["openai"],
     availability: "requiresConnector",
     showInConnectList: true,
@@ -131,5 +131,21 @@ export const PLATFORM_REGISTRY_GENERATED: PlatformRegistryEntry[] = [
     availability: "requiresConnector",
     showInConnectList: true,
     ingestScope: "claude.conversations"
+  },
+  {
+    id: "apple-health",
+    displayName: "Apple Health",
+    platformIds: ["apple-health-pdpp", "apple-health"],
+    availability: "requiresConnector",
+    showInConnectList: true,
+    ingestScope: "pdpp.manual.apple-health.records"
+  },
+  {
+    id: "ynab",
+    displayName: "YNAB",
+    platformIds: ["ynab-pdpp", "ynab"],
+    availability: "requiresConnector",
+    showInConnectList: true,
+    ingestScope: "pdpp.ynab.budgets"
   }
 ];

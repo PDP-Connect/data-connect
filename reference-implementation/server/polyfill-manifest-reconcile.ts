@@ -11,10 +11,12 @@
  * declarations (and keep breaking records pagination).
  *
  * Scope:
- *   - Only first-party manifests under
- *     `packages/polyfill-connectors/manifests/` are reconciled. Connectors
- *     that are NOT in this shipped set are left alone so user-custom
- *     manifests are never overwritten.
+ *   - When the development polyfill package is present, only its first-party
+ *     manifests are reconciled. Connectors that are NOT in this shipped set
+ *     are left alone so user-custom manifests are never overwritten.
+ *   - The production Docker image has no polyfill package. Its verified
+ *     catalog installer registers each installed manifest directly, so this
+ *     optional reconciliation path is a no-op there.
  *   - Comparison is a deep structural equality against the persisted
  *     manifest; any difference triggers a fresh `registerConnector()`
  *     call, which is idempotent and runs the full validation + lexical
@@ -65,14 +67,20 @@ const deleteAllRecordsForConnectorTyped: DeleteAllRecordsForConnector =
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Resolve the shipped polyfill-connectors manifests directory: the
- * `@pdpp/polyfill-connectors` package's own `manifests/` directory,
- * resolved via the package's `./manifests` export so this reference never
- * hardcodes (or drifts from) that package's on-disk layout.
+ * Resolve the optional polyfill package's manifests directory through its
+ * `./manifests` export. The production image has no such package, so the
+ * returned sentinel path makes this reconciliation path a no-op there.
  */
 export function defaultPolyfillManifestsDir(): string {
-  const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
-  return join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
+  try {
+    const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
+    return join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
+  } catch {
+    // The production Docker image has no polyfill package. An unavailable
+    // directory makes reconciliation a documented no-op; catalog-installed
+    // manifests are registered by the verified install service instead.
+    return resolve(__dirname, "..", "polyfill-connectors-not-installed", "manifests");
+  }
 }
 
 /**
@@ -165,7 +173,7 @@ interface ManifestFingerprint {
 /**
  * Cheap, stable summary of a manifest's identity for shape comparison:
  * `(version, sorted-stream-names)`. Strong enough to distinguish the
- * shipped reference fixture from the shipped polyfill manifest for
+ * shipped reference fixture from an optional catalog manifest for
  * connectors that share a `connector_id` (spotify/github/reddit), and
  * cheap enough to compute on every reconcile pass.
  *
@@ -355,13 +363,13 @@ interface EntryContext {
 }
 
 /**
- * Decide whether the persisted→shipped diff represents the narrow
- * fixture→polyfill transition that requires record invalidation.
+ * Decide whether the persisted→catalog diff represents the narrow
+ * fixture→catalog transition that requires record invalidation.
  *
  * The criterion is conservative: invalidation fires only when the
  * persisted manifest's `(version, sorted-stream-names)` fingerprint
  * matches the shipped reference-fixture manifest's fingerprint for the
- * same connector_id, AND the shipped polyfill manifest has a different
+ * same connector_id, AND the catalog manifest has a different
  * fingerprint. This is the exact shape of `pdpp seed`'s footprint, and
  * the only case where the persisted records were emitted by the seed
  * connector against fixture identities. Ordinary polyfill manifest
@@ -687,12 +695,12 @@ async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<Ent
     return reconcileUnchangedManifestEntry();
   }
   // Default path: the manifest changed shape but the diff is ordinary
-  // polyfill evolution (description, semantic_fields, schema additions,
+  // catalog evolution (description, semantic_fields, schema additions,
   // stream views). Re-register without touching records — owner data is
   // preserved across manifest fixes.
   //
   // Narrow exception: when the persisted manifest fingerprint matches a
-  // reference-fixture fingerprint AND the shipped polyfill fingerprint
+  // reference-fixture fingerprint AND the catalog fingerprint
   // is different, the records currently in the RS were emitted by the
   // seed connector against fixture identities (Taylor Swift, Adele,
   // seedowner/personal-site, ...). Those records are safe to drop and

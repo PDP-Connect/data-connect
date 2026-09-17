@@ -50,7 +50,7 @@ Use this path if a binary is not available for your platform.
 
 ### Requirements
 
-- Node.js 22 or 23.
+- Node.js 24.15.0 or later. CI builds on 24.21.0.
 - Rust stable and the Tauri build prerequisites for your operating system.
 - Internet access during setup to install dependencies and resolve bundled
   connectors when they are absent.
@@ -174,7 +174,9 @@ npm run connectors:check
 
 `connectors:resolve` resolves the pinned versions from the signed connector
 index and updates the bundled connector tree. `connectors:check` verifies the
-lockfile and bundled connector tree without changing them.
+lockfile and the integrity of each recorded profile, entrypoint, and provenance
+file without changing them. It does not attest to auxiliary files that are not
+part of those lock entries.
 
 ## Releasing
 

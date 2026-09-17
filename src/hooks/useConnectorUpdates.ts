@@ -19,6 +19,7 @@ export function useConnectorUpdates() {
     (state: RootState) => state.app.isCheckingUpdates
   );
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const checkForUpdates = useCallback(
@@ -39,19 +40,22 @@ export function useConnectorUpdates() {
 
   const downloadConnector = useCallback(
     async (id: string) => {
-      setError(null);
+      setDownloadErrors(prev => ({ ...prev, [id]: '' }));
       setDownloadingIds((prev) => new Set(prev).add(id));
 
       try {
         await invoke('download_connector', { id });
-        // Remove from updates list after successful download
-        dispatch(removeConnectorUpdate(id));
-        // Note: Caller is responsible for reloading platforms after successful download
+        // Keep new connectors in the list until the platform reload completes.
+        // AvailableSourcesList uses the retained entry to keep the source's
+        // stable card order while the newly installed platform is discovered.
+        // Keep the catalog entry until the serving restart and platform reload
+        // complete. The caller removes it only after the new profile is active.
+        // Note: Caller is responsible for reloading platforms after successful download.
         return true;
       } catch (err) {
         const errorMsg =
-          err instanceof Error ? err.message : 'Failed to download connector';
-        setError(errorMsg);
+          err instanceof Error ? err.message : String(err || 'Failed to download connector');
+        setDownloadErrors(prev => ({ ...prev, [id]: errorMsg }));
         console.error('Failed to download connector:', err);
         return false;
       } finally {
@@ -62,12 +66,17 @@ export function useConnectorUpdates() {
         });
       }
     },
-    [dispatch]
+    [dispatch, updates]
   );
 
   const isDownloading = useCallback(
     (id: string) => downloadingIds.has(id),
     [downloadingIds]
+  );
+
+  const removeDownloadedConnectorUpdate = useCallback(
+    (id: string) => dispatch(removeConnectorUpdate(id)),
+    [dispatch]
   );
 
   const hasUpdates = updates.length > 0;
@@ -84,12 +93,14 @@ export function useConnectorUpdates() {
     lastUpdateCheck,
     isCheckingUpdates,
     error,
+    downloadErrors,
     hasUpdates,
     updateCount,
     newConnectorCount,
     updateableCount,
     checkForUpdates,
     downloadConnector,
+    removeConnectorUpdate: removeDownloadedConnectorUpdate,
     isDownloading,
   };
 }

@@ -15,12 +15,18 @@
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
-  testRunner: "vitest",
+  // Pair the existing Vitest 5 identity repair with its coverage setup so
+  // per-test mutant runs select the tests recorded by the baseline.
+  plugins: [
+    "@stryker-mutator/vitest-runner",
+    "./scripts/mutation-falsification/vitest-runner-plugin.mjs",
+  ],
+  testRunner: "vitest-6210",
   // The client suite is a Vitest project, so the native runner applies: it
   // reports per-test identities, which is what lets `perTest` coverage analysis
   // work on real test-level data rather than guesses.
   coverageAnalysis: "perTest",
-  vitest: { configFile: "vite.config.ts" },
+  vitest: { configFile: "vite.mutation-client.config.ts" },
 
   mutate: [],
 

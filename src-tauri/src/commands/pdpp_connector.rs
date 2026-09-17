@@ -187,6 +187,9 @@ impl PdppInteractionResponder {
 
 #[derive(Clone)]
 pub struct PdppRunOptions {
+    /// Idle timeout: bounds inactivity between valid messages, not total
+    /// runtime. Progress and other valid messages reset the watchdog; an owner
+    /// interaction pauses it until the response is sent.
     pub timeout: Option<Duration>,
     pub control: PdppRunControl,
     pub scope_validators: PdppScopeValidators,
@@ -208,7 +211,11 @@ impl Default for PdppRunOptions {
             timeout: None,
             control: PdppRunControl::default(),
             scope_validators: PdppScopeValidators::default(),
-            max_stdout_line_bytes: 64 * 1024,
+            // This 16 MiB allowance applies per protocol line, not per run.
+            // Kernel-retained records and events are bounded by the caps below;
+            // downstream sinks and export accumulators need their own aggregate
+            // bound or backpressure policy.
+            max_stdout_line_bytes: 16 * 1024 * 1024,
             max_stderr_bytes: 64 * 1024,
             max_retained_records: 0,
             max_retained_events: 32,
@@ -317,6 +324,9 @@ pub struct PdppRunResult {
     pub done: Option<PdppDone>,
     pub stderr: String,
     pub stderr_truncated: bool,
+    /// True when the child exited without DONE: the host attaches a redacted
+    /// stderr tail to the failure message after secrets have been removed.
+    pub attach_stderr_tail: bool,
     pub exit_code: Option<i32>,
     pub failure: Option<String>,
 }
@@ -514,8 +524,7 @@ pub fn supervise_pdpp_connector(
     let stdout_thread = spawn_reader(stdout, options.max_stdout_line_bytes, true, tx.clone());
     let stderr_thread = spawn_reader(stderr, options.max_stderr_bytes, false, tx);
 
-    let mut normal_started = Instant::now();
-    let mut normal_elapsed = Duration::ZERO;
+    let mut idle_started = Instant::now();
     let mut pending_interaction: Option<PendingInteraction> = None;
     let mut interaction_generation = 0u64;
     let mut stdout_closed = false;
@@ -557,7 +566,7 @@ pub fn supervise_pdpp_connector(
             && pending_interaction.is_none()
             && options
                 .timeout
-                .is_some_and(|timeout| normal_elapsed + normal_started.elapsed() >= timeout)
+                .is_some_and(|timeout| idle_started.elapsed() >= timeout)
         {
             termination = Some(PdppRunStatus::TimedOut);
             set_failure(&mut failure, "PDPP connector exceeded its runtime timeout");
@@ -584,7 +593,7 @@ pub fn supervise_pdpp_connector(
                     .take()
                     .expect("matching response requires a pending interaction");
                 close_pending_interaction(&options, &start.run_id, pending);
-                normal_started = Instant::now();
+                idle_started = Instant::now();
             }
         }
         if termination.is_none()
@@ -605,7 +614,7 @@ pub fn supervise_pdpp_connector(
                 set_failure(&mut failure, error);
                 terminate_child(&mut child);
             } else {
-                normal_started = Instant::now();
+                idle_started = Instant::now();
             }
         }
         match rx.recv_timeout(Duration::from_millis(10)) {
@@ -732,7 +741,6 @@ pub fn supervise_pdpp_connector(
                                     continue;
                                 }
                             };
-                            normal_elapsed += normal_started.elapsed();
                             interaction_generation += 1;
                             let responder = PdppInteractionResponder {
                                 run_id: start.run_id.clone(),
@@ -766,6 +774,9 @@ pub fn supervise_pdpp_connector(
                         set_failure(&mut failure, error);
                         terminate_child(&mut child);
                     }
+                }
+                if failure.is_none() {
+                    idle_started = Instant::now();
                 }
                 if failure.is_some() {
                     terminate_child(&mut child);
@@ -813,11 +824,17 @@ pub fn supervise_pdpp_connector(
         set_failure(&mut failure, "PDPP stderr reader terminated unexpectedly");
     }
     let exit_code = exit.code();
+    let mut attach_stderr_tail = false;
     match done.as_ref() {
-        None => set_failure(
-            &mut failure,
-            "PDPP connector exited without a terminal DONE message",
-        ),
+        None => {
+            // Do not embed stderr here: it is redacted later by the caller,
+            // which knows the secrets. Cutting a tail before redaction could
+            // split a credential so that redaction no longer matches it.
+            attach_stderr_tail = true;
+            if failure.is_none() {
+                failure = Some("PDPP connector exited without a terminal DONE message".into());
+            }
+        }
         Some(done) if done.records_emitted != record_count => set_failure(
             &mut failure,
             format!(
@@ -856,6 +873,7 @@ pub fn supervise_pdpp_connector(
         done,
         stderr: stderr_text,
         stderr_truncated,
+        attach_stderr_tail,
         exit_code,
         failure,
     })
@@ -1153,6 +1171,32 @@ fn append_stderr(output: &mut String, truncated: &mut bool, limit: usize, line: 
     }
     output.push_str(line);
 }
+
+/// Append the last lines of an ALREADY-REDACTED stderr to a failure message.
+/// `truncated` means the reader cut the stream at its byte cap; the final line
+/// may then be a fragment that split a secret, so it is dropped.
+pub(crate) fn failure_with_stderr_tail(message: &str, stderr: &str, truncated: bool) -> String {
+    if stderr.trim().is_empty() {
+        return message.to_string();
+    }
+    let mut lines = stderr.lines().collect::<Vec<_>>();
+    if truncated {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return message.to_string();
+    }
+    let start = lines.len().saturating_sub(8);
+    let mut tail = lines[start..].join("\n");
+    if tail.len() > 2048 {
+        let mut offset = tail.len() - 2048;
+        while !tail.is_char_boundary(offset) {
+            offset += 1;
+        }
+        tail = tail[offset..].to_string();
+    }
+    format!("{message}; stderr tail:\n{tail}")
+}
 fn terminate_child(child: &mut std::process::Child) {
     #[cfg(unix)]
     unsafe {
@@ -1361,6 +1405,36 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         }
     }
 
+    fn periodic_progress_fixture() -> PdppConnectorCommand {
+        PdppConnectorCommand {
+            program: "node".into(),
+            args: vec![
+                "-e".into(),
+                r#"
+const readline = require('node:readline');
+const emit = message => process.stdout.write(`${JSON.stringify(message)}\n`);
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  if (JSON.parse(line).type !== 'START') process.exit(70);
+  let count = 0;
+  const timer = setInterval(() => {
+    count += 1;
+    emit({ type: 'PROGRESS', stream: 'items', message: `progress ${count}` });
+    if (count === 5) {
+      clearInterval(timer);
+      emit({ type: 'DONE', status: 'succeeded', records_emitted: 0 });
+      setImmediate(() => process.exit(0));
+    }
+  }, 40);
+});
+"#
+                .into(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            clear_env: false,
+        }
+    }
+
     fn output_while_waiting_fixture(output: &str) -> PdppConnectorCommand {
         PdppConnectorCommand {
             program: "node".into(),
@@ -1433,6 +1507,22 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
             let result = supervise_pdpp_connector(&fixture(mode), &scoped(), &options()).unwrap();
             assert_eq!(result.status, PdppRunStatus::Failed, "{mode}");
         }
+    }
+
+    #[test]
+    fn includes_child_stderr_tail_when_done_is_missing() {
+        let result =
+            supervise_pdpp_connector(&fixture("missing-done-with-stderr"), &scoped(), &options())
+                .unwrap();
+        assert_eq!(result.status, PdppRunStatus::Failed);
+        let failure = result.failure.expect("missing DONE failure");
+        assert!(failure.starts_with("PDPP connector exited without a terminal DONE message"));
+        assert!(result.attach_stderr_tail);
+        assert!(!failure.contains("stderr tail:"), "tail is attached only after redaction");
+        let with_tail = failure_with_stderr_tail(&failure, &result.stderr, result.stderr_truncated);
+        assert!(with_tail.contains("stderr tail:"));
+        assert!(with_tail.contains("GitHub API request failed: 401 Unauthorized"));
+        assert!(with_tail.contains("request id: fixture-1"));
     }
     #[test]
     fn rejects_counter_scope_field_and_resource_violations() {
@@ -1605,7 +1695,7 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
     }
 
     #[test]
-    fn interaction_pauses_the_normal_timeout_then_response_resumes_it() {
+    fn interaction_pauses_the_idle_timeout_then_response_rearms_it() {
         let result = supervise_pdpp_connector(
             &delayed_after_interaction_fixture(),
             &scoped(),
@@ -1625,9 +1715,25 @@ readline.createInterface({{ input: process.stdin }}).on('line', line => {{
         )
         .unwrap();
 
-        // The 50ms owner interaction exceeds the normal 25ms policy without
+        // The 50ms owner interaction exceeds the idle 25ms policy without
         // timing out; the connector then exceeds that policy after response.
         assert_eq!(result.status, PdppRunStatus::TimedOut);
+    }
+
+    #[test]
+    fn connector_progress_rearms_the_idle_timeout() {
+        let result = supervise_pdpp_connector(
+            &periodic_progress_fixture(),
+            &scoped(),
+            &PdppRunOptions {
+                timeout: Some(Duration::from_millis(150)),
+                ..options()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.status, PdppRunStatus::Succeeded);
+        assert_eq!(result.event_counts.progress, 5);
     }
 
     #[test]

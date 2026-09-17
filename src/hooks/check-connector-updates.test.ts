@@ -19,6 +19,11 @@ describe("checkConnectorUpdates", () => {
     const dispatch = vi.fn()
     const updates = [
       {
+        tier: "supported",
+        requiredBindings: ["network"],
+        setupModality: null,
+        runnable: true,
+        unavailableReason: null,
         id: "chatgpt",
         name: "ChatGPT",
         description: "ChatGPT connector",

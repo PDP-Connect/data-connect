@@ -1,7 +1,7 @@
 {
   "name": "@pdpp/connector-protocol",
   "version": "0.0.1",
-  "description": "The connector authoring contract for PDPP: the JSONL wire-protocol message types, the LocalCollectorDefinition type contract, the bootstrap/emit/scope-filter primitives connector authors import directly, and small text/auth/retry utilities connectors depend on. Bottom of the dependency graph \u2014 depends on nothing in @pdpp/collector-runtime or @pdpp/polyfill-connectors, so connector authors never pull in the runtime package or its release cadence just to get the files they author against.",
+  "description": "The connector authoring contract for PDPP: the JSONL wire-protocol message types, the LocalCollectorDefinition type contract, the bootstrap/emit/scope-filter primitives connector authors import directly, and small text/auth/retry utilities connectors depend on. Bottom of the dependency graph — depends on nothing in @pdpp/collector-runtime or @pdpp/polyfill-connectors, so connector authors never pull in the runtime package or its release cadence just to get the files they author against.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PDP-Connect/data-connect.git",
@@ -54,13 +54,13 @@
     "verify": "npm run typecheck && npm run check && npm test && npm run artifact:verify"
   },
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.6.2"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
-    "@types/node": "^26.5.0",
+    "@biomejs/biome": "2.5.13",
+    "@types/node": "^26.5.1",
     "tsx": "^4.23.13",
-    "ultracite": "7.11.0"
+    "ultracite": "^7.11.1"
   },
   "engines": {
     "node": ">=22.14.0"

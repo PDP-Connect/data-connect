@@ -30,6 +30,7 @@ const initialState: AppState = {
   isRunLayerVisible: false,
   breadcrumb: [{ text: 'Home', link: '/' }],
   runs: [],
+  pendingConnectorChanges: [],
   platforms: [],
   connectedPlatforms: {},
   connectorUpdates: [],
@@ -80,6 +81,16 @@ const appSlice = createSlice({
     startRun(state, action: PayloadAction<Run>) {
       state.runs.push(action.payload);
     },
+    markConnectorChangePending(state, action: PayloadAction<string>) {
+      if (!state.pendingConnectorChanges.includes(action.payload)) {
+        state.pendingConnectorChanges.push(action.payload);
+      }
+    },
+    clearConnectorChangePending(state, action: PayloadAction<string>) {
+      state.pendingConnectorChanges = state.pendingConnectorChanges.filter(
+        (id) => id !== action.payload
+      );
+    },
     deleteRun(state, action: PayloadAction<string>) {
       state.runs = state.runs.filter((run) => run.id !== action.payload);
       if (state.runs.length === 0) {
@@ -92,6 +103,8 @@ const appSlice = createSlice({
         runId: string;
         status: Run['status'];
         endDate?: string;
+        statusMessage?: string;
+        errorClass?: string;
         onlyIfRunning?: boolean;
       }>
     ) {
@@ -105,6 +118,12 @@ const appSlice = createSlice({
         run.status = action.payload.status;
         if (action.payload.endDate) {
           run.endDate = action.payload.endDate;
+        }
+        if (action.payload.statusMessage) {
+          run.statusMessage = action.payload.statusMessage;
+        }
+        if (action.payload.errorClass) {
+          run.errorClass = action.payload.errorClass;
         }
       }
     },
@@ -264,6 +283,8 @@ export const {
   setPlatforms,
   setConnectedPlatforms,
   setRuns,
+  markConnectorChangePending,
+  clearConnectorChangePending,
   startRun,
   deleteRun,
   updateRunStatus,

@@ -23,6 +23,9 @@ pub struct ActiveConnectorManifest {
 #[serde(rename_all = "camelCase")]
 pub struct ActiveConnectorInstall {
     pub connector_id: String,
+    /// The `connector_id` declared by the hash-verified PDPP manifest.
+    #[serde(default)]
+    pub manifest_connector_id: Option<String>,
     pub company: String,
     pub version: String,
     pub root_path: String,
@@ -30,6 +33,8 @@ pub struct ActiveConnectorInstall {
     pub script_relative_path: String,
     #[serde(default)]
     pub artifact_kind: Option<String>,
+    #[serde(default)]
+    pub artifact_digest: Option<String>,
     #[serde(default)]
     pub manifest_path: Option<String>,
     #[serde(default)]
@@ -162,22 +167,23 @@ fn update_active_connector_install_at(
             updated_at: chrono::Utc::now().to_rfc3339(),
             connectors: HashMap::new(),
         });
-    if let Some(existing) = manifest.connectors.get_mut(&install.connector_id) {
+    if let Some(existing) = manifest.connectors.get(&install.connector_id).cloned() {
         match policy {
             ConnectorInstallUpdatePolicy::ReplaceExisting => {}
             ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact => {
-                if !same_bundled_artifact(existing, &install) {
+                let existing_root_is_allowed =
+                    active_root_is_allowed(&existing.root_path, parent, &install);
+                if existing_root_is_allowed && existing.version != install.version {
                     return Ok(false);
                 }
-                existing.root_path = install.root_path;
-                existing.metadata_relative_path = install.metadata_relative_path;
-                existing.script_relative_path = install.script_relative_path;
-                existing.manifest_path = install.manifest_path;
-                existing.entrypoint_path = install.entrypoint_path;
-                existing.provenance_path = install.provenance_path;
-                manifest.updated_at = chrono::Utc::now().to_rfc3339();
-                write_active_connector_manifest_to(manifest_path, &manifest)?;
-                return Ok(true);
+                if existing_root_is_allowed && same_bundled_artifact(&existing, &install) {
+                    manifest
+                        .connectors
+                        .insert(install.connector_id.clone(), install);
+                    manifest.updated_at = chrono::Utc::now().to_rfc3339();
+                    write_active_connector_manifest_to(manifest_path, &manifest)?;
+                    return Ok(true);
+                }
             }
         }
     }
@@ -197,12 +203,33 @@ fn same_bundled_artifact(
         && existing.company == install.company
         && existing.version == install.version
         && existing.artifact_kind == install.artifact_kind
+        && required_equal(&existing.artifact_digest, &install.artifact_digest)
         && existing.manifest_path == install.manifest_path
         && existing.entrypoint_path == install.entrypoint_path
         && existing.provenance_path == install.provenance_path
         && required_equal(&existing.manifest_sha256, &install.manifest_sha256)
         && required_equal(&existing.entrypoint_sha256, &install.entrypoint_sha256)
         && required_equal(&existing.provenance_sha256, &install.provenance_sha256)
+}
+
+fn active_root_is_allowed(
+    active_root: &str,
+    app_data_root: &std::path::Path,
+    bundled_install: &ActiveConnectorInstall,
+) -> bool {
+    let active_root = std::path::Path::new(active_root);
+    if !active_root.is_absolute() {
+        return false;
+    }
+
+    let connectors_store = app_data_root.join("connectors-store");
+    let bundled_resources = std::path::Path::new(&bundled_install.root_path)
+        .parent()
+        .and_then(std::path::Path::parent);
+
+    active_root.starts_with(app_data_root)
+        || active_root.starts_with(connectors_store)
+        || bundled_resources.is_some_and(|root| active_root.starts_with(root))
 }
 
 fn required_equal(existing: &Option<String>, install: &Option<String>) -> bool {
@@ -237,12 +264,14 @@ mod tests {
     fn install(version: &str, root_path: &str) -> ActiveConnectorInstall {
         ActiveConnectorInstall {
             connector_id: "github-pdpp".to_string(),
+            manifest_connector_id: Some("https://registry.pdpp.org/connectors/github".to_string()),
             company: "github".to_string(),
             version: version.to_string(),
             root_path: root_path.to_string(),
             metadata_relative_path: "profile/collection-profile.json".to_string(),
             script_relative_path: "dist/collection-profile.mjs".to_string(),
             artifact_kind: Some("pdpp-collection-profile".to_string()),
+            artifact_digest: Some("sha256:artifact".to_string()),
             manifest_path: Some("profile/collection-profile.json".to_string()),
             entrypoint_path: Some("dist/collection-profile.mjs".to_string()),
             entrypoint_sha256: Some("sha256:entrypoint".to_string()),
@@ -274,7 +303,14 @@ mod tests {
                 bundled_barrier.wait();
                 update_active_connector_install_at(
                     &bundled_path,
-                    install("0.1.0", "/bundled/github-pdpp"),
+                    install(
+                        "0.1.0",
+                        &bundled_path
+                            .parent()
+                            .expect("manifest parent")
+                            .join("resources/connectors/collection-profiles/github-pdpp")
+                            .to_string_lossy(),
+                    ),
                     ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
                 )
             });
@@ -284,7 +320,14 @@ mod tests {
                 user_barrier.wait();
                 update_active_connector_install_at(
                     &user_path,
-                    install("9.9.9", "/user/github-pdpp"),
+                    install(
+                        "9.9.9",
+                        &user_path
+                            .parent()
+                            .expect("manifest parent")
+                            .join("connectors-store/user/github-pdpp")
+                            .to_string_lossy(),
+                    ),
                     ConnectorInstallUpdatePolicy::ReplaceExisting,
                 )
             });
@@ -298,15 +341,21 @@ mod tests {
 
             let selected = selected(&manifest_path);
             assert_eq!(selected.version, "9.9.9");
-            assert_eq!(selected.root_path, "/user/github-pdpp");
+            assert!(selected
+                .root_path
+                .ends_with("connectors-store/user/github-pdpp"));
         }
     }
 
     #[test]
     fn bundled_activation_refreshes_path_for_same_exact_artifact() {
         let temp = tempdir().expect("manifest tempdir");
-        let manifest_path = temp.path().join("connectors-active.json");
-        let mut stale = install("0.1.0", "/tmp/.mount-old/github-pdpp");
+        let manifest_path = temp.path().join("data/connectors-active.json");
+        let bundled_root = temp.path().join("resources/connectors/collection-profiles");
+        let mut stale = install(
+            "0.1.0",
+            &bundled_root.join("old/github-pdpp").to_string_lossy(),
+        );
         stale.metadata_relative_path = "old-profile/collection-profile.json".to_string();
         stale.script_relative_path = "old-dist/collection-profile.mjs".to_string();
         update_active_connector_install_at(
@@ -316,9 +365,13 @@ mod tests {
         )
         .expect("stale bundled install");
 
-        let mut fresh = install("0.1.0", "/tmp/.mount-new/github-pdpp");
+        let mut fresh = install(
+            "0.1.0",
+            &bundled_root.join("new/github-pdpp").to_string_lossy(),
+        );
         fresh.metadata_relative_path = "profile/collection-profile.json".to_string();
         fresh.script_relative_path = "dist/collection-profile.mjs".to_string();
+        let fresh_root = fresh.root_path.clone();
         assert!(update_active_connector_install_at(
             &manifest_path,
             fresh,
@@ -327,7 +380,7 @@ mod tests {
         .expect("fresh bundled activation"));
 
         let selected = selected(&manifest_path);
-        assert_eq!(selected.root_path, "/tmp/.mount-new/github-pdpp");
+        assert_eq!(selected.root_path, fresh_root);
         assert_eq!(
             selected.metadata_relative_path,
             "profile/collection-profile.json"
@@ -339,49 +392,91 @@ mod tests {
     #[test]
     fn bundled_activation_preserves_distinct_user_install() {
         let temp = tempdir().expect("manifest tempdir");
-        let manifest_path = temp.path().join("connectors-active.json");
+        let manifest_path = temp.path().join("data/connectors-active.json");
+        let user_root = temp.path().join("data/connectors-store/user/github-pdpp");
         update_active_connector_install_at(
             &manifest_path,
-            install("9.9.9", "/user/github-pdpp"),
+            install("9.9.9", &user_root.to_string_lossy()),
             ConnectorInstallUpdatePolicy::ReplaceExisting,
         )
         .expect("user install");
 
         assert!(!update_active_connector_install_at(
             &manifest_path,
-            install("0.1.0", "/bundled/github-pdpp"),
+            install(
+                "0.1.0",
+                &temp
+                    .path()
+                    .join("resources/connectors/collection-profiles/github-pdpp")
+                    .to_string_lossy(),
+            ),
             ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
         )
         .expect("bundled activation"));
 
         let selected = selected(&manifest_path);
         assert_eq!(selected.version, "9.9.9");
-        assert_eq!(selected.root_path, "/user/github-pdpp");
+        assert_eq!(selected.root_path, user_root.to_string_lossy());
     }
 
     #[test]
-    fn bundled_activation_preserves_same_version_with_changed_or_missing_hash() {
+    fn bundled_activation_replaces_same_version_with_changed_or_missing_identity() {
         let temp = tempdir().expect("manifest tempdir");
-        let changed_hash_path = temp.path().join("changed-hash.json");
+        let changed_hash_path = temp.path().join("data/changed-hash.json");
+        let store_root = temp.path().join("data/connectors-store/github-pdpp");
         update_active_connector_install_at(
             &changed_hash_path,
-            install("0.1.0", "/user/github-pdpp"),
+            install("0.1.0", &store_root.to_string_lossy()),
             ConnectorInstallUpdatePolicy::ReplaceExisting,
         )
         .expect("user install");
 
-        let mut changed = install("0.1.0", "/bundled/github-pdpp");
+        let mut changed = install(
+            "0.1.0",
+            &temp
+                .path()
+                .join("resources/connectors/collection-profiles/github-pdpp")
+                .to_string_lossy(),
+        );
         changed.manifest_sha256 = Some("sha256:changed".to_string());
-        assert!(!update_active_connector_install_at(
+        let changed_root = changed.root_path.clone();
+        assert!(update_active_connector_install_at(
             &changed_hash_path,
             changed,
             ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
         )
         .expect("changed hash bundled activation"));
-        assert_eq!(selected(&changed_hash_path).root_path, "/user/github-pdpp");
+        assert_eq!(selected(&changed_hash_path).root_path, changed_root);
 
-        let missing_hash_path = temp.path().join("missing-hash.json");
-        let mut missing = install("0.1.0", "/user/github-pdpp");
+        let changed_digest_path = temp.path().join("data/changed-digest.json");
+        update_active_connector_install_at(
+            &changed_digest_path,
+            install("0.1.0", &store_root.to_string_lossy()),
+            ConnectorInstallUpdatePolicy::ReplaceExisting,
+        )
+        .expect("user install with old digest");
+        let mut changed_digest = install(
+            "0.1.0",
+            &temp
+                .path()
+                .join("resources/connectors/collection-profiles/github-pdpp")
+                .to_string_lossy(),
+        );
+        changed_digest.artifact_digest = Some("sha256:changed-artifact".to_string());
+        let changed_digest_root = changed_digest.root_path.clone();
+        assert!(update_active_connector_install_at(
+            &changed_digest_path,
+            changed_digest,
+            ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
+        )
+        .expect("changed digest bundled activation"));
+        assert_eq!(
+            selected(&changed_digest_path).root_path,
+            changed_digest_root
+        );
+
+        let missing_hash_path = temp.path().join("data/missing-hash.json");
+        let mut missing = install("0.1.0", &store_root.to_string_lossy());
         missing.entrypoint_sha256 = None;
         update_active_connector_install_at(
             &missing_hash_path,
@@ -390,13 +485,55 @@ mod tests {
         )
         .expect("user install without hash");
 
-        assert!(!update_active_connector_install_at(
+        assert!(update_active_connector_install_at(
             &missing_hash_path,
-            install("0.1.0", "/bundled/github-pdpp"),
+            install(
+                "0.1.0",
+                &temp
+                    .path()
+                    .join("resources/connectors/collection-profiles/github-pdpp")
+                    .to_string_lossy(),
+            ),
             ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
         )
         .expect("missing hash bundled activation"));
-        assert_eq!(selected(&missing_hash_path).root_path, "/user/github-pdpp");
+        assert_eq!(
+            selected(&missing_hash_path).root_path,
+            temp.path()
+                .join("resources/connectors/collection-profiles/github-pdpp")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn bundled_activation_replaces_an_active_install_outside_allowed_roots() {
+        let temp = tempdir().expect("manifest tempdir");
+        let manifest_path = temp.path().join("data/connectors-active.json");
+        let foreign_root = temp
+            .path()
+            .parent()
+            .expect("temp parent")
+            .join("foreign-pdpp-install");
+        update_active_connector_install_at(
+            &manifest_path,
+            install("9.9.9", &foreign_root.to_string_lossy()),
+            ConnectorInstallUpdatePolicy::ReplaceExisting,
+        )
+        .expect("foreign install");
+
+        let bundled_root = temp
+            .path()
+            .join("resources/connectors/collection-profiles/github-pdpp");
+        assert!(update_active_connector_install_at(
+            &manifest_path,
+            install("9.9.9", &bundled_root.to_string_lossy()),
+            ConnectorInstallUpdatePolicy::RefreshBundledPathIfSameArtifact,
+        )
+        .expect("bundled activation"));
+        assert_eq!(
+            selected(&manifest_path).root_path,
+            bundled_root.to_string_lossy()
+        );
     }
 
     #[test]

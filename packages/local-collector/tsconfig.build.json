@@ -28,13 +28,41 @@
     "../polyfill-connectors/connectors/google_takeout/**/*.ts",
     "../polyfill-connectors/connectors/apple_photos/**/*.ts",
     "../polyfill-connectors/connectors/google_messages/**/*.ts",
+    // Shared connector modules, reached from the connector entries above via
+    // `../../src/*.ts` imports. This list is DERIVED, not curated: it is the
+    // import-graph closure computed by scripts/derive-connector-sources.ts, and
+    // `test/derive-connector-sources.test.ts` fails if this array and that
+    // closure disagree in either direction.
+    //
+    // It used to be hand-written, which made it wrong in two ways at once. It
+    // named seven files while the connectors actually reach nineteen — tsc
+    // followed the extra imports anyway, so the list documented far less than
+    // the build compiled. And it had no way to notice a NEW shared import: when
+    // claude_code/artifact-capture.ts began importing artifact-capture-env.ts,
+    // nothing here objected and the build failed on a module this repo did not
+    // have. Regenerate with `npm run derive:connector-sources` rather than
+    // editing by hand.
+    "../polyfill-connectors/src/artifact-capture-env.ts",
+    "../polyfill-connectors/src/artifact-capture.ts",
+    "../polyfill-connectors/src/bounded-file-preview.ts",
     "../polyfill-connectors/src/browser-handoff.ts",
+    "../polyfill-connectors/src/browser-launch.ts",
+    "../polyfill-connectors/src/collection-scope-enumeration.ts",
+    "../polyfill-connectors/src/connector-exit.ts",
     "../polyfill-connectors/src/connector-runtime.ts",
+    "../polyfill-connectors/src/fingerprint-cursor.ts",
     "../polyfill-connectors/src/fixture-capture.ts",
+    "../polyfill-connectors/src/local-jsonl-cursor.ts",
+    "../polyfill-connectors/src/local-media-blob-hydration.ts",
     "../polyfill-connectors/src/local-source-inventory.ts",
+    "../polyfill-connectors/src/profile-lock.ts",
+    "../polyfill-connectors/src/reference-blob-uploader.ts",
+    "../polyfill-connectors/src/runtime-environment.ts",
     "../polyfill-connectors/src/schema-registry.ts",
+    "../polyfill-connectors/src/session-establish.ts",
     "../polyfill-connectors/src/shutdown-hook.ts",
     "../polyfill-connectors/src/streaming-target-registration.ts",
+    "../polyfill-connectors/src/terminal-error.ts",
     // @pdpp/collector-runtime's local-device-client.ts has always imported
     // canonicalTerminalRunCommitEnvelope from @pdpp/reference-contract/common
     // as a real runtime dependency (flagged, not introduced, by engine-split

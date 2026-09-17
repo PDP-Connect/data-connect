@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -79,12 +79,17 @@ const SEEDED_ORDERS_STATE = {
 
 function freshDb(t: TestContext) {
   closeDb();
-  initDb(join(mkdtempSync(join(tmpdir(), "pdpp-run-now-state-ns-")), "pdpp.sqlite"));
-  __resetControllerInteractionStateForTests();
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-run-now-state-ns-"));
   t.after(() => {
-    __resetControllerInteractionStateForTests();
-    closeDb();
+    try {
+      __resetControllerInteractionStateForTests();
+      closeDb();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
+  initDb(join(dir, "pdpp.sqlite"));
+  __resetControllerInteractionStateForTests();
 }
 
 interface PendingDetailGapRowFixture {

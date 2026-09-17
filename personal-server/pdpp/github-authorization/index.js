@@ -110,7 +110,7 @@ export function createPdppAuthorizationAdapter({
         ...local,
         manifest: manifest.manifest,
         scopeForStream: stream => `pdpp.local.github.${stream}`,
-        sourceIds: ["github", "https://registry.pdpp.org/connectors/github"],
+        sourceIds: [manifest.manifest.connector_key, manifest.manifest.connector_id],
         localTimeline: true,
       })
       return {

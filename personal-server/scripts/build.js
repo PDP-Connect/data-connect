@@ -9,7 +9,7 @@
 
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, lstatSync, readlinkSync, cpSync, writeFileSync, readFileSync } from 'fs';
-import { join, dirname, posix, resolve, relative, win32 } from 'path';
+import { join, dirname, posix, resolve, relative, sep, win32 } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { createRequire } from 'module';
@@ -95,7 +95,36 @@ function toImportPath(fromFile, toFile) {
   return rel.startsWith('.') ? rel : `./${rel}`;
 }
 
-function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
+// Walk `node_modules` upward from the importing file, the way Node resolves a
+// bare specifier, and answer with the first copy of the package that is
+// actually visible to it.
+//
+// A fixed `DIST/node_modules` lookup was right only while one copy of each
+// package existed. It stopped being right when personal-server-ts-mcp pinned
+// `personal-server-ts-core` at exactly 0.2.0 while personal-server-ts-server
+// requires 1.16.1: npm nests the 0.2.0 copy under ts-mcp, and the two versions
+// do not export the same subpaths. `./gateway` exists in 0.2.0 and was removed
+// in 1.x, so ts-mcp's own `import ... from "@opendatalabs/personal-server-ts-core/gateway"`
+// was being answered from the top-level 1.16.1 package.json, which has no such
+// entry, and the build stopped on a subpath that is present on disk in the copy
+// that importer resolves.
+function packageRootFor(packageName, fromFile) {
+  const segments = packageName.split('/');
+  let directory = dirname(fromFile);
+  for (;;) {
+    const candidate = join(directory, 'node_modules', ...segments);
+    if (existsSync(join(candidate, 'package.json'))) {
+      return candidate;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return null;
+    }
+    directory = parent;
+  }
+}
+
+function resolveWorkspaceSpecifier(specifier, fromFile, packageJsonCache) {
   const workspacePackages = [
     '@opendatalabs/personal-server-ts-core',
     '@opendatalabs/personal-server-ts-mcp',
@@ -105,7 +134,8 @@ function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
   );
   if (!packageName) return null;
 
-  const packageRoot = join(DIST, 'node_modules', ...packageName.split('/'));
+  const packageRoot =
+    packageRootFor(packageName, fromFile) ?? join(DIST, 'node_modules', ...packageName.split('/'));
   const packageJsonPath = join(packageRoot, 'package.json');
   const packageJson =
     packageJsonCache.get(packageJsonPath) ??
@@ -127,6 +157,121 @@ function resolveWorkspaceSpecifier(specifier, packageJsonCache) {
   return join(packageRoot, importTarget);
 }
 
+// Every copy of a package under a `node_modules` tree, top level and nested.
+// npm nests a second copy whenever two dependents pin incompatible ranges, and
+// a step that treats the top-level copy as the only one silently leaves the
+// nested one as it found it.
+function findPackageCopies(nodeModulesRoot, packageName) {
+  const copies = [];
+  if (!existsSync(nodeModulesRoot)) return copies;
+
+  for (const entry of readdirSync(nodeModulesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+
+    if (entry.name === packageName) {
+      copies.push(join(nodeModulesRoot, entry.name));
+      continue;
+    }
+
+    // Scopes hold packages rather than being one, so descend a level.
+    const children = entry.name.startsWith('@')
+      ? readdirSync(join(nodeModulesRoot, entry.name), { withFileTypes: true })
+          .filter(child => child.isDirectory())
+          .map(child => join(nodeModulesRoot, entry.name, child.name))
+      : [join(nodeModulesRoot, entry.name)];
+
+    for (const child of children) {
+      copies.push(...findPackageCopies(join(child, 'node_modules'), packageName));
+    }
+  }
+
+  return copies;
+}
+
+/** Every `.node` addon under a directory, at any depth. */
+function collectNativeAddons(dir, found = []) {
+  if (!existsSync(dir)) return found;
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = join(dir, entry.name);
+    if (entry.isDirectory()) collectNativeAddons(entryPath, found);
+    else if (entry.isFile() && entry.name.endsWith('.node')) found.push(entryPath);
+  }
+
+  return found;
+}
+
+/**
+ * The C library an ELF file needs, or `null` for anything that is not a native
+ * ELF for this machine.
+ *
+ * Read straight from the `DT_NEEDED` entries rather than inferred from the
+ * filename: packages disagree about naming (`linuxmusl-x64.node` for
+ * better-sqlite3, `secp256k1.musl.node` for secp256k1), and a name is a claim
+ * while the dynamic section is the fact linuxdeploy will act on.
+ */
+function neededLibc(addonPath) {
+  // `-d` needs a parsable ELF; anything else (Mach-O, PE) exits non-zero and is
+  // not our problem -- see below.
+  const result = spawnSync('readelf', ['-d', addonPath], { encoding: 'utf8' });
+  if (result.status !== 0 || !result.stdout) return null;
+
+  const needed = [...result.stdout.matchAll(/Shared library: \[([^\]]+)\]/g)].map(m => m[1]);
+  return needed.find(lib => lib.startsWith('libc.')) ?? null;
+}
+
+/**
+ * Delete bundled addons that this Linux build's own C library cannot satisfy.
+ *
+ * Packages that ship prebuilt binaries ship one per platform they support, and
+ * exactly one of them is ever loadable here. The rest are usually just weight.
+ * On Linux they are not: linuxdeploy walks the AppDir, identifies ELF files by
+ * magic bytes, and resolves every `DT_NEEDED` entry it finds.
+ *
+ * Mach-O and PE addons it cannot parse, so it skips them, and a foreign-arch
+ * ELF it warns about and ships. A *musl* addon is neither -- it is a native
+ * x86_64 ELF, so it is parsed like any other, and it needs
+ * `libc.musl-x86_64.so.1`, which does not exist on a glibc runner. linuxdeploy
+ * cannot resolve it and exits non-zero. Tauri discards the tool's output and
+ * reports only `failed to run linuxdeploy`, which is the whole of the
+ * diagnostic for the ubuntu-22.04 bundling failure.
+ *
+ * Two packages in this bundle ship one: better-sqlite3
+ * (`prebuilds/linuxmusl-x64.node`) and secp256k1
+ * (`prebuilds/linux-x64/secp256k1.musl.node`). Matching on the libc rather than
+ * on either package's naming scheme is what makes this cover both, and the next
+ * one.
+ *
+ * This removes no capability. Both Linux bundle targets, `appimage` and `deb`,
+ * are glibc formats, so a musl addon could never have been the one loaded from
+ * either; the matching glibc build sits beside each one and is untouched.
+ */
+function pruneUnsatisfiableAddons() {
+  if (PLATFORM !== 'linux') return;
+
+  // What this machine -- and so the bundle it is producing -- actually links.
+  const hostLibc = neededLibc(process.execPath) ?? 'libc.so.6';
+
+  const removed = [];
+  for (const addon of collectNativeAddons(join(DIST, 'node_modules'))) {
+    const libc = neededLibc(addon);
+    // `null` is a non-ELF or foreign-arch addon, which linuxdeploy handles on
+    // its own. Only a native ELF wanting a different libc is the failure.
+    if (libc === null || libc === hostLibc) continue;
+
+    rmSync(addon, { force: true });
+    removed.push(`${relative(DIST, addon)} (needs ${libc})`);
+  }
+
+  if (removed.length === 0) {
+    log('No bundled addon requires a foreign C library.');
+    return;
+  }
+
+  for (const entry of removed) log(`Removed unloadable addon ${entry}.`);
+  log(`Pruned ${removed.length} addon(s) this ${hostLibc} build cannot load.`);
+}
+
 function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
   if (
     !specifier ||
@@ -143,11 +288,103 @@ function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {
     specifier === '@opendatalabs/personal-server-ts-mcp' ||
     specifier.startsWith('@opendatalabs/personal-server-ts-mcp/')
   ) {
-    return resolveWorkspaceSpecifier(specifier, packageJsonCache);
+    return resolveWorkspaceSpecifier(specifier, fromFile, packageJsonCache);
   }
 
   const requireFromFile = createRequire(fromFile);
-  return requireFromFile.resolve(specifier);
+  try {
+    return requireFromFile.resolve(specifier);
+  } catch (error) {
+    if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
+      throw error;
+    }
+    // The files being rewritten here are ESM, so a subpath their author
+    // published under `import` alone is legitimate and `require.resolve` is
+    // simply the wrong resolver for it. That only started to matter when
+    // personal-server-ts-core began routing through `@opendatalabs/vana-sdk`,
+    // whose `./browser` and `./*` entries carry `types` and `import` and no
+    // `require` -- correct for a browser build, which has no CJS artifact to
+    // point at. Every dependency before it shipped dual CJS/ESM, so the CJS
+    // resolver happened to answer for all of them.
+    //
+    // The ESM resolver is consulted only on this error, so every specifier
+    // that resolves today keeps resolving to the same file it resolves to
+    // now. Widening it to the first choice would re-point the other
+    // specifiers at their ESM artifacts, which is a larger change than the
+    // one this failure calls for.
+    //
+    // `import.meta.resolve(specifier, parentURL)` cannot do this job. Its
+    // second argument exists only under `--experimental-import-meta-resolve`,
+    // and this build runs plain `node scripts/build.js`. Without the flag Node
+    // does not reject the extra argument, it silently ignores it and resolves
+    // from *this file* -- `personal-server/scripts/build.js` -- so every
+    // import-only specifier was answered out of the build tree's own
+    // `personal-server/node_modules` rather than out of the copy sitting in
+    // `dist`. `toImportPath` then faithfully wrote the relative path to that
+    // answer, which is how the shipped artifact came to hold
+    // `../../../../../node_modules/@opendatalabs/vana-sdk/dist/index.browser.js`:
+    // an absolute dependency on the build machine, fatal the moment the dist
+    // is moved anywhere else. `assertImportsStayInsideDist` now fails the
+    // build on any such path, so this cannot regress silently.
+    return resolveImportOnlyExport(specifier, fromFile, packageJsonCache);
+  }
+}
+
+// Resolve a subpath its author published under `import` alone, starting from
+// the *importing file* -- which during this step is the copy under `dist`, not
+// the original in the build tree.
+//
+// This asks Node itself rather than reimplementing `exports`. The previous
+// version walked the map by hand under a fixed condition list of
+// `['browser', 'import', 'module', 'default']`, and disagreed with real Node on
+// every export-map form that list cannot express:
+//
+//  - **`node` was never consulted.** These files are ESM run by Node, so `node`
+//    applies and outranks `browser`. For `{ node, browser, default }` the hand
+//    resolver picked the browser artifact; Node picks the node one.
+//  - **Author order was disregarded.** The spec resolves conditions in the
+//    order the *author* wrote them, not in the consumer's preference order. For
+//    `{ default, browser }` Node takes `default` because it is listed first;
+//    iterating a fixed list took `browser`.
+//  - **Nested condition objects repeated both faults** one level down, e.g.
+//    `{ import: { node, browser } }`.
+//  - **Wildcard specificity was incomplete.** Only prefix length was compared,
+//    so between `./p/*` and `./p/*.js` the winner depended on key order rather
+//    than on the longer pattern.
+//
+// `import.meta.resolve(specifier, parentURL)` still cannot do this job, for the
+// reason recorded above: the second argument needs
+// `--experimental-import-meta-resolve`, and without it Node silently ignores
+// the argument and resolves from *this* file. So the resolver is run in a short
+// child process whose `--input-type=module` evaluation is rooted at the
+// importing file's own directory, where the one-argument form resolves exactly
+// as the shipped file will. That is Node's real resolver, including conditions,
+// author order, wildcards and `null` blocks, with no second implementation to
+// drift.
+//
+// `packageJsonCache` is retained for callers but no longer consulted here:
+// resolution is delegated, so there is no map for this function to read.
+export function resolveImportOnlyExport(specifier, fromFile, _packageJsonCache) {
+  const from = dirname(fromFile);
+  const probe = spawnSync(
+    process.execPath,
+    ['--input-type=module', '--eval', `process.stdout.write(import.meta.resolve(${JSON.stringify(specifier)}))`],
+    { cwd: from, encoding: 'utf8' }
+  );
+
+  if (probe.status !== 0) {
+    // Refuse rather than guess. An unresolvable or unsupported specifier must
+    // fail the build loudly; the old code's fallback answer was the defect.
+    throw new Error(
+      `Cannot resolve ${specifier} from ${fromFile}: ${(probe.stderr || '').trim() || 'node resolution failed'}`
+    );
+  }
+
+  const resolved = probe.stdout.trim();
+  if (!resolved.startsWith('file:')) {
+    throw new Error(`Refusing non-file resolution for ${specifier} from ${fromFile}: ${resolved}`);
+  }
+  return fileURLToPath(resolved);
 }
 
 function rewriteCopiedPackageImports() {
@@ -192,6 +429,69 @@ function rewriteCopiedPackageImports() {
       writeFileSync(file, rewritten);
     }
   }
+
+  assertImportsStayInsideDist(jsFiles);
+}
+
+/**
+ * The artifact boundary, checked rather than hoped for.
+ *
+ * `dist` is the whole deliverable: the executable, and beside it the full
+ * production dependency tree this build copies in. Everything a shipped file
+ * imports has to be reachable from within that directory, because the host is
+ * promised nothing else -- no `personal-server/node_modules`, no repository, no
+ * npm install. A relative import that climbs out of `dist` reads a path that
+ * exists only on the machine that built it.
+ *
+ * That is not hypothetical. This build shipped
+ * `../../../../../node_modules/@opendatalabs/vana-sdk/dist/index.browser.js`,
+ * which booted fine in place and died with `Cannot find module` the first time
+ * the dist was copied anywhere else -- a defect no in-place smoke test can see,
+ * and one four green platform builds did not catch. So the boundary is asserted
+ * here, in the step that writes these paths, where the failure names the file
+ * and the specifier that caused it.
+ *
+ * Scope is honest and narrow: this checks the static relative imports this
+ * build itself rewrote. It does not model `require()`, dynamic `import()`, or
+ * the bare specifiers left for Node to resolve out of `dist/node_modules` at
+ * runtime. The relocated-boot check in `verify-artifact-relocatable.js` is what
+ * exercises the rest.
+ */
+export function assertImportsStayInsideDist(jsFiles, distRoot = DIST) {
+  const escaping = [];
+
+  for (const file of jsFiles) {
+    const lines = readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, index) => {
+      const trimmed = line.trimStart();
+      if (
+        !(trimmed.startsWith('import ') || trimmed.startsWith('export ')) ||
+        !trimmed.includes(' from ')
+      ) {
+        return;
+      }
+      const match = /from\s+(["'])([^"'`]+)\1/.exec(line);
+      if (!match) return;
+
+      const specifier = match[2];
+      if (!specifier.startsWith('.')) return;
+
+      const target = resolve(dirname(file), specifier);
+      if (target === distRoot || target.startsWith(distRoot + sep)) return;
+
+      escaping.push(`${relative(distRoot, file)}:${index + 1} imports ${specifier}`);
+    });
+  }
+
+  if (escaping.length === 0) return;
+
+  throw new Error(
+    [
+      `${escaping.length} import(s) in the built artifact resolve outside ${distRoot}.`,
+      'The dist is the whole deliverable; a path that leaves it only works on this machine.',
+      ...escaping.map(entry => `  ${entry}`),
+    ].join('\n')
+  );
 }
 
 export function listProductionDependencyPaths({
@@ -259,7 +559,7 @@ async function build() {
   // Must redirect better-sqlite3, bindings, and file-uri-to-path to external node_modules
   const nativeModulesList = ['better-sqlite3', 'bindings', 'file-uri-to-path'];
   const runtimeExternalModules = [
-    '@opendatalabs/personal-server-ts-core/config',
+    '@opendatalabs/personal-server-ts-server/config',
     '@opendatalabs/personal-server-ts-server',
     '@opendatalabs/personal-server-ts-mcp',
     '@hono/node-server',
@@ -383,18 +683,55 @@ async function build() {
   // Re-download the better-sqlite3 prebuilt binary for the pkg target Node version.
   // The local npm install compiles for the host Node.js, which may differ from the
   // Node.js version embedded in the pkg binary (e.g. local Node 20 vs pkg Node 22).
+  //
+  // Every copy is redownloaded, not just the one at the top of `dist`. npm
+  // nests a second better-sqlite3 whenever a dependency pins a different major
+  // -- personal-server-ts-server 1.16.1 pins 12.11.1 while this package
+  // declares 13.x -- and the nested copy is the one its own code loads. Fixing
+  // only the top-level copy left that nested addon compiled against the host
+  // Node, and the packaged binary died on first database access with
+  // `NODE_MODULE_VERSION 137 ... requires 127`. The build still succeeded,
+  // because nothing in the build loads the addon.
   const pkgNodeMajor = target.match(/node(\d+)/)?.[1];
   if (pkgNodeMajor) {
-    const bsqlDist = join(DIST, 'node_modules', 'better-sqlite3');
-    if (existsSync(bsqlDist)) {
-      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor}...`);
+    for (const bsqlDist of findPackageCopies(join(DIST, 'node_modules'), 'better-sqlite3')) {
+      const where = relative(DIST, bsqlDist);
+
+      // 13.x ships Node-API prebuilds in `prebuilds/<platform>-<arch>.node` and
+      // builds no `build/Release` at all. Node-API is ABI-stable across Node
+      // versions, so those need no per-ABI download and there is nothing for
+      // this step to do -- which is just as well, because 13.x publishes no
+      // downloadable linux-x64 prebuild for any ABI.
+      //
+      // The 12.11.1 copy nested under personal-server-ts-server is the older
+      // shape, compiled against the host Node by `npm install`, and does need
+      // redownloading for the pkg target's ABI.
+      if (existsSync(join(bsqlDist, 'prebuilds'))) {
+        log(`better-sqlite3 in ${where} ships Node-API prebuilds; no per-ABI download needed.`);
+        continue;
+      }
+
+      log(`Downloading better-sqlite3 prebuilt for Node ${pkgNodeMajor} in ${where}...`);
       try {
         exec(`npx prebuild-install -r node -t ${pkgNodeMajor}.0.0 --platform ${PLATFORM} --arch ${ARCH}`, { cwd: bsqlDist });
       } catch (e) {
         log(`WARNING: prebuild-install failed, falling back to local build: ${e.message}`);
       }
+
+      // A missing addon is only observable at runtime, on first database
+      // access, long after this build reports success. Checking here keeps the
+      // failure attached to the step that caused it.
+      if (!existsSync(join(bsqlDist, 'build', 'Release', 'better_sqlite3.node'))) {
+        throw new Error(
+          `better-sqlite3 in ${where} has no build/Release/better_sqlite3.node after preparing it for Node ${pkgNodeMajor}.`
+        );
+      }
     }
   }
+
+  // Last, so it sees the tree exactly as it will be bundled -- including the
+  // addons the step above just downloaded.
+  pruneUnsatisfiableAddons();
 
   log('Build complete!');
   log(`Output: ${DIST}`);

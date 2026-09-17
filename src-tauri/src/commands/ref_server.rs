@@ -8,24 +8,16 @@
 // This follows the same lifecycle shape as `commands/server.rs`
 // (personal-server): start/health-wait/stop/restart-on-crash, process-group
 // signaling on unix, and honest event surfacing to the frontend. It is
-// intentionally a *separate* supervisor from `server.rs` — the reference
-// server is a different codebase (pdpp's `reference-implementation/`, not
-// yet vendored into this repo; see Move B) with a different lifecycle and a
-// different auth story.
+// intentionally a *separate* supervisor from `server.rs`: the reference
+// implementation's operator console is a different application from the
+// bundled Personal Server.
 //
-// Bundling status: the reference server is not yet a packaged binary this
-// app can ship (Move B — importing `reference-implementation/` into this
-// repo via `git filter-repo` — has not landed; see
-// `reference-implementation/README.md`). Until it does, "start" means
-// spawning `pnpm dev` inside a locally configured pdpp checkout
-// (`PDPP_REFERENCE_CHECKOUT`), which is the same "spawn a real child
-// process, supervise it, health-check it" shape a bundled binary would need.
-// If no checkout is configured, this falls back to health-checking an
-// already-running server at `PDPP_REFERENCE_SERVER_URL` (default
-// `http://localhost:3000`) without spawning anything — the dev-mode escape
-// hatch the task explicitly allows. Swapping the checkout-spawn branch for a
-// bundled-binary spawn (mirroring `get_bundled_personal_server`) is the only
-// change needed once Move B lands.
+// Bundling status: the shipped Personal Server exposes its own `/ui` dev page,
+// but it does not serve the reference operator console's `/owner/login` or
+// `/_ref` surfaces. The desktop build therefore does not pretend that the
+// bundled server can back this tab. A developer can explicitly configure a
+// reference checkout (`PDPP_REFERENCE_CHECKOUT`) or an already-running
+// reference origin (`PDPP_REFERENCE_SERVER_URL`) as an escape hatch.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -46,6 +38,7 @@ static REF_SERVER_STOPPING: Mutex<bool> = Mutex::new(false);
 static REF_SERVER_OWNS_PROCESS: Mutex<bool> = Mutex::new(false);
 
 const DEFAULT_REFERENCE_SERVER_URL: &str = "http://localhost:3000";
+const OPERATOR_TOOLS_UNAVAILABLE: &str = "Operator tools are not included in this build.";
 const HEALTH_CHECK_PATH: &str = "/.well-known/oauth-protected-resource";
 const HEALTH_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -60,16 +53,61 @@ pub struct ReferenceServerStatus {
     pub managed: bool,
 }
 
-fn configured_checkout_dir() -> Option<PathBuf> {
-    std::env::var("PDPP_REFERENCE_CHECKOUT")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
+#[derive(Debug, PartialEq, Eq)]
+enum ReferenceServerTarget {
+    Spawn {
+        checkout_dir: PathBuf,
+        origin: String,
+    },
+    Attach {
+        origin: String,
+    },
 }
 
-fn configured_server_url() -> String {
-    std::env::var("PDPP_REFERENCE_SERVER_URL")
-        .unwrap_or_else(|_| DEFAULT_REFERENCE_SERVER_URL.to_string())
+fn configured_checkout_dir() -> Result<Option<PathBuf>, String> {
+    let Some(value) = std::env::var("PDPP_REFERENCE_CHECKOUT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let path = PathBuf::from(value);
+    if path.is_dir() {
+        Ok(Some(path))
+    } else {
+        Err(format!(
+            "PDPP_REFERENCE_CHECKOUT is set but is not a directory: {:?}",
+            path
+        ))
+    }
+}
+
+fn configured_server_url() -> Option<String> {
+    std::env::var("DATACONNECT_RI_URL")
+        .or_else(|_| std::env::var("PDPP_REFERENCE_SERVER_URL"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_server_origin() -> String {
+    configured_server_url().unwrap_or_else(|| DEFAULT_REFERENCE_SERVER_URL.to_string())
+}
+
+fn resolve_reference_server_target(
+    checkout_dir: Option<PathBuf>,
+    server_url: Option<String>,
+) -> Result<ReferenceServerTarget, String> {
+    match checkout_dir {
+        Some(checkout_dir) => Ok(ReferenceServerTarget::Spawn {
+            checkout_dir,
+            origin: server_url.unwrap_or_else(|| DEFAULT_REFERENCE_SERVER_URL.to_string()),
+        }),
+        None => server_url
+            .map(|origin| ReferenceServerTarget::Attach { origin })
+            .ok_or_else(|| OPERATOR_TOOLS_UNAVAILABLE.to_string()),
+    }
 }
 
 fn health_check_url(origin: &str) -> String {
@@ -91,12 +129,28 @@ async fn wait_for_health(origin: String) -> bool {
     false
 }
 
-/// Start the reference server: spawn it from a configured local pdpp
-/// checkout if one is available, otherwise attach (health-check only) to an
-/// already-running server. Emits `reference-server-ready` on success,
-/// `reference-server-error` on failure to become healthy.
+/// Start the reference server from an explicitly configured development
+/// checkout or attach to an explicitly configured origin. The shipped
+/// Personal Server is not a reference operator-console host. Emits
+/// `reference-server-ready` on success, `reference-server-error` on failure.
 #[tauri::command]
 pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, true).await
+}
+
+/// Attach to an already-running reference server without consulting the
+/// legacy checkout-spawn setting. The unified tray uses this until the A3
+/// supervisor owns sidecar startup.
+pub(crate) async fn attach_reference_server(
+    app: AppHandle,
+) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, false).await
+}
+
+async fn start_reference_server_internal(
+    app: AppHandle,
+    allow_spawn: bool,
+) -> Result<ReferenceServerStatus, String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -132,13 +186,27 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
         }
     };
 
-    let checkout_dir = configured_checkout_dir();
+    let checkout_dir = if allow_spawn {
+        match configured_checkout_dir() {
+            Ok(checkout_dir) => checkout_dir,
+            Err(message) => {
+                clear_starting();
+                let _ = app.emit(
+                    "reference-server-error",
+                    serde_json::json!({ "message": message }),
+                );
+                return Err(message);
+            }
+        }
+    } else {
+        None
+    };
 
-    let Some(checkout_dir) = checkout_dir else {
+    if !allow_spawn {
         // Dev-mode fallback: no local pdpp checkout configured. Health-check
         // whatever is already listening at PDPP_REFERENCE_SERVER_URL instead
         // of spawning anything.
-        let origin = configured_server_url();
+        let origin = configured_server_origin();
         log::info!(
             "PDPP_REFERENCE_CHECKOUT not set; attaching to already-running reference server at {}",
             origin
@@ -163,9 +231,7 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
         }
         clear_starting();
         let message = format!(
-            "No PDPP_REFERENCE_CHECKOUT configured, and no reference server answered {} within {:?}. \
-             Either set PDPP_REFERENCE_CHECKOUT to a local pdpp repo checkout, or start the reference \
-             server yourself (`pnpm dev` from the pdpp repo root) before opening Server & Repairs.",
+            "No reference server answered {} within {:?}.",
             health_check_url(&origin),
             HEALTH_WAIT_TIMEOUT
         );
@@ -174,13 +240,65 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
             serde_json::json!({ "message": message }),
         );
         return Err(message);
+    }
+    let target = match resolve_reference_server_target(checkout_dir, configured_server_url()) {
+        Ok(target) => target,
+        Err(message) => {
+            clear_starting();
+            let _ = app.emit(
+                "reference-server-error",
+                serde_json::json!({ "message": message }),
+            );
+            return Err(message);
+        }
+    };
+
+    let (checkout_dir, origin) = match target {
+        ReferenceServerTarget::Attach { origin } => {
+            log::info!(
+                "PDPP_REFERENCE_CHECKOUT not set; attaching to explicitly configured reference server at {}",
+                origin
+            );
+            if wait_for_health(origin.clone()).await {
+                if let Ok(mut guard) = REF_SERVER_ORIGIN.lock() {
+                    *guard = Some(origin.clone());
+                }
+                if let Ok(mut guard) = REF_SERVER_OWNS_PROCESS.lock() {
+                    *guard = false;
+                }
+                clear_starting();
+                let _ = app.emit(
+                    "reference-server-ready",
+                    serde_json::json!({ "origin": origin, "managed": false }),
+                );
+                return Ok(ReferenceServerStatus {
+                    running: true,
+                    origin: Some(origin),
+                    managed: false,
+                });
+            }
+            clear_starting();
+            let message = format!(
+                "PDPP_REFERENCE_SERVER_URL is set, but no reference server answered {} within {:?}.",
+                health_check_url(&origin),
+                HEALTH_WAIT_TIMEOUT
+            );
+            let _ = app.emit(
+                "reference-server-error",
+                serde_json::json!({ "message": message }),
+            );
+            return Err(message);
+        }
+        ReferenceServerTarget::Spawn {
+            checkout_dir,
+            origin,
+        } => (checkout_dir, origin),
     };
 
     // Spawn `pnpm dev` from the configured checkout. This is the same
     // composed-mode entrypoint a developer runs by hand; see
     // reference-implementation/README.md "Same-origin local reference
     // composition" in the pdpp repo.
-    let origin = configured_server_url();
     log::info!(
         "Starting reference server via 'pnpm dev' in {:?}, expecting origin {}",
         checkout_dir,
@@ -519,6 +637,13 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
             .to_string()
     })?;
 
+    login_reference_server_with_password(origin, &password).await
+}
+
+pub(crate) async fn login_reference_server_with_password(
+    origin: String,
+    password: &str,
+) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
     // setting pdpp_owner_session on THAT response, not on whatever it
@@ -555,8 +680,7 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("pdpp_owner_session="))
-        .map(|v| v.to_string());
+        .find_map(extract_owner_session_cookie);
 
     let Some(raw_cookie) = set_cookie_header else {
         return Err(
@@ -565,14 +689,82 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         );
     };
 
-    // Extract just the cookie value (between '=' and the first ';').
-    let value = raw_cookie
-        .split_once('=')
-        .map(|(_, rest)| rest.split(';').next().unwrap_or("").to_string())
-        .ok_or_else(|| "Malformed Set-Cookie header from reference server".to_string())?;
-
     Ok(ReferenceServerLoginResult {
-        session_cookie: value,
+        session_cookie: raw_cookie,
         origin,
     })
+}
+
+fn extract_owner_session_cookie(header: &str) -> Option<String> {
+    let value = header
+        .strip_prefix("pdpp_owner_session=")?
+        .split(';')
+        .next()?
+        .trim();
+    (!value.is_empty()).then_some(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn explicit_server_url_overrides_the_default_origin() {
+        let target = resolve_reference_server_target(
+            Some(PathBuf::from("/pdpp")),
+            Some("http://127.0.0.1:4310".to_string()),
+        )
+        .expect("configured checkout should be spawnable");
+
+        assert_eq!(
+            target,
+            ReferenceServerTarget::Spawn {
+                checkout_dir: PathBuf::from("/pdpp"),
+                origin: "http://127.0.0.1:4310".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_server_url_without_checkout_attaches_to_that_origin() {
+        let target =
+            resolve_reference_server_target(None, Some("http://127.0.0.1:4310".to_string()))
+                .expect("explicit origin should enable dev attachment");
+
+        assert_eq!(
+            target,
+            ReferenceServerTarget::Attach {
+                origin: "http://127.0.0.1:4310".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn no_explicit_reference_configuration_returns_honest_error() {
+        let error = resolve_reference_server_target(None, None)
+            .expect_err("the bundled Personal Server is not a reference operator host");
+
+        assert_eq!(error, OPERATOR_TOOLS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn extracts_owner_session_cookie_value_without_attributes() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=abc123; Path=/; HttpOnly"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_other_or_empty_cookie_headers() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_csrf=abc123; Path=/"),
+            None
+        );
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=; Path=/"),
+            None
+        );
+    }
 }

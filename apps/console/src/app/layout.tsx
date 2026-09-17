@@ -10,41 +10,40 @@ import DensityProvider from "@/components/density/density-provider.tsx";
 import { DENSITY_KEY, normalizeDensity } from "@/components/density/density-state.ts";
 import { TooltipProvider } from "@/components/ui/tooltip.tsx";
 import { cn } from "@/lib/utils.ts";
+import { getProductIdentity } from "./(console)/lib/product-identity.ts";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  // iOS home-screen launch. statusBarStyle "default" lets iOS pick the bar
-  // treatment per system appearance (light bar on light, dark bar on dark)
-  // instead of forcing one — so the launch reads correctly under both themes,
-  // matching the theme-following first-paint guard below. The apple-icon.tsx
-  // file convention supplies the touch icon itself.
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: "default",
-    title: "PDPP",
-  },
-  description:
-    "An authorization and disclosure protocol for personal data. You decide what to share, with whom, for how long, for what purpose.",
-  icons: {
-    icon: [
-      { type: "image/svg+xml", url: "/icon.svg" },
-      { type: "image/svg+xml", url: "/brand/pdpp-favicon.svg" },
-    ],
-  },
-  metadataBase: new URL("https://pdpp.dev"),
-  openGraph: {
-    description:
-      "An authorization and disclosure protocol for personal data. You decide what to share, with whom, for how long, for what purpose.",
-    title: "PDPP — Personal Data Portability Protocol",
-    type: "website",
-  },
-  title: "PDPP — Personal Data Portability Protocol",
-  twitter: {
-    card: "summary_large_image",
-    description: "An authorization and disclosure protocol for personal data.",
-    title: "PDPP — Personal Data Portability Protocol",
-  },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const identity = getProductIdentity();
+  const title = identity.name;
+  const description = identity.description;
+
+  return {
+    // iOS home-screen launch. statusBarStyle "default" lets iOS pick the bar
+    // treatment per system appearance (light bar on light, dark bar on dark)
+    // instead of forcing one — so the launch reads correctly under both themes,
+    // matching the theme-following first-paint guard below. The apple-icon.tsx
+    // file convention supplies the touch icon itself.
+    appleWebApp: {
+      capable: true,
+      statusBarStyle: "default",
+      title: identity.name,
+    },
+    description,
+    metadataBase: new URL("https://pdpp.dev"),
+    openGraph: {
+      description,
+      title,
+      type: "website",
+    },
+    title,
+    twitter: {
+      card: "summary_large_image",
+      description,
+      title,
+    },
+  };
+}
 
 export const viewport = {
   initialScale: 1,

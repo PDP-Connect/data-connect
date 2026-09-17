@@ -1,17 +1,53 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs"
+import { createHash, generateKeyPairSync, sign, verify } from "node:crypto"
+import { execFileSync, spawnSync } from "node:child_process"
+import { createRequire } from "node:module"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
+import { installFromLock } from "@opendatalabs/data-connectors-tools/installer-core"
 import {
   artifactCertificateIdentityResolver,
+  authorOciLock,
+  authorOciProfile,
+  checkInstalledLock,
+  installConnectorsAtomically,
+  ociCertificateIdentityResolver,
   LOCKED_ARTIFACT_SOURCE,
   resolveIndexUrl,
+  recoverInterruptedInstall,
 } from "./resolve-connectors.js"
 
-const lock = JSON.parse(readFileSync("connectors/lock.json", "utf8"))
-const legacyArtifacts = lock.connectors.filter(connector =>
-  connector.artifactUrl.startsWith("https://github.com/vana-com/")
+const require = createRequire(import.meta.url)
+const installerCorePath =
+  require.resolve("@opendatalabs/data-connectors-tools/installer-core")
+const { readTarGzEntries } = await import(
+  pathToFileURL(join(dirname(installerCorePath), "tar-stream.mjs")).href
 )
+
+const lock = JSON.parse(readFileSync("connectors/lock.json", "utf8"))
+const npmPackage = JSON.parse(readFileSync("package.json", "utf8"))
+const npmLock = JSON.parse(readFileSync("package-lock.json", "utf8"))
+const legacyArtifacts = lock.connectors.filter(connector =>
+  connector.artifactUrl?.startsWith("https://github.com/vana-com/")
+)
+
+// This is the reviewed data-connectors main commit containing the duplicate
+// normalized-member guard. Keep the ancestry check local and deterministic;
+// acceptance must not turn into a live git or network lookup.
+const DATA_CONNECTORS_MAIN_ANCESTOR = "ee11b09dc4e4c3acb1a1e0606ced0429f761be27"
 
 describe("connector artifact signer identities", () => {
   it("trusts only the six exact legacy artifact URLs retained by the lock", () => {
@@ -49,7 +85,13 @@ describe("connector index selection", () => {
     expect(lock.index.url).not.toContain("connectors-latest")
 
     for (const connector of lock.connectors) {
-      if (connector.artifactUrl.startsWith("https://github.com/vana-com/")) {
+      if (connector.oci) {
+        expect(connector.oci.registry).toBe("ghcr.io")
+        expect(connector.oci.digest).toMatch(/^sha256:[a-f0-9]{64}$/)
+        expect(connector.artifactUrl).toBeUndefined()
+        continue
+      }
+      if (connector.artifactUrl?.startsWith("https://github.com/vana-com/")) {
         continue
       }
       expect(connector.artifactUrl).toContain(releasePath)
@@ -67,7 +109,7 @@ describe("connector index selection", () => {
     ).toBe(lock.index.url)
   })
 
-  it("honors an explicit index and uses latest only for an update", () => {
+  it("honors an explicit index, and otherwise stays pinned to the existing lock even outside --check", () => {
     const explicitIndexUrl = "https://example.com/connector-index.json"
     expect(
       resolveIndexUrl({
@@ -76,11 +118,20 @@ describe("connector index selection", () => {
         existingLock: lock,
       })
     ).toBe(explicitIndexUrl)
+    // A bare (re)generation must not float the legacy tarball entries to
+    // whatever "latest" currently contains; only an explicit --index-url does.
     expect(
       resolveIndexUrl({
         checkMode: false,
         explicitIndexUrl: null,
         existingLock: lock,
+      })
+    ).toBe(lock.index.url)
+    expect(
+      resolveIndexUrl({
+        checkMode: false,
+        explicitIndexUrl: null,
+        existingLock: null,
       })
     ).toBeNull()
   })
@@ -89,4 +140,816 @@ describe("connector index selection", () => {
     expect(LOCKED_ARTIFACT_SOURCE).toEqual({ mode: "locked", doc: {} })
     expect(LOCKED_ARTIFACT_SOURCE.mode).not.toBe("remote")
   })
+})
+
+const identity =
+  "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main"
+const anchoredIdentityPattern = value =>
+  `^${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`
+const digest = bytes =>
+  `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+const json = value => Buffer.from(`${JSON.stringify(value)}\n`)
+function put(root, path, bytes) {
+  mkdirSync(dirname(join(root, path)), { recursive: true })
+  writeFileSync(join(root, path), bytes)
+}
+function archive(root, name, files) {
+  const input = join(root, `${name}-input`)
+  for (const [path, bytes] of Object.entries(files)) put(input, path, bytes)
+  const output = join(root, `${name}.tgz`)
+  execFileSync("tar", ["-czf", output, "-C", input, "."])
+  return readFileSync(output)
+}
+function archiveMembers(root, name, members) {
+  const raw = join(root, `${name}.tar`)
+  members.forEach(({ path, bytes }, index) => {
+    const input = join(root, `${name}-input-${index}`)
+    put(input, path, bytes)
+    execFileSync("tar", [index === 0 ? "-cf" : "-rf", raw, "-C", input, path])
+  })
+  return execFileSync("gzip", ["-c", raw])
+}
+function tree(root) {
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => {
+      const path = join(entry.parentPath, entry.name).slice(root.length + 1)
+      return [path, readFileSync(join(root, path)).toString("base64")]
+    })
+    .sort(([a], [b]) => a.localeCompare(b))
+}
+async function temporary(run) {
+  const root = mkdtempSync(join(tmpdir(), "dc-oci-test-"))
+  try {
+    return await run(root)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+describe("resolved connector-installer archive acceptance", () => {
+  it("requires package and lock commits to be a data-connectors-main ancestor without git ls-remote", () => {
+    const dependency = "@opendatalabs/data-connectors-tools"
+    const packageSpec = npmPackage.devDependencies[dependency]
+    const lockResolution =
+      npmLock.packages[`node_modules/${dependency}`].resolved
+    const packageCommit = packageSpec.match(/#([0-9a-f]{40})$/)?.[1]
+    const lockCommit = lockResolution.match(/#([0-9a-f]{40})$/)?.[1]
+
+    expect(installerCorePath).toContain(
+      join("node_modules", "@opendatalabs", "data-connectors-tools")
+    )
+    expect(packageCommit).toBe(DATA_CONNECTORS_MAIN_ANCESTOR)
+    expect(lockCommit).toBe(DATA_CONNECTORS_MAIN_ANCESTOR)
+  })
+
+  it("refuses two differing collection-profile.mjs archive members through the resolved reader", async () => {
+    await temporary(async root => {
+      const archive = archiveMembers(root, "duplicate-entrypoint", [
+        {
+          path: "collection-profile.mjs",
+          bytes: Buffer.from("export const value = 1\n"),
+        },
+        {
+          path: "collection-profile.mjs",
+          bytes: Buffer.from("export const value = 2\n"),
+        },
+      ])
+
+      await expect(
+        readTarGzEntries(archive, { maxUnpackedBytes: 1024 })
+      ).rejects.toThrow("duplicate member destination")
+    })
+  })
+
+  it("refuses x and ./x aliases through the resolved reader", async () => {
+    await temporary(async root => {
+      const archive = archiveMembers(root, "duplicate-alias", [
+        { path: "x", bytes: Buffer.from("first") },
+        { path: "./x", bytes: Buffer.from("second") },
+      ])
+
+      await expect(
+        readTarGzEntries(archive, { maxUnpackedBytes: 1024 })
+      ).rejects.toThrow("duplicate member destination")
+    })
+  })
+
+  it("installs and loads a unique collection-profile.mjs member through the resolved installer", async () => {
+    await temporary(async root => {
+      const manifest = Buffer.from('{"name":"fixture","version":"1.0.0"}\n')
+      const entrypoint = Buffer.from('export const fixtureBytes = "expected"\n')
+      const provenance = Buffer.from('{"source":"acceptance"}\n')
+      const artifact = archiveMembers(root, "unique-entrypoint", [
+        { path: "profile/collection-profile.json", bytes: manifest },
+        { path: "dist/collection-profile.mjs", bytes: entrypoint },
+        { path: "provenance.json", bytes: provenance },
+      ])
+      const artifactPath = "unique-entrypoint.tgz"
+      writeFileSync(join(root, artifactPath), artifact)
+      const entry = {
+        connectorId: "fixture-pdpp",
+        artifactKind: "pdpp-collection-profile",
+        artifactPath,
+        version: "1.0.0",
+        manifestPath: "profile/collection-profile.json",
+        entrypointPath: "dist/collection-profile.mjs",
+        provenancePath: "provenance.json",
+        artifactSha256: digest(artifact),
+        manifestSha256: digest(manifest),
+        entrypointSha256: digest(entrypoint),
+        provenanceSha256: digest(provenance),
+      }
+      const installRoot = join(root, "installed")
+
+      await installFromLock({
+        lock: { connectors: [entry] },
+        source: { mode: "local", rootDir: root, doc: {} },
+        installRoot,
+        layout: "source",
+      })
+
+      const installedEntrypoint = join(
+        installRoot,
+        "collection-profiles",
+        "fixture-pdpp",
+        "dist",
+        "collection-profile.mjs"
+      )
+      expect(readFileSync(installedEntrypoint)).toEqual(entrypoint)
+      const loadedBytes = execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `const loaded = await import(${JSON.stringify(pathToFileURL(installedEntrypoint).href)}); console.log(loaded.fixtureBytes);`,
+        ],
+        { encoding: "utf8" }
+      ).trim()
+      expect(loadedBytes).toBe("expected")
+    })
+  })
+})
+
+// Reproduce PR A's OCI wire fixture. The core still parses manifests, checks
+// digests, extracts archives and assembles the cosign bundle. Only registry I/O
+// and Fulcio/Rekor are replaced; the test verifier checks a real EC signature.
+function fixture(root) {
+  const key = "ynab",
+    connectorId = `${key}-pdpp`,
+    version = "0.3.0"
+  const profile = json({
+    connector_key: key,
+    connector_id: `https://github.com/PDP-Connect/data-connectors/connector/${key}`,
+    version,
+    protocol_version: "1.0",
+    display_name: "YNAB",
+  })
+  const code = Buffer.from("export const collect = () => {};\n")
+  const provenance = json({ connector_key: key, version })
+  const files = {
+    "profile/collection-profile.json": profile,
+    "dist/collection-profile.mjs": code,
+    "provenance.json": provenance,
+  }
+  const tar = archive(root, "release", files)
+  const entry = {
+    connectorId,
+    connectorKey: key,
+    company: "YNAB",
+    version,
+    resolvedFrom: version,
+    artifactKind: "pdpp-collection-profile",
+    manifestPath: "profile/collection-profile.json",
+    entrypointPath: "dist/collection-profile.mjs",
+    provenancePath: "provenance.json",
+    manifestSha256: digest(profile),
+    entrypointSha256: digest(code),
+    provenanceSha256: digest(provenance),
+  }
+  const objects = new Map()
+  const layer = (bytes, mediaType) => {
+    const hash = digest(bytes)
+    objects.set(`blobs/${hash}`, bytes)
+    return { mediaType, digest: hash, size: bytes.length }
+  }
+  const config = json({
+    ...JSON.parse(profile),
+    config_version: "1.0",
+    profile_digest: digest(profile),
+    entrypoint: "code/collection-profile.mjs",
+  })
+  const manifest = json({
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    config: layer(config, "application/vnd.pdpp.connector.config.v1+json"),
+    layers: [
+      layer(profile, "application/vnd.pdpp.connector.profile.v1+json"),
+      layer(
+        archive(root, "code", { "collection-profile.mjs": code }),
+        "application/vnd.pdpp.connector.code.v1.tar+gzip"
+      ),
+      layer(
+        archive(root, "licenses", { LICENSE: "Apache-2.0\n" }),
+        "application/vnd.pdpp.connector.licenses.v1.tar+gzip"
+      ),
+      layer(provenance, "application/vnd.pdpp.connector.provenance.v1+json"),
+    ],
+  })
+  const manifestDigest = digest(manifest)
+  objects.set(`manifests/${manifestDigest}`, manifest)
+  objects.set(`manifests/${version}`, manifest)
+  const payload = json({
+    critical: { image: { "docker-manifest-digest": manifestDigest } },
+  })
+  const { privateKey, publicKey } = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+  })
+  const signature = sign("sha256", payload, privateKey).toString("base64")
+  const rekorBundle = JSON.stringify({
+    SignedEntryTimestamp: "test-set",
+    Payload: {
+      body: Buffer.from(
+        JSON.stringify({ kind: "hashedrekord", apiVersion: "0.0.1" })
+      ).toString("base64"),
+      integratedTime: 1,
+      logIndex: 1,
+      logID: "0".repeat(64),
+    },
+  })
+  objects.set(
+    `manifests/${manifestDigest.replace(":", "-")}.sig`,
+    json({
+      schemaVersion: 2,
+      layers: [
+        {
+          ...layer(payload, "application/vnd.dev.cosign.simplesigning.v1+json"),
+          annotations: {
+            "dev.cosignproject.cosign/signature": signature,
+            "dev.sigstore.cosign/certificate": `-----BEGIN CERTIFICATE-----\n${Buffer.from(identity).toString("base64")}\n-----END CERTIFICATE-----`,
+            "dev.sigstore.cosign/bundle": rekorBundle,
+          },
+        },
+      ],
+    })
+  )
+  const oci = {
+    ...entry,
+    oci: {
+      registry: "ghcr.io",
+      repository: `pdp-connect/connector/${key}`,
+      digest: manifestDigest,
+      configDigest: digest(config),
+    },
+  }
+  const tarball = {
+    ...entry,
+    artifactPath: "release.tgz",
+    artifactSha256: digest(tar),
+  }
+  const lockFor = (connector, lockVersion = "2.0") => ({
+    lockVersion,
+    dependencies: { [connectorId]: version },
+    connectors: [connector],
+  })
+  const options = {
+    fetchImpl: async url => {
+      const path = new URL(url).pathname.replace(
+        `/v2/${oci.oci.repository}/`,
+        ""
+      )
+      const bytes = objects.get(decodeURIComponent(path))
+      if (!bytes) throw new Error(`Unexpected registry request: ${url}`)
+      return new Response(bytes, {
+        status: 200,
+        headers: { "docker-content-digest": digest(bytes) },
+      })
+    },
+    sigstoreVerifier: async (bundle, bytes, policy) => {
+      expect(policy.certificateIdentityURI).toBe(
+        anchoredIdentityPattern(identity)
+      )
+      expect(policy.certificateIssuer).toBe(
+        "https://token.actions.githubusercontent.com"
+      )
+      expect(
+        Buffer.from(
+          bundle.verificationMaterial.certificate.rawBytes,
+          "base64"
+        ).toString()
+      ).toBe(identity)
+      expect(
+        verify(
+          "sha256",
+          bytes,
+          publicKey,
+          Buffer.from(bundle.messageSignature.signature, "base64")
+        )
+      ).toBe(true)
+    },
+  }
+  return { files, oci, tarball, lockFor, options }
+}
+
+describe("OCI consumer acceptance", () => {
+  it("does not reintroduce OCI entries that are absent from requested dependencies", async () =>
+    temporary(async root => {
+      const legacy = legacyArtifacts[0]
+      const lock = {
+        lockVersion: "1.0",
+        connectors: [{ connectorId: "chatgpt-pdpp", version: "0.1.0" }, legacy],
+      }
+      const authored = await authorOciLock(lock, {})
+      expect(authored.lockVersion).toBe("2.0")
+      expect(authored.connectors).toEqual([legacy])
+    }))
+
+  it("B-T1 an authored v2 OCI entry installs a tree byte-identical to the registry artifact's own layers, with config/profile cross-checks passing", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "installed")
+      // Authoring is not migration: it never sees or compares against a prior
+      // v1 lock entry, so there are no stale hashes it could reject against.
+      const authored = await authorOciProfile(
+        f.oci.connectorId,
+        f.oci.connectorKey,
+        f.oci.version,
+        f.options
+      )
+      expect(authored.oci).toEqual(f.oci.oci)
+      expect(authored.manifestSha256).toBe(f.oci.manifestSha256)
+      expect(authored.entrypointSha256).toBe(f.oci.entrypointSha256)
+      expect(authored.provenanceSha256).toBe(f.oci.provenanceSha256)
+      await installConnectorsAtomically({
+        lock: { lockVersion: "2.0", connectors: [authored] },
+        installRoot,
+        ...f.options,
+      })
+      for (const [path, bytes] of Object.entries(f.files)) {
+        expect(
+          readFileSync(join(installRoot, "collection-profiles/ynab-pdpp", path))
+        ).toEqual(bytes)
+      }
+      expect(
+        readFileSync(
+          join(installRoot, "collection-profiles/ynab-pdpp/licenses/LICENSE"),
+          "utf8"
+        )
+      ).toBe("Apache-2.0\n")
+    }))
+
+  it("authoring never compares the fetched artifact against a prior lock entry's bytes", async () =>
+    temporary(async root => {
+      const f = fixture(root)
+      // A stale/drifted hash on a would-be "previous" entry is irrelevant:
+      // authoring only ever reads from the registry, so nothing here can
+      // trigger the old migration path's "OCI bytes differ" refusal.
+      const authored = await authorOciProfile(
+        f.oci.connectorId,
+        f.oci.connectorKey,
+        f.oci.version,
+        f.options
+      )
+      expect(authored.entrypointSha256).not.toBe(
+        digest("different published bytes")
+      )
+      expect(authored).toMatchObject({
+        connectorId: f.oci.connectorId,
+        oci: f.oci.oci,
+      })
+    }))
+
+  it("B-T4 install root uses connectorId, never connectorKey", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "installed")
+      await installConnectorsAtomically({
+        lock: f.lockFor(f.oci),
+        installRoot,
+        ...f.options,
+      })
+      expect(
+        existsSync(
+          join(
+            installRoot,
+            "collection-profiles/ynab-pdpp/profile/collection-profile.json"
+          )
+        )
+      ).toBe(true)
+      expect(existsSync(join(installRoot, "collection-profiles/ynab"))).toBe(
+        false
+      )
+    }))
+
+  it("verifies an OCI install at connectorId when connectorKey differs and reports a missing file", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "installed")
+      await installConnectorsAtomically({
+        lock: f.lockFor(f.oci),
+        installRoot,
+        ...f.options,
+      })
+      expect(f.oci.connectorId).not.toBe(f.oci.connectorKey)
+      expect(
+        checkInstalledLock({ lock: f.lockFor(f.oci), installRoot })
+      ).toEqual({
+        ok: true,
+        missing: [],
+        mismatched: [],
+      })
+
+      const missingPath = join(
+        installRoot,
+        "collection-profiles",
+        f.oci.connectorId,
+        f.oci.entrypointPath
+      )
+      rmSync(missingPath)
+      expect(
+        checkInstalledLock({ lock: f.lockFor(f.oci), installRoot })
+      ).toEqual({
+        ok: false,
+        missing: [
+          `collection-profiles/${f.oci.connectorId}/${f.oci.entrypointPath}`,
+        ],
+        mismatched: [],
+      })
+    }))
+
+  it("B-T5 a failed install at connector 2 of 3 leaves the previous tree byte-identical", async () =>
+    temporary(async root => {
+      const installRoot = join(root, "installed")
+      for (const id of ["first", "second", "third"])
+        put(installRoot, `${id}/manifest.json`, `previous ${id}`)
+      put(installRoot, "lock.json", "previous lock")
+      const before = tree(installRoot),
+        attempted = []
+      await expect(
+        installConnectorsAtomically({
+          lock: {
+            lockVersion: "2.0",
+            connectors: ["first", "second", "third"].map(connectorId => ({
+              connectorId,
+            })),
+          },
+          installRoot,
+          install: async ({ lock: next, installRoot: target }) => {
+            for (const connector of next.connectors) {
+              attempted.push(connector.connectorId)
+              if (connector.connectorId === "second")
+                throw new Error("injected second connector failure")
+              put(
+                target,
+                `${connector.connectorId}/manifest.json`,
+                "replacement bytes"
+              )
+            }
+          },
+        })
+      ).rejects.toThrow("injected second connector failure")
+      expect(attempted).toEqual(["first", "second"])
+      expect(tree(installRoot)).toEqual(before)
+      expect(readdirSync(root)).toEqual(["installed"])
+    }))
+
+  it("B-T6 --check succeeds with the network disabled and detects changed installed bytes", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        installRoot = join(root, "connectors"),
+        mixed = f.lockFor(f.oci)
+      mkdirSync(installRoot)
+      const legacy = {
+        connectorId: "legacy",
+        version: "1.0.0",
+        sourceFiles: {
+          metadata: "legacy/manifest.json",
+          script: "legacy/script.js",
+        },
+        manifestSha256: digest("{}\n"),
+        scriptSha256: digest("legacy\n"),
+        artifactUrl: legacyArtifacts[0].artifactUrl,
+      }
+      mixed.connectors.push(legacy)
+      mixed.dependencies.legacy = legacy.version
+      await installConnectorsAtomically({
+        lock: f.lockFor(f.oci),
+        installRoot,
+        ...f.options,
+      })
+      put(installRoot, legacy.sourceFiles.metadata, "{}\n")
+      put(installRoot, legacy.sourceFiles.script, "legacy\n")
+      put(installRoot, "lock.json", json(mixed))
+      put(
+        installRoot,
+        "connector-dependencies.json",
+        json({ connectors: mixed.dependencies })
+      )
+      for (const script of ["resolve-connectors.js", "is-main-module.js"])
+        put(root, `scripts/${script}`, readFileSync(`scripts/${script}`))
+      put(root, "package.json", '{"type":"module"}')
+      symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir")
+      put(
+        root,
+        "offline.mjs",
+        'import http from "node:http"; import https from "node:https"; const deny = () => { throw new Error("NETWORK DISABLED") }; globalThis.fetch = deny; http.request = deny; http.get = deny; https.request = deny; https.get = deny;'
+      )
+      const env = {
+        ...process.env,
+        SKIP_CONNECTOR_FETCH: "",
+        CONNECTORS_PATH: "",
+        CONNECTOR_INDEX_URL: "",
+      }
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          join(root, "offline.mjs"),
+          join(root, "scripts/resolve-connectors.js"),
+          "--check",
+        ],
+        { env, encoding: "utf8" }
+      )
+      expect(result.stderr).toBe("")
+      expect(result.status).toBe(0)
+      expect(() =>
+        checkInstalledLock({
+          lock: mixed,
+          installRoot,
+          dependencies: { connectors: {} },
+        })
+      ).toThrow("lock drift")
+      for (const invalid of [
+        { ...f.oci, manifestPath: "../escape" },
+        { ...f.oci, manifestSha256: "sha256:invalid" },
+      ]) {
+        expect(() =>
+          checkInstalledLock({ lock: f.lockFor(invalid), installRoot })
+        ).toThrow("Invalid installed file contract")
+      }
+      put(
+        installRoot,
+        "collection-profiles/ynab-pdpp/dist/collection-profile.mjs",
+        "tampered\n"
+      )
+      expect(
+        checkInstalledLock({
+          lock: mixed,
+          dependencies: { connectors: mixed.dependencies },
+          installRoot,
+        }).ok
+      ).toBe(false)
+      const entrypoint = join(
+        installRoot,
+        "collection-profiles/ynab-pdpp/dist/collection-profile.mjs"
+      )
+      rmSync(entrypoint)
+      symlinkSync(
+        join(root, "code-input/code/collection-profile.mjs"),
+        entrypoint
+      )
+      expect(() => checkInstalledLock({ lock: mixed, installRoot })).toThrow(
+        "Refusing installed symlink"
+      )
+    }))
+
+  it("preinstall check reports a missing bundle without labeling it an error", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        bundle = f.lockFor(f.oci)
+      put(root, "connectors/lock.json", json(bundle))
+      put(
+        root,
+        "connectors/connector-dependencies.json",
+        json({ connectors: bundle.dependencies })
+      )
+      for (const script of ["resolve-connectors.js", "is-main-module.js"])
+        put(root, `scripts/${script}`, readFileSync(`scripts/${script}`))
+      put(root, "package.json", '{"type":"module"}')
+      symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir")
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(root, "scripts/resolve-connectors.js"),
+          "--check",
+          "--check-for-install",
+        ],
+        {
+          env: {
+            ...process.env,
+            CONNECTORS_PATH: "",
+            CONNECTOR_INDEX_URL: "",
+            SKIP_CONNECTOR_FETCH: "",
+          },
+          encoding: "utf8",
+        }
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toContain("installation required")
+    }))
+
+  it("B-T7 an entry naming a non-GHCR registry is refused before fetching", async () =>
+    temporary(async root => {
+      const f = fixture(root)
+      mkdirSync(join(root, "installed"))
+      for (const registry of ["evil.example", "ghcr.io.evil.example"]) {
+        const reference = { registry, repository: f.oci.oci.repository }
+        expect(ociCertificateIdentityResolver(reference)).toBeNull()
+        let fetched = false
+        await expect(
+          installConnectorsAtomically({
+            lock: f.lockFor({ ...f.oci, oci: { ...f.oci.oci, registry } }),
+            installRoot: join(root, "installed"),
+            fetchImpl: async () => {
+              fetched = true
+              throw new Error("unexpected network")
+            },
+          })
+        ).rejects.toThrow(/registry|trusted/i)
+        expect(fetched).toBe(false)
+      }
+      expect(ociCertificateIdentityResolver(f.oci.oci)).toBe(identity)
+      for (const repository of [
+        "attacker/connector/ynab",
+        "pdp-connect/connector/ynab/extra",
+      ]) {
+        expect(
+          ociCertificateIdentityResolver({ registry: "ghcr.io", repository })
+        ).toBeNull()
+      }
+    }))
+
+  it("B-T8 generate-platform-registry output is unchanged by a mixed v2 lock", async () =>
+    temporary(async root => {
+      const f = fixture(root),
+        legacy = {
+          connectorId: "legacy",
+          sourceFiles: {
+            metadata: "legacy/manifest.json",
+            script: "legacy/script.js",
+          },
+        }
+      put(root, "package.json", '{"type":"module"}')
+      put(
+        root,
+        "scripts/generate-platform-registry.js",
+        readFileSync("scripts/generate-platform-registry.js")
+      )
+      put(
+        root,
+        "connectors/legacy/manifest.json",
+        json({
+          connector_id: "legacy",
+          source_id: "legacy",
+          name: "Legacy",
+          consumer_metadata: {
+            brand_domain: "example.com",
+            default_scope: "legacy.data",
+          },
+        })
+      )
+      put(
+        root,
+        "src/lib/platform/registry.overlay.json",
+        json({
+          connectors: [{ connectorId: "legacy", showInConnectList: true }],
+        })
+      )
+      const output = join(root, "src/lib/platform/registry.generated.ts")
+      const generate = current => {
+        put(root, "connectors/lock.json", json(current))
+        execFileSync(process.execPath, [
+          join(root, "scripts/generate-platform-registry.js"),
+        ])
+        return readFileSync(output)
+      }
+      const before = generate({
+        lockVersion: "1.0",
+        connectors: [legacy, f.tarball],
+      })
+      expect(
+        generate({ lockVersion: "2.0", connectors: [legacy, f.oci] })
+      ).toEqual(before)
+    }))
+})
+
+describe("connector publication recovery", () => {
+  it("recovers the previous tree after process exit between publication renames", async () =>
+    temporary(async root => {
+      const installRoot = join(root, "installed")
+      put(installRoot, "lock.json", "previous lock")
+      put(installRoot, "legacy/script.js", "previous connector")
+      const before = tree(installRoot)
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      import { pathToFileURL } from "node:url";
+      const installRoot = ${JSON.stringify(installRoot)};
+      const rename = fs.renameSync;
+      fs.renameSync = (from, to) => {
+        const result = rename(from, to);
+        if (from === installRoot && to.endsWith("previous")) process.exit(73);
+        return result;
+      };
+      syncBuiltinESMExports();
+      const { installConnectorsAtomically } = await import(pathToFileURL(${JSON.stringify(resolve("scripts/resolve-connectors.js"))}));
+      await installConnectorsAtomically({ lock: { lockVersion: "2.0", connectors: [] }, installRoot, install: async () => ({}) });
+    `,
+        ],
+        { encoding: "utf8" }
+      )
+      expect(result.status).toBe(73)
+      expect(existsSync(installRoot)).toBe(false)
+      // A prior publication may have exited after its final rename but before
+      // cleanup. Its missing `next` distinguishes it from the interrupted one.
+      put(
+        root,
+        ".installed-install-completed/owner.json",
+        json({ installRoot, pid: result.pid })
+      )
+      put(root, ".installed-install-completed/previous/lock.json", "older lock")
+      recoverInterruptedInstall(installRoot)
+      expect(tree(installRoot)).toEqual(before)
+      expect(readdirSync(root)).toEqual(["installed"])
+    }))
+
+  for (const rollbackFails of [false, true]) {
+    it(
+      rollbackFails
+        ? "retains the previous bytes and reports their location when rollback fails"
+        : "restores the previous tree when publication fails",
+      async () =>
+        temporary(async root => {
+          const installRoot = join(root, "installed")
+          put(installRoot, "lock.json", "previous lock")
+          put(installRoot, "legacy/script.js", "previous connector")
+          const before = tree(installRoot)
+          // A child process confines the filesystem fault injection to this test.
+          // Creating a competing destination reproduces the failed-rollback case.
+          const result = spawnSync(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `
+        import fs from "node:fs";
+        import { join } from "node:path";
+        import { syncBuiltinESMExports } from "node:module";
+        import { pathToFileURL } from "node:url";
+        const installRoot = ${JSON.stringify(installRoot)};
+        const rollbackFails = ${rollbackFails};
+        const rename = fs.renameSync;
+        fs.renameSync = (from, to) => {
+          if (from.endsWith("next") && to === installRoot) {
+            if (rollbackFails) {
+              fs.mkdirSync(installRoot);
+              fs.writeFileSync(join(installRoot, "concurrent"), "other process");
+            }
+            throw new Error("injected publication failure");
+          }
+          return rename(from, to);
+        };
+        syncBuiltinESMExports();
+        const { installConnectorsAtomically } = await import(pathToFileURL(${JSON.stringify(resolve("scripts/resolve-connectors.js"))}));
+        try {
+          await installConnectorsAtomically({
+            lock: { lockVersion: "2.0", connectors: [] }, installRoot,
+            install: async () => ({})
+          });
+          process.exitCode = 1;
+        } catch (error) { console.log(error.message); }
+      `,
+            ],
+            { encoding: "utf8" }
+          )
+          expect(result.status).toBe(0)
+          expect(result.stderr).toBe("")
+          if (rollbackFails) {
+            const recovery = readdirSync(root).find(name =>
+              name.startsWith(".installed-install-")
+            )
+            expect(recovery).toBeDefined()
+            const previous = join(root, recovery, "previous")
+            expect(tree(previous)).toEqual(before)
+            expect(result.stdout).toContain(
+              `previous bundle retained at ${previous}`
+            )
+            expect(readFileSync(join(installRoot, "concurrent"), "utf8")).toBe(
+              "other process"
+            )
+          } else {
+            expect(result.stdout).toContain("injected publication failure")
+            expect(tree(installRoot)).toEqual(before)
+            expect(readdirSync(root)).toEqual(["installed"])
+          }
+        })
+    )
+  }
 })

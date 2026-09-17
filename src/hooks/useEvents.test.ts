@@ -195,37 +195,61 @@ describe("useEvents", () => {
     expect(trackSyncFailed).not.toHaveBeenCalled()
   })
 
-  it("treats terminal partial as partial telemetry without overwriting the run to error", async () => {
+  it("persists data carried by a terminal partial result and keeps its warning", async () => {
     const useEvents = await importHook()
+    const exportPath = "/tmp/dataconnect/exported_data/GitHub/GitHub/github-pdpp-run-1"
     currentRuns = [
       {
-        id: "chatgpt-run-1",
-        platformId: "chatgpt-playwright",
-        company: "OpenAI",
-        name: "ChatGPT",
+        id: "github-pdpp-run-1",
+        platformId: "github-pdpp",
+        company: "GitHub",
+        name: "GitHub",
         startDate: "2026-04-14T12:00:00.000Z",
-        status: "success",
-        exportPath: "/tmp/export",
-        syncedToPersonalServer: false,
+        status: "running",
       },
     ]
+    mockDispatch.mockImplementation((action: {
+      type: string
+      payload?: Record<string, unknown>
+    }) => {
+      if (action.type === "app/updateRunExportData" && action.payload) {
+        Object.assign(currentRuns[0], action.payload)
+      }
+      if (action.type === "app/updateExportStatus" && action.payload) {
+        Object.assign(currentRuns[0], action.payload)
+      }
+    })
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === "write_export_data") {
+        return Promise.resolve(exportPath)
+      }
+      return Promise.resolve(null)
+    })
 
     renderHook(() => useEvents())
 
     await act(async () => {
       emit("connector-status", {
-        runId: "chatgpt-run-1",
+        runId: "github-pdpp-run-1",
         status: {
           type: "ERROR",
-          message: "Collection completed with partial data",
+          message: "1 search window(s) reported more than 1000 pull requests; GitHub search API caps results so the oldest could not be collected",
           outcome: "partial",
-          errorClass: "selector_error",
-          recordCount: 12,
+          errorClass: "upstream_error",
+          recordCount: 1,
           scopeSummary: {
-            requested: 2,
+            requested: 1,
             produced: 1,
             degraded: 0,
-            omitted: 1,
+            omitted: 0,
+          },
+          data: {
+            platform: "github-pdpp",
+            company: "GitHub",
+            exportSummary: { count: 1, label: "records" },
+            "pdpp.recordsByStream": {
+              search: [{ type: "RECORD", stream: "search", data: { id: "pr-1" } }],
+            },
           },
         },
         timestamp: Date.now(),
@@ -236,25 +260,80 @@ describe("useEvents", () => {
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "app/updateRunStatus",
       payload: {
-        runId: "chatgpt-run-1",
+        runId: "github-pdpp-run-1",
         status: "partial",
         endDate: expect.any(String),
       },
     })
     expect(trackCollectionPartial).toHaveBeenCalledWith({
-      collectionRunId: "chatgpt-run-1",
-      source: "chatgpt",
+      collectionRunId: "github-pdpp-run-1",
+      source: "github",
       durationMs: expect.any(Number),
-      errorClass: "selector_error",
-      recordCount: 12,
+      errorClass: "upstream_error",
+      recordCount: 1,
       scopeSummary: {
-        requested: 2,
+        requested: 1,
         produced: 1,
         degraded: 0,
-        omitted: 1,
+        omitted: 0,
       },
     })
+    expect(mockInvoke).toHaveBeenCalledWith("write_export_data", {
+      runId: "github-pdpp-run-1",
+      platformId: "github-pdpp",
+      company: "GitHub",
+      name: "github-pdpp",
+      data: expect.any(String),
+    })
+    expect(currentRuns[0].exportData).toEqual(
+      expect.objectContaining({
+        platform: "github-pdpp",
+        company: "GitHub",
+      })
+    )
+    expect(currentRuns[0].statusMessage).toBe(
+      "1 search window(s) reported more than 1000 pull requests; GitHub search API caps results so the oldest could not be collected"
+    )
     expect(trackCollectionFailed).not.toHaveBeenCalled()
+  })
+
+  it("preserves the host authentication error class on terminal failures", async () => {
+    const useEvents = await importHook()
+    currentRuns = [
+      {
+        id: "github-pdpp-run-1",
+        platformId: "github-pdpp",
+        company: "GitHub",
+        name: "GitHub",
+        startDate: "2026-04-14T12:00:00.000Z",
+        status: "running",
+      },
+    ]
+
+    renderHook(() => useEvents())
+
+    await act(async () => {
+      emit("connector-status", {
+        runId: "github-pdpp-run-1",
+        status: {
+          type: "ERROR",
+          message: "The GitHub token was rejected",
+          errorClass: "auth_failed",
+        },
+        timestamp: Date.now(),
+      })
+      await Promise.resolve()
+    })
+
+    expect(mockDispatch).toHaveBeenCalledWith({
+      type: "app/updateRunStatus",
+      payload: {
+        runId: "github-pdpp-run-1",
+        status: "error",
+        endDate: expect.any(String),
+        errorClass: "auth_failed",
+      },
+    })
   })
 
   it("persists PDPP COMPLETE status payloads through the normal export path", async () => {

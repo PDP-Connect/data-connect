@@ -63,11 +63,9 @@ jobs:
     outputs:
       new-release-published: ${{ steps.version.outputs.new-release-published }}
       new-release-version: ${{ steps.version.outputs.new-release-version }}
-      new-release-git-tag: ${{ steps.version.outputs.new-release-git-tag }}
-      mode: ${{ steps.mode.outputs.mode }}
-      converge-tag: ${{ steps.mode.outputs.converge-tag }}
-      converge-version: ${{ steps.mode.outputs.converge-version }}
-      converge-missing: ${{ steps.mode.outputs.converge-missing }}
+      superseded-tag: ${{ steps.mode.outputs.superseded-tag }}
+      superseded-version: ${{ steps.mode.outputs.superseded-version }}
+      superseded-missing: ${{ steps.mode.outputs.superseded-missing }}
 
     steps:
       - name: Checkout
@@ -79,29 +77,25 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      # Reconciles the two sources of truth the pipeline depends on — the git
-      # tags semantic-release reads, and the registry it publishes to — BEFORE
-      # deciding what this run does.
+      # Reads what the registry holds for the newest release tag, so a
+      # partially-published prior version is REPORTED rather than discovered
+      # by whoever installs next.
       #
       # semantic-release derives versions from tags alone and never asks the
       # registry, so it cannot see a tag that claims a release the registry
-      # only partly holds. That blind spot is what turned a mid-publish crash
-      # into a repository that could not release at all: with the tag present
-      # and no commits after it, every subsequent run resolved "no relevant
-      # changes" while two of three packages were still missing.
+      # only partly holds. This step asks.
       #
-      # This step looks at both and emits one of two modes:
-      #   converge — the newest tag is a partially-completed release. Publish
-      #              only the missing packages at that tag's version.
-      #   release  — ordinary release (or nothing to do). Unchanged behaviour.
-      #
-      # It runs first so the decision is made before any publishing job.
+      # It does not gate anything. A partial prior version stays incomplete;
+      # this run publishes the next version from commits as usual, and that
+      # version supersedes it. There is no retry that completes the partial
+      # one: its tag is already on the commit it ran at, so a run there
+      # resolves zero commits and no version at all.
       - name: Resolve release mode
         id: mode
         run: node --import tsx scripts/resolve-release-version.ts
@@ -111,12 +105,8 @@ jobs:
       # rules differ. That keeps `quality` gating publication in both cases:
       # forcing changes which commits count as releasable, never whether the
       # release has to pass its checks.
-      #
-      # Skipped entirely on a converge, where the version comes from the tag
-      # rather than from commit analysis.
       - name: Determine next version
         id: version
-        if: steps.mode.outputs.mode != 'converge'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TYPE: ${{ inputs.release_type }}
@@ -137,13 +127,14 @@ jobs:
   quality:
     name: release quality checks
     needs: resolve-version
-    # Gates BOTH publishing paths. A converge publishes real tarballs to the
-    # real registry, so it has to clear the same bar as an ordinary release —
-    # the packages it ships were never published, and npm immutability means a
-    # bad one cannot be replaced afterwards.
-    if: >-
-      needs.resolve-version.outputs.new-release-published == 'true' ||
-      needs.resolve-version.outputs.mode == 'converge'
+    # Gates publication. npm immutability means a bad tarball cannot be
+    # replaced afterwards, so nothing publishes until these pass.
+    #
+    # This job checks out the push head with no `ref:`, which is the same
+    # commit the `release` job publishes from. There is one publishing path
+    # and it is this one, so `quality` cannot verify a tree other than the one
+    # being shipped.
+    if: needs.resolve-version.outputs.new-release-published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -158,7 +149,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -220,7 +211,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -289,71 +280,8 @@ jobs:
         run: |
           node scripts/verify-packed-install-capability-exports.mjs "${{ needs.resolve-version.outputs.new-release-version }}"
 
-  # Finishes a release whose tag is already pushed but whose publishing
-  # stopped partway. It publishes ONLY the packages the registry reports as
-  # missing at that tag's version, and creates no tag and no GitHub release —
-  # the run that pushed the tag already did both.
-  #
-  # It does not re-run semantic-release, because semantic-release structurally
-  # cannot finish this job: it resolves versions from git tags alone, so with
-  # the tag present it finds zero commits since the last release and resolves
-  # no version at all. Deleting the tag locally does not help either — it runs
-  # `git fetch --tags` before enumerating tags and restores it within the same
-  # run. Deleting the tag on the remote would work, but a release pipeline
-  # must not rewrite the public record of versions that are already live and
-  # provenance-attested to work around its own crash. So this job does the one
-  # thing actually left outstanding: the publishing.
-  converge:
-    name: converge a partially-published release
-    needs: [resolve-version, quality]
-    if: >-
-      needs.resolve-version.outputs.mode == 'converge' &&
-      github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      # Deliberately NOT `contents: write`. Converging must never create a tag
-      # or a release, and denying ref-write access makes that structural
-      # rather than a promise the script keeps.
-      contents: read
-      id-token: write # OIDC trusted publishing — no NPM_TOKEN
-
-    steps:
-      # Checks out THE TAG, not the push head. A tag records a commit as well
-      # as a version, and the packages this job publishes must be built from
-      # the tree that tag names — the same tree the ordinary release would
-      # have published had it not crashed partway. Building from the push head
-      # would ship code the tag never covered under the tag's immutable
-      # version: @pdpp/local-collector vendors connector-protocol's built
-      # dist/ into its own tarball, so a head-built local-collector@X can
-      # embed protocol code that the already-published connector-protocol@X
-      # does not contain.
-      - name: Checkout the tag being converged
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.resolve-version.outputs.converge-tag }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.23.1"
-          cache: npm
-
-      # Also provides node_modules/.bin/npm — the npm 11 that
-      # converge-release.ts publishes through. The runner's ambient npm is 10,
-      # which has no OIDC trusted-publishing support at all.
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Publish the missing packages
-        env:
-          CONVERGE_RELEASE_TAG: ${{ needs.resolve-version.outputs.converge-tag }}
-        run: node --import tsx scripts/converge-release.ts
-
-  # The postcondition of the whole pipeline, on BOTH paths: all three lockstep
-  # packages are live at this release's version.
+  # The postcondition of the pipeline: all three lockstep packages are live at
+  # the version this run published.
   #
   # "The release job exited 0" is not the same claim as "the release
   # happened" — the half-published v2.2.1 is the proof, and nothing in the
@@ -361,16 +289,16 @@ jobs:
   # the registry rather than trusting what the publish steps reported about
   # themselves, and fails with the missing packages named if the set is
   # incomplete.
+  #
+  # It gates ONLY the version just published. A prior version that is still
+  # incomplete is reported, not gated on: it is superseded by this release and
+  # cannot be completed from here.
   verify-release-complete:
     name: verify the lockstep release is complete
-    needs: [resolve-version, release, converge]
-    # always() because exactly one of release/converge runs on any given
-    # release; the other is skipped, and a skipped dependency would otherwise
-    # skip this job too. The condition then narrows to runs that actually
-    # published something.
-    if: >-
-      always() &&
-      (needs.release.result == 'success' || needs.converge.result == 'success')
+    # No `if:` and no `always()`. `release` is a hard dependency, so this job
+    # runs exactly when the release succeeded and is skipped when the release
+    # was skipped or failed — which is the condition, expressed structurally.
+    needs: [resolve-version, release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -385,7 +313,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.21.0"
           cache: npm
 
       - name: Install dependencies
@@ -393,8 +321,18 @@ jobs:
 
       - name: Assert all three packages are live at this version
         run: |
-          VERSION="${{ needs.resolve-version.outputs.new-release-version }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="${{ needs.resolve-version.outputs.converge-version }}"
-          fi
-          node --import tsx scripts/verify-release-complete.ts "$VERSION"
+          node --import tsx scripts/verify-release-complete.ts \
+            "${{ needs.resolve-version.outputs.new-release-version }}"
+
+      # Reporting, not a gate. A version left incomplete by an earlier run
+      # cannot be completed from here; naming it keeps the gap in the registry
+      # visible in the log of the release that supersedes it.
+      - name: Report the superseded partial version
+        if: needs.resolve-version.outputs.superseded-version != ''
+        env:
+          SUPERSEDED_TAG: ${{ needs.resolve-version.outputs.superseded-tag }}
+          SUPERSEDED_MISSING: ${{ needs.resolve-version.outputs.superseded-missing }}
+          NEW_VERSION: ${{ needs.resolve-version.outputs.new-release-version }}
+        run: |
+          node --import tsx scripts/report-superseded-release.ts \
+            "$SUPERSEDED_TAG" "$SUPERSEDED_MISSING" "$NEW_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"

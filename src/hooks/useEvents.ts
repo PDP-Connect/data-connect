@@ -284,6 +284,7 @@ async function persistAndDeliverExport({
   exportData,
   dispatch,
   persistedRunIds,
+  statusMessage = 'Export complete',
 }: {
   runId: string;
   platformId: string;
@@ -292,6 +293,7 @@ async function persistAndDeliverExport({
   exportData: ExportedData;
   dispatch: AppDispatch;
   persistedRunIds: Set<string>;
+  statusMessage?: string;
 }): Promise<void> {
   if (persistedRunIds.has(runId)) return;
 
@@ -302,7 +304,7 @@ async function persistAndDeliverExport({
   dispatch(
     updateRunExportData({
       runId,
-      statusMessage: 'Export complete',
+      statusMessage,
       itemsExported,
       itemLabel,
       exportData,
@@ -521,6 +523,36 @@ export function useEvents() {
       });
     }
 
+    function persistStatusExport(
+      runId: string,
+      data: unknown,
+      statusMessage?: string,
+    ) {
+      const activeRun = store.getState().app.runs.find((r) => r.id === runId);
+      if (!activeRun) {
+        if (isDev) {
+          console.warn('[Connector Status] terminal export for unknown run', runId);
+        }
+        return;
+      }
+      const normalizedData = toExportedData(data, {
+        platform: activeRun.platformId,
+        company: activeRun.company ?? 'Unknown',
+      });
+      if (!normalizedData) return;
+
+      void persistAndDeliverExport({
+        runId,
+        platformId: normalizedData.platform,
+        company: normalizedData.company,
+        name: normalizedData.platform,
+        exportData: normalizedData,
+        dispatch,
+        persistedRunIds,
+        statusMessage,
+      });
+    }
+
     addListener<ConnectorLogEvent>('connector-log', ({ runId, message }) => {
       debugLog('[Connector Log]', message);
       dispatch(updateRunLogs({ runId, logs: message }));
@@ -584,41 +616,31 @@ export function useEvents() {
         dispatch(updateRunStatus({ runId, status: 'running' }));
         updateProgress();
       } else if (statusType === 'COMPLETE') {
+        const isPartial = outcome === 'partial';
         dispatch(
           updateRunStatus({
             runId,
-            status: 'success',
+            status: isPartial ? 'partial' : 'success',
             endDate: new Date().toISOString(),
           })
         );
         dispatch(updateRunConnected({ runId, isConnected: true }));
-        markCollectionCompleted(runId, {
-          recordCount,
-          scopeSummary,
-        });
+        if (isPartial) {
+          markCollectionPartial(runId, {
+            errorClass: terminalErrorClass,
+            error: statusMessage ?? statusType,
+            recordCount,
+            scopeSummary,
+          });
+        } else {
+          markCollectionCompleted(runId, {
+            recordCount,
+            scopeSummary,
+          });
+        }
 
         if (typeof status === 'object') {
-          const activeRun = store.getState().app.runs.find((r) => r.id === runId);
-          if (!activeRun) {
-            if (isDev) {
-              console.warn('[Connector Status] COMPLETE for unknown run', runId);
-            }
-            return;
-          }
-          const normalizedData = toExportedData(status.data, {
-            platform: activeRun.platformId,
-            company: activeRun.company ?? 'Unknown',
-          });
-          if (!normalizedData) return;
-          void persistAndDeliverExport({
-            runId,
-            platformId: normalizedData.platform,
-            company: normalizedData.company,
-            name: normalizedData.platform,
-            exportData: normalizedData,
-            dispatch,
-            persistedRunIds,
-          });
+          persistStatusExport(runId, status.data, isPartial ? statusMessage : undefined);
         }
       } else if (statusType === 'ERROR') {
         const isPartial = outcome === 'partial';
@@ -627,6 +649,9 @@ export function useEvents() {
             runId,
             status: isPartial ? 'partial' : 'error',
             endDate: new Date().toISOString(),
+            ...(!isPartial && terminalErrorClass
+              ? { errorClass: terminalErrorClass }
+              : {}),
           })
         );
         if (isPartial) {
@@ -649,6 +674,9 @@ export function useEvents() {
             terminalErrorClass,
             scopeSummary,
           );
+        }
+        if (isPartial && typeof status === 'object') {
+          persistStatusExport(runId, status.data, statusMessage);
         }
       } else if (statusType === 'STOPPED') {
         const currentRun = store.getState().app.runs.find((candidate) => candidate.id === runId);

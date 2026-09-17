@@ -37,7 +37,7 @@ export function SourceStack({
 
   return (
     <div data-slot="source-stack" className="w-full">
-      <div className="h-[96px] flex items-start border-b">
+      <div className="min-h-[96px] flex items-start border-b">
         <div className="p-2">
           <PlatformIcon
             iconName={iconName}

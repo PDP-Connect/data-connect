@@ -12,7 +12,7 @@ import {
 
 /**
  * Shared platform icon utilities for displaying connector icons.
- * Used by Home.tsx and ConnectorUpdates.tsx.
+ * Used by Home source cards, source rows, and connector surfaces.
  */
 
 interface PlatformIconProps extends Omit<ComponentProps<"div">, "children"> {

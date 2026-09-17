@@ -1574,6 +1574,17 @@ async function bootstrapPostgresSchemaOnce({
         created_at TEXT NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::text
       );
 
+      CREATE TABLE IF NOT EXISTS connector_installs (
+        connector_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS connector_install_catalog_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        catalog_high_water TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS connector_instances (
         connector_instance_id TEXT PRIMARY KEY,
         owner_subject_id TEXT NOT NULL,

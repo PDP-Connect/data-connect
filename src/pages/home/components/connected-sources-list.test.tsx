@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { fireEvent, render, screen } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import type { Platform } from "@/types"
 import { MemoryRouter } from "react-router-dom"
@@ -24,6 +24,49 @@ const PLATFORM: Platform = {
 }
 
 describe("ConnectedSourcesList sync click guard", () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it("passes an installed platform logo to the source row", () => {
+    const logoURL = "data:image/svg+xml;base64,ZXhhbXBsZQ=="
+    const { container } = render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[{ ...PLATFORM, logoURL }]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(logoURL)
+  })
+
+  it("uses the registry logo while an installed platform has no logo URL", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[
+              { ...PLATFORM, id: "github-pdpp", name: "GitHub", logoURL: "" },
+            ]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(container.querySelector("img")?.getAttribute("src")).toContain(
+      "github.com"
+    )
+  })
+
   it("describes the local Personal Server without linking to its legacy page", () => {
     render(
       <MemoryRouter>
@@ -76,5 +119,50 @@ describe("ConnectedSourcesList sync click guard", () => {
 
     expect(onSyncSource).toHaveBeenCalledTimes(2)
     errorSpy.mockRestore()
+  })
+
+  it("offers credential replacement for static-secret connections", () => {
+    const platform = {
+      ...PLATFORM,
+      id: "ynab-pdpp",
+      company: "YNAB",
+      name: "YNAB",
+      filename: "ynab-pdpp",
+      runtime: "pdpp-network" as const,
+      setup: {
+        modality: "static_secret" as const,
+        credentialCapture: {
+          fields: [
+            {
+              name: "secret",
+              label: "YNAB personal access token",
+              type: "password" as const,
+              required: true,
+              secret: true,
+            },
+          ],
+        },
+      },
+    }
+    const onReplaceCredentials = vi.fn()
+
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[platform]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+            onReplaceCredentials={onReplaceCredentials}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credentials for YNAB" })
+    )
+    expect(onReplaceCredentials).toHaveBeenCalledWith(platform)
   })
 })

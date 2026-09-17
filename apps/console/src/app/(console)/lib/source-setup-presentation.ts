@@ -26,8 +26,10 @@
 import { type ConnectorCatalogEntry, isExperimentalEntry, isOwnerActionableEntry } from "./connection-catalog.ts";
 
 export interface SourceSetupStatus {
-  /** One short owner-facing status label. */
-  label: string;
+  /** One short owner-facing exception label; supported is the implied default. */
+  label: string | null;
+  /** Plain-language explanation for an exception label, exposed as a tooltip. */
+  description: string;
   /** Tailwind classes for the badge tone. */
   tone: string;
 }
@@ -38,7 +40,7 @@ export interface SourceSetupAction {
 }
 
 export function publicTierLabel(tier: ConnectorCatalogEntry["publicTier"]): string {
-  return tier.charAt(0).toUpperCase() + tier.slice(1);
+  return tier === "development" ? "In development" : tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
 /**
@@ -149,76 +151,114 @@ export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStat
     // Collapsing these into one badge would hide exactly the distinction the
     // owner needs to decide whether clicking a card can do anything.
     return entry.isKnownScaffold
-      ? { label: "Not implemented", tone: "border-border bg-muted/30 text-muted-foreground" }
-      : { label: publicTierLabel(entry.publicTier), tone: "border-border bg-muted/30 text-muted-foreground" };
+      ? {
+          description: "This connector is registered, but its collection code is not implemented yet.",
+          label: "Not implemented",
+          tone: "border-border bg-muted/30 text-muted-foreground",
+        }
+      : {
+          description: "This connector has a setup path, but it has not completed live-account validation.",
+          label: publicTierLabel(entry.publicTier),
+          tone: "border-border bg-muted/30 text-muted-foreground",
+        };
   }
   if (entry.publicTier === "preview") {
-    return { label: publicTierLabel(entry.publicTier), tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg" };
+    return {
+      description: "This setup path is implemented but has not completed live validation. Use non-critical data.",
+      label: publicTierLabel(entry.publicTier),
+      tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
+    };
   }
   if (isUnavailableSetupEntry(entry)) {
-    return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+    return {
+      description: "This dashboard cannot offer a working setup path for this connector yet.",
+      label: "Not available here",
+      tone: "border-border bg-muted/30 text-muted-foreground",
+    };
   }
   if (browserBoundWithStoredCredentials(entry)) {
     return {
-      label: "Supported",
+      description: "Ready to set up from this page.",
+      label: null,
       tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
     };
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "browser_collector_manual":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "static_secret_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "manual_upload_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "provider_auth_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "static_secret_experimental":
       return {
+        description: "This credential setup path is available for testing, but it has not completed live validation.",
         label: "Preview",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "manual_upload_pending":
       return {
+        description: "The connector is known, but file import is not available from this dashboard yet.",
         label: "Import not available yet",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "provider_auth_deployment_blocked":
       return {
+        description: "Configure the instance-level provider settings before adding this connector.",
         label: "Server setup required",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "browser_bound_runbook":
       return {
+        description: "This connector needs a browser setup path that this dashboard does not offer yet.",
         label: "Browser setup not available yet",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "local_collector_unproven":
     case "provider_auth_proof_gated":
       // Existing data keeps working; there is just no shipped owner add path.
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no proven setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
     case "api_network_unsupported":
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
     default:
       // unknown_unsupported and any future unclassified disposition.
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
   }
 }
 
@@ -308,13 +348,13 @@ function developmentFallbackGuidance(entry: ConnectorCatalogEntry): string {
   // generic "unproven" note -- that fact is more actionable than anything
   // else this branch could say, and it holds regardless of tier.
   if (entry.disposition === "provider_auth_deployment_blocked") {
-    return `Development: also waiting on server settings: ${entry.deploymentReadiness.blockers
+    return `In development: also waiting on server settings: ${entry.deploymentReadiness.blockers
       .map((blocker) => blocker.label || blocker.key)
       .join(", ")}.`;
   }
   const note = entry.listingNote ?? entry.refreshPolicyRationale ?? entry.setupDescription;
   const base =
-    "Development: this connector's setup path is implemented, but no live run against a real account has proven it yet.";
+    "In development: this connector's setup path is implemented, but no live run against a real account has proven it yet.";
   return note ? `${base} ${note}` : `${base} Test it with non-critical data.`;
 }
 

@@ -27,12 +27,14 @@ import {
   TableCell,
   TableHeader,
   TableHeaderRow,
+  type ConnectorIconLike,
 } from "@pdpp/brand-react";
 import { formatCoverageAxis, humanizeFieldLabel } from "@pdpp/display";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 
 import { SOURCE_WORK_GROUP_COPY } from "../lib/source-actionability.ts";
+import { ConnectorMark } from "../components/connector-mark.tsx";
 import {
   type DuplicateSyncGroup,
   describeRecentSyncOutcome,
@@ -50,6 +52,8 @@ interface RecentSyncsFilterOption {
   label: string;
   value: string;
 }
+
+type ConnectorIconMap = Readonly<Record<string, ConnectorIconLike | null | undefined>>;
 
 /**
  * Pagination + filter state for the recent-syncs list, computed server-side in
@@ -146,7 +150,7 @@ function HealthBandStrip({ band }: { band: SyncsViewModel["band"] }) {
  *
  * The prose is verbatim from the server-owned rendered verdict when available.
  */
-function FailureCardPanel({ card }: { card: FailureCard }) {
+function FailureCardPanel({ card, connectorIcons }: { card: FailureCard; connectorIcons: ConnectorIconMap }) {
   const { summary } = card;
   const ownerActionLabel = summary.actionLabel ?? (summary.cta === "reconnect" ? "Reconnect" : "Open source");
   // biome-ignore lint/suspicious/noUnnecessaryConditions: card.work is SourceWorkItem | null; tsc rejects removing this guard.
@@ -155,6 +159,7 @@ function FailureCardPanel({ card }: { card: FailureCard }) {
     <section className="rr-fix" data-cta={summary.cta} data-source-work={sourceWorkGroup}>
       <div className="rr-fix__body">
         <h3 className="rr-fix__title">
+          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[card.connectorId]} name={card.name} />
           {card.name} — {summary.triggerLabel}
         </h3>
         <p className="rr-fix__expl">{summary.prose}</p>
@@ -201,11 +206,12 @@ function FailureCardPanel({ card }: { card: FailureCard }) {
  * run to derive one from) so a freshly created connection is discoverable on
  * Syncs immediately, not only after it starts failing or succeeding.
  */
-function PendingSetupCardPanel({ card }: { card: PendingSetupCard }) {
+function PendingSetupCardPanel({ card, connectorIcons }: { card: PendingSetupCard; connectorIcons: ConnectorIconMap }) {
   return (
     <section className="rr-fix" data-source-work="needsOwner" data-testid="syncs-pending-setup-card">
       <div className="rr-fix__body">
         <h3 className="rr-fix__title">
+          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[card.connectorId]} name={card.name} />
           {card.name} — {card.statusLabel}
         </h3>
         <p className="rr-fix__expl">{card.what}</p>
@@ -265,7 +271,7 @@ function attentionSections(model: SyncsViewModel): AttentionSectionData[] {
   });
 }
 
-function AttentionSection({ cards, pendingSetupCards, section }: AttentionSectionData) {
+function AttentionSection({ cards, connectorIcons, pendingSetupCards, section }: AttentionSectionData & { connectorIcons: ConnectorIconMap }) {
   const copy = FAILURE_SECTION_COPY[section];
   const count = cards.length + pendingSetupCards.length;
   return (
@@ -278,21 +284,22 @@ function AttentionSection({ cards, pendingSetupCards, section }: AttentionSectio
       </div>
       <div className="rr-sync__fix-section-cards">
         {pendingSetupCards.map((card) => (
-          <PendingSetupCardPanel card={card} key={`setup:${card.connectionId}`} />
+          <PendingSetupCardPanel card={card} connectorIcons={connectorIcons} key={`setup:${card.connectionId}`} />
         ))}
         {cards.map((card) => (
-          <FailureCardPanel card={card} key={card.connectionId} />
+          <FailureCardPanel card={card} connectorIcons={connectorIcons} key={card.connectionId} />
         ))}
       </div>
     </section>
   );
 }
 
-function DuplicateSyncGroupPanel({ group }: { group: DuplicateSyncGroup }) {
+function DuplicateSyncGroupPanel({ group, connectorIcons }: { group: DuplicateSyncGroup; connectorIcons: ConnectorIconMap }) {
   return (
     <aside className="rr-sync-duplicates" data-testid="syncs-duplicate-group">
       <span className="rr-sync-duplicates__eyebrow">Several sources need labels</span>
       <p className="rr-sync-duplicates__head">
+        <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.kind} />
         {group.total.toLocaleString()} unnamed {group.kind} sources are collapsed in this overview.
       </p>
       <p className="rr-sync-duplicates__note">
@@ -326,11 +333,14 @@ const RECENT_COLS = "minmax(0,1.4fr) minmax(0,1fr) minmax(0,0.9fr) minmax(0,0.8f
  * One recent run. The whole row links to `/syncs/[runId]`, so the primary
  * gesture on this page is "open the sync I am looking at".
  */
-function RecentSyncRow({ entry }: { entry: RecentSyncEntry }) {
+function RecentSyncRow({ connectorIcons, entry }: { connectorIcons: ConnectorIconMap; entry: RecentSyncEntry }) {
   return (
     <Link className="pdpp-table__row rr-recent-row" href={entry.href} prefetch={false}>
       <TableCell className="rr-recent-row__name">
-        <span className="rr-recent-row__connection">{entry.connectionName}</span>
+        <span className="rr-recent-row__connection">
+          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={entry.connectorId ? connectorIcons[entry.connectorId] : null} name={entry.connectionName} />
+          {entry.connectionName}
+        </span>
         <span className="rr-recent-row__run">{entry.runId}</span>
       </TableCell>
       <TableCell className="rr-recent-row__outcome">
@@ -447,7 +457,15 @@ function RecentSyncsPager({ paging }: { paging: RecentSyncsPaging }) {
   );
 }
 
-function RecentSyncsSection({ entries, paging }: { entries: readonly RecentSyncEntry[]; paging: RecentSyncsPaging }) {
+function RecentSyncsSection({
+  connectorIcons,
+  entries,
+  paging,
+}: {
+  connectorIcons: ConnectorIconMap;
+  entries: readonly RecentSyncEntry[];
+  paging: RecentSyncsPaging;
+}) {
   const hasFilter = Boolean(paging.params.status) || Boolean(paging.params.connector_id);
   return (
     <section className="rr-sync__recent" data-testid="syncs-recent-list">
@@ -465,7 +483,7 @@ function RecentSyncsSection({ entries, paging }: { entries: readonly RecentSyncE
               <TableHeader numeric>when</TableHeader>
             </TableHeaderRow>
             {entries.map((entry) => (
-              <RecentSyncRow entry={entry} key={entry.runId} />
+              <RecentSyncRow connectorIcons={connectorIcons} entry={entry} key={entry.runId} />
             ))}
           </Table>
           <RecentSyncsPager paging={paging} />
@@ -480,7 +498,13 @@ function RecentSyncsSection({ entries, paging }: { entries: readonly RecentSyncE
 }
 
 /** Seeded-demo rendering: no filter form or pager, since the demo has no live runs feed to page against. */
-function RecentSyncsSectionDemo({ entries }: { entries: readonly RecentSyncEntry[] }) {
+function RecentSyncsSectionDemo({
+  connectorIcons,
+  entries,
+}: {
+  connectorIcons: ConnectorIconMap;
+  entries: readonly RecentSyncEntry[];
+}) {
   return (
     <section className="rr-sync__recent" data-testid="syncs-recent-list">
       <div className="rr-sync__section-head">
@@ -495,7 +519,7 @@ function RecentSyncsSectionDemo({ entries }: { entries: readonly RecentSyncEntry
             <TableHeader numeric>when</TableHeader>
           </TableHeaderRow>
           {entries.map((entry) => (
-            <RecentSyncRow entry={entry} key={entry.runId} />
+            <RecentSyncRow connectorIcons={connectorIcons} entry={entry} key={entry.runId} />
           ))}
         </Table>
       ) : (
@@ -637,7 +661,7 @@ function SyncGroupSchedule({
   );
 }
 
-function SyncGroupBlock({ group }: { group: SyncGroup }) {
+function SyncGroupBlock({ connectorIcons, group }: { connectorIcons: ConnectorIconMap; group: SyncGroup }) {
   const healthy = group.health === "ok";
   const activeRunHref = group.activeRunId ? `/syncs/${encodeURIComponent(group.activeRunId)}` : null;
   // Reserve an accurate placeholder height for content-visibility so off-screen
@@ -651,7 +675,10 @@ function SyncGroupBlock({ group }: { group: SyncGroup }) {
     >
       <div className="rr-sync-group__head">
         <span aria-hidden className={["rr-sync-group__dot", healthy ? "is-ok" : "is-fail"].join(" ")} />
-        <span className="rr-sync-group__name">{group.name}</span>
+        <span className="rr-sync-group__name">
+          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.name} />
+          {group.name}
+        </span>
         <span className="rr-sync-group__cin">{group.connectionId}</span>
         <span className="rr-sync-group__count">
           {group.streams.length} {group.streams.length === 1 ? "stream" : "streams"}
@@ -691,10 +718,12 @@ function SyncGroupBlock({ group }: { group: SyncGroup }) {
 // ─── The view ─────────────────────────────────────────────────────────────────
 
 export function SyncsView({
+  connectorIcons = {},
   model,
   recentSyncsPaging,
   seeded = false,
 }: {
+  connectorIcons?: ConnectorIconMap;
   model: SyncsViewModel;
   /** Absent only for the seeded `?demo=` render, which has no live runs feed to page. */
   recentSyncsPaging?: RecentSyncsPaging;
@@ -713,7 +742,13 @@ export function SyncsView({
       {model.pendingSetupCards.length > 0 || model.failureCards.length > 0 ? (
         <div className="rr-sync__fixes">
           {attentionSections(model).map(({ cards, pendingSetupCards, section }) => (
-            <AttentionSection cards={cards} key={section} pendingSetupCards={pendingSetupCards} section={section} />
+            <AttentionSection
+              cards={cards}
+              connectorIcons={connectorIcons}
+              key={section}
+              pendingSetupCards={pendingSetupCards}
+              section={section}
+            />
           ))}
         </div>
       ) : null}
@@ -721,15 +756,15 @@ export function SyncsView({
       {model.duplicateGroups.length > 0 ? (
         <div className="rr-sync__duplicates">
           {model.duplicateGroups.map((group) => (
-            <DuplicateSyncGroupPanel group={group} key={group.connectorId} />
+            <DuplicateSyncGroupPanel connectorIcons={connectorIcons} group={group} key={group.connectorId} />
           ))}
         </div>
       ) : null}
 
       {recentSyncsPaging ? (
-        <RecentSyncsSection entries={model.recentSyncs} paging={recentSyncsPaging} />
+        <RecentSyncsSection connectorIcons={connectorIcons} entries={model.recentSyncs} paging={recentSyncsPaging} />
       ) : (
-        <RecentSyncsSectionDemo entries={model.recentSyncs} />
+        <RecentSyncsSectionDemo connectorIcons={connectorIcons} entries={model.recentSyncs} />
       )}
 
       <section className="rr-sync__streams">
@@ -740,7 +775,7 @@ export function SyncsView({
         {model.groups.length > 0 ? (
           <div className="rr-sync__groups">
             {model.groups.map((group) => (
-              <SyncGroupBlock group={group} key={group.connectionId} />
+              <SyncGroupBlock connectorIcons={connectorIcons} group={group} key={group.connectionId} />
             ))}
           </div>
         ) : (

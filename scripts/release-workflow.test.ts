@@ -92,7 +92,7 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
-    expect(workflow).toContain('node-version: "22.23.1"')
+    expect(workflow).toContain('node-version: "24.21.0"')
     expect(workflow).toContain("Stage Node.js runtime sidecar")
     expect(workflow).toContain(
       'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'
@@ -102,6 +102,15 @@ describe("release workflow", () => {
     )
     expect(workflow).toContain("Install PDPP runtime dependencies")
     expect(workflow).toContain("node scripts/ensure-pdpp-runtime.js")
+    expect(workflow).toContain("Stage reference-stack roots")
+    expect(workflow).toContain(
+      'node scripts/ensure-console-stack.js --profile release'
+    )
+    expect(workflow).toContain("node scripts/ensure-reference-stack.js \\")
+    expect(workflow).toContain('--node-binary "$node_binary"')
+    expect(workflow).toContain(
+      'node scripts/verify-reference-stack.mjs --profile release'
+    )
     expect(workflow).toContain("if: github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i

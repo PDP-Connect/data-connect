@@ -50,7 +50,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -115,12 +115,17 @@ function manifestWithRefreshPolicy(refreshPolicy: Record<string, unknown> | null
 
 function freshDb(t: TestContext) {
   closeDb();
-  initDb(join(mkdtempSync(join(tmpdir(), "pdpp-recovery-policy-freshness-")), "pdpp.sqlite"));
-  __resetControllerInteractionStateForTests();
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-recovery-policy-freshness-"));
   t.after(() => {
-    __resetControllerInteractionStateForTests();
-    closeDb();
+    try {
+      __resetControllerInteractionStateForTests();
+      closeDb();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
+  initDb(join(dir, "pdpp.sqlite"));
+  __resetControllerInteractionStateForTests();
 }
 
 interface PendingDetailGapRowFixture {

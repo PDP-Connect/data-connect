@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { execFileSync, spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import {
   mkdirSync,
@@ -9,6 +10,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
@@ -16,6 +18,7 @@ import {
   assertBinaryArchitecture,
   assertPackagedBrowser,
   assertPackagedNode,
+  assertPackagedReferenceStacks,
   assertPackagedRuntime,
   collectRelevantWindowsInstallerEntries,
   listDebEntries,
@@ -69,7 +72,83 @@ const macRuntimeEntries = windowsRuntimeEntries.map(entry =>
 const linuxBrowserEntry =
   "usr/lib/DataConnect/playwright-runner/dist/browsers/chromium-1228/chrome-linux64/chrome"
 
+function hashFile(contents, prefixed = true) {
+  const digest = createHash("sha256").update(contents).digest("hex")
+  return prefixed ? `sha256:${digest}` : digest
+}
+
 describe("bundled personal-server verifier", () => {
+  it("requires both packaged reference stacks and verifies their manifests", () => {
+    const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
+    try {
+      const riRoot = join(
+        root,
+        "usr",
+        "lib",
+        "DataConnect",
+        "reference-stack",
+        "ri"
+      )
+      const consoleRoot = join(
+        root,
+        "usr",
+        "lib",
+        "DataConnect",
+        "reference-stack",
+        "console"
+      )
+      mkdirSync(riRoot, { recursive: true })
+      mkdirSync(consoleRoot, { recursive: true })
+
+      const riLaunch = "#!/usr/bin/env node\n"
+      const riPayload = "reference implementation"
+      writeFileSync(join(riRoot, "launch.mjs"), riLaunch)
+      writeFileSync(join(riRoot, "payload.txt"), riPayload)
+      writeFileSync(
+        join(riRoot, "manifest.json"),
+        JSON.stringify({
+          files: [
+            {
+              path: "launch.mjs",
+              sha256: hashFile(riLaunch, false),
+              size: Buffer.byteLength(riLaunch),
+            },
+            {
+              path: "payload.txt",
+              sha256: hashFile(riPayload, false),
+              size: Buffer.byteLength(riPayload),
+            },
+          ],
+        })
+      )
+
+      const consoleLaunch = "#!/usr/bin/env node\n"
+      const consolePayload = "operator console"
+      writeFileSync(join(consoleRoot, "launch.mjs"), consoleLaunch)
+      writeFileSync(join(consoleRoot, "payload.txt"), consolePayload)
+      writeFileSync(
+        join(consoleRoot, "manifest.json"),
+        JSON.stringify({
+          hashes: {
+            "launch.mjs": hashFile(consoleLaunch),
+            "payload.txt": hashFile(consolePayload),
+          },
+        })
+      )
+
+      expect(() =>
+        assertPackagedReferenceStacks(root, "DataConnect.deb")
+      ).not.toThrow()
+
+      writeFileSync(join(riRoot, "payload.txt"), "tampered")
+      expect(() =>
+        assertPackagedReferenceStacks(root, "DataConnect.deb")
+      ).toThrow("reference-stack/ri manifest hashes do not match")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("accepts an artifact with the helper and native dependency", () => {
     expect(() =>
       assertPackagedRuntime(runtimeEntries, "DataConnect.deb")
@@ -82,6 +161,48 @@ describe("bundled personal-server verifier", () => {
         runtimeEntries.filter(entry => !entry.includes("better_sqlite3.node")),
         "DataConnect.exe"
       )
+    ).toThrow("better-sqlite3")
+  })
+
+  it("accepts either better-sqlite3 addon layout", () => {
+    // 12.x builds `build/Release/better_sqlite3.node`; 13.x ships
+    // `prebuilds/<platform>-<arch>.node` and builds no `build/Release` at all.
+    // Either is an addon the sidecar can open a database with, so requiring one
+    // release's filename fails a correct bundle built from the other.
+    // `runtimeEntries` already carries the 12.x shape.
+    expect(() =>
+      assertPackagedRuntime(runtimeEntries, "DataConnect.deb")
+    ).not.toThrow()
+
+    const napiEntries = runtimeEntries.map(entry =>
+      entry.includes("better_sqlite3.node")
+        ? "usr/lib/DataConnect/personal-server/dist/node_modules/better-sqlite3/prebuilds/linux-x64.node"
+        : entry
+    )
+    expect(() =>
+      assertPackagedRuntime(napiEntries, "DataConnect.deb")
+    ).not.toThrow()
+  })
+
+  it("rejects an artifact carrying neither better-sqlite3 addon layout", () => {
+    // Still all-or-nothing: an addon in one of its two real shapes, not an
+    // addon optionally.
+    expect(() =>
+      assertPackagedRuntime(
+        runtimeEntries.filter(entry => !entry.includes("better-sqlite3")),
+        "DataConnect.deb"
+      )
+    ).toThrow("better-sqlite3")
+  })
+
+  it("rejects an addon path that is neither shape", () => {
+    const strayEntries = runtimeEntries.map(entry =>
+      entry.includes("better_sqlite3.node")
+        ? "usr/lib/DataConnect/personal-server/dist/node_modules/better-sqlite3/build/Debug/better_sqlite3.node"
+        : entry
+    )
+    expect(() =>
+      assertPackagedRuntime(strayEntries, "DataConnect.deb")
     ).toThrow("better-sqlite3")
   })
 
@@ -300,6 +421,10 @@ describe("bundled personal-server verifier", () => {
     expect(parseArgs(commonArgs).verifyCodeSignature).toBe(false)
     expect(
       parseArgs([...commonArgs, "--verify-code-signature"]).verifyCodeSignature
+    ).toBe(true)
+    expect(
+      parseArgs([...commonArgs, "--verify-reference-stacks"])
+        .verifyReferenceStacks
     ).toBe(true)
   })
 

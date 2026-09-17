@@ -51,7 +51,7 @@ const nextConfig = {
   async redirects() {
     return [
       {
-        destination: "/brand/pdpp-favicon.svg",
+        destination: "/icon",
         permanent: false,
         source: "/favicon.ico",
       },

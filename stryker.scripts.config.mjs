@@ -29,12 +29,53 @@
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
-  testRunner: "vitest",
+  // The stock `vitest` runner wrapped by a local plugin. The wrapper exists for
+  // one upstream defect: @stryker-mutator/vitest-runner 10.0.0 joins a test's
+  // suite chain with a single space to build its coverage keys and its
+  // `testNamePattern`, while Vitest 5 matches that pattern against a name
+  // joined with " > ". The pattern matches nothing, per-test coverage comes
+  // back empty, and every mutant re-runs the whole suite -- which times out.
+  // This is stryker-js#6210, open upstream; both packages are already on their
+  // latest releases, so there is no version to move to.
+  //
+  // The repair is two documented extension points, not a patch: this plugin
+  // (Stryker's `plugins` + `PluginKind.TestRunner`), which corrects the test
+  // ids the runner reports, and a Vitest setup file
+  // (`scripts/mutation-falsification/test-identity-setup.ts`), which corrects
+  // the coverage keys the sandbox records.
+  // Stryker matches the two by exact string, so both halves are load-bearing,
+  // and neither is correct without the other: a rewritten coverage key under a
+  // stock runner's space-joined id simply fails to join. They are therefore
+  // paired in each mutation configuration -- this cohort selects
+  // `vite.mutation-scripts.config.ts`, and the client selects its own, so no
+  // cohort running the stock `vitest` runner sees either half. Nothing under
+  // node_modules is modified.
+  plugins: [
+    "@stryker-mutator/vitest-runner",
+    "./scripts/mutation-falsification/vitest-runner-plugin.mjs",
+  ],
+  testRunner: "vitest-6210",
   // The `scripts/` tests run as part of the root Vitest project -- `test.include`
   // in vite.config.ts lists them explicitly -- so the native runner applies and
   // reports per-test identities, which is what `perTest` analysis needs.
   coverageAnalysis: "perTest",
-  vitest: { configFile: "vite.config.ts" },
+  // `related: false` is required, not tuning. The runner defaults to Vitest's
+  // related mode, which selects test files by following the import graph from
+  // the mutated file. This cohort's tests deliberately do not import their
+  // targets: npm-release-signer-workflow.test.ts reads
+  // `scripts/verify-npm-provenance.ts` as source text through `readFileSync`,
+  // and release-atomicity.test.ts reads its workflow the same way. There is no
+  // import edge for related mode to follow, so it selects nothing, the dry run
+  // reports "No tests were found", and Stryker exits before trying a single
+  // mutant -- which is exactly how this cohort came to execute no trials.
+  //
+  // Selecting the whole root suite instead is affordable only because `perTest`
+  // coverage then narrows each mutant to the tests that actually reached it.
+  // That narrowing depends on the stryker-js#6210 repair described above the
+  // `plugins` entry: without it coverage comes back empty and every mutant
+  // re-runs the whole suite, which times out. The two are load-bearing
+  // together.
+  vitest: { configFile: "vite.mutation-scripts.config.ts", related: false },
 
   // Populated from the pull request diff by the workflow; empty means this
   // revision touched no scripts production source.

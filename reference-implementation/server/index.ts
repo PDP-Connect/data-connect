@@ -21,8 +21,12 @@ import {
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
 } from "../vendor/cli/src/package-info.ts";
-import type { ProviderAuthManifestLike } from "@pdpp/polyfill-connectors/provider-auth-adapter";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import type { ProviderAuthManifestLike } from "./polyfill-connectors-runtime.ts";
+import {
+  loadCredentialProbeHelpers,
+  loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
+  readPolyfillManifests,
+} from "./polyfill-connectors-runtime.ts";
 import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
@@ -58,9 +62,11 @@ import {
   createBrowserSurfaceLeaseSweepTimer,
 } from "../runtime/browser-surface-lease-sweep-timer.ts";
 import {
+  DEFAULT_NEKO_READINESS_TIMEOUT_MS,
   DEFAULT_NEKO_LEASE_SWEEP_INTERVAL_MS,
   parseNekoBrowserSurfaceRuntimeConfig,
 } from "../runtime/browser-surface-leases.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
@@ -74,8 +80,10 @@ import {
   type Controller,
   createController,
   getScheduleIneligibilityReason,
-  resolveDefaultConnectorPath,
+  resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
+import { createConnectorInstallService } from "./connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -334,6 +342,7 @@ import { mountOwnerConnectionRun } from "./routes/owner-connection-run.ts";
 import { mountOwnerConnectionSchedule } from "./routes/owner-connection-schedule.ts";
 import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/owner-connections.ts";
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
+import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import {
   mountRefApprovals,
@@ -2104,17 +2113,12 @@ function createRequestRecordRejectionStore() {
   return createRecordRejectionStore();
 }
 
-// Lazily loads the pure static-secret injection helpers from the
-// polyfill-connectors runner slice. The reference server reaches connector
-// code by relative path (it does not declare the package as a dependency), so
-// this mirrors the controller's `await import("../../packages/...")` idiom and
-// caches the resolved module after the first run.
-let staticSecretInjectionModulePromise: Promise<Record<string, unknown>> | null = null;
+// Lazily loads the pure static-secret injection helpers through the optional
+// connector-runtime boundary. Development and conformance runs may provide
+// the polyfill package; the production image does not, so the boundary's
+// empty/fail-closed behavior remains explicit before catalog installation.
 function loadStaticSecretInjectionHelpers() {
-  if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
-  }
-  return staticSecretInjectionModulePromise;
+  return loadOptionalStaticSecretInjectionHelpers();
 }
 
 // Build the route-facing static-secret credential prober. The reference-only
@@ -2126,13 +2130,12 @@ function loadStaticSecretInjectionHelpers() {
 // or grant-scoped reads. Resolved once at startup and injected, so the route
 // stays synchronous and tests inject a deterministic double instead.
 async function buildStaticSecretCredentialProber() {
-  const [probe, transport, adapter] = await Promise.all([
-    import("@pdpp/polyfill-connectors/credential-probe"),
-    import("@pdpp/polyfill-connectors/credential-probe-transport"),
+  const [probe, adapter] = await Promise.all([
+    loadCredentialProbeHelpers(),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return (adapter.createStaticSecretCredentialProber as unknown as (args: Record<string, unknown>) => unknown)({
-    createLiveCredentialProbeTransport: transport.createLiveCredentialProbeTransport,
+    createLiveCredentialProbeTransport: probe.createLiveCredentialProbeTransport,
     hasCredentialProbe: probe.hasCredentialProbe,
     probeCredential: probe.probeCredential,
   });
@@ -7722,6 +7725,17 @@ function buildRsApp(opts: ServerOpts = {}) {
     uatExposeUnlistedConnectors: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
   } as unknown as Parameters<typeof mountOwnerConnectorTemplates>[1]);
 
+  // OCI artifact mutation is intentionally separate from connector-instance
+  // setup. The service records executable artifact identity under PDPP_DATA_DIR
+  // and registers only a verified installed manifest.
+  mountOwnerConnectorInstall(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    service: createConnectorInstallService({ registerManifest: registerConnector }),
+  } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
   // action family, marks supported vs owner-mediated vs unsupported, and links
@@ -8172,6 +8186,7 @@ export async function startServer(opts: ServerOpts = {}) {
       return { connectorId: namespace.connectorId, connectorInstanceId: namespace.connectorInstanceId };
     },
     ownerSubjectId: ownerAuthSubjectId,
+    localConnectorSourceStore: createFileLocalConnectorSourceStore(),
     resolveOwnerSubjectIdForConnectorInstance: async (connectorInstanceId) =>
       (await createRequestConnectorInstanceStore().get(connectorInstanceId))?.ownerSubjectId ?? null,
     ...(opts.connectorPathResolver === null
@@ -8704,7 +8719,7 @@ export async function startServer(opts: ServerOpts = {}) {
   schedulerManager = createReferenceSchedulerManager({
     connectionScopedRunEnvResolver,
     connectorEnvironmentPolicy,
-    connectorPathResolver: opts.connectorPathResolver || resolveDefaultConnectorPath,
+    connectorPathResolver: opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath,
     controller,
     logger,
     ownerSubjectId: ownerAuthSubjectId,
@@ -9092,6 +9107,24 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
   }
 
+  if (runtimeConfig.host) {
+    const hostAllocator = createHostBrowserSurfaceAllocator({
+      endpoint: runtimeConfig.host.endpoint,
+      headless: runtimeConfig.host.headless,
+      token: runtimeConfig.host.token,
+    });
+    options.browserSurfaceAllocator = hostAllocator;
+    options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
+    options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
+    options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+    options.beforeBrowserSurfaceLeaseEnsure = (args: { readonly runId: string; readonly surfaceId: string }) => {
+      hostAllocator.bindRunToSurface(args);
+    };
+    options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
+      return hostAllocator.releaseRun(args.runId);
+    };
+  }
+
   return options;
 }
 
@@ -9207,7 +9240,7 @@ function createReferenceSchedulerManager({
   logger,
   runtimeContext,
   schedulerStore = getDefaultSchedulerStore(),
-  connectorPathResolver = resolveDefaultConnectorPath,
+  connectorPathResolver = resolveActiveInstallFirstConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
   webPushConfig = resolveWebPushConfig(),
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
@@ -10111,7 +10144,10 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
   process.on("SIGTERM", exitOnSignal("SIGTERM"));
   process.on("SIGINT", exitOnSignal("SIGINT"));
 
-  startServer({ logger: cliLogger })
+  startServer({
+    ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
+    logger: cliLogger,
+  })
     .then((result) => {
       server.asServer = result.asServer;
       server.rsServer = result.rsServer;

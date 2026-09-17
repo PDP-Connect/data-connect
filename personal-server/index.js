@@ -35,51 +35,69 @@ import {
 import { createPdppAuthorizationAdapter } from './pdpp/github-authorization/index.js';
 import { registerPdppAuthorizationRoutes } from './pdpp/github-authorization/http-routes.js';
 import { loadInstalledManifest } from './pdpp/installed-manifest.js';
+import { loadInstalledPdppServingProfiles } from './pdpp/serving-profile.js';
 import { createPersonalServerServeOptions } from './listener-options.cjs';
 
+// Bare specifiers that have to be loaded from beside the executable rather than
+// from the pkg snapshot. The value names the package directory and the export
+// subpath within it; the file is read from that package's own manifest at
+// startup, never spelled out here.
+//
+// These used to name a file directly -- `@hono/node-server/dist/index.js` --
+// which is a copy of a decision the package makes in its `exports` map, and it
+// went stale the moment the package made that decision differently:
+// `@hono/node-server` 2.x renamed `dist/index.js` to `dist/index.mjs` and
+// `dist/index.cjs`, so the packaged binary asked for a file that no longer
+// exists and died at startup with `Cannot find module`. The build still
+// succeeded, because nothing before this point loads the path.
 const PACKAGED_RUNTIME_ENTRYPOINTS = {
-  '@opendatalabs/personal-server-ts-core/config': '@opendatalabs/personal-server-ts-core/dist/config/index.js',
-  '@opendatalabs/personal-server-ts-server': '@opendatalabs/personal-server-ts-server/dist/api.js',
-  '@hono/node-server': '@hono/node-server/dist/index.js',
-};
-
-const PDPP_SERVING_PROFILES = {
-  'github-pdpp': {
-    connector: {
-      key: 'github',
-      id: 'https://registry.pdpp.org/connectors/github',
-    },
-    scopeForStream: stream => ({
-      user: 'github.profile',
-      repositories: 'github.repositories',
-      starred: 'github.starred',
-    })[stream],
-    enableLocalTimeline: true,
+  // `loadConfig` and `saveConfig` moved package: personal-server-ts-core 0.2.0
+  // exported them from its own `./config`, and 1.x dropped them there with no
+  // replacement anywhere in that package. They are published from
+  // personal-server-ts-server's `./config` instead, same names and same
+  // `loadConfig(options?) => Promise<ServerConfig>` signature.
+  '@opendatalabs/personal-server-ts-server/config': {
+    packageName: '@opendatalabs/personal-server-ts-server',
+    subpath: './config',
   },
-  'chatgpt-pdpp': {
-    connector: {
-      key: 'chatgpt',
-      id: 'https://registry.pdpp.org/connectors/chatgpt',
-    },
-    scopeForStream: stream => [
-      'conversations',
-      'messages',
-      'memories',
-      'custom_gpts',
-      'custom_instructions',
-      'shared_conversations',
-    ].includes(stream) ? `chatgpt.${stream}` : undefined,
-    enableLocalTimeline: false,
+  '@opendatalabs/personal-server-ts-server': {
+    packageName: '@opendatalabs/personal-server-ts-server',
+    subpath: '.',
+  },
+  '@hono/node-server': {
+    packageName: '@hono/node-server',
+    subpath: '.',
   },
 };
 
-function selectedPdppServingProfile() {
-  const connectorId = process.env.PDPP_SERVING_CONNECTOR_ID || 'github-pdpp';
-  const profile = PDPP_SERVING_PROFILES[connectorId];
-  if (!profile) {
-    throw new Error(`PDPP_SERVING_CONNECTOR_ID must select a supported profile, got ${connectorId}`);
+// Read the file a package publishes for one of its export subpaths.
+//
+// This walks the same `import`/`default` conditions the rewriter in
+// `scripts/build.js` walks, including the nested form 2.x uses
+// (`{ import: { types, default } }`), and falls back to `main` for a package
+// with no `exports` map. It is deliberately small: it answers for the three
+// entrypoints above and nothing else.
+function packagedEntrypointFile(nodeModulesRoot, { packageName, subpath }) {
+  const packageRoot = join(nodeModulesRoot, ...packageName.split('/'));
+  const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
+
+  const selectCondition = entry => {
+    if (typeof entry === 'string') return entry;
+    if (!entry || typeof entry !== 'object') return undefined;
+    return selectCondition(entry.import ?? entry.node ?? entry.default);
+  };
+
+  const target = selectCondition(manifest.exports?.[subpath]) ??
+    (subpath === '.' ? manifest.main : undefined);
+
+  if (!target) {
+    throw new Error(
+      `${packageName} publishes no import target for ${subpath}; ` +
+        'its exports map changed shape and PACKAGED_RUNTIME_ENTRYPOINTS needs revisiting.'
+    );
   }
-  return { connectorId, ...profile };
+
+  return join(packageRoot, ...target.split('/'));
 }
 
 function pdppProfileStorageName(connectorId) {
@@ -113,20 +131,23 @@ export function pdppDefaultStorageRoots({
 export function createPdppRevocationSink({
   storageRoot,
   activeManifestPath,
-  selectedPdppProfile = selectedPdppServingProfile(),
+  servingProfiles,
+  selectedPdppProfile,
+  send = () => {},
 }) {
-  return createPdppAuthorizationAdapter({
-    databasePath: pdppProfileDatabasePath(
-      storageRoot,
-      selectedPdppProfile.connectorId,
-      'authorization'
-    ),
-    activeManifestPath,
-    connectorId: selectedPdppProfile.connectorId,
-    expectedConnector: selectedPdppProfile.connector,
-    scopeForStream: selectedPdppProfile.scopeForStream,
-    enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
+  const profiles = servingProfiles || (selectedPdppProfile ? [selectedPdppProfile] : []);
+  const adapters = profiles.flatMap(profile => {
+    try {
+      return [createAuthorizationAdapter({ storageRoot, activeManifestPath, profile })];
+    } catch (error) {
+      send({
+        type: 'log',
+        message: `[pdpp] skipped revocation profile ${profile.connectorId}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return [];
+    }
   });
+  return createAuthorizationDispatcher(adapters);
 }
 
 export async function registerOptionalPdppSurfaces({
@@ -137,74 +158,133 @@ export async function registerOptionalPdppSurfaces({
   activeManifestPath,
   exportRoot,
   connectionId = 'default',
-  selectedPdppProfile = selectedPdppServingProfile(),
+  servingProfiles,
+  selectedPdppProfile,
   singleUseAccessExpiresInSeconds,
   externalOrigin,
   send = () => {},
 }) {
-  let adapter;
-  try {
-    // Resolve this once, then require both independently mounted surfaces to
-    // re-verify this exact selected install. The two surfaces must never
-    // compose grants from one active-manifest path with records from another.
-    const selectedInstall = loadInstalledManifest({
-      activeManifestPath,
-      connectorId: selectedPdppProfile.connectorId,
-      expectedConnector: selectedPdppProfile.connector,
-    });
-    adapter = createPdppAuthorizationAdapter({
-      databasePath: pdppProfileDatabasePath(
-        storageRoot,
-        selectedPdppProfile.connectorId,
-        'authorization'
-      ),
-      activeManifestPath,
-      connectorId: selectedPdppProfile.connectorId,
-      expectedConnector: selectedPdppProfile.connector,
-      selectedInstall,
-      scopeForStream: selectedPdppProfile.scopeForStream,
-      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
-      singleUseAccessExpiresInSeconds,
-    });
-    const resourceServer = await createPdppResourceServer({
-      activeManifestPath,
-      connectorId: selectedPdppProfile.connectorId,
-      expectedConnector: selectedPdppProfile.connector,
-      selectedInstall,
-      databasePath: pdppProfileDatabasePath(
-        recordsRoot,
-        selectedPdppProfile.connectorId,
-        'records'
-      ),
-      exportRoot,
-      connectionId,
-      tokenIntrospector: {
-        introspect: token => adapter.resolveForResourceServer(token),
-      },
-    });
-    registerPdppAuthorizationRoutes({
-      app,
-      devToken,
-      adapter,
-      enableLocalTimeline: selectedPdppProfile.enableLocalTimeline,
-      externalOrigin,
-    });
-    mountPdppResourceRoutes(app, resourceServer);
-    send({
-      type: 'log',
-      message: `[pdpp] mounted selected ${selectedPdppProfile.connector.key} resource routes`,
-    });
-    return adapter;
-  } catch (error) {
-    adapter?.close();
-    send({
-      type: 'log',
-      message: `[pdpp] routes unavailable: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    });
+  const profiles = servingProfiles || (selectedPdppProfile ? [selectedPdppProfile] : loadInstalledPdppServingProfiles({ activeManifestPath, send }));
+  const mounted = [];
+  let failedAfterAdapter = false;
+  for (const profile of profiles) {
+    let adapter;
+    try {
+      const selectedInstall = profile.installed || loadInstalledManifest({
+        activeManifestPath,
+        connectorId: profile.connectorId,
+        expectedConnector: profile.connector,
+      });
+      adapter = createPdppAuthorizationAdapter({
+        databasePath: pdppProfileDatabasePath(storageRoot, profile.connectorId, 'authorization'),
+        activeManifestPath,
+        connectorId: profile.connectorId,
+        expectedConnector: profile.connector,
+        selectedInstall,
+        scopeForStream: profile.scopeForStream,
+        enableLocalTimeline: profile.enableLocalTimeline,
+        singleUseAccessExpiresInSeconds,
+      });
+      const resourceServer = await createPdppResourceServer({
+        activeManifestPath,
+        connectorId: profile.connectorId,
+        expectedConnector: profile.connector,
+        selectedInstall,
+        databasePath: pdppProfileDatabasePath(recordsRoot, profile.connectorId, 'records'),
+        exportRoot,
+        connectionId,
+        tokenIntrospector: {
+          introspect: token => adapter.resolveForResourceServer(token),
+        },
+      });
+      mounted.push({ profile, adapter, resourceServer });
+      send({
+        type: 'log',
+        message: `[pdpp] mounted ${profile.connector.key} resource routes`,
+      });
+    } catch (error) {
+      failedAfterAdapter ||= adapter !== undefined;
+      adapter?.close();
+      send({
+        type: 'log',
+        message: `[pdpp] skipped serving profile ${profile.connectorId}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+  if (mounted.length === 0) {
+    if (!failedAfterAdapter) {
+      send({ type: 'log', message: '[pdpp] routes unavailable: no admitted serving profiles' });
+    }
     return null;
   }
+
+  const adapter = createAuthorizationDispatcher(mounted);
+  registerPdppAuthorizationRoutes({
+    app,
+    devToken,
+    adapter,
+    enableLocalTimeline: mounted.some(({ profile }) => profile.enableLocalTimeline),
+    externalOrigin,
+  });
+  mountPdppResourceRoutes(app, createResourceDispatcher(mounted));
+  return adapter;
+}
+
+function createAuthorizationAdapter({ storageRoot, activeManifestPath, profile }) {
+  return createPdppAuthorizationAdapter({
+    databasePath: pdppProfileDatabasePath(storageRoot, profile.connectorId, 'authorization'),
+    activeManifestPath,
+    connectorId: profile.connectorId,
+    expectedConnector: profile.connector,
+    selectedInstall: profile.installed,
+    scopeForStream: profile.scopeForStream,
+    enableLocalTimeline: profile.enableLocalTimeline,
+  });
+}
+
+function createAuthorizationDispatcher(entries) {
+  const adapters = entries.map(entry => entry.adapter || entry);
+  const timelineAdapters = entries
+    .filter(entry => entry.profile?.enableLocalTimeline)
+    .map(entry => entry.adapter || entry);
+  const invoke = (method, args, candidates = adapters) => {
+    let lastError;
+    for (const adapter of candidates) {
+      try {
+        return adapter[method](args);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error(`No PDPP adapter handled ${method}`);
+  };
+  return {
+    createConsentRequest: args => invoke('createConsentRequest', args),
+    issueApprovedGrantForRedemption: args => invoke('issueApprovedGrantForRedemption', args),
+    redeemSessionCredential: args => invoke('redeemSessionCredential', args),
+    createLocalTimelineConsentRequest: args => invoke('createLocalTimelineConsentRequest', args, timelineAdapters),
+    issueLocalTimelineGrant: args => invoke('issueLocalTimelineGrant', args, timelineAdapters),
+    revokeLocalTimelineSession: args => invoke('revokeLocalTimelineSession', args, timelineAdapters),
+    introspectPublic: token => adapters.reduce((found, adapter) => found?.active ? found : adapter.introspectPublic(token), null),
+    introspectPublicBearer: authorization => adapters.reduce((found, adapter) => found?.active ? found : adapter.introspectPublicBearer(authorization), null) || { active: false },
+    resolveForResourceServer: token => adapters.reduce((found, adapter) => found?.active ? found : adapter.resolveForResourceServer(token), null),
+    revokeByLegacyGrantId: legacyGrantId => adapters.some(adapter => adapter.revokeByLegacyGrantId(legacyGrantId)),
+    close: () => adapters.forEach(adapter => adapter.close()),
+  };
+}
+
+function createResourceDispatcher(entries) {
+  return {
+    async fetch(request) {
+      let unauthorized;
+      for (const { resourceServer } of entries) {
+        const response = await resourceServer.fetch(request);
+        if (response.status !== 401) return response;
+        unauthorized ||= response;
+      }
+      return unauthorized || new Response('Not found', { status: 404 });
+    },
+  };
 }
 
 function send(msg) {
@@ -240,7 +320,8 @@ function personalServerExternalOrigin(serverAddress, tunnelServerAddr) {
 async function importRuntimeModule(specifier) {
   const packagedEntrypoint = PACKAGED_RUNTIME_ENTRYPOINTS[specifier];
   if (process.pkg && packagedEntrypoint) {
-    const filesystemEntrypoint = join(dirname(process.execPath), 'node_modules', ...packagedEntrypoint.split('/'));
+    const nodeModulesRoot = join(dirname(process.execPath), 'node_modules');
+    const filesystemEntrypoint = packagedEntrypointFile(nodeModulesRoot, packagedEntrypoint);
     return import(pathToFileURL(filesystemEntrypoint).href);
   }
 
@@ -531,7 +612,7 @@ async function main() {
       'PDPP_SINGLE_USE_ACCESS_EXPIRES_IN_SECONDS'
     );
     const [{ loadConfig }, { createServer }, { serve }] = await Promise.all([
-      importRuntimeModule('@opendatalabs/personal-server-ts-core/config'),
+      importRuntimeModule('@opendatalabs/personal-server-ts-server/config'),
       importRuntimeModule('@opendatalabs/personal-server-ts-server'),
       importRuntimeModule('@hono/node-server'),
     ]);
@@ -577,8 +658,11 @@ async function main() {
     // Keep as a reference because startBackgroundServices mutates context.tunnelManager / context.tunnelUrl.
     const context = await createServer(config, { rootPath: configDir });
     const { app, devToken, cleanup, gatewayClient, serverSigner } = context;
-    const selectedPdppProfile = selectedPdppServingProfile();
     const pdppActiveManifestPath = process.env.DATACONNECT_ACTIVE_CONNECTORS_PATH;
+    const servingProfiles = loadInstalledPdppServingProfiles({
+      activeManifestPath: pdppActiveManifestPath,
+      send,
+    });
     const pdppStorageRoots = pdppDefaultStorageRoots({
       configDir,
       pdppStorageDir: process.env.PDPP_STORAGE_DIR,
@@ -586,7 +670,8 @@ async function main() {
     const pdppRevocationSink = createPdppRevocationSink({
       storageRoot: pdppStorageRoots.authorizationRoot,
       activeManifestPath: pdppActiveManifestPath,
-      selectedPdppProfile,
+      servingProfiles,
+      send,
     });
     const pdppAuthorization = await registerOptionalPdppSurfaces({
       app,
@@ -599,7 +684,7 @@ async function main() {
         process.env.PDPP_SERVING_CONNECTION_ID ||
         process.env.PDPP_GITHUB_CONNECTION_ID ||
         'default',
-      selectedPdppProfile,
+      servingProfiles,
       singleUseAccessExpiresInSeconds,
       externalOrigin: personalServerExternalOrigin(
         context.serverAccount?.address,

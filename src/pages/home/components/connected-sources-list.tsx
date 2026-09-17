@@ -16,10 +16,13 @@ import {
 import { ROUTES } from "@/config/routes"
 import { cn } from "@/lib/classes"
 import { getLastRunLabel } from "@/lib/platform/ui"
+import { getPlatformRegistryEntry } from "@/lib/platform/utils"
+import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import type { Platform, Run } from "@/types"
-import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
+import { ChevronRightIcon, KeyRoundIcon, RotateCcwIcon } from "lucide-react"
 import { Link } from "react-router-dom"
 import { isBlockingRun } from "./available-sources-list.policy"
+import { getPlatformSourceLabel } from "./available-sources-list.lib"
 
 interface ConnectedSourcesListProps {
   platforms: Platform[]
@@ -28,6 +31,7 @@ interface ConnectedSourcesListProps {
   onOpenRuns?: (platform: Platform) => void
   onSyncSource?: (platform: Platform) => void
   onReconnectSource?: (platform: Platform) => void
+  onReplaceCredentials?: (platform: Platform) => void
 }
 
 type OnboardingMessageState = "empty" | "early" | "mature"
@@ -48,6 +52,7 @@ export function ConnectedSourcesList({
   onOpenRuns,
   onSyncSource,
   onReconnectSource,
+  onReplaceCredentials,
 }: ConnectedSourcesListProps) {
   const inFlightSyncPlatformIdsRef = useRef<Set<string>>(new Set())
   const syncFeedbackTimeoutsRef = useRef<
@@ -174,6 +179,11 @@ export function ConnectedSourcesList({
             platform.id === "chatgpt-pdpp" &&
             Boolean(onReconnectSource) &&
             !hasActiveRun
+          const canReplaceCredentials =
+            Boolean(onReplaceCredentials) &&
+            (platform.id === "github-pdpp" ||
+              platform.setup?.modality === "static_secret") &&
+            !hasActiveRun
           const syncTooltipCopy =
             hasActiveRun || syncFeedbackState === "backgrounding"
               ? "Fetching in background"
@@ -184,7 +194,11 @@ export function ConnectedSourcesList({
             <SourceRowWithActions
               key={platform.id}
               iconName={platform.name}
-              label={platform.name}
+              iconImageSrc={resolvePlatformLogo(
+                platform,
+                getPlatformRegistryEntry(platform)
+              )}
+              label={getPlatformSourceLabel(platform)}
               meta={meta}
               rowAction={{
                 onClick: onOpenRuns ? () => onOpenRuns(platform) : undefined,
@@ -193,6 +207,22 @@ export function ConnectedSourcesList({
               }}
               middleSlot={
                 <div className="flex h-full">
+                  {canReplaceCredentials ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SourceRowActionButton
+                          className="px-2"
+                          onClick={() => onReplaceCredentials?.(platform)}
+                          aria-label={`Replace credentials for ${platform.name}`}
+                        >
+                          <KeyRoundIcon aria-hidden />
+                        </SourceRowActionButton>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        Replace credentials
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {canReconnect ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -242,7 +272,9 @@ export function ConnectedSourcesList({
                         />
                       </SourceRowActionButton>
                     </TooltipTrigger>
-                    <TooltipContent side="top">{syncTooltipCopy}</TooltipContent>
+                    <TooltipContent side="top">
+                      {syncTooltipCopy}
+                    </TooltipContent>
                   </Tooltip>
                 </div>
               }

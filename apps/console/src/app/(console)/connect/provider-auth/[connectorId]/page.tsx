@@ -6,6 +6,9 @@ import { formatConnectorKeyForDisplay } from "@pdpp/display";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +29,7 @@ export default async function ProviderAuthPage({
 }) {
   const [{ connectorId }, query] = await Promise.all([params, searchParams]);
   const displayName = formatConnectorKeyForDisplay(connectorId);
+  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), connectorId)?.icon;
   return (
     <RecordroomShellWithPalette>
       <PageHeader
@@ -34,8 +38,18 @@ export default async function ProviderAuthPage({
           { href: "/sources/add", label: "Add source" },
           { label: `Authorize ${displayName}` },
         ]}
-        description="Authorize this account in the provider's browser. The connection activates after authorization and account inventory succeed."
-        title={`Authorize ${displayName}`}
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <span>Authorize this account in the provider's browser. The connection activates after authorization and account inventory succeed.</span>
+          </span>
+        }
+        title={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            Authorize {displayName}
+          </span>
+        }
       />
       <section className="grid max-w-2xl gap-4 rounded-xl border border-border/70 bg-card p-5 shadow-sm">
         {query.error ? (
@@ -44,7 +58,7 @@ export default async function ProviderAuthPage({
           </p>
         ) : null}
         <p className="pdpp-body text-muted-foreground">
-          Continue to the provider to grant access for this account. Credentials stay with the provider. PDPP activates
+          Continue to the provider to grant access for this account. Credentials stay with the provider. DataConnect activates
           the source after the provider confirms access.
         </p>
         <form action={`/connect/provider-auth/${encodeURIComponent(connectorId)}/start`} method="post">

@@ -6,7 +6,7 @@ authors = ["DataConnect Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 [lib]
 name = "dataconnect_lib"
@@ -19,9 +19,10 @@ tauri-build = { version = "2.5.5", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11", features = ["unstable"] }
+tauri = { version = "2.11", features = ["test", "unstable", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2.6"
 tauri-plugin-deep-link = "2"
@@ -31,12 +32,15 @@ zip = "8.6"
 walkdir = "2"
 futures-util = "0.3"
 base64 = "0.23"
+getrandom = "0.3.4"
+keyring = "4.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 hex = "0.4"
-sigstore = { version = "0.13", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls-native-roots"] }
+sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
+oci-client = "0.17"
 semver = "1.0"
-dirs = "6.0"
+dirs = "7.0"
 dotenvy = "0.15"
 mime_guess = "2.0.5"
 flate2 = "1.0"
@@ -48,6 +52,9 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 ngrok = "0.19.0"
 url = "2.5"
+open = "5.3.3"
+uuid = { version = "1.22", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = "0.4.4"

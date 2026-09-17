@@ -35,6 +35,12 @@ import { createInterface as createFileReader } from "node:readline";
 import { canonicalJson } from "@pdpp/collector-runtime";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
+import {
+	type ArtifactCaptureContext,
+	ArtifactCaptureLedger,
+	captureFileArtifact,
+	openArtifactCapture,
+} from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
 import {
 	type EnumerationScope,
@@ -444,6 +450,8 @@ export async function emitSessionsFromAccumulators({
 // ─── Tool-results (attachments) ─────────────────────────────────────────
 
 interface WalkToolResultsArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
@@ -455,6 +463,9 @@ interface WalkToolResultsArgs {
 }
 
 export interface EmitToolResultFileArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	/** Records which bodies remain owed, so their mtime is not checkpointed. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	full: string;
 	projectDir: string;
@@ -463,26 +474,59 @@ export interface EmitToolResultFileArgs {
 	toolResultsDir: string;
 }
 
+/**
+ * Emit one tool-result attachment record, capturing its body when configured.
+ *
+ * Returns false when the source could not be read at all, so the caller can
+ * withhold the checkpoint and let the next run retry. That signal is NOT the
+ * same as the capture ledger: an unreadable file owes a retry even on a run
+ * with no artifact stores wired, because not even the preview record was
+ * emitted. Capture state alone cannot carry that, since the ledger is inert
+ * when capture is disabled.
+ */
 export async function emitToolResultFile(
 	args: EmitToolResultFileArgs,
-): Promise<void> {
-	// Tool-result blobs are machine-generated and unbounded (a single large
-	// command output can be hundreds of MB). The durable record keeps only a
-	// short preview plus the byte length (already known from `st.size`), so we
-	// read just a bounded head prefix instead of the whole file — keeping memory
-	// flat on huge sessions. A forbidden byte past the window cannot reach the
-	// preview anyway, so prefix-only screening is honest for this lossy field.
+): Promise<boolean> {
+	// The bounded head prefix below is unchanged: it remains the record's
+	// SEARCH PROJECTION, read without materialising a file that can be hundreds
+	// of MB. What changes is that it is no longer the only copy — the complete
+	// bytes now stream to the artifact spool and on to blob storage, so the
+	// record is reconstructable rather than merely findable.
 	const bounded = await readBoundedFilePreview(args.full);
 	if (bounded === null) {
-		return;
+		// The file could not be read at all, so there is no preview to emit and no
+		// capture to attempt. Returning silently here used to let the caller
+		// checkpoint the file as enumerated, and a later readable run then skipped
+		// it forever — the bytes were lost to a transient EACCES/EIO.
+		//
+		// Record the obligation explicitly instead. `unavailable` is the honest
+		// status: nothing is durably held. The caller reads the ledger, withholds
+		// this file's checkpoint, and the next run re-examines it. One unreadable
+		// file still does not abort the session.
+		args.captureLedger?.record(args.full, "unavailable");
+		return false;
 	}
 	const rel = args.full.slice(args.toolResultsDir.length + 1);
 	const previewResult = safeTextPreview(
 		bounded.buffer,
 		TOOL_RESULT_PREVIEW_CHARS,
 	);
+	const recordKey = `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`;
+	// Capture before emit: a `blob_ref` is written only once the complete bytes
+	// are durably held, so the record never claims a capture that is still in
+	// flight.
+	const captured = await captureFileArtifact({
+		context: args.captureContext ?? null,
+		mimeType: "application/octet-stream",
+		path: args.full,
+		recordKey,
+		stream: "attachments",
+	});
+	// A body that is not durably held is still owed. The ledger keeps that
+	// obligation off the file-mtime checkpoint so the next run retries it.
+	args.captureLedger?.record(args.full, captured.status);
 	await args.emitRecord("attachments", {
-		id: `tool_result_file:${args.projectDir}/${args.sessionId}/${rel}`,
+		id: recordKey,
 		session_id: args.sessionId,
 		parent_uuid: null,
 		event_type: "tool_result_file",
@@ -493,10 +537,15 @@ export async function emitToolResultFile(
 			previewResult.kind === "binary" ? previewResult.reason : null,
 		content_bytes: args.st.size,
 		timestamp: new Date(args.st.mtimeMs).toISOString(),
+		artifact_capture: captured.status,
+		artifact_sha256: captured.sha256,
 	});
+	return true;
 }
 
 interface ProcessToolResultArgs {
+	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	fileMtimes: Record<string, number>;
 	full: string;
@@ -521,15 +570,35 @@ async function processToolResultEntry(
 		return;
 	}
 	const mtime = st.mtimeMs;
-	if (args.fileMtimes[args.full] === mtime) {
+	// An unchanged file is normally settled work. It is NOT settled when its
+	// body is still owed: the prior run enumerated the preview but did not
+	// durably hold the bytes, so skipping on mtime alone would bury the retry
+	// behind a checkpoint that only a source rewrite could lift.
+	//
+	// The checkpoint VALUE, not its mere presence, is what answers this across
+	// runs. The ledger is per-run, so a run that follows a failure starts with an
+	// empty outstanding set; only a checkpoint that encodes "body durably held"
+	// can prove the file is settled. A plain mtime — written by a run that had no
+	// stores wired, or before this encoding existed — means the body state is
+	// unknown, so the file is revisited ONCE and backfilled. See
+	// `ArtifactCaptureLedger.isSettled`.
+	const settled = args.captureLedger
+		? args.captureLedger.isSettled(args.full, args.fileMtimes[args.full], mtime)
+		: args.fileMtimes[args.full] === mtime;
+	if (settled) {
+		args.newMtimes[args.full] = args.fileMtimes[args.full] ?? mtime;
+		return;
+	}
+	if (!args.requested.has("attachments")) {
+		// Nothing will attempt capture on this pass, so the plain mtime is an
+		// honest record of the enumeration that did happen — and, because it does
+		// not claim a captured body, a later capture-enabled run still revisits it.
 		args.newMtimes[args.full] = mtime;
 		return;
 	}
-	args.newMtimes[args.full] = mtime;
-	if (!args.requested.has("attachments")) {
-		return;
-	}
-	await emitToolResultFile({
+	const emitted = await emitToolResultFile({
+		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		emitRecord: args.emitRecord,
 		full: args.full,
 		toolResultsDir: args.toolResultsDir,
@@ -537,6 +606,24 @@ async function processToolResultEntry(
 		sessionId: args.sessionId,
 		st,
 	});
+	if (!emitted) {
+		// The source was unreadable, so nothing was enumerated and nothing was
+		// captured. Leave NO checkpoint: the absent entry is the retry obligation,
+		// and it survives a run with capture disabled, where the ledger is inert.
+		return;
+	}
+	// Checkpoint only once the body is no longer owed. Withholding the value for
+	// an outstanding artifact is what makes the next run retry this file while
+	// every captured sibling stays settled.
+	//
+	// The value written must be the one `isSettled` accepts: a captured body gets
+	// the stronger encoding, so the NEXT run recognises it and skips the file.
+	// Writing the plain mtime here instead would make every successfully captured
+	// file read as "body state unknown" forever, re-reading it on every run.
+	if (!(args.captureLedger?.isOutstanding(args.full) ?? false)) {
+		args.newMtimes[args.full] =
+			args.captureLedger?.checkpointValue(args.full, mtime) ?? mtime;
+	}
 }
 
 async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
@@ -569,6 +656,8 @@ async function walkToolResults(args: WalkToolResultsArgs): Promise<void> {
 				continue;
 			}
 			await processToolResultEntry(ent, {
+				captureContext: args.captureContext ?? null,
+				captureLedger: args.captureLedger ?? null,
 				full,
 				toolResultsDir,
 				projectDir,
@@ -1041,6 +1130,10 @@ type SymlinkSkipped = (path: string) => Promise<void>;
 type DirectoryReadFailure = (path: string, error: unknown) => Promise<void>;
 
 export interface ScanProjectDirsArgs {
+	/** Artifact spool + outbox for full-fidelity body capture. Null disables it. */
+	captureContext?: ArtifactCaptureContext | null;
+	/** Bodies still owed, kept off the file-mtime checkpoint so they retry. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	scope?: EnumerationScope | null;
 	onSymlink?: SymlinkSkipped;
 	onDirectoryError?: DirectoryReadFailure;
@@ -1168,6 +1261,8 @@ async function processSessionDir(
 
 	// tool-results/*.txt → attachments with event_type=tool_result_file.
 	await walkToolResults({
+		captureContext: args.captureContext ?? null,
+		captureLedger: args.captureLedger ?? null,
 		sessionDir,
 		sessionId,
 		projectDir,
@@ -2480,316 +2575,297 @@ if (isMainModule(import.meta.url)) {
 						next[path] = value;
 			};
 
-			const claudeHome =
-				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
-			const baseDir =
-				process.env.CLAUDE_CODE_PROJECTS_DIR || join(claudeHome, "projects");
-			// Build the source inventory and flush durable coverage diagnostics
-			// BEFORE asserting requested content sources exist. A missing content
-			// store should surface an honest `missing` coverage row, not abort the
-			// run with zero coverage evidence — the connection-health rollup
-			// derives a local collector's coverage axis from these records, and an
-			// omitted coverage stream collapses to `coverage_unknown` forever (the
-			// local run path writes no spine run). The inventory walk reads only
-			// path metadata, never payload, so it is safe on a partial/empty home.
-			const enumerationScope = readEnumerationScope(requested, [
-				"sessions",
-				"messages",
-				"attachments",
-			]);
-			// The measured boundary is stamped onto the coverage records themselves,
-			// so it commits atomically with the evidence it qualifies.
-			const inventory = await buildLocalSourceInventory(
-				"claude_code",
-				claudeHome,
-				CLAUDE_CODE_KNOWN_LOCAL_STORES,
-				enumerationScopeFingerprint(enumerationScope),
-			);
-			await emitCoverageDiagnostics({ emitRecord, inventory, requested });
-			// Commit the static coverage proof now, independent of everything that
-			// follows. `inventory` classifies every known store (shell content,
-			// config, cache, file-history, etc.) from a path stat, not from the
-			// JSONL scan below — a later failure in that scan has nothing to do
-			// with whether this classification is honest, so it must not hold this
-			// snapshot hostage. `emitCoverageDiagnosticsState`'s later calls still
-			// supersede this one (STATE is last-wins per stream) once the full
-			// collection pass legitimately completes.
-			await emitCoverageDiagnosticsState({ emit, inventory, requested });
-			// The owner-declared boundary rides on the stream scopes the runtime
-			// already threads through. Read once here and applied at ENUMERATION so a
-			// bounded run does not open files it was never asked to collect.
-			if (scopeBoundsEnumeration(enumerationScope)) {
-				await emit({
-					type: "PROGRESS",
-					message: `Claude Code phase=index pass=index enumeration_bounded=true roots=${
-						enumerationScope?.source_roots?.length ?? 0
-					}`,
-				});
-			}
-			const typedState = state as ClaudeCodeState;
+			// The artifact stores live with the collector runner that spawned this
+			// process; `bin/collector-runner.ts` hands their locations over in the
+			// child env. Null means this run has none (a fixture, or a caller that
+			// has not opted in) and every body is honestly recorded `unavailable`.
+			const openedCapture = openArtifactCapture({ connectorId: "claude_code" });
+			// N4: the store is live from here, so its release guard starts here too.
+			// Everything below — inventory build, coverage emission, the scan — can
+			// reject, and a guard that only wrapped the final collection call would
+			// leak the handle for every one of those earlier failures.
 			try {
-				await assertRequestedClaudeSources({ baseDir, claudeHome, requested });
-			} catch (error) {
-				// A failed source preflight cannot prove older parse gaps repaired.
-				await reportSourceGaps(
-					["sessions"],
-					readSourceGaps(typedState.sessions?.source_gaps),
+				const captureContext = openedCapture?.context ?? null;
+				const captureLedger = new ArtifactCaptureLedger({
+					enabled: captureContext !== null,
+				});
+
+				const claudeHome =
+					process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
+				const baseDir =
+					process.env.CLAUDE_CODE_PROJECTS_DIR || join(claudeHome, "projects");
+				// Build the source inventory and flush durable coverage diagnostics
+				// BEFORE asserting requested content sources exist. A missing content
+				// store should surface an honest `missing` coverage row, not abort the
+				// run with zero coverage evidence — the connection-health rollup
+				// derives a local collector's coverage axis from these records, and an
+				// omitted coverage stream collapses to `coverage_unknown` forever (the
+				// local run path writes no spine run). The inventory walk reads only
+				// path metadata, never payload, so it is safe on a partial/empty home.
+				const enumerationScope = readEnumerationScope(requested, [
+					"sessions",
+					"messages",
+					"attachments",
+				]);
+				// The measured boundary is stamped onto the coverage records themselves,
+				// so it commits atomically with the evidence it qualifies.
+				const inventory = await buildLocalSourceInventory(
+					"claude_code",
+					claudeHome,
+					CLAUDE_CODE_KNOWN_LOCAL_STORES,
+					enumerationScopeFingerprint(enumerationScope),
 				);
-				await reportSourceGaps(
-					["messages", "attachments"],
-					readSourceGaps(typedState.messages?.source_gaps),
-				);
-				if (requested.has("sessions")) {
-					for (const cursor of Object.values(
-						readSessionFileCursors(typedState.sessions?.file_cursors).cursors,
-					))
-						await reportGaps(cursor.jsonl_gaps);
+				await emitCoverageDiagnostics({ emitRecord, inventory, requested });
+				// Commit the static coverage proof now, independent of everything that
+				// follows. `inventory` classifies every known store (shell content,
+				// config, cache, file-history, etc.) from a path stat, not from the
+				// JSONL scan below — a later failure in that scan has nothing to do
+				// with whether this classification is honest, so it must not hold this
+				// snapshot hostage. `emitCoverageDiagnosticsState`'s later calls still
+				// supersede this one (STATE is last-wins per stream) once the full
+				// collection pass legitimately completes.
+				await emitCoverageDiagnosticsState({ emit, inventory, requested });
+				// The owner-declared boundary rides on the stream scopes the runtime
+				// already threads through. Read once here and applied at ENUMERATION so a
+				// bounded run does not open files it was never asked to collect.
+				if (scopeBoundsEnumeration(enumerationScope)) {
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code phase=index pass=index enumeration_bounded=true roots=${
+							enumerationScope?.source_roots?.length ?? 0
+						}`,
+					});
 				}
-				if (requested.has("messages") || requested.has("attachments")) {
-					for (const cursor of Object.values(
-						readChildFileCursors(typedState.messages?.file_cursors),
-					))
-						await reportGaps(cursor.jsonl_gaps);
-				}
-				throw error;
-			}
-			// STATE is stream-keyed per Collection Profile. JSONL child emits and
-			// session aggregation use separate cursors so sessions can backfill
-			// without re-emitting unchanged child records. Fall back to top-level
-			// for pre-stream-keyed message state.
-			const messageFileMtimes: Record<string, number> =
-				streamFileMtimes(typedState, "messages") ??
-				typedState.file_mtimes ??
-				{};
-			const sessionFileMtimes = streamFileMtimes(typedState, "sessions") ?? {};
-			const skillsMtimes = streamFileMtimes(typedState, "skills") ?? {};
-			const slashCommandMtimes =
-				streamFileMtimes(typedState, "slash_commands") ?? {};
-			const memoryNoteMtimes =
-				streamFileMtimes(typedState, "memory_notes") ?? {};
-			const newSkillsMtimes: Record<string, number> = { ...skillsMtimes };
-			const newSlashCommandMtimes: Record<string, number> = {
-				...slashCommandMtimes,
-			};
-			const newMemoryNoteMtimes: Record<string, number> = {
-				...memoryNoteMtimes,
-			};
-
-			await emitLocalInventoryStreams({
-				claudeHome,
-				emit,
-				emitRecord,
-				inventory,
-				requested,
-				state: typedState,
-			});
-
-			await runSkillsAndCommands(claudeHome, requested, emit, emitRecord, {
-				skillsMtimes,
-				newSkillsMtimes,
-				slashCommandMtimes,
-				newSlashCommandMtimes,
-			});
-
-			// The parent-first state machine intentionally keeps the temporal
-			// ordering visible here: session records/state, non-JSONL attachments,
-			// child records/state, then coverage state. Extracting those transitions
-			// would hide the checkpoint barrier behind a shallow orchestration API.
-			const collectProjectStreams = async (): Promise<void> => {
-				// ---- sessions / messages / attachments ----
-				const needsProjects =
-					requested.has("sessions") ||
-					requested.has("messages") ||
-					requested.has("attachments") ||
-					requested.has("memory_notes");
-				if (!needsProjects) {
-					await emitCoverageDiagnosticsState({ emit, inventory, requested });
-					return;
-				}
-
-				// Derived-stream coverage: messages/attachments/memory_notes are
-				// parsed out of the same on-disk files as `sessions` (no
-				// KnownLocalStore entry of their own), so they must be counted here
-				// and reported as their own coverage_diagnostics rows below —
-				// otherwise a run that emits real records for these streams still
-				// reports them as absent from terminal collection evidence.
-				const derivedCounts = {
-					attachments: makeDerivedStreamCounts(),
-					memoryNotes: makeDerivedStreamCounts(),
-					messages: makeDerivedStreamCounts(),
-				};
-				const countingEmitRecord = async (
-					stream: string,
-					data: RecordData,
-				): Promise<void> => {
-					if (stream === "messages") {
-						derivedCounts.messages.emitted += 1;
-					} else if (stream === "attachments") {
-						derivedCounts.attachments.emitted += 1;
-					} else if (stream === "memory_notes") {
-						derivedCounts.memoryNotes.emitted += 1;
+				const typedState = state as ClaudeCodeState;
+				try {
+					await assertRequestedClaudeSources({
+						baseDir,
+						claudeHome,
+						requested,
+					});
+				} catch (error) {
+					// A failed source preflight cannot prove older parse gaps repaired.
+					await reportSourceGaps(
+						["sessions"],
+						readSourceGaps(typedState.sessions?.source_gaps),
+					);
+					await reportSourceGaps(
+						["messages", "attachments"],
+						readSourceGaps(typedState.messages?.source_gaps),
+					);
+					if (requested.has("sessions")) {
+						for (const cursor of Object.values(
+							readSessionFileCursors(typedState.sessions?.file_cursors).cursors,
+						))
+							await reportGaps(cursor.jsonl_gaps);
 					}
-					await emitRecord(stream, data);
+					if (requested.has("messages") || requested.has("attachments")) {
+						for (const cursor of Object.values(
+							readChildFileCursors(typedState.messages?.file_cursors),
+						))
+							await reportGaps(cursor.jsonl_gaps);
+					}
+					throw error;
+				}
+				// STATE is stream-keyed per Collection Profile. JSONL child emits and
+				// session aggregation use separate cursors so sessions can backfill
+				// without re-emitting unchanged child records. Fall back to top-level
+				// for pre-stream-keyed message state.
+				const messageFileMtimes: Record<string, number> =
+					streamFileMtimes(typedState, "messages") ??
+					typedState.file_mtimes ??
+					{};
+				const sessionFileMtimes =
+					streamFileMtimes(typedState, "sessions") ?? {};
+				const skillsMtimes = streamFileMtimes(typedState, "skills") ?? {};
+				const slashCommandMtimes =
+					streamFileMtimes(typedState, "slash_commands") ?? {};
+				const memoryNoteMtimes =
+					streamFileMtimes(typedState, "memory_notes") ?? {};
+				const newSkillsMtimes: Record<string, number> = { ...skillsMtimes };
+				const newSlashCommandMtimes: Record<string, number> = {
+					...slashCommandMtimes,
+				};
+				const newMemoryNoteMtimes: Record<string, number> = {
+					...memoryNoteMtimes,
 				};
 
-				const messageRaw = typedState.messages;
-				const sessionsRaw = typedState.sessions;
-				const sessionSourceGaps = readSourceGaps(sessionsRaw?.source_gaps);
-				const childSourceGaps = readSourceGaps(messageRaw?.source_gaps);
-				const messageUsesLegacyJsonlMtimes =
-					messageRaw?.local_jsonl_cursor_version !== 1;
-				const sessionsUsesLegacyJsonlMtimes =
-					sessionsRaw?.local_jsonl_cursor_version !== 1;
-				const messageLegacyJsonlMtimes = readLegacyJsonlMtimes(
-					messageUsesLegacyJsonlMtimes
-						? (messageRaw?.file_mtimes ?? typedState.file_mtimes)
-						: undefined,
-				);
-				const sessionLegacyJsonlMtimes = readLegacyJsonlMtimes(
-					sessionsUsesLegacyJsonlMtimes ? sessionsRaw?.file_mtimes : undefined,
-				);
-				const priorChildCursors =
-					messageRaw?.local_jsonl_cursor_version === 1
-						? readChildFileCursors(messageRaw.file_cursors)
-						: {};
-				const decodedSessionCursors =
-					sessionsRaw?.local_jsonl_cursor_version === 1
-						? readSessionFileCursors(sessionsRaw.file_cursors)
-						: { cursors: {}, valid: false };
-				const decodedSessionAggregates =
-					sessionsRaw?.local_jsonl_cursor_version === 1
-						? readSessionAggregates(sessionsRaw.session_aggregates)
-						: { aggregates: {}, valid: false };
-				const priorSessionCursors = decodedSessionCursors.cursors;
-				const priorSessionAggregates = decodedSessionAggregates.aggregates;
-				const sessionSnapshotIsValid =
-					sessionsRaw?.local_jsonl_cursor_version === 1 &&
-					decodedSessionCursors.valid &&
-					decodedSessionAggregates.valid;
-				const sources = await discoverClaudeJsonlSources(
-					baseDir,
+				await emitLocalInventoryStreams({
+					claudeHome,
 					emit,
-					enumerationScope,
-					reportDirectoryError,
-					reportSymlink,
-				);
-				if (sources === null) {
-					return;
-				}
-				const enumeratedPaths = new Set(sources.map((source) => source.path));
-				const sourcePaths = new Set(enumeratedPaths);
-				const unavailableSessionCursors: Record<
-					string,
-					ClaudeSessionFileCursorV1
-				> = {};
-				retainUnavailable(priorSessionCursors, unavailableSessionCursors);
-				// Absence cannot prove a saved parse gap repaired. Keep the original
-				// boundary and evidence until this file can actually be read again.
-				for (const [path, cursor] of Object.entries(priorSessionCursors)) {
-					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
-						unavailableSessionCursors[path] = cursor;
-				}
-				for (const path of Object.keys(unavailableSessionCursors))
-					sourcePaths.add(path);
-				const telemetry = makeLocalJsonlTelemetry();
-				// Rich cursor state is authoritative. Rebuild these compatibility maps
-				// from discovered files and known files under unreadable directories;
-				// prune paths only when their directories were successfully enumerated.
-				const newMessageFileMtimes: Record<string, number> = {};
-				const newSessionFileMtimes: Record<string, number> = {};
-				retainUnavailable(messageFileMtimes, newMessageFileMtimes);
-				retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
-				retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
-				let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {
-					...unavailableSessionCursors,
-				};
-				const nextChildCursors: Record<string, ClaudeChildFileCursorV1> = {};
-				retainUnavailable(priorChildCursors, nextChildCursors);
-				for (const [path, cursor] of Object.entries(priorChildCursors)) {
-					if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
-						nextChildCursors[path] = cursor;
-				}
-				let stagedSessionCursor:
-					| {
-							file_cursors: Record<string, ClaudeSessionFileCursorV1>;
-							file_mtimes: Record<string, number>;
-							fetched_at: string;
-							local_jsonl_cursor_version: 1;
-							session_aggregates: Record<string, SessionAccumulator>;
-							source_gaps: Record<string, ClaudeSourceGap>;
-							session_rebuild_required: boolean;
-					  }
-					| undefined;
+					emitRecord,
+					inventory,
+					requested,
+					state: typedState,
+				});
 
-				if (requested.has("sessions")) {
-					const missingRichCursorForKnownFile = sources.some(
-						(source) =>
-							sessionFileMtimes[source.path] !== undefined &&
-							!priorSessionCursors[source.path],
-					);
-					let rebuildAll =
-						sessionsRaw?.session_rebuild_required === true ||
-						!sessionSnapshotIsValid ||
-						missingRichCursorForKnownFile ||
-						Object.keys(priorSessionCursors).some(
-							(path) => !sourcePaths.has(path),
-						);
-					let sessionAccumulators = new Map<string, SessionAccumulator>(
-						Object.entries(rebuildAll ? {} : priorSessionAggregates).map(
-							([id, aggregate]) => [id, { ...aggregate }],
-						),
-					);
-					const changedLegacySessionIds = new Set<string>();
-					for (const source of sources) {
-						const scanned = await tryScanTranscript(
-							source.path,
-							sessionSourceGaps,
-							() =>
-								scanSessionSource({
-									cursor: rebuildAll
-										? undefined
-										: priorSessionCursors[source.path],
-									projectDir: source.projectDir,
-									sessionAccumulators,
-									source,
-									telemetry,
-								}),
-						);
-						if (!scanned) {
-							const prior = priorSessionCursors[source.path];
-							if (prior) nextSessionCursors[source.path] = prior;
-							delete newSessionFileMtimes[source.path];
-							continue;
-						}
+				await runSkillsAndCommands(claudeHome, requested, emit, emitRecord, {
+					skillsMtimes,
+					newSkillsMtimes,
+					slashCommandMtimes,
+					newSlashCommandMtimes,
+				});
 
-						await reportGaps(scanned.cursor.jsonl_gaps);
-						nextSessionCursors[source.path] = scanned.cursor;
-						newSessionFileMtimes[source.path] =
-							scanned.cursor.observed_mtime_ms;
-						rebuildAll ||= scanned.rebuilt;
-						if (
-							sessionsUsesLegacyJsonlMtimes &&
-							!matchesLegacyJsonlMtime(
-								sessionLegacyJsonlMtimes,
-								source.path,
-								scanned.cursor.observed_mtime_ms,
-							)
-						) {
-							for (const sessionId of scanned.sessionIds) {
-								changedLegacySessionIds.add(sessionId);
-							}
-						}
+				// The parent-first state machine intentionally keeps the temporal
+				// ordering visible here: session records/state, non-JSONL attachments,
+				// child records/state, then coverage state. Extracting those transitions
+				// would hide the checkpoint barrier behind a shallow orchestration API.
+				const collectProjectStreams = async (): Promise<void> => {
+					// ---- sessions / messages / attachments ----
+					const needsProjects =
+						requested.has("sessions") ||
+						requested.has("messages") ||
+						requested.has("attachments") ||
+						requested.has("memory_notes");
+					if (!needsProjects) {
+						await emitCoverageDiagnosticsState({ emit, inventory, requested });
+						return;
 					}
-					if (rebuildAll && sessionSnapshotIsValid) {
-						sessionAccumulators = new Map();
-						nextSessionCursors = { ...unavailableSessionCursors };
+
+					// Derived-stream coverage: messages/attachments/memory_notes are
+					// parsed out of the same on-disk files as `sessions` (no
+					// KnownLocalStore entry of their own), so they must be counted here
+					// and reported as their own coverage_diagnostics rows below —
+					// otherwise a run that emits real records for these streams still
+					// reports them as absent from terminal collection evidence.
+					const derivedCounts = {
+						attachments: makeDerivedStreamCounts(),
+						memoryNotes: makeDerivedStreamCounts(),
+						messages: makeDerivedStreamCounts(),
+					};
+					const countingEmitRecord = async (
+						stream: string,
+						data: RecordData,
+					): Promise<void> => {
+						if (stream === "messages") {
+							derivedCounts.messages.emitted += 1;
+						} else if (stream === "attachments") {
+							derivedCounts.attachments.emitted += 1;
+						} else if (stream === "memory_notes") {
+							derivedCounts.memoryNotes.emitted += 1;
+						}
+						await emitRecord(stream, data);
+					};
+
+					const messageRaw = typedState.messages;
+					const sessionsRaw = typedState.sessions;
+					const sessionSourceGaps = readSourceGaps(sessionsRaw?.source_gaps);
+					const childSourceGaps = readSourceGaps(messageRaw?.source_gaps);
+					const messageUsesLegacyJsonlMtimes =
+						messageRaw?.local_jsonl_cursor_version !== 1;
+					const sessionsUsesLegacyJsonlMtimes =
+						sessionsRaw?.local_jsonl_cursor_version !== 1;
+					const messageLegacyJsonlMtimes = readLegacyJsonlMtimes(
+						messageUsesLegacyJsonlMtimes
+							? (messageRaw?.file_mtimes ?? typedState.file_mtimes)
+							: undefined,
+					);
+					const sessionLegacyJsonlMtimes = readLegacyJsonlMtimes(
+						sessionsUsesLegacyJsonlMtimes
+							? sessionsRaw?.file_mtimes
+							: undefined,
+					);
+					const priorChildCursors =
+						messageRaw?.local_jsonl_cursor_version === 1
+							? readChildFileCursors(messageRaw.file_cursors)
+							: {};
+					const decodedSessionCursors =
+						sessionsRaw?.local_jsonl_cursor_version === 1
+							? readSessionFileCursors(sessionsRaw.file_cursors)
+							: { cursors: {}, valid: false };
+					const decodedSessionAggregates =
+						sessionsRaw?.local_jsonl_cursor_version === 1
+							? readSessionAggregates(sessionsRaw.session_aggregates)
+							: { aggregates: {}, valid: false };
+					const priorSessionCursors = decodedSessionCursors.cursors;
+					const priorSessionAggregates = decodedSessionAggregates.aggregates;
+					const sessionSnapshotIsValid =
+						sessionsRaw?.local_jsonl_cursor_version === 1 &&
+						decodedSessionCursors.valid &&
+						decodedSessionAggregates.valid;
+					const sources = await discoverClaudeJsonlSources(
+						baseDir,
+						emit,
+						enumerationScope,
+						reportDirectoryError,
+						reportSymlink,
+					);
+					if (sources === null) {
+						return;
+					}
+					const enumeratedPaths = new Set(sources.map((source) => source.path));
+					const sourcePaths = new Set(enumeratedPaths);
+					const unavailableSessionCursors: Record<
+						string,
+						ClaudeSessionFileCursorV1
+					> = {};
+					retainUnavailable(priorSessionCursors, unavailableSessionCursors);
+					// Absence cannot prove a saved parse gap repaired. Keep the original
+					// boundary and evidence until this file can actually be read again.
+					for (const [path, cursor] of Object.entries(priorSessionCursors)) {
+						if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+							unavailableSessionCursors[path] = cursor;
+					}
+					for (const path of Object.keys(unavailableSessionCursors))
+						sourcePaths.add(path);
+					const telemetry = makeLocalJsonlTelemetry();
+					// Rich cursor state is authoritative. Rebuild these compatibility maps
+					// from discovered files and known files under unreadable directories;
+					// prune paths only when their directories were successfully enumerated.
+					const newMessageFileMtimes: Record<string, number> = {};
+					const newSessionFileMtimes: Record<string, number> = {};
+					retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+					retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+					retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
+					let nextSessionCursors: Record<string, ClaudeSessionFileCursorV1> = {
+						...unavailableSessionCursors,
+					};
+					const nextChildCursors: Record<string, ClaudeChildFileCursorV1> = {};
+					retainUnavailable(priorChildCursors, nextChildCursors);
+					for (const [path, cursor] of Object.entries(priorChildCursors)) {
+						if (!enumeratedPaths.has(path) && cursor.jsonl_gaps?.length)
+							nextChildCursors[path] = cursor;
+					}
+					let stagedSessionCursor:
+						| {
+								file_cursors: Record<string, ClaudeSessionFileCursorV1>;
+								file_mtimes: Record<string, number>;
+								fetched_at: string;
+								local_jsonl_cursor_version: 1;
+								session_aggregates: Record<string, SessionAccumulator>;
+								source_gaps: Record<string, ClaudeSourceGap>;
+								session_rebuild_required: boolean;
+						  }
+						| undefined;
+
+					if (requested.has("sessions")) {
+						const missingRichCursorForKnownFile = sources.some(
+							(source) =>
+								sessionFileMtimes[source.path] !== undefined &&
+								!priorSessionCursors[source.path],
+						);
+						let rebuildAll =
+							sessionsRaw?.session_rebuild_required === true ||
+							!sessionSnapshotIsValid ||
+							missingRichCursorForKnownFile ||
+							Object.keys(priorSessionCursors).some(
+								(path) => !sourcePaths.has(path),
+							);
+						let sessionAccumulators = new Map<string, SessionAccumulator>(
+							Object.entries(rebuildAll ? {} : priorSessionAggregates).map(
+								([id, aggregate]) => [id, { ...aggregate }],
+							),
+						);
+						const changedLegacySessionIds = new Set<string>();
 						for (const source of sources) {
 							const scanned = await tryScanTranscript(
 								source.path,
 								sessionSourceGaps,
 								() =>
 									scanSessionSource({
-										cursor: undefined,
+										cursor: rebuildAll
+											? undefined
+											: priorSessionCursors[source.path],
 										projectDir: source.projectDir,
 										sessionAccumulators,
 										source,
@@ -2807,170 +2883,184 @@ if (isMainModule(import.meta.url)) {
 							nextSessionCursors[source.path] = scanned.cursor;
 							newSessionFileMtimes[source.path] =
 								scanned.cursor.observed_mtime_ms;
-						}
-					}
-					if (rebuildAll) {
-						telemetry.sessionRebuildAll += 1;
-					}
-					if (
-						rebuildAll &&
-						(Object.keys(sessionSourceGaps).length > 0 ||
-							Object.keys(unavailableSessionCursors).length > 0)
-					) {
-						// Preserve summaries only where an unreadable prior contributor
-						// makes the rebuilt fold incomplete. Unrelated sessions can advance.
-						for (const path of new Set([
-							...Object.keys(sessionSourceGaps),
-							...Object.keys(unavailableSessionCursors),
-						])) {
-							const prior = priorSessionCursors[path];
-							const ids =
-								prior?.session_ids ??
-								(prior?.observation.sessionId
-									? [prior.observation.sessionId]
-									: []);
-							for (const id of ids) {
-								const aggregate = priorSessionAggregates[id];
-								if (aggregate) sessionAccumulators.set(id, { ...aggregate });
+							rebuildAll ||= scanned.rebuilt;
+							if (
+								sessionsUsesLegacyJsonlMtimes &&
+								!matchesLegacyJsonlMtime(
+									sessionLegacyJsonlMtimes,
+									source.path,
+									scanned.cursor.observed_mtime_ms,
+								)
+							) {
+								for (const sessionId of scanned.sessionIds) {
+									changedLegacySessionIds.add(sessionId);
+								}
 							}
 						}
-					}
-					for (const cursor of Object.values(nextSessionCursors))
-						await reportGaps(cursor.jsonl_gaps);
-					await reportSourceGaps(["sessions"], sessionSourceGaps);
-					await emitChangedSessions({
-						emitRecord,
-						next: sessionAccumulators,
-						// A legacy checkpoint has no aggregate snapshot. Treat only the
-						// session ids contributed by an mtime-mismatched/new source as
-						// changed; matching sources were fully scanned to establish their
-						// cursors and aggregate contribution, not replayed from an
-						// all-or-nothing migration switch.
-						prior: sessionsUsesLegacyJsonlMtimes
-							? Object.fromEntries(
-									[...sessionAccumulators].filter(
-										([sessionId]) => !changedLegacySessionIds.has(sessionId),
-									),
-								)
-							: priorSessionAggregates,
-						requested,
-					});
-					const sessionAggregates = Object.fromEntries(sessionAccumulators);
-					stagedSessionCursor = {
-						file_cursors: nextSessionCursors,
-						file_mtimes: newSessionFileMtimes,
-						fetched_at: nowIso(),
-						local_jsonl_cursor_version: 1 as const,
-						session_aggregates: sessionAggregates,
-						source_gaps: sessionSourceGaps,
-						session_rebuild_required:
+						if (rebuildAll && sessionSnapshotIsValid) {
+							sessionAccumulators = new Map();
+							nextSessionCursors = { ...unavailableSessionCursors };
+							for (const source of sources) {
+								const scanned = await tryScanTranscript(
+									source.path,
+									sessionSourceGaps,
+									() =>
+										scanSessionSource({
+											cursor: undefined,
+											projectDir: source.projectDir,
+											sessionAccumulators,
+											source,
+											telemetry,
+										}),
+								);
+								if (!scanned) {
+									const prior = priorSessionCursors[source.path];
+									if (prior) nextSessionCursors[source.path] = prior;
+									delete newSessionFileMtimes[source.path];
+									continue;
+								}
+
+								await reportGaps(scanned.cursor.jsonl_gaps);
+								nextSessionCursors[source.path] = scanned.cursor;
+								newSessionFileMtimes[source.path] =
+									scanned.cursor.observed_mtime_ms;
+							}
+						}
+						if (rebuildAll) {
+							telemetry.sessionRebuildAll += 1;
+						}
+						if (
 							rebuildAll &&
 							(Object.keys(sessionSourceGaps).length > 0 ||
-								Object.keys(unavailableSessionCursors).length > 0),
-					};
-				}
-
-				// Existing non-JSONL discovery remains responsible for memory notes and
-				// tool-result attachments. Fresh JSONL mtimes make its old JSONL path a
-				// no-op while retaining its established blob privacy policy.
-				const scanLegacyNonJsonl = async (): Promise<void> => {
-					// Read the acknowledged dual-write map, but write only current
-					// discovery into the fresh map so deleted non-JSONL paths prune.
-					const nonJsonlMtimeGate = requested.has("sessions")
-						? sessionFileMtimes
-						: messageFileMtimes;
-					await scanProjectDirs({
-						baseDir,
-						buildOnly: requested.has("memory_notes"),
-						emit,
-						emitRecord: countingEmitRecord,
-						fileMtimes: nonJsonlMtimeGate,
-						newMtimes: requested.has("sessions")
-							? newSessionFileMtimes
-							: newMessageFileMtimes,
-						memoryNoteMtimes,
-						memoryNotesExamined: derivedCounts.memoryNotes,
-						newMemoryNoteMtimes,
-						requested,
-						sessionAccumulators: new Map(),
-						skipJsonl: true,
-						onDirectoryError: reportDirectoryError,
-						onSymlink: reportSymlink,
-						scope: enumerationScope,
-					});
-					retainUnavailable(messageFileMtimes, newMessageFileMtimes);
-					retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
-					retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
-				};
-				if (requested.has("sessions")) {
-					await scanLegacyNonJsonl();
-					// The attachment walker owns current non-JSONL discovery. Preserve
-					// its mtime gate in both downgrade maps when both streams are in
-					// scope, while retaining JSONL ownership in the rich cursors.
-					if (requested.has("messages") || requested.has("attachments")) {
-						for (const [path, mtime] of Object.entries(newSessionFileMtimes)) {
-							if (!sourcePaths.has(path)) {
-								newMessageFileMtimes[path] = mtime;
+								Object.keys(unavailableSessionCursors).length > 0)
+						) {
+							// Preserve summaries only where an unreadable prior contributor
+							// makes the rebuilt fold incomplete. Unrelated sessions can advance.
+							for (const path of new Set([
+								...Object.keys(sessionSourceGaps),
+								...Object.keys(unavailableSessionCursors),
+							])) {
+								const prior = priorSessionCursors[path];
+								const ids =
+									prior?.session_ids ??
+									(prior?.observation.sessionId
+										? [prior.observation.sessionId]
+										: []);
+								for (const id of ids) {
+									const aggregate = priorSessionAggregates[id];
+									if (aggregate) sessionAccumulators.set(id, { ...aggregate });
+								}
 							}
 						}
-					}
-					if (stagedSessionCursor) {
-						telemetry.cursorStateBytes += Buffer.byteLength(
-							JSON.stringify(stagedSessionCursor),
-							"utf8",
-						);
-						await emit({
-							type: "STATE",
-							stream: "sessions",
-							cursor: stagedSessionCursor,
+						for (const cursor of Object.values(nextSessionCursors))
+							await reportGaps(cursor.jsonl_gaps);
+						await reportSourceGaps(["sessions"], sessionSourceGaps);
+						await emitChangedSessions({
+							emitRecord,
+							next: sessionAccumulators,
+							// A legacy checkpoint has no aggregate snapshot. Treat only the
+							// session ids contributed by an mtime-mismatched/new source as
+							// changed; matching sources were fully scanned to establish their
+							// cursors and aggregate contribution, not replayed from an
+							// all-or-nothing migration switch.
+							prior: sessionsUsesLegacyJsonlMtimes
+								? Object.fromEntries(
+										[...sessionAccumulators].filter(
+											([sessionId]) => !changedLegacySessionIds.has(sessionId),
+										),
+									)
+								: priorSessionAggregates,
+							requested,
 						});
+						const sessionAggregates = Object.fromEntries(sessionAccumulators);
+						stagedSessionCursor = {
+							file_cursors: nextSessionCursors,
+							file_mtimes: newSessionFileMtimes,
+							fetched_at: nowIso(),
+							local_jsonl_cursor_version: 1 as const,
+							session_aggregates: sessionAggregates,
+							source_gaps: sessionSourceGaps,
+							session_rebuild_required:
+								rebuildAll &&
+								(Object.keys(sessionSourceGaps).length > 0 ||
+									Object.keys(unavailableSessionCursors).length > 0),
+						};
 					}
-				}
 
-				if (requested.has("messages") || requested.has("attachments")) {
-					for (const source of sources) {
-						const candidateLegacyBaseline =
-							messageUsesLegacyJsonlMtimes &&
-							messageLegacyJsonlMtimes.has(source.path);
-						let scanned = await tryScanTranscript(
-							source.path,
-							childSourceGaps,
-							() =>
-								scanChildSource({
-									cursor: priorChildCursors[source.path],
-									emitRecord: countingEmitRecord,
-									emitRecords: !candidateLegacyBaseline,
-									requested,
-									source,
-									telemetry,
-								}),
-						);
-						if (!scanned) {
-							const prior = priorChildCursors[source.path];
-							if (prior) nextChildCursors[source.path] = prior;
-							delete newMessageFileMtimes[source.path];
-							continue;
+					// Existing non-JSONL discovery remains responsible for memory notes and
+					// tool-result attachments. Fresh JSONL mtimes make its old JSONL path a
+					// no-op while retaining its established blob privacy policy.
+					const scanLegacyNonJsonl = async (): Promise<void> => {
+						// Read the acknowledged dual-write map, but write only current
+						// discovery into the fresh map so deleted non-JSONL paths prune.
+						const nonJsonlMtimeGate = requested.has("sessions")
+							? sessionFileMtimes
+							: messageFileMtimes;
+						await scanProjectDirs({
+							baseDir,
+							buildOnly: requested.has("memory_notes"),
+							captureContext,
+							captureLedger,
+							emit,
+							emitRecord: countingEmitRecord,
+							fileMtimes: nonJsonlMtimeGate,
+							newMtimes: requested.has("sessions")
+								? newSessionFileMtimes
+								: newMessageFileMtimes,
+							memoryNoteMtimes,
+							memoryNotesExamined: derivedCounts.memoryNotes,
+							newMemoryNoteMtimes,
+							requested,
+							sessionAccumulators: new Map(),
+							skipJsonl: true,
+							onDirectoryError: reportDirectoryError,
+							onSymlink: reportSymlink,
+							scope: enumerationScope,
+						});
+						retainUnavailable(messageFileMtimes, newMessageFileMtimes);
+						retainUnavailable(sessionFileMtimes, newSessionFileMtimes);
+						retainUnavailable(memoryNoteMtimes, newMemoryNoteMtimes);
+					};
+					if (requested.has("sessions")) {
+						await scanLegacyNonJsonl();
+						// The attachment walker owns current non-JSONL discovery. Preserve
+						// its mtime gate in both downgrade maps when both streams are in
+						// scope, while retaining JSONL ownership in the rich cursors.
+						if (requested.has("messages") || requested.has("attachments")) {
+							for (const [path, mtime] of Object.entries(
+								newSessionFileMtimes,
+							)) {
+								if (!sourcePaths.has(path)) {
+									newMessageFileMtimes[path] = mtime;
+								}
+							}
 						}
-						// The scan, not a pre-scan stat, decides whether the old mtime
-						// actually describes the bytes that were cursorized. A change in
-						// the small interval before the open snapshot is replayed from
-						// zero rather than being silently baselined.
-						if (
-							candidateLegacyBaseline &&
-							!matchesLegacyJsonlMtime(
-								messageLegacyJsonlMtimes,
-								source.path,
-								scanned.cursor.observed_mtime_ms,
-							)
-						) {
-							scanned = await tryScanTranscript(
+						if (stagedSessionCursor) {
+							telemetry.cursorStateBytes += Buffer.byteLength(
+								JSON.stringify(stagedSessionCursor),
+								"utf8",
+							);
+							await emit({
+								type: "STATE",
+								stream: "sessions",
+								cursor: stagedSessionCursor,
+							});
+						}
+					}
+
+					if (requested.has("messages") || requested.has("attachments")) {
+						for (const source of sources) {
+							const candidateLegacyBaseline =
+								messageUsesLegacyJsonlMtimes &&
+								messageLegacyJsonlMtimes.has(source.path);
+							let scanned = await tryScanTranscript(
 								source.path,
 								childSourceGaps,
 								() =>
 									scanChildSource({
-										cursor: undefined,
+										cursor: priorChildCursors[source.path],
 										emitRecord: countingEmitRecord,
-										emitRecords: true,
+										emitRecords: !candidateLegacyBaseline,
 										requested,
 										source,
 										telemetry,
@@ -2982,101 +3072,172 @@ if (isMainModule(import.meta.url)) {
 								delete newMessageFileMtimes[source.path];
 								continue;
 							}
+							// The scan, not a pre-scan stat, decides whether the old mtime
+							// actually describes the bytes that were cursorized. A change in
+							// the small interval before the open snapshot is replayed from
+							// zero rather than being silently baselined.
+							if (
+								candidateLegacyBaseline &&
+								!matchesLegacyJsonlMtime(
+									messageLegacyJsonlMtimes,
+									source.path,
+									scanned.cursor.observed_mtime_ms,
+								)
+							) {
+								scanned = await tryScanTranscript(
+									source.path,
+									childSourceGaps,
+									() =>
+										scanChildSource({
+											cursor: undefined,
+											emitRecord: countingEmitRecord,
+											emitRecords: true,
+											requested,
+											source,
+											telemetry,
+										}),
+								);
+								if (!scanned) {
+									const prior = priorChildCursors[source.path];
+									if (prior) nextChildCursors[source.path] = prior;
+									delete newMessageFileMtimes[source.path];
+									continue;
+								}
+							}
+							if (requested.has("messages")) {
+								derivedCounts.messages.examined += scanned.messagesExamined;
+							}
+							if (requested.has("attachments")) {
+								derivedCounts.attachments.examined +=
+									scanned.attachmentsExamined;
+							}
+							await reportGaps(scanned.cursor.jsonl_gaps);
+							nextChildCursors[source.path] = scanned.cursor;
+							newMessageFileMtimes[source.path] =
+								scanned.cursor.observed_mtime_ms;
 						}
-						if (requested.has("messages")) {
-							derivedCounts.messages.examined += scanned.messagesExamined;
-						}
-						if (requested.has("attachments")) {
-							derivedCounts.attachments.examined += scanned.attachmentsExamined;
-						}
-						await reportGaps(scanned.cursor.jsonl_gaps);
-						nextChildCursors[source.path] = scanned.cursor;
-						newMessageFileMtimes[source.path] =
-							scanned.cursor.observed_mtime_ms;
 					}
-				}
 
-				if (requested.has("messages") || requested.has("attachments")) {
-					for (const cursor of Object.values(nextChildCursors))
-						await reportGaps(cursor.jsonl_gaps);
-				}
-				await reportSourceGaps(["messages", "attachments"], childSourceGaps);
+					if (requested.has("messages") || requested.has("attachments")) {
+						for (const cursor of Object.values(nextChildCursors))
+							await reportGaps(cursor.jsonl_gaps);
+					}
+					await reportSourceGaps(["messages", "attachments"], childSourceGaps);
 
-				if (!requested.has("sessions")) {
-					await scanLegacyNonJsonl();
-				}
-				if (requested.has("memory_notes")) {
+					if (!requested.has("sessions")) {
+						await scanLegacyNonJsonl();
+					}
+					if (requested.has("memory_notes")) {
+						await emit({
+							type: "STATE",
+							stream: "memory_notes",
+							cursor: {
+								file_mtimes: newMemoryNoteMtimes,
+								fetched_at: nowIso(),
+							},
+						});
+					}
+					// Transcript children and memory notes have no dedicated
+					// KnownLocalStore entry for their derived content streams
+					// and would otherwise never appear in coverage_diagnostics — see
+					// buildDerivedCoverageRecords. Every branch above that could touch
+					// these streams ran (or was gated by !requested.has(...)) before
+					// this point. Declared transcript gaps remain incomplete coverage even
+					// though all readable records have been collected.
+					if (reportedGaps.size > 0) {
+						for (const record of inventory.coverage) {
+							if (record.stream === "sessions") {
+								record.status = "unaccounted";
+								record.reason =
+									"Source gaps were declared in SKIP_RESULT events; affected coverage remains incomplete";
+								if (requested.has("coverage_diagnostics"))
+									await emitRecord("coverage_diagnostics", record);
+							}
+						}
+					}
+					const derivedCoverageRecords = requested.has("coverage_diagnostics")
+						? buildDerivedCoverageRecords({
+								attachments: derivedCounts.attachments,
+								memoryNotes: derivedCounts.memoryNotes,
+								memoryNotesComplete: failedDirectories.size === 0,
+								messages: derivedCounts.messages,
+								requested,
+								scanComplete: reportedGaps.size === 0,
+							})
+						: [];
+					await emitDerivedCoverage({
+						emitRecord,
+						records: derivedCoverageRecords,
+					});
+					// Re-commit coverage STATE now that the full collection pass
+					// completed. This supersedes the early static-only snapshot written
+					// right after the inventory pass (see the top of `collect()`) with
+					// the final gap classifications and derived coverage, and keeps
+					// the STATE cursor's `fetched_at` current for this completed run.
+					await emitCoverageDiagnosticsState({
+						derived: derivedCoverageRecords,
+						emit,
+						inventory,
+						requested,
+					});
+
+					if (requested.has("messages") || requested.has("attachments")) {
+						const cursor = {
+							file_cursors: nextChildCursors,
+							source_gaps: childSourceGaps,
+							file_mtimes: newMessageFileMtimes,
+							fetched_at: nowIso(),
+							local_jsonl_cursor_version: 1 as const,
+						};
+						telemetry.cursorStateBytes += Buffer.byteLength(
+							JSON.stringify(cursor),
+							"utf8",
+						);
+						await emit({
+							type: "STATE",
+							stream: "messages",
+							cursor,
+						});
+					}
+					await emitLocalJsonlTelemetry(emit, telemetry);
+				};
+				await collectProjectStreams();
+				if (captureLedger.size > 0) {
+					// Visible, and retried: these files' mtimes were withheld above, so
+					// the next run re-examines exactly them.
 					await emit({
-						type: "STATE",
-						stream: "memory_notes",
-						cursor: { file_mtimes: newMemoryNoteMtimes, fetched_at: nowIso() },
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_outstanding=${captureLedger.size}`,
 					});
 				}
-				// Transcript children and memory notes have no dedicated
-				// KnownLocalStore entry for their derived content streams
-				// and would otherwise never appear in coverage_diagnostics — see
-				// buildDerivedCoverageRecords. Every branch above that could touch
-				// these streams ran (or was gated by !requested.has(...)) before
-				// this point. Declared transcript gaps remain incomplete coverage even
-				// though all readable records have been collected.
-				if (reportedGaps.size > 0) {
-					for (const record of inventory.coverage) {
-						if (record.stream === "sessions") {
-							record.status = "unaccounted";
-							record.reason =
-								"Source gaps were declared in SKIP_RESULT events; affected coverage remains incomplete";
-							if (requested.has("coverage_diagnostics"))
-								await emitRecord("coverage_diagnostics", record);
-						}
-					}
+				if (captureLedger.pendingUpload > 0) {
+					// Bodies that ARE durably spooled but have not been delivered
+					// upstream, because no upload transport is wired yet. Reported so
+					// the partial state is legible rather than passing as complete:
+					// local retention is done, remote delivery is still owed.
+					await emit({
+						type: "PROGRESS",
+						message: `Claude Code artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+					});
 				}
-				const derivedCoverageRecords = requested.has("coverage_diagnostics")
-					? buildDerivedCoverageRecords({
-							attachments: derivedCounts.attachments,
-							memoryNotes: derivedCounts.memoryNotes,
-							memoryNotesComplete: failedDirectories.size === 0,
-							messages: derivedCounts.messages,
-							requested,
-							scanComplete: reportedGaps.size === 0,
-						})
-					: [];
-				await emitDerivedCoverage({
-					emitRecord,
-					records: derivedCoverageRecords,
-				});
-				// Re-commit coverage STATE now that the full collection pass
-				// completed. This supersedes the early static-only snapshot written
-				// right after the inventory pass (see the top of `collect()`) with
-				// the final gap classifications and derived coverage, and keeps
-				// the STATE cursor's `fetched_at` current for this completed run.
-				await emitCoverageDiagnosticsState({
-					derived: derivedCoverageRecords,
-					emit,
-					inventory,
-					requested,
-				});
-
-				if (requested.has("messages") || requested.has("attachments")) {
-					const cursor = {
-						file_cursors: nextChildCursors,
-						source_gaps: childSourceGaps,
-						file_mtimes: newMessageFileMtimes,
-						fetched_at: nowIso(),
-						local_jsonl_cursor_version: 1 as const,
-					};
-					telemetry.cursorStateBytes += Buffer.byteLength(
-						JSON.stringify(cursor),
-						"utf8",
+			} finally {
+				// Releasing the outbox handle must not mask a collection failure.
+				// `finally` runs while a primary error is propagating, so a throw from
+				// close() here would REPLACE that error and report a cleanup symptom in
+				// place of the real cause. Swallow only the close failure, and only
+				// after making it visible.
+				try {
+					openedCapture?.close();
+				} catch (closeError) {
+					console.error(
+						`claude_code: releasing the artifact store failed: ${
+							closeError instanceof Error
+								? closeError.message
+								: String(closeError)
+						}`,
 					);
-					await emit({
-						type: "STATE",
-						stream: "messages",
-						cursor,
-					});
 				}
-				await emitLocalJsonlTelemetry(emit, telemetry);
-			};
-			await collectProjectStreams();
+			}
 		},
 	});
 }

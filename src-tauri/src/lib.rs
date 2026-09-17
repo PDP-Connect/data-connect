@@ -1,10 +1,19 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
+#[cfg(desktop)]
+mod owner_credential;
 mod processors;
+#[cfg(desktop)]
+mod remote_access;
+#[cfg(desktop)]
+mod unified;
+
+pub use commands::browser_surface_host_env_pairs;
 
 use commands::{
-    check_browser_available, check_connected_platforms, check_connector_updates,
+    cleanup_browser_surface_host, BrowserSurfaceHost, check_browser_available,
+    check_connected_platforms, check_connector_updates,
     cleanup_installed_pdpp_connector_runs, cleanup_personal_server, cleanup_playwright_processes,
     cleanup_reference_server, clear_browser_session, clear_personal_server_data,
     close_reference_server_view, debug_connector_paths, delete_exported_run, download_browser,
@@ -16,11 +25,20 @@ use commands::{
     load_run_export_data, load_runs, load_source_export_full_from_path,
     load_source_export_preview_from_path, login_reference_server, mark_export_synced, open_folder,
     open_personal_server_scope_folder, open_platform_export_folder, open_reference_server_view,
-    reset_installed_pdpp_browser_profile, resize_reference_server_view, set_app_config,
+    prepare_installed_pdpp_import, reset_installed_pdpp_browser_profile,
+    add_developer_connector_source, list_developer_connector_sources,
+    reload_developer_connector_source, remove_developer_connector_source,
+    select_developer_connector_source,
+    resize_reference_server_view, set_app_config,
     start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
     start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
     stop_personal_server, stop_reference_server, submit_installed_pdpp_interaction_response,
     test_nodejs, write_export_data,
+};
+#[cfg(desktop)]
+use remote_access::{
+    configure_remote_access, get_remote_access_config, inspect_remote_access,
+    set_remote_access_config,
 };
 use tauri::{Listener, Manager};
 
@@ -35,11 +53,25 @@ pub fn run() {
             // Focus the existing window when a second instance is intercepted.
             // The deep-link URL is forwarded automatically via the `deep-link`
             // cargo feature — no manual arg parsing needed.
-            if let Some(window) = app.get_webview_window("main") {
+            #[cfg(desktop)]
+            let window = if unified::is_enabled() {
+                app.get_webview_window(unified::CONSOLE_WINDOW_LABEL)
+            } else {
+                app.get_webview_window("main")
+            };
+            #[cfg(not(desktop))]
+            let window = app.get_webview_window("main");
+            if let Some(window) = window {
                 let _ = window.set_focus();
+            } else {
+                #[cfg(desktop)]
+                if unified::is_enabled() {
+                    unified::focus_or_bootstrap(app.clone());
+                }
             }
         }))
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -62,6 +94,17 @@ pub fn run() {
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
 
+            #[cfg(desktop)]
+            if unified::is_enabled() {
+                let app_data_dir = app.path().app_data_dir()?;
+                let resource_dir = app.path().resource_dir().ok();
+                let host = BrowserSurfaceHost::start(app_data_dir, resource_dir)
+                    .map_err(std::io::Error::other)?;
+                log::info!("Started unified browser surface host at {}", host.endpoint());
+                app.manage(host);
+                unified::setup(app)?;
+            }
+
             // Listen for close window events from connectors
             let app_handle = app.handle().clone();
             app.listen("connector-close-window", move |event| {
@@ -81,8 +124,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_platforms,
+            add_developer_connector_source,
+            list_developer_connector_sources,
+            reload_developer_connector_source,
+            remove_developer_connector_source,
+            select_developer_connector_source,
             start_connector_run,
             start_installed_pdpp_connector_run,
+            prepare_installed_pdpp_import,
             stop_installed_pdpp_connector_run,
             reset_installed_pdpp_browser_profile,
             is_installed_pdpp_browser_setup_complete,
@@ -131,15 +180,36 @@ pub fn run() {
             resize_reference_server_view,
             hide_reference_server_view,
             close_reference_server_view,
+            #[cfg(desktop)]
+            inspect_remote_access,
+            #[cfg(desktop)]
+            get_remote_access_config,
+            #[cfg(desktop)]
+            set_remote_access_config,
+            #[cfg(desktop)]
+            configure_remote_access,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                #[cfg(desktop)]
+                if unified::is_enabled() && unified::request_shutdown(app, code.unwrap_or_default())
+                {
+                    api.prevent_exit();
+                }
+            }
+            tauri::RunEvent::Exit => {
+                #[cfg(desktop)]
+                if unified::is_enabled() {
+                    unified::cleanup(app);
+                }
+                cleanup_browser_surface_host(app);
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
                 cleanup_playwright_processes();
             }
+            _ => {}
         });
 }

@@ -20,6 +20,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../components/warnings-banner.tsx";
 import { formatStreamCollectionFacts, type StreamCollectionFacts } from "../../../lib/collection-report.ts";
@@ -29,6 +30,7 @@ import { pickSemanticTimestamp, primaryTimestamp } from "../../../lib/record-tim
 import type { RefCollectionReportEntry, RefConnectorRunSummary } from "../../../lib/ref-client.ts";
 import {
   computeDefaultColumns,
+  type ConnectorManifest,
   deriveAllColumns,
   type ExpandCapability,
   getStreamMetadata,
@@ -195,6 +197,7 @@ export default async function StreamPage({
     relationships?: Array<{ name: string; stream?: string; foreign_key?: string; cardinality?: string }>;
   }
   let connectorStreams: ManifestStream[] = [];
+  let connectorIcon: ConnectorManifest["icon"] = null;
   try {
     const connection = await resolveConnectionForRecordsRoute(routeId);
     if (!connection) {
@@ -270,6 +273,7 @@ export default async function StreamPage({
     }));
     listStreamMetadata = listStreamMetadataFrom(streamMetadata);
     const connectorManifest = findManifestForConnectorId(manifests, connectorId);
+    connectorIcon = connectorManifest?.icon ?? null;
     connectorStreams = (connectorManifest?.streams ?? []) as ManifestStream[];
     const maybeStream = connectorStreams.find((s) => s.name === streamName);
     streamManifest = (maybeStream ?? null) as StreamManifest | null;
@@ -452,9 +456,12 @@ export default async function StreamPage({
         ]}
         count={headerCount}
         description={
-          <>
-            Source <span className="text-foreground">{sourceLabel}</span>
-          </>
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <span>
+              Source <span className="text-foreground">{sourceLabel}</span>
+            </span>
+          </span>
         }
         title={<span title={streamName}>{humanizeFieldLabel(streamName)}</span>}
       />

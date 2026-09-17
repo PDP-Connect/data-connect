@@ -25,12 +25,101 @@ const isTauriRuntime = () =>
 
 const MAX_RESTART_ATTEMPTS = 3;
 let _restartCount = 0;
+let _nextRestartGeneration = 0;
+let _activeRestartGeneration: number | null = null;
+let _restartQueue: Promise<void> = Promise.resolve();
 let _restartTimer: ReturnType<typeof setTimeout> | null = null;
 let _credentialStartTimer: ReturnType<typeof setTimeout> | null = null;
 let _downgradePending = false;
 let _lastStartedCredentialKey: string | null = null;
 let _lastMasterKeySignature: string | null = null;
 const FALLBACK_START_ERROR = 'Failed to start Personal Server';
+
+type ReadyWaiter = {
+  generation: number;
+  resolve: (port: number) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const _readyWaiters = new Map<number, ReadyWaiter>();
+
+function waitForPersonalServerReady(
+  generation: number,
+  timeoutMs = 10_000,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const waiter: ReadyWaiter = {
+      generation,
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        _readyWaiters.delete(generation);
+        reject(new Error('Personal Server did not become ready'));
+      }, timeoutMs),
+    };
+    _readyWaiters.set(generation, waiter);
+  });
+}
+
+function resolveReadyWaiter(port: number, eventGeneration?: number) {
+  if (
+    _activeRestartGeneration === null ||
+    (eventGeneration !== undefined && eventGeneration !== _activeRestartGeneration)
+  ) {
+    return;
+  }
+
+  const waiter = _readyWaiters.get(_activeRestartGeneration);
+  if (!waiter) return;
+  clearTimeout(waiter.timer);
+  _readyWaiters.delete(waiter.generation);
+  waiter.resolve(port);
+}
+
+function rejectReadyWaiter(error: Error) {
+  if (_activeRestartGeneration === null) return;
+  const waiter = _readyWaiters.get(_activeRestartGeneration);
+  if (!waiter) return;
+  clearTimeout(waiter.timer);
+  _readyWaiters.delete(waiter.generation);
+  waiter.reject(error);
+}
+
+async function waitForPersonalServerHealth(port: number, timeoutMs = 10_000) {
+  const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+  const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const deadlineTimer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    while (Date.now() < deadline && !controller.signal.aborted) {
+      try {
+        const response = await tauriFetch(`http://localhost:${port}/health`, {
+          signal: controller.signal,
+        });
+        if (response.ok) return true;
+      } catch {
+        // The listener can be ready a moment before the health route is reachable.
+        if (controller.signal.aborted || Date.now() >= deadline) break;
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, remainingMs)));
+    }
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
+
+  return false;
+}
+
+function enqueueRestart<T>(operation: () => Promise<T>) {
+  const next = _restartQueue.then(operation, operation);
+  _restartQueue = next.then(() => undefined, () => undefined);
+  return next;
+}
 
 function cancelScheduledRestart() {
   if (_restartTimer !== null) {
@@ -94,7 +183,9 @@ export function usePersonalServer() {
   const [devToken, setDevToken] = useState<string | null>(_sharedDevToken);
   const [error, setError] = useState<string | null>(_sharedError);
   const running = useRef(_sharedStatus === 'starting' || _sharedStatus === 'running');
+  const statusRef = useRef(_sharedStatus);
   const restartingRef = useRef(false);
+  const queuedRestartCountRef = useRef(0);
   const startServerRef = useRef<(
     wallet?: string | null,
     allowScheduledRestart?: boolean,
@@ -105,6 +196,7 @@ export function usePersonalServer() {
   // while the Settings page is mounted).
   useEffect(() => {
     const sync = () => {
+      statusRef.current = _sharedStatus;
       setStatus(_sharedStatus);
       setPort(_sharedPort);
       setTunnelUrl(_sharedTunnelUrl);
@@ -194,13 +286,40 @@ export function usePersonalServer() {
   }, []);
 
   const restartServer = useCallback(async (wallet?: string | null) => {
-    console.log('[PersonalServer] Restarting with wallet:', wallet ?? 'none');
-    _restartCount = 0;
-    if (!(await stopServer())) return;
-    // Brief wait for port release (stop_personal_server already waits up to 3s,
-    // but add a small buffer for OS-level cleanup)
-    await new Promise((r) => setTimeout(r, 500));
-    await startServerRef.current(wallet);
+    const generation = ++_nextRestartGeneration;
+    queuedRestartCountRef.current += 1;
+    restartingRef.current = true;
+    return enqueueRestart(async () => {
+      console.log('[PersonalServer] Restarting with wallet:', wallet ?? 'none');
+      _restartCount = 0;
+
+      try {
+        const wasAlreadyInError = _sharedStatus === 'error';
+        if (!(await stopServer()) && !wasAlreadyInError) return false;
+
+        // Brief wait for port release (stop_personal_server already waits up to 3s,
+        // but add a small buffer for OS-level cleanup)
+        await new Promise((r) => setTimeout(r, 500));
+
+        _activeRestartGeneration = generation;
+        const ready = waitForPersonalServerReady(generation);
+        void ready.catch(() => undefined);
+        await startServerRef.current(wallet);
+        const port = await ready;
+        return await waitForPersonalServerHealth(port);
+      } catch (error) {
+        console.error('[PersonalServer] Failed to wait for restarted server:', error);
+        return false;
+      } finally {
+        if (_activeRestartGeneration === generation) {
+          _activeRestartGeneration = null;
+        }
+        queuedRestartCountRef.current -= 1;
+        if (queuedRestartCountRef.current === 0) {
+          restartingRef.current = false;
+        }
+      }
+    });
   }, [stopServer]);
 
   // Listen for server events
@@ -208,8 +327,9 @@ export function usePersonalServer() {
     if (!isTauriRuntime()) return;
     const unlisteners: (() => void)[] = [];
 
-    listen<{ port: number }>('personal-server-ready', (event) => {
+    listen<{ port: number; generation?: number }>('personal-server-ready', (event) => {
       console.log('[PersonalServer] Ready on port', event.payload.port);
+      resolveReadyWaiter(event.payload.port, event.payload.generation);
       _sharedStatus = 'running';
       _sharedPort = event.payload.port;
       _restartCount = 0;
@@ -217,12 +337,15 @@ export function usePersonalServer() {
       setStatus('running');
       setPort(event.payload.port);
 
-      restartingRef.current = false;
+      if (_activeRestartGeneration === null && queuedRestartCountRef.current === 0) {
+        restartingRef.current = false;
+      }
       _notifyAll();
     }).then((fn) => unlisteners.push(fn));
 
     listen<{ message: string }>('personal-server-error', (event) => {
       console.error('[PersonalServer] Error:', event.payload.message);
+      rejectReadyWaiter(new Error(event.payload.message));
       cancelScheduledRestart();
       running.current = false;
       _sharedStatus = 'error';
@@ -235,6 +358,10 @@ export function usePersonalServer() {
     listen<{ exitCode: number | null; crashed: boolean }>('personal-server-exited', (event) => {
       const { exitCode, crashed } = event.payload;
       console.log('[PersonalServer] Exited:', { exitCode, crashed });
+
+      if (crashed) {
+        rejectReadyWaiter(new Error('Personal Server exited before becoming ready'));
+      }
 
       running.current = false;
       _sharedPort = null;
@@ -382,5 +509,17 @@ export function usePersonalServer() {
   // before startBackgroundServices(), so frontend registration + restart
   // is no longer needed.
 
-  return { status, port, tunnelUrl, tunnelFailed, devToken, error, startServer, stopServer, restartServer, restartingRef };
+  return {
+    status,
+    statusRef,
+    port,
+    tunnelUrl,
+    tunnelFailed,
+    devToken,
+    error,
+    startServer,
+    stopServer,
+    restartServer,
+    restartingRef,
+  };
 }

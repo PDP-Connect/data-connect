@@ -65,6 +65,11 @@ export interface CatalogManifestLike {
   connector_id: string;
   connector_key?: string | null;
   display_name?: string | null;
+  icon?: {
+    color?: string | null;
+    kind?: string | null;
+    svg?: string | null;
+  } | null;
   external_docs?: readonly { label?: string | null; url?: string | null }[] | null;
   name?: string | null;
   runtime_requirements?: { bindings?: Record<string, unknown> | null } | null;
@@ -109,6 +114,8 @@ export interface CatalogManifestLike {
  * for that separate API capability.
  */
 export interface OwnerConnectorTemplateLike {
+  /** Staged deployments may expose only the canonical connector URI identity. */
+  connector_id?: string | null;
   connector_key?: string | null;
   connector_modality?: string | null;
   display_name?: string | null;
@@ -377,6 +384,7 @@ export function buildConnectorCatalog(
       displayName: displayNameFor(manifest, connectorKey),
       disposition: plan.catalogDisposition,
       externalDocs: externalDocsFromManifest(manifest),
+      icon: manifest.icon ?? null,
       isKnownScaffold: isKnownScaffoldConnector(connectorKey),
       listingNote: listingNoteFromPublicListing(manifest.capabilities?.public_listing),
       modality: plan.connectorModality,
@@ -504,7 +512,9 @@ function actionableOwnerActionFromTemplate(
 /**
  * Build the live catalog from the authenticated server projection. A template
  * with missing authority fields is dropped rather than reconstructed from a
- * local manifest. Local data is a display/help/docs join only.
+ * local manifest. When the authenticated server has no registered templates,
+ * the manifest catalog is the fresh-instance listing fallback; no template is
+ * synthesized, and the install snapshot remains a separate lifecycle input.
  */
 export function buildOwnerConnectorCatalog(
   manifests: readonly CatalogManifestLike[],
@@ -512,14 +522,22 @@ export function buildOwnerConnectorCatalog(
 ): ConnectorCatalogEntry[] {
   const manifestsByKey = new Map<string, CatalogManifestLike>();
   for (const manifest of manifests) {
-    if (manifest.connector_id) {
-      manifestsByKey.set(canonicalConnectorKey(manifest.connector_id), manifest);
+    for (const identity of [manifest.connector_key, manifest.connector_id]) {
+      const cleanIdentity = cleanManifestText(identity);
+      if (cleanIdentity) {
+        manifestsByKey.set(canonicalConnectorKey(cleanIdentity), manifest);
+      }
     }
+  }
+
+  if (templates.length === 0) {
+    return buildConnectorCatalog(manifests);
   }
 
   const entries: ConnectorCatalogEntry[] = [];
   for (const template of templates) {
-    const connectorKey = cleanManifestText(template.connector_key);
+    const templateConnectorKey = cleanManifestText(template.connector_key);
+    const templateIdentity = templateConnectorKey ?? cleanManifestText(template.connector_id);
     const setupPlan = template.setup_plan;
     // Development-tier entries flow through as catalog entries so the owner
     // running this instance can see what exists and self-test it -- they are
@@ -534,7 +552,7 @@ export function buildOwnerConnectorCatalog(
     // the other development connectors on his own instance. The flag remains
     // authoritative for the owner-actionable/disposition decisions above; it is
     // only its use as a LISTING gate here that this replaces.
-    if (!connectorKey || template.registration_status !== "registered") {
+    if (!templateIdentity || template.registration_status !== "registered") {
       continue;
     }
     const disposition = setupPlan?.catalog_disposition;
@@ -557,7 +575,8 @@ export function buildOwnerConnectorCatalog(
       continue;
     }
 
-    const localManifest = manifestsByKey.get(canonicalConnectorKey(connectorKey));
+    const localManifest = manifestsByKey.get(canonicalConnectorKey(templateIdentity));
+    const connectorKey = templateConnectorKey ?? cleanManifestText(localManifest?.connector_key) ?? canonicalConnectorKey(templateIdentity);
     const manifestForCopy = localManifest ?? { connector_id: connectorKey };
     const proofGate = typeof setupPlan.proof_gate === "string" ? setupPlan.proof_gate : null;
     const enrollmentKey = cleanManifestText(setupPlan.enrollment_key) ?? undefined;
@@ -578,7 +597,7 @@ export function buildOwnerConnectorCatalog(
       displayName: cleanManifestText(template.display_name) ?? displayNameFor(manifestForCopy, connectorKey),
       disposition,
       externalDocs: externalDocsFromManifest(manifestForCopy),
-      icon: template.icon ?? null,
+      icon: template.icon ?? localManifest?.icon ?? null,
       isKnownScaffold:
         typeof template.is_known_scaffold === "boolean"
           ? template.is_known_scaffold
@@ -603,6 +622,30 @@ export function buildOwnerConnectorCatalog(
       entry.enrollmentKey = enrollmentKey;
     }
     entries.push(entry);
+  }
+
+  // Templates ENRICH the catalog; they never gate it. A manifest-known connector
+  // the owner has not connected yet must still be offered on /sources/add — the
+  // page's whole job is offering connectors to add. Before this, a single
+  // registered template collapsed the list to just that connector.
+  const coveredKeys = new Set<string>();
+  for (const covered of entries) {
+    for (const identity of [covered.connectorKey]) {
+      const cleanIdentity = cleanManifestText(identity);
+      if (cleanIdentity) {
+        coveredKeys.add(canonicalConnectorKey(cleanIdentity));
+      }
+    }
+  }
+  for (const manifestOnlyEntry of buildConnectorCatalog(manifests)) {
+    const identities = [manifestOnlyEntry.connectorKey]
+      .map((identity) => cleanManifestText(identity))
+      .filter((identity): identity is string => Boolean(identity))
+      .map((identity) => canonicalConnectorKey(identity));
+    if (identities.some((identity) => coveredKeys.has(identity))) {
+      continue;
+    }
+    entries.push(manifestOnlyEntry);
   }
   entries.sort((a, b) => a.displayName.localeCompare(b.displayName));
   return entries;

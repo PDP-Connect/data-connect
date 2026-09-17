@@ -212,6 +212,10 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   "reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts:94",
   // reference-revision.ts reads the repo's own package.json for its version string.
   "reference-implementation/server/reference-revision.ts:17",
+  // createFileConnectorInstallStore() reads the operator-managed
+  // PDPP_DATA_DIR connector activation state. Connector ids in this file are
+  // runtime data supplied by the owner, not RI-committed provider knowledge.
+  "reference-implementation/server/connector-install/index.ts:110",
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-root-derived-dir>, entryName) (defaultPolyfillManifestsDir()
   // / defaultReferenceFixturesDir(), both resolve()'d off the two sanctioned

@@ -2,10 +2,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, resolve } from "node:path"
+import { basename, join, relative, resolve } from "node:path"
 import { createInterface } from "node:readline"
 import { isMainModule } from "./is-main-module.js"
 
@@ -19,7 +21,8 @@ const REQUIRED_PATH_FRAGMENTS = [
   "connectors/collection-profiles/chatgpt-pdpp/provenance.json",
   "licenses/pdpp-node-license",
   "personal-server/dist/personal-server",
-  "personal-server/dist/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+  // The SQLite addon is required through `sqliteAddonAlternatives` rather than
+  // named here, because it has two legitimate shapes on disk. See that function.
   "playwright-runner/dist/playwright-runner",
   "pdpp-runtime/connector-loader.mjs",
   "pdpp-runtime/connector-loader-bootstrap.mjs",
@@ -60,6 +63,11 @@ export function assertPackagedRuntime(entries, artifactName) {
     expectedPath => !packagedPaths.has(expectedPath)
   )
 
+  const addonAlternatives = sqliteAddonAlternatives(platform)
+  if (!addonAlternatives.some(candidate => packagedPaths.has(candidate))) {
+    missing.push(`one of [${addonAlternatives.join(", ")}]`)
+  }
+
   if (missing.length > 0) {
     fail(
       `${artifactName} is missing packaged runtime files: ${missing.join(", ")}`
@@ -77,13 +85,18 @@ function artifactPlatform(artifactName) {
   fail(`Cannot determine artifact platform from ${artifactName}`)
 }
 
-function expectedRuntimePaths(platform) {
+function runtimePathRoot(platform) {
   const root = {
     linux: "usr/lib/dataconnect/",
     macos: "contents/resources/",
     windows: "",
   }[platform]
   if (root === undefined) fail(`Unsupported runtime platform: ${platform}`)
+  return root
+}
+
+function expectedRuntimePaths(platform) {
+  const root = runtimePathRoot(platform)
   return REQUIRED_PATH_FRAGMENTS.map(fragment => {
     const executableSuffix =
       platform === "windows" &&
@@ -93,6 +106,29 @@ function expectedRuntimePaths(platform) {
         : ""
     return `${root}${fragment}${executableSuffix}`.toLowerCase()
   })
+}
+
+// The addon requirement, as the alternatives that satisfy it. Naming the 13.x
+// prebuild alone is as version-specific as naming the 12.x path was: it asserts
+// which release produced the bundle, when what has to be true is that the
+// sidecar can open a database. 12.x builds `build/Release/better_sqlite3.node`,
+// 13.x ships `prebuilds/<platform>-<arch>.node`, and either is an addon its own
+// `lib/binding.js` will load.
+//
+// This does not relax the check. A bundle carrying neither shape still fails,
+// and it is still exactly one addon that has to be there.
+function sqliteAddonAlternatives(platform) {
+  const root = runtimePathRoot(platform)
+  const addonRoot = "personal-server/dist/node_modules/better-sqlite3"
+  const names = {
+    linux: ["linux-x64.node", "linuxmusl-x64.node"],
+    macos: ["darwin-x64.node", "darwin-arm64.node"],
+    windows: ["win32-x64.node"],
+  }[platform]
+  return [
+    `${root}${addonRoot}/build/Release/better_sqlite3.node`.toLowerCase(),
+    ...names.map(name => `${root}${addonRoot}/prebuilds/${name}`.toLowerCase()),
+  ]
 }
 
 function packagedEntryPath(entry, platform) {
@@ -166,6 +202,19 @@ export function listDebEntries(artifact) {
   }).split("\n")
 }
 
+function extractDebArtifact(artifact) {
+  const root = mkdtempSync(
+    join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-deb-")
+  )
+  try {
+    run("dpkg-deb", ["--extract", artifact, root])
+    return root
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
 function listDirectoryEntries(root, relative = "") {
   const entries = []
   for (const entry of readdirSync(join(root, relative), {
@@ -178,28 +227,144 @@ function listDirectoryEntries(root, relative = "") {
   return entries
 }
 
-function listAppImageEntries(artifact) {
+function findResourceRoots(root, resourcePath) {
+  const segments = resourcePath.split("/").filter(Boolean)
+  const normalizedSegments = segments.map(segment => segment.toLowerCase())
+  const matches = []
+
+  function visit(current) {
+    const candidate = join(current, ...segments)
+    if (existsSync(candidate) && statSync(candidate).isDirectory()) {
+      matches.push(candidate)
+    }
+
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory()) visit(join(current, entry.name))
+    }
+  }
+
+  visit(root)
+  if (matches.length === 0) return []
+
+  return matches.filter(candidate => {
+    const suffix = relative(root, candidate)
+      .split(/[/\\]/)
+      .slice(-segments.length)
+      .map(segment => segment.toLowerCase())
+    return JSON.stringify(suffix) === JSON.stringify(normalizedSegments)
+  })
+}
+
+function hashFile(filePath, prefixed = true) {
+  const digest = createHash("sha256")
+    .update(readFileSync(filePath))
+    .digest("hex")
+  return prefixed ? `sha256:${digest}` : digest
+}
+
+function packagedManifestFiles(root, prefixed) {
+  const files = []
+  function visit(current) {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort(
+      (left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0
+    )) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile() && entry.name !== "manifest.json") {
+        files.push({
+          path: relative(root, path).split("\\").join("/"),
+          sha256: hashFile(path, prefixed),
+          size: statSync(path).size,
+        })
+      }
+    }
+  }
+  visit(root)
+  return files
+}
+
+export function assertPackagedReferenceStacks(root, artifactName) {
+  for (const stack of ["ri", "console"]) {
+    const matches = findResourceRoots(root, `reference-stack/${stack}`)
+    if (matches.length !== 1) {
+      fail(
+        `${artifactName} must contain exactly one packaged reference-stack/${stack} root`
+      )
+    }
+
+    const stackRoot = matches[0]
+    const manifestPath = join(stackRoot, "manifest.json")
+    if (!existsSync(manifestPath)) {
+      fail(`${artifactName} is missing reference-stack/${stack}/manifest.json`)
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+
+    if (Array.isArray(manifest.files)) {
+      const prefixed = manifest.files[0]?.sha256?.startsWith("sha256:") ?? false
+      const actual = packagedManifestFiles(stackRoot, prefixed)
+      if (JSON.stringify(manifest.files) !== JSON.stringify(actual)) {
+        fail(
+          `${artifactName} reference-stack/${stack} manifest hashes do not match`
+        )
+      }
+      continue
+    }
+
+    if (manifest.hashes && typeof manifest.hashes === "object") {
+      const actual = packagedManifestFiles(stackRoot, true)
+      const expected = Object.fromEntries(
+        actual.map(file => [file.path, file.sha256])
+      )
+      if (JSON.stringify(manifest.hashes) !== JSON.stringify(expected)) {
+        fail(
+          `${artifactName} reference-stack/${stack} manifest hashes do not match`
+        )
+      }
+      continue
+    }
+
+    fail(
+      `${artifactName} reference-stack/${stack}/manifest.json has no supported hash collection`
+    )
+  }
+}
+
+function extractAppImage(artifact) {
   const extractionRoot = mkdtempSync(
     join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-appimage-")
   )
+  run(artifact, ["--appimage-extract"], {
+    cwd: extractionRoot,
+    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
+  })
+  return extractionRoot
+}
+
+function extractWindowsInstaller(artifact) {
+  const root = mkdtempSync(
+    join(process.env.RUNNER_TEMP || tmpdir(), "dataconnect-nsis-")
+  )
   try {
-    run(artifact, ["--appimage-extract"], {
-      cwd: extractionRoot,
-      env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
-    })
-    const appDir = join(extractionRoot, "squashfs-root")
-    if (!existsSync(appDir))
-      fail(`${basename(artifact)} did not extract an AppDir`)
-    return listDirectoryEntries(appDir)
-  } finally {
-    rmSync(extractionRoot, { recursive: true, force: true })
+    run("7z", ["x", "-y", `-o${root}`, artifact])
+    return root
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true })
+    throw error
   }
 }
 
 const WINDOWS_BROWSER_FRAGMENT = "playwright-runner/dist/browsers/chromium-"
 const WINDOWS_BROWSER_EXECUTABLE = "/chrome.exe"
 const WINDOWS_NODE_FILENAME = "pdpp-node.exe"
-const WINDOWS_RUNTIME_PATHS = new Set(expectedRuntimePaths("windows"))
+// Retention, not requirement: this decides which installer entries are kept
+// while streaming `7z l`. Every addon alternative has to be retained too, or the
+// entry that would satisfy the requirement is discarded before the check runs
+// and a correct bundle is reported as missing its addon.
+const WINDOWS_RUNTIME_PATHS = new Set([
+  ...expectedRuntimePaths("windows"),
+  ...sqliteAddonAlternatives("windows"),
+])
 const COMMAND_ERROR_OUTPUT_LIMIT = 64 * 1024
 
 function windowsInstallerEntryPath(entry) {
@@ -314,12 +479,60 @@ export function selectMacAppExecutables(
   }
 }
 
-function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
+// Where this app bundle's SQLite addon is, so the architecture check below can
+// run `file` on it. The same two shapes as `sqliteAddonAlternatives`, resolved
+// against the filesystem instead of an entry listing.
+//
+// Naming the 12.x path unconditionally here would have failed a correct 13.x
+// bundle on macOS even with the entry check fixed, because the caller treats
+// every path in its list as a hard `existsSync` requirement.
+//
+// When neither shape is present this fails rather than returning nothing, so a
+// bundle with no addon is still rejected, by this function instead of by a
+// confusing `file` invocation on a path that does not exist.
+//
+// 13.x ships both macOS architectures, and the caller asserts the file it gets
+// back matches the architecture being built. So the prebuild for that
+// architecture is preferred, not whichever is found first -- returning
+// `darwin-arm64.node` to an x86_64 build would fail a correct bundle on the
+// architecture check.
+function macSqliteAddon(app, artifactName, expectedArch) {
+  const addonRoot = join(
+    app,
+    "Contents",
+    "Resources",
+    "personal-server",
+    "dist",
+    "node_modules",
+    "better-sqlite3"
+  )
+  const preferredArch = expectedArch === "arm64" ? "arm64" : "x64"
+  const candidates = [
+    join(addonRoot, "build", "Release", "better_sqlite3.node"),
+    join(addonRoot, "prebuilds", `darwin-${preferredArch}.node`),
+  ]
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found) return found
+  fail(
+    `${artifactName} carries no better-sqlite3 addon; looked for ${candidates.join(", ")}`
+  )
+}
+
+function verifyMacApp(
+  app,
+  expectedArch,
+  artifactName,
+  verifyCodeSignature,
+  verifyReferenceStacks
+) {
   if (verifyCodeSignature) {
     run("codesign", ["--verify", "--deep", "--strict", app])
   }
   const entries = listDirectoryEntries(app)
   assertPackagedRuntime(entries, artifactName)
+  if (verifyReferenceStacks) {
+    assertPackagedReferenceStacks(app, artifactName)
+  }
   assertPackagedNode(entries, artifactName, "macos")
   assertPackagedBrowser(entries, artifactName, "macos")
 
@@ -349,18 +562,7 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
       "dist",
       "personal-server"
     ),
-    join(
-      app,
-      "Contents",
-      "Resources",
-      "personal-server",
-      "dist",
-      "node_modules",
-      "better-sqlite3",
-      "build",
-      "Release",
-      "better_sqlite3.node"
-    ),
+    macSqliteAddon(app, artifactName, expectedArch),
     join(
       app,
       "Contents",
@@ -381,7 +583,12 @@ function verifyMacApp(app, expectedArch, artifactName, verifyCodeSignature) {
   }
 }
 
-function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
+function verifyMacArtifacts(
+  bundleRoot,
+  expectedArch,
+  verifyCodeSignature,
+  verifyReferenceStacks
+) {
   const sourceApps = findAppBundles(join(bundleRoot, "macos"))
   const dmgArtifacts = listArtifacts(join(bundleRoot, "dmg"), name =>
     name.endsWith(".dmg")
@@ -393,7 +600,8 @@ function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
     sourceApps[0],
     expectedArch,
     basename(sourceApps[0]),
-    verifyCodeSignature
+    verifyCodeSignature,
+    verifyReferenceStacks
   )
 
   const mountRoot = mkdtempSync(
@@ -418,7 +626,8 @@ function verifyMacArtifacts(bundleRoot, expectedArch, verifyCodeSignature) {
       mountedApps[0],
       expectedArch,
       basename(dmgArtifacts[0]),
-      verifyCodeSignature
+      verifyCodeSignature,
+      verifyReferenceStacks
     )
   } finally {
     if (attached) run("hdiutil", ["detach", mountRoot])
@@ -433,7 +642,7 @@ function listArtifacts(directory, matcher) {
     .map(filename => join(directory, filename))
 }
 
-function verifyLinuxArtifacts(bundleRoot) {
+function verifyLinuxArtifacts(bundleRoot, verifyReferenceStacks) {
   const debArtifacts = listArtifacts(join(bundleRoot, "deb"), name =>
     name.endsWith(".deb")
   )
@@ -447,17 +656,37 @@ function verifyLinuxArtifacts(bundleRoot) {
   assertPackagedRuntime(debEntries, basename(debArtifacts[0]))
   assertPackagedNode(debEntries, basename(debArtifacts[0]), "linux")
   assertPackagedBrowser(debEntries, basename(debArtifacts[0]), "linux")
-  const appImageEntries = listAppImageEntries(appImageArtifacts[0])
-  assertPackagedRuntime(appImageEntries, basename(appImageArtifacts[0]))
-  assertPackagedNode(appImageEntries, basename(appImageArtifacts[0]), "linux")
-  assertPackagedBrowser(
-    appImageEntries,
-    basename(appImageArtifacts[0]),
-    "linux"
-  )
+  if (verifyReferenceStacks) {
+    const debRoot = extractDebArtifact(debArtifacts[0])
+    try {
+      assertPackagedReferenceStacks(debRoot, basename(debArtifacts[0]))
+    } finally {
+      rmSync(debRoot, { recursive: true, force: true })
+    }
+  }
+
+  const appImageRoot = extractAppImage(appImageArtifacts[0])
+  try {
+    const appDir = join(appImageRoot, "squashfs-root")
+    if (!existsSync(appDir))
+      fail(`${basename(appImageArtifacts[0])} did not extract an AppDir`)
+    const appImageEntries = listDirectoryEntries(appDir)
+    assertPackagedRuntime(appImageEntries, basename(appImageArtifacts[0]))
+    if (verifyReferenceStacks) {
+      assertPackagedReferenceStacks(appDir, basename(appImageArtifacts[0]))
+    }
+    assertPackagedNode(appImageEntries, basename(appImageArtifacts[0]), "linux")
+    assertPackagedBrowser(
+      appImageEntries,
+      basename(appImageArtifacts[0]),
+      "linux"
+    )
+  } finally {
+    rmSync(appImageRoot, { recursive: true, force: true })
+  }
 }
 
-async function verifyWindowsArtifacts(bundleRoot) {
+async function verifyWindowsArtifacts(bundleRoot, verifyReferenceStacks) {
   const installers = listArtifacts(join(bundleRoot, "nsis"), name =>
     name.endsWith(".exe")
   )
@@ -466,6 +695,14 @@ async function verifyWindowsArtifacts(bundleRoot) {
   assertPackagedRuntime(entries, basename(installers[0]))
   assertPackagedNode(entries, basename(installers[0]), "windows")
   assertPackagedBrowser(entries, basename(installers[0]), "windows")
+  if (verifyReferenceStacks) {
+    const extractedRoot = extractWindowsInstaller(installers[0])
+    try {
+      assertPackagedReferenceStacks(extractedRoot, basename(installers[0]))
+    } finally {
+      rmSync(extractedRoot, { recursive: true, force: true })
+    }
+  }
 }
 
 export function parseArgs(argv) {
@@ -474,6 +711,7 @@ export function parseArgs(argv) {
     expectedArch: "",
     platform: "",
     verifyCodeSignature: false,
+    verifyReferenceStacks: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
@@ -483,11 +721,13 @@ export function parseArgs(argv) {
     else if (token === "--platform") args.platform = argv[++index] ?? ""
     else if (token === "--verify-code-signature")
       args.verifyCodeSignature = true
+    else if (token === "--verify-reference-stacks")
+      args.verifyReferenceStacks = true
     else fail(`Unknown argument: ${token}`)
   }
   if (!args.bundleRoot || !args.platform) {
     fail(
-      "Usage: --bundle-root <path> --platform <macos|linux|windows> [--expected-arch <arm64|x86_64>] [--verify-code-signature]"
+      "Usage: --bundle-root <path> --platform <macos|linux|windows> [--expected-arch <arm64|x86_64>] [--verify-code-signature] [--verify-reference-stacks]"
     )
   }
   if (
@@ -500,14 +740,24 @@ export function parseArgs(argv) {
 }
 
 async function main() {
-  const { bundleRoot, expectedArch, platform, verifyCodeSignature } = parseArgs(
-    process.argv.slice(2)
-  )
+  const {
+    bundleRoot,
+    expectedArch,
+    platform,
+    verifyCodeSignature,
+    verifyReferenceStacks,
+  } = parseArgs(process.argv.slice(2))
   if (platform === "macos") {
-    verifyMacArtifacts(resolve(bundleRoot), expectedArch, verifyCodeSignature)
-  } else if (platform === "linux") verifyLinuxArtifacts(resolve(bundleRoot))
+    verifyMacArtifacts(
+      resolve(bundleRoot),
+      expectedArch,
+      verifyCodeSignature,
+      verifyReferenceStacks
+    )
+  } else if (platform === "linux")
+    verifyLinuxArtifacts(resolve(bundleRoot), verifyReferenceStacks)
   else if (platform === "windows")
-    await verifyWindowsArtifacts(resolve(bundleRoot))
+    await verifyWindowsArtifacts(resolve(bundleRoot), verifyReferenceStacks)
   else fail(`Unsupported platform: ${platform}`)
   console.log(
     `[verify-bundled-personal-server] ${platform} artifact contents verified`
