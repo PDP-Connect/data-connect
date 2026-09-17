@@ -3,13 +3,9 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: this direct reference-implementation dependency is resolved by the reference test runner.
-import type BetterSqlite3 from "better-sqlite3";
-const Database = createRequire(import.meta.url)("better-sqlite3-multiple-ciphers") as typeof BetterSqlite3;
 import { seedPreRegisteredClients as seedPreRegisteredClientsUntyped } from "../server/auth.ts";
 import {
   closeDb as closeDbUntyped,
@@ -18,6 +14,7 @@ import {
   isTransientSqliteLockError as isTransientSqliteLockErrorUntyped,
   runWithSqliteBusyRetry as runWithSqliteBusyRetryUntyped,
 } from "../server/db.ts";
+import Database, { type BetterSqlite3 } from "./helpers/sqlite-driver.ts";
 
 /**
  * `server/db.js` and `server/auth.ts` are untyped JS (allowJs, checkJs:false)

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { closeSync, openSync, readSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
+import { SqliteDriver } from "../../server/sqlite-driver.ts";
 import type { RawValue } from "./transformers.ts";
 
 const DATABASE_ENCRYPTION_KEY_ENV = "PDPP_DATABASE_ENCRYPTION_KEY";
@@ -22,7 +22,7 @@ interface DatabaseHandle {
   };
 }
 type DatabaseConstructor = new (path: string, options: { fileMustExist: boolean; readonly: boolean }) => DatabaseHandle;
-const Database = createRequire(import.meta.url)("better-sqlite3-multiple-ciphers") as DatabaseConstructor;
+const Database = SqliteDriver as unknown as DatabaseConstructor;
 
 function hasPlaintextSqliteHeader(filepath: string): boolean {
   const descriptor = openSync(filepath, "r");

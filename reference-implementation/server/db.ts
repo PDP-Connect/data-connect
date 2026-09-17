@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Personal Server — Database layer (`better-sqlite3`).
+ * PDPP Personal Server — Database layer (`better-sqlite3` API, linked via
+ * `server/sqlite-driver.ts`; see that module for why the driver package is
+ * named in exactly one place).
  *
  * The reference implementation talks to SQLite synchronously. Callers do:
  *
@@ -21,7 +23,6 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -30,18 +31,13 @@ import {
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
-import {
-  openSqliteDatabase,
-  type SqliteEncryptionDatabaseConstructor,
-  type SqliteEncryptionOptions,
-} from "./sqlite-encryption.ts";
+import { SqliteDriver } from "./sqlite-driver.ts";
+import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
-const Database = createRequire(import.meta.url)(
-  "better-sqlite3-multiple-ciphers"
-) as SqliteEncryptionDatabaseConstructor;
+const Database = SqliteDriver;
 
 type SqliteRow = Record<string, unknown>;
 interface SqliteRunResult {

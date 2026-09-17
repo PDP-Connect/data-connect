@@ -9,16 +9,11 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs"
-import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import type BetterSqlite3 from "better-sqlite3"
 import { closeDb, initDb } from "../server/db.ts"
-
-const Database = createRequire(import.meta.url)(
-  "better-sqlite3-multiple-ciphers"
-) as typeof BetterSqlite3
+import Database from "./helpers/sqlite-driver.ts"
 
 const DATABASE_KEY = "sqlite-encryption-test-key"
 const WRONG_DATABASE_KEY = "wrong-sqlite-encryption-test-key"
