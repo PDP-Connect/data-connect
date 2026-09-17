@@ -159,6 +159,29 @@ function ownerTemplate(
   };
 }
 
+test("owner catalog keeps manifest-known connectors when a template exists", () => {
+  // Regression: one registered template used to collapse the whole catalog to
+  // that single connector, so connecting a first source hid every other one.
+  const manifests = [
+    { connector_id: "https://registry.pdpp.dev/connectors/ynab", connector_key: "ynab", display_name: "YNAB" },
+    { connector_id: "https://registry.pdpp.dev/connectors/strava", connector_key: "strava", display_name: "Strava" },
+    { connector_id: "https://registry.pdpp.dev/connectors/github", connector_key: "github", display_name: "GitHub" },
+  ];
+
+  const withoutTemplates = buildOwnerConnectorCatalog(manifests, []);
+  assert.equal(withoutTemplates.length, 3);
+
+  const withOneTemplate = buildOwnerConnectorCatalog(manifests, [
+    { ...ownerTemplate({ connectorKey: "ynab" }), connector_id: "https://registry.pdpp.dev/connectors/ynab" },
+  ]);
+  assert.equal(withOneTemplate.length, 3);
+  assert.equal(withOneTemplate.filter((entry) => entry.connectorKey === "ynab").length, 1);
+  assert.deepEqual(
+    withOneTemplate.map((entry) => entry.connectorKey).sort(),
+    ["github", "strava", "ynab"]
+  );
+});
+
 test("owner catalog joins staged URI identities through explicit manifest keys", () => {
   const catalog = buildOwnerConnectorCatalog(
     [

@@ -617,6 +617,30 @@ export function buildOwnerConnectorCatalog(
     }
     entries.push(entry);
   }
+
+  // Templates ENRICH the catalog; they never gate it. A manifest-known connector
+  // the owner has not connected yet must still be offered on /sources/add — the
+  // page's whole job is offering connectors to add. Before this, a single
+  // registered template collapsed the list to just that connector.
+  const coveredKeys = new Set<string>();
+  for (const covered of entries) {
+    for (const identity of [covered.connectorKey]) {
+      const cleanIdentity = cleanManifestText(identity);
+      if (cleanIdentity) {
+        coveredKeys.add(canonicalConnectorKey(cleanIdentity));
+      }
+    }
+  }
+  for (const manifestOnlyEntry of buildConnectorCatalog(manifests)) {
+    const identities = [manifestOnlyEntry.connectorKey]
+      .map((identity) => cleanManifestText(identity))
+      .filter((identity): identity is string => Boolean(identity))
+      .map((identity) => canonicalConnectorKey(identity));
+    if (identities.some((identity) => coveredKeys.has(identity))) {
+      continue;
+    }
+    entries.push(manifestOnlyEntry);
+  }
   entries.sort((a, b) => a.displayName.localeCompare(b.displayName));
   return entries;
 }
