@@ -38,7 +38,7 @@ const REQUIRE_ACCESS = /await requireDashboardAccess\(/;
 const PREVIEW_ONLY_COPY = /Preview only/;
 const IMPORT_FILE_COPY = /Import file/;
 const OPTIONAL_PREVIEW_COPY = /Preview checks one file/;
-const WHAT_PDPP_FOUND_COPY = /What PDPP found/;
+const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
 const TARGET_CHOICE_COPY = /Create a new source for these files/;
 const EXISTING_SOURCE_COPY = /Add these files to an existing source/;
 const LABEL_INPUT = /name=\{connectionName\.name\}/;
@@ -86,7 +86,7 @@ test("manual-upload form imports directly and offers preview without connector-s
   assert.match(src, PREVIEW_ONLY_COPY);
   assert.match(src, IMPORT_FILE_COPY);
   assert.match(src, OPTIONAL_PREVIEW_COPY);
-  assert.match(src, WHAT_PDPP_FOUND_COPY);
+  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
   assert.match(src, TARGET_CHOICE_COPY);
   assert.match(src, EXISTING_SOURCE_COPY);
   assert.match(src, LABEL_INPUT);

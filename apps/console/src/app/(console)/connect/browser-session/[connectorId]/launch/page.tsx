@@ -60,7 +60,7 @@ export default async function BrowserSessionLaunchPage({
           },
           { label: "Starting browser" },
         ]}
-        description={`PDPP is starting a secure browser session for ${displayName}.`}
+        description={`DataConnect is starting a secure browser session for ${displayName}.`}
         title="Starting secure browser"
       />
 

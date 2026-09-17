@@ -575,14 +575,14 @@ function importPhaseProgress(status: ConnectionSetupStatus): readonly ImportPhas
   const facts = importPhaseFacts(status);
   return [
     {
-      detail: facts.fileReceived ? "PDPP captured the file for this import." : "Choose a file to start.",
+      detail: facts.fileReceived ? "DataConnect captured the file for this import." : "Choose a file to start.",
       label: "Received",
       state: facts.fileReceived ? "done" : "waiting",
     },
     {
       detail: facts.parsed
         ? "The connector parser produced safe validation facts."
-        : "PDPP has not parsed this file yet.",
+        : "DataConnect has not parsed this file yet.",
       label: "Parsed",
       state: parsedPhaseState(facts),
     },
@@ -655,7 +655,7 @@ function CoverageReceiptCard({ receipt }: { receipt: ImportReceipt }) {
   return (
     <div className="mt-4 max-w-2xl rounded-md border border-border/80 bg-background p-4">
       <p className="pdpp-eyebrow text-muted-foreground">Coverage preview</p>
-      <h2 className="pdpp-section-title mt-1">What PDPP found</h2>
+      <h2 className="pdpp-section-title mt-1">What DataConnect found</h2>
       <p className="pdpp-caption mt-1 text-muted-foreground">
         Repeating the same file returns this receipt instead of creating another import.
       </p>

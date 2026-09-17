@@ -616,7 +616,7 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so PDPP cannot tell you whether anything is missing
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing
           for {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
