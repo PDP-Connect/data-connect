@@ -21,6 +21,7 @@ import type {
 export {
   inspectUserSuppliedOrigin,
   offRemoteAccessConfig,
+  validatePinnedConsolePort,
   validateUserSuppliedOrigin,
   type InvalidOrigin,
   type NgrokEndpointMode,

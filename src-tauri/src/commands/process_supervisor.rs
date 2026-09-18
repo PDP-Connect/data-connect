@@ -112,6 +112,13 @@ pub struct ProcessSpec {
     pub restart: RestartPolicy,
     pub process_group: bool,
     pub stop: StopPolicy,
+    /// An owner-pinned port to bind instead of an OS-assigned ephemeral one.
+    /// `None` keeps the existing dynamic-allocation behavior. `Some(port)`
+    /// must bind exactly that port (and `port + 1` when the spec needs an
+    /// adjacent port) or fail loudly -- see `allocate_loopback_port` -- so a
+    /// reverse proxy pointed at a pinned port never silently targets the
+    /// wrong one.
+    pub requested_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -312,7 +319,10 @@ impl Supervisor {
         if self.spec.process_group {
             install_parent_signal_handlers()?;
         }
-        let port = allocate_loopback_port(spec_requires_adjacent_port(&self.spec))?;
+        let port = allocate_loopback_port(
+            spec_requires_adjacent_port(&self.spec),
+            self.spec.requested_port,
+        )?;
         let state = Arc::new(SupervisorState::new());
         let (ready_sender, ready_receiver) = mpsc::channel();
         let thread_state = Arc::clone(&state);
@@ -1039,8 +1049,29 @@ fn process_group_exists(process_group: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-fn allocate_loopback_port(adjacent: bool) -> io::Result<u16> {
+/// Resolve the loopback port (and, when `adjacent`, the port right after it)
+/// this process will bind. `requested_port` pins the owner's chosen port: it
+/// must be free, or this returns an error naming the exact port that
+/// collided -- there is no silent fallback to a different port, because a
+/// pinned port exists specifically so an external reverse proxy has a
+/// stable, known target. Absent a request, an OS-assigned ephemeral port is
+/// chosen as before.
+fn allocate_loopback_port(adjacent: bool, requested_port: Option<u16>) -> io::Result<u16> {
     let required_ports = if adjacent { 2 } else { 1 };
+    if let Some(port) = requested_port {
+        return (0..required_ports)
+            .all(|offset| {
+                port.checked_add(offset)
+                    .is_some_and(|candidate| loopback_port_is_free(candidate))
+            })
+            .then_some(port)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("the pinned port {port} is already in use"),
+                )
+            });
+    }
     for _ in 0..64 {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
@@ -1094,6 +1125,7 @@ pub fn personal_server_spec(
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
+        requested_port: None,
     }
 }
 
@@ -1147,6 +1179,7 @@ mod tests {
                 escalate: Duration::from_secs(1),
                 total: Duration::from_secs(2),
             },
+            requested_port: None,
         }
     }
 
@@ -1350,6 +1383,62 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(states(&sink)
             .iter()
             .any(|event| matches!(event, LifecycleState::Ready)));
+    }
+
+    #[test]
+    fn a_pinned_port_is_bound_exactly_and_reused_across_restarts() {
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+	response.writeHead(request.url === '/ready' ? 302 : 404, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        // Free the port right before use rather than picking a fixed literal,
+        // so the test cannot collide with another process already listening.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let pinned_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::HttpGet {
+                url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.requested_port = Some(pinned_port);
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        assert_eq!(handle.port(), pinned_port);
+        handle.stop().unwrap();
+    }
+
+    #[test]
+    fn a_pinned_port_already_in_use_fails_loudly_instead_of_picking_another() {
+        let script = node_script(
+            r#"const http = require('node:http');
+http.createServer((_req, res) => res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let sink = Arc::new(RecordingSink::default());
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::HttpGet {
+                url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+                deadline: Duration::from_secs(1),
+            },
+        );
+        spec.requested_port = Some(occupied_port);
+        let result = Supervisor::new(spec, ArcSink(Arc::clone(&sink))).start();
+
+        assert!(result.is_err());
+        drop(occupied);
     }
 
     #[test]
