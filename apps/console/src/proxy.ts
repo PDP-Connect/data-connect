@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type NextRequest, NextResponse } from "next/server";
-import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session";
+import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants";
 import { resolveReferenceTopology } from "pdpp-reference-implementation/reference-topology";
 import { normalizeDashboardReturnTo } from "@/app/(console)/lib/return-to.ts";
 

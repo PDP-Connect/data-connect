@@ -632,6 +632,7 @@ test("owner-agent onboarding rebases to the forwarded public origin and never na
     referenceOrigin: localOrigin,
     rsPort: 0,
     rsPublicUrl: localOrigin,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "laptop-dev.example",
   });
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -680,6 +681,7 @@ test("proxied composed metadata rebases localhost defaults to the forwarded publ
     referenceOrigin: localOrigin,
     rsPort: 0,
     rsPublicUrl: localOrigin,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "laptop-dev.example",
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -883,6 +885,7 @@ test("operator-supplied DCR token remains advertised for public metadata", async
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: publicHost,
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -956,6 +959,7 @@ test("provider metadata rejects unconfigured public Host and X-Forwarded-Host va
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "",
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -994,6 +998,7 @@ test("PDPP_TRUSTED_HOSTS permits explicit public host-derived metadata allowlist
       dbPath: ":memory:",
       quiet: true,
       rsPort: 0,
+      trustedProxies: "127.0.0.1",
     });
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
@@ -1314,6 +1319,7 @@ test("public forwarded host advertises self-registration and rejects bogus beare
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: publicHost,
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -1492,6 +1498,7 @@ test("native provider metadata surfaces the native provider name", async () => {
     quiet: true,
     rsPort: 0,
     sourceDeclarationUri,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "northstar.example.test",
   });
   const asUrl = `http://localhost:${server.asPort}`;

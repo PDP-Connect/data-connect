@@ -218,6 +218,10 @@ pub async fn start_personal_server(
     let mut env_vars: Vec<(&str, String)> = vec![
         ("PORT", port.to_string()),
         ("NODE_ENV", "production".to_string()),
+        ("PDPP_BIND_HOST", "127.0.0.1".to_string()),
+        ("PDPP_REFERENCE_ORIGIN", format!("http://127.0.0.1:{}", port)),
+        ("PDPP_TRUSTED_HOSTS", "127.0.0.1,localhost,::1".to_string()),
+        ("PDPP_TRUSTED_PROXIES", String::new()),
     ];
     if let Some(ref sig) = master_key_signature {
         env_vars.push(("VANA_MASTER_KEY_SIGNATURE", sig.clone()));

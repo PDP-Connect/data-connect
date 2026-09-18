@@ -217,6 +217,7 @@ import {
   buildOwnerConnectionSupportedActions,
   buildProtectedResourceMetadata,
   buildSemanticRetrievalCapability,
+  forwardedPublicOrigin,
   isLocalOrPrivateRequestOrigin,
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -228,6 +229,14 @@ import {
 import { unresolvedOwnerActionEvidenceFromSummary } from "./owner-action-gate.ts";
 import { createOwnerAuthPlaceholder, OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
 import { resolveOwnerExposurePosture } from "./owner-exposure-posture.ts";
+import {
+  type ReachabilityContract,
+  evaluateReachabilityRequest,
+  isLoopbackOriginHost,
+  isNonLoopbackBindHost,
+  parseReachabilityContract,
+  validateReachabilityContract,
+} from "./reachability-contract.ts";
 import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
 import { reconcilePolyfillManifests } from "./polyfill-manifest-reconcile.ts";
 import { postgresPersistContentAddressedBlob } from "./postgres-records.ts";
@@ -634,6 +643,8 @@ interface ReqLike {
     on?: (...args: unknown[]) => void;
     off?: (...args: unknown[]) => void;
     removeListener?: (...args: unknown[]) => void;
+    socket?: { remoteAddress?: string };
+    url?: string;
   };
   socket?: { remoteAddress?: string };
   tokenInfo?: TokenInfo;
@@ -752,6 +763,7 @@ interface ServerOpts {
   autoEnrollEligibleSchedules?: boolean;
   awaitStartupBackfill?: boolean;
   bindHost?: string;
+  reachabilityContract?: ReachabilityContract | null;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | null;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -810,6 +822,7 @@ interface ServerOpts {
     hosted?: boolean;
     bindsNonLoopback?: boolean;
   } | null;
+  trustedProxies?: string | null;
   ownerToken?: string | null;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
@@ -1347,6 +1360,14 @@ function resolveTrustedProtectedResourceMetadataUrl(
   } catch {
     return null;
   }
+}
+
+function reachabilityContractIsHosted(contract: ReachabilityContract): boolean {
+  return (
+    isNonLoopbackBindHost(contract.bindHost) ||
+    (contract.referenceOrigin !== null &&
+      !isLoopbackOriginHost(new URL(contract.referenceOrigin).hostname))
+  );
 }
 
 function getProtectedResourceMetadataUrl(res: ResLike) {
@@ -4522,6 +4543,19 @@ export async function evaluateOwnerStreamCoverageAuthority({
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function buildAsApp(opts: ServerOpts = {}) {
   const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -6328,6 +6362,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     generateSpineId,
     getOwnerSubjectId,
     handleError,
+    // A trusted proxy is not guaranteed to attach x-forwarded-host to every
+    // request in a flow (see resolveCallbackBaseUrl below); this reports
+    // only whether THIS request carries that header, so the callback route
+    // can tell "no signal" apart from "an explicit, conflicting claim."
+    hasForwardedOriginSignal: (req: unknown) =>
+      forwardedPublicOrigin(req as Parameters<typeof forwardedPublicOrigin>[0]) !== null,
     pdppError,
     pendingAuthStore,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -6781,6 +6821,19 @@ function buildOwnerAgentOnboardingMetadata({
 
 function buildRsApp(opts: ServerOpts = {}) {
   const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -6861,6 +6914,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleStreamableHttpRequest,
     internalResource,
     pdppError,
+    reachabilityContract,
     referenceRevision,
     requireClientOrMcpPackage,
     requireToken,
@@ -7832,6 +7886,41 @@ function buildRsApp(opts: ServerOpts = {}) {
 export async function startServer(opts: ServerOpts = {}) {
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
+  const requestedAsPort = opts.asPort ?? AS_PORT;
+  const requestedRsPort = opts.rsPort ?? RS_PORT;
+  const ignoreAmbientPublicUrls =
+    opts.ignoreAmbientPublicUrls ??
+    ((requestedAsPort === 0 || requestedRsPort === 0) &&
+      !opts.asPublicUrl &&
+      !opts.rsPublicUrl &&
+      !opts.asIssuer &&
+      opts.referenceOrigin === undefined);
+  const reachabilityEnv =
+    ignoreAmbientPublicUrls && opts.referenceOrigin === undefined
+      ? { ...process.env, PDPP_REFERENCE_ORIGIN: undefined }
+      : process.env;
+  const reachabilityContract =
+    opts.reachabilityContract ??
+    parseReachabilityContract({
+      env: reachabilityEnv,
+      bindHost: opts.bindHost,
+      referenceOrigin: opts.referenceOrigin,
+      trustedHosts: opts.trustedMetadataHosts,
+      trustedProxies: opts.trustedProxies,
+    });
+  const reachabilityHosted = reachabilityContractIsHosted(reachabilityContract);
+  validateReachabilityContract(reachabilityContract, reachabilityHosted);
+  const earlyOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const ownerExposurePosture = resolveOwnerExposurePosture({
+    bindHost: reachabilityContract.bindHost,
+    env: process.env,
+    hasOwnerPassword:
+      typeof earlyOwnerAuthConfig.password === "string" && earlyOwnerAuthConfig.password.length > 0,
+    referenceOrigin: reachabilityContract.referenceOrigin,
+  });
+  if (ownerExposurePosture.refuseBootReason) {
+    throw new Error(ownerExposurePosture.refuseBootReason);
+  }
   const connectorEnvironmentPolicy = resolveConnectorEnvironmentPolicy(opts);
   setConnectorSummaryReconcileObservationSink(createConnectorSummaryReconcileObservationSink(logger));
   const nativeConfig = validateNativeConfiguration(opts);
@@ -8010,14 +8099,9 @@ export async function startServer(opts: ServerOpts = {}) {
     process.env.PDPP_PROVIDER_NAME ||
     PDPP_PROVIDER_NAME;
 
-  const requestedAsPort = opts.asPort ?? AS_PORT;
-  const requestedRsPort = opts.rsPort ?? RS_PORT;
-  const ignoreAmbientPublicUrls =
-    opts.ignoreAmbientPublicUrls ??
-    ((requestedAsPort === 0 || requestedRsPort === 0) && !opts.asPublicUrl && !opts.rsPublicUrl && !opts.asIssuer);
   const referenceTopology = resolveReferenceTopology({
     ...(opts.referenceMode === null ? {} : { explicitMode: opts.referenceMode }),
-    ...(opts.referenceOrigin === null ? {} : { referenceOrigin: opts.referenceOrigin }),
+    referenceOrigin: reachabilityContract.referenceOrigin,
     ...(opts.asPublicUrl === null ? {} : { asPublicUrl: opts.asPublicUrl }),
     ...(opts.rsPublicUrl === null ? {} : { rsPublicUrl: opts.rsPublicUrl }),
     ignoreAmbient: ignoreAmbientPublicUrls,
@@ -8088,42 +8172,8 @@ export async function startServer(opts: ServerOpts = {}) {
     referenceBaseUrl: configuredAsPublicUrl || null,
     rsUrl: configuredRsPublicUrl || null,
   };
-  const resolvedOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
-
-  // ── Owner-exposure posture (security audit S-1 / S-2, lane A1) ────────────
-  // Decide whether this deployment is internet-facing. In a hosted posture an
-  // unset PDPP_OWNER_PASSWORD is a full bypass of the owner control plane, so
-  // we FAIL CLOSED: refuse to boot. In a local-dev (loopback) posture we keep
-  // the password-optional convenience and the open `requireOwnerSession`
-  // fall-through. The posture also gates `POST /connectors` (manifest upsert)
-  // so a one-request grant-wipe DoS is not reachable unauthenticated on a
-  // hosted surface. See server/owner-exposure-posture.ts for the signal logic.
-  const ownerExposurePosture = resolveOwnerExposurePosture({
-    bindHost: opts.bindHost,
-    env: process.env,
-    hasOwnerPassword:
-      typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0,
-    isTestContext: !!process.env.NODE_TEST_CONTEXT,
-    publicUrlOption: configuredAsPublicUrl,
-  });
-  if (ownerExposurePosture.refuseBootReason) {
-    // Throw BEFORE any listener binds. The CLI entrypoint's `.catch` exits(1)
-    // with the fatal log line; the test harness sees a rejected promise.
-    throw new Error(ownerExposurePosture.refuseBootReason);
-  }
-  if (
-    !ownerExposurePosture.hosted &&
-    ownerExposurePosture.bindsNonLoopback &&
-    !(typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0)
-  ) {
-    // Local-dev posture that still binds a non-loopback interface without a
-    // password — not refused (could be a deliberate LAN demo), but loud.
-    logger.warn(
-      { bindHost: opts.bindHost ?? "(all interfaces)" },
-      "reference server is binding a non-loopback interface with PDPP_OWNER_PASSWORD unset — the owner control plane (/_ref, connector registry) is reachable without authentication. Set PDPP_OWNER_PASSWORD to gate it."
-    );
-  }
 
   const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -8484,6 +8534,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // Owner-exposure posture: gates the disabled-auth fall-through and the
     // connector-registry lock (security audit S-1 / S-2, lane A1).
     ownerExposurePosture,
+    reachabilityContract,
     preRegisteredPublicClients: resolvePreRegisteredPublicClients(opts),
     presentationScreenStateStore,
     presentationTerminalBarrier,
@@ -8513,11 +8564,10 @@ export async function startServer(opts: ServerOpts = {}) {
     staticSecretAutoResume: opts.staticSecretAutoResume,
   } as unknown as ServerOpts);
 
-  // opts.bindHost — restrict listening interface (e.g. '127.0.0.1'). Default
-  // is undefined which lets Node bind to all interfaces. Passing '127.0.0.1'
-  // keeps the server off the LAN/public internet.
+  // The normalized contract always supplies a bind host. The loopback default
+  // keeps the server off the LAN/public internet unless an operator opts in.
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const bindHost = opts.bindHost;
+  const bindHost = reachabilityContract.bindHost;
 
   const asServer = await asApp.listen(requestedAsPort, bindHost);
   if (typeof (asApp as unknown as Record<string, unknown>).__pdppStreamingUpgradeHandler === "function") {
@@ -8582,6 +8632,7 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
+    reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
     // Explicitly-configured internal RS base for the hosted-MCP adapter's
