@@ -41,6 +41,19 @@ function createConsoleBuildFixture() {
     join(root, "apps", "console", "public", "favicon.svg"),
     "public"
   )
+  const manifestsDirectory = join(
+    root,
+    "node_modules",
+    "@pdpp",
+    "polyfill-connectors",
+    "manifests"
+  )
+  mkdirSync(manifestsDirectory, { recursive: true })
+  writeFileSync(join(manifestsDirectory, "ynab.json"), "{}")
+  writeFileSync(
+    join(root, "node_modules", "@pdpp", "polyfill-connectors", "package.json"),
+    "{}\n"
+  )
   return root
 }
 
@@ -98,6 +111,46 @@ describe("ensure console stack", () => {
       expect(
         readFileSync(join(result.stageDirectory, "launch.mjs"), "utf8")
       ).toContain('resolve(stageDirectory, "apps/console/server.js")')
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("stages the connector manifests package so the packaged console is self-contained", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      const stagedManifestsDirectory = join(
+        result.stageDirectory,
+        "apps",
+        "console",
+        "node_modules",
+        "@pdpp",
+        "polyfill-connectors",
+        "manifests"
+      )
+      expect(
+        readFileSync(join(stagedManifestsDirectory, "ynab.json"), "utf8")
+      ).toBe("{}")
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("fails fast if the connector manifests package is not installed", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      rmSync(join(root, "node_modules", "@pdpp", "polyfill-connectors"), {
+        force: true,
+        recursive: true,
+      })
+      expect(() =>
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      ).toThrow(/connector manifests package/)
     } finally {
       rmSync(root, { force: true, recursive: true })
     }

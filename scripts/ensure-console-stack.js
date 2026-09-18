@@ -26,6 +26,17 @@ const PROJECT_ROOT = dirname(ROOT)
 const DEFAULT_PROFILE = "release"
 const STAGE_DIRECTORY = ["src-tauri", "target", "reference-stack", "console"]
 
+// The console reads connector manifest JSON from this package's installed
+// layout via dynamic fs paths (readdir over a resolved package root), not a
+// static import, so Next's standalone output tracer never bundles it. Copy
+// it into the staged node_modules explicitly so the packaged app is
+// self-contained and does not need a monorepo checkout to find manifests.
+const CONNECTOR_MANIFEST_PACKAGE = join(
+  "node_modules",
+  "@pdpp",
+  "polyfill-connectors"
+)
+
 // These are read by the generated Next server, the console's reference proxy,
 // or the imported reference-topology/auth helpers. The launcher inherits the
 // complete parent environment; this list documents the supported runtime
@@ -104,6 +115,37 @@ function requireDirectory(directory, label) {
   if (!existsSync(directory) || !lstatSync(directory).isDirectory()) {
     fail(`${label} is missing: ${directory}`)
   }
+}
+
+function stageConnectorManifestsPackage(root, stagedRuntimeDirectory) {
+  const sourcePackageDirectory = join(root, CONNECTOR_MANIFEST_PACKAGE)
+  requireDirectory(
+    sourcePackageDirectory,
+    "connector manifests package (@pdpp/polyfill-connectors)"
+  )
+  const sourceManifestsDirectory = join(sourcePackageDirectory, "manifests")
+  requireDirectory(
+    sourceManifestsDirectory,
+    "connector manifests directory"
+  )
+  const targetPackageDirectory = join(
+    stagedRuntimeDirectory,
+    CONNECTOR_MANIFEST_PACKAGE
+  )
+  mkdirSync(targetPackageDirectory, { recursive: true })
+  // Stage only what connector-manifests-dir.ts needs to locate and read the
+  // catalog: package.json (root detection) and manifests/ (the catalog
+  // itself). The package's own node_modules/bin/connectors are for running
+  // collection, not for listing the catalog, and dragging them along pulls
+  // in symlinked binaries (e.g. patchright) the staging manifest hasher
+  // can't walk.
+  cpSync(
+    join(sourcePackageDirectory, "package.json"),
+    join(targetPackageDirectory, "package.json")
+  )
+  cpSync(sourceManifestsDirectory, join(targetPackageDirectory, "manifests"), {
+    recursive: true,
+  })
 }
 
 function findServer(standaloneDirectory) {
@@ -242,6 +284,7 @@ export function stageConsoleStack({
     cpSync(publicDirectory, join(stagedRuntimeDirectory, "public"), {
       recursive: true,
     })
+    stageConnectorManifestsPackage(root, stagedRuntimeDirectory)
     writeLauncher(temporaryDirectory, serverRelativePath)
     writeManifest(temporaryDirectory, validatedProfile, serverRelativePath)
     rmSync(targetDirectory, { force: true, recursive: true })
