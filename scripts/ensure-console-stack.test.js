@@ -316,4 +316,27 @@ describe("ensure console stack", () => {
       })
     }
   )
+
+  it("fails loudly instead of staging a console with an empty connector manifest catalog", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      const manifestsDirectory = join(
+        root,
+        "node_modules",
+        "@pdpp",
+        "polyfill-connectors",
+        "manifests"
+      )
+      rmSync(join(manifestsDirectory, "ynab.json"))
+      expect(() =>
+        stageConsoleStack({
+          build: false,
+          profile: "release",
+          projectRoot: root,
+        })
+      ).toThrow(/staged connector manifests directory is empty/)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
 })

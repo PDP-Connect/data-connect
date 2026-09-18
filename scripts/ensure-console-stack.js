@@ -430,6 +430,28 @@ export function stageConsoleStack({
     throw error
   }
 
+  // Post-stage assertion: a staged console with an empty or missing
+  // manifest catalog is the worst failure mode (a silent empty Add-source
+  // list that only surfaces as a 500 once the console is already running).
+  // Verify against the final targetDirectory, not the pre-rename temp copy,
+  // so this also catches a corrupted rename on filesystems with non-atomic
+  // directory replace semantics.
+  const stagedManifestsDirectory = join(
+    targetDirectory,
+    runtimeRelativeDirectory,
+    CONNECTOR_MANIFEST_PACKAGE,
+    "manifests"
+  )
+  requireDirectory(stagedManifestsDirectory, "staged connector manifests directory")
+  const stagedManifestCount = readdirSync(stagedManifestsDirectory).filter((entry) =>
+    entry.endsWith(".json")
+  ).length
+  if (stagedManifestCount === 0) {
+    fail(
+      `staged connector manifests directory is empty: ${stagedManifestsDirectory}`
+    )
+  }
+
   return {
     manifestPath: join(targetDirectory, "manifest.json"),
     profile: validatedProfile,
