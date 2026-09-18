@@ -109,6 +109,13 @@ export type SourceSetupAvailability =
 
 /** Owner-facing picker order: actionable dispositions first, unsupported last. */
 export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
+  // A row with no click target at all (see `sourceSetupRowIsUnavailable`)
+  // sorts after every other rank, including the experimental opt-in below:
+  // there is nothing here to compare against those on cost/benefit, only a
+  // dead end, so it never interrupts a scan of rows the owner can act on.
+  if (sourceSetupRowIsUnavailable(entry)) {
+    return 10;
+  }
   if (isUnavailableSetupEntry(entry)) {
     return 8;
   }
@@ -139,6 +146,26 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
     default:
       return 9;
   }
+}
+
+/**
+ * Whether this row has no click target at all: a known scaffold, or any
+ * other disposition `sourceSetupAction` refuses (proof-gated, unproven,
+ * unsupported, unknown). These are the rows the owner has called out as
+ * "should not allow you to install" -- offering an install or add control
+ * that can never work is worse than not offering one, so the catalog must
+ * never render an action (including the Package column's install button)
+ * for a row this returns true for, and must sort every such row after
+ * every row that does have one.
+ *
+ * Deliberately narrower than `sourceSetupAvailability(entry) ===
+ * "not_available_here"`: that check also covers a real (non-scaffold)
+ * Development entry with a genuine self-test action -- e.g. an unproven
+ * local-collector connector -- which DOES have something to click and must
+ * not be treated as dead.
+ */
+export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boolean {
+  return sourceSetupAction(entry) === null;
 }
 
 /** The owner-facing status label + tone for first-account setup. */
