@@ -30,14 +30,18 @@ import {
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
+import {
+  openSqliteDatabase,
+  type SqliteEncryptionDatabaseConstructor,
+  type SqliteEncryptionOptions,
+} from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
-const Database = createRequire(import.meta.url)("better-sqlite3") as new (
-  filename: string,
-  options: { timeout: number }
-) => SqliteDatabase;
+const Database = createRequire(import.meta.url)(
+  "better-sqlite3-multiple-ciphers"
+) as SqliteEncryptionDatabaseConstructor;
 
 type SqliteRow = Record<string, unknown>;
 interface SqliteRunResult {
@@ -264,7 +268,7 @@ interface AccountDestinationRow {
   status: string;
 }
 
-interface InitDbOptions extends BusyRetryOptions {
+export interface InitDbOptions extends BusyRetryOptions, SqliteEncryptionOptions {
   busyTimeoutMs?: number;
   onSchemaMigration?: (event: SchemaMigrationEvent) => void;
   onSchemaRetry?: (event: BusyRetryEvent) => void;
@@ -6048,7 +6052,7 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
   }
-  const raw = new Database(path, { timeout: busyTimeoutMs }) as unknown as SqliteDatabase;
+  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
   sqliteStoreCacheGeneration += 1;
   sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
   raw.pragma(`busy_timeout = ${busyTimeoutMs}`);

@@ -69,6 +69,7 @@
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "@streamparser/json": "^0.0.25",
     "better-sqlite3": "^13.0.3",
+    "better-sqlite3-multiple-ciphers": "13.0.3",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "fastify": "^5.12.4",

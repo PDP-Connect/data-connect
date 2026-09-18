@@ -13,7 +13,10 @@ use crate::commands::process_supervisor::{
 };
 use crate::commands::{attach_reference_server, login_reference_server_with_password};
 use crate::owner_credential::{
-    configured_owner_password, load_or_create_owner_credential, owner_credential_path,
+    configured_owner_password, credential_encryption_key_path,
+    database_encryption_key_path, load_or_create_credential_encryption_key,
+    load_or_create_database_encryption_key, load_or_create_owner_credential,
+    owner_credential_path,
 };
 use crate::remote_access::{
     load_remote_access_config, off_remote_access_config, RemoteAccessConfig,
@@ -40,6 +43,9 @@ const RI_LABEL: &str = "reference-implementation";
 const CONSOLE_LABEL: &str = "console";
 const RI_HEALTH_PATH: &str = "/.well-known/oauth-protected-resource";
 const UNIFIED_DB_DIRECTORY: &str = "unified";
+const UNIFIED_DB_FILE: &str = "pdpp.sqlite";
+const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
+const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
 const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -417,40 +423,16 @@ fn ri_process_spec(
     root: &Path,
     data_dir: &Path,
     owner_password: &str,
+    credential_encryption_key: &str,
+    database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
 ) -> ProcessSpec {
-    let mut env = env_map(vec![
-        (OsString::from("AS_PORT"), OsString::from("{port}")),
-        (OsString::from("RS_PORT"), OsString::from("{port+1}")),
-        (
-            OsString::from("PDPP_DB_PATH"),
-            data_dir.join("pdpp.sqlite").into_os_string(),
-        ),
-        (
-            OsString::from("PDPP_DATA_DIR"),
-            data_dir.as_os_str().to_os_string(),
-        ),
-        (
-            OsString::from("PDPP_OWNER_PASSWORD"),
-            OsString::from(owner_password),
-        ),
-        (
-            OsString::from("PDPP_BIND_HOST"),
-            OsString::from("127.0.0.1"),
-        ),
-        (
-            OsString::from("PDPP_EMBEDDING_DOWNLOAD_ALLOWED"),
-            OsString::from("0"),
-        ),
-        (
-            OsString::from("PATCHRIGHT_SKIP_BROWSER_DOWNLOAD"),
-            OsString::from("1"),
-        ),
-        (
-            OsString::from("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"),
-            OsString::from("1"),
-        ),
-    ]);
+    let mut env = ri_environment(
+        data_dir,
+        owner_password,
+        credential_encryption_key,
+        database_encryption_key,
+    );
     env.extend(remote_access.fields.environment());
     add_browser_host_environment(app, &mut env);
     ProcessSpec {
@@ -474,6 +456,54 @@ fn ri_process_spec(
             total: Duration::from_secs(8),
         },
     }
+}
+
+fn ri_environment(
+    data_dir: &Path,
+    owner_password: &str,
+    credential_encryption_key: &str,
+    database_encryption_key: &str,
+) -> BTreeMap<OsString, OsString> {
+    env_map(vec![
+        (OsString::from("AS_PORT"), OsString::from("{port}")),
+        (OsString::from("RS_PORT"), OsString::from("{port+1}")),
+        (
+            OsString::from("PDPP_DB_PATH"),
+            data_dir.join(UNIFIED_DB_FILE).into_os_string(),
+        ),
+        (
+            OsString::from("PDPP_DATA_DIR"),
+            data_dir.as_os_str().to_os_string(),
+        ),
+        (
+            OsString::from("PDPP_OWNER_PASSWORD"),
+            OsString::from(owner_password),
+        ),
+        (
+            OsString::from(CREDENTIAL_ENCRYPTION_KEY_ENV),
+            OsString::from(credential_encryption_key),
+        ),
+        (
+            OsString::from(DATABASE_ENCRYPTION_KEY_ENV),
+            OsString::from(database_encryption_key),
+        ),
+        (
+            OsString::from("PDPP_BIND_HOST"),
+            OsString::from("127.0.0.1"),
+        ),
+        (
+            OsString::from("PDPP_EMBEDDING_DOWNLOAD_ALLOWED"),
+            OsString::from("0"),
+        ),
+        (
+            OsString::from("PATCHRIGHT_SKIP_BROWSER_DOWNLOAD"),
+            OsString::from("1"),
+        ),
+        (
+            OsString::from("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"),
+            OsString::from("1"),
+        ),
+    ])
 }
 
 fn console_process_spec(
@@ -577,6 +607,8 @@ struct ManagedStackStart {
 fn start_managed_stack(
     app: &AppHandle,
     owner_password: &str,
+    credential_encryption_key: &str,
+    database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
 ) -> Result<ManagedStackStart, String> {
     let resource_dir = app
@@ -619,6 +651,8 @@ fn start_managed_stack(
             &ri_root,
             &data_dir,
             owner_password,
+            credential_encryption_key,
+            database_encryption_key,
             remote_access,
         ),
         sink.clone(),
@@ -804,6 +838,30 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
         load_remote_access_config(&app)?
     };
 
+    let (credential_encryption_key, database_encryption_key) = if attach_mode() {
+        (None, None)
+    } else {
+        let credential_encryption_key_path = credential_encryption_key_path(&app)?;
+        let database_encryption_key_path = database_encryption_key_path(&app)?;
+        let database_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+            .join(UNIFIED_DB_DIRECTORY)
+            .join(UNIFIED_DB_FILE);
+        let database_encryption_key = load_or_create_database_encryption_key(
+            &database_encryption_key_path,
+            &database_path,
+        )?;
+        (
+            Some(load_or_create_credential_encryption_key(
+                &credential_encryption_key_path,
+                &database_path,
+            )?),
+            Some(database_encryption_key),
+        )
+    };
+
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
         let ri_origin = reference_status
@@ -812,12 +870,20 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
         (ri_origin, configured_console_url()?, false)
     } else {
         let password_for_sidecar = password.clone();
+        let credential_encryption_key_for_sidecar = credential_encryption_key
+            .clone()
+            .ok_or_else(|| "Unified RI credential encryption key was not provisioned".to_string())?;
+        let database_encryption_key_for_sidecar = database_encryption_key
+            .clone()
+            .ok_or_else(|| "Unified RI database encryption key was not provisioned".to_string())?;
         let app_for_sidecars = app.clone();
         let remote_access_for_sidecars = remote_access.clone();
         let result = tokio::task::spawn_blocking(move || {
             start_managed_stack(
                 &app_for_sidecars,
                 &password_for_sidecar,
+                &credential_encryption_key_for_sidecar,
+                &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
             )
         })
@@ -1201,6 +1267,32 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!enabled_for_value(Some("0")));
         assert!(!enabled_for_value(Some("true")));
         assert!(!enabled_for_value(None));
+    }
+
+    #[test]
+    fn ri_environment_passes_secrets_only_to_the_ri_allowlist_without_debug_values() {
+        let owner_password = "owner-password-test";
+        let credential_key = "credential-key-test";
+        let database_key = "database-key-test";
+        let environment = ri_environment(
+            Path::new("/tmp/unified"),
+            owner_password,
+            credential_key,
+            database_key,
+        );
+
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new(CREDENTIAL_ENCRYPTION_KEY_ENV)),
+            Some(&OsString::from(credential_key))
+        );
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new(DATABASE_ENCRYPTION_KEY_ENV)),
+            Some(&OsString::from(database_key))
+        );
+        let debug = format!("{:?}", EnvironmentSpec::cleared(environment));
+        assert!(!debug.contains(owner_password));
+        assert!(!debug.contains(credential_key));
+        assert!(!debug.contains(database_key));
     }
 
     #[test]

@@ -1,15 +1,19 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { statSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import type { RawValue } from "./transformers.ts";
 
-/** A better-sqlite3 database handle. */
+const DATABASE_ENCRYPTION_KEY_ENV = "PDPP_DATABASE_ENCRYPTION_KEY";
+const SQLITE_HEADER = Buffer.from("SQLite format 3\0", "ascii");
+
+/** A cipher-enabled SQLite database handle. */
 interface DatabaseHandle {
   close: () => void;
+  key: (key: Buffer) => number;
   loadExtension: (path: string) => void;
   prepare: (sql: string) => {
     all: () => unknown[];
@@ -18,7 +22,17 @@ interface DatabaseHandle {
   };
 }
 type DatabaseConstructor = new (path: string, options: { fileMustExist: boolean; readonly: boolean }) => DatabaseHandle;
-const Database = createRequire(import.meta.url)("better-sqlite3") as DatabaseConstructor;
+const Database = createRequire(import.meta.url)("better-sqlite3-multiple-ciphers") as DatabaseConstructor;
+
+function hasPlaintextSqliteHeader(filepath: string): boolean {
+  const descriptor = openSync(filepath, "r");
+  const header = Buffer.alloc(SQLITE_HEADER.length);
+  try {
+    return readSync(descriptor, header, 0, header.length, 0) === header.length && header.equals(SQLITE_HEADER);
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 /**
  * Opens a read-only handle to a SQLite database.
@@ -49,7 +63,30 @@ export function openSqliteSource(url: string): {
     filepath = isAbsolute(url) ? url : resolve(url);
   }
 
+  const encryptionKey = process.env[DATABASE_ENCRYPTION_KEY_ENV]?.trim() || null;
+  const encrypted = !hasPlaintextSqliteHeader(filepath);
+  if (encrypted && !encryptionKey) {
+    throw new Error(
+      `The SQLite source at ${filepath} is encrypted, but ${DATABASE_ENCRYPTION_KEY_ENV} is missing.`
+    );
+  }
+
   const handle = new Database(filepath, { fileMustExist: true, readonly: true });
+  if (encrypted && encryptionKey) {
+    handle.key(Buffer.from(encryptionKey, "utf8"));
+    try {
+      handle.prepare("SELECT COUNT(*) AS count FROM sqlite_master").get();
+    } catch (error) {
+      handle.close();
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not open the encrypted SQLite source at ${filepath} with ${DATABASE_ENCRYPTION_KEY_ENV}. ` +
+          "Restore the database key and retry. " +
+          detail,
+        { cause: error }
+      );
+    }
+  }
 
   let vecLoaded = false;
   try {
