@@ -599,6 +599,9 @@ fn ri_process_spec(
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
+        // AS/RS stay internal (never a reverse-proxy target), so they always
+        // use dynamic loopback allocation.
+        requested_port: None,
     }
 }
 
@@ -718,6 +721,11 @@ fn console_process_spec(
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
+        // The console is the one surface a "proxy you run" points at (it
+        // fronts AS/RS internally) -- see RemoteAccessConfig::console_port's
+        // doc comment. RI keeps its dynamic AS/RS allocation; only this spec
+        // ever receives a pin.
+        requested_port: remote_access.console_port,
     }
 }
 
@@ -2542,6 +2550,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 escalate: Duration::from_secs(1),
                 total: Duration::from_secs(2),
             },
+            requested_port: None,
         }
     }
 
@@ -2869,6 +2878,36 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!debug.contains(owner_password));
         assert!(!debug.contains(credential_key));
         assert!(!debug.contains(database_key));
+    }
+
+    #[test]
+    fn a_pinned_console_port_reaches_the_console_process_spec() {
+        let mut remote_access = off_remote_access_config();
+        remote_access.console_port = Some(4310);
+
+        // The console is the one surface a "proxy you run" points at (it
+        // fronts AS/RS internally), so it is the only spec that ever
+        // receives a pin -- ri_process_spec's literal always sets
+        // `requested_port: None` (AS/RS keep dynamic allocation).
+        let console_spec = console_process_spec(
+            &node_program(),
+            Path::new("/tmp/console-root"),
+            "http://127.0.0.1:7662",
+            "http://127.0.0.1:7663",
+            "owner-password-test",
+            &remote_access,
+        );
+        assert_eq!(console_spec.requested_port, Some(4310));
+
+        let unpinned_console_spec = console_process_spec(
+            &node_program(),
+            Path::new("/tmp/console-root"),
+            "http://127.0.0.1:7662",
+            "http://127.0.0.1:7663",
+            "owner-password-test",
+            &off_remote_access_config(),
+        );
+        assert_eq!(unpinned_console_spec.requested_port, None);
     }
 
     #[test]
