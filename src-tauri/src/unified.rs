@@ -1039,6 +1039,16 @@ fn create_or_update_console_window(
         WebviewWindowBuilder::new(app, CONSOLE_WINDOW_LABEL, WebviewUrl::External(blank_url))
             .title("DataConnect")
             .visible(false)
+            // Sizing grounded in measured prior art, not a round number —
+            // see ai/research/desktop-app-packaging/vscode-electron-window-state-sizing-precedent-2026.md.
+            // Minimum tracks the sidebar's own collapse breakpoint in
+            // apps/console DashboardShell (`md:` = 768px CSS width), with margin.
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(800.0, 600.0)
+            // Clamp to the monitor's work area so the window never opens
+            // larger than a small display (checked on creation only).
+            .prevent_overflow()
+            .center()
             .build()
             .map_err(|error| format!("Failed to create console window: {error}"))?;
 
