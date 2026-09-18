@@ -33,6 +33,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "npm run typecheck && vitest run",
     "test:pdpp-interop": "node --test scripts/pdpp-interoperability-e2e.test.mjs",
+    "test:e2e": "npm --prefix e2e run test:e2e",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:icon": "tauri icon ./public/data_connect_1024_1x.png",

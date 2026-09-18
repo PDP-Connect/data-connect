@@ -47,3 +47,7 @@ pdpp-runtime/.install-stamp
 # published as a pull request artifact, not committed.
 .stryker-tmp/
 reports/mutation/
+
+# Playwright e2e run output
+e2e/test-results/
+e2e/playwright-report/
