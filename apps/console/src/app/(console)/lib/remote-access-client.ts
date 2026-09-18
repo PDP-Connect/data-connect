@@ -8,9 +8,12 @@
  * `connector-install-client.ts`: mint the owner token from the dashboard's
  * session cookie, then call the resource server directly.
  *
- * This module owns only the `user_supplied_origin` provider surface. ngrok
- * remains desktop-only and keeps calling the existing Tauri commands from
- * `remote-access-setting.tsx` when `window.__TAURI_INTERNALS__` is present.
+ * Covers both providers: `user_supplied_origin` end to end, and ngrok's
+ * config + authtoken submission (the route seals the token server-side; see
+ * `owner-remote-access.ts`). ngrok's native work -- OS keychain storage and
+ * Rust-side tunnel supervision -- still happens only on a Tauri host, but
+ * that host consumes this same HTTP-submitted config via its own config-file
+ * watcher, not a direct `invoke()` call from this client.
  */
 
 import { describeErrorText } from "./describe-error.ts"
@@ -63,9 +66,12 @@ export async function getRemoteAccessConfig(): Promise<RemoteAccessConfig> {
   return unwrapData(payload) as RemoteAccessConfig
 }
 
-export async function setRemoteAccessConfig(config: RemoteAccessConfig): Promise<RemoteAccessConfig> {
+export async function setRemoteAccessConfig(
+  config: RemoteAccessConfig,
+  providerCredential?: string
+): Promise<RemoteAccessConfig> {
   const payload = await remoteAccessFetch("/v1/owner/remote-access/config", {
-    body: JSON.stringify(config),
+    body: JSON.stringify(providerCredential === undefined ? config : { ...config, providerCredential }),
     method: "POST",
   })
   return unwrapData(payload) as RemoteAccessConfig
@@ -73,5 +79,10 @@ export async function setRemoteAccessConfig(config: RemoteAccessConfig): Promise
 
 export async function inspectRemoteAccess(): Promise<RemoteAccessInspection> {
   const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect")
+  return unwrapData(payload) as RemoteAccessInspection
+}
+
+export async function inspectNgrokRemoteAccess(): Promise<RemoteAccessInspection> {
+  const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/ngrok")
   return unwrapData(payload) as RemoteAccessInspection
 }

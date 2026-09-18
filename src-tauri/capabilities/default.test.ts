@@ -142,59 +142,11 @@ describe("windowIsGranted window-pattern matching", () => {
   })
 })
 
-describe("remote-access commands reachable from the console window", () => {
-  const defaultDocument = JSON.parse(
-    readFileSync(
-      resolve(process.cwd(), "src-tauri/capabilities/default.json"),
-      "utf-8"
-    )
-  ) as CapabilityDocument
-  const consoleDocument = JSON.parse(
-    readFileSync(
-      resolve(process.cwd(), "src-tauri/capabilities/console.json"),
-      "utf-8"
-    )
-  ) as CapabilityDocument
-
-  const remoteAccessCommands = [
-    "get_remote_access_config",
-    "inspect_remote_access",
-    "set_remote_access_config",
-    "configure_remote_access",
-  ]
-
-  // These commands have no per-command ACL identifier (see windowIsGranted
-  // above), so "grants access to the command" reduces to "some capability
-  // grants core:default to this window" -- the same check for every
-  // command in the list. Parameterized so the intent (four named commands,
-  // all reachable) stays explicit rather than collapsing into one grant
-  // check that a renamed/shortened command list wouldn't be caught by.
-  it.each(remoteAccessCommands)("grants the console window access to %s", () => {
-    const grantedToConsole =
-      windowIsGranted(defaultDocument, "console") ||
-      windowIsGranted(consoleDocument, "console")
-
-    expect(grantedToConsole).toBe(true)
-  })
-
-  it.each(remoteAccessCommands)(
-    "does not grant a window absent from every capability access to %s",
-    () => {
-      const grantedToUnknownWindow =
-        windowIsGranted(defaultDocument, "not-a-real-window") ||
-        windowIsGranted(consoleDocument, "not-a-real-window")
-
-      expect(grantedToUnknownWindow).toBe(false)
-    }
-  )
-
-  it("grants the remote-access commands to console specifically, not via a blanket default.json window", () => {
-    // default.json's own windows list must not have grown to include the
-    // console (or a wildcard) as a side effect of this fix -- the grant
-    // must come from the dedicated console.json capability, not from
-    // widening the shared default capability the brief said not to widen.
-    expect(defaultDocument.windows).toEqual(["main", "connector-*"])
-    expect(windowIsGranted(defaultDocument, "console")).toBe(false)
-    expect(windowIsGranted(consoleDocument, "console")).toBe(true)
-  })
-})
+// The remote-access commands (get_remote_access_config, inspect_remote_access,
+// set_remote_access_config, configure_remote_access) that this section used to
+// test capability grants for are gone: the console now reaches both remote-
+// access providers over the owner-authenticated HTTP routes in
+// reference-implementation/server/routes/owner-remote-access.ts, never
+// invoke() (see remote-access-setting.tsx's module doc comment). Asserting a
+// capability grant for commands that no longer exist would test a premise
+// that is no longer true.

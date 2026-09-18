@@ -5,17 +5,16 @@
  * Acceptance coverage for the owner remote-access routes
  * (server/routes/owner-remote-access.ts).
  *
- * These routes are the HTTP replacement for the four Tauri commands the
- * console used to call directly (get_remote_access_config /
- * set_remote_access_config / configure_remote_access / inspect_remote_access,
- * in src-tauri/src/remote_access.rs) -- unreachable from the console's
- * http://127.0.0.1:{port} window because Tauri never injects invoke() into
- * that origin (local/HOST-BRIDGE-DESIGN-0918.md). The property this file
- * protects: the routes validate and persist through the SAME store the
- * `user_supplied_origin` provider owns, reject the ngrok provider (desktop-only
- * scope fence), and never touch owner-session/token verification themselves --
- * that stays entirely in the injected `requireToken`/`requireOwner` middleware,
- * matching every other `/v1/owner/*` route.
+ * These routes are the HTTP replacement for the remote-access Tauri commands
+ * the console used to call directly (src-tauri/src/remote_access.rs) --
+ * unreachable from the console's http://127.0.0.1:{port} window because
+ * Tauri never injects invoke() into that origin (Tauri Discussion #2650).
+ * The property this file protects: the routes validate and persist through
+ * the SAME store both providers own, seal ngrok's authtoken rather than
+ * persisting it as plaintext, and never touch owner-session/token
+ * verification themselves -- that stays entirely in the injected
+ * `requireToken`/`requireOwner` middleware, matching every other
+ * `/v1/owner/*` route.
  */
 
 import assert from "node:assert/strict";
@@ -27,6 +26,9 @@ import test from "node:test";
 import { offRemoteAccessConfig, type RemoteAccessConfig } from "../server/remote-access-config.ts";
 import { createRemoteAccessConfigStore } from "../server/remote-access-store.ts";
 import { mountOwnerRemoteAccess } from "../server/routes/owner-remote-access.ts";
+import { createCredentialCipherFromEnv } from "../server/stores/credential-encryption.ts";
+
+const TEST_CREDENTIAL_ENCRYPTION_KEY = "test-owner-remote-access-route-credential-encryption-key";
 
 interface CapturedResponse {
   body: unknown;
@@ -71,6 +73,8 @@ async function withMountedRoutes(
   fn: (routes: FakeApp["routes"]) => Promise<void>
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "owner-remote-access-route-"));
+  const previousKey = process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
+  process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY = TEST_CREDENTIAL_ENCRYPTION_KEY;
   try {
     const app = new FakeApp();
     mountOwnerRemoteAccess(app as unknown as Parameters<typeof mountOwnerRemoteAccess>[0], {
@@ -88,6 +92,11 @@ async function withMountedRoutes(
     });
     await fn(app.routes);
   } finally {
+    if (previousKey === undefined) {
+      delete process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
+    } else {
+      process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY = previousKey;
+    }
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -152,11 +161,48 @@ test("POST config rejects a non-HTTPS origin with a 400 and does not persist it"
   });
 });
 
-test("POST config rejects the ngrok provider — desktop-only scope fence", async () => {
+test("POST config seals a submitted ngrok authtoken and never echoes it back", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const ngrokConfig = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+    };
+
+    const post = makeRes();
+    await postHandler?.(
+      { body: { ...ngrokConfig, providerCredential: "shhh-ngrok-authtoken" } },
+      post.res
+    );
+    assert.equal(post.captured.status, 200);
+    const postedBody = post.captured.body as { data: RemoteAccessConfig };
+    assert.equal(postedBody.data.provider, "ngrok");
+    // The response never carries the sealed or plaintext token.
+    assert.equal((postedBody.data as { ngrok_authtoken_sealed?: unknown }).ngrok_authtoken_sealed, undefined);
+    assert.doesNotMatch(JSON.stringify(post.captured.body), /shhh-ngrok-authtoken/);
+
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    const storedBody = get.captured.body as { data: RemoteAccessConfig & { ngrok_authtoken_sealed?: string } };
+    assert.equal(storedBody.data.provider, "ngrok");
+    // Persisted on disk, but sealed -- not the plaintext token.
+    assert.ok(storedBody.data.ngrok_authtoken_sealed);
+    assert.doesNotMatch(storedBody.data.ngrok_authtoken_sealed ?? "", /shhh-ngrok-authtoken/);
+
+    const cipher = createCredentialCipherFromEnv();
+    assert.equal(cipher.open(storedBody.data.ngrok_authtoken_sealed ?? ""), "shhh-ngrok-authtoken");
+  });
+});
+
+test("POST config rejects an ngrok submission with no providerCredential", async () => {
   await withMountedRoutes(async (routes) => {
     const postHandler = routes.get("POST /v1/owner/remote-access/config");
     const ngrokConfig = {
       fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
       posture: "public_url",
       provider: "ngrok",
     };
@@ -166,8 +212,30 @@ test("POST config rejects the ngrok provider — desktop-only scope fence", asyn
     assert.equal(post.captured.status, 400);
     assert.match(
       String((post.captured.body as { error: { message: string } }).error.message),
-      /user_supplied_origin/
+      /providerCredential/
     );
+  });
+});
+
+test("POST config rejects ngrok with a non-empty PDPP_REFERENCE_ORIGIN before a tunnel exists", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const ngrokConfig = {
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://not-yet-assigned.ngrok.app",
+        PDPP_TRUSTED_HOSTS: "not-yet-assigned.ngrok.app",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+      providerCredential: "shhh-ngrok-authtoken",
+    };
+
+    const post = makeRes();
+    await postHandler?.({ body: ngrokConfig }, post.res);
+    assert.equal(post.captured.status, 400);
   });
 });
 
@@ -216,4 +284,36 @@ test("GET inspect is a static capability probe, independent of the stored postur
     await inspectHandler?.({}, after.res);
     assert.deepEqual(after.captured.body, before.captured.body);
   });
+});
+
+test("GET inspect/ngrok reports unavailable without a managed desktop host, and available with one", async () => {
+  const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
+  try {
+    delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    await withMountedRoutes(async (routes) => {
+      const handler = routes.get("GET /v1/owner/remote-access/inspect/ngrok");
+      const { captured, res } = makeRes();
+      await handler?.({}, res);
+      const body = captured.body as { data: { availability: string; reason: string | null } };
+      assert.equal(body.data.availability, "unavailable");
+      assert.match(body.data.reason ?? "", /desktop app/i);
+    });
+
+    process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
+    await withMountedRoutes(async (routes) => {
+      const handler = routes.get("GET /v1/owner/remote-access/inspect/ngrok");
+      const { captured, res } = makeRes();
+      await handler?.({}, res);
+      assert.deepEqual(captured.body, {
+        data: { availability: "available", authentication: "not_required", reason: null },
+        object: "remote_access_inspection",
+      });
+    });
+  } finally {
+    if (previousHost === undefined) {
+      delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    } else {
+      process.env.PDPP_MANAGED_DESKTOP_HOST = previousHost;
+    }
+  }
 });

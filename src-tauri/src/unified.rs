@@ -13,13 +13,13 @@ use crate::commands::process_supervisor::{
 };
 use crate::commands::{attach_reference_server, login_reference_server_with_password};
 use crate::owner_credential::{
-    configured_owner_password, credential_encryption_key_path,
-    database_encryption_key_path, load_or_create_credential_encryption_key,
-    load_or_create_database_encryption_key, load_or_create_owner_credential,
-    owner_credential_path,
+    configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
+    load_or_create_credential_encryption_key, load_or_create_database_encryption_key,
+    load_or_create_owner_credential, owner_credential_path,
 };
 use crate::remote_access::{
-    load_remote_access_config, off_remote_access_config, RemoteAccessConfig,
+    load_remote_access_config, off_remote_access_config, save_remote_access_config,
+    CredentialReference, RemoteAccessConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -50,6 +50,14 @@ pub(crate) const UNIFIED_DB_DIRECTORY: &str = "unified";
 const UNIFIED_DB_FILE: &str = "pdpp.sqlite";
 const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
 const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
+// Read by `inspectNgrok` in `reference-implementation/server/remote-access-config.ts`
+// to tell a browser-reached self-hoster honestly that ngrok cannot activate
+// without this supervisor's config watcher and native tunnel supervision. Set
+// only when `remote_access_configuration_supported()` (see `ri_process_spec`)
+// -- an attach-mode RI has no watcher and no supervisor-owned config file
+// either, so it is exactly as unable to activate ngrok as a plain self-hosted
+// deployment, and must report the same honest "unavailable" answer.
+const MANAGED_DESKTOP_HOST_ENV: &str = "PDPP_MANAGED_DESKTOP_HOST";
 const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -102,18 +110,32 @@ struct ShutdownState {
 struct UnifiedStack {
     ri: SupervisorHandle,
     console: SupervisorHandle,
+    /// Owns the live ngrok session/tunnel when the configured provider is
+    /// ngrok (see `start_ngrok_provider`); `None` for every other posture.
+    /// Held here, not dropped at the end of `start_managed_stack`, so the
+    /// tunnel survives for the life of the stack and is stopped alongside the
+    /// sidecars in `stop`/`stop_until` rather than by `NgrokProvider`'s
+    /// `Drop` firing early.
+    ngrok: Option<
+        crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
+    >,
 }
 
 impl UnifiedStack {
-    fn stop(&self) -> Result<(), String> {
+    fn stop(&mut self) -> Result<(), String> {
         self.stop_until(std::time::Instant::now() + UNIFIED_SHUTDOWN_BUDGET)
     }
 
-    fn stop_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+    fn stop_until(&mut self, deadline: std::time::Instant) -> Result<(), String> {
         log::info!(
             "Unified sidecar shutdown started with a {:?} budget",
             UNIFIED_SHUTDOWN_BUDGET
         );
+        if let Some(ngrok) = self.ngrok.as_mut() {
+            if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(ngrok) {
+                log::error!("Failed to stop the ngrok tunnel during shutdown: {error}");
+            }
+        }
         let (console_error, ri_error) = std::thread::scope(|scope| {
             let console = scope.spawn(|| self.console.stop_until(deadline));
             let ri = scope.spawn(|| self.ri.stop_until(deadline));
@@ -441,9 +463,11 @@ fn env_map(entries: Vec<(OsString, OsString)>) -> BTreeMap<OsString, OsString> {
 
 fn add_browser_host_environment(app: &AppHandle, env: &mut BTreeMap<OsString, OsString>) {
     if let Some(pairs) = crate::commands::browser_surface_host_env_pairs(app) {
-        env.extend(pairs.into_iter().map(|(name, value)| {
-            (OsString::from(name), OsString::from(value))
-        }));
+        env.extend(
+            pairs
+                .into_iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+        );
     }
 }
 
@@ -494,7 +518,7 @@ fn ri_environment(
     credential_encryption_key: &str,
     database_encryption_key: &str,
 ) -> BTreeMap<OsString, OsString> {
-    env_map(vec![
+    let mut env = env_map(vec![
         (OsString::from("AS_PORT"), OsString::from("{port}")),
         (OsString::from("RS_PORT"), OsString::from("{port+1}")),
         (
@@ -533,7 +557,14 @@ fn ri_environment(
             OsString::from("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"),
             OsString::from("1"),
         ),
-    ])
+    ]);
+    if remote_access_configuration_supported() {
+        env.insert(
+            OsString::from(MANAGED_DESKTOP_HOST_ENV),
+            OsString::from("1"),
+        );
+    }
+    env
 }
 
 fn console_process_spec(
@@ -691,6 +722,28 @@ fn start_managed_stack(
     .map_err(|error| format!("Failed to start staged RI: {error}"))?;
     let ri_origin = format!("http://127.0.0.1:{}", ri.port());
     let rs_origin = format!("http://127.0.0.1:{}", ri.port().saturating_add(1));
+
+    // ngrok discovers its own origin only once its tunnel is up, and the RI
+    // must already be listening (on `ri.port()`, just allocated above) for
+    // ngrok to have anything to forward to -- so the tunnel starts here,
+    // between the RI and console, rather than before either. The console
+    // gets the discovered fields immediately (below); the RI itself keeps
+    // running with the empty fields it was spawned with until
+    // `apply_discovered_ngrok_origin` persists them and the existing
+    // remote-access config watcher restarts the whole stack with the real
+    // origin applied at RI startup too (see that function's doc comment).
+    let (console_remote_access, ngrok) = match start_ngrok_provider(remote_access, ri.port())? {
+        Some((fields, provider)) => {
+            let mut with_origin = remote_access.clone();
+            with_origin.fields = fields;
+            (with_origin, Some(provider))
+        }
+        None => (remote_access.clone(), None),
+    };
+    if ngrok.is_some() {
+        apply_discovered_ngrok_origin(app, &console_remote_access.fields);
+    }
+
     let console = Supervisor::new(
         console_process_spec(
             &node_binary,
@@ -698,7 +751,7 @@ fn start_managed_stack(
             &ri_origin,
             &rs_origin,
             owner_password,
-            remote_access,
+            &console_remote_access,
         ),
         sink,
     )
@@ -706,10 +759,129 @@ fn start_managed_stack(
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
     let console_url = format!("http://127.0.0.1:{}", console.port());
     Ok(ManagedStackStart {
-        stack: UnifiedStack { ri, console },
+        stack: UnifiedStack { ri, console, ngrok },
         ri_origin,
         console_url,
     })
+}
+
+/// Start the ngrok tunnel and return the reachability fields it discovered,
+/// when `remote_access` selects the ngrok provider. `Ok(None)` for every
+/// other provider -- not an error, just "no tunnel to start".
+///
+/// The authtoken is read back out of the OS keychain
+/// (`KeychainCredentialResolver`), never carried in `remote_access` itself:
+/// `owner-remote-access.ts`'s POST handler only ever seals it into
+/// `ngrok_authtoken_sealed`, and `apply_pending_ngrok_authtoken` (the config
+/// watcher) is the only thing that ever decrypts it, storing the plaintext
+/// in the keychain and nothing else. If no credential is stored yet (the
+/// owner just submitted one and the watcher hasn't caught up, or submitted
+/// none at all), this fails with a clear error instead of starting sidecars
+/// nothing outside this device can reach.
+fn start_ngrok_provider(
+    remote_access: &RemoteAccessConfig,
+    ri_port: u16,
+) -> Result<
+    Option<(
+        crate::remote_access::ReachabilityFields,
+        crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
+    )>,
+    String,
+> {
+    use crate::remote_access::{
+        CancellationToken, CredentialReference, CredentialResolver, KeychainCredentialResolver,
+        LoopbackTarget, RemoteAccessContractConfig, RemoteAccessPosture, RemoteAccessProvider,
+    };
+    use crate::remote_access_ngrok::{NgrokProvider, NGROK_PROVIDER_ID};
+    use crate::remote_access_providers::{resolve_public_url_provider, PublicUrlProvider};
+
+    if remote_access.provider.as_deref() != Some(NGROK_PROVIDER_ID) {
+        return Ok(None);
+    }
+    if !matches!(remote_access.posture, RemoteAccessPosture::PublicUrl) {
+        return Ok(None);
+    }
+    let PublicUrlProvider::Ngrok(options) = resolve_public_url_provider(
+        &remote_access.posture,
+        remote_access.provider.as_deref(),
+        remote_access.ngrok.as_ref(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let resolver = KeychainCredentialResolver;
+    let credential = resolver
+        .resolve(NGROK_PROVIDER_ID)
+        .map_err(|error| format!("Could not read the ngrok authtoken from the keychain: {error}"))?
+        .ok_or_else(|| {
+            "ngrok is configured but no authtoken is stored yet. Submit one from Settings."
+                .to_string()
+        })?;
+
+    let mut provider = NgrokProvider::with_reserved_domain(
+        RemoteAccessContractConfig {
+            provider_id: NGROK_PROVIDER_ID.to_string(),
+            posture: RemoteAccessPosture::PublicUrl,
+            user_supplied_origin: None,
+            credential_reference: match &credential {
+                CredentialReference::Stored(token) => Some(token.clone()),
+                CredentialReference::NotRequired => None,
+            },
+        },
+        resolver,
+        options.endpoint_mode.into(),
+        options.reserved_domain.clone(),
+    )?;
+
+    let handle = provider.start(
+        LoopbackTarget {
+            host: "127.0.0.1".to_string(),
+            port: ri_port,
+        },
+        credential,
+        CancellationToken::new(),
+    )?;
+    let fields = NgrokProvider::<KeychainCredentialResolver>::reachability_fields(&handle.origin)?;
+    log::info!("ngrok tunnel is up at {}", handle.origin);
+    Ok(Some((fields, provider)))
+}
+
+/// Persist the origin ngrok's tunnel just discovered so the NEXT stack
+/// restart starts the RI itself with the correct `PDPP_REFERENCE_ORIGIN` /
+/// `PDPP_TRUSTED_HOSTS` -- required because the RI (unlike the console, which
+/// gets the discovered fields for THIS run directly in `start_managed_stack`)
+/// already started with empty fields before the tunnel's origin was known
+/// (see `start_managed_stack`'s ordering comment) and enforces its allowed-
+/// host contract from env parsed once at its own startup
+/// (`reachability-contract.ts`). Writing here is a no-op if the origin is
+/// already what's on disk (a restart that re-attaches an already-known
+/// origin), so this does not loop by itself; a FRESH ngrok origin on every
+/// restart (the free-tier random-hostname case) will still cause one restart
+/// per session start, which is inherent to ngrok's free tier, not something
+/// this function can fix -- a reserved domain (paid plan) keeps the origin
+/// stable across restarts and settles after exactly one.
+fn apply_discovered_ngrok_origin(
+    app: &AppHandle,
+    fields: &crate::remote_access::ReachabilityFields,
+) {
+    let current = match load_remote_access_config(app) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!("Could not read the remote-access config to persist ngrok's discovered origin: {error}");
+            return;
+        }
+    };
+    if &current.fields == fields {
+        return;
+    }
+    let updated = RemoteAccessConfig {
+        fields: fields.clone(),
+        ..current
+    };
+    if let Err(error) = save_remote_access_config(app, updated) {
+        log::error!("Could not persist ngrok's discovered origin: {error}");
+    }
 }
 
 fn store_stack(app: &AppHandle, stack: UnifiedStack) -> Result<(), String> {
@@ -736,7 +908,7 @@ fn take_stack(app: &AppHandle) -> Result<Option<UnifiedStack>, String> {
 
 fn stop_stack(app: &AppHandle) -> Result<(), String> {
     let stack = take_stack(app)?;
-    stack.map_or(Ok(()), |stack| stack.stop())
+    stack.map_or(Ok(()), |mut stack| stack.stop())
 }
 
 fn mark_shutdown_complete(app: &AppHandle) {
@@ -775,7 +947,7 @@ fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack
             take_stack(&app).ok().flatten()
         });
 
-        let result = stack.map_or(Ok(()), |stack| stack.stop_until(deadline));
+        let result = stack.map_or(Ok(()), |mut stack| stack.stop_until(deadline));
         match result {
             Ok(()) => log::info!("Unified shutdown finished within its budget"),
             Err(error) => log::error!("Unified shutdown finished with errors: {error}"),
@@ -940,10 +1112,8 @@ fn load_bootstrap_secrets(app: &AppHandle, attach_mode: bool) -> Result<Bootstra
             .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
             .join(UNIFIED_DB_DIRECTORY)
             .join(UNIFIED_DB_FILE);
-        let database_encryption_key = load_or_create_database_encryption_key(
-            &database_encryption_key_path,
-            &database_path,
-        )?;
+        let database_encryption_key =
+            load_or_create_database_encryption_key(&database_encryption_key_path, &database_path)?;
         (
             Some(load_or_create_credential_encryption_key(
                 &credential_encryption_key_path,
@@ -983,9 +1153,10 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         (ri_origin, configured_console_url()?, false)
     } else {
         let password_for_sidecar = password.clone();
-        let credential_encryption_key_for_sidecar = credential_encryption_key
-            .clone()
-            .ok_or_else(|| "Unified RI credential encryption key was not provisioned".to_string())?;
+        let credential_encryption_key_for_sidecar =
+            credential_encryption_key.clone().ok_or_else(|| {
+                "Unified RI credential encryption key was not provisioned".to_string()
+            })?;
         let database_encryption_key_for_sidecar = database_encryption_key
             .clone()
             .ok_or_else(|| "Unified RI database encryption key was not provisioned".to_string())?;
@@ -1116,6 +1287,63 @@ const REMOTE_ACCESS_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// (from `set_remote_access_config` / `configure_remote_access`, or a later
 /// external change) is likewise absorbed into `last_applied` as it happens,
 /// since this is the only task that ever advances it.
+/// Decrypt a pending `ngrok_authtoken_sealed` (written by `owner-remote-access.ts`'s
+/// POST handler, see `RemoteAccessConfig::ngrok_authtoken_sealed`'s doc comment
+/// in `remote_access.rs`) into the OS keychain, then blank the sealed field
+/// back to `None` on disk. Returns the config with the field cleared either
+/// way -- on decrypt failure the sealed token is dropped rather than retried
+/// forever, since a bad token needs the owner to resubmit it, not a poll loop
+/// hammering the same ciphertext every 3 seconds.
+///
+/// Must run BEFORE `restart_after_remote_access_config`: the restart's own
+/// `start_managed_stack` reads the ngrok authtoken back out of the keychain
+/// (`sealed_credential` only ever writes there, never returns the plaintext
+/// to a caller that might restart the tunnel with it directly) to start the
+/// tunnel, so the keychain write must already be durable by the time that
+/// runs.
+fn apply_pending_ngrok_authtoken(
+    app: &AppHandle,
+    config: RemoteAccessConfig,
+) -> RemoteAccessConfig {
+    let Some(sealed) = config.ngrok_authtoken_sealed.clone() else {
+        return config;
+    };
+    let outcome = (|| -> Result<(), String> {
+        let key_path = credential_encryption_key_path(app)?;
+        let database_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+            .join(UNIFIED_DB_DIRECTORY)
+            .join(UNIFIED_DB_FILE);
+        let credential_encryption_key =
+            load_or_create_credential_encryption_key(&key_path, &database_path)?;
+        let token = crate::sealed_credential::open_sealed_credential(
+            &sealed,
+            &credential_encryption_key,
+        )
+        .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
+        crate::owner_credential::store_provider_credential_reference(
+            crate::remote_access_ngrok::NGROK_PROVIDER_ID,
+            &token,
+        )
+    })();
+    if let Err(error) = outcome {
+        log::error!("Could not apply the pending ngrok authtoken: {error}");
+    }
+    let cleared = RemoteAccessConfig {
+        ngrok_authtoken_sealed: None,
+        ..config
+    };
+    match save_remote_access_config(app, cleared.clone()) {
+        Ok(saved) => saved,
+        Err(error) => {
+            log::error!("Could not clear the pending ngrok authtoken from disk: {error}");
+            cleared
+        }
+    }
+}
+
 pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_applied = load_remote_access_config(&app).unwrap_or_else(|error| {
@@ -1130,9 +1358,16 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             let current = match load_remote_access_config(&app) {
                 Ok(config) => config,
                 Err(error) => {
-                    log::warn!("Remote-access config watcher could not read the config file: {error}");
+                    log::warn!(
+                        "Remote-access config watcher could not read the config file: {error}"
+                    );
                     continue;
                 }
+            };
+            let current = if current.ngrok_authtoken_sealed.is_some() {
+                apply_pending_ngrok_authtoken(&app, current)
+            } else {
+                current
             };
             if current == last_applied {
                 continue;
@@ -1140,7 +1375,9 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             log::info!("Remote-access config changed on disk; restarting the managed stack");
             last_applied = current;
             if let Err(error) = restart_after_remote_access_config(app.clone()).await {
-                log::error!("Automatic restart after a remote-access config change failed: {error}");
+                log::error!(
+                    "Automatic restart after a remote-access config change failed: {error}"
+                );
             }
         }
     });
@@ -1544,7 +1781,15 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         .start()
         .expect("fake console should become ready");
         let console_port = console.port();
-        (UnifiedStack { ri, console }, ri_port, console_port)
+        (
+            UnifiedStack {
+                ri,
+                console,
+                ngrok: None,
+            },
+            ri_port,
+            console_port,
+        )
     }
 
     #[test]
@@ -1745,7 +1990,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let ri_script = fake_ri_script(&login_log, None, None, None);
         let console_script = fake_console_script();
         let events = RecordingSink::default();
-        let (stack, ri_port, console_port) = fake_stack(
+        let (mut stack, ri_port, console_port) = fake_stack(
             ri_script.path(),
             console_script.path(),
             events,
@@ -1778,7 +2023,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let child_pid = directory.path().join("child.pid");
         let ri_script = fake_ri_script(&login_log, None, Some(&child_done), Some(&child_pid));
         let console_script = fake_console_script();
-        let (stack, _, _) = fake_stack(
+        let (mut stack, _, _) = fake_stack(
             ri_script.path(),
             console_script.path(),
             RecordingSink::default(),
@@ -1809,7 +2054,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let console_script = fake_console_script();
         let events = RecordingSink::default();
         let observed = Arc::clone(&events.0);
-        let (stack, _, _) = fake_stack(
+        let (mut stack, _, _) = fake_stack(
             ri_script.path(),
             console_script.path(),
             events,

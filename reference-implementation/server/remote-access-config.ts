@@ -41,6 +41,19 @@ export interface RemoteAccessConfig {
   provider: RemoteAccessProvider | null
   fields: ReachabilityFields
   ngrok?: NgrokOptions | null
+  /**
+   * The ngrok authtoken, sealed with `createCredentialCipherFromEnv()`
+   * (`stores/credential-encryption.ts`) under `PDPP_CREDENTIAL_ENCRYPTION_KEY`
+   * -- the SAME key `src-tauri/src/owner_credential.rs` generates and already
+   * passes to this process. Present only for the brief window between the
+   * owner submitting a new ngrok authtoken over HTTP and the Tauri
+   * supervisor's config watcher (`spawn_remote_access_config_watcher` in
+   * `src-tauri/src/unified.rs`) decrypting it into the OS keychain and
+   * writing this field back to `null`. Never the plaintext token: this file
+   * is read by both processes and neither should ever persist the token
+   * unsealed at rest, even briefly.
+   */
+  ngrok_authtoken_sealed?: string | null
 }
 
 export interface RemoteAccessInspection {
@@ -133,15 +146,18 @@ export function offRemoteAccessConfig(): RemoteAccessConfig {
 
 /**
  * Validate a full `RemoteAccessConfig` the way `set_remote_access_config` /
- * `configure_remote_access` do in `src-tauri/src/remote_access.rs`, for the
- * `user_supplied_origin` provider specifically (the only provider this HTTP
- * surface owns end to end -- see the route file header for the ngrok scope
- * fence).
+ * `configure_remote_access` do in `src-tauri/src/remote_access.rs`, for both
+ * providers this route family now owns: `user_supplied_origin` end to end,
+ * and ngrok's config/posture shape (the authtoken handoff is a separate
+ * concern -- see `owner-remote-access.ts`'s route handler, which seals it
+ * before it ever reaches this function).
  *
- * Kept byte-for-byte equivalent to the Rust validator's `PublicUrl` branch for
- * `user_supplied_origin`: bind host must stay loopback, the origin must pass
- * `validateUserSuppliedOrigin`, and `PDPP_TRUSTED_HOSTS` must equal the
- * origin's host.
+ * Kept byte-for-byte equivalent to the Rust validator's `PublicUrl` branch:
+ * bind host must stay loopback; `user_supplied_origin` requires the origin to
+ * pass `validateUserSuppliedOrigin` with `PDPP_TRUSTED_HOSTS` equal to the
+ * origin's host; ngrok is accepted with empty reachability fields (the ngrok
+ * edge assigns the origin at tunnel start, same as
+ * `validate_remote_access_config`'s `discovers_own_origin` branch).
  */
 export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
   if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
@@ -154,10 +170,13 @@ export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: tr
     return { ok: false, message: "My devices only is unavailable until a private-overlay provider is bundled." }
   }
   // public_url
+  if (config.provider === "ngrok") {
+    return validateNgrokConfig(config)
+  }
   if (config.provider !== "user_supplied_origin") {
     return {
       ok: false,
-      message: "This route only manages the user_supplied_origin provider. Configure ngrok from the desktop app.",
+      message: "This route only manages the user_supplied_origin and ngrok providers.",
     }
   }
   const origin = config.fields.PDPP_REFERENCE_ORIGIN
@@ -181,6 +200,49 @@ export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: tr
   }
 }
 
+const NGROK_ENDPOINT_MODES: readonly NgrokEndpointMode[] = [
+  "https_edge_termination",
+  "tls_passthrough",
+  "tcp_passthrough",
+]
+
+/**
+ * Mirrors `validate_remote_access_config`'s ngrok branch in
+ * `src-tauri/src/remote_access.rs` plus `resolve_public_url_provider`'s
+ * reserved-domain rule in `src-tauri/src/remote_access_providers.rs`: ngrok
+ * discovers its own origin at tunnel start, so `PDPP_REFERENCE_ORIGIN` and
+ * `PDPP_TRUSTED_HOSTS` must be empty here -- the Tauri supervisor fills them
+ * in once the tunnel reports its assigned address (see
+ * `NgrokProvider::reachability_fields` and `restart_after_remote_access_config`).
+ * `ngrok_authtoken_sealed` passes through untouched; this function only
+ * validates config shape, never the credential.
+ */
+function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
+  const ngrok = config.ngrok
+  if (!ngrok || !NGROK_ENDPOINT_MODES.includes(ngrok.endpoint_mode)) {
+    return { ok: false, message: "ngrok requires an endpoint mode." }
+  }
+  if (ngrok.endpoint_mode === "tcp_passthrough" && ngrok.reserved_domain) {
+    return { ok: false, message: "ngrok TCP endpoints reserve an address, not a domain." }
+  }
+  if (config.fields.PDPP_REFERENCE_ORIGIN || config.fields.PDPP_TRUSTED_HOSTS.trim()) {
+    return {
+      ok: false,
+      message: "PDPP_REFERENCE_ORIGIN and PDPP_TRUSTED_HOSTS must be empty until ngrok reports an origin.",
+    }
+  }
+  return {
+    ok: true,
+    config: {
+      posture: "public_url",
+      provider: "ngrok",
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: ngrok.endpoint_mode, reserved_domain: ngrok.reserved_domain ?? null },
+      ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
+    },
+  }
+}
+
 /**
  * Capability probe for the `user_supplied_origin` provider: NOT a reflection
  * of the currently stored config's posture. Matches
@@ -197,5 +259,46 @@ export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: tr
  * provider needs no credential, so authentication is always "not_required".
  */
 export function inspectUserSuppliedOrigin(): RemoteAccessInspection {
+  return { availability: "available", authentication: "not_required", reason: null }
+}
+
+/**
+ * Set by `src-tauri/src/unified.rs::ri_environment` ONLY when this RI process
+ * is a child of the Tauri desktop supervisor with remote-access configuration
+ * enabled (`remote_access_configuration_supported()`), never in a plain
+ * self-hosted deployment. ngrok's authtoken handoff and tunnel supervision
+ * both depend on the supervisor's config watcher
+ * (`spawn_remote_access_config_watcher`) being alive to consume
+ * `ngrok_authtoken_sealed` and start the tunnel -- with no Tauri host, a
+ * submitted ngrok config would sit in `remote-access.json` forever, sealed
+ * and inert. Reusing the SAME reachability contract shape as
+ * `ReachabilityEnv` (a plain env read) keeps this consistent with the rest of
+ * the deployment-detection story instead of adding a second heartbeat
+ * mechanism.
+ */
+export const MANAGED_DESKTOP_HOST_ENV = "PDPP_MANAGED_DESKTOP_HOST"
+
+export function isManagedDesktopHostPresent(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[MANAGED_DESKTOP_HOST_ENV] === "1"
+}
+
+/**
+ * Capability probe for the ngrok provider. Unlike `user_supplied_origin`,
+ * ngrok genuinely needs a native host: an OS keychain slot for its authtoken
+ * and Rust-side (`src-tauri/src/remote_access_ngrok.rs`) tunnel process
+ * supervision, neither of which a plain Node RI process can do for itself.
+ * When no Tauri supervisor is present, the row must say so plainly rather
+ * than accept a config that will never activate (see the module doc comment
+ * above `MANAGED_DESKTOP_HOST_ENV`).
+ */
+export function inspectNgrok(env: NodeJS.ProcessEnv = process.env): RemoteAccessInspection {
+  if (!isManagedDesktopHostPresent(env)) {
+    return {
+      availability: "unavailable",
+      authentication: "not_required",
+      reason:
+        "ngrok needs the DataConnect desktop app: it stores your authtoken in the OS keychain and supervises the tunnel process natively. This deployment has no desktop host to do that, so ngrok cannot be enabled here. Use \"A proxy you run\" instead.",
+    }
+  }
   return { availability: "available", authentication: "not_required", reason: null }
 }

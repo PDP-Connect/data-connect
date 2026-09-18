@@ -7792,9 +7792,10 @@ function buildRsApp(opts: ServerOpts = {}) {
     service: createConnectorInstallService({ registerManifest: registerConnector }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
-  // Owner-authenticated HTTP routes for the user_supplied_origin remote-access
-  // provider (config read/write/inspect). See routes/owner-remote-access.ts
-  // for the full rationale and scope fence (ngrok stays Tauri-only).
+  // Owner-authenticated HTTP routes for both remote-access providers
+  // (config read/write/inspect). See routes/owner-remote-access.ts for the
+  // full rationale, including how ngrok's authtoken handoff and native
+  // tunnel supervision stay split across this route and the Tauri host.
   mountOwnerRemoteAccess(app, {
     handleError,
     pdppError,

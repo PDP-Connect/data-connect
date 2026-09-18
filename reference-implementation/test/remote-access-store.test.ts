@@ -76,7 +76,7 @@ test("save rejects a config that fails validation and does not write the file", 
   });
 });
 
-test("save rejects the ngrok provider — this store only owns user_supplied_origin", async () => {
+test("save rejects an ngrok config with no endpoint mode", async () => {
   await withTempDir(async (dir) => {
     const store = createRemoteAccessConfigStore(dir);
     const config = {
@@ -85,7 +85,26 @@ test("save rejects the ngrok provider — this store only owns user_supplied_ori
       provider: "ngrok",
     } as unknown as RemoteAccessConfig;
 
-    await assert.rejects(store.save(config), /user_supplied_origin/);
+    await assert.rejects(store.save(config), /endpoint mode/);
+  });
+});
+
+test("save persists a valid ngrok config with empty reachability fields", async () => {
+  await withTempDir(async (dir) => {
+    const store = createRemoteAccessConfigStore(dir);
+    const config: RemoteAccessConfig = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+    };
+
+    const saved = await store.save(config);
+    assert.equal(saved.provider, "ngrok");
+    assert.equal(saved.fields.PDPP_REFERENCE_ORIGIN, null);
+
+    const loaded = await store.load();
+    assert.deepEqual(loaded, saved);
   });
 });
 

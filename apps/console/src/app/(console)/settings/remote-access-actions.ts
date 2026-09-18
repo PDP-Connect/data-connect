@@ -5,6 +5,7 @@
 
 import {
   getRemoteAccessConfig,
+  inspectNgrokRemoteAccess,
   inspectRemoteAccess,
   setRemoteAccessConfig,
 } from "../lib/remote-access-client.ts"
@@ -22,18 +23,24 @@ function actionMessage(err: unknown): string {
 export async function loadRemoteAccessStateAction(): Promise<{
   config: RemoteAccessConfig
   inspection: Awaited<ReturnType<typeof inspectRemoteAccess>>
+  ngrokInspection: Awaited<ReturnType<typeof inspectNgrokRemoteAccess>>
 }> {
   await requireDashboardAccess("/settings")
-  const [config, inspection] = await Promise.all([getRemoteAccessConfig(), inspectRemoteAccess()])
-  return { config, inspection }
+  const [config, inspection, ngrokInspection] = await Promise.all([
+    getRemoteAccessConfig(),
+    inspectRemoteAccess(),
+    inspectNgrokRemoteAccess(),
+  ])
+  return { config, inspection, ngrokInspection }
 }
 
 export async function setRemoteAccessConfigAction(
-  config: RemoteAccessConfig
+  config: RemoteAccessConfig,
+  providerCredential?: string
 ): Promise<RemoteAccessActionResult> {
   await requireDashboardAccess("/settings")
   try {
-    const saved = await setRemoteAccessConfig(config)
+    const saved = await setRemoteAccessConfig(config, providerCredential)
     return { config: saved, ok: true }
   } catch (err) {
     return { message: actionMessage(err), ok: false }

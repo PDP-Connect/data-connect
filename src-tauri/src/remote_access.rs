@@ -82,6 +82,18 @@ pub(crate) struct RemoteAccessConfig {
     /// keeps the four-field contract itself provider-neutral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ngrok: Option<crate::remote_access_providers::NgrokOptions>,
+    /// The ngrok authtoken, sealed by the reference server's
+    /// `createCredentialCipherFromEnv()` under the SAME
+    /// `PDPP_CREDENTIAL_ENCRYPTION_KEY` this process generated
+    /// (`owner_credential::load_or_create_credential_encryption_key`). Present
+    /// only for the brief window between the owner submitting a new ngrok
+    /// authtoken over HTTP (`owner-remote-access.ts`) and
+    /// `unified::spawn_remote_access_config_watcher` decrypting it
+    /// (`sealed_credential::open_sealed_credential`) into the OS keychain and
+    /// writing this field back to `None`. See that watcher for the full
+    /// handoff sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ngrok_authtoken_sealed: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -315,6 +327,7 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         provider: None,
         fields: ReachabilityFields::loopback(),
         ngrok: None,
+        ngrok_authtoken_sealed: None,
     }
 }
 
@@ -411,110 +424,6 @@ pub(crate) fn save_remote_access_config(
         .map_err(|error| format!("Failed to serialize remote-access configuration: {error}"))?;
     fs::write(&path, content)
         .map_err(|error| format!("Failed to write remote-access configuration: {error}"))?;
-    Ok(config)
-}
-
-/// The browser settings page uses this command as a capability probe. The
-/// user-supplied provider needs no daemon, account, or provider secret.
-#[tauri::command]
-pub(crate) fn inspect_remote_access() -> RemoteAccessInspection {
-    let provider = UserSuppliedOriginProvider::new(
-        RemoteAccessContractConfig {
-            provider_id: USER_SUPPLIED_ORIGIN_PROVIDER_ID.to_string(),
-            posture: RemoteAccessPosture::PublicUrl,
-            user_supplied_origin: Some("https://origin.invalid".to_string()),
-            credential_reference: None,
-        },
-        KeychainCredentialResolver,
-    )
-    .expect("static user-supplied-origin provider configuration is valid");
-    provider.inspect()
-}
-
-/// Report whether a provider credential is already in the keychain, so the
-/// settings page can skip asking for a token it already holds. The credential
-/// itself never crosses this boundary.
-#[tauri::command]
-pub(crate) fn inspect_remote_access_provider(provider_id: String) -> RemoteAccessInspection {
-    validate_provider_id(&provider_id)
-        .map(|()| {
-            let stored = crate::owner_credential::load_provider_credential_reference(&provider_id)
-                .ok()
-                .flatten()
-                .is_some_and(|reference| !reference.trim().is_empty());
-            RemoteAccessInspection {
-                availability: RemoteAccessAvailability::Available,
-                authentication: if stored {
-                    RemoteAccessAuthentication::Authenticated
-                } else {
-                    RemoteAccessAuthentication::MissingCredential
-                },
-                reason: if stored {
-                    None
-                } else {
-                    Some(format!("{provider_id} needs a credential"))
-                },
-            }
-        })
-        .unwrap_or_else(|reason| RemoteAccessInspection {
-            availability: RemoteAccessAvailability::Unavailable,
-            authentication: RemoteAccessAuthentication::MissingCredential,
-            reason: Some(reason),
-        })
-}
-
-#[tauri::command]
-pub(crate) fn get_remote_access_config(app: AppHandle) -> Result<RemoteAccessConfig, String> {
-    load_remote_access_config(&app)
-}
-
-#[tauri::command]
-pub(crate) async fn set_remote_access_config(
-    app: AppHandle,
-    config: RemoteAccessConfig,
-) -> Result<RemoteAccessConfig, String> {
-    if !crate::unified::remote_access_configuration_supported() {
-        return Err("Remote access requires the managed desktop stack".to_string());
-    }
-    let config = save_remote_access_config(&app, config)?;
-    crate::unified::restart_after_remote_access_config(app).await?;
-    Ok(config)
-}
-
-#[tauri::command]
-pub(crate) async fn configure_remote_access(
-    app: AppHandle,
-    config: RemoteAccessConfig,
-    owner_password: String,
-    provider_credential: Option<String>,
-) -> Result<RemoteAccessConfig, String> {
-    if !crate::unified::remote_access_configuration_supported() {
-        return Err("Remote access requires the managed desktop stack".to_string());
-    }
-    let config = validate_remote_access_config(config)?;
-    if owner_password.trim().len() < 8 {
-        return Err("Owner password must contain at least 8 characters".to_string());
-    }
-
-    // ngrok has no sign-in flow a desktop app can complete on the owner's
-    // behalf, so the authtoken arrives as a one-time paste. Persist it in the
-    // OS keychain here so the owner is never asked for it again, and so it
-    // never reaches the remote-access configuration file.
-    if let Some(credential) = provider_credential.as_deref() {
-        let credential = credential.trim();
-        if credential.is_empty() {
-            return Err("Provider credential cannot be empty".to_string());
-        }
-        let provider_id = config
-            .provider
-            .as_deref()
-            .ok_or_else(|| "A provider credential needs a provider".to_string())?;
-        crate::owner_credential::store_provider_credential_reference(provider_id, credential)?;
-    }
-
-    crate::owner_credential::save_owner_credential(&app, &owner_password)?;
-    let config = save_remote_access_config(&app, config)?;
-    crate::unified::restart_after_remote_access_config(app).await?;
     Ok(config)
 }
 
@@ -756,6 +665,7 @@ mod tests {
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
             ngrok: None,
+            ngrok_authtoken_sealed: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
         assert_eq!(serialized["posture"], "public_url");
@@ -780,6 +690,7 @@ mod tests {
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
             ngrok: None,
+            ngrok_authtoken_sealed: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
         config.fields.trusted_hosts = "vault.example".to_string();
@@ -798,6 +709,7 @@ mod tests {
                 endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
                 reserved_domain: None,
             }),
+            ngrok_authtoken_sealed: None,
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
         // The origin stays empty until the adapter reports the assigned URL.
@@ -812,6 +724,7 @@ mod tests {
             provider: Some("ngrok".to_string()),
             fields: ReachabilityFields::loopback(),
             ngrok: None,
+            ngrok_authtoken_sealed: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }
@@ -823,6 +736,7 @@ mod tests {
             provider: Some("mystery_relay".to_string()),
             fields: ReachabilityFields::loopback(),
             ngrok: None,
+            ngrok_authtoken_sealed: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }

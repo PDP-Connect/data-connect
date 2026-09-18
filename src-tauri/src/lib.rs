@@ -11,41 +11,37 @@ mod remote_access_ngrok;
 #[cfg(desktop)]
 mod remote_access_providers;
 #[cfg(desktop)]
+mod sealed_credential;
+#[cfg(desktop)]
 mod unified;
 
 pub use commands::browser_surface_host_env_pairs;
 
 use commands::{
-    cleanup_browser_surface_host, BrowserSurfaceHost, check_browser_available,
-    check_connected_platforms, check_connector_updates,
-    cleanup_installed_pdpp_connector_runs, cleanup_personal_server, cleanup_playwright_processes,
-    cleanup_reference_server, clear_browser_session, clear_personal_server_data,
-    close_reference_server_view, debug_connector_paths, delete_exported_run, download_browser,
-    download_chromium_rust, download_connector, get_app_config, get_installed_connectors,
-    get_log_path, get_personal_server_data_path, get_personal_server_status, get_platforms,
+    add_developer_connector_source, check_browser_available, check_connected_platforms,
+    check_connector_updates, cleanup_browser_surface_host, cleanup_installed_pdpp_connector_runs,
+    cleanup_personal_server, cleanup_playwright_processes, cleanup_reference_server,
+    clear_browser_session, clear_personal_server_data, close_reference_server_view,
+    debug_connector_paths, delete_exported_run, download_browser, download_chromium_rust,
+    download_connector, get_app_config, get_installed_connectors, get_log_path,
+    get_personal_server_data_path, get_personal_server_status, get_platforms,
     get_reference_server_status, get_registry_url, get_run_files, get_user_data_path,
     handle_download, hide_reference_server_view, is_installed_pdpp_browser_setup_complete,
-    list_browser_sessions, load_latest_source_export_full, load_latest_source_export_preview,
-    load_run_export_data, load_runs, load_source_export_full_from_path,
-    load_source_export_preview_from_path, login_reference_server, mark_export_synced, open_folder,
-    open_personal_server_scope_folder, open_platform_export_folder, open_reference_server_view,
-    prepare_installed_pdpp_import, reset_installed_pdpp_browser_profile,
-    add_developer_connector_source, list_developer_connector_sources,
+    list_browser_sessions, list_developer_connector_sources, load_latest_source_export_full,
+    load_latest_source_export_preview, load_run_export_data, load_runs,
+    load_source_export_full_from_path, load_source_export_preview_from_path,
+    login_reference_server, mark_export_synced, open_folder, open_personal_server_scope_folder,
+    open_platform_export_folder, open_reference_server_view, prepare_installed_pdpp_import,
     reload_developer_connector_source, remove_developer_connector_source,
-    select_developer_connector_source,
-    resize_reference_server_view, set_app_config,
-    start_connector_run, start_installed_pdpp_connector_run, start_personal_server,
-    start_reference_server, stop_connector_run, stop_installed_pdpp_connector_run,
-    stop_personal_server, stop_reference_server, submit_installed_pdpp_interaction_response,
-    test_nodejs, write_export_data,
+    reset_installed_pdpp_browser_profile, resize_reference_server_view,
+    select_developer_connector_source, set_app_config, start_connector_run,
+    start_installed_pdpp_connector_run, start_personal_server, start_reference_server,
+    stop_connector_run, stop_installed_pdpp_connector_run, stop_personal_server,
+    stop_reference_server, submit_installed_pdpp_interaction_response, test_nodejs,
+    write_export_data, BrowserSurfaceHost,
 };
 #[cfg(desktop)]
 use commands::{get_autostart_enabled, set_autostart_enabled};
-#[cfg(desktop)]
-use remote_access::{
-    configure_remote_access, get_remote_access_config, inspect_remote_access,
-    inspect_remote_access_provider, set_remote_access_config,
-};
 use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -123,7 +119,10 @@ pub fn run() {
                 let resource_dir = app.path().resource_dir().ok();
                 let host = BrowserSurfaceHost::start(app_data_dir, resource_dir)
                     .map_err(std::io::Error::other)?;
-                log::info!("Started unified browser surface host at {}", host.endpoint());
+                log::info!(
+                    "Started unified browser surface host at {}",
+                    host.endpoint()
+                );
                 app.manage(host);
                 unified::setup(app)?;
             }
@@ -203,16 +202,6 @@ pub fn run() {
             resize_reference_server_view,
             hide_reference_server_view,
             close_reference_server_view,
-            #[cfg(desktop)]
-            inspect_remote_access,
-            #[cfg(desktop)]
-            get_remote_access_config,
-            #[cfg(desktop)]
-            set_remote_access_config,
-            #[cfg(desktop)]
-            configure_remote_access,
-            #[cfg(desktop)]
-            inspect_remote_access_provider,
             #[cfg(desktop)]
             get_autostart_enabled,
             #[cfg(desktop)]
