@@ -22,7 +22,7 @@ import type {
   ProviderAuthAdapter,
   ProviderAuthManifestLike,
 } from "../polyfill-connectors-runtime.ts";
-import { resolveProviderAuthAdapter } from "../polyfill-connectors-runtime.ts";
+import { resolveProviderAuthAdapter } from "../provider-auth-adapter-loader.ts";
 import type { ProviderAccount, ProviderAuthExchanger, ProviderAuthTokens } from "../routes/ref-provider-auth.ts";
 
 export class GenericProviderAuthDispatchError extends Error {

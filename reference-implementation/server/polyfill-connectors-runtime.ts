@@ -321,34 +321,11 @@ export function connectorOptionsSchema(connectorKey: string | null): ResolvedCon
   return typeof resolve === "function" ? (resolve(connectorKey) as ResolvedConnectorOptionsSchema | null) : null;
 }
 
-// `requireOptional` above loads every other optional module synchronously
-// via `require()`, which is fine for modules whose registration is entirely
-// internal. Provider-auth adapters are different: `registerProviderAuthAdapter`
-// is also called directly by test/connector code that reaches it through a
-// plain ESM `import` of the same package specifier. Node does not guarantee
-// that specifier resolves to the same module instance across the `require()`
-// and `import()` boundaries under every loader (observed split under tsx),
-// so a `require()`-loaded copy here can silently miss registrations made via
-// `import` elsewhere, each side holding its own adapter registry Map. Using
-// `import()` — the same loading path external registrants use — keeps this
-// resolver looking at the one registry they actually wrote to.
-let providerAdaptersModulePromise: Promise<Record<string, unknown> | null> | null = null;
-
-function loadProviderAdaptersModule(): Promise<Record<string, unknown> | null> {
-  providerAdaptersModulePromise ??= import("@pdpp/polyfill-connectors/provider-auth-adapters").catch((error: unknown) => {
-    if (error instanceof Error && "code" in error && (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")) {
-      return null;
-    }
-    throw error;
-  });
-  return providerAdaptersModulePromise;
-}
-
-export async function resolveProviderAuthAdapter(kind: string): Promise<ProviderAuthAdapter | null> {
-  const module = await loadProviderAdaptersModule();
-  const resolve = module?.resolveProviderAuthAdapter;
-  return typeof resolve === "function" ? ((await resolve(kind)) as ProviderAuthAdapter | null) : null;
-}
+// `resolveProviderAuthAdapter` moved to provider-auth-adapter-loader.ts and is
+// deliberately NOT re-exported here: re-exporting it would put its
+// webpack-analyzable "node:crypto"-reaching import back on this module's
+// value-import graph, defeating the split. Import it directly from
+// provider-auth-adapter-loader.ts. See that module's header comment.
 
 export function parseCoverageDiagnosticsStateSnapshot(
   connectorId: string,
