@@ -11,7 +11,7 @@ import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
-import { connectorInstallRowModel } from "../lib/connector-install-presentation.ts";
+import { connectorInstallRowModel, connectorLookupKey } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   sourceSetupAction,
@@ -27,58 +27,9 @@ import {
   getDeveloperModeServerSnapshot,
   getDeveloperModeSnapshot,
   subscribeToDeveloperMode,
-  SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY,
   filterCatalogForDevelopmentVisibility,
-  persistShowDevelopmentConnectors,
-  readShowDevelopmentConnectors,
-  type DevelopmentConnectorStorage,
 } from "../lib/source-setup-development.ts";
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
-
-function browserStorage(): DevelopmentConnectorStorage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-const developmentVisibilityListeners = new Set<() => void>();
-let developmentVisibilitySnapshot: boolean | undefined;
-
-function subscribeToDevelopmentVisibility(onChange: () => void): () => void {
-  developmentVisibilityListeners.add(onChange);
-  const onStorage = (event: StorageEvent) => {
-    if (event.key === null || event.key === SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY) {
-      developmentVisibilitySnapshot = undefined;
-      onChange();
-    }
-  };
-  window.addEventListener("storage", onStorage);
-  return () => {
-    developmentVisibilityListeners.delete(onChange);
-    window.removeEventListener("storage", onStorage);
-  };
-}
-
-function getDevelopmentVisibilitySnapshot(): boolean {
-  if (developmentVisibilitySnapshot === undefined) {
-    const storage = browserStorage();
-    developmentVisibilitySnapshot = storage ? readShowDevelopmentConnectors(storage) : false;
-  }
-  return developmentVisibilitySnapshot;
-}
-
-function setDevelopmentVisibility(show: boolean): void {
-  const storage = browserStorage();
-  if (storage) {
-    persistShowDevelopmentConnectors(storage, show);
-  }
-  developmentVisibilitySnapshot = show;
-  for (const listener of developmentVisibilityListeners) {
-    listener();
-  }
-}
 
 export interface ExistingSourceSetupLink {
   connectionId: string;
@@ -190,7 +141,7 @@ function SourceAcquisitionPaths({ paths }: { paths: readonly ConnectorAcquisitio
  */
 function developmentMethodLine(entry: ConnectorCatalogEntry): string {
   if (entry.isKnownScaffold) {
-    return "Not implemented yet: this connector cannot collect data.";
+    return "Not built yet: nobody has written this connector's collection code.";
   }
   return "Setup path implemented, not yet proven against a live account.";
 }
@@ -449,7 +400,10 @@ function SourceSetupCardList({
           installLifecycle={
             installLifecycleByConnector === null
               ? null
-              : (installLifecycleByConnector?.[entry.connectorKey] ?? { catalog: null, installed: null })
+              : (installLifecycleByConnector?.[connectorLookupKey(entry.connectorKey)] ?? {
+                  catalog: null,
+                  installed: null,
+                })
           }
           key={entry.connectorKey}
         />
@@ -484,12 +438,12 @@ export function SourceSetupCatalog({
     getDeveloperModeSnapshot,
     getDeveloperModeServerSnapshot,
   );
-  const showDevelopmentConnectors = useSyncExternalStore(
-    subscribeToDevelopmentVisibility,
-    getDevelopmentVisibilitySnapshot,
-    () => false,
-  );
-  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode && showDevelopmentConnectors);
+  // Developer mode (Settings) is the single control for development-tier
+  // visibility; this surface never grows a second toggle for the same
+  // concept. When it's off, the hidden count stays discoverable via the
+  // quiet line below instead of a silently shrinking list.
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode);
+  const hiddenDevelopmentCount = catalog.length - visibleCatalog.length;
   const filtered = filterSourceCatalog(visibleCatalog, query);
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
@@ -500,26 +454,14 @@ export function SourceSetupCatalog({
       description="Choose a connector to add data. Supported is the default; exception labels explain preview, in-development, and setup limits."
       title="Add data"
     >
-      {developerMode ? (
-        <div className="mb-5" data-testid="show-development-connectors-control">
-          <label className="pdpp-caption flex cursor-pointer items-start gap-2">
-            <input
-              checked={showDevelopmentConnectors}
-              className="mt-0.5 shrink-0"
-              onChange={(event) => {
-                const show = event.currentTarget.checked;
-                setDevelopmentVisibility(show);
-              }}
-              type="checkbox"
-            />
-            <span>
-              <span className="font-medium text-foreground">Show in-development connectors</span>
-              <span className="mt-0.5 block text-muted-foreground">
-                Include registered connectors that are not proven against a live account yet.
-              </span>
-            </span>
-          </label>
-        </div>
+      {hiddenDevelopmentCount > 0 ? (
+        <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="development-hidden-notice">
+          {hiddenDevelopmentCount} {hiddenDevelopmentCount === 1 ? "connector is" : "connectors are"} hidden by{" "}
+          <Link className="underline underline-offset-4 hover:text-foreground" href="/settings">
+            Developer mode
+          </Link>
+          .
+        </p>
       ) : null}
       <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label className="sr-only" htmlFor="source_q">

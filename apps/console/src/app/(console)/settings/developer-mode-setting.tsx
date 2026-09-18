@@ -32,9 +32,8 @@ export function DeveloperModeSetting() {
             Enable developer connector surfaces
           </span>
           <span className="pdpp-caption text-muted-foreground">
-            This reveals local connector sources and the development connector
-            filter on Add source. It is stored in this browser and is off by
-            default.
+            This reveals in-development connectors on Add source. It is stored
+            in this browser and is off by default.
           </span>
         </span>
       </label>

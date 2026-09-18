@@ -22,7 +22,14 @@ test("source cards keep one flat surface with identity, package, and action colu
   assert.doesNotMatch(src, /experimental-setup-summary|development-setup-summary|ExperimentalSetupSummary|DevelopmentSetupSummary/);
   assert.match(src, /Package status unavailable/);
   assert.doesNotMatch(src, /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/);
-  assert.doesNotMatch(src, /data-testid="show-development-connectors-control"[\s\S]{0,240}rounded-md border/);
+  // Developer mode (Settings) is the single control for development-tier
+  // visibility. This surface must never grow its own second toggle for the
+  // same concept -- it only reports the hidden count with a link back to
+  // Settings.
+  assert.doesNotMatch(src, /show-development-connectors-control|Show in-development connectors/);
+  assert.match(src, /data-testid="development-hidden-notice"/, "hidden development connectors must stay discoverable");
+  assert.match(src, /hidden by/i);
+  assert.match(src, /href="\/settings"/);
 });
 
 test("source-setup-catalog renders external documentation links with new-tab forewarning", async () => {

@@ -16,6 +16,7 @@ import {
 import {
   buildConnectorInstallLifecycleByConnector,
   connectorInstallRowModel,
+  connectorLookupKey,
   shortConnectorDigest,
 } from "./connector-install-presentation.ts";
 
@@ -83,6 +84,36 @@ test("lifecycle join uses connector_key when catalog and status ids are registry
 
   assert.equal(lifecycle["owner-key"]?.catalog?.version, "1.1.0");
   assert.equal(lifecycle["owner-key"]?.installed?.version, "1.0.0");
+});
+
+/**
+ * Regression coverage for the Apple Contacts package-state bug: the manifest
+ * spells its connector_key with an underscore (`apple_contacts`, this app's
+ * own convention), but the published GHCR repository -- and so the OCI
+ * catalog's connector_key -- uses a hyphen (`apple-contacts`). Before this
+ * fix, `connectorLookupKey` only stripped a registry URL prefix, so the two
+ * spellings never matched and a genuinely published connector fell through
+ * to "not_listed" ("No published package") even though 42 of 45 connectors,
+ * including this one, are live on the registry.
+ */
+test("lifecycle join matches a manifest's underscore connector_key against the catalog's hyphenated spelling", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const status = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  const template = catalog.find((candidate) => candidate.latest);
+  assert.ok(template);
+
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [{ ...template, connector_id: "apple-contacts", connector_key: "apple-contacts" }],
+    status
+  );
+
+  const appleContacts = entry("apple_contacts");
+  const model = connectorInstallRowModel(appleContacts, lifecycle[connectorLookupKey(appleContacts.connectorKey)] ?? {
+    catalog: null,
+    installed: null,
+  });
+  assert.notEqual(model.activationState, "not_listed", "a published connector must not report Not packaged yet");
+  assert.ok(model.action, "a not-installed published connector must expose an install action");
 });
 
 test("not-installed latest package exposes Install with the explicit target digest", () => {
