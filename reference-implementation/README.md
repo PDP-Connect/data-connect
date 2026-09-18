@@ -411,6 +411,18 @@ metadata, device verification URLs, and PAR authorization URLs.
 
 ### Standalone reference server
 
+The reference server imports built output from the `@pdpp/connector-protocol`
+and `@pdpp/collector-runtime` workspace packages
+(`packages/connector-protocol`, `packages/collector-runtime`). A root-level
+`npm install` builds both automatically via their `prepare` scripts — if you
+ever see `ERR_MODULE_NOT_FOUND` for one of those packages' `dist/` files (for
+example after `npm install --workspace=<something>` instead of a plain
+`npm install` at the repo root), rebuild them directly:
+
+```bash
+npm run build --workspace=packages/connector-protocol --workspace=packages/collector-runtime
+```
+
 Run the server:
 
 ```bash
