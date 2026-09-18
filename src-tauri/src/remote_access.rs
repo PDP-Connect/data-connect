@@ -78,6 +78,10 @@ pub(crate) struct RemoteAccessConfig {
     pub(crate) posture: RemoteAccessPosture,
     pub(crate) provider: Option<String>,
     pub(crate) fields: ReachabilityFields,
+    /// Provider-specific options. Absent for every provider but ngrok, which
+    /// keeps the four-field contract itself provider-neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ngrok: Option<crate::remote_access_providers::NgrokOptions>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -310,6 +314,7 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         posture: RemoteAccessPosture::Off,
         provider: None,
         fields: ReachabilityFields::loopback(),
+        ngrok: None,
     }
 }
 
@@ -325,9 +330,25 @@ pub(crate) fn validate_remote_access_config(
             Err("My devices only is unavailable until a private-overlay provider is bundled".into())
         }
         RemoteAccessPosture::PublicUrl => {
-            if config.provider.as_deref() != Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID) {
-                return Err("Public URL requires the user-supplied-origin provider".to_string());
+            let provider = crate::remote_access_providers::resolve_public_url_provider(
+                &config.posture,
+                config.provider.as_deref(),
+                config.ngrok.as_ref(),
+            )?;
+
+            // ngrok is assigned its origin by the edge at start, so the stored
+            // config legitimately has no origin yet. The supervisor writes the
+            // four fields from the discovered origin once the tunnel is up.
+            if provider.discovers_own_origin() && config.fields.reference_origin.is_none() {
+                if !config.fields.trusted_hosts.trim().is_empty() {
+                    return Err(
+                        "PDPP_TRUSTED_HOSTS must be empty until the provider reports an origin"
+                            .to_string(),
+                    );
+                }
+                return Ok(config);
             }
+
             let origin = config
                 .fields
                 .reference_origin
@@ -402,6 +423,38 @@ pub(crate) fn inspect_remote_access() -> RemoteAccessInspection {
     provider.inspect()
 }
 
+/// Report whether a provider credential is already in the keychain, so the
+/// settings page can skip asking for a token it already holds. The credential
+/// itself never crosses this boundary.
+#[tauri::command]
+pub(crate) fn inspect_remote_access_provider(provider_id: String) -> RemoteAccessInspection {
+    validate_provider_id(&provider_id)
+        .map(|()| {
+            let stored = crate::owner_credential::load_provider_credential_reference(&provider_id)
+                .ok()
+                .flatten()
+                .is_some_and(|reference| !reference.trim().is_empty());
+            RemoteAccessInspection {
+                availability: RemoteAccessAvailability::Available,
+                authentication: if stored {
+                    RemoteAccessAuthentication::Authenticated
+                } else {
+                    RemoteAccessAuthentication::MissingCredential
+                },
+                reason: if stored {
+                    None
+                } else {
+                    Some(format!("{provider_id} needs a credential"))
+                },
+            }
+        })
+        .unwrap_or_else(|reason| RemoteAccessInspection {
+            availability: RemoteAccessAvailability::Unavailable,
+            authentication: RemoteAccessAuthentication::MissingCredential,
+            reason: Some(reason),
+        })
+}
+
 #[tauri::command]
 pub(crate) fn get_remote_access_config(app: AppHandle) -> Result<RemoteAccessConfig, String> {
     load_remote_access_config(&app)
@@ -425,6 +478,7 @@ pub(crate) async fn configure_remote_access(
     app: AppHandle,
     config: RemoteAccessConfig,
     owner_password: String,
+    provider_credential: Option<String>,
 ) -> Result<RemoteAccessConfig, String> {
     if !crate::unified::remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".to_string());
@@ -433,6 +487,23 @@ pub(crate) async fn configure_remote_access(
     if owner_password.trim().len() < 8 {
         return Err("Owner password must contain at least 8 characters".to_string());
     }
+
+    // ngrok has no sign-in flow a desktop app can complete on the owner's
+    // behalf, so the authtoken arrives as a one-time paste. Persist it in the
+    // OS keychain here so the owner is never asked for it again, and so it
+    // never reaches the remote-access configuration file.
+    if let Some(credential) = provider_credential.as_deref() {
+        let credential = credential.trim();
+        if credential.is_empty() {
+            return Err("Provider credential cannot be empty".to_string());
+        }
+        let provider_id = config
+            .provider
+            .as_deref()
+            .ok_or_else(|| "A provider credential needs a provider".to_string())?;
+        crate::owner_credential::store_provider_credential_reference(provider_id, credential)?;
+    }
+
     crate::owner_credential::save_owner_credential(&app, &owner_password)?;
     let config = save_remote_access_config(&app, config)?;
     crate::unified::restart_after_remote_access_config(app).await?;
@@ -676,6 +747,7 @@ mod tests {
                 trusted_proxies: String::new(),
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
+            ngrok: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
         assert_eq!(serialized["posture"], "public_url");
@@ -699,9 +771,51 @@ mod tests {
                 trusted_proxies: String::new(),
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
+            ngrok: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
         config.fields.trusted_hosts = "vault.example".to_string();
         assert!(validate_remote_access_config(config).is_ok());
+    }
+
+    #[test]
+    fn ngrok_public_config_is_accepted_before_the_edge_assigns_an_origin() {
+        use crate::remote_access_providers::{NgrokEndpointModeConfig, NgrokOptions};
+
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some("ngrok".to_string()),
+            fields: ReachabilityFields::loopback(),
+            ngrok: Some(NgrokOptions {
+                endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
+                reserved_domain: None,
+            }),
+        };
+        let validated = validate_remote_access_config(config).expect("ngrok config is valid");
+        // The origin stays empty until the adapter reports the assigned URL.
+        assert_eq!(validated.fields.reference_origin, None);
+        assert_eq!(validated.fields.bind_host, LOOPBACK_BIND_HOST);
+    }
+
+    #[test]
+    fn ngrok_public_config_requires_endpoint_options() {
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some("ngrok".to_string()),
+            fields: ReachabilityFields::loopback(),
+            ngrok: None,
+        };
+        assert!(validate_remote_access_config(config).is_err());
+    }
+
+    #[test]
+    fn an_unknown_public_provider_is_still_refused() {
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some("mystery_relay".to_string()),
+            fields: ReachabilityFields::loopback(),
+            ngrok: None,
+        };
+        assert!(validate_remote_access_config(config).is_err());
     }
 }

@@ -5,8 +5,12 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   offRemoteAccessConfig,
+  privacyBadgeForNgrokMode,
   privacyBadgeForPosture,
+  publicUrlOptionById,
+  publicUrlOptions,
   remoteAccessRequiresOwnerPassword,
+  validateReservedDomain,
   validateUserSuppliedOrigin,
 } from "./remote-access.ts"
 
@@ -88,6 +92,70 @@ test("my_devices_only asserts no privacy property while it cannot be selected", 
   const badge = privacyBadgeForPosture("my_devices_only")
   assert.match(badge, /unavailable/i)
   assert.doesNotMatch(badge, /read your data/i)
+})
+
+test("ngrok edge termination is disclosed as readable, passthrough as not", () => {
+  assert.equal(
+    privacyBadgeForNgrokMode("https_edge_termination"),
+    "Provider can read your data"
+  )
+  assert.equal(
+    privacyBadgeForNgrokMode("tls_passthrough"),
+    "Provider cannot read your data"
+  )
+  assert.equal(
+    privacyBadgeForNgrokMode("tcp_passthrough"),
+    "Provider cannot read your data"
+  )
+})
+
+test("every selectable public URL option states a badge and stays consistent", () => {
+  assert.ok(publicUrlOptions.length >= 3)
+  for (const option of publicUrlOptions) {
+    assert.match(
+      option.badge,
+      /^Provider (cannot|can) read your data$|^Depends on your proxy - it can read your data unless it passes TLS through$/
+    )
+    assert.ok(option.label.length > 0)
+    assert.ok(option.description.length > 0)
+    // The row badge must agree with the mode's own privacy answer.
+    if (option.ngrokMode) {
+      assert.equal(option.badge, privacyBadgeForNgrokMode(option.ngrokMode))
+    }
+  }
+})
+
+test("both ngrok profiles are offered with opposite privacy answers", () => {
+  const edge = publicUrlOptionById("ngrok_https_edge_termination")
+  const passthrough = publicUrlOptionById("ngrok_tls_passthrough")
+  assert.notEqual(edge, null)
+  assert.notEqual(passthrough, null)
+  assert.equal(edge?.badge, "Provider can read your data")
+  assert.equal(passthrough?.badge, "Provider cannot read your data")
+  assert.equal(edge?.requiresAuthtoken, true)
+  assert.equal(passthrough?.requiresAuthtoken, true)
+  assert.equal(
+    publicUrlOptionById("user_supplied_origin")?.requiresAuthtoken,
+    false
+  )
+})
+
+test("a reserved domain is optional and must be a bare hostname", () => {
+  assert.deepEqual(validateReservedDomain(""), { ok: true, domain: null })
+  assert.deepEqual(validateReservedDomain("   "), { ok: true, domain: null })
+  assert.deepEqual(validateReservedDomain(" Vault.NGROK.app "), {
+    ok: true,
+    domain: "vault.ngrok.app",
+  })
+  for (const invalid of [
+    "https://vault.ngrok.app",
+    "vault.ngrok.app:443",
+    "vault.ngrok.app/mcp",
+    "vault",
+    "-vault.ngrok.app",
+  ]) {
+    assert.equal(validateReservedDomain(invalid).ok, false, invalid)
+  }
 })
 
 test("remote posture selection requires an owner password in either remote direction", () => {

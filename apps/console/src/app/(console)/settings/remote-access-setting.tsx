@@ -6,9 +6,14 @@
 import { useEffect, useMemo, useState } from "react"
 import { cn } from "@/lib/utils.ts"
 import {
+  DEFAULT_PUBLIC_URL_OPTION_ID,
   offRemoteAccessConfig,
   privacyBadgeForPosture,
+  publicUrlOptionById,
+  publicUrlOptions,
+  validateReservedDomain,
   validateUserSuppliedOrigin,
+  type PublicUrlOption,
   type RemoteAccessConfig,
   type RemoteAccessInspection,
   type RemoteAccessPosture,
@@ -48,9 +53,28 @@ function asConfig(value: unknown): RemoteAccessConfig {
   return {
     posture: candidate.posture,
     provider:
-      candidate.provider === "user_supplied_origin" ? candidate.provider : null,
+      candidate.provider === "user_supplied_origin" ||
+      candidate.provider === "ngrok"
+        ? candidate.provider
+        : null,
     fields: candidate.fields ?? offRemoteAccessConfig().fields,
+    ngrok: candidate.ngrok ?? null,
   }
+}
+
+/** Recover which option row produced the stored config, for the active panel. */
+function activeOption(config: RemoteAccessConfig): PublicUrlOption | null {
+  if (config.provider === "user_supplied_origin") {
+    return publicUrlOptionById("user_supplied_origin")
+  }
+  if (config.provider === "ngrok" && config.ngrok) {
+    return (
+      publicUrlOptions.find(
+        option => option.ngrokMode === config.ngrok?.endpoint_mode
+      ) ?? null
+    )
+  }
+  return null
 }
 
 function asInspection(value: unknown): RemoteAccessInspection {
@@ -121,6 +145,9 @@ export function RemoteAccessSetting({
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
+  const [authtoken, setAuthtoken] = useState("")
+  const [reservedDomain, setReservedDomain] = useState("")
 
   useEffect(() => {
     if (!invoke) {
@@ -163,6 +190,11 @@ export function RemoteAccessSetting({
     () => validateUserSuppliedOrigin(origin),
     [origin]
   )
+  const selectedOption = useMemo(
+    () => publicUrlOptionById(optionId),
+    [optionId]
+  )
+  const runningOption = useMemo(() => activeOption(config), [config])
 
   const choosePosture = (nextPosture: RemoteAccessPosture) => {
     setError(null)
@@ -200,26 +232,62 @@ export function RemoteAccessSetting({
       setError("Choose an owner password with at least 8 characters.")
       return
     }
-    if (!configuredOriginValidation.ok) {
-      setError(configuredOriginValidation.message)
+
+    const option = publicUrlOptionById(optionId)
+    if (!option) {
+      setError("Choose how this Personal Server should be reachable.")
       return
     }
 
-    const nextConfig: RemoteAccessConfig = {
-      posture: "public_url",
-      provider: "user_supplied_origin",
-      fields: configuredOriginValidation.fields,
+    let nextConfig: RemoteAccessConfig
+    if (option.provider === "user_supplied_origin") {
+      if (!configuredOriginValidation.ok) {
+        setError(configuredOriginValidation.message)
+        return
+      }
+      nextConfig = {
+        posture: "public_url",
+        provider: "user_supplied_origin",
+        fields: configuredOriginValidation.fields,
+      }
+    } else {
+      if (!authtoken.trim()) {
+        setError("Paste your ngrok authtoken to continue.")
+        return
+      }
+      const domain = validateReservedDomain(reservedDomain)
+      if (!domain.ok) {
+        setError(domain.message)
+        return
+      }
+      // ngrok is assigned its hostname by the edge at start, so the four
+      // fields stay empty until the adapter reports the origin.
+      nextConfig = {
+        posture: "public_url",
+        provider: "ngrok",
+        fields: offRemoteAccessConfig().fields,
+        ngrok: {
+          endpoint_mode: option.ngrokMode ?? "https_edge_termination",
+          reserved_domain: domain.domain,
+        },
+      }
     }
+
     setBusy(true)
     setError(null)
     void invoke("configure_remote_access", {
       config: nextConfig,
       ownerPassword: password,
+      ...(option.provider === "ngrok"
+        ? { providerCredential: authtoken.trim() }
+        : {}),
     })
       .then(nextConfigValue => {
         setConfig(asConfig(nextConfigValue ?? nextConfig))
         setPendingPosture(null)
         setPassword("")
+        // The authtoken now lives in the OS keychain; drop the copy here.
+        setAuthtoken("")
       })
       .catch(reason => setError(String(reason)))
       .finally(() => setBusy(false))
@@ -311,20 +379,26 @@ export function RemoteAccessSetting({
         <div className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="pdpp-caption font-medium text-foreground">
-              User-supplied origin
+              {runningOption?.label ?? "Public URL"}
             </span>
-            <span className="pdpp-caption rounded-full border border-border/80 px-2 py-0.5 text-muted-foreground">
-              {privacyBadgeForPosture("public_url")}
+            <span
+              className={cn(
+                "pdpp-caption rounded-full border px-2 py-0.5",
+                runningOption?.badge === "Provider can read your data"
+                  ? "border-destructive/50 text-destructive"
+                  : "border-border/80 text-muted-foreground"
+              )}
+            >
+              {/* Never blank and never "unknown" for an active provider. */}
+              {runningOption?.badge ?? "Provider can read your data"}
             </span>
           </div>
           <p className="pdpp-caption text-muted-foreground">
-            DataConnect does not operate this proxy and cannot verify how it
-            handles TLS. Unless it passes TLS through to the loopback Personal
-            Server, its operator can read your traffic in plaintext. Your proxy
-            must forward the root origin to the loopback Personal Server.
+            {runningOption?.description ??
+              "DataConnect does not operate this connection."}
           </p>
           <p className="break-all font-mono text-xs text-foreground/80">
-            {activeOrigin}
+            {activeOrigin ?? "Waiting for the provider to report an address…"}
           </p>
           <button
             className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
@@ -332,7 +406,7 @@ export function RemoteAccessSetting({
             onClick={() => choosePosture("public_url")}
             type="button"
           >
-            Change origin
+            Change how this is reachable
           </button>
         </div>
       ) : null}
@@ -376,23 +450,144 @@ export function RemoteAccessSetting({
               value={password}
             />
           </label>
-          <label
-            className="grid gap-1 pdpp-caption text-foreground"
-            htmlFor="remote-access-origin"
+          <div
+            aria-label="Public URL provider"
+            className="grid gap-2"
+            role="radiogroup"
           >
-            HTTPS origin
-            <input
-              autoCapitalize="none"
-              autoComplete="url"
-              className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-              id="remote-access-origin"
-              onChange={event => setOrigin(event.currentTarget.value)}
-              placeholder="https://vault.example.com"
-              spellCheck={false}
-              type="url"
-              value={origin}
-            />
-          </label>
+            <span className="pdpp-caption font-semibold text-foreground">
+              How should it be reachable?
+            </span>
+            {publicUrlOptions.map(option => {
+              const chosen = optionId === option.id
+              return (
+                <label
+                  className={cn(
+                    "grid cursor-pointer gap-1 rounded-md border px-3 py-2",
+                    chosen
+                      ? "border-foreground/50 bg-muted/30"
+                      : "border-border/70"
+                  )}
+                  key={option.id}
+                >
+                  <span className="flex items-start gap-3">
+                    <input
+                      aria-label={option.label}
+                      checked={chosen}
+                      disabled={busy}
+                      name="public-url-option"
+                      onChange={() => {
+                        setOptionId(option.id)
+                        setError(null)
+                      }}
+                      type="radio"
+                    />
+                    <span className="grid min-w-0 flex-1 gap-1">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="pdpp-caption font-medium text-foreground">
+                          {option.label}
+                        </span>
+                        <span
+                          className={cn(
+                            "pdpp-caption rounded-full border px-2 py-0.5",
+                            option.badge === "Provider can read your data"
+                              ? "border-destructive/50 text-destructive"
+                              : "border-border/80 text-muted-foreground"
+                          )}
+                        >
+                          {option.badge}
+                        </span>
+                      </span>
+                      <span className="pdpp-caption text-muted-foreground">
+                        {option.description}
+                      </span>
+                      {option.planNote ? (
+                        <span className="pdpp-caption text-muted-foreground/80">
+                          {option.planNote}
+                        </span>
+                      ) : null}
+                    </span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+
+          {selectedOption?.requiresAuthtoken ? (
+            <>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-authtoken"
+              >
+                ngrok authtoken
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-authtoken"
+                  onChange={event => setAuthtoken(event.currentTarget.value)}
+                  spellCheck={false}
+                  type="password"
+                  value={authtoken}
+                />
+                <span className="pdpp-caption text-muted-foreground">
+                  ngrok has no sign-in flow an app can complete for you, so this
+                  is a one-time copy and paste. DataConnect stores it in your
+                  system keychain and does not ask again.{" "}
+                  <a
+                    className="underline"
+                    href="https://dashboard.ngrok.com/get-started/your-authtoken"
+                    rel="noreferrer noopener"
+                    target="_blank"
+                  >
+                    Open your ngrok authtoken page
+                  </a>
+                  . You can sign up with Google or GitHub.
+                </span>
+              </label>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-reserved-domain"
+              >
+                Reserved domain (optional)
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-reserved-domain"
+                  onChange={event =>
+                    setReservedDomain(event.currentTarget.value)
+                  }
+                  placeholder="vault.ngrok.app"
+                  spellCheck={false}
+                  type="text"
+                  value={reservedDomain}
+                />
+                <span className="pdpp-caption text-muted-foreground">
+                  Leave this empty to accept the hostname ngrok assigns. A
+                  reserved domain requires a paid ngrok plan.
+                </span>
+              </label>
+            </>
+          ) : (
+            <label
+              className="grid gap-1 pdpp-caption text-foreground"
+              htmlFor="remote-access-origin"
+            >
+              HTTPS origin
+              <input
+                autoCapitalize="none"
+                autoComplete="url"
+                className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                id="remote-access-origin"
+                onChange={event => setOrigin(event.currentTarget.value)}
+                placeholder="https://vault.example.com"
+                spellCheck={false}
+                type="url"
+                value={origin}
+              />
+            </label>
+          )}
           <div className="flex flex-wrap justify-end gap-2">
             <button
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
