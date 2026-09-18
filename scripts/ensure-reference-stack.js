@@ -361,6 +361,39 @@ function copyRuntimeSources(projectRoot, stageRoot) {
   }
 }
 
+// better-sqlite3 and better-sqlite3-multiple-ciphers each ship a prebuilds/
+// directory with every platform's binary. Rebuilding better-sqlite3 from
+// source below (npm rebuild) only adds the current platform's build/Release
+// output — it does not delete the package's own shipped prebuilds/, which is
+// where the foreign-platform artifacts actually sit (sqlite-vec is not
+// affected: its per-platform builds are separate npm packages, e.g.
+// sqlite-vec-linux-x64, so npm never installs a musl one on this host).
+// Tauri's Linux AppImage bundler (linuxdeploy) walks the ELF dependencies of
+// every staged .node file and hard-fails the whole bundle on a musl
+// prebuild's unresolvable libc.musl-x86_64.so.1 reference, even though
+// nothing loads that file on this glibc target. Delete every prebuild
+// except the one this staged tree will actually run.
+const PACKAGES_WITH_PLATFORM_PREBUILDS = [
+  "better-sqlite3",
+  "better-sqlite3-multiple-ciphers",
+]
+
+export function pruneForeignPlatformPrebuilds(stageRoot) {
+  const keep = `${process.platform}-${process.arch}.node`
+  for (const packageName of PACKAGES_WITH_PLATFORM_PREBUILDS) {
+    const prebuildsDir = join(
+      stageRoot,
+      "node_modules",
+      packageName,
+      "prebuilds"
+    )
+    if (!existsSync(prebuildsDir)) continue
+    for (const entry of readdirSync(prebuildsDir)) {
+      if (entry !== keep) rmSync(join(prebuildsDir, entry), { force: true })
+    }
+  }
+}
+
 function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
   writeFileSync(
     join(stageRoot, "package.json"),
@@ -409,6 +442,7 @@ function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
       },
     }
   )
+  pruneForeignPlatformPrebuilds(stageRoot)
 }
 
 function nodeVersion(nodeBinary) {

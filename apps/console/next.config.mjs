@@ -36,6 +36,16 @@ const nextConfig = {
     useTypeScriptCli: true,
   },
   output: "standalone",
+  // sharp ships prebuilt binaries for both glibc and musl per platform, and Next's
+  // file tracer can't tell at build time which one the deploy target needs, so it
+  // conservatively includes both. The console never runs on musl, but linuxdeploy
+  // (the Tauri Linux AppImage bundler) walks every .node file's ELF deps and treats
+  // the musl-only libc.musl-x86_64.so.1 reference as an unresolvable dependency,
+  // hard-failing the whole bundle. Exclude the musl variant so it never reaches the
+  // standalone output that gets packaged into the AppImage.
+  outputFileTracingExcludes: {
+    "*": ["**/node_modules/@img/sharp-linuxmusl-x64/**", "**/node_modules/@img/sharp-libvips-linuxmusl-x64/**"],
+  },
   outputFileTracingIncludes: {
     "/llms-full.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
     "/llms.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
