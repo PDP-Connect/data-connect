@@ -1,5 +1,6 @@
 [package]
 name = "dataconnect"
+default-run = "dataconnect"
 version = "0.1.0"
 description = "DataConnect - Export your data from various platforms"
 authors = ["DataConnect Team"]
