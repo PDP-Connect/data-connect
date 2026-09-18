@@ -25,6 +25,7 @@ import { emitSpineEvent } from "../lib/spine.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { getConnectorSummaryForRoute } from "../server/ref-control.ts";
+import { SqliteDriver } from "../server/sqlite-driver.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
@@ -44,7 +45,7 @@ function tempDbName(label: string): string {
 // Same CJS module instance server/db.ts requires — patching this prototype
 // method observes every `db.prepare(...)` call the Proxy cache wrapper
 // (withCachedPrepare, server/db.ts) delegates to.
-const BetterSqlite3Database = createRequire(import.meta.url)("better-sqlite3") as {
+const BetterSqlite3Database = SqliteDriver as unknown as {
   readonly prototype: { prepare: (this: unknown, sql: string) => unknown };
 };
 

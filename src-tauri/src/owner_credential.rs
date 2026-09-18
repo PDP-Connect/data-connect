@@ -8,15 +8,19 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
-const OWNER_CREDENTIAL_BYTES: usize = 32;
+const CREDENTIAL_ENCRYPTION_KEY_FILE: &str = "credential-encryption-key";
+const DATABASE_ENCRYPTION_KEY_FILE: &str = "database-encryption-key";
+const GENERATED_SECRET_BYTES: usize = 32;
 const KEYRING_SERVICE: &str = "com.vana.dataconnect";
-const KEYRING_USERNAME: &str = "owner";
+const OWNER_KEYRING_USERNAME: &str = "owner";
 const PROVIDER_CREDENTIAL_USERNAME_PREFIX: &str = "remote-access-provider:";
+const CREDENTIAL_ENCRYPTION_KEYRING_USERNAME: &str = "credential-encryption-key";
+const DATABASE_ENCRYPTION_KEYRING_USERNAME: &str = "database-encryption-key";
 
 trait CredentialStore {
     fn load(&mut self) -> Result<Option<String>, String>;
@@ -28,17 +32,21 @@ struct SystemKeyring {
 }
 
 impl SystemKeyring {
-    fn owner() -> Self {
+    fn new(username: impl Into<String>) -> Self {
         Self {
-            username: KEYRING_USERNAME.to_string(),
+            username: username.into(),
         }
+    }
+
+    fn owner() -> Self {
+        Self::new(OWNER_KEYRING_USERNAME)
     }
 
     fn provider_credential_reference(provider_id: &str) -> Result<Self, String> {
         let provider_id = validated_provider_id(provider_id)?;
-        Ok(Self {
-            username: format!("{PROVIDER_CREDENTIAL_USERNAME_PREFIX}{provider_id}"),
-        })
+        Ok(Self::new(format!(
+            "{PROVIDER_CREDENTIAL_USERNAME_PREFIX}{provider_id}"
+        )))
     }
 }
 
@@ -70,6 +78,22 @@ pub(crate) fn owner_credential_path(app: &AppHandle) -> Result<PathBuf, String> 
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
+/// Resolve the app-data path used for the generated desktop SQLite key.
+pub(crate) fn database_encryption_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join(DATABASE_ENCRYPTION_KEY_FILE))
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// Resolve the app-data path used for the generated credential encryption key.
+pub(crate) fn credential_encryption_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join(CREDENTIAL_ENCRYPTION_KEY_FILE))
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
 /// Prefer an explicit development credential when one is supplied. The
 /// `PDPP_OWNER_PASSWORD` fallback matches the RI's existing attach contract;
 /// `DATACONNECT_OWNER_PASSWORD` makes the desktop-specific override explicit.
@@ -86,6 +110,33 @@ pub(crate) fn configured_owner_password() -> Option<String> {
 pub(crate) fn load_or_create_owner_credential(path: &Path) -> Result<String, String> {
     let mut store = SystemKeyring::owner();
     load_or_create_owner_credential_with_store(path, &mut store)
+}
+
+/// Load the durable desktop database key, or create it only when the existing
+/// database is not already encrypted. Replacing a missing key for an
+/// encrypted database would permanently orphan the vault.
+pub(crate) fn load_or_create_database_encryption_key(
+    path: &Path,
+    database_path: &Path,
+) -> Result<String, String> {
+    let mut store = SystemKeyring::new(DATABASE_ENCRYPTION_KEYRING_USERNAME);
+    load_or_create_database_encryption_key_with_store(path, database_path, &mut store)
+}
+
+/// Load the durable instance credential key, or create it only when no sealed
+/// connector credential would be orphaned by doing so.
+pub(crate) fn load_or_create_credential_encryption_key(
+    path: &Path,
+    database_path: &Path,
+) -> Result<String, String> {
+    let mut store = SystemKeyring::new(CREDENTIAL_ENCRYPTION_KEYRING_USERNAME);
+    load_or_create_secret_with_store(
+        path,
+        &mut store,
+        "Credential encryption key",
+        || database_contains_sealed_credentials(database_path),
+        Some("Credential encryption key is missing while sealed connector credentials exist. Restore the key from the OS keychain or the credential-encryption-key app-data file; refusing to mint a replacement that would orphan those credentials."),
+    )
 }
 
 /// Replace the owner password in the OS keychain, with the protected app-data
@@ -154,9 +205,33 @@ fn load_or_create_owner_credential_with_store(
     path: &Path,
     store: &mut impl CredentialStore,
 ) -> Result<String, String> {
+    load_or_create_secret_with_store(path, store, "Owner credential", || Ok(false), None)
+}
+
+fn load_or_create_database_encryption_key_with_store(
+    path: &Path,
+    database_path: &Path,
+    store: &mut impl CredentialStore,
+) -> Result<String, String> {
+    load_or_create_secret_with_store(
+        path,
+        store,
+        "Database encryption key",
+        || database_is_encrypted(database_path),
+        Some("Database encryption key is missing while an encrypted SQLite vault exists. Restore the key from the OS keychain or the database-encryption-key app-data file; refusing to mint a replacement that would orphan the vault."),
+    )
+}
+
+fn load_or_create_secret_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    label: &str,
+    missing_secret_check: impl FnOnce() -> Result<bool, String>,
+    missing_secret_message: Option<&str>,
+) -> Result<String, String> {
     let keyring_error = match store.load() {
         Ok(Some(credential)) if !credential.trim().is_empty() => {
-            log::info!("Owner credential store: OS keychain");
+            log::info!("{label} store: OS keychain");
             return Ok(credential);
         }
         Ok(Some(_)) => Some("OS keychain returned an empty credential".to_string()),
@@ -165,23 +240,28 @@ fn load_or_create_owner_credential_with_store(
     };
 
     if path.exists() {
-        let credential = read_owner_credential(path)?;
+        let credential = read_secret(path, label)?;
         if keyring_error.is_none() && store.save(&credential).is_ok() {
-            log::info!("Owner credential store: OS keychain");
+            log::info!("{label} store: OS keychain");
             return Ok(credential);
         }
-        log_fallback_store(keyring_error.as_deref());
+        log_fallback_store(label, keyring_error.as_deref());
         return Ok(credential);
     }
 
-    let mut bytes = [0u8; OWNER_CREDENTIAL_BYTES];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| format!("Failed to generate owner credential: {error}"))?;
+    if missing_secret_check()? {
+        if let Some(message) = missing_secret_message {
+            return Err(message.to_string());
+        }
+    }
+
+    let mut bytes = [0u8; GENERATED_SECRET_BYTES];
+    getrandom::fill(&mut bytes).map_err(|error| format!("Failed to generate {label}: {error}"))?;
     let credential = URL_SAFE_NO_PAD.encode(bytes);
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create owner credential directory: {error}"))?;
+            .map_err(|error| format!("Failed to create {label} directory: {error}"))?;
     }
 
     let mut options = OpenOptions::new();
@@ -193,26 +273,24 @@ fn load_or_create_owner_credential_with_store(
     }
 
     if keyring_error.is_none() && store.save(&credential).is_ok() {
-        log::info!("Owner credential store: OS keychain");
+        log::info!("{label} store: OS keychain");
         return Ok(credential);
     }
 
-    log_fallback_store(keyring_error.as_deref());
+    log_fallback_store(label, keyring_error.as_deref());
     match options.open(path) {
         Ok(mut file) => {
             file.write_all(credential.as_bytes())
-                .map_err(|error| format!("Failed to write owner credential: {error}"))?;
+                .map_err(|error| format!("Failed to write {label}: {error}"))?;
             file.sync_all()
-                .map_err(|error| format!("Failed to persist owner credential: {error}"))?;
+                .map_err(|error| format!("Failed to persist {label}: {error}"))?;
             #[cfg(unix)]
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("Failed to protect owner credential: {error}"))?;
+                .map_err(|error| format!("Failed to protect {label}: {error}"))?;
             Ok(credential)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            read_owner_credential(path)
-        }
-        Err(error) => Err(format!("Failed to create owner credential: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read_secret(path, label),
+        Err(error) => Err(format!("Failed to create {label}: {error}")),
     }
 }
 
@@ -250,28 +328,88 @@ fn write_owner_credential_file(path: &Path, credential: &str) -> Result<(), Stri
     Ok(())
 }
 
-fn log_fallback_store(keyring_error: Option<&str>) {
+fn log_fallback_store(label: &str, keyring_error: Option<&str>) {
     match keyring_error {
         Some(error) => log::warn!(
-            "Owner credential store: 0600 app-data fallback; OS keychain unavailable ({error})"
+            "{label} store: 0600 app-data fallback; OS keychain unavailable ({error})"
         ),
         None => {
-            log::warn!("Owner credential store: 0600 app-data fallback; OS keychain write failed")
+            log::warn!("{label} store: 0600 app-data fallback; OS keychain write failed")
         }
     }
 }
 
-fn read_owner_credential(path: &Path) -> Result<String, String> {
+fn read_secret(path: &Path, label: &str) -> Result<String, String> {
     let credential = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read owner credential: {error}"))?;
+        .map_err(|error| format!("Failed to read {label}: {error}"))?;
     let credential = credential.trim().to_string();
     if credential.is_empty() {
-        return Err("Owner credential file is empty".to_string());
+        return Err(format!("{label} file is empty"));
     }
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("Failed to protect owner credential: {error}"))?;
+        .map_err(|error| format!("Failed to protect {label}: {error}"))?;
     Ok(credential)
+}
+
+fn database_is_encrypted(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if fs::metadata(path)
+        .map_err(|error| format!("Could not inspect the database file: {error}"))?
+        .len()
+        == 0
+    {
+        return Ok(false);
+    }
+
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Could not inspect the database header: {error}"))?;
+    let mut header = [0u8; 16];
+    let bytes_read = file
+        .read(&mut header)
+        .map_err(|error| format!("Could not inspect the database header: {error}"))?;
+    Ok(bytes_read != header.len() || &header != b"SQLite format 3\0")
+}
+
+fn database_contains_sealed_credentials(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if database_is_encrypted(path)? {
+        // rusqlite cannot inspect a ciphered database. Treat an existing
+        // encrypted vault as containing protected credentials until its
+        // durable credential key is restored.
+        return Ok(true);
+    }
+
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| {
+        format!(
+            "Could not inspect the unified database before creating the credential encryption key: {error}"
+        )
+    })?;
+    let table_exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'connector_instance_credentials')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("Could not inspect credential storage metadata: {error}"))?;
+    if !table_exists {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM connector_instance_credentials LIMIT 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("Could not inspect sealed credential records: {error}"))
 }
 
 #[cfg(unix)]
@@ -398,5 +536,44 @@ mod tests {
         assert!(validated_provider_id("user-origin").is_ok());
         assert!(validated_provider_id("../user-origin").is_err());
         assert!(validated_provider_id(" ").is_err());
+    }
+
+    #[test]
+    fn database_key_is_generated_for_a_plaintext_database() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, b"SQLite format 3\0").expect("plaintext database marker");
+        let mut store = MockKeyring::default();
+
+        let key = load_or_create_database_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("database key");
+
+        assert_eq!(key.len(), 43);
+        assert_eq!(store.value.as_deref(), None);
+        assert_eq!(fs::read_to_string(key_path).expect("database key file"), key);
+    }
+
+    #[test]
+    fn missing_database_key_fails_closed_for_an_encrypted_database() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_database_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("missing key must not be replaced");
+
+        assert!(error.contains("Database encryption key is missing"));
+        assert!(!key_path.exists());
     }
 }

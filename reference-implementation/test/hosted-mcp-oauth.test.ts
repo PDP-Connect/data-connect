@@ -11,8 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver cannot model this installed package export
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import {
   buildPendingConsentRequestUri,
   countGrantPackagesForOwner,

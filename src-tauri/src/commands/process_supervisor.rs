@@ -40,10 +40,20 @@ static PROCESS_GROUP_REGISTRY: OnceLock<Result<ProcessGroupRegistry, String>> = 
 /// cleared environment makes the allowlist in `vars` the whole child
 /// environment. The inherited mode exists only to represent legacy launches
 /// that intentionally still depend on the parent environment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnvironmentSpec {
     pub clear: bool,
     pub vars: BTreeMap<OsString, OsString>,
+}
+
+impl fmt::Debug for EnvironmentSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentSpec")
+            .field("clear", &self.clear)
+            .field("keys", &self.vars.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl EnvironmentSpec {

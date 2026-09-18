@@ -552,6 +552,21 @@ passwords, tokens, cookies, or DCR initial access tokens into images. The
 repo-root `.env.local` remains a local development convenience, not a Docker
 or production posture.
 
+### SQLite encryption boundary
+
+The managed DataConnect desktop stack always supplies a database key from the
+OS keychain as PDPP_DATABASE_ENCRYPTION_KEY to the RI child at spawn time.
+Desktop SQLite storage is encrypted at rest with no user setting or opt-out.
+Existing plaintext desktop vaults are migrated on startup with a verified
+backup and rollback path.
+
+Self-hosted and Docker deployments intentionally remain plaintext when
+PDPP_DATABASE_ENCRYPTION_KEY is absent. They have no desktop OS keychain, and
+their database-key lifecycle is not defined by this release. Do not treat the
+absence of the variable as permission for a desktop install to mint a
+replacement key: an encrypted vault fails closed until its original key is
+restored.
+
 Browser-based polyfill connectors are not clean-room portable demos. They need
 persistent browser profiles and remain subject to upstream anti-bot behavior.
 Mount any optional local connector inputs, such as Slack archives, explicitly
