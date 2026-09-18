@@ -12,6 +12,14 @@ rust-version = "1.88.0"
 name = "dataconnect_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "stall_repro"
+path = "src/bin/stall_repro.rs"
+required-features = ["stall-repro"]
+
+[features]
+stall-repro = []
+
 [build-dependencies]
 tauri-build = { version = "2.5.5", features = [] }
 

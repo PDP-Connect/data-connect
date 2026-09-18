@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
 #[cfg(desktop)]
+mod main_thread_watchdog;
+#[cfg(desktop)]
 mod owner_credential;
 mod processors;
 #[cfg(desktop)]
@@ -10,6 +12,8 @@ mod remote_access;
 mod remote_access_ngrok;
 #[cfg(desktop)]
 mod remote_access_providers;
+#[cfg(all(desktop, feature = "stall-repro"))]
+pub mod stall_repro;
 #[cfg(desktop)]
 mod unified;
 
@@ -116,6 +120,11 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+
+            #[cfg(desktop)]
+            if main_thread_watchdog::is_enabled() {
+                main_thread_watchdog::spawn(app.handle().clone());
+            }
 
             #[cfg(desktop)]
             if unified::is_enabled() {

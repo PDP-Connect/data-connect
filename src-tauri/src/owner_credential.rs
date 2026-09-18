@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tauri::{AppHandle, Manager};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
@@ -52,21 +53,43 @@ impl SystemKeyring {
 
 impl CredentialStore for SystemKeyring {
     fn load(&mut self) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
-            .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("could not read OS keychain: {error}")),
-        }
+        log::info!("OS keychain load: entry username={}", self.username);
+        let started = Instant::now();
+        let result = (|| {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
+                .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
+            match entry.get_password() {
+                Ok(value) => Ok(Some(value)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(format!("could not read OS keychain: {error}")),
+            }
+        })();
+        log::info!(
+            "OS keychain load: exit username={} duration_ms={} ok={}",
+            self.username,
+            started.elapsed().as_millis(),
+            result.is_ok()
+        );
+        result
     }
 
     fn save(&mut self, credential: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
-            .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
-        entry
-            .set_password(credential)
-            .map_err(|error| format!("could not write OS keychain: {error}"))
+        log::info!("OS keychain save: entry username={}", self.username);
+        let started = Instant::now();
+        let result = (|| {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
+                .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
+            entry
+                .set_password(credential)
+                .map_err(|error| format!("could not write OS keychain: {error}"))
+        })();
+        log::info!(
+            "OS keychain save: exit username={} duration_ms={} ok={}",
+            self.username,
+            started.elapsed().as_millis(),
+            result.is_ok()
+        );
+        result
     }
 }
 
@@ -223,6 +246,30 @@ fn load_or_create_database_encryption_key_with_store(
 }
 
 fn load_or_create_secret_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    label: &str,
+    missing_secret_check: impl FnOnce() -> Result<bool, String>,
+    missing_secret_message: Option<&str>,
+) -> Result<String, String> {
+    log::info!("{label}: load_or_create entry");
+    let started = Instant::now();
+    let result = load_or_create_secret_with_store_inner(
+        path,
+        store,
+        label,
+        missing_secret_check,
+        missing_secret_message,
+    );
+    log::info!(
+        "{label}: load_or_create exit duration_ms={} ok={}",
+        started.elapsed().as_millis(),
+        result.is_ok()
+    );
+    result
+}
+
+fn load_or_create_secret_with_store_inner(
     path: &Path,
     store: &mut impl CredentialStore,
     label: &str,
