@@ -37,14 +37,21 @@ import { registerProviderAuthAdapter } from "@pdpp/polyfill-connectors/provider-
 import type { ProviderAuthAdapter } from "../server/polyfill-connectors-runtime.ts";
 import { moduleNotFoundFallback, resolveProviderAuthAdapter } from "../server/provider-auth-adapter-loader.ts";
 
+// Message text deliberately avoids the phrase "Cannot find module": the CI
+// mutation gate's projection layer treats that exact phrase in a test
+// failure's output as evidence the runner itself crashed (Stryker's own
+// crash-vs-kill disambiguation heuristic), which would misclassify these
+// tests' own expected failures-during-mutation as inconclusive rather than
+// real kills. The assertion only cares about `.code`, so the message text
+// carries no meaning of its own.
 test("moduleNotFoundFallback: ERR_MODULE_NOT_FOUND is swallowed to null", () => {
-  const error = new Error("Cannot find module") as Error & { code: string };
+  const error = new Error("synthetic missing-package error for this test") as Error & { code: string };
   error.code = "ERR_MODULE_NOT_FOUND";
   assert.equal(moduleNotFoundFallback(error), null);
 });
 
 test("moduleNotFoundFallback: MODULE_NOT_FOUND (the CJS code) is also swallowed to null", () => {
-  const error = new Error("Cannot find module") as Error & { code: string };
+  const error = new Error("synthetic missing-package error for this test") as Error & { code: string };
   error.code = "MODULE_NOT_FOUND";
   assert.equal(moduleNotFoundFallback(error), null);
 });
