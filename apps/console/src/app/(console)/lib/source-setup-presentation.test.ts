@@ -28,6 +28,8 @@ import {
   isRunnableAddOffer,
   sourceSetupAction,
   sourceSetupGuidance,
+  sourceSetupRank,
+  sourceSetupRowIsUnavailable,
   sourceSetupStatus,
 } from "./source-setup-presentation.ts";
 import { filterCatalogForDevelopmentVisibility } from "./source-setup-development.ts";
@@ -290,4 +292,85 @@ test("development real entry surfaces its manifest listingNote in guidance when 
     setupModality: "static_secret",
   });
   assert.equal(sourceSetupAction(spotify) !== null, true);
+});
+
+/**
+ * Regression coverage for the owner-reported "NOT AVAILABLE HERE rows still
+ * offer an install action" defect. `sourceSetupRowIsUnavailable` is the
+ * predicate the catalog uses to suppress the Package column's install
+ * control and sort a row to the bottom -- it must match exactly "nothing
+ * this owner can click" (a known scaffold, or any other disposition
+ * `sourceSetupAction` refuses), never the broader
+ * `sourceSetupAvailability === "not_available_here"` set, which also covers
+ * a real self-testable Development entry that DOES have a click target.
+ */
+test("a known scaffold has no click target and is unavailable", () => {
+  const scaffold = makeEntry({
+    connectorKey: "anthropic",
+    disposition: "browser_bound_runbook",
+    isKnownScaffold: true,
+    publicTier: "development",
+    setupModality: "browser_bound",
+  });
+  assert.equal(sourceSetupRowIsUnavailable(scaffold), true);
+});
+
+test("a real self-testable development entry has a click target and is NOT unavailable", () => {
+  const imessage = makeEntry({
+    connectorKey: "imessage",
+    disposition: "local_collector_enroll",
+    isKnownScaffold: false,
+    modality: "local_collector",
+    ownerActionable: false,
+    publicTier: "development",
+    setupModality: "local_collector",
+  });
+  assert.equal(sourceSetupRowIsUnavailable(imessage), false, "a self-testable development entry must stay in the scannable list");
+});
+
+test("a supported entry with a real action is not unavailable", () => {
+  const chatgpt = makeEntry({
+    connectorKey: "chatgpt",
+    disposition: "static_secret_connect",
+    isKnownScaffold: false,
+    ownerActionable: true,
+    publicTier: "supported",
+    setupModality: "static_secret",
+  });
+  assert.equal(sourceSetupRowIsUnavailable(chatgpt), false);
+});
+
+test("an unclassified unsupported disposition has no click target and is unavailable", () => {
+  const unsupported = makeEntry({
+    connectorKey: "some-dead-connector",
+    disposition: "unknown_unsupported",
+    isKnownScaffold: false,
+    ownerActionable: false,
+    publicTier: "supported",
+    setupModality: "provider_authorization",
+  });
+  assert.equal(sourceSetupRowIsUnavailable(unsupported), true);
+});
+
+test("sourceSetupRank always sorts an unavailable row after every rank a normal row can have", () => {
+  const scaffold = makeEntry({
+    connectorKey: "anthropic",
+    disposition: "browser_bound_runbook",
+    isKnownScaffold: true,
+    publicTier: "development",
+    setupModality: "browser_bound",
+  });
+  const experimental = makeEntry({
+    connectorKey: "signal",
+    disposition: "static_secret_experimental",
+    isKnownScaffold: false,
+    publicTier: "preview",
+    setupModality: "static_secret",
+    supportState: "experimental",
+  });
+  assert.equal(sourceSetupRowIsUnavailable(experimental), false, "test fixture sanity: experimental opt-in has a click target");
+  assert.ok(
+    sourceSetupRank(scaffold) > sourceSetupRank(experimental),
+    "an unavailable row's rank must exceed even the lowest-priority actionable rank"
+  );
 });

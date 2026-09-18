@@ -19,6 +19,7 @@ import {
   sourceSetupContext,
   sourceSetupGuidance,
   sourceSetupRank,
+  sourceSetupRowIsUnavailable,
   sourceSetupSecondaryAction,
   sourceSetupStatus,
 } from "../lib/source-setup-presentation.ts";
@@ -318,15 +319,25 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
+  // A row with no click target at all must never offer an install control
+  // either: an OCI package can exist for a connector this dashboard cannot
+  // otherwise use (a known scaffold, a proof-gated or unsupported
+  // disposition), and offering Install there is exactly the dead control the
+  // owner rejected -- a package state fact is still shown, just without a
+  // button that can never do anything.
+  const isUnavailable = sourceSetupRowIsUnavailable(entry);
   const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
-  const packageNeedsInstall = installModel?.activationState === "not_installed";
-  const action = packageNeedsInstall ? null : sourceSetupAction(entry);
+  const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
+  const action = packageNeedsInstall || isUnavailable ? null : sourceSetupAction(entry);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
-      className="grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4 sm:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] sm:items-start"
+      className={`grid gap-4 rounded-sm border border-border/80 bg-card px-4 py-4 sm:grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] sm:items-start ${
+        isUnavailable ? "opacity-70" : ""
+      }`}
       data-testid={`source-setup-${entry.connectorKey}`}
       data-install-state={installModel?.activationState ?? "unknown"}
+      data-row-unavailable={isUnavailable}
       data-tier={entry.publicTier}
     >
       <div className="min-w-0">
@@ -352,7 +363,11 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {installModel ? (
+        {isUnavailable ? (
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
+            Not installable: no setup path is available here.
+          </span>
+        ) : installModel ? (
           <ConnectorInstallRow compact model={installModel} />
         ) : (
           <span className="pdpp-caption text-muted-foreground">Package status unavailable</span>
@@ -448,6 +463,16 @@ export function SourceSetupCatalog({
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
   // not create nested containers or disappear from the scan path.
+  //
+  // The one exception: a row with no click target at all (known scaffold,
+  // proof-gated, unsupported, unknown -- see `sourceSetupRowIsUnavailable`)
+  // carries no scannable information a working row doesn't already imply, so
+  // it never sits in the middle of the actionable list. `sourceSetupRank`
+  // already sorts these last; splitting them out here keeps that guarantee
+  // even if a future rank changes, and lets the count stay visible without
+  // N dead rows in the primary scan path.
+  const scannableEntries = filtered.filter((entry) => !sourceSetupRowIsUnavailable(entry));
+  const unavailableEntries = filtered.filter((entry) => sourceSetupRowIsUnavailable(entry));
   const anyMatch = filtered.length > 0;
   return (
     <Section
@@ -480,10 +505,25 @@ export function SourceSetupCatalog({
             <span className="pdpp-eyebrow text-muted-foreground">Action</span>
           </div>
           <SourceSetupCardList
-            entries={filtered}
+            entries={scannableEntries}
             existingSourcesByConnector={existingSourcesByConnector}
             installLifecycleByConnector={installLifecycleByConnector}
           />
+          {unavailableEntries.length > 0 ? (
+            <details className="group" data-testid="unavailable-connectors-disclosure">
+              <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
+                {unavailableEntries.length}{" "}
+                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available on this platform
+              </summary>
+              <div className="mt-3">
+                <SourceSetupCardList
+                  entries={unavailableEntries}
+                  existingSourcesByConnector={existingSourcesByConnector}
+                  installLifecycleByConnector={installLifecycleByConnector}
+                />
+              </div>
+            </details>
+          ) : null}
         </div>
       ) : (
         <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">

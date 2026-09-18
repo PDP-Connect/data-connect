@@ -47,3 +47,19 @@ test("source-setup-catalog renders external documentation links with new-tab for
     'external documentation links must have title="Opens in a new tab" for accessibility/forewarning'
   );
 });
+
+test("unavailable rows never offer an install control and sort into a collapsed footer", async () => {
+  const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
+  assert.match(src, /sourceSetupRowIsUnavailable/, "must use the shared unavailable predicate, not a local reimplementation");
+  // The Package column must render a disabled fact instead of ConnectorInstallRow
+  // for an unavailable row -- an OCI package existing for a scaffold or
+  // proof-gated connector must never surface an Install button.
+  assert.match(src, /data-testid="connector-install-disabled"/);
+  assert.match(src, /isUnavailable[\s\S]{0,80}\?[\s\S]{0,200}data-testid="connector-install-disabled"/);
+  // The primary action column must also stay empty for an unavailable row.
+  assert.match(src, /const action = packageNeedsInstall \|\| isUnavailable \? null : sourceSetupAction\(entry\);/);
+  // Unavailable rows collapse into their own disclosure, separate from the
+  // primary scannable list, so N dead rows never sit in the middle of it.
+  assert.match(src, /data-testid="unavailable-connectors-disclosure"/);
+  assert.match(src, /not available on this platform/);
+});
