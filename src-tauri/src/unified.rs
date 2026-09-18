@@ -58,6 +58,14 @@ enum UnifiedStatus {
     Starting,
     Ready,
     Restarting,
+    // Quitting is distinct from Stopped: Stopped is the terminal state after
+    // shutdown finishes, Quitting covers the up-to-UNIFIED_SHUTDOWN_BUDGET
+    // window while sidecars are still winding down. Without this the tray
+    // silently freezes on whatever status it last had (usually "Ready")
+    // for up to 10s after the window vanishes, which reads as a hang -- see
+    // ai/research/desktop-app-packaging/quit-window-hide-vs-progress-indicator-2026.md
+    // (NN/G: waits should show a progress indicator, not silence).
+    Quitting,
     Stopped,
     Error,
 }
@@ -68,6 +76,7 @@ impl UnifiedStatus {
             Self::Starting => "Status: Starting",
             Self::Ready => "Status: Ready",
             Self::Restarting => "Status: Restarting",
+            Self::Quitting => "Status: Quitting…",
             Self::Stopped => "Status: Stopped",
             Self::Error => "Status: Error",
         }
@@ -216,12 +225,13 @@ where
     M: Manager<R>,
     R: Runtime,
 {
+    let quitting = status == UnifiedStatus::Quitting;
     let status_item = MenuItem::with_id(manager, "status", status.label(), false, None::<&str>)?;
     let open_console = MenuItem::with_id(
         manager,
         "open-console",
         "Open DataConnect",
-        true,
+        !quitting,
         None::<&str>,
     )?;
     let open_browser = MenuItem::with_id(
@@ -232,7 +242,14 @@ where
         None::<&str>,
     )?;
     let show_logs = MenuItem::with_id(manager, "show-logs", "Show logs", true, None::<&str>)?;
-    let quit = MenuItem::with_id(manager, "quit", "Quit", true, None::<&str>)?;
+    // Disabled (not hidden) while quitting: a visible-but-inert "Quit" is
+    // the field-observed pattern for "your quit request already landed,
+    // there's nothing more to click" (Docker Desktop's tray shows a
+    // disabled/greyed state during its own "stopping" phase) -- see
+    // ai/research/desktop-app-packaging/quit-window-hide-vs-progress-indicator-2026.md.
+    // A second click while disabled is a no-op, not a second concurrent
+    // shutdown, because request_shutdown (lib.rs/unified.rs) is idempotent.
+    let quit = MenuItem::with_id(manager, "quit", "Quit", !quitting, None::<&str>)?;
     Menu::with_items(
         manager,
         &[
@@ -839,6 +856,11 @@ pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
         return false;
     }
 
+    // Set after the early-return above: that path exits immediately with
+    // nothing to wait on, so there is nothing for a "Quitting…" status to
+    // usefully describe. Only the real up-to-UNIFIED_SHUTDOWN_BUDGET wait
+    // below gets the indicator.
+    set_status(app, UnifiedStatus::Quitting);
     begin_background_shutdown(app, initial_stack, exit_code);
     true
 }
@@ -878,23 +900,40 @@ fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     }
 }
 
-async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), String> {
-    set_status(&app, UnifiedStatus::Starting);
+/// Local secrets/config the sidecars need before they can start: the owner
+/// password plus (when managed, not attach mode) the database and
+/// credential encryption keys and the remote-access config. Loaded together
+/// because every one of them is a synchronous OS keychain (D-Bus
+/// secret-service on Linux) or filesystem call -- see
+/// owner_credential.rs::load_or_create_owner_credential and its
+/// load_or_create_*_encryption_key siblings, all backed by SystemKeyring.
+struct BootstrapSecrets {
+    password: String,
+    remote_access: RemoteAccessConfig,
+    credential_encryption_key: Option<String>,
+    database_encryption_key: Option<String>,
+}
 
-    let credential_path = owner_credential_path(&app)?;
+/// Load `BootstrapSecrets` synchronously. Must run inside spawn_blocking:
+/// every call here can block on a D-Bus round trip to the OS keychain
+/// (gnome-keyring/kwallet via the `keyring` crate's secret-service backend)
+/// or on disk I/O, none of which should run inline on a Tokio worker thread
+/// borrowed from the shared async runtime.
+fn load_bootstrap_secrets(app: &AppHandle, attach_mode: bool) -> Result<BootstrapSecrets, String> {
+    let credential_path = owner_credential_path(app)?;
     let stored_credential = load_or_create_owner_credential(&credential_path)?;
     let password = configured_owner_password().unwrap_or(stored_credential);
-    let remote_access = if attach_mode() {
+    let remote_access = if attach_mode {
         off_remote_access_config()
     } else {
-        load_remote_access_config(&app)?
+        load_remote_access_config(app)?
     };
 
-    let (credential_encryption_key, database_encryption_key) = if attach_mode() {
+    let (credential_encryption_key, database_encryption_key) = if attach_mode {
         (None, None)
     } else {
-        let credential_encryption_key_path = credential_encryption_key_path(&app)?;
-        let database_encryption_key_path = database_encryption_key_path(&app)?;
+        let credential_encryption_key_path = credential_encryption_key_path(app)?;
+        let database_encryption_key_path = database_encryption_key_path(app)?;
         let database_path = app
             .path()
             .app_data_dir()
@@ -913,6 +952,28 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
             Some(database_encryption_key),
         )
     };
+
+    Ok(BootstrapSecrets {
+        password,
+        remote_access,
+        credential_encryption_key,
+        database_encryption_key,
+    })
+}
+
+async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), String> {
+    set_status(&app, UnifiedStatus::Starting);
+
+    let attach = attach_mode();
+    let secrets_app = app.clone();
+    let BootstrapSecrets {
+        password,
+        remote_access,
+        credential_encryption_key,
+        database_encryption_key,
+    } = tokio::task::spawn_blocking(move || load_bootstrap_secrets(&secrets_app, attach))
+        .await
+        .map_err(|error| format!("Bootstrap secrets task failed: {error}"))??;
 
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
@@ -1191,8 +1252,14 @@ fn create_or_update_console_window(
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = window_for_close.hide();
+            if crate::commands::read_close_to_tray_preference() {
+                api.prevent_close();
+                let _ = window_for_close.hide();
+            }
+            // else: let the close proceed. With no other windows open this
+            // drops to zero webview windows, which fires RunEvent::ExitRequested
+            // (handled in lib.rs -> request_shutdown), so disabling the
+            // preference still gets a clean sidecar shutdown, not a bare kill.
         }
     });
     // tauri-plugin-window-state restores a saved SIZE in physical pixels with
@@ -1531,6 +1598,52 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
         assert!(is_valid_profile("release"));
         assert!(!is_valid_profile("../release"));
+    }
+
+    #[test]
+    fn quitting_status_disables_quit_and_open_console_tray_items() {
+        let app = tauri::test::mock_app();
+
+        let quitting_menu =
+            build_tray_menu(&app, UnifiedStatus::Quitting).expect("quitting menu should build");
+        let quit_item = quitting_menu
+            .get("quit")
+            .and_then(|item| item.as_menuitem().cloned())
+            .expect("quit item should exist");
+        let open_console_item = quitting_menu
+            .get("open-console")
+            .and_then(|item| item.as_menuitem().cloned())
+            .expect("open-console item should exist");
+        assert!(
+            !quit_item.is_enabled().expect("quit enabled state"),
+            "Quit must be disabled while a shutdown is already in flight, \
+             since request_shutdown is idempotent but a second click should \
+             not look like it did anything"
+        );
+        assert!(
+            !open_console_item
+                .is_enabled()
+                .expect("open-console enabled state"),
+            "Open DataConnect must be disabled while quitting: the window \
+             is already hidden and sidecars are winding down, so reopening \
+             it makes no sense mid-shutdown"
+        );
+
+        let ready_menu =
+            build_tray_menu(&app, UnifiedStatus::Ready).expect("ready menu should build");
+        let quit_item = ready_menu
+            .get("quit")
+            .and_then(|item| item.as_menuitem().cloned())
+            .expect("quit item should exist");
+        assert!(
+            quit_item.is_enabled().expect("quit enabled state"),
+            "Quit must stay enabled outside of an in-flight shutdown"
+        );
+    }
+
+    #[test]
+    fn quitting_status_label_reads_as_a_visible_progress_indicator() {
+        assert_eq!(UnifiedStatus::Quitting.label(), "Status: Quitting…");
     }
 
     #[test]

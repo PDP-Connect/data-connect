@@ -30,12 +30,25 @@ function nativeInvoke(): NativeInvoke | null {
 /** Mirrors the AppConfig shape from src-tauri/src/commands/file_ops.rs. */
 interface AppConfigShape {
   startMinimized?: boolean
+  closeToTray?: boolean
 }
 
 function asStartMinimized(value: unknown): boolean {
   if (!value || typeof value !== "object") return false
   const candidate = value as AppConfigShape
   return candidate.startMinimized === true
+}
+
+// AppConfig::default() on the Rust side defaults closeToTray to true, and
+// this must read the same way here: an unset/unrecognized value should not
+// display as "off" while the backend actually treats it as "on". Unlike
+// asStartMinimized (whose real default is false), the absence of a value
+// -- an unread state, not a confirmed false -- must not paint as false, so
+// this only returns false for an explicit `false`, not for undefined/missing.
+function asCloseToTray(value: unknown): boolean {
+  if (!value || typeof value !== "object") return true
+  const candidate = value as AppConfigShape
+  return candidate.closeToTray !== false
 }
 
 type LoadState = "loading" | "loaded" | "bridge_absent" | "failed"
@@ -52,12 +65,14 @@ export function DesktopSettingsSetting({
   // trust their machine to a launch-at-login toggle.
   const [autostartEnabled, setAutostartEnabled] = useState(false)
   const [startMinimized, setStartMinimizedState] = useState(false)
+  const [closeToTray, setCloseToTrayState] = useState(true)
   const [loadState, setLoadState] = useState<LoadState>(() =>
     invoke ? "loading" : "bridge_absent"
   )
   const [error, setError] = useState<string | null>(null)
   const [busyAutostart, setBusyAutostart] = useState(false)
   const [busyStartMinimized, setBusyStartMinimized] = useState(false)
+  const [busyCloseToTray, setBusyCloseToTray] = useState(false)
 
   useEffect(() => {
     if (!invoke) {
@@ -75,6 +90,7 @@ export function DesktopSettingsSetting({
         if (cancelled) return
         setAutostartEnabled(autostart === true)
         setStartMinimizedState(asStartMinimized(config))
+        setCloseToTrayState(asCloseToTray(config))
         setLoadState("loaded")
       })
       .catch(reason => {
@@ -118,6 +134,25 @@ export function DesktopSettingsSetting({
       .then(() => setStartMinimizedState(next))
       .catch(reason => setError(String(reason)))
       .finally(() => setBusyStartMinimized(false))
+  }
+
+  const toggleCloseToTray = (next: boolean) => {
+    if (!invoke) return
+    setError(null)
+    setBusyCloseToTray(true)
+    void invoke("get_app_config")
+      .then(config => {
+        const current =
+          config && typeof config === "object"
+            ? (config as Record<string, unknown>)
+            : {}
+        return invoke("set_app_config", {
+          config: { ...current, closeToTray: next },
+        })
+      })
+      .then(() => setCloseToTrayState(next))
+      .catch(reason => setError(String(reason)))
+      .finally(() => setBusyCloseToTray(false))
   }
 
   return (
@@ -192,6 +227,33 @@ export function DesktopSettingsSetting({
             <span className="pdpp-caption text-muted-foreground">
               Keep the console window hidden at startup. DataConnect keeps
               running in the tray; open it from there. Off by default.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      <div
+        className={cn(
+          "grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3",
+          desktopUnavailable && "opacity-60"
+        )}
+      >
+        <label className="flex items-start gap-2" htmlFor="close-to-tray">
+          <input
+            checked={stateIsKnown && closeToTray}
+            disabled={busyCloseToTray || desktopUnavailable}
+            id="close-to-tray"
+            onChange={event => toggleCloseToTray(event.currentTarget.checked)}
+            type="checkbox"
+          />
+          <span className="grid gap-1">
+            <span className="pdpp-caption font-medium text-foreground">
+              Keep running when the window is closed
+            </span>
+            <span className="pdpp-caption text-muted-foreground">
+              Closing the window hides it to the tray instead of quitting.
+              DataConnect and its background connectors keep running; quit
+              from the tray menu to stop them. On by default.
             </span>
           </span>
         </label>
