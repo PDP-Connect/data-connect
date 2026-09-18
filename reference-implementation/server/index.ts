@@ -84,6 +84,7 @@ import {
 } from "../runtime/controller.ts";
 import { createConnectorInstallService } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
+import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -353,6 +354,7 @@ import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
+import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -7789,6 +7791,17 @@ function buildRsApp(opts: ServerOpts = {}) {
     requireToken,
     service: createConnectorInstallService({ registerManifest: registerConnector }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+
+  // Owner-authenticated HTTP routes for the user_supplied_origin remote-access
+  // provider (config read/write/inspect). See routes/owner-remote-access.ts
+  // for the full rationale and scope fence (ngrok stays Tauri-only).
+  mountOwnerRemoteAccess(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
 
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control

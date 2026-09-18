@@ -7,6 +7,10 @@ import { useEffect, useMemo, useState } from "react"
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import { cn } from "@/lib/utils.ts"
 import {
+  loadRemoteAccessStateAction,
+  setRemoteAccessConfigAction,
+} from "./remote-access-actions.ts"
+import {
   DEFAULT_PUBLIC_URL_OPTION_ID,
   offRemoteAccessConfig,
   privacyBadgeForPosture,
@@ -25,8 +29,21 @@ type NativeInvoke = (
   args?: Record<string, unknown>
 ) => Promise<unknown>
 
+/**
+ * The `user_supplied_origin` config surface (load/save) now runs over the
+ * owner-authenticated HTTP routes on the reference server -- see
+ * `remote-access-actions.ts` -- in both the desktop app and a plain browser.
+ * Only ngrok, which needs the OS keychain and Rust-side tunnel supervision,
+ * still goes through Tauri's `invoke()`, and only when that bridge exists
+ * (see `local/HOST-BRIDGE-DESIGN-0918.md`: Tauri never injects it into the
+ * console's `http://127.0.0.1:{port}` window, so `invoke` is always absent in
+ * the current desktop build -- ngrok configuration is disabled below rather
+ * than silently broken).
+ */
 interface RemoteAccessSettingProps {
   invoke?: NativeInvoke
+  loadState?: typeof loadRemoteAccessStateAction
+  saveConfig?: typeof setRemoteAccessConfigAction
 }
 
 interface TauriWindow {
@@ -83,7 +100,7 @@ function asInspection(value: unknown): RemoteAccessInspection {
     return {
       availability: "unavailable",
       authentication: "not_required",
-      reason: "Remote access is only available in the DataConnect desktop app.",
+      reason: "The current remote access state could not be read.",
     }
   }
   const candidate = value as Partial<RemoteAccessInspection>
@@ -126,17 +143,24 @@ const postureRows: Array<{
 
 export function RemoteAccessSetting({
   invoke: suppliedInvoke,
+  loadState: suppliedLoadState,
+  saveConfig: suppliedSaveConfig,
 }: RemoteAccessSettingProps) {
+  // ngrok-only: Tauri's invoke() bridge, when present (desktop only; see the
+  // module doc comment above). Never used for user_supplied_origin, which
+  // always goes through the HTTP actions below.
   const invoke = suppliedInvoke ?? nativeInvoke()
+  const loadRemoteAccessState = suppliedLoadState ?? loadRemoteAccessStateAction
+  const saveRemoteAccessConfig = suppliedSaveConfig ?? setRemoteAccessConfigAction
   const [config, setConfig] = useState<RemoteAccessConfig>(
     offRemoteAccessConfig
   )
   // The default config above is a placeholder, not state we have read. Until a
   // load succeeds, we must not paint it as the real posture: rendering "Off"
   // for an unknown state is what let the dishonest badge go unnoticed.
-  const [loadState, setLoadState] = useState<
-    "loading" | "loaded" | "bridge_absent" | "failed"
-  >(() => (invoke ? "loading" : "bridge_absent"))
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "failed">(
+    "loading"
+  )
   const [inspection, setInspection] = useState<RemoteAccessInspection | null>(
     null
   )
@@ -151,19 +175,10 @@ export function RemoteAccessSetting({
   const [reservedDomain, setReservedDomain] = useState("")
 
   useEffect(() => {
-    if (!invoke) {
-      setInspection(asInspection(null))
-      setLoadState("bridge_absent")
-      return
-    }
-
     let cancelled = false
     setLoadState("loading")
-    void Promise.all([
-      invoke("get_remote_access_config"),
-      invoke("inspect_remote_access"),
-    ])
-      .then(([nextConfig, nextInspection]) => {
+    void loadRemoteAccessState()
+      .then(({ config: nextConfig, inspection: nextInspection }) => {
         if (cancelled) return
         const resolved = asConfig(nextConfig)
         setConfig(resolved)
@@ -173,7 +188,7 @@ export function RemoteAccessSetting({
       })
       .catch(reason => {
         if (cancelled) return
-        // The command exists but this build could not answer it. Report the
+        // The route exists but this request could not answer it. Report the
         // failure instead of falling back to a default that looks real.
         setError(String(reason))
         setLoadState("failed")
@@ -182,7 +197,7 @@ export function RemoteAccessSetting({
     return () => {
       cancelled = true
     }
-  }, [invoke])
+  }, [loadRemoteAccessState])
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
@@ -200,12 +215,15 @@ export function RemoteAccessSetting({
   const choosePosture = (nextPosture: RemoteAccessPosture) => {
     setError(null)
     if (nextPosture === "off") {
-      if (!invoke) return
       setBusy(true)
-      void invoke("set_remote_access_config", {
-        config: offRemoteAccessConfig(),
-      })
-        .then(() => setConfig(offRemoteAccessConfig()))
+      void saveRemoteAccessConfig(offRemoteAccessConfig())
+        .then(result => {
+          if (!result.ok) {
+            setError(result.message)
+            return
+          }
+          setConfig(asConfig(result.config))
+        })
         .catch(reason => setError(String(reason)))
         .finally(() => setBusy(false))
       return
@@ -222,10 +240,49 @@ export function RemoteAccessSetting({
     setError(null)
   }
 
+  /**
+   * The owner is already authenticated to reach this page (an owner bearer
+   * token cannot be minted without PDPP_OWNER_PASSWORD already configured),
+   * so user_supplied_origin never re-collects a password here -- there is no
+   * separate credential to set. ngrok still needs one for the desktop-only
+   * onboarding path (see file header).
+   */
   const enablePublicUrl = () => {
+    const option = publicUrlOptionById(optionId)
+    if (!option) {
+      setError("Choose how this Personal Server should be reachable.")
+      return
+    }
+
+    if (option.provider === "user_supplied_origin") {
+      if (!configuredOriginValidation.ok) {
+        setError(configuredOriginValidation.message)
+        return
+      }
+      const nextConfig: RemoteAccessConfig = {
+        posture: "public_url",
+        provider: "user_supplied_origin",
+        fields: configuredOriginValidation.fields,
+      }
+      setBusy(true)
+      setError(null)
+      void saveRemoteAccessConfig(nextConfig)
+        .then(result => {
+          if (!result.ok) {
+            setError(result.message)
+            return
+          }
+          setConfig(asConfig(result.config))
+          setPendingPosture(null)
+        })
+        .catch(reason => setError(String(reason)))
+        .finally(() => setBusy(false))
+      return
+    }
+
     if (!invoke) {
       setError(
-        "Remote access is only available in the DataConnect desktop app."
+        "ngrok is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
       )
       return
     }
@@ -233,45 +290,25 @@ export function RemoteAccessSetting({
       setError("Choose an owner password with at least 8 characters.")
       return
     }
-
-    const option = publicUrlOptionById(optionId)
-    if (!option) {
-      setError("Choose how this Personal Server should be reachable.")
+    if (!authtoken.trim()) {
+      setError("Paste your ngrok authtoken to continue.")
       return
     }
-
-    let nextConfig: RemoteAccessConfig
-    if (option.provider === "user_supplied_origin") {
-      if (!configuredOriginValidation.ok) {
-        setError(configuredOriginValidation.message)
-        return
-      }
-      nextConfig = {
-        posture: "public_url",
-        provider: "user_supplied_origin",
-        fields: configuredOriginValidation.fields,
-      }
-    } else {
-      if (!authtoken.trim()) {
-        setError("Paste your ngrok authtoken to continue.")
-        return
-      }
-      const domain = validateReservedDomain(reservedDomain)
-      if (!domain.ok) {
-        setError(domain.message)
-        return
-      }
-      // ngrok is assigned its hostname by the edge at start, so the four
-      // fields stay empty until the adapter reports the origin.
-      nextConfig = {
-        posture: "public_url",
-        provider: "ngrok",
-        fields: offRemoteAccessConfig().fields,
-        ngrok: {
-          endpoint_mode: option.ngrokMode ?? "https_edge_termination",
-          reserved_domain: domain.domain,
-        },
-      }
+    const domain = validateReservedDomain(reservedDomain)
+    if (!domain.ok) {
+      setError(domain.message)
+      return
+    }
+    // ngrok is assigned its hostname by the edge at start, so the four
+    // fields stay empty until the adapter reports the origin.
+    const nextConfig: RemoteAccessConfig = {
+      posture: "public_url",
+      provider: "ngrok",
+      fields: offRemoteAccessConfig().fields,
+      ngrok: {
+        endpoint_mode: option.ngrokMode ?? "https_edge_termination",
+        reserved_domain: domain.domain,
+      },
     }
 
     setBusy(true)
@@ -279,9 +316,7 @@ export function RemoteAccessSetting({
     void invoke("configure_remote_access", {
       config: nextConfig,
       ownerPassword: password,
-      ...(option.provider === "ngrok"
-        ? { providerCredential: authtoken.trim() }
-        : {}),
+      providerCredential: authtoken.trim(),
     })
       .then(nextConfigValue => {
         setConfig(asConfig(nextConfigValue ?? nextConfig))
@@ -304,12 +339,6 @@ export function RemoteAccessSetting({
         {loadState === "loading" ? (
           <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
             Reading the current remote access state…
-          </p>
-        ) : null}
-        {loadState === "bridge_absent" ? (
-          <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-            Remote access is unavailable here. Open the DataConnect desktop app
-            to view or change it.
           </p>
         ) : null}
         {loadState === "failed" ? (
@@ -429,28 +458,33 @@ export function RemoteAccessSetting({
         >
           <div className="grid gap-1">
             <h3 className="pdpp-caption font-semibold text-foreground">
-              Set an owner password
+              {selectedOption?.requiresAuthtoken
+                ? "Set an owner password"
+                : "Choose a reachable origin"}
             </h3>
             <p className="pdpp-caption text-muted-foreground">
-              Remote access cannot turn on without a password you choose. This
-              blocks owner controls from an unprotected public origin.
+              {selectedOption?.requiresAuthtoken
+                ? "Remote access cannot turn on without a password you choose. This blocks owner controls from an unprotected public origin."
+                : "You are already signed in as the owner, so no separate password is needed for a proxy you run."}
             </p>
           </div>
-          <label
-            className="grid gap-1 pdpp-caption text-foreground"
-            htmlFor="remote-access-password"
-          >
-            Owner password
-            <input
-              autoComplete="new-password"
-              className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-              id="remote-access-password"
-              minLength={8}
-              onChange={event => setPassword(event.currentTarget.value)}
-              type="password"
-              value={password}
-            />
-          </label>
+          {selectedOption?.requiresAuthtoken ? (
+            <label
+              className="grid gap-1 pdpp-caption text-foreground"
+              htmlFor="remote-access-password"
+            >
+              Owner password
+              <input
+                autoComplete="new-password"
+                className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+                id="remote-access-password"
+                minLength={8}
+                onChange={event => setPassword(event.currentTarget.value)}
+                type="password"
+                value={password}
+              />
+            </label>
+          ) : null}
           <div
             aria-label="Public URL provider"
             className="grid gap-2"
@@ -602,7 +636,11 @@ export function RemoteAccessSetting({
               onClick={enablePublicUrl}
               type="button"
             >
-              {busy ? "Enabling…" : "Set password and enable"}
+              {busy
+                ? "Enabling…"
+                : selectedOption?.requiresAuthtoken
+                  ? "Set password and enable"
+                  : "Enable"}
             </button>
           </div>
         </div>

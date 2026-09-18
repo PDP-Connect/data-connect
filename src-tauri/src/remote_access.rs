@@ -369,10 +369,18 @@ pub(crate) fn validate_remote_access_config(
     }
 }
 
+/// Resolve the persisted config path under the SAME directory the reference
+/// server is given as `PDPP_DATA_DIR` (see `unified.rs::ri_environment`), so
+/// the desktop supervisor and the reference server's owner-authenticated
+/// remote-access routes (`server/routes/owner-remote-access.ts`) read and
+/// write one persisted config, never two.
 fn remote_access_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|path| path.join(REMOTE_ACCESS_CONFIG_FILE))
+        .map(|path| {
+            path.join(crate::unified::UNIFIED_DB_DIRECTORY)
+                .join(REMOTE_ACCESS_CONFIG_FILE)
+        })
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 

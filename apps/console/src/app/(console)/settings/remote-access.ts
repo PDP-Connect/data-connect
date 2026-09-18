@@ -1,137 +1,37 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-export type RemoteAccessPosture = "off" | "my_devices_only" | "public_url"
-
-export type RemoteAccessProvider = "user_supplied_origin" | "ngrok"
-
 /**
- * ngrok exposes one session in several endpoint shapes. The shape decides
- * whether ngrok terminates TLS, so it decides the payload-privacy badge and
- * cannot be chosen after the fact.
+ * The `RemoteAccessConfig` contract and `validateUserSuppliedOrigin` are
+ * pure, zero-Tauri-dependency logic now shared with the reference server's
+ * owner-authenticated remote-access routes
+ * (`reference-implementation/server/routes/owner-remote-access.ts`), which
+ * validate and persist this same config. `apps/console` depends on
+ * `pdpp-reference-implementation`, never the reverse, so the shared contract
+ * lives there and this module re-exports it. Everything below this re-export
+ * is console-only presentation (badges, selectable provider rows).
  */
-export type NgrokEndpointMode =
-  "https_edge_termination" | "tls_passthrough" | "tcp_passthrough"
+import type {
+  InvalidOrigin,
+  NgrokEndpointMode,
+  RemoteAccessPosture,
+  RemoteAccessProvider,
+} from "pdpp-reference-implementation/remote-access-config"
 
-export interface ReachabilityFields {
-  PDPP_REFERENCE_ORIGIN: string | null
-  PDPP_TRUSTED_HOSTS: string
-  PDPP_TRUSTED_PROXIES: string
-  PDPP_BIND_HOST: "127.0.0.1"
-}
-
-export interface NgrokOptions {
-  endpoint_mode: NgrokEndpointMode
-  /**
-   * A reserved domain the owner already holds on a paid ngrok plan. Omitted
-   * means ngrok assigns a random hostname, which the owner accepts.
-   */
-  reserved_domain: string | null
-}
-
-export interface RemoteAccessConfig {
-  posture: RemoteAccessPosture
-  provider: RemoteAccessProvider | null
-  fields: ReachabilityFields
-  ngrok?: NgrokOptions | null
-}
-
-export interface RemoteAccessInspection {
-  availability: "available" | "unavailable"
-  authentication: "not_required" | "required" | "authenticated" | "missing"
-  reason: string | null
-}
-
-export interface OriginValidation {
-  ok: true
-  origin: string
-  host: string
-  fields: ReachabilityFields
-}
-
-export interface InvalidOrigin {
-  ok: false
-  message: string
-}
-
-const LOOPBACK_HOSTS = new Set(["localhost", "0.0.0.0", "::1"])
-
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.toLowerCase()
-  return (
-    LOOPBACK_HOSTS.has(host) ||
-    host === "[::1]" ||
-    host.startsWith("127.") ||
-    host.endsWith(".local")
-  )
-}
-
-/** Parse the owner-supplied URL into the exact four reachability fields. */
-export function validateUserSuppliedOrigin(
-  raw: string
-): OriginValidation | InvalidOrigin {
-  const value = raw.trim()
-  if (!value) {
-    return { ok: false, message: "Enter the HTTPS origin your proxy serves." }
-  }
-
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return {
-      ok: false,
-      message:
-        "Use an absolute HTTPS origin, such as https://vault.example.com.",
-    }
-  }
-
-  if (url.protocol !== "https:") {
-    return { ok: false, message: "Remote access requires an HTTPS origin." }
-  }
-  if (!url.hostname || url.username || url.password) {
-    return {
-      ok: false,
-      message: "The origin must include a host and no embedded credentials.",
-    }
-  }
-  if (url.pathname !== "/" || url.search || url.hash) {
-    return {
-      ok: false,
-      message:
-        "Use only scheme, host, and optional port. Paths are not supported.",
-    }
-  }
-  if (isLoopbackHost(url.hostname)) {
-    return { ok: false, message: "Remote access needs a non-loopback origin." }
-  }
-
-  const origin = url.origin
-  return {
-    ok: true,
-    origin,
-    host: url.hostname,
-    fields: {
-      PDPP_REFERENCE_ORIGIN: origin,
-      PDPP_TRUSTED_HOSTS: url.hostname,
-      PDPP_TRUSTED_PROXIES: "",
-      PDPP_BIND_HOST: "127.0.0.1",
-    },
-  }
-}
-
-export function offRemoteAccessConfig(): RemoteAccessConfig {
-  return {
-    posture: "off",
-    provider: null,
-    fields: {
-      PDPP_REFERENCE_ORIGIN: null,
-      PDPP_TRUSTED_HOSTS: "",
-      PDPP_TRUSTED_PROXIES: "",
-      PDPP_BIND_HOST: "127.0.0.1",
-    },
-  }
-}
+export {
+  inspectUserSuppliedOrigin,
+  offRemoteAccessConfig,
+  validateUserSuppliedOrigin,
+  type InvalidOrigin,
+  type NgrokEndpointMode,
+  type NgrokOptions,
+  type OriginValidation,
+  type ReachabilityFields,
+  type RemoteAccessConfig,
+  type RemoteAccessInspection,
+  type RemoteAccessPosture,
+  type RemoteAccessProvider,
+} from "pdpp-reference-implementation/remote-access-config"
 
 /**
  * The badge states only what we can actually verify about who can read

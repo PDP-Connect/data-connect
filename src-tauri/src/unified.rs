@@ -42,7 +42,11 @@ const DEFAULT_PROFILE: &str = "release";
 const RI_LABEL: &str = "reference-implementation";
 const CONSOLE_LABEL: &str = "console";
 const RI_HEALTH_PATH: &str = "/.well-known/oauth-protected-resource";
-const UNIFIED_DB_DIRECTORY: &str = "unified";
+// pub(crate): src-tauri/src/remote_access.rs's `remote_access_config_path`
+// also joins this directory, so the desktop supervisor and the reference
+// server (which is given this same path as PDPP_DATA_DIR -- see
+// `ri_environment` below) read and write the exact same remote-access.json.
+pub(crate) const UNIFIED_DB_DIRECTORY: &str = "unified";
 const UNIFIED_DB_FILE: &str = "pdpp.sqlite";
 const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
 const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
@@ -258,6 +262,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     }
 
     let app_handle = app.handle().clone();
+    spawn_remote_access_config_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(error) = bootstrap_and_open_console(app_handle.clone()).await {
             log::error!("Unified DataConnect startup failed: {error}");
@@ -963,6 +968,70 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     .await
     .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
     bootstrap_and_open_console(app).await
+}
+
+const REMOTE_ACCESS_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Watch the remote-access config file for changes made from OUTSIDE this
+/// process and restart the managed stack when one lands.
+///
+/// The console can no longer call `configure_remote_access` /
+/// `set_remote_access_config` for the `user_supplied_origin` provider --
+/// Tauri never injects `invoke()` into the console's `http://127.0.0.1:{port}`
+/// window (see `local/HOST-BRIDGE-DESIGN-0918.md`). It now writes the SAME
+/// file directly over HTTP (`server/routes/owner-remote-access.ts`, via
+/// `remote_access_config_path`, which both processes now agree on). Nothing
+/// else notifies this process that the file changed, and the four PDPP_*
+/// reachability fields are only read once at RI/console process startup, so
+/// applying a change still means restarting those sidecars -- this task is
+/// what makes that restart automatic instead of requiring the owner to
+/// manually quit and reopen DataConnect.
+///
+/// Polls rather than uses a filesystem-notify crate: this repo has no
+/// existing file-watch dependency, the codebase's own idiom for this shape of
+/// wait is already a short interval poll (`CONSOLE_POLL_INTERVAL`, ~15 lines
+/// above `bootstrap_and_open_console`), and a settings change is a rare,
+/// human-paced event where a few seconds of latency is unobservable.
+///
+/// Spawned exactly once from `setup()`, before the first
+/// `bootstrap_and_open_console` call. `last_applied` seeds from the config
+/// file's state at that moment -- the same read `bootstrap_and_open_console`
+/// is about to make to launch the stack for the first time -- so the first
+/// poll tick never fires spuriously. A restart this task itself triggers
+/// updates `last_applied` before handing control to
+/// `restart_after_remote_access_config`, so that restart's own (unchanged)
+/// config read never re-triggers a loop; every subsequent Tauri-side restart
+/// (from `set_remote_access_config` / `configure_remote_access`, or a later
+/// external change) is likewise absorbed into `last_applied` as it happens,
+/// since this is the only task that ever advances it.
+pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_applied = load_remote_access_config(&app).unwrap_or_else(|error| {
+            log::warn!("Remote-access config watcher could not seed its baseline: {error}");
+            off_remote_access_config()
+        });
+        loop {
+            tokio::time::sleep(REMOTE_ACCESS_CONFIG_POLL_INTERVAL).await;
+            if !remote_access_configuration_supported() {
+                continue;
+            }
+            let current = match load_remote_access_config(&app) {
+                Ok(config) => config,
+                Err(error) => {
+                    log::warn!("Remote-access config watcher could not read the config file: {error}");
+                    continue;
+                }
+            };
+            if current == last_applied {
+                continue;
+            }
+            log::info!("Remote-access config changed on disk; restarting the managed stack");
+            last_applied = current;
+            if let Err(error) = restart_after_remote_access_config(app.clone()).await {
+                log::error!("Automatic restart after a remote-access config change failed: {error}");
+            }
+        }
+    });
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {
