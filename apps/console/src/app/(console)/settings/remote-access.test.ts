@@ -112,7 +112,10 @@ test("ngrok edge termination is disclosed as readable, passthrough as not", () =
 test("every selectable public URL option states a badge and stays consistent", () => {
   assert.ok(publicUrlOptions.length >= 3)
   for (const option of publicUrlOptions) {
-    assert.match(option.badge, /^Provider (cannot|can) read your data$/)
+    assert.match(
+      option.badge,
+      /^Provider (cannot|can) read your data$|^Depends on your proxy - it can read your data unless it passes TLS through$/
+    )
     assert.ok(option.label.length > 0)
     assert.ok(option.description.length > 0)
     // The row badge must agree with the mode's own privacy answer.

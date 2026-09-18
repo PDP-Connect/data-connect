@@ -173,7 +173,9 @@ export function privacyBadgeForPosture(
  * so each Public URL option carries its own, never-blank badge.
  */
 export type ProviderPrivacyBadge =
-  "Provider cannot read your data" | "Provider can read your data"
+  | "Provider cannot read your data"
+  | "Provider can read your data"
+  | "Depends on your proxy - it can read your data unless it passes TLS through"
 
 export function privacyBadgeForNgrokMode(
   mode: NgrokEndpointMode
@@ -241,7 +243,11 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     label: "A proxy you run",
     description:
       "Use a reverse proxy or tunnel you already operate. DataConnect only records the origin it should expect.",
-    badge: "Provider cannot read your data",
+    // DataConnect does not operate this proxy and cannot inspect where it
+    // terminates TLS, so it cannot prove the operator is unable to read the
+    // traffic. We never assert a negative we cannot prove.
+    badge:
+      "Depends on your proxy - it can read your data unless it passes TLS through",
     requiresAuthtoken: false,
     planNote: null,
   },
