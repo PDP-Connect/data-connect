@@ -191,7 +191,7 @@ function trustedHostsInclude(request: HostAndPort, trustedHosts: MetadataTrusted
   });
 }
 
-function forwardedPublicOrigin(req: ResolvePublicUrlRequest): string | null {
+export function forwardedPublicOrigin(req: ResolvePublicUrlRequest): string | null {
   const forwardedHost = firstHeaderValue(req.get("x-forwarded-host"));
   if (!forwardedHost) {
     return null;

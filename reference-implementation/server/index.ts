@@ -217,6 +217,7 @@ import {
   buildOwnerConnectionSupportedActions,
   buildProtectedResourceMetadata,
   buildSemanticRetrievalCapability,
+  forwardedPublicOrigin,
   isLocalOrPrivateRequestOrigin,
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -6361,6 +6362,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     generateSpineId,
     getOwnerSubjectId,
     handleError,
+    // A trusted proxy is not guaranteed to attach x-forwarded-host to every
+    // request in a flow (see resolveCallbackBaseUrl below); this reports
+    // only whether THIS request carries that header, so the callback route
+    // can tell "no signal" apart from "an explicit, conflicting claim."
+    hasForwardedOriginSignal: (req: unknown) =>
+      forwardedPublicOrigin(req as Parameters<typeof forwardedPublicOrigin>[0]) !== null,
     pdppError,
     pendingAuthStore,
     requireOwnerSession: ownerAuth.requireOwnerSession,
