@@ -301,6 +301,53 @@ The placeholder is intentionally narrow:
 - public protocol surfaces (`/oauth/par`, `/oauth/register`, `/oauth/token`, `/v1/*`, `/.well-known/*`) are **not** gated
 - the placeholder is still not a durable owner-auth story; it is only the current reference-local browser/session gate
 
+### Config precedence: stored values vs. environment variables
+
+Most config keys have exactly one precedence rule, implemented once in
+[`server/stores/config-precedence-resolver.ts`](server/stores/config-precedence-resolver.ts)
+(`createConfigPrecedenceResolver`):
+
+> An env var is read only when the config store has no value for that key and
+> the key is not on the platform-owned list; everywhere else, once the owner
+> has set a value through the UI, that stored value wins even if the env var
+> is still present, and the env var is consulted again only if the stored
+> value is cleared.
+
+Two exceptions:
+
+- **Platform-owned keys** (`PORT`, `AS_PORT`, `RS_PORT` today) never consult
+  the store at all — env always wins, so the UI can never fight the platform
+  that injects them (Railway/PaaS `PORT` injection, or the `core` image's
+  internal AS/RS supervisor ports).
+- **Bootstrap values** — `PDPP_DATABASE_URL` (or `PDPP_STORAGE_BACKEND=sqlite`
+  + `PDPP_DB_PATH`), `PDPP_OWNER_PASSWORD`, `PDPP_CREDENTIAL_ENCRYPTION_KEY` /
+  `_FILE`, and `PDPP_REFERENCE_ORIGIN` — can never come from the store, because
+  each is needed before the store can be read (it names the database, decrypts
+  it, or classifies hosted/local deployment before any store lookup) or
+  because storing it would let store-write access grant itself store-read
+  access. These are read directly from `process.env`, never through this
+  resolver.
+
+`createDeploymentConfigResolver` (in
+[`server/stores/provider-app-config-store.ts`](server/stores/provider-app-config-store.ts))
+is the shipped, tested instance of this rule for provider OAuth app config
+(`identityGroup`/`logicalKey`-scoped); it is implemented in terms of the
+generic resolver above. No provider-app-config key is platform-owned.
+
+This PR lands the rule, its generic form, and the platform-owned exception —
+it does not migrate additional env vars into the store. `PDPP_INSTANCE_NAME`,
+`PDPP_TRUSTED_HOSTS`/`PDPP_TRUSTED_PROXIES`, the `GOOGLE_DATAPORTABILITY_*`
+vars, VAPID web-push keys, operational limits
+(`PDPP_MANUAL_UPLOAD_MAX_BYTES`, `PDPP_RECORD_REJECTION_*_QUOTA_BYTES`,
+`PDPP_CHANGE_HISTORY_LIMIT`), feature toggles
+(`PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION`, `PDPP_DCR_INITIAL_ACCESS_TOKENS`,
+`PDPP_ENABLE_STREAM_PLAYGROUND`), and owner-session policy
+(`PDPP_OWNER_SESSION_TTL_SECONDS`, `PDPP_OWNER_SAMESITE`,
+`PDPP_OWNER_FORCE_SECURE_COOKIES`) are candidates for the same treatment, but
+that migration is a separate, larger, not-yet-scoped change. There is no
+`PDPP_BIND_HOST` env var in this server today — `bindHost` is an in-process
+start option, not a config-store or bootstrap candidate.
+
 ### Reference-only hosted-UI layer
 
 Server-rendered HTML pages (`GET /consent`, `GET /device` and its result pages, `POST /consent/approve`/`deny` result pages, and the stable owner-entry page at `GET /owner/login`) all go through a small shared hosted-UI module, [`server/hosted-ui.js`](server/hosted-ui.js). That module renders the PDPP brand mark and typography, reuses the `data-surface="human"` / `data-surface="protocol"` language from `packages/pdpp-brand/styles/base.css`, and serves a single shared stylesheet at `GET /__pdpp/hosted-ui.css`.
