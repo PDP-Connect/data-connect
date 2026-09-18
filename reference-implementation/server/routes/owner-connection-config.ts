@@ -68,10 +68,7 @@ import type {
   ResolvedConfigOption,
   ResolvedConnectorOptionsSchema,
 } from "../polyfill-connectors-runtime.ts";
-import {
-  ConnectorOptionsSchemaError,
-  connectorOptionsSchema as defaultConnectorOptionsSchema,
-} from "../polyfill-connectors-runtime.ts";
+import { connectorOptionsSchema as defaultConnectorOptionsSchema } from "../polyfill-connectors-runtime.ts";
 import type {
   ConfigOrigin,
   ConfigRevision,
@@ -346,6 +343,16 @@ interface ResolvedSchemaOutcome {
  * typed 400 instead of letting `ConnectorOptionsSchemaError` -- a plain Error
  * with no `code` -- fall through `handleError` into an opaque 500 (see
  * `handleError` in server/index.ts: `codeToStatus[code] || 500`).
+ *
+ * Classified by constructor name, not `instanceof`: `ctx.connectorOptionsSchema`
+ * is injectable (tests construct `ConnectorOptionsSchemaError` from a direct
+ * `import` of `@pdpp/polyfill-connectors/connector-options-schema`), while the
+ * production default reaches the same class through this module's own
+ * `require()`-based optional-module loader. Node does not guarantee those two
+ * loading paths resolve to the same module instance under every loader
+ * (observed split under tsx), so `instanceof` against either side's copy of
+ * the class would miss errors constructed via the other. The class's own
+ * `constructor.name` is stable across both instantiations.
  */
 function resolveOptionsSchema(ctx: MountOwnerConnectionConfigContext, connectorKey: string): ResolvedSchemaOutcome {
   const resolve = ctx.connectorOptionsSchema ?? defaultConnectorOptionsSchema;
@@ -353,7 +360,7 @@ function resolveOptionsSchema(ctx: MountOwnerConnectionConfigContext, connectorK
     const schema = resolve(connectorKey);
     return schema ? { schema, status: "declared" } : { schema: null, status: "not_declared" };
   } catch (err) {
-    if (err instanceof ConnectorOptionsSchemaError) {
+    if (err instanceof Error && err.constructor.name === "ConnectorOptionsSchemaError") {
       return { schema: null, status: "unreadable" };
     }
     throw err;
