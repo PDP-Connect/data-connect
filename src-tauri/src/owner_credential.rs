@@ -215,6 +215,64 @@ pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result
     save_owner_credential_with_store(&path, &mut store, credential)
 }
 
+/// True once this device has an owner credential -- always true once the
+/// unified stack has booted at least once, since boot mints one when absent
+/// (`load_or_create_owner_credential`). Reading this must never itself create
+/// a credential: a status check is not a boot path.
+pub(crate) fn owner_credential_exists(app: &AppHandle) -> Result<bool, String> {
+    let path = owner_credential_path(app)?;
+    let mut store = SystemKeyring::owner();
+    owner_credential_exists_with_store(&path, &mut store)
+}
+
+/// Constant-time check of a submitted password against the one owner
+/// credential on this device (the same value `load_bootstrap_secrets` used to
+/// start the managed stack). Never mints a credential as a side effect --
+/// callers that need one to already exist should check
+/// `owner_credential_exists` first.
+pub(crate) fn verify_owner_credential(app: &AppHandle, submitted: &str) -> Result<bool, String> {
+    let path = owner_credential_path(app)?;
+    let mut store = SystemKeyring::owner();
+    verify_owner_credential_with_store(&path, &mut store, submitted)
+}
+
+fn owner_credential_exists_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+) -> Result<bool, String> {
+    if matches!(store.load(), Ok(Some(value)) if !value.trim().is_empty()) {
+        return Ok(true);
+    }
+    Ok(path.exists())
+}
+
+fn verify_owner_credential_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    submitted: &str,
+) -> Result<bool, String> {
+    let stored = match store.load() {
+        Ok(Some(value)) if !value.trim().is_empty() => value,
+        _ => read_secret(path, "Owner credential")?,
+    };
+    let expected = configured_owner_password().unwrap_or(stored);
+    Ok(constant_time_eq(expected.as_bytes(), submitted.as_bytes()))
+}
+
+/// Compares two byte strings in time independent of where they first differ,
+/// so a mismatched owner password cannot be timed to learn how many leading
+/// characters were correct.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Load the opaque provider credential reference for a native remote-access provider.
 pub(crate) fn load_provider_credential_reference(
     provider_id: &str,
@@ -621,6 +679,103 @@ mod tests {
 
         assert_eq!(store.value.as_deref(), Some("chosen-owner-password"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn reports_no_credential_before_one_is_created() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        let mut store = MockKeyring::default();
+
+        let exists =
+            owner_credential_exists_with_store(&path, &mut store).expect("existence check");
+
+        assert!(!exists);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn reports_a_credential_once_the_keyring_holds_one() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        let mut store = MockKeyring {
+            available: true,
+            value: Some("owner-password".to_string()),
+        };
+
+        let exists =
+            owner_credential_exists_with_store(&path, &mut store).expect("existence check");
+
+        assert!(exists);
+    }
+
+    #[test]
+    fn reports_a_credential_from_the_fallback_file_when_the_keyring_is_unavailable() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        fs::write(&path, "owner-password").expect("fallback credential file");
+        let mut store = MockKeyring::default();
+
+        let exists =
+            owner_credential_exists_with_store(&path, &mut store).expect("existence check");
+
+        assert!(exists);
+    }
+
+    /// `verify_owner_credential_with_store` intentionally defers to
+    /// `configured_owner_password()` (a `DATACONNECT_OWNER_PASSWORD` /
+    /// `PDPP_OWNER_PASSWORD` env override) when one is set, exactly like
+    /// production boot does. These tests must verify against whatever that
+    /// function actually resolves to right now rather than assuming the test
+    /// environment has neither var set -- this repo's own dev environment
+    /// commonly does.
+    fn expected_owner_password_for_test(stored: &str) -> String {
+        configured_owner_password().unwrap_or_else(|| stored.to_string())
+    }
+
+    #[test]
+    fn verifies_a_matching_password_against_the_keyring() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        let mut store = MockKeyring {
+            available: true,
+            value: Some("owner-password".to_string()),
+        };
+        let expected = expected_owner_password_for_test("owner-password");
+
+        assert!(
+            verify_owner_credential_with_store(&path, &mut store, &expected)
+                .expect("verification")
+        );
+        assert!(
+            !verify_owner_credential_with_store(&path, &mut store, "wrong-password")
+                .expect("verification")
+        );
+    }
+
+    #[test]
+    fn verifies_a_matching_password_against_the_fallback_file() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        fs::write(&path, "owner-password").expect("fallback credential file");
+        let mut store = MockKeyring::default();
+        let expected = expected_owner_password_for_test("owner-password");
+
+        assert!(
+            verify_owner_credential_with_store(&path, &mut store, &expected)
+                .expect("verification")
+        );
+        assert!(
+            !verify_owner_credential_with_store(&path, &mut store, "wrong-password")
+                .expect("verification")
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_lengths_and_accepts_equal_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
     }
 
     #[test]
