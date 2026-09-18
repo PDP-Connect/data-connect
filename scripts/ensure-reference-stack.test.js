@@ -1,13 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   launchScript,
+  pruneForeignPlatformPrebuilds,
   referenceStackRoot,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
@@ -158,5 +159,41 @@ describe("reference stack staging contract", () => {
     expect(source).toContain("RS_PORT")
     expect(source).toContain('PDPP_EMBEDDING_DOWNLOAD_ALLOWED || "0"')
     expect(source).toContain('PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"')
+  })
+
+  for (const packageName of ["better-sqlite3", "better-sqlite3-multiple-ciphers"]) {
+    it(`prunes every foreign-platform ${packageName} prebuild`, () => {
+      const root = fixtureRoot()
+      const prebuildsDir = join(root, "node_modules", packageName, "prebuilds")
+      mkdirSync(prebuildsDir, { recursive: true })
+      for (const name of [
+        "linux-x64.node",
+        "linux-arm64.node",
+        "linuxmusl-x64.node",
+        "linuxmusl-arm64.node",
+        "darwin-x64.node",
+        "darwin-arm64.node",
+        "win32-x64.node",
+        "win32-arm64.node",
+      ]) {
+        writeFileSync(join(prebuildsDir, name), "")
+      }
+
+      pruneForeignPlatformPrebuilds(root)
+
+      expect(readdirSync(prebuildsDir)).toEqual([
+        `${process.platform}-${process.arch}.node`,
+      ])
+    })
+  }
+
+  it("does nothing when neither package ships a prebuilds directory", () => {
+    const root = fixtureRoot()
+    expect(() => pruneForeignPlatformPrebuilds(root)).not.toThrow()
+    expect(
+      existsSync(
+        join(root, "node_modules", "better-sqlite3-multiple-ciphers")
+      )
+    ).toBe(false)
   })
 })
