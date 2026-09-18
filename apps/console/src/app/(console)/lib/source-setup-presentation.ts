@@ -62,13 +62,41 @@ export function sourceSetupContext(entry: ConnectorCatalogEntry): string | null 
   return entry.setupDescription;
 }
 
-function browserBoundWithStoredCredentials(entry: ConnectorCatalogEntry): boolean {
+/**
+ * A browser-bound connector whose manifest also declares static-secret
+ * capture (e.g. Amazon, ChatGPT, Reddit): the dashboard's browser-session
+ * page is a real, dedicated setup path for these regardless of whether the
+ * connector has cleared the separate manual-browser-collector proof roster
+ * (`isSupportedBrowserCollectorConnector`) that `owner_actionable` is gated
+ * on server-side. That roster answers "has a human proven this exact
+ * connector's live collection," a fact orthogonal to "does this dashboard
+ * have a setup path for it" -- so this predicate, not `isOwnerActionableEntry`,
+ * is what a row's setup-path fact must key on.
+ */
+export function browserBoundWithStoredCredentials(entry: ConnectorCatalogEntry): boolean {
   return entry.modality === "browser_bound" && entry.setupModality === "static_secret";
+}
+
+/**
+ * Whether THIS dashboard has a working setup path for `entry`, independent
+ * of whether that path has been proven against a live account yet. A
+ * `static_secret_connect` disposition on a browser-bound connector always
+ * resolves to the browser-session page (`browserBoundWithStoredCredentials`)
+ * regardless of live-proof status -- see the reference planner's own comment
+ * in `buildStaticSecretSetupPlan` for why that disposition is deliberately
+ * not remapped to `static_secret_experimental` for browser-bound connectors.
+ * Folding that case into `isUnavailableSetupEntry` would say "not available
+ * on this platform" for a connector this dashboard can, in fact, walk an
+ * owner through today.
+ */
+export function hasDashboardSetupPath(entry: ConnectorCatalogEntry): boolean {
+  return entry.disposition === "static_secret_connect" && browserBoundWithStoredCredentials(entry);
 }
 
 function isUnavailableSetupEntry(entry: ConnectorCatalogEntry): boolean {
   return (
     !isOwnerActionableEntry(entry) &&
+    !hasDashboardSetupPath(entry) &&
     entry.disposition !== "provider_auth_deployment_blocked" &&
     entry.disposition !== "provider_auth_proof_gated" &&
     entry.disposition !== "manual_upload_pending" &&
@@ -204,6 +232,20 @@ export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStat
       description: "This dashboard cannot offer a working setup path for this connector yet.",
       label: "Not available here",
       tone: "border-border bg-muted/30 text-muted-foreground",
+    };
+  }
+  // hasDashboardSetupPath entries that are NOT yet owner-actionable have a
+  // real browser-session page but have not cleared the separate live-proof
+  // roster -- the same honest "implemented, not yet live-validated" fact
+  // `static_secret_experimental` names elsewhere, so this reuses that exact
+  // label/tone rather than either "Ready to set up" (overclaiming proof this
+  // connector does not have yet) or "Not available here" (denying the setup
+  // path this row is about to render).
+  if (hasDashboardSetupPath(entry) && !isOwnerActionableEntry(entry)) {
+    return {
+      description: "This connector has a browser-session setup path, but it has not completed live-account validation.",
+      label: "Preview",
+      tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
     };
   }
   if (browserBoundWithStoredCredentials(entry)) {
@@ -461,7 +503,7 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
     if (entry.isKnownScaffold || !isDevelopmentSelfTestDisposition(entry.disposition)) {
       return null;
     }
-  } else if (!(isOwnerActionableEntry(entry) || isExperimentalEntry(entry))) {
+  } else if (!(isOwnerActionableEntry(entry) || isExperimentalEntry(entry) || hasDashboardSetupPath(entry))) {
     return null;
   }
   // Browser-bound connectors that also declare credential capture still start
