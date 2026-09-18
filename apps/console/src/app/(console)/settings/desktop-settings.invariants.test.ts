@@ -76,3 +76,28 @@ test("both toggles are off by default in their copy, matching the surveyed field
     "both Launch at login and Start minimized must state they default off"
   )
 })
+
+test("close-to-tray defaults to true and reads/writes through the generic app config", async () => {
+  const setting = await readFile(SETTING_FILE, "utf8")
+
+  // Unlike startMinimized/autostart (real default false), closeToTray's
+  // real default is true (AppConfig::default() in file_ops.rs), so its
+  // loaded-state hook must default true, not false -- an unset config must
+  // read as "close-to-tray is on", matching what the Rust side actually
+  // does when config.json has no closeToTray key at all.
+  assert.match(setting, /const \[closeToTray, setCloseToTrayState\] = useState\(true\)/)
+  assert.match(setting, /checked=\{stateIsKnown && closeToTray\}/)
+  assert.match(setting, /invoke\("set_app_config", \{/)
+  assert.match(setting, /closeToTray: next/)
+  assert.match(
+    setting,
+    /candidate\.closeToTray !== false/,
+    "asCloseToTray must only treat an explicit false as off, not an absent/unread value"
+  )
+})
+
+test("close-to-tray copy states it is on by default, not off", async () => {
+  const setting = await readFile(SETTING_FILE, "utf8")
+
+  assert.match(setting, /On by default\./)
+})
