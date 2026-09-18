@@ -17,15 +17,12 @@ const TOP_LEVEL_REGEX_3 = /internet-facing|hosted|exposed/i;
  *   And that the local-dev posture (no signals) preserves the open
  *        password-optional `POST /connectors` the dev/test harness relies on.
  *
- * Under the Node test runner the INFERRED hosting signals (non-loopback
- * asPublicUrl / origin / bind host, NODE_ENV) are deliberately ignored so the
- * rest of the suite — which sets those for origin/metadata/CIMD purposes —
- * stays hermetic. The hosted posture here is therefore driven by the EXPLICIT
- * operator override `PDPP_HOSTED=1`, which is honored in every context. That is
- * exactly the knob a real hosted deploy would carry (or infer in production).
+ * The hosted posture here is driven by the same declared-origin contract that
+ * production startup reads from the environment.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -120,6 +117,7 @@ async function withServer(
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    ignoreAmbientPublicUrls: false,
     quiet: true,
     rsPort: 0,
     ...opts,
@@ -174,25 +172,64 @@ async function login(asUrl: string, password: string): Promise<string | null> {
   return findPair(getSetCookies(postResp), "pdpp_owner_session");
 }
 
-// Run a block with PDPP_HOSTED=1 in the environment, restoring it after. This
-// is the explicit operator override that forces the hosted posture in every
-// context (the inferred signals are intentionally inert under the test runner).
+async function requestWithHeaders(
+  url: string,
+  headers: Record<string, string>
+): Promise<{ body: string; status: number }> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        headers,
+        hostname: parsed.hostname,
+        path: `${parsed.pathname}${parsed.search}`,
+        port: parsed.port,
+      },
+      response => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", chunk => {
+          body += chunk;
+        });
+        response.on("end", () => resolve({ body, status: response.statusCode ?? 0 }));
+      }
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+// Run a block with the declared hosted contract in the environment, restoring
+// it after. The loopback bind keeps the test listener local while the public
+// origin exercises hosted owner-auth and request-boundary behavior.
 async function withHostedEnv(fn: () => Promise<void>): Promise<void> {
-  const prev = process.env.PDPP_HOSTED;
-  process.env.PDPP_HOSTED = "1";
+  const previous = {
+    bindHost: process.env.PDPP_BIND_HOST,
+    ownerPassword: process.env.PDPP_OWNER_PASSWORD,
+    origin: process.env.PDPP_REFERENCE_ORIGIN,
+    trustedHosts: process.env.PDPP_TRUSTED_HOSTS,
+  };
+  process.env.PDPP_BIND_HOST = "127.0.0.1";
+  delete process.env.PDPP_OWNER_PASSWORD;
+  process.env.PDPP_REFERENCE_ORIGIN = "https://reference.example";
+  process.env.PDPP_TRUSTED_HOSTS = "localhost,127.0.0.1,::1";
   try {
     await fn();
   } finally {
-    if (prev === undefined) {
-      delete process.env.PDPP_HOSTED;
-    } else {
-      process.env.PDPP_HOSTED = prev;
+    for (const [name, value] of [
+      ["PDPP_BIND_HOST", previous.bindHost],
+      ["PDPP_OWNER_PASSWORD", previous.ownerPassword],
+      ["PDPP_REFERENCE_ORIGIN", previous.origin],
+      ["PDPP_TRUSTED_HOSTS", previous.trustedHosts],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
     }
   }
 }
 
 // ── S-1: hosted + no password → refuse to boot ───────────────────────────────
-test("S-1: hosted posture (PDPP_HOSTED=1) without a password refuses to boot", async () => {
+test("S-1: declared hosted origin without a password refuses to boot", async () => {
   await withHostedEnv(async () => {
     let server: TestServerHandle | null = null;
     await assert.rejects(
@@ -200,6 +237,7 @@ test("S-1: hosted posture (PDPP_HOSTED=1) without a password refuses to boot", a
         server = await startServer({
           asPort: 0,
           dbPath: ":memory:",
+          ignoreAmbientPublicUrls: false,
           quiet: true,
           rsPort: 0,
         });
@@ -214,25 +252,6 @@ test("S-1: hosted posture (PDPP_HOSTED=1) without a password refuses to boot", a
     // Defensive: if a partial server object leaked, tear it down.
     await closeServer(server);
   });
-});
-
-test("S-1: hosted posture + PDPP_ALLOW_UNAUTHENTICATED_OWNER=1 boots (explicit escape hatch)", async () => {
-  const prev = process.env.PDPP_ALLOW_UNAUTHENTICATED_OWNER;
-  process.env.PDPP_ALLOW_UNAUTHENTICATED_OWNER = "1";
-  try {
-    await withHostedEnv(async () => {
-      await withServer({}, async ({ asUrl }) => {
-        const meta = await fetch(`${asUrl}/.well-known/oauth-authorization-server`);
-        assert.equal(meta.status, 200, "override allows the server to boot and serve");
-      });
-    });
-  } finally {
-    if (prev === undefined) {
-      delete process.env.PDPP_ALLOW_UNAUTHENTICATED_OWNER;
-    } else {
-      process.env.PDPP_ALLOW_UNAUTHENTICATED_OWNER = prev;
-    }
-  }
 });
 
 // ── S-1: hosted + password → boots normally ──────────────────────────────────
@@ -276,6 +295,26 @@ test("S-2: hosted posture gates POST /connectors behind owner session; GET detai
         headers: { Accept: "application/json" },
       });
       assert.equal(detail.status, 200, "manifest read stays open");
+    });
+  });
+});
+
+test("R3/R4: hosted request boundary rejects mismatched Host and MCP Origin", async () => {
+  await withHostedEnv(async () => {
+    await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl, server }) => {
+      const badHost = await requestWithHeaders(`${asUrl}/.well-known/oauth-authorization-server`, {
+        Host: "attacker.example",
+      });
+      assert.equal(badHost.status, 400);
+      assert.doesNotMatch(badHost.body, /attacker\.example/);
+
+      const badOrigin = await fetch(`http://localhost:${server.rsPort}/mcp`, {
+        headers: {
+          Host: "localhost",
+          Origin: "https://attacker.example",
+        },
+      });
+      assert.equal(badOrigin.status, 403);
     });
   });
 });

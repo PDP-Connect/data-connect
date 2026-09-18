@@ -71,9 +71,10 @@ test("ownerPasswordRow is error when password is absent", () => {
 
 // ─── Reference origin alignment ─────────────────────────────────────────────
 
-test("referenceOriginRow is warn when not configured", () => {
+test("referenceOriginRow is ok when not configured on loopback", () => {
   const row = referenceOriginRow({ ...baseInputs, referenceOriginConfigured: null }, "https://example.com");
-  assert.equal(row.status, "warn");
+  assert.equal(row.status, "ok");
+  assert.equal(row.detail, "Loopback deployment; no public origin needed.");
 });
 
 test("referenceOriginRow is unknown when browser origin not yet observed", () => {
@@ -86,10 +87,18 @@ test("referenceOriginRow is ok when configured matches browser origin", () => {
   assert.equal(row.status, "ok");
 });
 
-test("referenceOriginRow is warn when configured mismatches browser origin", () => {
-  const row = referenceOriginRow(baseInputs, "https://other.example.com");
-  assert.equal(row.status, "warn");
+test("referenceOriginRow is error when configured mismatches browser origin", () => {
+  let clicked = false;
+  const row = referenceOriginRow(baseInputs, "https://other.example.com", {
+    label: "Use this origin",
+    onClick: () => {
+      clicked = true;
+    },
+  });
+  assert.equal(row.status, "error");
   assert.match(row.hint ?? "", REFERENCE_ORIGIN_ENV_RE);
+  row.action?.onClick();
+  assert.equal(clicked, true);
 });
 
 test("referenceOriginRow ignores trailing slashes when comparing", () => {
