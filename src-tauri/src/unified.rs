@@ -257,9 +257,17 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         main_window.hide()?;
     }
 
+    // Read once, synchronously, before spawning: this is the one bootstrap
+    // call that represents "the app just launched", which is the only time
+    // the start-minimized preference should suppress the initial show().
+    // Every other caller of bootstrap_and_open_console (focus_or_bootstrap,
+    // reached from the tray "Open console" item or single-instance
+    // re-focus) is a user explicitly asking to see the window, so it always
+    // passes should_show = true regardless of this preference.
+    let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app_handle.clone()).await {
+        if let Err(error) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
             log::error!("Unified DataConnect startup failed: {error}");
             set_status(&app_handle, UnifiedStatus::Error);
         }
@@ -274,7 +282,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app.clone()).await {
+        if let Err(error) = bootstrap_and_open_console(app.clone(), true).await {
             log::error!("Failed to open DataConnect console: {error}");
             set_status(&app, UnifiedStatus::Error);
         }
@@ -757,6 +765,40 @@ fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack
     });
 }
 
+/// Hide every visible webview window immediately.
+///
+/// Tauri's `ExitRequested` handler calls `prevent_exit()` while the sidecar
+/// stack winds down in the background (up to `UNIFIED_SHUTDOWN_BUDGET`), so
+/// the OS process keeps running for that whole window. Without this, the
+/// window(s) stay on screen — visible but unresponsive to close — for the
+/// full shutdown budget, which reads as a hang even though nothing is
+/// actually stuck. Hiding here is a UI-perception fix only: it does not
+/// touch the SIGTERM/SIGKILL escalation or shutdown budget in
+/// `process_supervisor.rs`, which still run to completion in the
+/// background.
+///
+/// This is this app's own design choice, not a copy of an industry norm —
+/// researched prior art was mixed/negative on "hide immediately, clean up
+/// silently" as a general pattern (Docker Desktop shows a visible blocking
+/// "Turning off the Docker Engine" screen on quit; VS Code's extension-host
+/// shutdown is a documented *visible* hang, not a hide-first design; NN/G's
+/// guidance for 8-10s waits is to show a progress indicator, not hide the
+/// UI). What does apply here: this app keeps a tray icon after the window
+/// disappears, so hiding reads as "gone to tray", the same mental model
+/// Electron's `before-quit`/`will-quit` cleanup idiom and Signal Desktop's
+/// close-to-tray handler both rely on (hide first, then the process does
+/// its own async teardown). See
+/// ai/research/desktop-app-packaging/quit-window-hide-vs-progress-indicator-2026.md
+/// for the full sourced findings and why this repo departs from the NN/G
+/// default recommendation.
+fn hide_all_windows(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if let Err(error) = window.hide() {
+            log::warn!("Failed to hide window '{label}' during shutdown: {error}");
+        }
+    }
+}
+
 pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
     let state = app.state::<UnifiedRuntimeState>();
     let request = state
@@ -778,6 +820,11 @@ pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
         ShutdownRequest::Pending => return true,
         ShutdownRequest::Start => {}
     }
+
+    // Hide immediately so the app disappears from the user's perspective
+    // right away, even though the background stop below can still take up
+    // to UNIFIED_SHUTDOWN_BUDGET to finish (see hide_all_windows doc comment).
+    hide_all_windows(app);
 
     log::info!("Unified shutdown requested; stopping managed sidecars asynchronously");
     let initial_stack = take_stack(app).ok().flatten();
@@ -826,7 +873,7 @@ fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     }
 }
 
-async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
+async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), String> {
     set_status(&app, UnifiedStatus::Starting);
 
     let credential_path = owner_credential_path(&app)?;
@@ -943,7 +990,7 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
         return Err(error);
     }
 
-    if let Err(error) = create_or_update_console_window(&app, console_origin, cookie) {
+    if let Err(error) = create_or_update_console_window(&app, console_origin, cookie, should_show) {
         cleanup_managed_stack_on_error(&app, managed);
         return Err(error);
     }
@@ -962,7 +1009,11 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     })
     .await
     .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
-    bootstrap_and_open_console(app).await
+    // A restart after a config change is always user-initiated from a
+    // visible settings surface, so the console must reappear regardless of
+    // the start-minimized preference (that preference only governs the
+    // very first launch of the app).
+    bootstrap_and_open_console(app, true).await
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {
@@ -1009,6 +1060,7 @@ fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookie: Cookie<'static>,
+    should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
         set_cookie_then_navigate(
@@ -1023,12 +1075,14 @@ fn create_or_update_console_window(
                     .map_err(|error| format!("Failed to navigate console: {error}"))
             },
         )?;
-        window
-            .show()
-            .map_err(|error| format!("Failed to show console: {error}"))?;
-        window
-            .set_focus()
-            .map_err(|error| format!("Failed to focus console: {error}"))?;
+        if should_show {
+            window
+                .show()
+                .map_err(|error| format!("Failed to show console: {error}"))?;
+            window
+                .set_focus()
+                .map_err(|error| format!("Failed to focus console: {error}"))?;
+        }
         return Ok(());
     }
 
@@ -1072,12 +1126,14 @@ fn create_or_update_console_window(
             let _ = window_for_close.hide();
         }
     });
-    window
-        .show()
-        .map_err(|error| format!("Failed to show console: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("Failed to focus console: {error}"))?;
+    if should_show {
+        window
+            .show()
+            .map_err(|error| format!("Failed to show console: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("Failed to focus console: {error}"))?;
+    }
     Ok(())
 }
 

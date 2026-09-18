@@ -6,6 +6,7 @@ import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { AboutSection } from "./about-section.tsx"
+import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
@@ -34,6 +35,12 @@ export default function SettingsPage() {
           title="Remote access"
         >
           <RemoteAccessSetting />
+        </Section>
+        <Section
+          description="Control how DataConnect starts on this computer."
+          title="Desktop"
+        >
+          <DesktopSettingsSetting />
         </Section>
         <AboutSection identity={identity} />
       </main>

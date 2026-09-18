@@ -40,6 +40,8 @@ use commands::{
     test_nodejs, write_export_data,
 };
 #[cfg(desktop)]
+use commands::{get_autostart_enabled, set_autostart_enabled};
+#[cfg(desktop)]
 use remote_access::{
     configure_remote_access, get_remote_access_config, inspect_remote_access,
     inspect_remote_access_provider, set_remote_access_config,
@@ -91,6 +93,12 @@ pub fn run() {
                 )
                 .build(),
         );
+
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
 
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
@@ -205,6 +213,10 @@ pub fn run() {
             configure_remote_access,
             #[cfg(desktop)]
             inspect_remote_access_provider,
+            #[cfg(desktop)]
+            get_autostart_enabled,
+            #[cfg(desktop)]
+            set_autostart_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
