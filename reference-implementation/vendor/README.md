@@ -230,3 +230,15 @@ upstream connector index is regenerated before packing; host-provided dependenci
 bundled local collector sources are updated using the same post-pack procedure above.
 This replaces the three interim PR-head pins recorded while #92 was open
 (`f57aa6f5a`, `f5adf2546`, `b17342743`), which are superseded and no longer current.
+
+**Update (2026-09-18): pin moved to `data-connectors` commit
+`243c3d726b278bc0da14b7047f37d9805c620e2f`** (`main`, data-connectors#139, the
+LinkedIn/ChatGPT icon normalization fix). The prior pin (2026-09-10) had gone two days
+stale with no automated signal: `scripts/revendor-polyfill-connectors.sh`'s connector-file
+patch step (added for #92's malformed-line fix) does not apply to an icon-only change, so
+this re-vendor ran the tarball-only portion of that script by hand — pack, repoint the
+three in-repo `*` dependencies, strip `vendor/`/`node_modules`, update `SHA256SUMS`, clear
+and refresh `package-lock.json` integrity — and skipped the `claude_code`/`codex`
+connector-source copy, which is orthogonal to this pin and script-updates its own
+hardcoded targets pin-to-pin. See `scripts/check-polyfill-connectors-tarball-freshness.mjs`
+for the check that now fails CI instead of letting a future pin go silently stale.

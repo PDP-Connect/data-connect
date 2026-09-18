@@ -67,6 +67,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/verify-release-ref.test.mjs",
       "scripts/verify-bundled-personal-server.test.mjs",
       "scripts/consumer-drift-signal.test.mjs",
+      "scripts/check-polyfill-connectors-tarball-freshness.test.mjs",
       "playwright-runner/scripts/build.test.js",
     ],
     exclude: ["src-tauri/target/**"],
