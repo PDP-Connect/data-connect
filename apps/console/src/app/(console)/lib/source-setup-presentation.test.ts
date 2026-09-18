@@ -30,33 +30,13 @@ import {
   sourceSetupGuidance,
   sourceSetupStatus,
 } from "./source-setup-presentation.ts";
-import {
-  SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY,
-  filterCatalogForDevelopmentVisibility,
-  persistShowDevelopmentConnectors,
-  readShowDevelopmentConnectors,
-} from "./source-setup-development.ts";
+import { filterCatalogForDevelopmentVisibility } from "./source-setup-development.ts";
 
-test("development visibility uses desktop storage semantics and tier-only filtering", () => {
-  const values = new Map<string, string>();
-  const storage = {
-    getItem: (key: string) => values.get(key) ?? null,
-    removeItem: (key: string) => values.delete(key),
-    setItem: (key: string, value: string) => values.set(key, value),
-  };
+test("development visibility is tier-only filtering keyed on Settings' Developer mode alone", () => {
   const catalog = [{ publicTier: "supported" as const }, { publicTier: "development" as const }];
 
-  assert.equal(readShowDevelopmentConnectors(storage), false);
   assert.deepEqual(filterCatalogForDevelopmentVisibility(catalog, false), [catalog[0]]);
-
-  persistShowDevelopmentConnectors(storage, true);
-  assert.equal(values.get(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY), "true");
-  assert.equal(readShowDevelopmentConnectors(storage), true);
   assert.deepEqual(filterCatalogForDevelopmentVisibility(catalog, true), catalog);
-
-  persistShowDevelopmentConnectors(storage, false);
-  assert.equal(values.has(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY), false);
-  assert.equal(readShowDevelopmentConnectors(storage), false);
 });
 
 /**
@@ -223,7 +203,7 @@ test("preview + browser_collector_manual (Venmo) is offered on /sources/add", ()
  * false, unconditionally, for the whole tier -- see "development tier is
  * never offered" above), but it DOES get a self-test action, distinct status
  * label, and honest guidance in the Development disclosure. A KNOWN scaffold
- * gets none of those: no action, "Not implemented" status, and guidance that
+ * gets none of those: no action, "Not built yet" status, and guidance that
  * says plainly there is nothing to test yet.
  */
 
@@ -246,7 +226,7 @@ test("development + real (non-scaffold) self-testable disposition gets a self-te
   assert.equal(sourceSetupStatus(imessage).label, "In development");
 });
 
-test("development + known scaffold gets no action and a distinct 'Not implemented' status", () => {
+test("development + known scaffold gets no action and a distinct 'Not built yet' status", () => {
   const anthropic = makeEntry({
     connectorKey: "anthropic",
     disposition: "browser_bound_runbook",
@@ -259,7 +239,7 @@ test("development + known scaffold gets no action and a distinct 'Not implemente
   });
   assert.equal(isRunnableAddOffer(anthropic), false);
   assert.equal(sourceSetupAction(anthropic), null, "a known scaffold must never render an add action");
-  assert.equal(sourceSetupStatus(anthropic).label, "Not implemented");
+  assert.equal(sourceSetupStatus(anthropic).label, "Not built yet");
   assert.match(
     sourceSetupGuidance(anthropic),
     /scaffold/i,

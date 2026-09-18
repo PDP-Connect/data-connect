@@ -144,16 +144,19 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
 /** The owner-facing status label + tone for first-account setup. */
 export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStatus {
   if (entry.publicTier === "development") {
-    // "Not implemented" and "Development" are deliberately different labels:
+    // "Not built yet" and "In development" are deliberately different labels:
     // a scaffold has no collection code at all (there is nothing to test),
     // while a real Development entry has an implemented, self-testable setup
     // path that simply has not been proven against a live account yet.
     // Collapsing these into one badge would hide exactly the distinction the
-    // owner needs to decide whether clicking a card can do anything.
+    // owner needs to decide whether clicking a card can do anything. "Not
+    // built yet" reads as a known roadmap gap (part of the shared "not
+    // available yet" family with "Not packaged yet" below), never as a
+    // broken build.
     return entry.isKnownScaffold
       ? {
-          description: "This connector is registered, but its collection code is not implemented yet.",
-          label: "Not implemented",
+          description: "This connector is registered, but nobody has written its collection code yet.",
+          label: "Not built yet",
           tone: "border-border bg-muted/30 text-muted-foreground",
         }
       : {

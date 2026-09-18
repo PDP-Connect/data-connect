@@ -3,7 +3,6 @@
 
 import type { ConnectorCatalogEntry } from "./connection-catalog.ts";
 
-export const SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY = "dataconnect_show_development_connectors";
 export const DEVELOPER_MODE_STORAGE_KEY = "dataconnect_developer_mode";
 const DEVELOPER_MODE_CHANGE_EVENT = "dataconnect_developer_mode_changed";
 
@@ -11,26 +10,6 @@ export interface DevelopmentConnectorStorage {
   getItem: (key: string) => string | null;
   removeItem: (key: string) => void;
   setItem: (key: string, value: string) => void;
-}
-
-export function readShowDevelopmentConnectors(storage: DevelopmentConnectorStorage): boolean {
-  try {
-    return storage.getItem(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function persistShowDevelopmentConnectors(storage: DevelopmentConnectorStorage, show: boolean): void {
-  try {
-    if (show) {
-      storage.setItem(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY, "true");
-    } else {
-      storage.removeItem(SHOW_DEVELOPMENT_CONNECTORS_STORAGE_KEY);
-    }
-  } catch {
-    // Storage is optional; the current session remains usable when unavailable.
-  }
 }
 
 export function readDeveloperMode(storage: DevelopmentConnectorStorage): boolean {
@@ -109,11 +88,16 @@ export function setDeveloperMode(enabled: boolean): void {
   window.dispatchEvent(new Event(DEVELOPER_MODE_CHANGE_EVENT));
 }
 
+/**
+ * Development-tier connectors are visible only when Settings' Developer mode
+ * switch is on. That switch is the single control for this concept; no
+ * surface gets its own second toggle.
+ */
 export function filterCatalogForDevelopmentVisibility<T extends Pick<ConnectorCatalogEntry, "publicTier">>(
   catalog: readonly T[],
-  showDevelopmentConnectors: boolean
+  developerMode: boolean
 ): T[] {
-  if (showDevelopmentConnectors) {
+  if (developerMode) {
     return [...catalog];
   }
   return catalog.filter((entry) => entry.publicTier !== "development");

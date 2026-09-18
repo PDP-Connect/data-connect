@@ -31,8 +31,21 @@ export interface ConnectorInstallRowModel {
   readonly tier: PublicConnectorTier;
 }
 
-function connectorLookupKey(value: string): string {
-  return canonicalConnectorKey(value.trim());
+/**
+ * Matches a manifest's `connector_key` (this app's internal convention,
+ * which allows underscores -- e.g. `apple_contacts`) against the OCI
+ * catalog's own key spelling (GHCR repository names, which use hyphens --
+ * e.g. `apple-contacts`). `canonicalConnectorKey` alone does not bridge this:
+ * it only strips a registry URL prefix, so a manifest/catalog pair that
+ * differs solely by separator silently misses the Map lookup below and
+ * reports a real, published connector as "not_listed". Underscore and
+ * hyphen are the only separators either side uses, so normalizing both to
+ * hyphen is a safe, narrow fix scoped to this lookup -- it does not touch
+ * `canonicalConnectorKey` itself, which many other call sites rely on for
+ * unrelated comparisons against manifest-spelled literals.
+ */
+export function connectorLookupKey(value: string): string {
+  return canonicalConnectorKey(value.trim()).replaceAll("_", "-");
 }
 
 function displayBindingName(binding: string): string {
@@ -124,7 +137,11 @@ export function connectorInstallRowModel(
   const digest = targetDigest(lifecycle);
   const hostBlockReason = explicitBindingBlockReason(target?.bindings ?? installed?.bindings ?? {});
   let activationState: ConnectorInstallActivationState = "not_listed";
-  let activationLabel = "No published package";
+  // "not_listed" means the OCI catalog has never carried an artifact for
+  // this connector, so there is nothing to install and no action this owner
+  // can take — part of the shared "not available yet" family with the
+  // scaffold ("Not built yet") and development-hidden states.
+  let activationLabel = "Not packaged yet";
   let action: ConnectorInstallAction | null = null;
 
   if (installed) {
