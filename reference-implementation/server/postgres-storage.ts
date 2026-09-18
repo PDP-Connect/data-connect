@@ -2036,6 +2036,12 @@ async function bootstrapPostgresSchemaOnce({
         client_id TEXT NOT NULL,
         storage_binding_json JSONB,
         grant_json JSONB NOT NULL,
+        -- The trust signal the AS relied on to accept this client's identity, when
+        -- it relied on one (spec-core.md#trust-registry-queries). Nullable: a grant
+        -- issued to a pre-registered client relied on no assertion. It sits beside
+        -- grant_json rather than inside it because the resolved-grant contract is
+        -- closed to extra members. SQLite twin: grants.trust_signal_json, db.ts.
+        trust_signal_json JSONB,
         access_mode TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
         consumed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -2044,6 +2050,10 @@ async function bootstrapPostgresSchemaOnce({
         trace_id TEXT,
         scenario_id TEXT
       );
+      -- Additive and NULL-tolerant, for databases created before the column
+      -- existed. NULL is the honest record for a grant issued without one; no
+      -- signal is back-filled, because none was relied on.
+      ALTER TABLE grants ADD COLUMN IF NOT EXISTS trust_signal_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_pg_grants_client_status
         ON grants(client_id, status, issued_at);
       -- Absent-only grant expiry: grants issued before that normalization
