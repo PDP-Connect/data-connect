@@ -37,6 +37,13 @@ const CONNECTOR_MANIFEST_PACKAGE = join(
   "polyfill-connectors"
 )
 
+// resolve-connector-icon-simple-icons.ts reads this package the same way —
+// dynamic fs paths against a resolved install root, not a static import — so
+// it hits the identical standalone-tracing gap and needs the same explicit
+// copy. Icons are looked up by name once a manifest's own bundled icon is
+// absent (see NOTICE for the third-party-brand posture this vendors under).
+const SIMPLE_ICONS_PACKAGE = join("node_modules", "simple-icons")
+
 // These are read by the generated Next server, the console's reference proxy,
 // or the imported reference-topology/auth helpers. The launcher inherits the
 // complete parent environment; this list documents the supported runtime
@@ -146,6 +153,38 @@ function stageConnectorManifestsPackage(root, stagedRuntimeDirectory) {
   cpSync(sourceManifestsDirectory, join(targetPackageDirectory, "manifests"), {
     recursive: true,
   })
+}
+
+function stageSimpleIconsPackage(root, stagedRuntimeDirectory) {
+  const sourcePackageDirectory = join(root, SIMPLE_ICONS_PACKAGE)
+  if (!existsSync(sourcePackageDirectory)) {
+    // simple-icons is the layer-2 vendored-icon lookup, not a hard
+    // dependency of the console booting: a manifest without a bundled icon
+    // (layer 1) and no simple-icons match (layer 2) still renders the
+    // deterministic Monogram (layer 3). Degrade quietly rather than failing
+    // the whole stage.
+    return
+  }
+  const targetPackageDirectory = join(stagedRuntimeDirectory, SIMPLE_ICONS_PACKAGE)
+  mkdirSync(targetPackageDirectory, { recursive: true })
+  // Stage only what resolve-connector-icon-simple-icons.ts needs: package.json
+  // (root detection), data/simple-icons.json (slug lookup), and icons/ (the
+  // SVGs themselves). Skip the .mjs/.js/.d.ts module entrypoints — nothing
+  // here imports simple-icons as a module.
+  cpSync(
+    join(sourcePackageDirectory, "package.json"),
+    join(targetPackageDirectory, "package.json")
+  )
+  cpSync(
+    join(sourcePackageDirectory, "data"),
+    join(targetPackageDirectory, "data"),
+    { recursive: true }
+  )
+  cpSync(
+    join(sourcePackageDirectory, "icons"),
+    join(targetPackageDirectory, "icons"),
+    { recursive: true }
+  )
 }
 
 function findServer(standaloneDirectory) {
@@ -285,6 +324,7 @@ export function stageConsoleStack({
       recursive: true,
     })
     stageConnectorManifestsPackage(root, stagedRuntimeDirectory)
+    stageSimpleIconsPackage(root, stagedRuntimeDirectory)
     writeLauncher(temporaryDirectory, serverRelativePath)
     writeManifest(temporaryDirectory, validatedProfile, serverRelativePath)
     rmSync(targetDirectory, { force: true, recursive: true })

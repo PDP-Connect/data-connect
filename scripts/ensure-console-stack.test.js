@@ -141,6 +141,58 @@ describe("ensure console stack", () => {
     }
   })
 
+  it("stages the simple-icons package when installed, for the layer-2 vendored icon lookup", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      const simpleIconsDirectory = join(root, "node_modules", "simple-icons")
+      mkdirSync(join(simpleIconsDirectory, "icons"), { recursive: true })
+      mkdirSync(join(simpleIconsDirectory, "data"), { recursive: true })
+      writeFileSync(join(simpleIconsDirectory, "package.json"), "{}\n")
+      writeFileSync(
+        join(simpleIconsDirectory, "data", "simple-icons.json"),
+        '[{"title":"GitHub","slug":"github"}]'
+      )
+      writeFileSync(
+        join(simpleIconsDirectory, "icons", "github.svg"),
+        "<svg><title>GitHub</title></svg>"
+      )
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      const stagedSimpleIconsDirectory = join(
+        result.stageDirectory,
+        "apps",
+        "console",
+        "node_modules",
+        "simple-icons"
+      )
+      expect(
+        readFileSync(join(stagedSimpleIconsDirectory, "icons", "github.svg"), "utf8")
+      ).toBe("<svg><title>GitHub</title></svg>")
+      expect(
+        readFileSync(
+          join(stagedSimpleIconsDirectory, "data", "simple-icons.json"),
+          "utf8"
+        )
+      ).toContain("github")
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("degrades quietly (no throw) when simple-icons is not installed", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      expect(() =>
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      ).not.toThrow()
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
   it("fails fast if the connector manifests package is not installed", () => {
     const root = createConsoleBuildFixture()
     try {
