@@ -25,6 +25,7 @@
     "@pdpp/list-envelope": "*",
     "@pdpp/operator-ui": "*",
     "@tailwindcss/postcss": "^4.3.3",
+    "@tauri-apps/plugin-shell": "^2.3.6",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",

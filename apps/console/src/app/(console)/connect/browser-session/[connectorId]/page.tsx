@@ -28,6 +28,7 @@ import { formatConnectorKeyForDisplay } from "@pdpp/display";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { isBrowserBoundConnector, isSupportedBrowserCollectorConnector } from "../../../lib/connection-modality.ts";
@@ -113,14 +114,12 @@ function OptionalStoredCredentialFields({
                 {field.help_url ? (
                   <>
                     {" "}
-                    <a
+                    <OpenExternalLink
                       className="underline decoration-dotted underline-offset-4"
                       href={field.help_url}
-                      rel="noreferrer"
-                      target="_blank"
                     >
                       Open provider setup page in a new tab
-                    </a>
+                    </OpenExternalLink>
                   </>
                 ) : null}
               </span>

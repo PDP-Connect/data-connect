@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from "react"
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import { cn } from "@/lib/utils.ts"
 import {
   DEFAULT_PUBLIC_URL_OPTION_ID,
@@ -534,14 +535,12 @@ export function RemoteAccessSetting({
                   ngrok has no sign-in flow an app can complete for you, so this
                   is a one-time copy and paste. DataConnect stores it in your
                   system keychain and does not ask again.{" "}
-                  <a
+                  <OpenExternalLink
                     className="underline"
                     href="https://dashboard.ngrok.com/get-started/your-authtoken"
-                    rel="noreferrer noopener"
-                    target="_blank"
                   >
                     Open your ngrok authtoken page
-                  </a>
+                  </OpenExternalLink>
                   . You can sign up with Google or GitHub.
                 </span>
               </label>
