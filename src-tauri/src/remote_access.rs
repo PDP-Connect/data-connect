@@ -78,6 +78,20 @@ pub(crate) struct RemoteAccessConfig {
     pub(crate) posture: RemoteAccessPosture,
     pub(crate) provider: Option<String>,
     pub(crate) fields: ReachabilityFields,
+    /// The port an owner-run reverse proxy must target, pinned so it survives
+    /// restarts instead of chasing the supervisor's per-launch ephemeral
+    /// allocation. Only meaningful for `user_supplied_origin` (the only
+    /// provider a self-hoster's own proxy points at); other providers ignore
+    /// it. `None` keeps today's dynamic-port behavior. This is a supervisor
+    /// launch parameter, not a PLATFORM-OWNED env var like PORT/AS_PORT/
+    /// RS_PORT (see `reference-implementation/README.md`, "Config
+    /// precedence") -- it never goes through the config-store precedence
+    /// resolver; the desktop supervisor reads it from this same
+    /// remote-access.json and passes it as the console's `PORT` env at
+    /// spawn time, exactly how every other reachability field here already
+    /// flows into the child environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) console_port: Option<u16>,
     /// Provider-specific options. Absent for every provider but ngrok, which
     /// keeps the four-field contract itself provider-neutral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +328,7 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         posture: RemoteAccessPosture::Off,
         provider: None,
         fields: ReachabilityFields::loopback(),
+        console_port: None,
         ngrok: None,
     }
 }
@@ -323,6 +338,9 @@ pub(crate) fn validate_remote_access_config(
 ) -> Result<RemoteAccessConfig, String> {
     if config.fields.bind_host != LOOPBACK_BIND_HOST {
         return Err("Remote access must keep PDPP_BIND_HOST at 127.0.0.1".to_string());
+    }
+    if config.console_port == Some(0) {
+        return Err("Pinned console port cannot be zero".to_string());
     }
     match config.posture {
         RemoteAccessPosture::Off => Ok(off_remote_access_config()),
@@ -755,6 +773,7 @@ mod tests {
                 trusted_proxies: String::new(),
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
+            console_port: None,
             ngrok: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
@@ -779,6 +798,7 @@ mod tests {
                 trusted_proxies: String::new(),
                 bind_host: LOOPBACK_BIND_HOST.to_string(),
             },
+            console_port: None,
             ngrok: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
@@ -794,6 +814,7 @@ mod tests {
             posture: RemoteAccessPosture::PublicUrl,
             provider: Some("ngrok".to_string()),
             fields: ReachabilityFields::loopback(),
+            console_port: None,
             ngrok: Some(NgrokOptions {
                 endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
                 reserved_domain: None,
@@ -811,6 +832,7 @@ mod tests {
             posture: RemoteAccessPosture::PublicUrl,
             provider: Some("ngrok".to_string()),
             fields: ReachabilityFields::loopback(),
+            console_port: None,
             ngrok: None,
         };
         assert!(validate_remote_access_config(config).is_err());
@@ -822,8 +844,51 @@ mod tests {
             posture: RemoteAccessPosture::PublicUrl,
             provider: Some("mystery_relay".to_string()),
             fields: ReachabilityFields::loopback(),
+            console_port: None,
             ngrok: None,
         };
         assert!(validate_remote_access_config(config).is_err());
+    }
+
+    #[test]
+    fn a_zero_pinned_console_port_is_rejected() {
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID.to_string()),
+            fields: ReachabilityFields {
+                reference_origin: Some("https://vault.example".to_string()),
+                trusted_hosts: "vault.example".to_string(),
+                trusted_proxies: String::new(),
+                bind_host: LOOPBACK_BIND_HOST.to_string(),
+            },
+            console_port: Some(0),
+            ngrok: None,
+        };
+        assert!(validate_remote_access_config(config).is_err());
+    }
+
+    #[test]
+    fn a_pinned_console_port_survives_validation_and_round_trips() {
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID.to_string()),
+            fields: ReachabilityFields {
+                reference_origin: Some("https://vault.example".to_string()),
+                trusted_hosts: "vault.example".to_string(),
+                trusted_proxies: String::new(),
+                bind_host: LOOPBACK_BIND_HOST.to_string(),
+            },
+            console_port: Some(4310),
+            ngrok: None,
+        };
+        let validated =
+            validate_remote_access_config(config).expect("pinned port config is valid");
+        assert_eq!(validated.console_port, Some(4310));
+
+        let serialized = serde_json::to_value(&validated).expect("serialized");
+        assert_eq!(serialized["console_port"], 4310);
+        let round_tripped: RemoteAccessConfig =
+            serde_json::from_value(serialized).expect("deserialized");
+        assert_eq!(round_tripped.console_port, Some(4310));
     }
 }

@@ -115,6 +115,7 @@ test("POST config persists a valid user_supplied_origin config and GET reflects 
       },
       posture: "public_url",
       provider: "user_supplied_origin",
+      console_port: 4310,
     };
 
     const post = makeRes();
@@ -140,6 +141,32 @@ test("POST config rejects a non-HTTPS origin with a 400 and does not persist it"
       },
       posture: "public_url",
       provider: "user_supplied_origin",
+    };
+
+    const post = makeRes();
+    await postHandler?.({ body: invalid }, post.res);
+    assert.equal(post.captured.status, 400);
+
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    assert.deepEqual(get.captured.body, { data: offRemoteAccessConfig(), object: "remote_access_config" });
+  });
+});
+
+test("POST config rejects a zero pinned port and does not persist it", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const invalid: RemoteAccessConfig = {
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "user_supplied_origin",
+      console_port: 0,
     };
 
     const post = makeRes();

@@ -16,6 +16,7 @@ import {
   privacyBadgeForPosture,
   publicUrlOptionById,
   publicUrlOptions,
+  validatePinnedConsolePort,
   validateReservedDomain,
   validateUserSuppliedOrigin,
   type PublicUrlOption,
@@ -76,6 +77,8 @@ function asConfig(value: unknown): RemoteAccessConfig {
         ? candidate.provider
         : null,
     fields: candidate.fields ?? offRemoteAccessConfig().fields,
+    console_port:
+      typeof candidate.console_port === "number" ? candidate.console_port : null,
     ngrok: candidate.ngrok ?? null,
   }
 }
@@ -173,17 +176,29 @@ export function RemoteAccessSetting({
   const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
   const [authtoken, setAuthtoken] = useState("")
   const [reservedDomain, setReservedDomain] = useState("")
+  const [pinnedPort, setPinnedPort] = useState("")
+  // The port this console process is actually bound to right now (read
+  // server-side from process.env.PORT), independent of any pin the owner
+  // has saved. Shown so the owner's proxy config can match reality even
+  // before -- or instead of -- setting a pin.
+  const [effectiveConsolePort, setEffectiveConsolePort] = useState<
+    number | null
+  >(null)
 
   useEffect(() => {
     let cancelled = false
     setLoadState("loading")
     void loadRemoteAccessState()
-      .then(({ config: nextConfig, inspection: nextInspection }) => {
+      .then(({ config: nextConfig, effectiveConsolePort: nextPort, inspection: nextInspection }) => {
         if (cancelled) return
         const resolved = asConfig(nextConfig)
         setConfig(resolved)
         setInspection(asInspection(nextInspection))
         setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
+        setPinnedPort(
+          resolved.console_port != null ? String(resolved.console_port) : ""
+        )
+        setEffectiveConsolePort(nextPort ?? null)
         setLoadState("loaded")
       })
       .catch(reason => {
@@ -259,10 +274,16 @@ export function RemoteAccessSetting({
         setError(configuredOriginValidation.message)
         return
       }
+      const portValidation = validatePinnedConsolePort(pinnedPort)
+      if (!portValidation.ok) {
+        setError(portValidation.message)
+        return
+      }
       const nextConfig: RemoteAccessConfig = {
         posture: "public_url",
         provider: "user_supplied_origin",
         fields: configuredOriginValidation.fields,
+        console_port: portValidation.port,
       }
       setBusy(true)
       setError(null)
@@ -430,6 +451,18 @@ export function RemoteAccessSetting({
           <p className="break-all font-mono text-xs text-foreground/80">
             {activeOrigin ?? "Waiting for the provider to report an address…"}
           </p>
+          {config.provider === "user_supplied_origin" &&
+          effectiveConsolePort != null ? (
+            <p className="pdpp-caption text-muted-foreground">
+              Point your proxy at{" "}
+              <span className="font-mono text-foreground/80">
+                http://127.0.0.1:{effectiveConsolePort}
+              </span>
+              {config.console_port != null
+                ? ". This port is pinned and will not change on restart."
+                : ". This port is not pinned, so it can change the next time DataConnect restarts -- set a fixed port below to stop that."}
+            </p>
+          ) : null}
           <button
             className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
             disabled={busy || desktopUnavailable}
@@ -603,23 +636,54 @@ export function RemoteAccessSetting({
               </label>
             </>
           ) : (
-            <label
-              className="grid gap-1 pdpp-caption text-foreground"
-              htmlFor="remote-access-origin"
-            >
-              HTTPS origin
-              <input
-                autoCapitalize="none"
-                autoComplete="url"
-                className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                id="remote-access-origin"
-                onChange={event => setOrigin(event.currentTarget.value)}
-                placeholder="https://vault.example.com"
-                spellCheck={false}
-                type="url"
-                value={origin}
-              />
-            </label>
+            <>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-origin"
+              >
+                HTTPS origin
+                <input
+                  autoCapitalize="none"
+                  autoComplete="url"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-origin"
+                  onChange={event => setOrigin(event.currentTarget.value)}
+                  placeholder="https://vault.example.com"
+                  spellCheck={false}
+                  type="url"
+                  value={origin}
+                />
+              </label>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-pinned-port"
+              >
+                Port your proxy targets (optional)
+                <input
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-pinned-port"
+                  inputMode="numeric"
+                  onChange={event => setPinnedPort(event.currentTarget.value)}
+                  placeholder={
+                    effectiveConsolePort != null
+                      ? String(effectiveConsolePort)
+                      : "4310"
+                  }
+                  type="text"
+                  value={pinnedPort}
+                />
+                <span className="pdpp-caption text-muted-foreground">
+                  {effectiveConsolePort != null
+                    ? `Currently running on port ${effectiveConsolePort}. `
+                    : ""}
+                  Leave this blank to let DataConnect pick a port each
+                  restart -- your proxy config would need updating every
+                  time. Set a fixed port so your proxy config never goes
+                  stale.
+                </span>
+              </label>
+            </>
           )}
           <div className="flex flex-wrap justify-end gap-2">
             <button

@@ -40,6 +40,20 @@ export interface RemoteAccessConfig {
   posture: RemoteAccessPosture
   provider: RemoteAccessProvider | null
   fields: ReachabilityFields
+  /**
+   * The port an owner-run reverse proxy must target, pinned so it survives
+   * restarts instead of chasing the desktop supervisor's per-launch
+   * ephemeral allocation (`src-tauri/src/commands/process_supervisor.rs`'s
+   * `allocate_loopback_port`). Only meaningful for `user_supplied_origin`.
+   * `null`/absent keeps today's dynamic-port behavior.
+   *
+   * This is a supervisor launch parameter, not a PLATFORM-OWNED env var like
+   * PORT/AS_PORT/RS_PORT (see README.md, "Config precedence") -- it never
+   * goes through the config-store precedence resolver. It rides in this same
+   * remote-access.json the desktop supervisor already reads to build each
+   * process's environment.
+   */
+  console_port?: number | null
   ngrok?: NgrokOptions | null
 }
 
@@ -128,7 +142,30 @@ export function offRemoteAccessConfig(): RemoteAccessConfig {
       PDPP_TRUSTED_PROXIES: "",
       PDPP_BIND_HOST: "127.0.0.1",
     },
+    console_port: null,
   }
+}
+
+/** A pinned port must be a real TCP port number, matching the Rust validator's `console_port == Some(0)` rejection. */
+function isValidPinnedPort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && port <= 65535
+}
+
+/**
+ * Parse and validate the owner's pinned-port form input. Empty input means
+ * "no pin, keep dynamic allocation" -- distinct from an invalid one, which
+ * must be rejected rather than silently falling back to unpinned.
+ */
+export function validatePinnedConsolePort(raw: string): { ok: true; port: number | null } | InvalidOrigin {
+  const value = raw.trim()
+  if (!value) {
+    return { ok: true, port: null }
+  }
+  const port = Number.parseInt(value, 10)
+  if (!isValidPinnedPort(port) || String(port) !== value) {
+    return { ok: false, message: "Enter a port number between 1 and 65535, or leave it blank." }
+  }
+  return { ok: true, port }
 }
 
 /**
@@ -146,6 +183,9 @@ export function offRemoteAccessConfig(): RemoteAccessConfig {
 export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
   if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
     return { ok: false, message: "Remote access must keep PDPP_BIND_HOST at 127.0.0.1." }
+  }
+  if (config.console_port != null && !isValidPinnedPort(config.console_port)) {
+    return { ok: false, message: "Pinned console port must be an integer between 1 and 65535." }
   }
   if (config.posture === "off") {
     return { ok: true, config: offRemoteAccessConfig() }
@@ -177,6 +217,7 @@ export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: tr
       posture: "public_url",
       provider: "user_supplied_origin",
       fields: validated.fields,
+      console_port: config.console_port ?? null,
     },
   }
 }
