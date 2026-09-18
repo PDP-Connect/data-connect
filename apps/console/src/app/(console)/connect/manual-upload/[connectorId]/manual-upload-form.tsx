@@ -5,6 +5,7 @@
 
 import { IcButton } from "@pdpp/brand-react";
 import { type SyntheticEvent, useState } from "react";
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { connectionNameFieldContract } from "../../../lib/source-setup-form-contract.ts";
 
 interface ManualUploadSetupForForm {
@@ -762,14 +763,12 @@ export function ManualUploadForm({
           {setup.help_url ? (
             <>
               {". "}
-              <a
+              <OpenExternalLink
                 className="underline decoration-dotted underline-offset-4"
                 href={setup.help_url}
-                rel="noreferrer"
-                target="_blank"
               >
                 Export instructions in a new tab
-              </a>
+              </OpenExternalLink>
             </>
           ) : null}
         </span>

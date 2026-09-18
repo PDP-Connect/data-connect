@@ -8,6 +8,7 @@ import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { useSyncExternalStore } from "react";
 import { ConnectorMark } from "./connector-mark.tsx";
+import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 import { connectorInstallRowModel } from "../lib/connector-install-presentation.ts";
@@ -317,16 +318,14 @@ function SourceExternalDocs({ entry }: { entry: ConnectorCatalogEntry }) {
     <div className="flex flex-wrap gap-x-3 gap-y-1">
       <span className="pdpp-caption text-muted-foreground">Provider documentation:</span>
       {entry.externalDocs.map((doc) => (
-        <a
+        <OpenExternalLink
           className="pdpp-caption text-foreground underline underline-offset-4"
           href={doc.url}
           key={`${entry.connectorKey}:${doc.url}`}
-          rel="noreferrer"
-          target="_blank"
           title="Opens in a new tab"
         >
           {doc.label} (opens in a new tab)
-        </a>
+        </OpenExternalLink>
       ))}
     </div>
   );

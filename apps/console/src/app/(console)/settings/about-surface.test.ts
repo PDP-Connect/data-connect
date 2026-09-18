@@ -24,10 +24,33 @@ test("the settings page mounts the About surface with product metadata", async (
   ]) {
     assert.match(
       about,
-      new RegExp(`>${field}<`),
+      new RegExp(`<KVRow k="${field}"`),
       `${field} must be visible in About`
     )
   }
+})
+
+test("the About metadata is a quiet KV list, not a bordered card", async () => {
+  const about = await readFile(`${HERE}about-section.tsx`, "utf8")
+
+  assert.match(about, /<KV>/, "metadata must use the shared KV primitive")
+  assert.doesNotMatch(
+    about,
+    /rounded-md border/,
+    "About metadata must not sit in a bordered box"
+  )
+})
+
+test("the About copy states the protocol relationship once, not twice", async () => {
+  const about = await readFile(`${HERE}about-section.tsx`, "utf8")
+
+  const poweredByOccurrences = about.match(/is powered by/g) ?? []
+  const usesPdppOccurrences = about.match(/uses PDPP to keep/g) ?? []
+  assert.equal(
+    poweredByOccurrences.length + usesPdppOccurrences.length,
+    0,
+    "the redundant 'powered by' / 'uses PDPP to keep' pair must not both appear"
+  )
 })
 
 test("the About surface exposes the researched product resources", async () => {
@@ -48,6 +71,20 @@ test("the About surface exposes the researched product resources", async () => {
   }
   assert.match(about, /TODO\(legal\): confirm the canonical privacy-policy URL/)
   assert.match(about, /TODO\(legal\): replace the repository NOTICE link/)
+})
+
+test("every outbound link in the About surface opens via OpenExternalLink, not a bare anchor", async () => {
+  const about = await readFile(`${HERE}about-section.tsx`, "utf8")
+
+  assert.match(
+    about,
+    /import \{ OpenExternalLink \} from "\.\.\/components\/open-external-link\.tsx"/
+  )
+  assert.doesNotMatch(
+    about,
+    /<a\s/,
+    "About must route external links through OpenExternalLink, not a bare <a>"
+  )
 })
 
 test("the product surface is fixed to DataConnect with PDPP attribution", async () => {

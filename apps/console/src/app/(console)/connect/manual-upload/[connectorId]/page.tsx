@@ -5,6 +5,7 @@ import { buttonVariants } from "@pdpp/brand-react";
 import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { existingSourcesForConnector as fetchExistingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
@@ -73,14 +74,12 @@ function MethodCard({ method }: { method: AcquisitionMethod }) {
       </div>
       {method.detail ? <p className="pdpp-caption mt-1 text-muted-foreground">{method.detail}</p> : null}
       {method.help_url ? (
-        <a
+        <OpenExternalLink
           className="pdpp-caption mt-1 inline-flex underline decoration-dotted underline-offset-4"
           href={method.help_url}
-          rel="noreferrer"
-          target="_blank"
         >
           Open instructions in a new tab
-        </a>
+        </OpenExternalLink>
       ) : null}
     </div>
   );

@@ -26,9 +26,8 @@ const ACCEPT_ATTR = /accepted_file_names/;
 const ACCEPT_EXTENSIONS = /accepted_file_extensions/;
 const SIZE_PREFLIGHT = /max_file_bytes/;
 const HELP_URL = /help_url/;
-const NEW_TAB = /target="_blank"/;
 const NEW_TAB_COPY = /in a new tab/;
-const NOREFERRER = /rel="noreferrer"/;
+const OPENS_VIA_SYSTEM_BROWSER = /<OpenExternalLink/;
 const SECURITY_BOUNDARY_COPY = /stored for this source and is not exposed to connected apps or clients/i;
 const NO_CONNECTOR_BRANCH = /connectorId\s*===/;
 const NO_PROVIDER_COPY = /\bGoogle\b|\bTimeline\b|\bMaps\b/i;
@@ -80,9 +79,12 @@ test("manual-upload form imports directly and offers preview without connector-s
   assert.match(src, ACCEPT_EXTENSIONS);
   assert.match(src, SIZE_PREFLIGHT);
   assert.match(src, HELP_URL);
-  assert.match(src, NEW_TAB);
+  assert.match(
+    src,
+    OPENS_VIA_SYSTEM_BROWSER,
+    "help_url must route through OpenExternalLink, not a bare <a>, so Tauri opens it in the system browser instead of the webview"
+  );
   assert.match(src, NEW_TAB_COPY);
-  assert.match(src, NOREFERRER);
   assert.match(src, PREVIEW_ONLY_COPY);
   assert.match(src, IMPORT_FILE_COPY);
   assert.match(src, OPTIONAL_PREVIEW_COPY);

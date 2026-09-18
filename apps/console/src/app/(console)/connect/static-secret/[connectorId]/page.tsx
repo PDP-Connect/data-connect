@@ -5,6 +5,7 @@ import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { getStaticSecretSetup, RefNotFoundError, type StaticSecretSetupField } from "../../../lib/ref-client.ts";
@@ -245,14 +246,12 @@ export default async function StaticSecretConnectPage({
                     {field.help_url ? (
                       <>
                         {" "}
-                        <a
+                        <OpenExternalLink
                           className="underline decoration-dotted underline-offset-4"
                           href={field.help_url}
-                          rel="noreferrer"
-                          target="_blank"
                         >
                           Open provider setup page in a new tab
-                        </a>
+                        </OpenExternalLink>
                       </>
                     ) : null}
                   </span>
