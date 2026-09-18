@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-latest-source-export-preview"
+description = "Enables the load_latest_source_export_preview command without any pre-configured scope."
+commands.allow = ["load_latest_source_export_preview"]
+
+[[permission]]
+identifier = "deny-load-latest-source-export-preview"
+description = "Denies the load_latest_source_export_preview command without any pre-configured scope."
+commands.deny = ["load_latest_source_export_preview"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-reference-server-status"
+description = "Enables the get_reference_server_status command without any pre-configured scope."
+commands.allow = ["get_reference_server_status"]
+
+[[permission]]
+identifier = "deny-get-reference-server-status"
+description = "Denies the get_reference_server_status command without any pre-configured scope."
+commands.deny = ["get_reference_server_status"]

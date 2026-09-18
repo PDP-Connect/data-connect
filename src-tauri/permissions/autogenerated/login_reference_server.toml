@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-login-reference-server"
+description = "Enables the login_reference_server command without any pre-configured scope."
+commands.allow = ["login_reference_server"]
+
+[[permission]]
+identifier = "deny-login-reference-server"
+description = "Denies the login_reference_server command without any pre-configured scope."
+commands.deny = ["login_reference_server"]

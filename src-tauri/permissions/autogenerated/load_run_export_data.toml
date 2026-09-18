@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-run-export-data"
+description = "Enables the load_run_export_data command without any pre-configured scope."
+commands.allow = ["load_run_export_data"]
+
+[[permission]]
+identifier = "deny-load-run-export-data"
+description = "Denies the load_run_export_data command without any pre-configured scope."
+commands.deny = ["load_run_export_data"]

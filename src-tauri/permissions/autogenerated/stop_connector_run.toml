@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-connector-run"
+description = "Enables the stop_connector_run command without any pre-configured scope."
+commands.allow = ["stop_connector_run"]
+
+[[permission]]
+identifier = "deny-stop-connector-run"
+description = "Denies the stop_connector_run command without any pre-configured scope."
+commands.deny = ["stop_connector_run"]

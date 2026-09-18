@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-remote-access-config"
+description = "Enables the set_remote_access_config command without any pre-configured scope."
+commands.allow = ["set_remote_access_config"]
+
+[[permission]]
+identifier = "deny-set-remote-access-config"
+description = "Denies the set_remote_access_config command without any pre-configured scope."
+commands.deny = ["set_remote_access_config"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-personal-server"
+description = "Enables the start_personal_server command without any pre-configured scope."
+commands.allow = ["start_personal_server"]
+
+[[permission]]
+identifier = "deny-start-personal-server"
+description = "Denies the start_personal_server command without any pre-configured scope."
+commands.deny = ["start_personal_server"]

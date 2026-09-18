@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-exported-run"
+description = "Enables the delete_exported_run command without any pre-configured scope."
+commands.allow = ["delete_exported_run"]
+
+[[permission]]
+identifier = "deny-delete-exported-run"
+description = "Denies the delete_exported_run command without any pre-configured scope."
+commands.deny = ["delete_exported_run"]

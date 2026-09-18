@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-inspect-remote-access"
+description = "Enables the inspect_remote_access command without any pre-configured scope."
+commands.allow = ["inspect_remote_access"]
+
+[[permission]]
+identifier = "deny-inspect-remote-access"
+description = "Denies the inspect_remote_access command without any pre-configured scope."
+commands.deny = ["inspect_remote_access"]

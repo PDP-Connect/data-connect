@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-handle-download"
+description = "Enables the handle_download command without any pre-configured scope."
+commands.allow = ["handle_download"]
+
+[[permission]]
+identifier = "deny-handle-download"
+description = "Denies the handle_download command without any pre-configured scope."
+commands.deny = ["handle_download"]

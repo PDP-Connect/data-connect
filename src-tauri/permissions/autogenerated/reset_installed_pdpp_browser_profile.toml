@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-installed-pdpp-browser-profile"
+description = "Enables the reset_installed_pdpp_browser_profile command without any pre-configured scope."
+commands.allow = ["reset_installed_pdpp_browser_profile"]
+
+[[permission]]
+identifier = "deny-reset-installed-pdpp-browser-profile"
+description = "Denies the reset_installed_pdpp_browser_profile command without any pre-configured scope."
+commands.deny = ["reset_installed_pdpp_browser_profile"]

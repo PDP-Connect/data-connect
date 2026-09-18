@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resize-reference-server-view"
+description = "Enables the resize_reference_server_view command without any pre-configured scope."
+commands.allow = ["resize_reference_server_view"]
+
+[[permission]]
+identifier = "deny-resize-reference-server-view"
+description = "Denies the resize_reference_server_view command without any pre-configured scope."
+commands.deny = ["resize_reference_server_view"]

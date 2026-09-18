@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-submit-installed-pdpp-interaction-response"
+description = "Enables the submit_installed_pdpp_interaction_response command without any pre-configured scope."
+commands.allow = ["submit_installed_pdpp_interaction_response"]
+
+[[permission]]
+identifier = "deny-submit-installed-pdpp-interaction-response"
+description = "Denies the submit_installed_pdpp_interaction_response command without any pre-configured scope."
+commands.deny = ["submit_installed_pdpp_interaction_response"]

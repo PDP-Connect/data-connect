@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hide-reference-server-view"
+description = "Enables the hide_reference_server_view command without any pre-configured scope."
+commands.allow = ["hide_reference_server_view"]
+
+[[permission]]
+identifier = "deny-hide-reference-server-view"
+description = "Denies the hide_reference_server_view command without any pre-configured scope."
+commands.deny = ["hide_reference_server_view"]

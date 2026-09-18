@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-source-export-full-from-path"
+description = "Enables the load_source_export_full_from_path command without any pre-configured scope."
+commands.allow = ["load_source_export_full_from_path"]
+
+[[permission]]
+identifier = "deny-load-source-export-full-from-path"
+description = "Denies the load_source_export_full_from_path command without any pre-configured scope."
+commands.deny = ["load_source_export_full_from_path"]

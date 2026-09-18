@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-installed-connectors"
+description = "Enables the get_installed_connectors command without any pre-configured scope."
+commands.allow = ["get_installed_connectors"]
+
+[[permission]]
+identifier = "deny-get-installed-connectors"
+description = "Denies the get_installed_connectors command without any pre-configured scope."
+commands.deny = ["get_installed_connectors"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-connected-platforms"
+description = "Enables the check_connected_platforms command without any pre-configured scope."
+commands.allow = ["check_connected_platforms"]
+
+[[permission]]
+identifier = "deny-check-connected-platforms"
+description = "Denies the check_connected_platforms command without any pre-configured scope."
+commands.deny = ["check_connected_platforms"]

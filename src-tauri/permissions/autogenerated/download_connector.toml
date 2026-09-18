@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-download-connector"
+description = "Enables the download_connector command without any pre-configured scope."
+commands.allow = ["download_connector"]
+
+[[permission]]
+identifier = "deny-download-connector"
+description = "Denies the download_connector command without any pre-configured scope."
+commands.deny = ["download_connector"]

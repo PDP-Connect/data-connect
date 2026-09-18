@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-personal-server-scope-folder"
+description = "Enables the open_personal_server_scope_folder command without any pre-configured scope."
+commands.allow = ["open_personal_server_scope_folder"]
+
+[[permission]]
+identifier = "deny-open-personal-server-scope-folder"
+description = "Denies the open_personal_server_scope_folder command without any pre-configured scope."
+commands.deny = ["open_personal_server_scope_folder"]

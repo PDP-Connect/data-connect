@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-is-installed-pdpp-browser-setup-complete"
+description = "Enables the is_installed_pdpp_browser_setup_complete command without any pre-configured scope."
+commands.allow = ["is_installed_pdpp_browser_setup_complete"]
+
+[[permission]]
+identifier = "deny-is-installed-pdpp-browser-setup-complete"
+description = "Denies the is_installed_pdpp_browser_setup_complete command without any pre-configured scope."
+commands.deny = ["is_installed_pdpp_browser_setup_complete"]

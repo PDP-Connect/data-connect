@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mark-export-synced"
+description = "Enables the mark_export_synced command without any pre-configured scope."
+commands.allow = ["mark_export_synced"]
+
+[[permission]]
+identifier = "deny-mark-export-synced"
+description = "Denies the mark_export_synced command without any pre-configured scope."
+commands.deny = ["mark_export_synced"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-browser-available"
+description = "Enables the check_browser_available command without any pre-configured scope."
+commands.allow = ["check_browser_available"]
+
+[[permission]]
+identifier = "deny-check-browser-available"
+description = "Denies the check_browser_available command without any pre-configured scope."
+commands.deny = ["check_browser_available"]

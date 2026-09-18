@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-personal-server"
+description = "Enables the stop_personal_server command without any pre-configured scope."
+commands.allow = ["stop_personal_server"]
+
+[[permission]]
+identifier = "deny-stop-personal-server"
+description = "Denies the stop_personal_server command without any pre-configured scope."
+commands.deny = ["stop_personal_server"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-download-browser"
+description = "Enables the download_browser command without any pre-configured scope."
+commands.allow = ["download_browser"]
+
+[[permission]]
+identifier = "deny-download-browser"
+description = "Denies the download_browser command without any pre-configured scope."
+commands.deny = ["download_browser"]

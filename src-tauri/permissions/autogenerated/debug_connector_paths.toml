@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-debug-connector-paths"
+description = "Enables the debug_connector_paths command without any pre-configured scope."
+commands.allow = ["debug_connector_paths"]
+
+[[permission]]
+identifier = "deny-debug-connector-paths"
+description = "Denies the debug_connector_paths command without any pre-configured scope."
+commands.deny = ["debug_connector_paths"]
