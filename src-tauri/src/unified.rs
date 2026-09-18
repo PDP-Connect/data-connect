@@ -261,10 +261,18 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         main_window.hide()?;
     }
 
+    // Read once, synchronously, before spawning: this is the one bootstrap
+    // call that represents "the app just launched", which is the only time
+    // the start-minimized preference should suppress the initial show().
+    // Every other caller of bootstrap_and_open_console (focus_or_bootstrap,
+    // reached from the tray "Open console" item or single-instance
+    // re-focus) is a user explicitly asking to see the window, so it always
+    // passes should_show = true regardless of this preference.
+    let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
     spawn_remote_access_config_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app_handle.clone()).await {
+        if let Err(error) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
             log::error!("Unified DataConnect startup failed: {error}");
             set_status(&app_handle, UnifiedStatus::Error);
         }
@@ -279,7 +287,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app.clone()).await {
+        if let Err(error) = bootstrap_and_open_console(app.clone(), true).await {
             log::error!("Failed to open DataConnect console: {error}");
             set_status(&app, UnifiedStatus::Error);
         }
@@ -762,6 +770,40 @@ fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack
     });
 }
 
+/// Hide every visible webview window immediately.
+///
+/// Tauri's `ExitRequested` handler calls `prevent_exit()` while the sidecar
+/// stack winds down in the background (up to `UNIFIED_SHUTDOWN_BUDGET`), so
+/// the OS process keeps running for that whole window. Without this, the
+/// window(s) stay on screen — visible but unresponsive to close — for the
+/// full shutdown budget, which reads as a hang even though nothing is
+/// actually stuck. Hiding here is a UI-perception fix only: it does not
+/// touch the SIGTERM/SIGKILL escalation or shutdown budget in
+/// `process_supervisor.rs`, which still run to completion in the
+/// background.
+///
+/// This is this app's own design choice, not a copy of an industry norm —
+/// researched prior art was mixed/negative on "hide immediately, clean up
+/// silently" as a general pattern (Docker Desktop shows a visible blocking
+/// "Turning off the Docker Engine" screen on quit; VS Code's extension-host
+/// shutdown is a documented *visible* hang, not a hide-first design; NN/G's
+/// guidance for 8-10s waits is to show a progress indicator, not hide the
+/// UI). What does apply here: this app keeps a tray icon after the window
+/// disappears, so hiding reads as "gone to tray", the same mental model
+/// Electron's `before-quit`/`will-quit` cleanup idiom and Signal Desktop's
+/// close-to-tray handler both rely on (hide first, then the process does
+/// its own async teardown). See
+/// ai/research/desktop-app-packaging/quit-window-hide-vs-progress-indicator-2026.md
+/// for the full sourced findings and why this repo departs from the NN/G
+/// default recommendation.
+fn hide_all_windows(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if let Err(error) = window.hide() {
+            log::warn!("Failed to hide window '{label}' during shutdown: {error}");
+        }
+    }
+}
+
 pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
     let state = app.state::<UnifiedRuntimeState>();
     let request = state
@@ -783,6 +825,11 @@ pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
         ShutdownRequest::Pending => return true,
         ShutdownRequest::Start => {}
     }
+
+    // Hide immediately so the app disappears from the user's perspective
+    // right away, even though the background stop below can still take up
+    // to UNIFIED_SHUTDOWN_BUDGET to finish (see hide_all_windows doc comment).
+    hide_all_windows(app);
 
     log::info!("Unified shutdown requested; stopping managed sidecars asynchronously");
     let initial_stack = take_stack(app).ok().flatten();
@@ -831,7 +878,7 @@ fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     }
 }
 
-async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
+async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), String> {
     set_status(&app, UnifiedStatus::Starting);
 
     let credential_path = owner_credential_path(&app)?;
@@ -948,7 +995,7 @@ async fn bootstrap_and_open_console(app: AppHandle) -> Result<(), String> {
         return Err(error);
     }
 
-    if let Err(error) = create_or_update_console_window(&app, console_origin, cookie) {
+    if let Err(error) = create_or_update_console_window(&app, console_origin, cookie, should_show) {
         cleanup_managed_stack_on_error(&app, managed);
         return Err(error);
     }
@@ -967,7 +1014,11 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     })
     .await
     .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
-    bootstrap_and_open_console(app).await
+    // A restart after a config change is always user-initiated from a
+    // visible settings surface, so the console must reappear regardless of
+    // the start-minimized preference (that preference only governs the
+    // very first launch of the app).
+    bootstrap_and_open_console(app, true).await
 }
 
 const REMOTE_ACCESS_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -1078,6 +1129,7 @@ fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookie: Cookie<'static>,
+    should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
         set_cookie_then_navigate(
@@ -1092,12 +1144,14 @@ fn create_or_update_console_window(
                     .map_err(|error| format!("Failed to navigate console: {error}"))
             },
         )?;
-        window
-            .show()
-            .map_err(|error| format!("Failed to show console: {error}"))?;
-        window
-            .set_focus()
-            .map_err(|error| format!("Failed to focus console: {error}"))?;
+        if should_show {
+            window
+                .show()
+                .map_err(|error| format!("Failed to show console: {error}"))?;
+            window
+                .set_focus()
+                .map_err(|error| format!("Failed to focus console: {error}"))?;
+        }
         return Ok(());
     }
 
@@ -1141,13 +1195,99 @@ fn create_or_update_console_window(
             let _ = window_for_close.hide();
         }
     });
-    window
-        .show()
-        .map_err(|error| format!("Failed to show console: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("Failed to focus console: {error}"))?;
+    // tauri-plugin-window-state restores a saved SIZE in physical pixels with
+    // no monitor/work-area check (only saved POSITION is validated against
+    // available_monitors() before being applied) — see
+    // ai/research/desktop-app-packaging/tauri-2-window-sizing-is-logical-pixels-but-window-state-restore-size-skips-monitor-clamping-2026.md.
+    // A size saved while a larger/differently-scaled monitor was connected
+    // can be re-applied verbatim to a smaller current monitor. Its restore
+    // runs via the plugin's on_window_ready hook, which fires synchronously
+    // during WebviewWindowBuilder::build() above, so by this point any
+    // restored size is already applied and safe to re-clamp.
+    clamp_to_current_monitor(&window);
+    if should_show {
+        window
+            .show()
+            .map_err(|error| format!("Failed to show console: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("Failed to focus console: {error}"))?;
+    }
     Ok(())
+}
+
+/// Re-clamp a window's size (and, if it now falls outside the monitor,
+/// position) to the monitor it currently resides on. A no-op when the
+/// window already fits, when it isn't on the primary/current monitor's
+/// detected bounds, or when the current monitor can't be determined
+/// (headless/CI environments, or a mid-hotplug race) — in all of those
+/// cases we leave the OS/compositor's own placement alone rather than
+/// risk moving the window somewhere worse.
+fn clamp_to_current_monitor(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+
+    let Some((clamped_size, clamped_position)) =
+        clamp_bounds_to_monitor(size, position, *monitor.size(), *monitor.position())
+    else {
+        return;
+    };
+
+    log::info!(
+        "Clamping console window to current monitor ({}x{} at {},{}): size {}x{}, position {},{}",
+        monitor.size().width,
+        monitor.size().height,
+        monitor.position().x,
+        monitor.position().y,
+        clamped_size.width,
+        clamped_size.height,
+        clamped_position.x,
+        clamped_position.y
+    );
+    let _ = window.set_size(clamped_size);
+    let _ = window.set_position(clamped_position);
+}
+
+/// Pure geometry: shrink `size` to fit within `monitor_size` and clamp
+/// `position` so the (possibly-shrunk) window's bounds stay within
+/// `monitor_position`..`monitor_position + monitor_size`. Returns `None` if
+/// the input already fits (no-op), so callers can skip the write-back.
+///
+/// Isolated from `Window`/`Monitor` so the clamping math itself is
+/// unit-testable without a live windowing system.
+fn clamp_bounds_to_monitor(
+    mut size: tauri::PhysicalSize<u32>,
+    mut position: tauri::PhysicalPosition<i32>,
+    monitor_size: tauri::PhysicalSize<u32>,
+    monitor_position: tauri::PhysicalPosition<i32>,
+) -> Option<(tauri::PhysicalSize<u32>, tauri::PhysicalPosition<i32>)> {
+    let mut changed = false;
+    if size.width > monitor_size.width || size.height > monitor_size.height {
+        size.width = size.width.min(monitor_size.width);
+        size.height = size.height.min(monitor_size.height);
+        changed = true;
+    }
+    let max_x = (monitor_position.x + monitor_size.width as i32 - size.width as i32)
+        .max(monitor_position.x);
+    let max_y = (monitor_position.y + monitor_size.height as i32 - size.height as i32)
+        .max(monitor_position.y);
+    if position.x < monitor_position.x || position.x > max_x {
+        position.x = position.x.clamp(monitor_position.x, max_x);
+        changed = true;
+    }
+    if position.y < monitor_position.y || position.y > max_y {
+        position.y = position.y.clamp(monitor_position.y, max_y);
+        changed = true;
+    }
+
+    changed.then_some((size, position))
 }
 
 fn set_status(app: &AppHandle, status: UnifiedStatus) {
@@ -1417,6 +1557,71 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(
             browser_url_from_runtime_origin(None),
             Err("Console is not ready".to_string())
+        );
+    }
+
+    #[test]
+    fn clamp_to_monitor_is_a_noop_when_the_window_already_fits() {
+        let size = tauri::PhysicalSize::new(1280, 800);
+        let position = tauri::PhysicalPosition::new(100, 100);
+        let monitor_size = tauri::PhysicalSize::new(1920, 1080);
+        let monitor_position = tauri::PhysicalPosition::new(0, 0);
+
+        assert_eq!(
+            clamp_bounds_to_monitor(size, position, monitor_size, monitor_position),
+            None
+        );
+    }
+
+    #[test]
+    fn clamp_to_monitor_shrinks_a_size_saved_on_a_larger_now_absent_monitor() {
+        // Simulates: size persisted while a 1920x1080 external monitor was
+        // connected, restored verbatim after it's unplugged and the window
+        // lands on a smaller 1280x720 laptop panel.
+        let size = tauri::PhysicalSize::new(1920, 1080);
+        let position = tauri::PhysicalPosition::new(0, 0);
+        let monitor_size = tauri::PhysicalSize::new(1280, 720);
+        let monitor_position = tauri::PhysicalPosition::new(0, 0);
+
+        let (clamped_size, clamped_position) =
+            clamp_bounds_to_monitor(size, position, monitor_size, monitor_position)
+                .expect("oversized window should be clamped");
+        assert_eq!(clamped_size, tauri::PhysicalSize::new(1280, 720));
+        assert_eq!(clamped_position, tauri::PhysicalPosition::new(0, 0));
+    }
+
+    #[test]
+    fn clamp_to_monitor_pulls_an_off_screen_position_back_into_the_work_area() {
+        // Simulates: position persisted on a monitor to the right of the
+        // primary display, restored after that monitor is unplugged so the
+        // saved x-coordinate now falls off the remaining screen entirely.
+        let size = tauri::PhysicalSize::new(1280, 800);
+        let position = tauri::PhysicalPosition::new(2400, 200);
+        let monitor_size = tauri::PhysicalSize::new(1920, 1080);
+        let monitor_position = tauri::PhysicalPosition::new(0, 0);
+
+        let (clamped_size, clamped_position) =
+            clamp_bounds_to_monitor(size, position, monitor_size, monitor_position)
+                .expect("off-screen position should be clamped");
+        assert_eq!(clamped_size, size);
+        assert_eq!(clamped_position.x, 1920 - 1280);
+        assert_eq!(clamped_position.y, 200);
+    }
+
+    #[test]
+    fn clamp_to_monitor_respects_a_non_origin_monitor_offset() {
+        // A secondary monitor positioned to the right of the primary one
+        // (e.g. primary is 1920 wide, secondary starts at x=1920) must not
+        // be clamped back toward x=0 — that would move the window onto a
+        // different monitor than the one it's actually on.
+        let size = tauri::PhysicalSize::new(1280, 800);
+        let position = tauri::PhysicalPosition::new(1920, 50);
+        let monitor_size = tauri::PhysicalSize::new(1280, 1024);
+        let monitor_position = tauri::PhysicalPosition::new(1920, 0);
+
+        assert_eq!(
+            clamp_bounds_to_monitor(size, position, monitor_size, monitor_position),
+            None
         );
     }
 

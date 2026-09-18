@@ -934,6 +934,13 @@ pub struct AppConfig {
     pub server_mode: Option<String>,
     #[serde(rename = "selfHostedUrl")]
     pub self_hosted_url: Option<String>,
+    /// Skip showing the console window at startup, leaving only the tray
+    /// icon. Purely a startup-sequencing preference (no OS side effect),
+    /// unlike autostart-at-login, which is why it lives in this general
+    /// config blob instead of desktop_settings.rs. Defaults to false so
+    /// existing config.json files without this field parse as "not set".
+    #[serde(rename = "startMinimized", default)]
+    pub start_minimized: bool,
 }
 
 impl Default for AppConfig {
@@ -942,6 +949,7 @@ impl Default for AppConfig {
             storage_provider: Some("local".to_string()),
             server_mode: Some("cloud".to_string()),
             self_hosted_url: None,
+            start_minimized: false,
         }
     }
 }
@@ -956,6 +964,13 @@ fn get_config_path() -> Result<PathBuf, String> {
 /// Get app configuration from ~/.dataconnect/config.json
 #[tauri::command]
 pub async fn get_app_config() -> Result<AppConfig, String> {
+    read_app_config_sync()
+}
+
+/// Synchronous config read shared by the async command above and by
+/// startup code (unified::setup runs before the async runtime is driving
+/// command dispatch, so it cannot `.await` the command wrapper).
+pub(crate) fn read_app_config_sync() -> Result<AppConfig, String> {
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
@@ -968,6 +983,16 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
 
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config file: {}", e))
+}
+
+/// Whether the console window should stay hidden at startup, leaving only
+/// the tray icon. Defaults to false (show) on any read failure — a config
+/// read/parse error must not silently hide the app from a user who never
+/// asked for that.
+pub(crate) fn read_start_minimized_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.start_minimized)
+        .unwrap_or(false)
 }
 
 /// Set app configuration to ~/.dataconnect/config.json
