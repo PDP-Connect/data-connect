@@ -154,7 +154,7 @@ const MANIFEST_ROOTS = [
  */
 const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
 
-const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:99";
+const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:107";
 
 /**
  * Closed, human-reviewed allowlist of call sites (file + 1-indexed line of
@@ -215,7 +215,30 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // createFileConnectorInstallStore() reads the operator-managed
   // PDPP_DATA_DIR connector activation state. Connector ids in this file are
   // runtime data supplied by the owner, not RI-committed provider knowledge.
-  "reference-implementation/server/connector-install/index.ts:110",
+  // Re-derived 2026-09-17: the call site moved from line 110 to 115 after
+  // feat/docker-connectors-from-catalog and feat/developer-connector-sources
+  // (both merged 2026-09-16, after this entry was last pinned) added lines
+  // above it -- the function itself is unchanged.
+  "reference-implementation/server/connector-install/index.ts:115",
+  // createFileLocalConnectorSourceStore() in local-source.ts: same shape and
+  // reasoning as connector-install/index.ts above -- statePath is
+  // join(dataDir, "connector-local-sources.json"), a fixed RI-owned literal
+  // filename joined with the operator-configured PDPP_DATA_DIR. The file
+  // tracks developer-local source selections (opaque connectorId keys are
+  // runtime data the operator supplied when adding a local source), not
+  // RI-committed provider/connector policy.
+  "reference-implementation/server/connector-install/local-source.ts:327",
+  // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
+  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
+  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
+  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
+  // developer-supplied absolute directory path given to the public
+  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
+  // already allowlisted above (cache.ts:125, common.ts:35): the path is
+  // caller-supplied, the filename component is an RI-owned generic literal,
+  // and this feature is explicitly unsigned/unregistered developer tooling
+  // (see this file's own module doc comment), not connector catalog data.
+  "reference-implementation/server/connector-install/local-source.ts:150",
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-root-derived-dir>, entryName) (defaultPolyfillManifestsDir()
   // / defaultReferenceFixturesDir(), both resolve()'d off the two sanctioned
@@ -230,9 +253,13 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // Verified by direct inspection, not by the scanner, hence the allowlist entry.
   // Re-derived 2026-09-03: the call site moved from line 98 to 99 after
   // 3870a58b (consume @pdpp/polyfill-connectors as a pinned dependency) added
-  // a line above it -- the function itself is unchanged. This entry is
-  // line-pinned by design (see this array's own doc comment above); it must
-  // be re-derived whenever an edit anywhere above the call site shifts it.
+  // a line above it -- the function itself is unchanged.
+  // Re-derived 2026-09-17: the call site moved from line 99 to 107 after the
+  // docker-connectors-from-catalog / developer-connector-sources merges
+  // (2026-09-16) added lines above it -- the function itself is unchanged.
+  // This entry is line-pinned by design (see this array's own doc comment
+  // above); it must be re-derived whenever an edit anywhere above the call
+  // site shifts it.
   POLYFILL_MANIFEST_READ_SITE,
   // readReviewedCompactionResidueMap() in version-disposition.ts:
   // readFileSync(path, "utf8") where `path` is compactionResidueReviewPath()

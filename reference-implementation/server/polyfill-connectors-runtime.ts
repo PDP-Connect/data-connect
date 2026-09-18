@@ -103,8 +103,6 @@ export interface ResolvedConnectorOptionsSchema {
   readonly options: readonly ResolvedConfigOption[];
 }
 
-export class ConnectorOptionsSchemaError extends Error {}
-
 export interface ProviderAuthManifestLike {
   readonly capabilities?: {
     readonly auth?: Record<string, unknown> | null;
@@ -156,8 +154,6 @@ interface OptionalModuleMap {
   readonly manualUpload: Record<string, unknown> | null;
   readonly ntfy: Record<string, unknown> | null;
   readonly options: Record<string, unknown> | null;
-  readonly providerAdapters: Record<string, unknown> | null;
-  readonly providerAuth: Record<string, unknown> | null;
   readonly resolve: Record<string, unknown> | null;
   readonly roster: Record<string, unknown> | null;
 }
@@ -200,8 +196,6 @@ const optionalModules: OptionalModuleMap = {
   manualUpload: requireOptional("@pdpp/polyfill-connectors/manual-upload-validation"),
   ntfy: requireOptional("@pdpp/polyfill-connectors/ntfy"),
   options: requireOptional("@pdpp/polyfill-connectors/connector-options-schema"),
-  providerAdapters: requireOptional("@pdpp/polyfill-connectors/provider-auth-adapters"),
-  providerAuth: requireOptional("@pdpp/polyfill-connectors/provider-auth-adapter"),
   resolve: requireOptional("@pdpp/polyfill-connectors/resolve"),
   roster: requireOptional("@pdpp/polyfill-connectors/connector-conformance-roster"),
 };
@@ -327,8 +321,32 @@ export function connectorOptionsSchema(connectorKey: string | null): ResolvedCon
   return typeof resolve === "function" ? (resolve(connectorKey) as ResolvedConnectorOptionsSchema | null) : null;
 }
 
+// `requireOptional` above loads every other optional module synchronously
+// via `require()`, which is fine for modules whose registration is entirely
+// internal. Provider-auth adapters are different: `registerProviderAuthAdapter`
+// is also called directly by test/connector code that reaches it through a
+// plain ESM `import` of the same package specifier. Node does not guarantee
+// that specifier resolves to the same module instance across the `require()`
+// and `import()` boundaries under every loader (observed split under tsx),
+// so a `require()`-loaded copy here can silently miss registrations made via
+// `import` elsewhere, each side holding its own adapter registry Map. Using
+// `import()` — the same loading path external registrants use — keeps this
+// resolver looking at the one registry they actually wrote to.
+let providerAdaptersModulePromise: Promise<Record<string, unknown> | null> | null = null;
+
+function loadProviderAdaptersModule(): Promise<Record<string, unknown> | null> {
+  providerAdaptersModulePromise ??= import("@pdpp/polyfill-connectors/provider-auth-adapters").catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")) {
+      return null;
+    }
+    throw error;
+  });
+  return providerAdaptersModulePromise;
+}
+
 export async function resolveProviderAuthAdapter(kind: string): Promise<ProviderAuthAdapter | null> {
-  const resolve = optionalModules.providerAdapters?.resolveProviderAuthAdapter;
+  const module = await loadProviderAdaptersModule();
+  const resolve = module?.resolveProviderAuthAdapter;
   return typeof resolve === "function" ? ((await resolve(kind)) as ProviderAuthAdapter | null) : null;
 }
 
