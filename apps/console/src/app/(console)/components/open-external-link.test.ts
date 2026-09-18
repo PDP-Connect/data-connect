@@ -29,6 +29,16 @@ test("OpenExternalLink opens in the system browser from the Tauri webview", asyn
   assert.match(source, /open\(href\)/, "must open the link's own href, not a stale value")
 })
 
+test("OpenExternalLink surfaces a failed open instead of failing silently", async () => {
+  const source = await readFile(`${HERE}open-external-link.tsx`, "utf8")
+
+  assert.match(
+    source,
+    /\.then\(\(\{ open \}\) => open\(href\)\)\s*\.catch\(/,
+    "a rejected open() (e.g. a missing shell:allow-open grant) must not vanish as an unhandled rejection"
+  )
+})
+
 test("OpenExternalLink falls back to a normal new-tab anchor in a plain browser", async () => {
   const source = await readFile(`${HERE}open-external-link.tsx`, "utf8")
 

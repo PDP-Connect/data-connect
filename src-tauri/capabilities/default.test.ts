@@ -67,16 +67,34 @@ describe("console window capabilities", () => {
     expect(stringPermissions).toContain("core:default")
   })
 
-  it("does not grant filesystem or shell access the console does not need", () => {
+  it("does not grant filesystem access the console does not need", () => {
     const stringPermissions = document.permissions.filter(
       (permission): permission is string => typeof permission === "string"
     )
 
-    const hasFsOrShell = stringPermissions.some(
-      permission => permission.startsWith("fs:") || permission.startsWith("shell:")
+    const hasFs = stringPermissions.some(permission => permission.startsWith("fs:"))
+
+    expect(hasFs).toBe(false)
+  })
+
+  it("grants shell:allow-open so outbound links open the system browser", () => {
+    const stringPermissions = document.permissions.filter(
+      permission => typeof permission === "string"
     )
 
-    expect(hasFsOrShell).toBe(false)
+    expect(stringPermissions).toContain("shell:allow-open")
+  })
+
+  it("does not grant shell access beyond opening links", () => {
+    const stringPermissions = document.permissions.filter(
+      (permission): permission is string => typeof permission === "string"
+    )
+
+    const shellPermissions = stringPermissions.filter(permission =>
+      permission.startsWith("shell:")
+    )
+
+    expect(shellPermissions).toEqual(["shell:allow-open"])
   })
 })
 
@@ -161,6 +179,7 @@ describe("remote-access commands reachable from the console window", () => {
     "inspect_remote_access",
     "set_remote_access_config",
     "configure_remote_access",
+    "owner_credential_status",
   ]
 
   // These commands have no per-command ACL identifier (see windowIsGranted
