@@ -14,6 +14,7 @@ import type { ConnectorInstallLifecycle } from "../lib/connector-install-present
 import { connectorInstallRowModel, connectorLookupKey } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
+  browserBoundWithStoredCredentials,
   sourceSetupAction,
   sourceSetupAvailability,
   sourceSetupContext,
@@ -151,11 +152,11 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
   if (entry.publicTier === "development") {
     return developmentMethodLine(entry);
   }
+  if (browserBoundWithStoredCredentials(entry) && entry.disposition === "static_secret_connect") {
+    return "Connect in a secure browser; interactive sign-in is valid, with optional saved details for repair.";
+  }
   if (sourceSetupAvailability(entry) === "not_available_here") {
     return "No proven setup path is available in this dashboard.";
-  }
-  if (entry.modality === "browser_bound" && entry.setupModality === "static_secret") {
-    return "Connect in a secure browser; interactive sign-in is valid, with optional saved details for repair.";
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
@@ -184,7 +185,11 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
 
 function SourceSetupContext({ entry }: { entry: ConnectorCatalogEntry }) {
   const context = sourceSetupContext(entry);
-  if (!context) {
+  // A row already saying "no setup path is available here" must never also
+  // show manifest-authored setup instructions for one right below it -- that
+  // is the exact same-row contradiction as the "not available" bucket
+  // claiming a connector has none.
+  if (!context || sourceSetupRowIsUnavailable(entry)) {
     return null;
   }
   return (
