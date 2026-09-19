@@ -106,6 +106,51 @@ struct UnifiedRuntimeState {
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
     shutdown: Mutex<ShutdownState>,
+    /// The live ngrok session, held OUTSIDE `stack` so a config-change
+    /// restart (`restart_after_remote_access_config`, which tears down and
+    /// rebuilds `stack` via `stop_stack`/`start_managed_stack`) does not drop
+    /// it. On a FREE ngrok plan a new tunnel gets a new random hostname, so
+    /// tearing this down on every restart the reference server needs (to
+    /// pick up the previous restart's discovered origin) made the origin the
+    /// owner just adopted stale before the console ever loaded it. See
+    /// `reuse_or_start_ngrok_provider`.
+    ngrok: Mutex<Option<HeldNgrok>>,
+}
+
+/// A live ngrok tunnel plus enough of its own configuration to tell whether
+/// the NEXT `start_managed_stack` call can keep using it unchanged, or must
+/// tear it down and start a new one.
+struct HeldNgrok {
+    provider:
+        crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
+    /// The loopback RI port this tunnel currently forwards to. The RI's port
+    /// is re-allocated on every `Supervisor::start`, so reuse is only valid
+    /// when the next RI instance can be brought up on this SAME port (see
+    /// `Supervisor::start_on_port`) -- otherwise the tunnel would keep
+    /// forwarding to a port nothing is listening on anymore.
+    ri_port: u16,
+    /// Identifies the provider settings (endpoint mode, reserved domain) this
+    /// tunnel was started with. A config change that alters either requires
+    /// a fresh tunnel -- reuse is only correct when the owner's request is
+    /// "restart the stack" (posture/provider/fields unrelated to the tunnel
+    /// itself), not "change how the tunnel behaves".
+    fingerprint: NgrokFingerprint,
+    fields: crate::remote_access::ReachabilityFields,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NgrokFingerprint {
+    endpoint_mode: crate::remote_access_providers::NgrokEndpointModeConfig,
+    reserved_domain: Option<String>,
+}
+
+impl NgrokFingerprint {
+    fn from_options(options: &crate::remote_access_providers::NgrokOptions) -> Self {
+        Self {
+            endpoint_mode: options.endpoint_mode,
+            reserved_domain: options.reserved_domain.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -117,15 +162,6 @@ struct ShutdownState {
 struct UnifiedStack {
     ri: SupervisorHandle,
     console: SupervisorHandle,
-    /// Owns the live ngrok session/tunnel when the configured provider is
-    /// ngrok (see `start_ngrok_provider`); `None` for every other posture.
-    /// Held here, not dropped at the end of `start_managed_stack`, so the
-    /// tunnel survives for the life of the stack and is stopped alongside the
-    /// sidecars in `stop`/`stop_until` rather than by `NgrokProvider`'s
-    /// `Drop` firing early.
-    ngrok: Option<
-        crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
-    >,
 }
 
 impl UnifiedStack {
@@ -138,11 +174,6 @@ impl UnifiedStack {
             "Unified sidecar shutdown started with a {:?} budget",
             UNIFIED_SHUTDOWN_BUDGET
         );
-        if let Some(ngrok) = self.ngrok.as_mut() {
-            if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(ngrok) {
-                log::error!("Failed to stop the ngrok tunnel during shutdown: {error}");
-            }
-        }
         let (console_error, ri_error) = std::thread::scope(|scope| {
             let console = scope.spawn(|| self.console.stop_until(deadline));
             let ri = scope.spawn(|| self.ri.stop_until(deadline));
@@ -711,6 +742,7 @@ impl EventSink for UnifiedEventSink {
 
 struct ManagedStackStart {
     stack: UnifiedStack,
+    ngrok: Option<HeldNgrok>,
     ri_origin: String,
     console_url: String,
 }
@@ -721,6 +753,7 @@ fn start_managed_stack(
     credential_encryption_key: &str,
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
+    held_ngrok: Option<HeldNgrok>,
 ) -> Result<ManagedStackStart, String> {
     let resource_dir = app
         .path()
@@ -755,6 +788,14 @@ fn start_managed_stack(
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
 
     let sink = UnifiedEventSink { app: app.clone() };
+    // Reuse the RI's previous loopback port when a held ngrok tunnel is
+    // already forwarding to it -- that is what lets `reuse_or_start_ngrok_provider`
+    // below keep the tunnel (and its origin) alive across this restart
+    // instead of starting a new one purely because the RI's port moved. If
+    // the port could not be reused (something else has since bound it), the
+    // supervisor falls back to a fresh allocation and the mismatch against
+    // `held.ri_port` correctly forces a fresh tunnel too.
+    let preferred_ri_port = held_ngrok.as_ref().map(|held| held.ri_port);
     let ri = Supervisor::new(
         ri_process_spec(
             app,
@@ -768,7 +809,7 @@ fn start_managed_stack(
         ),
         sink.clone(),
     )
-    .start()
+    .start_on_port(preferred_ri_port)
     .map_err(|error| format!("Failed to start staged RI: {error}"))?;
     let ri_origin = format!("http://127.0.0.1:{}", ri.port());
     let rs_origin = format!("http://127.0.0.1:{}", ri.port().saturating_add(1));
@@ -782,6 +823,11 @@ fn start_managed_stack(
     // `apply_ngrok_tunnel_outcome` persists them and the existing
     // remote-access config watcher restarts the whole stack with the real
     // origin applied at RI startup too (see that function's doc comment).
+    // When this run REUSES a held tunnel instead of starting a new one, the
+    // origin does not change, so `remote_access.fields` (already loaded from
+    // disk by the caller before this function runs) already carries the
+    // SAME origin the RI was started with last time -- the RI does not need
+    // a further restart to pick it up the way a genuinely new origin would.
     //
     // A tunnel failure (for example `ERR_NGROK_312`, TLS endpoints on ngrok's
     // free plan) must NOT abort the stack: the owner still needs a working
@@ -791,11 +837,17 @@ fn start_managed_stack(
     // the same config the console reads, rather than propagated to
     // `bootstrap_and_open_console`.
     let (console_remote_access, ngrok, tunnel_error) =
-        match start_ngrok_provider(remote_access, ri.port()) {
-            Ok(Some((fields, provider))) => {
+        match reuse_or_start_ngrok_provider(remote_access, held_ngrok, ri.port()) {
+            Ok(Some((fields, provider, fingerprint))) => {
                 let mut with_origin = remote_access.clone();
-                with_origin.fields = fields;
-                (with_origin, Some(provider), None)
+                with_origin.fields = fields.clone();
+                let held = HeldNgrok {
+                    provider,
+                    ri_port: ri.port(),
+                    fingerprint,
+                    fields,
+                };
+                (with_origin, Some(held), None)
             }
             Ok(None) => (remote_access.clone(), None, None),
             Err(error) => {
@@ -822,15 +874,45 @@ fn start_managed_stack(
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
     let console_url = format!("http://127.0.0.1:{}", console.port());
     Ok(ManagedStackStart {
-        stack: UnifiedStack { ri, console, ngrok },
+        stack: UnifiedStack { ri, console },
+        ngrok,
         ri_origin,
         console_url,
     })
 }
 
-/// Start the ngrok tunnel and return the reachability fields it discovered,
-/// when `remote_access` selects the ngrok provider. `Ok(None)` for every
-/// other provider -- not an error, just "no tunnel to start".
+/// Resolve the ngrok options `remote_access` currently selects, or `None` if
+/// ngrok is not the selected provider/posture. Split out from starting the
+/// tunnel so `reuse_or_start_ngrok_provider` can compute the desired
+/// `NgrokFingerprint` before deciding whether a held tunnel is still valid,
+/// without starting anything.
+fn resolve_ngrok_options(
+    remote_access: &RemoteAccessConfig,
+) -> Result<Option<crate::remote_access_providers::NgrokOptions>, String> {
+    use crate::remote_access::RemoteAccessPosture;
+    use crate::remote_access_ngrok::NGROK_PROVIDER_ID;
+    use crate::remote_access_providers::{resolve_public_url_provider, PublicUrlProvider};
+
+    if remote_access.provider.as_deref() != Some(NGROK_PROVIDER_ID) {
+        return Ok(None);
+    }
+    if !matches!(remote_access.posture, RemoteAccessPosture::PublicUrl) {
+        return Ok(None);
+    }
+    let PublicUrlProvider::Ngrok(options) = resolve_public_url_provider(
+        &remote_access.posture,
+        remote_access.provider.as_deref(),
+        remote_access.ngrok.as_ref(),
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(options))
+}
+
+/// Start a brand-new ngrok tunnel forwarding to `ri_port`, when
+/// `remote_access` selects the ngrok provider. `Ok(None)` for every other
+/// provider -- not an error, just "no tunnel to start".
 ///
 /// The authtoken is read back out of the OS keychain
 /// (`KeychainCredentialResolver`), never carried in `remote_access` itself:
@@ -848,6 +930,7 @@ fn start_ngrok_provider(
     Option<(
         crate::remote_access::ReachabilityFields,
         crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
+        NgrokFingerprint,
     )>,
     String,
 > {
@@ -856,22 +939,11 @@ fn start_ngrok_provider(
         LoopbackTarget, RemoteAccessContractConfig, RemoteAccessPosture, RemoteAccessProvider,
     };
     use crate::remote_access_ngrok::{NgrokProvider, NGROK_PROVIDER_ID};
-    use crate::remote_access_providers::{resolve_public_url_provider, PublicUrlProvider};
 
-    if remote_access.provider.as_deref() != Some(NGROK_PROVIDER_ID) {
-        return Ok(None);
-    }
-    if !matches!(remote_access.posture, RemoteAccessPosture::PublicUrl) {
-        return Ok(None);
-    }
-    let PublicUrlProvider::Ngrok(options) = resolve_public_url_provider(
-        &remote_access.posture,
-        remote_access.provider.as_deref(),
-        remote_access.ngrok.as_ref(),
-    )?
-    else {
+    let Some(options) = resolve_ngrok_options(remote_access)? else {
         return Ok(None);
     };
+    let fingerprint = NgrokFingerprint::from_options(&options);
 
     let resolver = KeychainCredentialResolver;
     let credential = resolver
@@ -907,7 +979,80 @@ fn start_ngrok_provider(
     )?;
     let fields = NgrokProvider::<KeychainCredentialResolver>::reachability_fields(&handle.origin)?;
     log::info!("ngrok tunnel is up at {}", handle.origin);
-    Ok(Some((fields, provider)))
+    Ok(Some((fields, provider, fingerprint)))
+}
+
+/// Pure reuse decision, split out from `reuse_or_start_ngrok_provider` so it
+/// is unit-testable without a real `NgrokProvider` (which needs a live
+/// network session to construct meaningfully). `None` for either side means
+/// "no tunnel" -- posture off, provider not ngrok, or nothing held yet.
+///
+/// Reuse requires ALL of:
+/// - `remote_access` still selects ngrok, with the SAME endpoint mode and
+///   reserved domain the held tunnel was started with (a different mode or
+///   domain changes what the tunnel itself must do, which nothing short of a
+///   new tunnel can apply).
+/// - The RI was brought up on the SAME loopback port the held tunnel already
+///   forwards to (see `Supervisor::start_on_port` in `start_managed_stack`) --
+///   otherwise the tunnel would keep forwarding to a port nothing is
+///   listening on.
+fn should_reuse_ngrok_tunnel(
+    held_fingerprint: Option<&NgrokFingerprint>,
+    held_ri_port: Option<u16>,
+    desired_fingerprint: Option<&NgrokFingerprint>,
+    ri_port: u16,
+) -> bool {
+    match (held_fingerprint, held_ri_port, desired_fingerprint) {
+        (Some(held), Some(held_port), Some(desired)) => held == desired && held_port == ri_port,
+        _ => false,
+    }
+}
+
+/// Decide whether a held ngrok tunnel from a previous run can be reused for
+/// this `start_managed_stack` call (see `should_reuse_ngrok_tunnel`), or
+/// start a fresh one via `start_ngrok_provider` -- accepting a new random
+/// hostname on ngrok's free plan, which is unavoidable whenever the tunnel
+/// itself must actually change (no held tunnel, provider/posture turned off,
+/// settings changed, or the preferred RI port could not be reused).
+fn reuse_or_start_ngrok_provider(
+    remote_access: &RemoteAccessConfig,
+    held: Option<HeldNgrok>,
+    ri_port: u16,
+) -> Result<
+    Option<(
+        crate::remote_access::ReachabilityFields,
+        crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
+        NgrokFingerprint,
+    )>,
+    String,
+> {
+    let desired_fingerprint = resolve_ngrok_options(remote_access)?
+        .as_ref()
+        .map(NgrokFingerprint::from_options);
+
+    let reuse = should_reuse_ngrok_tunnel(
+        held.as_ref().map(|held| &held.fingerprint),
+        held.as_ref().map(|held| held.ri_port),
+        desired_fingerprint.as_ref(),
+        ri_port,
+    );
+
+    if reuse {
+        let held = held.expect("should_reuse_ngrok_tunnel only returns true when held is Some");
+        log::info!(
+            "Reusing the existing ngrok tunnel at {:?}; RI port {ri_port} is unchanged",
+            held.fields.reference_origin
+        );
+        return Ok(Some((held.fields, held.provider, held.fingerprint)));
+    }
+
+    if let Some(mut held) = held {
+        log::info!("ngrok settings or the RI port changed; starting a fresh tunnel");
+        if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider) {
+            log::error!("Failed to stop the previous ngrok tunnel before replacing it: {error}");
+        }
+    }
+    start_ngrok_provider(remote_access, ri_port)
 }
 
 /// Persist the outcome of this run's ngrok start attempt -- either the
@@ -987,7 +1132,56 @@ fn take_stack(app: &AppHandle) -> Result<Option<UnifiedStack>, String> {
         .map(|mut stack| stack.take())
 }
 
-fn stop_stack(app: &AppHandle) -> Result<(), String> {
+fn take_held_ngrok(app: &AppHandle) -> Result<Option<HeldNgrok>, String> {
+    let state = app.state::<UnifiedRuntimeState>();
+    state
+        .ngrok
+        .lock()
+        .map_err(|_| "Unified runtime state is poisoned".to_string())
+        .map(|mut held| held.take())
+}
+
+fn store_held_ngrok(app: &AppHandle, held: HeldNgrok) -> Result<(), String> {
+    let state = app.state::<UnifiedRuntimeState>();
+    *state
+        .ngrok
+        .lock()
+        .map_err(|_| "Unified runtime state is poisoned".to_string())? = Some(held);
+    Ok(())
+}
+
+/// Stop and drop any held ngrok tunnel. Only called where the tunnel is
+/// actually meant to go away: full app shutdown, startup-error cleanup, and
+/// a config-change restart whose new settings require a different tunnel
+/// (see `reuse_or_start_ngrok_provider`). A config-change restart that keeps
+/// the same provider settings must NOT call this -- that is the whole point
+/// of holding the tunnel outside `UnifiedStack`.
+fn stop_held_ngrok(app: &AppHandle) {
+    match take_held_ngrok(app) {
+        Ok(Some(mut held)) => {
+            if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider)
+            {
+                log::error!("Failed to stop the ngrok tunnel: {error}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => log::error!("Could not read the held ngrok tunnel to stop it: {error}"),
+    }
+}
+
+/// Full teardown: sidecars and the ngrok tunnel. Used for app shutdown and
+/// startup-error cleanup, where nothing should survive.
+fn stop_stack_and_ngrok(app: &AppHandle) -> Result<(), String> {
+    let stack = take_stack(app)?;
+    let result = stack.map_or(Ok(()), |mut stack| stack.stop());
+    stop_held_ngrok(app);
+    result
+}
+
+/// Sidecar-only teardown for a config-change restart: stops the RI and
+/// console but leaves any held ngrok tunnel in `UnifiedRuntimeState` for
+/// `reuse_or_start_ngrok_provider` to pick back up.
+fn stop_stack_keep_ngrok(app: &AppHandle) -> Result<(), String> {
     let stack = take_stack(app)?;
     stack.map_or(Ok(()), |mut stack| stack.stop())
 }
@@ -1029,6 +1223,7 @@ fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack
         });
 
         let result = stack.map_or(Ok(()), |mut stack| stack.stop_until(deadline));
+        stop_held_ngrok(&app);
         match result {
             Ok(()) => log::info!("Unified shutdown finished within its budget"),
             Err(error) => log::error!("Unified shutdown finished with errors: {error}"),
@@ -1147,7 +1342,7 @@ fn open_log_file(app: &AppHandle) -> Result<(), String> {
 
 fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     if managed {
-        if let Err(error) = stop_stack(app) {
+        if let Err(error) = stop_stack_and_ngrok(app) {
             log::error!("Failed to clean up unified sidecars after startup error: {error}");
         }
     }
@@ -1295,6 +1490,7 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
             .ok_or_else(|| "Unified RI database encryption key was not provisioned".to_string())?;
         let app_for_sidecars = app.clone();
         let remote_access_for_sidecars = remote_access.clone();
+        let held_ngrok = take_held_ngrok(&app)?;
         let result = tokio::task::spawn_blocking(move || {
             start_managed_stack(
                 &app_for_sidecars,
@@ -1302,6 +1498,7 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
                 &credential_encryption_key_for_sidecar,
                 &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
+                held_ngrok,
             )
         })
         .await
@@ -1309,6 +1506,9 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         let ri_origin = result.ri_origin.clone();
         let console_url = result.console_url.clone();
         store_stack(&app, result.stack)?;
+        if let Some(ngrok) = result.ngrok {
+            store_held_ngrok(&app, ngrok)?;
+        }
         (ri_origin, console_url, true)
     };
 
@@ -1473,12 +1673,19 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let remote_access_for_attempt = remote_access.clone();
     let candidate_key_for_attempt = candidate_key.clone();
     let attempt = tokio::task::spawn_blocking(move || {
+        // No held ngrok tunnel to reuse here: this command only runs after
+        // the initial bootstrap attempt already failed on a missing database
+        // key, and that failure's `cleanup_managed_stack_on_error` (via
+        // `stop_stack_and_ngrok`) already tore down anything that was
+        // running, including any tunnel. This is a fresh start, not a
+        // config-change restart.
         start_managed_stack(
             &app_for_attempt,
             &password_for_attempt,
             &credential_encryption_key,
             &candidate_key_for_attempt,
             &remote_access_for_attempt,
+            None,
         )
     })
     .await
@@ -1487,6 +1694,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let result = match attempt {
         Ok(started) => {
             store_stack(&app, started.stack)?;
+            if let Some(ngrok) = started.ngrok {
+                store_held_ngrok(&app, ngrok)?;
+            }
             log::info!("Recovery import: candidate code started the managed stack successfully");
             Ok((started.ri_origin, started.console_url))
         }
@@ -1536,7 +1746,7 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
         let app = app.clone();
-        move || stop_stack(&app)
+        move || stop_stack_keep_ngrok(&app)
     })
     .await
     .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
@@ -2209,15 +2419,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         .start()
         .expect("fake console should become ready");
         let console_port = console.port();
-        (
-            UnifiedStack {
-                ri,
-                console,
-                ngrok: None,
-            },
-            ri_port,
-            console_port,
-        )
+        (UnifiedStack { ri, console }, ri_port, console_port)
     }
 
     #[test]
@@ -2240,6 +2442,82 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     fn ri_readiness_host_header_is_none_when_no_public_origin_is_configured() {
         assert_eq!(ri_readiness_host_header(""), None);
         assert_eq!(ri_readiness_host_header("   "), None);
+    }
+
+    fn ngrok_fingerprint() -> NgrokFingerprint {
+        NgrokFingerprint {
+            endpoint_mode:
+                crate::remote_access_providers::NgrokEndpointModeConfig::HttpsEdgeTermination,
+            reserved_domain: None,
+        }
+    }
+
+    #[test]
+    fn should_reuse_ngrok_tunnel_when_settings_and_ri_port_are_unchanged() {
+        // The shape a config-change restart (`restart_after_remote_access_config`)
+        // hits every time on a FREE ngrok plan: same provider settings, and
+        // the RI came back up on the same port (via `Supervisor::start_on_port`
+        // preferring the held tunnel's port). This is the case that must
+        // NOT create a new tunnel, or the owner's just-adopted origin goes
+        // stale before the console even loads it.
+        let fingerprint = ngrok_fingerprint();
+        assert!(should_reuse_ngrok_tunnel(
+            Some(&fingerprint),
+            Some(4310),
+            Some(&fingerprint),
+            4310,
+        ));
+    }
+
+    #[test]
+    fn should_not_reuse_ngrok_tunnel_when_the_ri_port_changed() {
+        // The RI's preferred port could not be reused (something else bound
+        // it in the gap) -- the held tunnel is forwarding to a port nothing
+        // is listening on anymore, so it cannot be kept.
+        let fingerprint = ngrok_fingerprint();
+        assert!(!should_reuse_ngrok_tunnel(
+            Some(&fingerprint),
+            Some(4310),
+            Some(&fingerprint),
+            4311,
+        ));
+    }
+
+    #[test]
+    fn should_not_reuse_ngrok_tunnel_when_provider_settings_changed() {
+        let held = ngrok_fingerprint();
+        let desired = NgrokFingerprint {
+            endpoint_mode:
+                crate::remote_access_providers::NgrokEndpointModeConfig::TlsPassthrough,
+            reserved_domain: None,
+        };
+        assert!(!should_reuse_ngrok_tunnel(
+            Some(&held),
+            Some(4310),
+            Some(&desired),
+            4310,
+        ));
+    }
+
+    #[test]
+    fn should_not_reuse_ngrok_tunnel_when_nothing_is_held() {
+        let fingerprint = ngrok_fingerprint();
+        assert!(!should_reuse_ngrok_tunnel(None, None, Some(&fingerprint), 4310));
+    }
+
+    #[test]
+    fn should_not_reuse_ngrok_tunnel_when_remote_access_no_longer_wants_ngrok() {
+        // Turning remote access off (or switching away from ngrok) must
+        // start a fresh tunnel the next time ngrok is selected again, not
+        // resurrect the old one -- see the "off then on starts fresh" test
+        // requirement.
+        let fingerprint = ngrok_fingerprint();
+        assert!(!should_reuse_ngrok_tunnel(
+            Some(&fingerprint),
+            Some(4310),
+            None,
+            4310,
+        ));
     }
 
     #[test]
