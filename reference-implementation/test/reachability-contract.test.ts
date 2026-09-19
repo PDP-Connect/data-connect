@@ -88,6 +88,28 @@ test("R3 refuses a hosted request whose effective host is not allowlisted", () =
   assert.match(decision?.message ?? "", /PDPP_REFERENCE_ORIGIN/)
 })
 
+test("R3b a loopback-originated request presenting the trusted Host is allowed, but 127.0.0.1 alone is not", () => {
+  // This is the exact shape of the RI's own internal readiness self-probe
+  // (src-tauri/src/commands/process_supervisor.rs's HttpGet readiness check,
+  // always dialed over 127.0.0.1) once a public origin like an ngrok tunnel
+  // is configured. Presenting vault.example -- the reachability contract's
+  // own trusted host -- must pass even though the TCP connection itself is
+  // loopback; presenting the bare 127.0.0.1 authority Rust's HTTP client
+  // sends with no override must still be refused, same as any other
+  // untrusted host. Proves this contract has no loopback exemption (unlike
+  // metadata.ts's separate isPrivateNetworkHost, which does) -- the fix for
+  // the self-probe lives entirely on the Rust side, sending a Host this
+  // contract already trusts, not by relaxing this check.
+  const contract = hostedContract({ PDPP_TRUSTED_HOSTS: "vault.example" })
+  const trusted = request({ host: "vault.example", origin: "https://vault.example" })
+  assert.equal(evaluateReachabilityRequest(trusted, contract, { hosted: true }), null)
+
+  const bareLoopback = request({ host: "127.0.0.1:38365", origin: "https://vault.example" })
+  const decision = evaluateReachabilityRequest(bareLoopback, contract, { hosted: true })
+  assert.equal(decision?.status, 400)
+  assert.equal(decision?.code, "invalid_host")
+})
+
 test("R4 refuses a bad Origin on MCP with HTTP 403", () => {
   const contract = hostedContract()
   const decision = evaluateReachabilityRequest(

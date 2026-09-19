@@ -499,6 +499,7 @@ fn ri_process_spec(
         readiness: Readiness::HttpGet {
             url_from_port: format!("http://127.0.0.1:{{port+1}}{RI_HEALTH_PATH}"),
             deadline: CONSOLE_WAIT_TIMEOUT,
+            host_header: ri_readiness_host_header(&remote_access.fields.trusted_hosts),
         },
         restart: RestartPolicy::Bounded {
             max: 3,
@@ -511,6 +512,26 @@ fn ri_process_spec(
             total: Duration::from_secs(8),
         },
     }
+}
+
+/// Once a public origin is configured, the RI's own reachability contract
+/// (`reachability-contract.ts::isAllowedRequestHost`) rejects any request
+/// whose `Host` header isn't in `PDPP_TRUSTED_HOSTS` -- correctly, since an
+/// untrusted `Host` on a loopback connection is indistinguishable from a
+/// DNS-rebound attacker request and that check exists specifically to catch
+/// it. But this process's OWN readiness probe of the RI it just spawned is
+/// also a loopback connection with an untrusted `Host` (`127.0.0.1`) by
+/// default, so without this override the probe fails every attempt
+/// post-restart and the whole stack cannot come back up after ngrok assigns
+/// an origin. Presenting the trusted host here is not a security exemption
+/// -- it's telling the probe to identify itself the way every other trusted
+/// caller already must. `None` while `trusted_hosts` is empty (posture off,
+/// or the first start before ngrok has discovered an origin) sends whatever
+/// the URL's own `127.0.0.1` authority implies, which is what an ungated RI
+/// expects.
+fn ri_readiness_host_header(trusted_hosts: &str) -> Option<String> {
+    let trimmed = trusted_hosts.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn ri_environment(
@@ -597,6 +618,7 @@ fn console_process_spec(
         readiness: Readiness::HttpGet {
             url_from_port: "http://127.0.0.1:{port}/".to_string(),
             deadline: CONSOLE_WAIT_TIMEOUT,
+            host_header: None,
         },
         restart: RestartPolicy::Bounded {
             max: 3,
@@ -1843,6 +1865,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 Readiness::HttpGet {
                     url_from_port: format!("http://127.0.0.1:{{port+1}}{RI_HEALTH_PATH}"),
                     deadline: Duration::from_secs(3),
+                    host_header: None,
                 },
                 ri_restart,
             ),
@@ -1859,6 +1882,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 Readiness::HttpGet {
                     url_from_port: "http://127.0.0.1:{port}/".to_string(),
                     deadline: Duration::from_secs(3),
+                    host_header: None,
                 },
                 RestartPolicy::Bounded {
                     max: 1,
@@ -1887,6 +1911,20 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!enabled_for_value(Some("0")));
         assert!(!enabled_for_value(Some("true")));
         assert!(!enabled_for_value(None));
+    }
+
+    #[test]
+    fn ri_readiness_host_header_trusts_the_configured_ngrok_host() {
+        assert_eq!(
+            ri_readiness_host_header("vault.ngrok-free.app"),
+            Some("vault.ngrok-free.app".to_string())
+        );
+    }
+
+    #[test]
+    fn ri_readiness_host_header_is_none_when_no_public_origin_is_configured() {
+        assert_eq!(ri_readiness_host_header(""), None);
+        assert_eq!(ri_readiness_host_header("   "), None);
     }
 
     #[test]

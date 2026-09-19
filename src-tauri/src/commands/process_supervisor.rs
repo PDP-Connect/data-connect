@@ -73,6 +73,18 @@ pub enum Readiness {
         /// `http://127.0.0.1:{port}/health`.
         url_from_port: String,
         deadline: Duration,
+        /// Overrides the `Host` header the probe sends, independent of the
+        /// URL's own `127.0.0.1` authority. Needed when the target server
+        /// enforces a request-host allowlist (see
+        /// `reachability-contract.ts::isAllowedRequestHost` on the reference
+        /// server): once a public origin is configured there, a probe whose
+        /// `Host` header reads `127.0.0.1` is indistinguishable from a
+        /// DNS-rebound attacker request and is correctly rejected, so this
+        /// process's own internal probe of a process it just spawned needs to
+        /// present a `Host` that server already trusts. `None` sends whatever
+        /// the URL's authority implies, correct for any target with no such
+        /// allowlist.
+        host_header: Option<String>,
     },
     StdoutMarker {
         marker: String,
@@ -821,7 +833,11 @@ fn wait_for_readiness(
                 }
             }
         },
-        Readiness::HttpGet { url_from_port, .. } => {
+        Readiness::HttpGet {
+            url_from_port,
+            host_header,
+            ..
+        } => {
             let url = render_port_string(url_from_port, port);
             let client = match reqwest::blocking::Client::builder()
                 .timeout(READINESS_POLL_INTERVAL)
@@ -847,8 +863,11 @@ fn wait_for_readiness(
                         "HTTP readiness URL {url} did not respond successfully before the deadline"
                     ));
                 }
-                if client
-                    .get(&url)
+                let mut request = client.get(&url);
+                if let Some(host) = host_header {
+                    request = request.header(reqwest::header::HOST, host);
+                }
+                if request
                     .send()
                     .map(|response| {
                         response.status().is_success() || response.status().is_redirection()
@@ -1340,6 +1359,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             Readiness::HttpGet {
                 url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
                 deadline: Duration::from_secs(3),
+                host_header: None,
             },
         );
         let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
@@ -1350,6 +1370,71 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(states(&sink)
             .iter()
             .any(|event| matches!(event, LifecycleState::Ready)));
+    }
+
+    #[test]
+    fn http_readiness_sends_the_configured_host_header() {
+        // Simulates the reference server's reachability-contract host
+        // allowlist: only succeeds (302) for the one Host it trusts, 400 for
+        // anything else -- including the bare 127.0.0.1 a probe would send
+        // with no override. Proves `host_header` actually reaches the wire,
+        // not just that it's stored on the enum variant.
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+  const trusted = request.headers.host === 'trusted.example';
+  response.writeHead(trusted ? 302 : 400, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let spec = base_spec(
+            script.path(),
+            Readiness::HttpGet {
+                url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+                deadline: Duration::from_secs(3),
+                host_header: Some("trusted.example".to_string()),
+            },
+        );
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .expect("readiness should succeed once the trusted Host header is presented");
+        handle.stop().unwrap();
+        assert!(states(&sink)
+            .iter()
+            .any(|event| matches!(event, LifecycleState::Ready)));
+    }
+
+    #[test]
+    fn http_readiness_without_a_host_header_fails_against_a_host_allowlist() {
+        // The inverse of the above: no override sent, so the probe presents
+        // whatever the URL's own 127.0.0.1 authority implies, which a
+        // trusted-host-only server rejects -- this is the exact failure mode
+        // that motivated adding `host_header` (a restart after ngrok assigns
+        // an origin, probed with no override, times out).
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+  const trusted = request.headers.host === 'trusted.example';
+  response.writeHead(trusted ? 302 : 400, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let spec = base_spec(
+            script.path(),
+            Readiness::HttpGet {
+                url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+                deadline: Duration::from_millis(300),
+                host_header: None,
+            },
+        );
+        let result = Supervisor::new(spec, ArcSink(Arc::clone(&sink))).start();
+        assert!(result.is_err());
     }
 
     #[test]
