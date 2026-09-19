@@ -55,7 +55,7 @@ export default function ExploreError({ error, reset }: { error: Error & { digest
           Reload
         </button>
         <a className={buttonVariants({ size: "sm", variant: "ghost" })} href="/">
-          Back to PDPP
+          Back to DataConnect
         </a>
       </div>
     </main>

@@ -106,6 +106,14 @@ pub struct Platform {
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
     pub setup: Option<ActivePdppSetup>,
+    #[serde(rename = "sourceKind", skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(rename = "sourceId", skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(rename = "sourcePath", skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(rename = "activeSource", skip_serializing_if = "Option::is_none")]
+    pub active_source: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +466,10 @@ fn platform_from_metadata(
         runtime: runtime_override.or(metadata.runtime),
         scopes,
         setup: None,
+        source_kind: None,
+        source_id: None,
+        source_path: None,
+        active_source: None,
     }
 }
 
@@ -557,14 +569,17 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
 }
 
 fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
-    let Some(manifest) = read_active_connector_manifest() else {
-        return Vec::new();
-    };
+    let mut installs = read_active_connector_manifest()
+        .map(|manifest| manifest.connectors.into_values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    installs.extend(
+        super::developer_connector_sources::list_sources()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|source| super::developer_connector_sources::as_active_install(&source)),
+    );
     let resource_dir = app.path().resource_dir().ok();
-    load_pdpp_platforms_with_resource_dir(
-        manifest.connectors.into_values(),
-        resource_dir.as_deref(),
-    )
+    load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref())
 }
 
 pub(super) fn load_pdpp_platforms(
@@ -642,8 +657,15 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             })
             .unwrap_or_default();
 
+        let source_id = install.connector_id.clone();
+        let local_source = source_id.starts_with("local_");
+        let active_source = local_source
+            && super::developer_connector_sources::selected_source(&install.connector_id)
+                .ok()
+                .flatten()
+                .is_some();
         platforms.push(Platform {
-            id: install.connector_id,
+            id: source_id.clone(),
             company,
             name: manifest
                 .display_name
@@ -663,6 +685,10 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             runtime: Some("pdpp-network".to_string()),
             scopes: Some(scopes),
             setup: manifest.setup,
+            source_kind: local_source.then(|| "developer_local".to_string()),
+            source_id: local_source.then_some(source_id),
+            source_path: local_source.then(|| install.root_path.clone()),
+            active_source: local_source.then_some(active_source),
         });
     }
 

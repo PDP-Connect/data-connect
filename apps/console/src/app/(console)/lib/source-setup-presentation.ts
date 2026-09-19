@@ -26,8 +26,10 @@
 import { type ConnectorCatalogEntry, isExperimentalEntry, isOwnerActionableEntry } from "./connection-catalog.ts";
 
 export interface SourceSetupStatus {
-  /** One short owner-facing status label. */
-  label: string;
+  /** One short owner-facing exception label; supported is the implied default. */
+  label: string | null;
+  /** Plain-language explanation for an exception label, exposed as a tooltip. */
+  description: string;
   /** Tailwind classes for the badge tone. */
   tone: string;
 }
@@ -38,7 +40,7 @@ export interface SourceSetupAction {
 }
 
 export function publicTierLabel(tier: ConnectorCatalogEntry["publicTier"]): string {
-  return tier.charAt(0).toUpperCase() + tier.slice(1);
+  return tier === "development" ? "In development" : tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
 /**
@@ -60,13 +62,41 @@ export function sourceSetupContext(entry: ConnectorCatalogEntry): string | null 
   return entry.setupDescription;
 }
 
-function browserBoundWithStoredCredentials(entry: ConnectorCatalogEntry): boolean {
+/**
+ * A browser-bound connector whose manifest also declares static-secret
+ * capture (e.g. Amazon, ChatGPT, Reddit): the dashboard's browser-session
+ * page is a real, dedicated setup path for these regardless of whether the
+ * connector has cleared the separate manual-browser-collector proof roster
+ * (`isSupportedBrowserCollectorConnector`) that `owner_actionable` is gated
+ * on server-side. That roster answers "has a human proven this exact
+ * connector's live collection," a fact orthogonal to "does this dashboard
+ * have a setup path for it" -- so this predicate, not `isOwnerActionableEntry`,
+ * is what a row's setup-path fact must key on.
+ */
+export function browserBoundWithStoredCredentials(entry: ConnectorCatalogEntry): boolean {
   return entry.modality === "browser_bound" && entry.setupModality === "static_secret";
+}
+
+/**
+ * Whether THIS dashboard has a working setup path for `entry`, independent
+ * of whether that path has been proven against a live account yet. A
+ * `static_secret_connect` disposition on a browser-bound connector always
+ * resolves to the browser-session page (`browserBoundWithStoredCredentials`)
+ * regardless of live-proof status -- see the reference planner's own comment
+ * in `buildStaticSecretSetupPlan` for why that disposition is deliberately
+ * not remapped to `static_secret_experimental` for browser-bound connectors.
+ * Folding that case into `isUnavailableSetupEntry` would say "not available
+ * on this platform" for a connector this dashboard can, in fact, walk an
+ * owner through today.
+ */
+export function hasDashboardSetupPath(entry: ConnectorCatalogEntry): boolean {
+  return entry.disposition === "static_secret_connect" && browserBoundWithStoredCredentials(entry);
 }
 
 function isUnavailableSetupEntry(entry: ConnectorCatalogEntry): boolean {
   return (
     !isOwnerActionableEntry(entry) &&
+    !hasDashboardSetupPath(entry) &&
     entry.disposition !== "provider_auth_deployment_blocked" &&
     entry.disposition !== "provider_auth_proof_gated" &&
     entry.disposition !== "manual_upload_pending" &&
@@ -107,6 +137,13 @@ export type SourceSetupAvailability =
 
 /** Owner-facing picker order: actionable dispositions first, unsupported last. */
 export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
+  // A row with no click target at all (see `sourceSetupRowIsUnavailable`)
+  // sorts after every other rank, including the experimental opt-in below:
+  // there is nothing here to compare against those on cost/benefit, only a
+  // dead end, so it never interrupts a scan of rows the owner can act on.
+  if (sourceSetupRowIsUnavailable(entry)) {
+    return 10;
+  }
   if (isUnavailableSetupEntry(entry)) {
     return 8;
   }
@@ -139,86 +176,161 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
   }
 }
 
+/**
+ * Whether this row has no click target at all: a known scaffold, or any
+ * other disposition `sourceSetupAction` refuses (proof-gated, unproven,
+ * unsupported, unknown). These are the rows the owner has called out as
+ * "should not allow you to install" -- offering an install or add control
+ * that can never work is worse than not offering one, so the catalog must
+ * never render an action (including the Package column's install button)
+ * for a row this returns true for, and must sort every such row after
+ * every row that does have one.
+ *
+ * Deliberately narrower than `sourceSetupAvailability(entry) ===
+ * "not_available_here"`: that check also covers a real (non-scaffold)
+ * Development entry with a genuine self-test action -- e.g. an unproven
+ * local-collector connector -- which DOES have something to click and must
+ * not be treated as dead.
+ */
+export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boolean {
+  return sourceSetupAction(entry) === null;
+}
+
 /** The owner-facing status label + tone for first-account setup. */
 export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStatus {
   if (entry.publicTier === "development") {
-    // "Not implemented" and "Development" are deliberately different labels:
+    // "Not built yet" and "In development" are deliberately different labels:
     // a scaffold has no collection code at all (there is nothing to test),
     // while a real Development entry has an implemented, self-testable setup
     // path that simply has not been proven against a live account yet.
     // Collapsing these into one badge would hide exactly the distinction the
-    // owner needs to decide whether clicking a card can do anything.
+    // owner needs to decide whether clicking a card can do anything. "Not
+    // built yet" reads as a known roadmap gap (part of the shared "not
+    // available yet" family with "Not packaged yet" below), never as a
+    // broken build.
     return entry.isKnownScaffold
-      ? { label: "Not implemented", tone: "border-border bg-muted/30 text-muted-foreground" }
-      : { label: publicTierLabel(entry.publicTier), tone: "border-border bg-muted/30 text-muted-foreground" };
+      ? {
+          description: "This connector is registered, but nobody has written its collection code yet.",
+          label: "Not built yet",
+          tone: "border-border bg-muted/30 text-muted-foreground",
+        }
+      : {
+          description: "This connector has a setup path, but it has not completed live-account validation.",
+          label: publicTierLabel(entry.publicTier),
+          tone: "border-border bg-muted/30 text-muted-foreground",
+        };
   }
   if (entry.publicTier === "preview") {
-    return { label: publicTierLabel(entry.publicTier), tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg" };
+    return {
+      description: "This setup path is implemented but has not completed live validation. Use non-critical data.",
+      label: publicTierLabel(entry.publicTier),
+      tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
+    };
   }
   if (isUnavailableSetupEntry(entry)) {
-    return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+    return {
+      description: "This dashboard cannot offer a working setup path for this connector yet.",
+      label: "Not available here",
+      tone: "border-border bg-muted/30 text-muted-foreground",
+    };
+  }
+  // hasDashboardSetupPath entries that are NOT yet owner-actionable have a
+  // real browser-session page but have not cleared the separate live-proof
+  // roster -- the same honest "implemented, not yet live-validated" fact
+  // `static_secret_experimental` names elsewhere, so this reuses that exact
+  // label/tone rather than either "Ready to set up" (overclaiming proof this
+  // connector does not have yet) or "Not available here" (denying the setup
+  // path this row is about to render).
+  if (hasDashboardSetupPath(entry) && !isOwnerActionableEntry(entry)) {
+    return {
+      description: "This connector has a browser-session setup path, but it has not completed live-account validation.",
+      label: "Preview",
+      tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
+    };
   }
   if (browserBoundWithStoredCredentials(entry)) {
     return {
-      label: "Supported",
+      description: "Ready to set up from this page.",
+      label: null,
       tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
     };
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "browser_collector_manual":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "static_secret_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "manual_upload_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "provider_auth_connect":
       return {
-        label: "Supported",
+        description: "Ready to set up from this page.",
+        label: null,
         tone: "border-[color:var(--success)]/30 bg-status-success-bg text-status-success-fg",
       };
     case "static_secret_experimental":
       return {
+        description: "This credential setup path is available for testing, but it has not completed live validation.",
         label: "Preview",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "manual_upload_pending":
       return {
+        description: "The connector is known, but file import is not available from this dashboard yet.",
         label: "Import not available yet",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "provider_auth_deployment_blocked":
       return {
+        description: "Configure the instance-level provider settings before adding this connector.",
         label: "Server setup required",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "browser_bound_runbook":
       return {
+        description: "This connector needs a browser setup path that this dashboard does not offer yet.",
         label: "Browser setup not available yet",
         tone: "border-[color:var(--warning)]/30 bg-status-warning-bg text-status-warning-fg",
       };
     case "local_collector_unproven":
     case "provider_auth_proof_gated":
       // Existing data keeps working; there is just no shipped owner add path.
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no proven setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
     case "api_network_unsupported":
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
     default:
       // unknown_unsupported and any future unclassified disposition.
-      return { label: "Not available here", tone: "border-border bg-muted/30 text-muted-foreground" };
+      return {
+        description: "This connector has no setup path in this dashboard yet.",
+        label: "Not available here",
+        tone: "border-border bg-muted/30 text-muted-foreground",
+      };
   }
 }
 
@@ -308,13 +420,13 @@ function developmentFallbackGuidance(entry: ConnectorCatalogEntry): string {
   // generic "unproven" note -- that fact is more actionable than anything
   // else this branch could say, and it holds regardless of tier.
   if (entry.disposition === "provider_auth_deployment_blocked") {
-    return `Development: also waiting on server settings: ${entry.deploymentReadiness.blockers
+    return `In development: also waiting on server settings: ${entry.deploymentReadiness.blockers
       .map((blocker) => blocker.label || blocker.key)
       .join(", ")}.`;
   }
   const note = entry.listingNote ?? entry.refreshPolicyRationale ?? entry.setupDescription;
   const base =
-    "Development: this connector's setup path is implemented, but no live run against a real account has proven it yet.";
+    "In development: this connector's setup path is implemented, but no live run against a real account has proven it yet.";
   return note ? `${base} ${note}` : `${base} Test it with non-critical data.`;
 }
 
@@ -391,7 +503,7 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
     if (entry.isKnownScaffold || !isDevelopmentSelfTestDisposition(entry.disposition)) {
       return null;
     }
-  } else if (!(isOwnerActionableEntry(entry) || isExperimentalEntry(entry))) {
+  } else if (!(isOwnerActionableEntry(entry) || isExperimentalEntry(entry) || hasDashboardSetupPath(entry))) {
     return null;
   }
   // Browser-bound connectors that also declare credential capture still start

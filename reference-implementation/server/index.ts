@@ -21,8 +21,12 @@ import {
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
 } from "../vendor/cli/src/package-info.ts";
-import type { ProviderAuthManifestLike } from "@pdpp/polyfill-connectors/provider-auth-adapter";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import type { ProviderAuthManifestLike } from "./polyfill-connectors-runtime.ts";
+import {
+  loadCredentialProbeHelpers,
+  loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
+  readPolyfillManifests,
+} from "./polyfill-connectors-runtime.ts";
 import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
@@ -58,9 +62,11 @@ import {
   createBrowserSurfaceLeaseSweepTimer,
 } from "../runtime/browser-surface-lease-sweep-timer.ts";
 import {
+  DEFAULT_NEKO_READINESS_TIMEOUT_MS,
   DEFAULT_NEKO_LEASE_SWEEP_INTERVAL_MS,
   parseNekoBrowserSurfaceRuntimeConfig,
 } from "../runtime/browser-surface-leases.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
@@ -74,8 +80,13 @@ import {
   type Controller,
   createController,
   getScheduleIneligibilityReason,
-  resolveDefaultConnectorPath,
+  resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
+import { createConnectorInstallService } from "./connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
+import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
+import { createAppConfigStore } from "./app-config-store.ts";
+import { createAutostartStore } from "./autostart-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -209,6 +220,7 @@ import {
   buildOwnerConnectionSupportedActions,
   buildProtectedResourceMetadata,
   buildSemanticRetrievalCapability,
+  forwardedPublicOrigin,
   isLocalOrPrivateRequestOrigin,
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -220,6 +232,14 @@ import {
 import { unresolvedOwnerActionEvidenceFromSummary } from "./owner-action-gate.ts";
 import { createOwnerAuthPlaceholder, OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
 import { resolveOwnerExposurePosture } from "./owner-exposure-posture.ts";
+import {
+  type ReachabilityContract,
+  evaluateReachabilityRequest,
+  isLoopbackOriginHost,
+  isNonLoopbackBindHost,
+  parseReachabilityContract,
+  validateReachabilityContract,
+} from "./reachability-contract.ts";
 import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
 import { reconcilePolyfillManifests } from "./polyfill-manifest-reconcile.ts";
 import { postgresPersistContentAddressedBlob } from "./postgres-records.ts";
@@ -334,7 +354,11 @@ import { mountOwnerConnectionRun } from "./routes/owner-connection-run.ts";
 import { mountOwnerConnectionSchedule } from "./routes/owner-connection-schedule.ts";
 import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/owner-connections.ts";
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
+import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
+import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
+import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -625,6 +649,8 @@ interface ReqLike {
     on?: (...args: unknown[]) => void;
     off?: (...args: unknown[]) => void;
     removeListener?: (...args: unknown[]) => void;
+    socket?: { remoteAddress?: string };
+    url?: string;
   };
   socket?: { remoteAddress?: string };
   tokenInfo?: TokenInfo;
@@ -743,6 +769,7 @@ interface ServerOpts {
   autoEnrollEligibleSchedules?: boolean;
   awaitStartupBackfill?: boolean;
   bindHost?: string;
+  reachabilityContract?: ReachabilityContract | null;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | null;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -801,6 +828,7 @@ interface ServerOpts {
     hosted?: boolean;
     bindsNonLoopback?: boolean;
   } | null;
+  trustedProxies?: string | null;
   ownerToken?: string | null;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
@@ -1338,6 +1366,14 @@ function resolveTrustedProtectedResourceMetadataUrl(
   } catch {
     return null;
   }
+}
+
+function reachabilityContractIsHosted(contract: ReachabilityContract): boolean {
+  return (
+    isNonLoopbackBindHost(contract.bindHost) ||
+    (contract.referenceOrigin !== null &&
+      !isLoopbackOriginHost(new URL(contract.referenceOrigin).hostname))
+  );
 }
 
 function getProtectedResourceMetadataUrl(res: ResLike) {
@@ -2104,17 +2140,12 @@ function createRequestRecordRejectionStore() {
   return createRecordRejectionStore();
 }
 
-// Lazily loads the pure static-secret injection helpers from the
-// polyfill-connectors runner slice. The reference server reaches connector
-// code by relative path (it does not declare the package as a dependency), so
-// this mirrors the controller's `await import("../../packages/...")` idiom and
-// caches the resolved module after the first run.
-let staticSecretInjectionModulePromise: Promise<Record<string, unknown>> | null = null;
+// Lazily loads the pure static-secret injection helpers through the optional
+// connector-runtime boundary. Development and conformance runs may provide
+// the polyfill package; the production image does not, so the boundary's
+// empty/fail-closed behavior remains explicit before catalog installation.
 function loadStaticSecretInjectionHelpers() {
-  if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
-  }
-  return staticSecretInjectionModulePromise;
+  return loadOptionalStaticSecretInjectionHelpers();
 }
 
 // Build the route-facing static-secret credential prober. The reference-only
@@ -2126,13 +2157,12 @@ function loadStaticSecretInjectionHelpers() {
 // or grant-scoped reads. Resolved once at startup and injected, so the route
 // stays synchronous and tests inject a deterministic double instead.
 async function buildStaticSecretCredentialProber() {
-  const [probe, transport, adapter] = await Promise.all([
-    import("@pdpp/polyfill-connectors/credential-probe"),
-    import("@pdpp/polyfill-connectors/credential-probe-transport"),
+  const [probe, adapter] = await Promise.all([
+    loadCredentialProbeHelpers(),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return (adapter.createStaticSecretCredentialProber as unknown as (args: Record<string, unknown>) => unknown)({
-    createLiveCredentialProbeTransport: transport.createLiveCredentialProbeTransport,
+    createLiveCredentialProbeTransport: probe.createLiveCredentialProbeTransport,
     hasCredentialProbe: probe.hasCredentialProbe,
     probeCredential: probe.probeCredential,
   });
@@ -4519,6 +4549,19 @@ export async function evaluateOwnerStreamCoverageAuthority({
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function buildAsApp(opts: ServerOpts = {}) {
   const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -6325,6 +6368,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     generateSpineId,
     getOwnerSubjectId,
     handleError,
+    // A trusted proxy is not guaranteed to attach x-forwarded-host to every
+    // request in a flow (see resolveCallbackBaseUrl below); this reports
+    // only whether THIS request carries that header, so the callback route
+    // can tell "no signal" apart from "an explicit, conflicting claim."
+    hasForwardedOriginSignal: (req: unknown) =>
+      forwardedPublicOrigin(req as Parameters<typeof forwardedPublicOrigin>[0]) !== null,
     pdppError,
     pendingAuthStore,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -6778,6 +6827,19 @@ function buildOwnerAgentOnboardingMetadata({
 
 function buildRsApp(opts: ServerOpts = {}) {
   const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -6858,6 +6920,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleStreamableHttpRequest,
     internalResource,
     pdppError,
+    reachabilityContract,
     referenceRevision,
     requireClientOrMcpPackage,
     requireToken,
@@ -7722,6 +7785,54 @@ function buildRsApp(opts: ServerOpts = {}) {
     uatExposeUnlistedConnectors: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
   } as unknown as Parameters<typeof mountOwnerConnectorTemplates>[1]);
 
+  // OCI artifact mutation is intentionally separate from connector-instance
+  // setup. The service records executable artifact identity under PDPP_DATA_DIR
+  // and registers only a verified installed manifest.
+  mountOwnerConnectorInstall(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    service: createConnectorInstallService({ registerManifest: registerConnector }),
+  } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+
+  // Owner-authenticated HTTP routes for both remote-access providers
+  // (config read/write/inspect). See routes/owner-remote-access.ts for the
+  // full rationale, including how ngrok's authtoken handoff and native
+  // tunnel supervision stay split across this route and the Tauri host.
+  mountOwnerRemoteAccess(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
+
+  // Owner-authenticated HTTP routes for the generic desktop app-config blob
+  // (storageProvider/serverMode/selfHostedUrl/startMinimized/closeToTray).
+  // See routes/owner-app-config.ts: same injection-gap rationale as
+  // owner-remote-access.ts, but this file has no OS side effect on write so
+  // it is persisted directly, no Rust-side watcher involved.
+  mountOwnerAppConfig(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAppConfigStore(),
+  } as unknown as Parameters<typeof mountOwnerAppConfig>[1]);
+
+  // Owner-authenticated HTTP routes for launch-at-login. Unlike app-config,
+  // autostart is an imperative OS action only the Tauri/Rust process can
+  // perform, so this route hands off to a request/ack file the desktop app's
+  // spawn_autostart_watcher polls and applies. See routes/owner-autostart.ts.
+  mountOwnerAutostart(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
+
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
   // action family, marks supported vs owner-mediated vs unsupported, and links
@@ -7818,6 +7929,41 @@ function buildRsApp(opts: ServerOpts = {}) {
 export async function startServer(opts: ServerOpts = {}) {
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
+  const requestedAsPort = opts.asPort ?? AS_PORT;
+  const requestedRsPort = opts.rsPort ?? RS_PORT;
+  const ignoreAmbientPublicUrls =
+    opts.ignoreAmbientPublicUrls ??
+    ((requestedAsPort === 0 || requestedRsPort === 0) &&
+      !opts.asPublicUrl &&
+      !opts.rsPublicUrl &&
+      !opts.asIssuer &&
+      opts.referenceOrigin === undefined);
+  const reachabilityEnv =
+    ignoreAmbientPublicUrls && opts.referenceOrigin === undefined
+      ? { ...process.env, PDPP_REFERENCE_ORIGIN: undefined }
+      : process.env;
+  const reachabilityContract =
+    opts.reachabilityContract ??
+    parseReachabilityContract({
+      env: reachabilityEnv,
+      bindHost: opts.bindHost,
+      referenceOrigin: opts.referenceOrigin,
+      trustedHosts: opts.trustedMetadataHosts,
+      trustedProxies: opts.trustedProxies,
+    });
+  const reachabilityHosted = reachabilityContractIsHosted(reachabilityContract);
+  validateReachabilityContract(reachabilityContract, reachabilityHosted);
+  const earlyOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const ownerExposurePosture = resolveOwnerExposurePosture({
+    bindHost: reachabilityContract.bindHost,
+    env: process.env,
+    hasOwnerPassword:
+      typeof earlyOwnerAuthConfig.password === "string" && earlyOwnerAuthConfig.password.length > 0,
+    referenceOrigin: reachabilityContract.referenceOrigin,
+  });
+  if (ownerExposurePosture.refuseBootReason) {
+    throw new Error(ownerExposurePosture.refuseBootReason);
+  }
   const connectorEnvironmentPolicy = resolveConnectorEnvironmentPolicy(opts);
   setConnectorSummaryReconcileObservationSink(createConnectorSummaryReconcileObservationSink(logger));
   const nativeConfig = validateNativeConfiguration(opts);
@@ -7996,14 +8142,9 @@ export async function startServer(opts: ServerOpts = {}) {
     process.env.PDPP_PROVIDER_NAME ||
     PDPP_PROVIDER_NAME;
 
-  const requestedAsPort = opts.asPort ?? AS_PORT;
-  const requestedRsPort = opts.rsPort ?? RS_PORT;
-  const ignoreAmbientPublicUrls =
-    opts.ignoreAmbientPublicUrls ??
-    ((requestedAsPort === 0 || requestedRsPort === 0) && !opts.asPublicUrl && !opts.rsPublicUrl && !opts.asIssuer);
   const referenceTopology = resolveReferenceTopology({
     ...(opts.referenceMode === null ? {} : { explicitMode: opts.referenceMode }),
-    ...(opts.referenceOrigin === null ? {} : { referenceOrigin: opts.referenceOrigin }),
+    referenceOrigin: reachabilityContract.referenceOrigin,
     ...(opts.asPublicUrl === null ? {} : { asPublicUrl: opts.asPublicUrl }),
     ...(opts.rsPublicUrl === null ? {} : { rsPublicUrl: opts.rsPublicUrl }),
     ignoreAmbient: ignoreAmbientPublicUrls,
@@ -8074,42 +8215,8 @@ export async function startServer(opts: ServerOpts = {}) {
     referenceBaseUrl: configuredAsPublicUrl || null,
     rsUrl: configuredRsPublicUrl || null,
   };
-  const resolvedOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
-
-  // ── Owner-exposure posture (security audit S-1 / S-2, lane A1) ────────────
-  // Decide whether this deployment is internet-facing. In a hosted posture an
-  // unset PDPP_OWNER_PASSWORD is a full bypass of the owner control plane, so
-  // we FAIL CLOSED: refuse to boot. In a local-dev (loopback) posture we keep
-  // the password-optional convenience and the open `requireOwnerSession`
-  // fall-through. The posture also gates `POST /connectors` (manifest upsert)
-  // so a one-request grant-wipe DoS is not reachable unauthenticated on a
-  // hosted surface. See server/owner-exposure-posture.ts for the signal logic.
-  const ownerExposurePosture = resolveOwnerExposurePosture({
-    bindHost: opts.bindHost,
-    env: process.env,
-    hasOwnerPassword:
-      typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0,
-    isTestContext: !!process.env.NODE_TEST_CONTEXT,
-    publicUrlOption: configuredAsPublicUrl,
-  });
-  if (ownerExposurePosture.refuseBootReason) {
-    // Throw BEFORE any listener binds. The CLI entrypoint's `.catch` exits(1)
-    // with the fatal log line; the test harness sees a rejected promise.
-    throw new Error(ownerExposurePosture.refuseBootReason);
-  }
-  if (
-    !ownerExposurePosture.hosted &&
-    ownerExposurePosture.bindsNonLoopback &&
-    !(typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0)
-  ) {
-    // Local-dev posture that still binds a non-loopback interface without a
-    // password — not refused (could be a deliberate LAN demo), but loud.
-    logger.warn(
-      { bindHost: opts.bindHost ?? "(all interfaces)" },
-      "reference server is binding a non-loopback interface with PDPP_OWNER_PASSWORD unset — the owner control plane (/_ref, connector registry) is reachable without authentication. Set PDPP_OWNER_PASSWORD to gate it."
-    );
-  }
 
   const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -8172,6 +8279,7 @@ export async function startServer(opts: ServerOpts = {}) {
       return { connectorId: namespace.connectorId, connectorInstanceId: namespace.connectorInstanceId };
     },
     ownerSubjectId: ownerAuthSubjectId,
+    localConnectorSourceStore: createFileLocalConnectorSourceStore(),
     resolveOwnerSubjectIdForConnectorInstance: async (connectorInstanceId) =>
       (await createRequestConnectorInstanceStore().get(connectorInstanceId))?.ownerSubjectId ?? null,
     ...(opts.connectorPathResolver === null
@@ -8469,6 +8577,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // Owner-exposure posture: gates the disabled-auth fall-through and the
     // connector-registry lock (security audit S-1 / S-2, lane A1).
     ownerExposurePosture,
+    reachabilityContract,
     preRegisteredPublicClients: resolvePreRegisteredPublicClients(opts),
     presentationScreenStateStore,
     presentationTerminalBarrier,
@@ -8498,11 +8607,10 @@ export async function startServer(opts: ServerOpts = {}) {
     staticSecretAutoResume: opts.staticSecretAutoResume,
   } as unknown as ServerOpts);
 
-  // opts.bindHost — restrict listening interface (e.g. '127.0.0.1'). Default
-  // is undefined which lets Node bind to all interfaces. Passing '127.0.0.1'
-  // keeps the server off the LAN/public internet.
+  // The normalized contract always supplies a bind host. The loopback default
+  // keeps the server off the LAN/public internet unless an operator opts in.
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const bindHost = opts.bindHost;
+  const bindHost = reachabilityContract.bindHost;
 
   const asServer = await asApp.listen(requestedAsPort, bindHost);
   if (typeof (asApp as unknown as Record<string, unknown>).__pdppStreamingUpgradeHandler === "function") {
@@ -8567,6 +8675,7 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
+    reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
     // Explicitly-configured internal RS base for the hosted-MCP adapter's
@@ -8704,7 +8813,7 @@ export async function startServer(opts: ServerOpts = {}) {
   schedulerManager = createReferenceSchedulerManager({
     connectionScopedRunEnvResolver,
     connectorEnvironmentPolicy,
-    connectorPathResolver: opts.connectorPathResolver || resolveDefaultConnectorPath,
+    connectorPathResolver: opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath,
     controller,
     logger,
     ownerSubjectId: ownerAuthSubjectId,
@@ -9092,6 +9201,24 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
   }
 
+  if (runtimeConfig.host) {
+    const hostAllocator = createHostBrowserSurfaceAllocator({
+      endpoint: runtimeConfig.host.endpoint,
+      headless: runtimeConfig.host.headless,
+      token: runtimeConfig.host.token,
+    });
+    options.browserSurfaceAllocator = hostAllocator;
+    options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
+    options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
+    options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+    options.beforeBrowserSurfaceLeaseEnsure = (args: { readonly runId: string; readonly surfaceId: string }) => {
+      hostAllocator.bindRunToSurface(args);
+    };
+    options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
+      return hostAllocator.releaseRun(args.runId);
+    };
+  }
+
   return options;
 }
 
@@ -9207,7 +9334,7 @@ function createReferenceSchedulerManager({
   logger,
   runtimeContext,
   schedulerStore = getDefaultSchedulerStore(),
-  connectorPathResolver = resolveDefaultConnectorPath,
+  connectorPathResolver = resolveActiveInstallFirstConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
   webPushConfig = resolveWebPushConfig(),
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
@@ -10111,7 +10238,10 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
   process.on("SIGTERM", exitOnSignal("SIGTERM"));
   process.on("SIGINT", exitOnSignal("SIGINT"));
 
-  startServer({ logger: cliLogger })
+  startServer({
+    ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
+    logger: cliLogger,
+  })
     .then((result) => {
       server.asServer = result.asServer;
       server.rsServer = result.rsServer;

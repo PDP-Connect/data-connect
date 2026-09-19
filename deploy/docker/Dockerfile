@@ -44,24 +44,28 @@ COPY reference-implementation/vendor/list-envelope/package.json reference-implem
 COPY reference-implementation/vendor/mcp-server/package.json reference-implementation/vendor/mcp-server/package.json
 COPY reference-implementation/vendor/operator-ui/package.json reference-implementation/vendor/operator-ui/package.json
 COPY reference-implementation/vendor/read-core/package.json reference-implementation/vendor/read-core/package.json
-# reference-implementation depends on @pdpp/reference-contract and
-# @pdpp/polyfill-connectors via `file:./vendor/*.tgz` (Move B's interim,
-# pre-registry-publish pin — see reference-implementation/vendor/README.md).
-# npm resolves and unpacks these tarballs during install, so they must be
-# present before the manifest-only install below runs.
-COPY reference-implementation/vendor/*.tgz reference-implementation/vendor/
+# The reference implementation keeps the reference-contract tarball as a
+# local compatibility dependency. Connector implementations are not copied
+# into this image; production installs resolve them from the signed catalog.
+COPY reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz reference-implementation/vendor/
 
 # --allow-git=all: this repo declares a git-sourced devDependency
 # (@opendatalabs/data-connectors-tools); the manifest-only tree above is
 # enough for npm to resolve it. --ignore-scripts here for the same reason
 # as the Patchright env vars: native rebuilds happen explicitly below, after
 # the full source tree exists, not against a manifest-only skeleton.
-RUN npm install --allow-git=all --ignore-scripts \
+RUN npm install --allow-git=all --omit=dev --ignore-scripts \
   && npm rebuild better-sqlite3 esbuild onnxruntime-node protobufjs
 
 FROM deps AS source
 
 COPY . .
+
+# The host tree retains the conformance tarball for local tests and packaging,
+# but the production image must not carry that connector bundle or its source
+# artifact. The reference-contract tarball remains because it is a direct RI
+# compatibility dependency.
+RUN rm -f /app/reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz
 
 # mcp-server ships as dist/-built output (not source-resolved), and depends
 # on both vendor/cli and vendor/read-core (also dist/-built) -- mcp-server's
@@ -92,15 +96,9 @@ COPY --from=source /app /app
 
 EXPOSE 7662 7663
 
-# --import tsx, not plain `node`: the moved server's vendored
-# @pdpp/polyfill-connectors dependency ships raw TypeScript source under
-# node_modules (see reference-implementation/vendor/README.md), and Node
-# refuses to strip types from any file there by policy — a bare `node
-# server/index.ts` crashes at the first import from that package with
-# ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING. Confirmed live: this exact
-# crash reproduced with a bare `node` CMD in this image before this fix.
-# Matches PDP-Connect/pdpp's own real production entrypoint (deploy/railway/
-# core-supervisor.ts), which is invoked the same way for the same reason.
+# --import tsx is required because the reference server is TypeScript. The
+# runtime connector package is intentionally absent from this image; installed
+# catalog artifacts provide executable connector entrypoints at run time.
 CMD ["sh", "-c", "export AS_PORT=\"${PORT:-${AS_PORT:-7662}}\"; export PDPP_RS_URL=\"${PDPP_RS_URL:-http://127.0.0.1:${RS_PORT:-7663}}\"; exec node --import tsx reference-implementation/server/index.ts"]
 
 # Dedicated browsers stage, cached independently of source changes: only a
@@ -114,17 +112,13 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && test -x /usr/bin/Xvfb
 
-COPY packages/polyfill-connectors/package.json /tmp/polyfill-connectors-package.json
+COPY reference-implementation/package.json /tmp/reference-implementation-package.json
 
 WORKDIR /tmp/patchright-install
 
-# The vendored reference-implementation/vendor/pdpp-polyfill-connectors-*.tgz
-# is the package version actually loaded at runtime (see vendor/README.md);
-# its Patchright dependency is what must match here, not this repo's own
-# top-level packages/polyfill-connectors (a different, native package with
-# no direct runtime relationship to reference-implementation's server).
-COPY reference-implementation/vendor/*.tgz /tmp/patchright-install/vendor/
-RUN PATCHRIGHT_VERSION="$(tar -xzO -f /tmp/patchright-install/vendor/pdpp-polyfill-connectors-0.0.1.tgz package/package.json | node --input-type=module -e "import { readFileSync } from 'node:fs'; const version = JSON.parse(readFileSync(0, 'utf8')).dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
+# Keep the browser layer tied to the direct runtime dependency, not to a
+# connector package that is absent from the production image.
+RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const packageJson = JSON.parse(readFileSync('/tmp/reference-implementation-package.json', 'utf8')); const version = packageJson.dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
   && npx patchright install --with-deps chromium \

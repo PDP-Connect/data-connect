@@ -8,12 +8,14 @@ import { formatConnectorKeyForDisplay, formatConnectorNameForDisplay } from "@pd
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
+import { ConnectorMark } from "../components/connector-mark.tsx";
 import type { RefConnectorSummary, RefSchedule } from "../lib/ref-client.ts";
 import { activeScheduleRunId, scheduleEnabled, scheduleIntervalSeconds } from "../lib/schedule-evidence.ts";
 import { formatTotalRecordsLabel } from "../lib/total-records-label.ts";
 import { deleteScheduleAction, pauseScheduleAction, resumeScheduleAction, upsertScheduleAction } from "./actions.ts";
 
 interface ScheduleRowProps {
+  connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null;
   runsHref: string;
   summary: RefConnectorSummary;
 }
@@ -124,7 +126,7 @@ function ScheduleEditButton({
   );
 }
 
-export function ScheduleRow({ summary, runsHref }: ScheduleRowProps) {
+export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [editState, setEditState] = useState<EditState>("idle");
@@ -259,6 +261,7 @@ export function ScheduleRow({ summary, runsHref }: ScheduleRowProps) {
               className="pdpp-body relative font-medium text-foreground before:absolute before:-inset-3 before:content-[''] hover:underline"
               href={recordsHref}
             >
+              <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcon} name={displayName} />
               {displayName}
             </Link>
             <div className="pdpp-caption mt-0.5 truncate font-mono text-muted-foreground">{connectorKey}</div>

@@ -1107,12 +1107,12 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     );
 
   assert.deepEqual(
-    readAtLine(99, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
+    readAtLine(107, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
     [],
     "the reviewed polyfill manifest call site must match its exact current line pin and call shape"
   );
   assert.ok(
-    readAtLine(100, 'await readFile(path, "utf8")', "return JSON.parse(raw);").some(
+    readAtLine(108, 'await readFile(path, "utf8")', "return JSON.parse(raw);").some(
       (violation) => violation.rule === "unresolvable-data-resource-load"
     ),
     "moving the identical call one line must invalidate the exemption and fail closed"
@@ -1124,7 +1124,7 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     ["missing JSON consumption", 'await readFile(path, "utf8")', "return raw;"],
   ] as const) {
     assert.ok(
-      readAtLine(99, readCall, jsonFlow).length > 0,
+      readAtLine(107, readCall, jsonFlow).length > 0,
       `${mutation} mutation at the approved line must fail closed`
     );
   }

@@ -117,6 +117,15 @@ function requiredBindingEnabled(manifest: SchedulerManifest, binding: string): b
 }
 
 function browserSurfaceConfigured(): boolean {
+  // Host capability provider: the server leases a browser from the loopback
+  // agent before dispatching the connector, so the endpoint is the admission
+  // signal rather than a CDP URL known at scheduler-check time.
+  if (
+    process.env.PDPP_BROWSER_SURFACE_MODE?.trim() === "host" &&
+    process.env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT?.trim()
+  ) {
+    return true;
+  }
   // Direct CDP URL — connector receives the URL in env and talks to it directly.
   if (process.env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim()) {
     return true;

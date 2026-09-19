@@ -5,6 +5,7 @@
 //! capability, then delegates process supervision to the PDPP connector kernel.
 
 use super::connector_store::{get_active_connector_install, ActiveConnectorInstall};
+use super::developer_connector_sources::{as_active_install, selected_source};
 use super::pdpp_browser::{PdppBrowserBinding, PdppBrowserLease};
 use super::pdpp_collection_state::{
     clear_connection_setup_complete, commit_terminal_run, is_connection_setup_complete,
@@ -834,7 +835,10 @@ fn resolve_active_installed_pdpp_connector(
     connector_id: &str,
     runtime_root: &Path,
 ) -> Result<ResolvedInstalledPdppConnector, String> {
-    let install = get_active_connector_install(connector_id)
+    let install = selected_source(connector_id)
+        .map_err(|error| format!("Failed to read developer connector source: {error}"))?
+        .map(|source| as_active_install(&source))
+        .or_else(|| get_active_connector_install(connector_id))
         .ok_or_else(|| format!("PDPP connector {connector_id} is not installed"))?;
     resolve_installed_pdpp_connector_with_runtime(&install, runtime_root)
 }
@@ -868,12 +872,15 @@ fn resolve_installed_pdpp_connector_with_runtime(
     let manifest_path = confined_existing_file(&root, manifest_relative, "PDPP manifest path")?;
     let entrypoint_path =
         confined_existing_file(&root, entrypoint_relative, "PDPP entrypoint path")?;
-    let provenance_relative = install
-        .provenance_path
-        .as_deref()
-        .ok_or("PDPP active install is missing provenancePath")?;
-    let provenance_path =
-        confined_existing_file(&root, provenance_relative, "PDPP provenance path")?;
+    let provenance_path = match install.provenance_path.as_deref() {
+        Some(provenance_relative) => Some(confined_existing_file(
+            &root,
+            provenance_relative,
+            "PDPP provenance path",
+        )?),
+        None if install.connector_id.starts_with("local_") => None,
+        None => return Err("PDPP active install is missing provenancePath".into()),
+    };
     let manifest_sha256 = required_hash(install.manifest_sha256.as_deref(), "manifestSha256")?;
     verify_file_hash(
         &entrypoint_path,
@@ -883,14 +890,16 @@ fn resolve_installed_pdpp_connector_with_runtime(
         )?),
         "PDPP entrypoint",
     )?;
-    verify_file_hash(
-        &provenance_path,
-        Some(required_hash(
-            install.provenance_sha256.as_deref(),
-            "provenanceSha256",
-        )?),
-        "PDPP provenance",
-    )?;
+    if let Some(provenance_path) = &provenance_path {
+        verify_file_hash(
+            provenance_path,
+            Some(required_hash(
+                install.provenance_sha256.as_deref(),
+                "provenanceSha256",
+            )?),
+            "PDPP provenance",
+        )?;
+    }
     let manifest_content = read_verified_manifest(&manifest_path, manifest_sha256)?;
     let manifest: PdppConnectorManifest = serde_json::from_str(&manifest_content)
         .map_err(|e| format!("Failed to parse PDPP connector manifest: {e}"))?;
@@ -903,7 +912,9 @@ fn resolve_installed_pdpp_connector_with_runtime(
         .as_deref()
         .or(manifest.connector_id.as_deref());
     validate_manifest(&install.version, recorded_manifest_connector_id, &manifest)?;
-    validate_chatgpt_runtime_requirements(&provenance_path, &manifest, runtime_root)?;
+    if let Some(provenance_path) = &provenance_path {
+        validate_chatgpt_runtime_requirements(provenance_path, &manifest, runtime_root)?;
+    }
     Ok(ResolvedInstalledPdppConnector {
         connector_id: install.connector_id.clone(),
         manifest_sha256: manifest_sha256.to_owned(),

@@ -15,6 +15,7 @@
   "scripts": {
     "dev": "vite",
     "dev:app": "vite --port 5173 --strictPort",
+    "legacy:ui": "vite --mode legacy --open /legacy.html",
     "build": "tsc -b && vite build",
     "prebuild:all": "node scripts/ensure-connectors.js && node scripts/ensure-pdpp-runtime.js && node scripts/ensure-playwright-runner.js && node scripts/ensure-personal-server.js",
     "connectors:resolve": "node scripts/resolve-connectors.js",
@@ -32,6 +33,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "npm run typecheck && vitest run",
     "test:pdpp-interop": "node --test scripts/pdpp-interoperability-e2e.test.mjs",
+    "test:e2e": "npm --prefix e2e run test:e2e",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:icon": "tauri icon ./public/data_connect_1024_1x.png",

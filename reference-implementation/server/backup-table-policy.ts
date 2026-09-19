@@ -79,6 +79,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Gap evidence records source coverage state.",
   },
+  connector_install_catalog_state: {
+    classification: "backup_required",
+    reason: "Verified connector catalog high-water state prevents catalog rollback after restore.",
+  },
+  connector_installs: {
+    classification: "backup_required",
+    reason: "Verified connector artifact records and activation state are required to resolve installed code after restore.",
+  },
   connector_instance_config_current: {
     classification: "backup_required",
     reason:

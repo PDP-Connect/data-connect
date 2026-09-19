@@ -21,6 +21,7 @@ import {
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import {
   formatStreamCollectionFacts,
@@ -799,6 +800,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={manifest.icon} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}

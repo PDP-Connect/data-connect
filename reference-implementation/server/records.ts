@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { setImmediate as yieldImmediate } from "node:timers/promises";
-import { parseCoverageDiagnosticsStateSnapshot } from "@pdpp/polyfill-connectors/local-source-inventory";
+import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */

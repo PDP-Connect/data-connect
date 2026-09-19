@@ -934,6 +934,30 @@ pub struct AppConfig {
     pub server_mode: Option<String>,
     #[serde(rename = "selfHostedUrl")]
     pub self_hosted_url: Option<String>,
+    /// Skip showing the console window at startup, leaving only the tray
+    /// icon. Purely a startup-sequencing preference (no OS side effect),
+    /// unlike autostart-at-login, which is why it lives in this general
+    /// config blob instead of desktop_settings.rs. Defaults to false so
+    /// existing config.json files without this field parse as "not set".
+    #[serde(rename = "startMinimized", default)]
+    pub start_minimized: bool,
+    /// Hide the console window to the tray instead of quitting when the
+    /// titlebar close button is used. Defaults to true: DataConnect keeps
+    /// background sidecars (RI, console, Personal Server) running whether
+    /// or not a window is open, the same "service-like" mental model as
+    /// Dropbox/1Password/Tailscale/Docker Desktop, which either have no
+    /// quit-on-close choice at all or background by default without asking
+    /// -- see ai/research/desktop-app-packaging/tray-app-lifecycle-settings-and-defaults-2026.md.
+    /// Unlike startMinimized this has a real behavioral consequence (it
+    /// changes whether closing the window quits the app), so it is exposed
+    /// as an explicit, visible setting rather than an implicit default the
+    /// user can't see or change.
+    #[serde(rename = "closeToTray", default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+}
+
+fn default_close_to_tray() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -942,6 +966,8 @@ impl Default for AppConfig {
             storage_provider: Some("local".to_string()),
             server_mode: Some("cloud".to_string()),
             self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: default_close_to_tray(),
         }
     }
 }
@@ -956,6 +982,13 @@ fn get_config_path() -> Result<PathBuf, String> {
 /// Get app configuration from ~/.dataconnect/config.json
 #[tauri::command]
 pub async fn get_app_config() -> Result<AppConfig, String> {
+    read_app_config_sync()
+}
+
+/// Synchronous config read shared by the async command above and by
+/// startup code (unified::setup runs before the async runtime is driving
+/// command dispatch, so it cannot `.await` the command wrapper).
+pub(crate) fn read_app_config_sync() -> Result<AppConfig, String> {
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
@@ -968,6 +1001,27 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
 
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config file: {}", e))
+}
+
+/// Whether the console window should stay hidden at startup, leaving only
+/// the tray icon. Defaults to false (show) on any read failure — a config
+/// read/parse error must not silently hide the app from a user who never
+/// asked for that.
+pub(crate) fn read_start_minimized_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.start_minimized)
+        .unwrap_or(false)
+}
+
+/// Whether the titlebar close button should hide the console window to the
+/// tray instead of quitting the app. Defaults to true (close-to-tray) on
+/// any read failure, matching AppConfig::default -- the safer failure mode
+/// is "sidecars keep running", not "an unreadable config silently starts
+/// quitting the app on every window close".
+pub(crate) fn read_close_to_tray_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.close_to_tray)
+        .unwrap_or(true)
 }
 
 /// Set app configuration to ~/.dataconnect/config.json
@@ -1015,6 +1069,7 @@ mod tests {
     use super::read_export_content;
     use super::sanitize_path_component;
     use super::scan_latest_json_in_confined_tree;
+    use super::AppConfig;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -1123,6 +1178,46 @@ mod tests {
         assert!(
             result.unwrap_err().contains("symlink"),
             "error should explain why the exact export was rejected"
+        );
+    }
+
+    #[test]
+    fn app_config_defaults_close_to_tray_true_for_a_pre_existing_config_file() {
+        // An older config.json written before closeToTray existed has no
+        // such key at all. It must still parse -- and default to true
+        // (close-to-tray), not false (quit-on-close) -- so upgrading the
+        // app does not silently change what the titlebar close button does
+        // for someone who never touched this setting.
+        let legacy_config = json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false
+        });
+
+        let config: AppConfig =
+            serde_json::from_value(legacy_config).expect("legacy config should still parse");
+
+        assert!(
+            config.close_to_tray,
+            "a config file predating closeToTray must default to true, not false"
+        );
+    }
+
+    #[test]
+    fn app_config_round_trips_an_explicit_close_to_tray_false() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false,
+            "closeToTray": false
+        }))
+        .expect("explicit closeToTray: false should parse");
+
+        assert!(
+            !config.close_to_tray,
+            "an explicit false must be honored, not overridden by the default"
         );
     }
 }

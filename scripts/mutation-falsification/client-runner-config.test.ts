@@ -3,7 +3,14 @@
 
 import { describe, expect, it } from "vitest"
 
-import rootConfig from "../../vite.config.ts"
+import rootConfigExport from "../../vite.config.ts"
+
+const rootConfig = rootConfigExport({
+  command: "serve",
+  mode: "test",
+  isSsrBuild: false,
+  isPreview: false,
+})
 
 describe("client mutation runner configuration", () => {
   it("pairs corrected test identities with ordered coverage setup", async () => {

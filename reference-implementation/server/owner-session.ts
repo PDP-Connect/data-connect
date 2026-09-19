@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import crypto from "node:crypto";
-
-export const OWNER_SESSION_COOKIE_NAME = "pdpp_owner_session";
-export const OWNER_SESSION_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
-export const OWNER_SESSION_DEFAULT_SUBJECT_ID = "owner_local";
-
-export const OWNER_AUTH_COOKIE_NAME = OWNER_SESSION_COOKIE_NAME;
-export const OWNER_AUTH_DEFAULT_SESSION_TTL_SECONDS = OWNER_SESSION_DEFAULT_TTL_SECONDS;
-export const OWNER_AUTH_DEFAULT_SUBJECT_ID = OWNER_SESSION_DEFAULT_SUBJECT_ID;
+export {
+  OWNER_AUTH_COOKIE_NAME,
+  OWNER_AUTH_DEFAULT_SESSION_TTL_SECONDS,
+  OWNER_AUTH_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_COOKIE_NAME,
+  OWNER_SESSION_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_DEFAULT_TTL_SECONDS,
+} from "./owner-session-constants.ts";
+import {
+  OWNER_SESSION_COOKIE_NAME,
+  OWNER_SESSION_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_DEFAULT_TTL_SECONDS,
+} from "./owner-session-constants.ts";
 
 export type OwnerSessionSecret = string | Uint8Array;
 

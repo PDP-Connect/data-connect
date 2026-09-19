@@ -122,8 +122,7 @@ export interface OwnerAuthPlaceholderOptions {
    * `requireOwnerSession` falls through to the open local-dev behavior
    * (`true`, the historical default) or fails closed with a 401 / login
    * redirect (`false`). The host computes this from the owner-exposure
-   * posture: it is `true` only in a local-dev (loopback) posture or under
-   * the explicit `PDPP_ALLOW_UNAUTHENTICATED_OWNER=1` override, and `false`
+   * posture: it is `true` only in a local-dev (loopback) posture, and `false`
    * on any internet-facing deployment. Security audit S-1: an unset password
    * must never silently open the owner control plane on a hosted surface.
    * Defaults to `true` to preserve the password-optional convenience for the

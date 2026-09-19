@@ -102,6 +102,15 @@ describe("release workflow", () => {
     )
     expect(workflow).toContain("Install PDPP runtime dependencies")
     expect(workflow).toContain("node scripts/ensure-pdpp-runtime.js")
+    expect(workflow).toContain("Stage reference-stack roots")
+    expect(workflow).toContain(
+      'node scripts/ensure-console-stack.js --profile release'
+    )
+    expect(workflow).toContain("node scripts/ensure-reference-stack.js \\")
+    expect(workflow).toContain('--node-binary "$node_binary"')
+    expect(workflow).toContain(
+      'node scripts/verify-reference-stack.mjs --profile release'
+    )
     expect(workflow).toContain("if: github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i

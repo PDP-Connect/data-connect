@@ -6,10 +6,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: this direct reference-implementation dependency is resolved by the reference test runner.
-import type BetterSqlite3 from "better-sqlite3";
-// biome-ignore lint/correctness/noUnresolvedImports: this direct reference-implementation dependency is resolved by the reference test runner.
-import Database from "better-sqlite3";
 import { seedPreRegisteredClients as seedPreRegisteredClientsUntyped } from "../server/auth.ts";
 import {
   closeDb as closeDbUntyped,
@@ -18,6 +14,7 @@ import {
   isTransientSqliteLockError as isTransientSqliteLockErrorUntyped,
   runWithSqliteBusyRetry as runWithSqliteBusyRetryUntyped,
 } from "../server/db.ts";
+import Database, { type BetterSqlite3 } from "./helpers/sqlite-driver.ts";
 
 /**
  * `server/db.js` and `server/auth.ts` are untyped JS (allowJs, checkJs:false)
@@ -186,7 +183,7 @@ test("initDb does not close a handle a previous caller still holds", () => {
 test("initDb migrates legacy event subscriptions before creating authority index", () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-event-sub-migrate-"));
   const dbPath = join(dir, "pdpp.sqlite");
-  let legacy: Database.Database | null | undefined;
+  let legacy: BetterSqlite3.Database | null | undefined;
   try {
     legacy = new Database(dbPath);
     legacy.exec(`
@@ -251,7 +248,7 @@ test("initDb migrates legacy event subscriptions before creating authority index
 test("initDb migrates legacy grant packages before creating parent index", () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-grant-packages-migrate-"));
   const dbPath = join(dir, "pdpp.sqlite");
-  let legacy: Database.Database | null | undefined;
+  let legacy: BetterSqlite3.Database | null | undefined;
   try {
     legacy = new Database(dbPath);
     legacy.exec(`
