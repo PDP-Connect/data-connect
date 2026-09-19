@@ -91,6 +91,13 @@ pub fn run() {
                     tauri_plugin_window_state::StateFlags::SIZE
                         | tauri_plugin_window_state::StateFlags::POSITION,
                 )
+                // Versioned filename: a state file saved before the console
+                // window's 1280x800 default existed pins a stale small size
+                // forever (the plugin re-saves whatever it restores, so a bad
+                // size never self-heals). Bumping the filename once discards
+                // any pre-v2 state so the builder's own default takes effect
+                // again; state saved under this name is trusted from here on.
+                .with_filename(".window-state-v2.json")
                 .build(),
         );
 
