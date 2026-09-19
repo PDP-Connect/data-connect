@@ -18,7 +18,7 @@
  * secret in plaintext between the watcher's write and this read.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
 const RECOVERY_EXPORT_FILE = "recovery-export.json"
@@ -60,9 +60,16 @@ async function loadState(path: string): Promise<RecoveryExportState> {
   }
 }
 
+// Locked to 0600: unlike remote-access's config file, this file transiently
+// carries the plaintext database encryption key in its `code` field, so it
+// needs the same protection every other secret-bearing file in this codebase
+// gets (see src-tauri/src/owner_credential.rs). writeFile's mode option only
+// applies when the file is created, so an explicit chmod covers the
+// overwrite case too (this file is written repeatedly by both sides).
 async function saveState(path: string, state: RecoveryExportState): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, "utf8")
+  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+  await chmod(path, 0o600)
 }
 
 function sleep(ms: number): Promise<void> {

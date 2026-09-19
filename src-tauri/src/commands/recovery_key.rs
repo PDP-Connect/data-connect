@@ -75,6 +75,12 @@ fn load_recovery_export_state(path: &Path) -> Result<RecoveryExportState, String
         .map_err(|error| format!("Failed to parse recovery export state: {error}"))
 }
 
+/// Writes `recovery-export.json` and locks it to 0600 immediately after the
+/// write. Unlike `remote-access.json` (config only), this file transiently
+/// carries the plaintext database encryption key in its `code` field, so it
+/// needs the same file-mode protection every other secret in this codebase
+/// gets in `owner_credential.rs` -- world-readable default permissions would
+/// let any local user read the key for as long as it sits on disk.
 fn save_recovery_export_state(path: &Path, state: &RecoveryExportState) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -82,7 +88,15 @@ fn save_recovery_export_state(path: &Path, state: &RecoveryExportState) -> Resul
     }
     let content = serde_json::to_string_pretty(state)
         .map_err(|error| format!("Failed to serialize recovery export state: {error}"))?;
-    fs::write(path, content).map_err(|error| format!("Failed to write recovery export state: {error}"))
+    fs::write(path, content)
+        .map_err(|error| format!("Failed to write recovery export state: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Failed to protect recovery export state: {error}"))?;
+    }
+    Ok(())
 }
 
 const NO_VAULT_MESSAGE: &str = "No encrypted vault exists yet. There is nothing to back up until DataConnect has started at least once.";
@@ -209,6 +223,26 @@ mod tests {
         save_recovery_export_state(&path, &state).expect("saved state");
         let loaded = load_recovery_export_state(&path).expect("loaded state");
         assert_eq!(loaded, state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_export_state_file_is_locked_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join(RECOVERY_EXPORT_FILE);
+        let state = RecoveryExportState {
+            request_id: 1,
+            applied_request_id: Some(1),
+            code: Some("plaintext-key-must-not-be-world-readable".to_string()),
+            error: None,
+        };
+
+        save_recovery_export_state(&path, &state).expect("saved state");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "recovery-export.json must be 0600, got {mode:o}");
     }
 
     #[test]

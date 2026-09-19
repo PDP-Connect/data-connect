@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -56,6 +56,37 @@ test("requestExport resolves with the code once the watcher answers", async () =
 
     const code = await exportPromise;
     assert.equal(code, "AB12-CD34");
+  });
+});
+
+test("requestExport locks recovery-export.json to owner-only permissions", async () => {
+  await withTempDir(async (dir) => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 2_000 });
+    const path = join(dir, RECOVERY_EXPORT_FILE);
+
+    const exportPromise = store.requestExport();
+
+    let requestId = 0;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const content = await readFile(path, "utf8").catch(() => "{}");
+      const parsed = JSON.parse(content || "{}") as { requestId?: number };
+      if (parsed.requestId) {
+        requestId = parsed.requestId;
+        break;
+      }
+    }
+    assert.ok(requestId > 0, "watcher never observed a request");
+    await writeFile(
+      path,
+      JSON.stringify({ appliedRequestId: requestId, code: "AB12-CD34", error: null, requestId }),
+      "utf8"
+    );
+
+    await exportPromise;
+
+    const mode = (await stat(path)).mode & 0o777;
+    assert.equal(mode, 0o600, `recovery-export.json must be 0600, got ${mode.toString(8)}`);
   });
 });
 
