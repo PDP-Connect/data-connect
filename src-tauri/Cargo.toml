@@ -47,6 +47,7 @@ keyring = "4.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
 oci-client = "0.17"
 semver = "1.0"
