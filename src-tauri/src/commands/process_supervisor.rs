@@ -320,11 +320,31 @@ impl Supervisor {
     /// Readiness and a `{port}` environment value both resolve from this same
     /// allocation.
     pub fn start(self) -> Result<SupervisorHandle, SupervisorError> {
+        self.start_on_port(None)
+    }
+
+    /// Same as `start`, but tries `preferred_port` (and its adjacent port, if
+    /// the spec needs one) first, falling back to a freshly allocated port
+    /// when the preferred one is unavailable -- for example another process
+    /// has since bound it, or it was never freed in time after the previous
+    /// occupant stopped. Used to keep a sidecar's port stable across a
+    /// stack-level restart (a new `Supervisor` each time) rather than only
+    /// across this supervisor's own internal crash-restarts, which already
+    /// reuse the one port allocated in `start`. `None` behaves exactly like
+    /// `start`.
+    pub fn start_on_port(
+        self,
+        preferred_port: Option<u16>,
+    ) -> Result<SupervisorHandle, SupervisorError> {
         #[cfg(unix)]
         if self.spec.process_group {
             install_parent_signal_handlers()?;
         }
-        let port = allocate_loopback_port(spec_requires_adjacent_port(&self.spec))?;
+        let adjacent = spec_requires_adjacent_port(&self.spec);
+        let port = match preferred_port {
+            Some(port) if loopback_port_range_is_free(port, adjacent) => port,
+            _ => allocate_loopback_port(adjacent)?,
+        };
         let state = Arc::new(SupervisorState::new());
         let (ready_sender, ready_receiver) = mpsc::channel();
         let thread_state = Arc::clone(&state);
@@ -1058,16 +1078,20 @@ fn process_group_exists(process_group: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-fn allocate_loopback_port(adjacent: bool) -> io::Result<u16> {
+fn loopback_port_range_is_free(port: u16, adjacent: bool) -> bool {
     let required_ports = if adjacent { 2 } else { 1 };
+    (0..required_ports).all(|offset| {
+        port.checked_add(offset)
+            .is_some_and(loopback_port_is_free)
+    })
+}
+
+fn allocate_loopback_port(adjacent: bool) -> io::Result<u16> {
     for _ in 0..64 {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         drop(listener);
-        if (0..required_ports).all(|offset| {
-            port.checked_add(offset)
-                .is_some_and(|candidate| loopback_port_is_free(candidate))
-        }) {
+        if loopback_port_range_is_free(port, adjacent) {
             return Ok(port);
         }
     }
@@ -1370,6 +1394,71 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(states(&sink)
             .iter()
             .any(|event| matches!(event, LifecycleState::Ready)));
+    }
+
+    #[test]
+    fn start_on_port_reuses_the_preferred_port_when_it_is_free() {
+        // The shape `reuse_or_start_ngrok_provider` (unified.rs) depends on:
+        // a fresh `Supervisor` for a NEW process instance still lands on the
+        // SAME port a caller asks for, when nothing else has taken it in the
+        // gap. This is what lets an ngrok tunnel forwarding to the previous
+        // RI's port keep working after the RI restarts.
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+  response.writeHead(request.url === '/ready' ? 302 : 404, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let readiness = Readiness::HttpGet {
+            url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+            deadline: Duration::from_secs(3),
+            host_header: None,
+        };
+        let first = Supervisor::new(base_spec(script.path(), readiness.clone()), ArcSink(Arc::clone(&sink)))
+            .start()
+            .unwrap();
+        let first_port = first.port();
+        first.stop().unwrap();
+
+        let second = Supervisor::new(base_spec(script.path(), readiness), ArcSink(Arc::clone(&sink)))
+            .start_on_port(Some(first_port))
+            .unwrap();
+        assert_eq!(second.port(), first_port);
+        second.stop().unwrap();
+    }
+
+    #[test]
+    fn start_on_port_falls_back_to_a_fresh_port_when_the_preferred_one_is_taken() {
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+  response.writeHead(request.url === '/ready' ? 302 : 404, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let readiness = Readiness::HttpGet {
+            url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+            deadline: Duration::from_secs(3),
+            host_header: None,
+        };
+        // Occupy a port, then ask a fresh supervisor to prefer it -- it must
+        // not fail, just fall back to an allocated port instead.
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let handle = Supervisor::new(base_spec(script.path(), readiness), ArcSink(Arc::clone(&sink)))
+            .start_on_port(Some(occupied_port))
+            .unwrap();
+        assert_ne!(handle.port(), occupied_port);
+        drop(occupied);
+        handle.stop().unwrap();
     }
 
     #[test]
