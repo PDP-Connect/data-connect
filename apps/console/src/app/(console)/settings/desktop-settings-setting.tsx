@@ -5,37 +5,37 @@
 
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils.ts"
+import type { AppConfig } from "../lib/app-config-client.ts"
+import type { AutostartState } from "../lib/autostart-client.ts"
+import {
+  loadAppConfigAction,
+  loadAutostartAction,
+  saveAppConfigAction,
+  setAutostartAction,
+} from "./desktop-settings-actions.ts"
 
-type NativeInvoke = (
-  command: string,
-  args?: Record<string, unknown>
-) => Promise<unknown>
-
+/**
+ * Both the generic app-config blob (start-minimized/close-to-tray) and
+ * autostart now run over owner-authenticated HTTP routes on the reference
+ * server (see `desktop-settings-actions.ts`), in both the desktop app and a
+ * plain browser -- the same shape `remote-access-setting.tsx` established
+ * for the `user_supplied_origin` remote-access provider. Unlike remote
+ * access's ngrok path, this component makes no Tauri IPC calls at all:
+ * neither surface here needs the OS keychain or Rust-side process
+ * supervision from the console's perspective (autostart's OS side effect is
+ * applied asynchronously by `unified.rs::spawn_autostart_watcher`, not by
+ * this window).
+ */
 interface DesktopSettingsProps {
-  invoke?: NativeInvoke
-}
-
-interface TauriWindow {
-  __TAURI_INTERNALS__?: {
-    invoke?: NativeInvoke
-  }
-}
-
-function nativeInvoke(): NativeInvoke | null {
-  if (typeof window === "undefined") return null
-  const internals = (window as TauriWindow).__TAURI_INTERNALS__
-  return typeof internals?.invoke === "function" ? internals.invoke : null
-}
-
-/** Mirrors the AppConfig shape from src-tauri/src/commands/file_ops.rs. */
-interface AppConfigShape {
-  startMinimized?: boolean
-  closeToTray?: boolean
+  loadAppConfig?: typeof loadAppConfigAction
+  saveAppConfig?: typeof saveAppConfigAction
+  loadAutostart?: typeof loadAutostartAction
+  setAutostart?: typeof setAutostartAction
 }
 
 function asStartMinimized(value: unknown): boolean {
   if (!value || typeof value !== "object") return false
-  const candidate = value as AppConfigShape
+  const candidate = value as Partial<AppConfig>
   return candidate.startMinimized === true
 }
 
@@ -47,48 +47,50 @@ function asStartMinimized(value: unknown): boolean {
 // this only returns false for an explicit `false`, not for undefined/missing.
 function asCloseToTray(value: unknown): boolean {
   if (!value || typeof value !== "object") return true
-  const candidate = value as AppConfigShape
+  const candidate = value as Partial<AppConfig>
   return candidate.closeToTray !== false
 }
 
-type LoadState = "loading" | "loaded" | "bridge_absent" | "failed"
+function asAutostartEnabled(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false
+  const candidate = value as Partial<AutostartState>
+  return candidate.enabled === true
+}
+
+type LoadState = "loading" | "loaded" | "failed"
 
 export function DesktopSettingsSetting({
-  invoke: suppliedInvoke,
+  loadAppConfig: suppliedLoadAppConfig,
+  saveAppConfig: suppliedSaveAppConfig,
+  loadAutostart: suppliedLoadAutostart,
+  setAutostart: suppliedSetAutostart,
 }: DesktopSettingsProps) {
-  const invoke = suppliedInvoke ?? nativeInvoke()
+  const loadAppConfig = suppliedLoadAppConfig ?? loadAppConfigAction
+  const saveAppConfig = suppliedSaveAppConfig ?? saveAppConfigAction
+  const loadAutostart = suppliedLoadAutostart ?? loadAutostartAction
+  const changeAutostart = suppliedSetAutostart ?? setAutostartAction
 
   // Neither default below is real state we have read yet. Until a load
   // succeeds we must not paint a guessed value as the current setting — the
   // same discipline remote-access-setting.tsx applies, because rendering an
   // unverified "off" reads as a real answer to a user deciding whether to
   // trust their machine to a launch-at-login toggle.
-  const [autostartEnabled, setAutostartEnabled] = useState(false)
+  const [autostartEnabled, setAutostartEnabledState] = useState(false)
   const [startMinimized, setStartMinimizedState] = useState(false)
   const [closeToTray, setCloseToTrayState] = useState(true)
-  const [loadState, setLoadState] = useState<LoadState>(() =>
-    invoke ? "loading" : "bridge_absent"
-  )
+  const [loadState, setLoadState] = useState<LoadState>("loading")
   const [error, setError] = useState<string | null>(null)
   const [busyAutostart, setBusyAutostart] = useState(false)
   const [busyStartMinimized, setBusyStartMinimized] = useState(false)
   const [busyCloseToTray, setBusyCloseToTray] = useState(false)
 
   useEffect(() => {
-    if (!invoke) {
-      setLoadState("bridge_absent")
-      return
-    }
-
     let cancelled = false
     setLoadState("loading")
-    void Promise.all([
-      invoke("get_autostart_enabled"),
-      invoke("get_app_config"),
-    ])
+    void Promise.all([loadAutostart(), loadAppConfig()])
       .then(([autostart, config]) => {
         if (cancelled) return
-        setAutostartEnabled(autostart === true)
+        setAutostartEnabledState(asAutostartEnabled(autostart))
         setStartMinimizedState(asStartMinimized(config))
         setCloseToTrayState(asCloseToTray(config))
         setLoadState("loaded")
@@ -102,55 +104,54 @@ export function DesktopSettingsSetting({
     return () => {
       cancelled = true
     }
-  }, [invoke])
+  }, [loadAutostart, loadAppConfig])
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown
 
   const toggleAutostart = (next: boolean) => {
-    if (!invoke) return
     setError(null)
     setBusyAutostart(true)
-    void invoke("set_autostart_enabled", { enabled: next })
-      .then(() => setAutostartEnabled(next))
+    void changeAutostart(next)
+      .then(result => {
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        setAutostartEnabledState(result.enabled)
+      })
       .catch(reason => setError(String(reason)))
       .finally(() => setBusyAutostart(false))
   }
 
   const toggleStartMinimized = (next: boolean) => {
-    if (!invoke) return
     setError(null)
     setBusyStartMinimized(true)
-    void invoke("get_app_config")
-      .then(config => {
-        const current =
-          config && typeof config === "object"
-            ? (config as Record<string, unknown>)
-            : {}
-        return invoke("set_app_config", {
-          config: { ...current, startMinimized: next },
-        })
+    void loadAppConfig()
+      .then(current => saveAppConfig({ ...current, startMinimized: next }))
+      .then(result => {
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        setStartMinimizedState(next)
       })
-      .then(() => setStartMinimizedState(next))
       .catch(reason => setError(String(reason)))
       .finally(() => setBusyStartMinimized(false))
   }
 
   const toggleCloseToTray = (next: boolean) => {
-    if (!invoke) return
     setError(null)
     setBusyCloseToTray(true)
-    void invoke("get_app_config")
-      .then(config => {
-        const current =
-          config && typeof config === "object"
-            ? (config as Record<string, unknown>)
-            : {}
-        return invoke("set_app_config", {
-          config: { ...current, closeToTray: next },
-        })
+    void loadAppConfig()
+      .then(current => saveAppConfig({ ...current, closeToTray: next }))
+      .then(result => {
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        setCloseToTrayState(next)
       })
-      .then(() => setCloseToTrayState(next))
       .catch(reason => setError(String(reason)))
       .finally(() => setBusyCloseToTray(false))
   }
@@ -160,12 +161,6 @@ export function DesktopSettingsSetting({
       {loadState === "loading" ? (
         <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
           Reading the current desktop settings…
-        </p>
-      ) : null}
-      {loadState === "bridge_absent" ? (
-        <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
-          Desktop settings are unavailable here. Open the DataConnect desktop
-          app to view or change them.
         </p>
       ) : null}
       {loadState === "failed" ? (
