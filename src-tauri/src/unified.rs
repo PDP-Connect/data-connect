@@ -15,7 +15,7 @@ use crate::commands::{attach_reference_server, login_reference_server_with_passw
 use crate::owner_credential::{
     configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
     load_or_create_credential_encryption_key, load_or_create_database_encryption_key,
-    load_or_create_owner_credential, owner_credential_path,
+    load_or_create_owner_credential, owner_credential_path, DatabaseKeyError,
 };
 use crate::remote_access::{
     load_remote_access_config, off_remote_access_config, save_remote_access_config,
@@ -33,6 +33,7 @@ use tauri::webview::Cookie;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
+pub(crate) const RECOVERY_WINDOW_LABEL: &str = "recovery";
 const TRAY_ICON_ID: &str = "dataconnect-tray";
 const DEFAULT_CONSOLE_URL: &str = "http://localhost:3001";
 const CONSOLE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -76,6 +77,11 @@ enum UnifiedStatus {
     Quitting,
     Stopped,
     Error,
+    // Distinct from Error: this is the one startup failure with a real
+    // owner-actionable next step (a dedicated recovery window is already
+    // open waiting for a recovery code), so the tray should say so rather
+    // than reuse the generic "something went wrong, nothing to do" label.
+    NeedsRecovery,
 }
 
 impl UnifiedStatus {
@@ -87,6 +93,7 @@ impl UnifiedStatus {
             Self::Quitting => "Status: Quitting…",
             Self::Stopped => "Status: Stopped",
             Self::Error => "Status: Error",
+            Self::NeedsRecovery => "Status: Needs recovery code",
         }
     }
 }
@@ -311,10 +318,10 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     let app_handle = app.handle().clone();
     spawn_remote_access_config_watcher(app_handle.clone());
     spawn_autostart_watcher(app_handle.clone());
+    crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
-            log::error!("Unified DataConnect startup failed: {error}");
-            set_status(&app_handle, UnifiedStatus::Error);
+        if let Err(failure) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
+            handle_bootstrap_failure(&app_handle, "Unified DataConnect startup", failure);
         }
     });
     Ok(())
@@ -327,11 +334,31 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap_and_open_console(app.clone(), true).await {
-            log::error!("Failed to open DataConnect console: {error}");
-            set_status(&app, UnifiedStatus::Error);
+        if let Err(failure) = bootstrap_and_open_console(app.clone(), true).await {
+            handle_bootstrap_failure(&app, "Opening the DataConnect console", failure);
         }
     });
+}
+
+/// Shared reaction to a `bootstrap_and_open_console` failure for both of its
+/// callers above: a plain error just flips the tray to "Error" (unchanged
+/// behavior), but `NeedsRecovery` additionally opens the dedicated recovery
+/// window so the owner has an actionable next step instead of a silent tray
+/// label change.
+fn handle_bootstrap_failure(app: &AppHandle, context: &str, failure: BootstrapFailure) {
+    match failure {
+        BootstrapFailure::NeedsRecovery => {
+            log::error!(
+                "{context} failed: database encryption key is missing while an encrypted vault exists"
+            );
+            set_status(app, UnifiedStatus::NeedsRecovery);
+            open_recovery_window(app);
+        }
+        BootstrapFailure::Other(error) => {
+            log::error!("{context} failed: {error}");
+            set_status(app, UnifiedStatus::Error);
+        }
+    }
 }
 
 fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -363,7 +390,7 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
-fn attach_mode() -> bool {
+pub(crate) fn attach_mode() -> bool {
     ["DATACONNECT_RI_URL", "DATACONNECT_CONSOLE_URL"]
         .into_iter()
         .any(|name| {
@@ -1126,6 +1153,20 @@ fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     }
 }
 
+/// Resolve the unified SQLite database path -- the same
+/// `<app-data-dir>/unified/pdpp.sqlite` path every one of `ri_environment`,
+/// `start_managed_stack`, and `load_bootstrap_secrets` needs, pulled into one
+/// place so the recovery-key command/watcher (`commands/recovery_key.rs`) can
+/// resolve it identically without re-deriving the join by hand.
+pub(crate) fn unified_database_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+        .join(UNIFIED_DB_DIRECTORY)
+        .join(UNIFIED_DB_FILE))
+}
+
 /// Local secrets/config the sidecars need before they can start: the owner
 /// password plus (when managed, not attach mode) the database and
 /// credential encryption keys and the remote-access config. Loaded together
@@ -1145,34 +1186,46 @@ struct BootstrapSecrets {
 /// (gnome-keyring/kwallet via the `keyring` crate's secret-service backend)
 /// or on disk I/O, none of which should run inline on a Tokio worker thread
 /// borrowed from the shared async runtime.
-fn load_bootstrap_secrets(app: &AppHandle, attach_mode: bool) -> Result<BootstrapSecrets, String> {
-    let credential_path = owner_credential_path(app)?;
-    let stored_credential = load_or_create_owner_credential(&credential_path)?;
+///
+/// Returns `DatabaseKeyError` (not a plain `String`) specifically so the one
+/// caller below can distinguish "the database key is missing while an
+/// encrypted vault exists" -- which should open the recovery window -- from
+/// every other bootstrap failure, which should not.
+fn load_bootstrap_secrets(
+    app: &AppHandle,
+    attach_mode: bool,
+) -> Result<BootstrapSecrets, DatabaseKeyError> {
+    let credential_path =
+        owner_credential_path(app).map_err(DatabaseKeyError::Other)?;
+    let stored_credential =
+        load_or_create_owner_credential(&credential_path).map_err(DatabaseKeyError::Other)?;
     let password = configured_owner_password().unwrap_or(stored_credential);
     let remote_access = if attach_mode {
         off_remote_access_config()
     } else {
-        load_remote_access_config(app)?
+        load_remote_access_config(app).map_err(DatabaseKeyError::Other)?
     };
 
     let (credential_encryption_key, database_encryption_key) = if attach_mode {
         (None, None)
     } else {
-        let credential_encryption_key_path = credential_encryption_key_path(app)?;
-        let database_encryption_key_path = database_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let database_encryption_key =
-            load_or_create_database_encryption_key(&database_encryption_key_path, &database_path)?;
+        let credential_encryption_key_path =
+            credential_encryption_key_path(app).map_err(DatabaseKeyError::Other)?;
+        let database_encryption_key_path =
+            database_encryption_key_path(app).map_err(DatabaseKeyError::Other)?;
+        let database_path = unified_database_path(app).map_err(DatabaseKeyError::Other)?;
+        let database_encryption_key = load_or_create_database_encryption_key(
+            &database_encryption_key_path,
+            &database_path,
+        )?;
         (
-            Some(load_or_create_credential_encryption_key(
-                &credential_encryption_key_path,
-                &database_path,
-            )?),
+            Some(
+                load_or_create_credential_encryption_key(
+                    &credential_encryption_key_path,
+                    &database_path,
+                )
+                .map_err(DatabaseKeyError::Other)?,
+            ),
             Some(database_encryption_key),
         )
     };
@@ -1185,7 +1238,32 @@ fn load_bootstrap_secrets(app: &AppHandle, attach_mode: bool) -> Result<Bootstra
     })
 }
 
-async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), String> {
+/// Bootstrap failure shapes `bootstrap_and_open_console` needs to react to
+/// differently: `NeedsRecovery` opens the dedicated recovery window instead
+/// of just flipping the tray to an inert "Error" state, because this one
+/// failure has a real owner-actionable next step (import a recovery code)
+/// that no other bootstrap failure has.
+enum BootstrapFailure {
+    NeedsRecovery,
+    Other(String),
+}
+
+impl From<DatabaseKeyError> for BootstrapFailure {
+    fn from(error: DatabaseKeyError) -> Self {
+        match error {
+            DatabaseKeyError::Missing(_) => Self::NeedsRecovery,
+            DatabaseKeyError::Other(message) => Self::Other(message),
+        }
+    }
+}
+
+impl From<String> for BootstrapFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
@@ -1197,7 +1275,8 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         database_encryption_key,
     } = tokio::task::spawn_blocking(move || load_bootstrap_secrets(&secrets_app, attach))
         .await
-        .map_err(|error| format!("Bootstrap secrets task failed: {error}"))??;
+        .map_err(|error| BootstrapFailure::Other(format!("Bootstrap secrets task failed: {error}")))?
+        .map_err(BootstrapFailure::from)?;
 
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
@@ -1233,16 +1312,36 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         (ri_origin, console_url, true)
     };
 
-    let login = match login_reference_server_with_password(ri_origin, &password).await {
+    finish_bootstrap(&app, &password, ri_origin, console_url, managed, should_show)
+        .await
+        .map_err(BootstrapFailure::from)
+}
+
+/// The shared tail of bootstrap once an RI origin and console URL exist,
+/// regardless of whether they came from the normal managed-stack/attach path
+/// above or from the recovery window's `import_database_encryption_recovery_code`
+/// command retrying `start_managed_stack` with a just-verified candidate key.
+/// Owner login, console readiness, session cookie, runtime state, and the
+/// console window itself all happen here exactly once so the two callers
+/// can't drift.
+async fn finish_bootstrap(
+    app: &AppHandle,
+    password: &str,
+    ri_origin: String,
+    console_url: String,
+    managed: bool,
+    should_show: bool,
+) -> Result<(), String> {
+    let login = match login_reference_server_with_password(ri_origin, password).await {
         Ok(login) => login,
         Err(error) => {
-            cleanup_managed_stack_on_error(&app, managed);
+            cleanup_managed_stack_on_error(app, managed);
             return Err(error);
         }
     };
 
     if let Err(error) = wait_for_console(&console_url).await {
-        cleanup_managed_stack_on_error(&app, managed);
+        cleanup_managed_stack_on_error(app, managed);
         return Err(error);
     }
     let console_origin = console_url
@@ -1251,14 +1350,14 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
     let console_origin = match console_origin {
         Ok(origin) => origin,
         Err(error) => {
-            cleanup_managed_stack_on_error(&app, managed);
+            cleanup_managed_stack_on_error(app, managed);
             return Err(error);
         }
     };
     let cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
-            cleanup_managed_stack_on_error(&app, managed);
+            cleanup_managed_stack_on_error(app, managed);
             return Err(error);
         }
     };
@@ -1277,16 +1376,157 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         Ok(())
     })();
     if let Err(error) = state_update {
-        cleanup_managed_stack_on_error(&app, managed);
+        cleanup_managed_stack_on_error(app, managed);
         return Err(error);
     }
 
-    if let Err(error) = create_or_update_console_window(&app, console_origin, cookie, should_show) {
-        cleanup_managed_stack_on_error(&app, managed);
+    if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show) {
+        cleanup_managed_stack_on_error(app, managed);
         return Err(error);
     }
-    set_status(&app, UnifiedStatus::Ready);
+    set_status(app, UnifiedStatus::Ready);
+    close_recovery_window(app);
     Ok(())
+}
+
+/// Recovery-window command: verify a candidate recovery code by actually
+/// starting the managed stack with it (Rust cannot decrypt/verify a
+/// SQLCipher file itself -- only `assertDatabaseKey` in
+/// `reference-implementation/server/sqlite-encryption.ts`, on the Node side,
+/// can), then either finish bootstrapping normally or leave the recovery
+/// window open with a clear rejection.
+///
+/// Never logs `code` or the decoded candidate key -- only the pass/fail
+/// outcome and generic stage names.
+#[tauri::command]
+pub(crate) async fn import_database_encryption_recovery_code(
+    app: AppHandle,
+    code: String,
+) -> Result<(), String> {
+    let candidate_key = crate::recovery_code::decode(&code).map_err(|error| {
+        log::info!("Recovery import: rejected at decode stage ({error})");
+        "That code is not a valid recovery code. Check for a typo and try again.".to_string()
+    })?;
+
+    let secrets_app = app.clone();
+    let attach = attach_mode();
+    let secrets = tokio::task::spawn_blocking(move || load_bootstrap_secrets(&secrets_app, attach))
+        .await
+        .map_err(|error| format!("Bootstrap secrets task failed: {error}"))?;
+    // Only the database key was missing (that's the precondition for this
+    // command being reachable at all -- the recovery window only opens on
+    // DatabaseKeyError::Missing). Owner password, remote-access config, and
+    // the credential encryption key must already have loaded successfully;
+    // load_bootstrap_secrets fails all-or-nothing per encryption key, so a
+    // fresh Missing here (keychain still down) or an unrelated Other error
+    // both need to surface rather than be silently retried.
+    let (password, remote_access, credential_encryption_key) = match secrets {
+        Ok(secrets) => (
+            secrets.password,
+            secrets.remote_access,
+            secrets.credential_encryption_key.ok_or_else(|| {
+                "Credential encryption key was not provisioned; cannot attempt recovery.".to_string()
+            })?,
+        ),
+        Err(DatabaseKeyError::Missing(_)) => {
+            // Try the candidate anyway with what we CAN load independently:
+            // owner password and remote-access config never depended on the
+            // database key, and the credential encryption key is derived
+            // the same missing-secret-safe way -- if IT also can't load,
+            // that's a different, unrelated failure this command should not
+            // paper over.
+            let secrets_app = app.clone();
+            let owner_password = tokio::task::spawn_blocking(move || {
+                owner_credential_path(&secrets_app)
+                    .and_then(|path| load_or_create_owner_credential(&path))
+            })
+            .await
+            .map_err(|error| format!("Owner password task failed: {error}"))??;
+            let remote_access = if attach_mode() {
+                off_remote_access_config()
+            } else {
+                load_remote_access_config(&app)?
+            };
+            let credential_key_app = app.clone();
+            let credential_encryption_key = tokio::task::spawn_blocking(move || {
+                let credential_encryption_key_path =
+                    credential_encryption_key_path(&credential_key_app)?;
+                let database_path = unified_database_path(&credential_key_app)?;
+                load_or_create_credential_encryption_key(
+                    &credential_encryption_key_path,
+                    &database_path,
+                )
+            })
+            .await
+            .map_err(|error| format!("Credential encryption key task failed: {error}"))??;
+            (
+                configured_owner_password().unwrap_or(owner_password),
+                remote_access,
+                credential_encryption_key,
+            )
+        }
+        Err(DatabaseKeyError::Other(message)) => return Err(message),
+    };
+
+    let app_for_attempt = app.clone();
+    let password_for_attempt = password.clone();
+    let remote_access_for_attempt = remote_access.clone();
+    let candidate_key_for_attempt = candidate_key.clone();
+    let attempt = tokio::task::spawn_blocking(move || {
+        start_managed_stack(
+            &app_for_attempt,
+            &password_for_attempt,
+            &credential_encryption_key,
+            &candidate_key_for_attempt,
+            &remote_access_for_attempt,
+        )
+    })
+    .await
+    .map_err(|error| format!("Recovery attempt task failed: {error}"))?;
+
+    let result = match attempt {
+        Ok(started) => {
+            store_stack(&app, started.stack)?;
+            log::info!("Recovery import: candidate code started the managed stack successfully");
+            Ok((started.ri_origin, started.console_url))
+        }
+        Err(error) => {
+            log::info!("Recovery import: candidate code failed to start the managed stack");
+            Err(error)
+        }
+    };
+
+    let (ri_origin, console_url) = match result {
+        Ok(value) => value,
+        Err(_) => {
+            // start_managed_stack failing partway through can leave one
+            // sidecar up and the other not -- e.g. the RI itself refused to
+            // open the vault (assertDatabaseKey threw). stop_stack's
+            // take_stack is a safe no-op when nothing was ever stored (the
+            // Err branch above never calls store_stack), so this is safe to
+            // call unconditionally: it is exactly what every other bootstrap
+            // failure path in this file already does.
+            cleanup_managed_stack_on_error(&app, true);
+            return Err(
+                "That code did not open your vault. Check for a typo and try again.".to_string(),
+            );
+        }
+    };
+
+    // The candidate key actually opened the vault: it is safe to trust and
+    // persist now, before finishing the rest of bootstrap (which can itself
+    // still fail for unrelated reasons -- login, console readiness -- but
+    // the key having worked is independent of those).
+    if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
+    {
+        log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
+        cleanup_managed_stack_on_error(&app, true);
+        return Err(format!(
+            "The code worked, but the key could not be saved for future launches: {error}"
+        ));
+    }
+
+    finish_bootstrap(&app, &password, ri_origin, console_url, true, true).await
 }
 
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
@@ -1304,7 +1544,23 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     // visible settings surface, so the console must reappear regardless of
     // the start-minimized preference (that preference only governs the
     // very first launch of the app).
-    bootstrap_and_open_console(app, true).await
+    //
+    // A NeedsRecovery failure here is surfaced the same way every other
+    // bootstrap failure from this call site always has been (as a returned
+    // error string for the watcher to log) rather than opening the recovery
+    // window directly -- restarting after a remote-access config change is
+    // not the moment to also introduce new recovery-window UI; the tray
+    // status still reaches NeedsRecovery on the NEXT natural bootstrap
+    // attempt (app relaunch or "Open console"), which does open it.
+    bootstrap_and_open_console(app, true)
+        .await
+        .map_err(|failure| match failure {
+            BootstrapFailure::NeedsRecovery => {
+                "Database encryption key is missing while an encrypted SQLite vault exists"
+                    .to_string()
+            }
+            BootstrapFailure::Other(message) => message,
+        })
 }
 
 const REMOTE_ACCESS_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -1492,6 +1748,65 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
         },
     )?;
     save_autostart_state(&path, &next)
+}
+
+/// Open the standalone recovery-code entry window, or focus it if it's
+/// already open (a repeat bootstrap failure, e.g. after a rejected code,
+/// must not stack duplicate windows).
+///
+/// `WebviewUrl::App` (NOT `WebviewUrl::External`, unlike the console window)
+/// so `invoke()` actually works here -- Tauri only injects its IPC bridge
+/// into app-origin (`tauri://localhost`) webviews, never into externally
+/// loaded http(s) origins like the console's. `withGlobalTauri` is already
+/// `true` app-wide in tauri.conf.json (an app-level build setting, not
+/// per-window), so `window.__TAURI__.core.invoke` is available on this page
+/// with no npm `@tauri-apps/api` import. That flag does not regress the
+/// console window's invoke()-lessness: Tauri never injects the global into
+/// `WebviewUrl::External` webviews regardless of `withGlobalTauri`, so the
+/// console keeps behaving exactly as `local/HOST-BRIDGE-DESIGN-0918.md`
+/// (Task 1) requires.
+///
+/// `recovery.html` resolves against `frontendDist` (`../dist`), the same
+/// asset root every other `WebviewUrl::App` reference in this codebase
+/// resolves against -- see `WebviewBuilder::prepare_webview` in the `tauri`
+/// crate, which joins the `WebviewUrl::App` path onto `get_app_url()`. It is
+/// a plain static file placed in `public/recovery.html` (Vite's
+/// copy-verbatim-to-dist-root convention -- no bundler, no build step), not
+/// a bundled *resource* (`tauri.conf.json`'s `bundle.resources`), because
+/// `WebviewUrl::App` paths are frontend-asset-root-relative, not
+/// resource-root-relative.
+fn open_recovery_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(RECOVERY_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let result = WebviewWindowBuilder::new(
+        app,
+        RECOVERY_WINDOW_LABEL,
+        WebviewUrl::App("recovery.html".into()),
+    )
+    .title("DataConnect — Restore vault access")
+    .inner_size(560.0, 420.0)
+    .min_inner_size(480.0, 360.0)
+    .center()
+    .resizable(true)
+    .build();
+    match result {
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(error) => log::error!("Failed to open the DataConnect recovery window: {error}"),
+    }
+}
+
+/// Close the recovery window after a successful import, or after any other
+/// path that resolves the missing-key state. A no-op if it was never opened.
+fn close_recovery_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(RECOVERY_WINDOW_LABEL) {
+        let _ = window.close();
+    }
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {

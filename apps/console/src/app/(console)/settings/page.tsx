@@ -8,6 +8,7 @@ import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
+import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 
 export const metadata: Metadata = {
@@ -41,6 +42,12 @@ export default function SettingsPage() {
           title="Desktop"
         >
           <DesktopSettingsSetting />
+        </Section>
+        <Section
+          description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
+          title="Vault recovery code"
+        >
+          <RecoveryKeySetting />
         </Section>
         <AboutSection identity={identity} />
       </main>
