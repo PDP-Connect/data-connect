@@ -492,8 +492,25 @@ pub(crate) async fn configure_remote_access(
         return Err("Remote access requires the managed desktop stack".to_string());
     }
     let config = validate_remote_access_config(config)?;
-    if owner_password.trim().len() < 8 {
-        return Err("Owner password must contain at least 8 characters".to_string());
+
+    // The unified stack mints an owner credential at first boot
+    // (owner_credential::load_or_create_owner_credential), so by the time
+    // this command is reachable one already exists. This gate authenticates
+    // the owner against it; it must never silently replace an existing
+    // password with whatever was typed here. Only when no credential exists
+    // yet (e.g. a fresh attach-mode install that has not booted the managed
+    // stack) does this create one, and only then does the 8-character rule
+    // apply -- it is a rule for choosing a new password, not for re-entering
+    // one that already satisfied whatever rule was current when it was set.
+    if crate::owner_credential::owner_credential_exists(&app)? {
+        if !crate::owner_credential::verify_owner_credential(&app, &owner_password)? {
+            return Err("That owner password doesn't match. Enter the password you use to sign in.".to_string());
+        }
+    } else {
+        if owner_password.trim().len() < 8 {
+            return Err("Choose an owner password with at least 8 characters.".to_string());
+        }
+        crate::owner_credential::save_owner_credential(&app, &owner_password)?;
     }
 
     // ngrok has no sign-in flow a desktop app can complete on the owner's
@@ -512,10 +529,23 @@ pub(crate) async fn configure_remote_access(
         crate::owner_credential::store_provider_credential_reference(provider_id, credential)?;
     }
 
-    crate::owner_credential::save_owner_credential(&app, &owner_password)?;
     let config = save_remote_access_config(&app, config)?;
     crate::unified::restart_after_remote_access_config(app).await?;
     Ok(config)
+}
+
+/// Whether this device already has an owner credential, so the settings page
+/// can ask the owner to confirm it rather than implying none exists.
+#[tauri::command]
+pub(crate) fn owner_credential_status(app: AppHandle) -> Result<OwnerCredentialStatus, String> {
+    Ok(OwnerCredentialStatus {
+        exists: crate::owner_credential::owner_credential_exists(&app)?,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct OwnerCredentialStatus {
+    pub(crate) exists: bool,
 }
 
 fn validate_provider_id(provider_id: &str) -> Result<(), String> {

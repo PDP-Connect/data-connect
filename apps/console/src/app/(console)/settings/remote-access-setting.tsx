@@ -173,6 +173,35 @@ export function RemoteAccessSetting({
   const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
   const [authtoken, setAuthtoken] = useState("")
   const [reservedDomain, setReservedDomain] = useState("")
+  // The unified stack mints an owner credential at first boot, so by the
+  // time this settings page is reachable one already exists in the near-
+  // certain common case. null means "not yet known" -- until this resolves,
+  // fall back to the "set a password" copy rather than asserting either way.
+  const [ownerCredentialExists, setOwnerCredentialExists] = useState<
+    boolean | null
+  >(null)
+
+  useEffect(() => {
+    if (!invoke) return
+    let cancelled = false
+    void invoke("owner_credential_status")
+      .then(status => {
+        if (cancelled) return
+        const exists =
+          !!status &&
+          typeof status === "object" &&
+          "exists" in status &&
+          (status as { exists: unknown }).exists === true
+        setOwnerCredentialExists(exists)
+      })
+      .catch(() => {
+        // Leave it unknown rather than asserting "no password exists" from a
+        // failed check -- that assertion is exactly the wrong default here.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [invoke])
 
   useEffect(() => {
     let cancelled = false
@@ -286,7 +315,21 @@ export function RemoteAccessSetting({
       )
       return
     }
-    if (password.trim().length < 8) {
+    if (!password.trim()) {
+      setError(
+        ownerCredentialExists === false
+          ? "Choose an owner password with at least 8 characters."
+          : "Enter your owner password to continue."
+      )
+      return
+    }
+    // The 8-character rule is for choosing a *new* password. An existing
+    // password was valid under whatever rule was current when it was set --
+    // rejecting it here on length alone would lock the owner out of this
+    // feature over a rule tightened after the fact. The Rust side is the
+    // actual gate (owner_credential::verify_owner_credential when one
+    // exists); this only blocks the "definitely too short to be new" case.
+    if (ownerCredentialExists === false && password.trim().length < 8) {
       setError("Choose an owner password with at least 8 characters.")
       return
     }
@@ -452,19 +495,27 @@ export function RemoteAccessSetting({
 
       {pendingPosture === "public_url" ? (
         <div
-          aria-label="Set owner password"
+          aria-label={
+            ownerCredentialExists === false
+              ? "Set owner password"
+              : "Confirm owner password"
+          }
           className="grid gap-3 rounded-md border border-foreground/20 bg-background px-3 py-3"
           role="dialog"
         >
           <div className="grid gap-1">
             <h3 className="pdpp-caption font-semibold text-foreground">
               {selectedOption?.requiresAuthtoken
-                ? "Set an owner password"
+                ? ownerCredentialExists === false
+                  ? "Set an owner password"
+                  : "Confirm your owner password"
                 : "Choose a reachable origin"}
             </h3>
             <p className="pdpp-caption text-muted-foreground">
               {selectedOption?.requiresAuthtoken
-                ? "Remote access cannot turn on without a password you choose. This blocks owner controls from an unprotected public origin."
+                ? ownerCredentialExists === false
+                  ? "Remote access cannot turn on without a password you choose. This blocks owner controls from an unprotected public origin."
+                  : "You already have an owner password. Enter it again here to confirm this device is yours before ngrok turns on."
                 : "You are already signed in as the owner, so no separate password is needed for a proxy you run."}
             </p>
           </div>
@@ -473,12 +524,18 @@ export function RemoteAccessSetting({
               className="grid gap-1 pdpp-caption text-foreground"
               htmlFor="remote-access-password"
             >
-              Owner password
+              {ownerCredentialExists === false
+                ? "Owner password"
+                : "Confirm owner password"}
               <input
-                autoComplete="new-password"
+                autoComplete={
+                  ownerCredentialExists === false
+                    ? "new-password"
+                    : "current-password"
+                }
                 className="rounded-md border border-border bg-background px-3 py-2 text-sm"
                 id="remote-access-password"
-                minLength={8}
+                minLength={ownerCredentialExists === false ? 8 : undefined}
                 onChange={event => setPassword(event.currentTarget.value)}
                 type="password"
                 value={password}
@@ -639,7 +696,9 @@ export function RemoteAccessSetting({
               {busy
                 ? "Enabling…"
                 : selectedOption?.requiresAuthtoken
-                  ? "Set password and enable"
+                  ? ownerCredentialExists === false
+                    ? "Set password and enable"
+                    : "Confirm and enable"
                   : "Enable"}
             </button>
           </div>

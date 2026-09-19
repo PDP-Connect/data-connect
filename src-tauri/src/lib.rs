@@ -48,7 +48,7 @@ use commands::{get_autostart_enabled, set_autostart_enabled};
 #[cfg(desktop)]
 use remote_access::{
     configure_remote_access, get_remote_access_config, inspect_remote_access,
-    inspect_remote_access_provider, set_remote_access_config,
+    inspect_remote_access_provider, owner_credential_status, set_remote_access_config,
 };
 use tauri::{Listener, Manager};
 
@@ -222,6 +222,8 @@ pub fn run() {
             configure_remote_access,
             #[cfg(desktop)]
             inspect_remote_access_provider,
+            #[cfg(desktop)]
+            owner_credential_status,
             #[cfg(desktop)]
             get_autostart_enabled,
             #[cfg(desktop)]
