@@ -456,12 +456,42 @@ export function isAllowedRequestHost(
   req: ReachabilityRequest,
   contract: ReachabilityContract
 ): boolean {
-  const rawHost = isTrustedProxyPeer(req, contract.trustedProxies)
+  const fromTrustedProxy = isTrustedProxyPeer(req, contract.trustedProxies)
+  const rawHost = fromTrustedProxy
     ? (headerValue(req, "x-forwarded-host") ?? headerValue(req, "host"))
     : headerValue(req, "host")
   const request = parseRequestHost(rawHost)
   if (!request) {
     return false
+  }
+  // A request whose Host names this process's OWN bind address is the
+  // process talking to itself: `isLoopbackBindHost` is only true for a
+  // listener that accepts loopback connections exclusively (127.0.0.1,
+  // ::1, localhost -- NOT 0.0.0.0, which is a real bind-all posture this
+  // exemption must not weaken), so nothing external can cause such a
+  // listener to receive a connection it did not originate locally. This is
+  // the trust the internal readiness probe, owner-login bootstrap, and the
+  // console's own server-side calls to the reference server all need once
+  // PDPP_TRUSTED_HOSTS is a public hostname none of them present -- without
+  // it, every loopback-originated caller inside this same machine is
+  // rejected identically to an external DNS-rebinding attempt.
+  //
+  // Deliberately excluded from `fromTrustedProxy`: `x-forwarded-host` is
+  // attacker-controlled from any peer that is not itself a trusted proxy,
+  // so an untrusted remote caller could otherwise claim a loopback Host
+  // through a forwarded header and pass this check without ever holding a
+  // real loopback connection. Only the OWN un-proxied `Host` header --
+  // which requires actually connecting to the loopback-bound listener --
+  // is eligible for this exemption. The request's claimed host must
+  // exactly match `bindHost` (not merely "also happen to be loopback"),
+  // since a request naming a DIFFERENT loopback family than the one this
+  // process actually bound is not this process's own traffic.
+  if (
+    !fromTrustedProxy &&
+    isLoopbackBindHost(contract.bindHost) &&
+    request.hostname === normalizeHostname(stripBrackets(contract.bindHost))
+  ) {
+    return true
   }
   if (
     contract.referenceOrigin &&

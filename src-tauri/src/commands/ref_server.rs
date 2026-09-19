@@ -644,6 +644,24 @@ pub(crate) async fn login_reference_server_with_password(
     origin: String,
     password: &str,
 ) -> Result<ReferenceServerLoginResult, String> {
+    login_reference_server_with_password_and_host(origin, password, None).await
+}
+
+/// Same as `login_reference_server_with_password`, but overrides the `Host`
+/// header when `trusted_host` is `Some`. Needed for the same reason
+/// `Readiness::HttpGet`'s `host_header` was added
+/// (`commands/process_supervisor.rs`): once a public origin is configured,
+/// the reference server's `isAllowedRequestHost` rejects any request whose
+/// `Host` header isn't in `PDPP_TRUSTED_HOSTS`, and this login call dials
+/// `127.0.0.1` just like that readiness probe did. Without this, every
+/// bootstrap/restart that runs after ngrok has discovered an origin fails
+/// its own login step with `invalid_host` and tears the stack back down --
+/// reproduced live against a real ngrok tunnel.
+pub(crate) async fn login_reference_server_with_password_and_host(
+    origin: String,
+    password: &str,
+    trusted_host: Option<&str>,
+) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
     // setting pdpp_owner_session on THAT response, not on whatever it
@@ -658,11 +676,15 @@ pub(crate) async fn login_reference_server_with_password(
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
     let login_url = format!("{}/owner/login", origin.trim_end_matches('/'));
-    let response = client
+    let mut request = client
         .post(&login_url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "password": password }))
+        .json(&serde_json::json!({ "password": password }));
+    if let Some(host) = trusted_host {
+        request = request.header(reqwest::header::HOST, host);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Failed to reach {}: {}", login_url, e))?;

@@ -11,7 +11,10 @@ use crate::commands::process_supervisor::{
     EnvironmentSpec, EventSink, LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness,
     RestartPolicy, StopPolicy, Supervisor, SupervisorError, SupervisorHandle,
 };
-use crate::commands::{attach_reference_server, login_reference_server_with_password};
+use crate::commands::{
+    attach_reference_server, login_reference_server_with_password,
+    login_reference_server_with_password_and_host,
+};
 use crate::owner_credential::{
     configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
     load_or_create_credential_encryption_key, load_or_create_database_encryption_key,
@@ -1512,9 +1515,17 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         (ri_origin, console_url, true)
     };
 
-    finish_bootstrap(&app, &password, ri_origin, console_url, managed, should_show)
-        .await
-        .map_err(BootstrapFailure::from)
+    finish_bootstrap(
+        &app,
+        &password,
+        ri_origin,
+        console_url,
+        managed,
+        should_show,
+        &remote_access.fields.trusted_hosts,
+    )
+    .await
+    .map_err(BootstrapFailure::from)
 }
 
 /// The shared tail of bootstrap once an RI origin and console URL exist,
@@ -1524,6 +1535,13 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
 /// Owner login, console readiness, session cookie, runtime state, and the
 /// console window itself all happen here exactly once so the two callers
 /// can't drift.
+///
+/// `trusted_hosts` mirrors `ri_readiness_host_header`'s contract: once a
+/// public origin is configured, the reference server's own login route
+/// enforces the same trusted-Host allowlist its readiness probe does, so
+/// this login call -- also dialed over loopback -- must present a Host the
+/// server already trusts. Empty (posture off, or no origin discovered yet)
+/// sends whatever the URL's own authority implies, same as before.
 async fn finish_bootstrap(
     app: &AppHandle,
     password: &str,
@@ -1531,8 +1549,16 @@ async fn finish_bootstrap(
     console_url: String,
     managed: bool,
     should_show: bool,
+    trusted_hosts: &str,
 ) -> Result<(), String> {
-    let login = match login_reference_server_with_password(ri_origin, password).await {
+    let host_header = ri_readiness_host_header(trusted_hosts);
+    let login = match login_reference_server_with_password_and_host(
+        ri_origin,
+        password,
+        host_header.as_deref(),
+    )
+    .await
+    {
         Ok(login) => login,
         Err(error) => {
             cleanup_managed_stack_on_error(app, managed);
@@ -1736,7 +1762,16 @@ pub(crate) async fn import_database_encryption_recovery_code(
         ));
     }
 
-    finish_bootstrap(&app, &password, ri_origin, console_url, true, true).await
+    finish_bootstrap(
+        &app,
+        &password,
+        ri_origin,
+        console_url,
+        true,
+        true,
+        &remote_access.fields.trusted_hosts,
+    )
+    .await
 }
 
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
