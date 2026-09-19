@@ -4,14 +4,17 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
+  describeTunnelError,
   offRemoteAccessConfig,
   privacyBadgeForNgrokMode,
   privacyBadgeForPosture,
   publicUrlOptionById,
   publicUrlOptions,
+  remoteAccessOriginDisplay,
   remoteAccessRequiresOwnerPassword,
   validateReservedDomain,
   validateUserSuppliedOrigin,
+  type RemoteAccessConfig,
 } from "./remote-access.ts"
 
 test("user-supplied origins normalize the four reachability fields", () => {
@@ -178,4 +181,74 @@ test("off is a loopback-only empty contract", () => {
       PDPP_BIND_HOST: "127.0.0.1",
     },
   })
+})
+
+test("ERR_NGROK_312 names the paid-plan cause and offers the free-plan HTTPS alternative", () => {
+  const guidance = describeTunnelError(
+    "ngrok TLS endpoint failed: ERR_NGROK_312: TLS endpoints require a paid plan"
+  )
+  assert.match(guidance.message, /paid ngrok plan/)
+  assert.match(guidance.message, /ERR_NGROK_312/)
+  assert.equal(guidance.suggestSwitchTo, "ngrok_https_edge_termination")
+})
+
+test("a tunnel failure without a known cause is shown as-is, with no invented suggestion", () => {
+  const guidance = describeTunnelError("ngrok session failed: connection refused")
+  assert.equal(guidance.message, "ngrok session failed: connection refused")
+  assert.equal(guidance.suggestSwitchTo, null)
+})
+
+function ngrokConfig(overrides: Partial<RemoteAccessConfig>): RemoteAccessConfig {
+  return {
+    posture: "public_url",
+    provider: "ngrok",
+    fields: offRemoteAccessConfig().fields,
+    ngrok: { endpoint_mode: "tls_passthrough", reserved_domain: null },
+    ...overrides,
+  }
+}
+
+test("a failed tunnel start renders the error, not the waiting string", () => {
+  const display = remoteAccessOriginDisplay(
+    ngrokConfig({ tunnel_error: "ngrok TLS endpoint failed: ERR_NGROK_312" })
+  )
+  assert.equal(display.kind, "error")
+  if (display.kind === "error") {
+    assert.match(display.guidance.message, /paid ngrok plan/)
+    assert.equal(display.guidance.suggestSwitchTo, "ngrok_https_edge_termination")
+  }
+})
+
+test("a successful start renders the origin", () => {
+  const display = remoteAccessOriginDisplay(
+    ngrokConfig({
+      fields: {
+        PDPP_REFERENCE_ORIGIN: "https://vault.ngrok.app",
+        PDPP_TRUSTED_HOSTS: "vault.ngrok.app",
+        PDPP_TRUSTED_PROXIES: "",
+        PDPP_BIND_HOST: "127.0.0.1",
+      },
+    })
+  )
+  assert.deepEqual(display, { kind: "origin", origin: "https://vault.ngrok.app" })
+})
+
+test("no origin and no failure yet renders the waiting state", () => {
+  const display = remoteAccessOriginDisplay(ngrokConfig({}))
+  assert.deepEqual(display, { kind: "waiting" })
+})
+
+test("a tunnel_error takes priority over a stale origin left from a previous successful start", () => {
+  const display = remoteAccessOriginDisplay(
+    ngrokConfig({
+      fields: {
+        PDPP_REFERENCE_ORIGIN: "https://old.ngrok.app",
+        PDPP_TRUSTED_HOSTS: "old.ngrok.app",
+        PDPP_TRUSTED_PROXIES: "",
+        PDPP_BIND_HOST: "127.0.0.1",
+      },
+      tunnel_error: "ngrok TLS endpoint failed: ERR_NGROK_312",
+    })
+  )
+  assert.equal(display.kind, "error")
 })

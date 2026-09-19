@@ -197,6 +197,33 @@ test("POST config seals a submitted ngrok authtoken and never echoes it back", a
   });
 });
 
+test("GET config surfaces a tunnel_error the Tauri supervisor persisted", async () => {
+  // `apply_ngrok_tunnel_outcome` (src-tauri/src/unified.rs) writes a failed
+  // tunnel start straight to remote-access.json, not through this route --
+  // GET must still read it back so the console can render the failure.
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const failed = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "tls_passthrough", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+      tunnel_error: "ngrok TLS endpoint failed: ERR_NGROK_312",
+    };
+
+    await postHandler?.(
+      { body: { ...failed, providerCredential: "shhh-ngrok-authtoken" } },
+      makeRes().res
+    );
+
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    const body = get.captured.body as { data: RemoteAccessConfig };
+    assert.equal(body.data.tunnel_error, "ngrok TLS endpoint failed: ERR_NGROK_312");
+  });
+});
+
 test("POST config rejects an ngrok submission with no providerCredential", async () => {
   await withMountedRoutes(async (routes) => {
     const postHandler = routes.get("POST /v1/owner/remote-access/config");
