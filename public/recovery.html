@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<!--
+  Copyright The PDP-Connect Contributors
+  SPDX-License-Identifier: Apache-2.0
+
+  Standalone recovery-code entry page, loaded via WebviewUrl::App("recovery.html")
+  from src-tauri/src/unified.rs's open_recovery_window. No build step, no
+  framework: this window only exists for the rare "the database encryption
+  key is missing while an encrypted vault exists" startup failure, so it does
+  not warrant wiring into the root src/ Vite app (a separate, much larger,
+  mostly-legacy app whose routes have nothing suited to this). Placed under
+  public/ so Vite copies it verbatim to dist/recovery.html -- WebviewUrl::App
+  paths resolve against the frontendDist asset root, not against
+  tauri.conf.json's bundle.resources (see the doc comment on
+  open_recovery_window in unified.rs for the full investigation).
+
+  Calls invoke() via window.__TAURI__.core.invoke, the vanilla-JS global
+  bridge Tauri 2 injects into app-origin (tauri://localhost) webviews when
+  withGlobalTauri is true in tauri.conf.json (already true, app-wide). This
+  does NOT reintroduce invoke() into the console window: Tauri only injects
+  the global into WebviewUrl::App pages, never into WebviewUrl::External
+  pages like the console's, regardless of withGlobalTauri.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DataConnect — Restore vault access</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      h1 {
+        font-size: 1.1rem;
+        margin: 0 0 0.5rem;
+      }
+      p {
+        font-size: 0.9rem;
+        line-height: 1.4;
+        opacity: 0.85;
+      }
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 4.5rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.95rem;
+        padding: 0.6rem;
+        margin-top: 1rem;
+        border-radius: 6px;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: Canvas;
+        color: CanvasText;
+      }
+      button {
+        margin-top: 0.75rem;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+        border-radius: 6px;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: CanvasText;
+        color: Canvas;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #error {
+        margin-top: 1rem;
+        padding: 0.6rem 0.8rem;
+        border-radius: 6px;
+        border: 1px solid #d33;
+        color: #d33;
+        font-size: 0.85rem;
+        display: none;
+      }
+      #error.visible {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Restore vault access</h1>
+    <p>
+      DataConnect could not find the key to your encrypted Personal Server vault. If you have a recovery code
+      saved from Settings, paste it below to restore access.
+    </p>
+    <textarea
+      id="code-input"
+      aria-label="Recovery code"
+      placeholder="XXXX-XXXX-XXXX-XXXX-…"
+      autocapitalize="off"
+      autocomplete="off"
+      spellcheck="false"
+    ></textarea>
+    <div>
+      <button id="submit-button" type="button">Restore access</button>
+    </div>
+    <div id="error" role="alert"></div>
+    <script>
+      const input = document.getElementById("code-input");
+      const button = document.getElementById("submit-button");
+      const errorBox = document.getElementById("error");
+
+      function showError(message) {
+        errorBox.textContent = message;
+        errorBox.classList.add("visible");
+      }
+
+      function clearError() {
+        errorBox.textContent = "";
+        errorBox.classList.remove("visible");
+      }
+
+      async function submit() {
+        const code = input.value.trim();
+        clearError();
+        if (!code) {
+          showError("Enter your recovery code.");
+          return;
+        }
+        const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+        if (typeof invoke !== "function") {
+          showError("This window cannot reach DataConnect. Restart the app and try again.");
+          return;
+        }
+        button.disabled = true;
+        button.textContent = "Checking…";
+        try {
+          await invoke("import_database_encryption_recovery_code", { code });
+          // On success the Rust side closes this window itself
+          // (finish_bootstrap -> close_recovery_window) once the console is
+          // ready, so there is nothing further to do here.
+        } catch (error) {
+          showError(typeof error === "string" ? error : "That code did not open your vault. Check for a typo and try again.");
+          button.disabled = false;
+          button.textContent = "Restore access";
+        }
+      }
+
+      button.addEventListener("click", () => {
+        void submit();
+      });
+      input.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          void submit();
+        }
+      });
+    </script>
+  </body>
+</html>

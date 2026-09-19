@@ -87,6 +87,7 @@ import { createFileLocalConnectorSourceStore } from "./connector-install/local-s
 import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
 import { createAppConfigStore } from "./app-config-store.ts";
 import { createAutostartStore } from "./autostart-store.ts";
+import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -359,6 +360,7 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
+import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -7832,6 +7834,18 @@ function buildRsApp(opts: ServerOpts = {}) {
     requireToken,
     store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
+
+  // Owner-authenticated HTTP route for exporting the desktop database
+  // encryption key as a printable recovery code. See
+  // routes/owner-recovery-key.ts for the full rationale: this route is a
+  // pure relay over the recovery-export.json file protocol, never a
+  // computation of the code itself.
+  mountOwnerRecoveryKey(app, {
+    handleError,
+    requireOwner,
+    requireToken,
+    store: createRecoveryKeyStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerRecoveryKey>[1]);
 
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
