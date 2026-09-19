@@ -39,7 +39,16 @@ export function OpenExternalLink({
         if (event.defaultPrevented) return
         if (!isTauriRuntime()) return
         event.preventDefault()
-        void import("@tauri-apps/plugin-shell").then(({ open }) => open(href))
+        void import("@tauri-apps/plugin-shell")
+          .then(({ open }) => open(href))
+          .catch(error => {
+            // A rejected promise here (e.g. the console window's Tauri
+            // capability does not grant shell:allow-open) previously failed
+            // silently: no browser tab opened and nothing was logged. Surface
+            // it so a missing grant is visible instead of looking like a dead
+            // link.
+            console.error(`Failed to open external link ${href}:`, error)
+          })
       }}
       {...props}
     >
