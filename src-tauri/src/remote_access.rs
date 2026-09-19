@@ -94,6 +94,17 @@ pub(crate) struct RemoteAccessConfig {
     /// handoff sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ngrok_authtoken_sealed: Option<String>,
+    /// Set by `start_managed_stack` when the selected provider's tunnel
+    /// failed to start (for example ngrok's `ERR_NGROK_312`, TLS endpoints
+    /// on a free plan). The stack keeps running without a public origin in
+    /// this case rather than aborting startup; this field is how the console
+    /// learns that happened instead of showing an unconditional "waiting"
+    /// state forever. Cleared on the next successful tunnel start, and
+    /// cleared immediately whenever the owner changes posture or provider
+    /// (see `off_remote_access_config` / the console's save path), so a
+    /// stale failure from a since-abandoned provider never lingers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tunnel_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -328,6 +339,7 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         fields: ReachabilityFields::loopback(),
         ngrok: None,
         ngrok_authtoken_sealed: None,
+        tunnel_error: None,
     }
 }
 
@@ -666,6 +678,7 @@ mod tests {
             },
             ngrok: None,
             ngrok_authtoken_sealed: None,
+            tunnel_error: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
         assert_eq!(serialized["posture"], "public_url");
@@ -691,6 +704,7 @@ mod tests {
             },
             ngrok: None,
             ngrok_authtoken_sealed: None,
+            tunnel_error: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
         config.fields.trusted_hosts = "vault.example".to_string();
@@ -710,6 +724,7 @@ mod tests {
                 reserved_domain: None,
             }),
             ngrok_authtoken_sealed: None,
+            tunnel_error: None,
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
         // The origin stays empty until the adapter reports the assigned URL.
@@ -725,6 +740,7 @@ mod tests {
             fields: ReachabilityFields::loopback(),
             ngrok: None,
             ngrok_authtoken_sealed: None,
+            tunnel_error: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }
@@ -737,7 +753,51 @@ mod tests {
             fields: ReachabilityFields::loopback(),
             ngrok: None,
             ngrok_authtoken_sealed: None,
+            tunnel_error: None,
         };
         assert!(validate_remote_access_config(config).is_err());
+    }
+
+    #[test]
+    fn tunnel_error_survives_validation_while_the_origin_is_still_pending() {
+        use crate::remote_access_providers::{NgrokEndpointModeConfig, NgrokOptions};
+
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some("ngrok".to_string()),
+            fields: ReachabilityFields::loopback(),
+            ngrok: Some(NgrokOptions {
+                endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
+                reserved_domain: None,
+            }),
+            ngrok_authtoken_sealed: None,
+            tunnel_error: Some("ngrok TLS endpoint failed: ERR_NGROK_312".to_string()),
+        };
+        let validated = validate_remote_access_config(config).expect("ngrok config is valid");
+        assert_eq!(
+            validated.tunnel_error.as_deref(),
+            Some("ngrok TLS endpoint failed: ERR_NGROK_312")
+        );
+    }
+
+    #[test]
+    fn turning_remote_access_off_drops_a_stale_tunnel_error() {
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::Off,
+            provider: Some("ngrok".to_string()),
+            fields: ReachabilityFields::loopback(),
+            ngrok: None,
+            ngrok_authtoken_sealed: None,
+            tunnel_error: Some("a failure from a since-abandoned provider".to_string()),
+        };
+        let validated = validate_remote_access_config(config).expect("off config is valid");
+        assert_eq!(validated.tunnel_error, None);
+    }
+
+    #[test]
+    fn tunnel_error_is_omitted_from_json_when_absent() {
+        let config = off_remote_access_config();
+        let serialized = serde_json::to_value(config).expect("serialized remote access config");
+        assert!(!serialized.as_object().unwrap().contains_key("tunnel_error"));
     }
 }

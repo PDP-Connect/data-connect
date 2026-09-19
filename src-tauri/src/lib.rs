@@ -50,6 +50,18 @@ use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls cannot pick a process-level CryptoProvider when both `ring` and
+    // `aws-lc-rs` are present in the tree (they both are, transitively), and
+    // it panics on first TLS use instead of failing gracefully. ngrok opens a
+    // TLS session, so without this the tunnel start thread panics and the
+    // whole managed stack fails to come up.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        log::debug!("A rustls CryptoProvider was already installed");
+    }
+
     // Load .env file into process environment so VITE_* vars are available
     // to std::env::var() calls (e.g. VITE_ACCOUNT_URL, VITE_CHAIN_ID).
     let _ = dotenvy::dotenv();

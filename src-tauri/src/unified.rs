@@ -730,19 +730,32 @@ fn start_managed_stack(
     // between the RI and console, rather than before either. The console
     // gets the discovered fields immediately (below); the RI itself keeps
     // running with the empty fields it was spawned with until
-    // `apply_discovered_ngrok_origin` persists them and the existing
+    // `apply_ngrok_tunnel_outcome` persists them and the existing
     // remote-access config watcher restarts the whole stack with the real
     // origin applied at RI startup too (see that function's doc comment).
-    let (console_remote_access, ngrok) = match start_ngrok_provider(remote_access, ri.port())? {
-        Some((fields, provider)) => {
-            let mut with_origin = remote_access.clone();
-            with_origin.fields = fields;
-            (with_origin, Some(provider))
-        }
-        None => (remote_access.clone(), None),
-    };
-    if ngrok.is_some() {
-        apply_discovered_ngrok_origin(app, &console_remote_access.fields);
+    //
+    // A tunnel failure (for example `ERR_NGROK_312`, TLS endpoints on ngrok's
+    // free plan) must NOT abort the stack: the owner still needs a working
+    // console to see the failure and change providers, and the RI is already
+    // listening on loopback regardless of whether a public origin exists. So
+    // this is a `match`, not a `?` -- the error is captured and carried into
+    // the same config the console reads, rather than propagated to
+    // `bootstrap_and_open_console`.
+    let (console_remote_access, ngrok, tunnel_error) =
+        match start_ngrok_provider(remote_access, ri.port()) {
+            Ok(Some((fields, provider))) => {
+                let mut with_origin = remote_access.clone();
+                with_origin.fields = fields;
+                (with_origin, Some(provider), None)
+            }
+            Ok(None) => (remote_access.clone(), None, None),
+            Err(error) => {
+                log::error!("ngrok tunnel failed to start: {error}");
+                (remote_access.clone(), None, Some(error))
+            }
+        };
+    if ngrok.is_some() || tunnel_error.is_some() {
+        apply_ngrok_tunnel_outcome(app, &console_remote_access.fields, tunnel_error.as_deref());
     }
 
     let console = Supervisor::new(
@@ -848,40 +861,58 @@ fn start_ngrok_provider(
     Ok(Some((fields, provider)))
 }
 
-/// Persist the origin ngrok's tunnel just discovered so the NEXT stack
-/// restart starts the RI itself with the correct `PDPP_REFERENCE_ORIGIN` /
-/// `PDPP_TRUSTED_HOSTS` -- required because the RI (unlike the console, which
-/// gets the discovered fields for THIS run directly in `start_managed_stack`)
-/// already started with empty fields before the tunnel's origin was known
-/// (see `start_managed_stack`'s ordering comment) and enforces its allowed-
-/// host contract from env parsed once at its own startup
-/// (`reachability-contract.ts`). Writing here is a no-op if the origin is
-/// already what's on disk (a restart that re-attaches an already-known
-/// origin), so this does not loop by itself; a FRESH ngrok origin on every
-/// restart (the free-tier random-hostname case) will still cause one restart
-/// per session start, which is inherent to ngrok's free tier, not something
-/// this function can fix -- a reserved domain (paid plan) keeps the origin
-/// stable across restarts and settles after exactly one.
-fn apply_discovered_ngrok_origin(
+/// Persist the outcome of this run's ngrok start attempt -- either the
+/// discovered origin (`tunnel_error: None`) or the failure message
+/// (`fields` unchanged, `tunnel_error: Some(..)`) -- so the console can read
+/// it from the same `RemoteAccessConfig` it already polls, instead of an
+/// error that only ever reached the app log.
+///
+/// The origin half: the NEXT stack restart needs it to start the RI itself
+/// with the correct `PDPP_REFERENCE_ORIGIN` / `PDPP_TRUSTED_HOSTS` --
+/// required because the RI (unlike the console, which gets the discovered
+/// fields for THIS run directly in `start_managed_stack`) already started
+/// with empty fields before the tunnel's origin was known (see
+/// `start_managed_stack`'s ordering comment) and enforces its allowed-host
+/// contract from env parsed once at its own startup
+/// (`reachability-contract.ts`). A FRESH ngrok origin on every restart (the
+/// free-tier random-hostname case) will still cause one restart per session
+/// start, which is inherent to ngrok's free tier, not something this
+/// function can fix -- a reserved domain (paid plan) keeps the origin stable
+/// across restarts and settles after exactly one.
+///
+/// The error half: cleared (`None`) as soon as a start succeeds, and written
+/// whenever the failure message changes from the last persisted one --
+/// including from `None`, so the first failure in a session always writes.
+/// A repeat of the SAME message is still a no-op, same as the origin case,
+/// so a config-watcher restart that hits the identical failure again
+/// (for example TLS passthrough is still on the free plan) does not loop:
+/// it costs exactly one extra restart cycle to settle, not a retry storm --
+/// the watcher's `current == last_applied` check in
+/// `spawn_remote_access_config_watcher` only sees a difference for the
+/// restart that FIRST writes the message, not the one after.
+fn apply_ngrok_tunnel_outcome(
     app: &AppHandle,
     fields: &crate::remote_access::ReachabilityFields,
+    tunnel_error: Option<&str>,
 ) {
     let current = match load_remote_access_config(app) {
         Ok(config) => config,
         Err(error) => {
-            log::error!("Could not read the remote-access config to persist ngrok's discovered origin: {error}");
+            log::error!("Could not read the remote-access config to persist the ngrok tunnel outcome: {error}");
             return;
         }
     };
-    if &current.fields == fields {
+    let tunnel_error = tunnel_error.map(str::to_string);
+    if &current.fields == fields && current.tunnel_error == tunnel_error {
         return;
     }
     let updated = RemoteAccessConfig {
         fields: fields.clone(),
+        tunnel_error,
         ..current
     };
     if let Err(error) = save_remote_access_config(app, updated) {
-        log::error!("Could not persist ngrok's discovered origin: {error}");
+        log::error!("Could not persist the ngrok tunnel outcome: {error}");
     }
 }
 

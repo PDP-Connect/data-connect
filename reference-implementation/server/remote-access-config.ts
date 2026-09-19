@@ -54,6 +54,19 @@ export interface RemoteAccessConfig {
    * unsealed at rest, even briefly.
    */
   ngrok_authtoken_sealed?: string | null
+  /**
+   * Set by `start_managed_stack` (`src-tauri/src/unified.rs`) when the
+   * selected provider's tunnel failed to start -- for example ngrok's
+   * `ERR_NGROK_312` (TLS endpoints require a paid plan). The stack keeps
+   * running without a public origin in this case rather than aborting
+   * startup; this field is how the console learns that happened instead of
+   * showing an unconditional "waiting for an address" state forever. Cleared
+   * on the next successful tunnel start, and cleared immediately by
+   * `offRemoteAccessConfig()` / `validateNgrokConfig()` whenever the owner
+   * changes posture or provider, so a stale failure from a since-abandoned
+   * provider never lingers on screen.
+   */
+  tunnel_error?: string | null
 }
 
 export interface RemoteAccessInspection {
@@ -239,6 +252,13 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
       fields: offRemoteAccessConfig().fields,
       ngrok: { endpoint_mode: ngrok.endpoint_mode, reserved_domain: ngrok.reserved_domain ?? null },
       ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
+      // Passed through, not synthesized: a reload of a file the Tauri
+      // supervisor wrote a failure to (`apply_ngrok_tunnel_outcome` in
+      // src-tauri/src/unified.rs) must keep reporting it, while a config the
+      // console just submitted never carries this field in the first place,
+      // so it naturally clears on the owner's next submission without this
+      // function needing to tell those two callers apart.
+      tunnel_error: config.tunnel_error ?? null,
     },
   }
 }

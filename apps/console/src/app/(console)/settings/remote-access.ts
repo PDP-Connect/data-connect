@@ -14,6 +14,7 @@
 import type {
   InvalidOrigin,
   NgrokEndpointMode,
+  RemoteAccessConfig,
   RemoteAccessPosture,
   RemoteAccessProvider,
 } from "pdpp-reference-implementation/remote-access-config"
@@ -193,4 +194,63 @@ export function remoteAccessRequiresOwnerPassword(
   next: RemoteAccessPosture
 ): boolean {
   return current === "off" && next !== "off"
+}
+
+export interface TunnelErrorGuidance {
+  message: string
+  /** Present only when a specific, working alternative exists to offer. */
+  suggestSwitchTo: "ngrok_https_edge_termination" | null
+}
+
+/**
+ * Turn `RemoteAccessConfig.tunnel_error` (set by `apply_ngrok_tunnel_outcome`
+ * in `src-tauri/src/unified.rs` when the provider's tunnel failed to start)
+ * into copy the owner can act on. `ERR_NGROK_312` specifically means "TLS
+ * endpoints need a paid ngrok plan"
+ * (https://ngrok.com/docs/errors/err_ngrok_312) -- a plan limit, not a broken
+ * build, and one with a free-plan alternative (`publicUrlOptions[0]`, ngrok
+ * HTTPS) worth surfacing directly rather than leaving the owner to guess.
+ * Every other tunnel failure still gets the raw message rather than a guess
+ * at its cause.
+ */
+export function describeTunnelError(tunnelError: string): TunnelErrorGuidance {
+  // ngrok's real error text carries the code lowercased -- it appears inside
+  // the docs URL (".../errors/err_ngrok_312"), not as a standalone uppercase
+  // token -- so this must match case-insensitively. Verified 2026-09-19
+  // against the actual RPC error a free-plan account gets back for a TLS
+  // endpoint request.
+  if (/err_ngrok_312/i.test(tunnelError)) {
+    return {
+      message:
+        "ngrok TLS passthrough needs a paid ngrok plan (ERR_NGROK_312): ngrok does not offer TLS endpoints on the free plan.",
+      suggestSwitchTo: "ngrok_https_edge_termination",
+    }
+  }
+  return { message: tunnelError, suggestSwitchTo: null }
+}
+
+export type RemoteAccessOriginDisplay =
+  | { kind: "error"; guidance: TunnelErrorGuidance }
+  | { kind: "waiting" }
+  | { kind: "origin"; origin: string }
+
+/**
+ * What `RemoteAccessSetting` shows in the Public URL origin slot, as a pure
+ * function of the persisted config -- kept separate from the component so
+ * the failure path (a Public URL posture whose provider never reached a
+ * reachable origin) is exercised by a plain unit test rather than a DOM
+ * renderer, matching every other decision in this module. `tunnel_error`
+ * wins over a present-but-stale origin: `apply_ngrok_tunnel_outcome`
+ * (`src-tauri/src/unified.rs`) never clears `PDPP_REFERENCE_ORIGIN` on a
+ * failed restart attempt, so an old origin sitting next to a fresh failure
+ * would otherwise look like a still-working tunnel.
+ */
+export function remoteAccessOriginDisplay(
+  config: RemoteAccessConfig
+): RemoteAccessOriginDisplay {
+  if (config.tunnel_error) {
+    return { kind: "error", guidance: describeTunnelError(config.tunnel_error) }
+  }
+  const origin = config.fields.PDPP_REFERENCE_ORIGIN
+  return origin ? { kind: "origin", origin } : { kind: "waiting" }
 }

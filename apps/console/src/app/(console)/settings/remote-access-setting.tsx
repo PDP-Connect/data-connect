@@ -16,6 +16,7 @@ import {
   privacyBadgeForPosture,
   publicUrlOptionById,
   publicUrlOptions,
+  remoteAccessOriginDisplay,
   validateReservedDomain,
   validateUserSuppliedOrigin,
   type PublicUrlOption,
@@ -64,6 +65,8 @@ function asConfig(value: unknown): RemoteAccessConfig {
         : null,
     fields: candidate.fields ?? offRemoteAccessConfig().fields,
     ngrok: candidate.ngrok ?? null,
+    tunnel_error:
+      typeof candidate.tunnel_error === "string" ? candidate.tunnel_error : null,
   }
 }
 
@@ -200,6 +203,7 @@ export function RemoteAccessSetting({
     [optionId]
   )
   const runningOption = useMemo(() => activeOption(config), [config])
+  const originDisplay = useMemo(() => remoteAccessOriginDisplay(config), [config])
 
   const choosePosture = (nextPosture: RemoteAccessPosture) => {
     setError(null)
@@ -225,6 +229,19 @@ export function RemoteAccessSetting({
   const cancelPublicUrlDialog = () => {
     setPendingPosture(null)
     setError(null)
+  }
+
+  /**
+   * Offered from the ERR_NGROK_312 guidance: reopens the Public URL dialog
+   * pre-selected to ngrok HTTPS, the free-plan alternative. Does not submit
+   * on its own -- the owner still needs to confirm (and re-paste the
+   * authtoken, since `enablePublicUrl` never retains it after a save), same
+   * as picking the row by hand.
+   */
+  const switchToNgrokHttps = () => {
+    setError(null)
+    setOptionId("ngrok_https_edge_termination")
+    setPendingPosture("public_url")
   }
 
   /**
@@ -412,9 +429,32 @@ export function RemoteAccessSetting({
             {runningOption?.description ??
               "DataConnect does not operate this connection."}
           </p>
-          <p className="break-all font-mono text-xs text-foreground/80">
-            {activeOrigin ?? "Waiting for the provider to report an address…"}
-          </p>
+          {originDisplay.kind === "error" ? (
+            <div
+              className="grid gap-1 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2"
+              role="alert"
+            >
+              <p className="pdpp-caption text-destructive">
+                {originDisplay.guidance.message}
+              </p>
+              {originDisplay.guidance.suggestSwitchTo === "ngrok_https_edge_termination" ? (
+                <button
+                  className="justify-self-start rounded-md border border-destructive/50 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                  disabled={busy || desktopUnavailable}
+                  onClick={switchToNgrokHttps}
+                  type="button"
+                >
+                  Switch to ngrok — HTTPS
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <p className="break-all font-mono text-xs text-foreground/80">
+              {originDisplay.kind === "origin"
+                ? originDisplay.origin
+                : "Waiting for the provider to report an address…"}
+            </p>
+          )}
           <button
             className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
             disabled={busy || desktopUnavailable}
