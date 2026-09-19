@@ -192,6 +192,23 @@ test("ERR_NGROK_312 names the paid-plan cause and offers the free-plan HTTPS alt
   assert.equal(guidance.suggestSwitchTo, "ngrok_https_edge_termination")
 })
 
+test("matches ngrok's real free-plan rejection, which carries the code lowercase in a docs URL", () => {
+  // Captured verbatim (owner identity redacted) from a live ngrok session
+  // request against a free-plan account, 2026-09-19. The code never appears
+  // as a standalone uppercase token in ngrok's own text -- only lowercase,
+  // inside "https://ngrok.com/docs/errors/err_ngrok_312".
+  const guidance = describeTunnelError(
+    "ngrok TLS endpoint failed: rpc error response:\n" +
+      "Failed to create a TLS endpoint for the account 'redacted@example.com'.\n" +
+      "Only Pay-as-you-go plans may create TLS endpoints.\n" +
+      "This account is on the 'Free' plan.\n" +
+      "Upgrade to a Pay-as-you-go plan at: https://dashboard.ngrok.com/billing/choose-a-plan?plan=paygo\n\n" +
+      "https://ngrok.com/docs/errors/err_ngrok_312"
+  )
+  assert.match(guidance.message, /paid ngrok plan/)
+  assert.equal(guidance.suggestSwitchTo, "ngrok_https_edge_termination")
+})
+
 test("a tunnel failure without a known cause is shown as-is, with no invented suggestion", () => {
   const guidance = describeTunnelError("ngrok session failed: connection refused")
   assert.equal(guidance.message, "ngrok session failed: connection refused")

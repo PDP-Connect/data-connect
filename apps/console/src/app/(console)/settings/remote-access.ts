@@ -214,7 +214,12 @@ export interface TunnelErrorGuidance {
  * at its cause.
  */
 export function describeTunnelError(tunnelError: string): TunnelErrorGuidance {
-  if (tunnelError.includes("ERR_NGROK_312")) {
+  // ngrok's real error text carries the code lowercased -- it appears inside
+  // the docs URL (".../errors/err_ngrok_312"), not as a standalone uppercase
+  // token -- so this must match case-insensitively. Verified 2026-09-19
+  // against the actual RPC error a free-plan account gets back for a TLS
+  // endpoint request.
+  if (/err_ngrok_312/i.test(tunnelError)) {
     return {
       message:
         "ngrok TLS passthrough needs a paid ngrok plan (ERR_NGROK_312): ngrok does not offer TLS endpoints on the free plan.",
