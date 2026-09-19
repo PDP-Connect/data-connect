@@ -23,26 +23,30 @@ test("launch-at-login and start-minimized default to unchecked until a real load
   // stateIsKnown, not render the unverified default as a real answer — the
   // same discipline remote-access-setting.tsx documents for its posture
   // radios ("must not paint the default config as real state").
-  assert.match(setting, /const \[autostartEnabled, setAutostartEnabled\] = useState\(false\)/)
+  assert.match(setting, /const \[autostartEnabled, setAutostartEnabledState\] = useState\(false\)/)
   assert.match(setting, /const \[startMinimized, setStartMinimizedState\] = useState\(false\)/)
   assert.match(setting, /checked=\{stateIsKnown && autostartEnabled\}/)
   assert.match(setting, /checked=\{stateIsKnown && startMinimized\}/)
 })
 
-test("the load-state machine degrades honestly across all four states", async () => {
+test("the load-state machine degrades honestly across all three states", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  for (const state of ["loading", "loaded", "bridge_absent", "failed"]) {
+  // bridge_absent no longer applies: neither surface here depends on a
+  // Tauri invoke() bridge, so it works identically in-app or in a plain
+  // browser hitting the console dev server, exactly like
+  // remote-access-setting.tsx's user_supplied_origin path.
+  for (const state of ["loading", "loaded", "failed"]) {
     assert.match(
       setting,
       new RegExp(`"${state}"`),
       `${state} must be a reachable load state`
     )
   }
-  assert.match(
+  assert.doesNotMatch(
     setting,
-    /Desktop settings are unavailable here\. Open the DataConnect desktop\s+app/,
-    "no Tauri bridge must read as unavailable, not as a guessed off state"
+    /"bridge_absent"/,
+    "bridge_absent no longer applies now that neither surface depends on invoke()"
   )
   assert.match(
     setting,
@@ -51,19 +55,32 @@ test("the load-state machine degrades honestly across all four states", async ()
   )
 })
 
-test("autostart reads and writes go through the dedicated OS-side-effect commands, not the generic config blob", async () => {
+test("no Tauri invoke() call remains anywhere in this file", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  assert.match(setting, /invoke\("get_autostart_enabled"\)/)
-  assert.match(setting, /invoke\("set_autostart_enabled", \{ enabled: next \}\)/)
+  assert.doesNotMatch(
+    setting,
+    /invoke\(/,
+    "desktop settings must go through the owner-authenticated server actions, never invoke()"
+  )
 })
 
-test("start-minimized reads and writes go through the generic app config, not a dedicated command", async () => {
+test("autostart reads and writes go through the dedicated autostart server actions, not the generic app-config actions", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  assert.match(setting, /invoke\("get_app_config"\)/)
-  assert.match(setting, /invoke\("set_app_config", \{/)
-  assert.match(setting, /startMinimized: next/)
+  assert.match(setting, /loadAutostart\(\)/)
+  assert.match(setting, /changeAutostart\(next\)/)
+  assert.match(setting, /import \{[^}]*loadAutostartAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
+  assert.match(setting, /import \{[^}]*setAutostartAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
+})
+
+test("start-minimized reads and writes go through the generic app-config actions, not a dedicated autostart action", async () => {
+  const setting = await readFile(SETTING_FILE, "utf8")
+
+  assert.match(setting, /loadAppConfig\(\)/)
+  assert.match(setting, /saveAppConfig\(\{ \.\.\.current, startMinimized: next \}\)/)
+  assert.match(setting, /import \{[^}]*loadAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
+  assert.match(setting, /import \{[^}]*saveAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
 })
 
 test("both toggles are off by default in their copy, matching the surveyed field default", async () => {
@@ -77,7 +94,7 @@ test("both toggles are off by default in their copy, matching the surveyed field
   )
 })
 
-test("close-to-tray defaults to true and reads/writes through the generic app config", async () => {
+test("close-to-tray defaults to true and reads/writes through the generic app-config actions", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
   // Unlike startMinimized/autostart (real default false), closeToTray's
@@ -87,8 +104,7 @@ test("close-to-tray defaults to true and reads/writes through the generic app co
   // does when config.json has no closeToTray key at all.
   assert.match(setting, /const \[closeToTray, setCloseToTrayState\] = useState\(true\)/)
   assert.match(setting, /checked=\{stateIsKnown && closeToTray\}/)
-  assert.match(setting, /invoke\("set_app_config", \{/)
-  assert.match(setting, /closeToTray: next/)
+  assert.match(setting, /saveAppConfig\(\{ \.\.\.current, closeToTray: next \}\)/)
   assert.match(
     setting,
     /candidate\.closeToTray !== false/,

@@ -85,6 +85,8 @@ import {
 import { createConnectorInstallService } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
+import { createAppConfigStore } from "./app-config-store.ts";
+import { createAutostartStore } from "./autostart-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -355,6 +357,8 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
+import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -7802,6 +7806,31 @@ function buildRsApp(opts: ServerOpts = {}) {
     requireToken,
     store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
+
+  // Owner-authenticated HTTP routes for the generic desktop app-config blob
+  // (storageProvider/serverMode/selfHostedUrl/startMinimized/closeToTray).
+  // See routes/owner-app-config.ts: same injection-gap rationale as
+  // owner-remote-access.ts, but this file has no OS side effect on write so
+  // it is persisted directly, no Rust-side watcher involved.
+  mountOwnerAppConfig(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAppConfigStore(),
+  } as unknown as Parameters<typeof mountOwnerAppConfig>[1]);
+
+  // Owner-authenticated HTTP routes for launch-at-login. Unlike app-config,
+  // autostart is an imperative OS action only the Tauri/Rust process can
+  // perform, so this route hands off to a request/ack file the desktop app's
+  // spawn_autostart_watcher polls and applies. See routes/owner-autostart.ts.
+  mountOwnerAutostart(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
 
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control

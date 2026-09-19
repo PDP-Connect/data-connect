@@ -288,6 +288,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
     spawn_remote_access_config_watcher(app_handle.clone());
+    spawn_autostart_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(error) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
             log::error!("Unified DataConnect startup failed: {error}");
@@ -1083,6 +1084,7 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
 }
 
 const REMOTE_ACCESS_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Watch the remote-access config file for changes made from OUTSIDE this
 /// process and restart the managed stack when one lands.
@@ -1144,6 +1146,62 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             }
         }
     });
+}
+
+/// Watch `autostart.json` for requests written by the reference server
+/// (`server/routes/owner-autostart.ts` via `server/autostart-store.ts`) and
+/// apply them with `tauri_plugin_autostart`, the only process that can
+/// perform this OS-level action (see `commands/desktop_settings.rs`'s
+/// `AutostartState` doc comment for why the server cannot do this itself).
+///
+/// Modeled directly on `spawn_remote_access_config_watcher` above: same poll
+/// shape, same rationale for polling over a file-watch crate. Unlike that
+/// watcher, which restarts sidecars on ANY external change, this one seeds
+/// the state file from real `is_enabled()` truth on first read (never
+/// mutating for a request nobody made) and then only acts when
+/// `request_id != applied_request_id` -- see
+/// `desktop_settings::apply_autostart_desired_state`, which holds the pure
+/// decision logic this loop drives.
+pub(crate) fn spawn_autostart_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Err(error) = tick_autostart_watcher(&app) {
+                log::warn!("Autostart watcher tick failed: {error}");
+            }
+            tokio::time::sleep(AUTOSTART_STATE_POLL_INTERVAL).await;
+        }
+    });
+}
+
+fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
+    use crate::commands::desktop_settings::{
+        apply_autostart_desired_state, autostart_state_path, load_autostart_state,
+        save_autostart_state,
+    };
+    use tauri_plugin_autostart::ManagerExt;
+
+    let path = autostart_state_path(app)?;
+    let current = load_autostart_state(&path)?;
+    let manager = app.autolaunch();
+    let next = apply_autostart_desired_state(
+        current,
+        || {
+            manager
+                .is_enabled()
+                .map_err(|error| format!("Failed to read autostart state: {error}"))
+        },
+        || {
+            manager
+                .enable()
+                .map_err(|error| format!("Failed to enable autostart: {error}"))
+        },
+        || {
+            manager
+                .disable()
+                .map_err(|error| format!("Failed to disable autostart: {error}"))
+        },
+    )?;
+    save_autostart_state(&path, &next)
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {
