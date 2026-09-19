@@ -1673,12 +1673,19 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let remote_access_for_attempt = remote_access.clone();
     let candidate_key_for_attempt = candidate_key.clone();
     let attempt = tokio::task::spawn_blocking(move || {
+        // No held ngrok tunnel to reuse here: this command only runs after
+        // the initial bootstrap attempt already failed on a missing database
+        // key, and that failure's `cleanup_managed_stack_on_error` (via
+        // `stop_stack_and_ngrok`) already tore down anything that was
+        // running, including any tunnel. This is a fresh start, not a
+        // config-change restart.
         start_managed_stack(
             &app_for_attempt,
             &password_for_attempt,
             &credential_encryption_key,
             &candidate_key_for_attempt,
             &remote_access_for_attempt,
+            None,
         )
     })
     .await
@@ -1687,6 +1694,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let result = match attempt {
         Ok(started) => {
             store_stack(&app, started.stack)?;
+            if let Some(ngrok) = started.ngrok {
+                store_held_ngrok(&app, ngrok)?;
+            }
             log::info!("Recovery import: candidate code started the managed stack successfully");
             Ok((started.ri_origin, started.console_url))
         }
