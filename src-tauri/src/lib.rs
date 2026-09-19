@@ -7,6 +7,8 @@ mod main_thread_watchdog;
 mod owner_credential;
 mod processors;
 #[cfg(desktop)]
+mod recovery_code;
+#[cfg(desktop)]
 mod remote_access;
 #[cfg(desktop)]
 mod remote_access_ngrok;
@@ -46,6 +48,10 @@ use commands::{
 };
 #[cfg(desktop)]
 use commands::{get_autostart_enabled, set_autostart_enabled};
+#[cfg(desktop)]
+use commands::export_database_encryption_recovery_code;
+#[cfg(desktop)]
+use unified::import_database_encryption_recovery_code;
 use tauri::{Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -215,6 +221,10 @@ pub fn run() {
             get_autostart_enabled,
             #[cfg(desktop)]
             set_autostart_enabled,
+            #[cfg(desktop)]
+            export_database_encryption_recovery_code,
+            #[cfg(desktop)]
+            import_database_encryption_recovery_code,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

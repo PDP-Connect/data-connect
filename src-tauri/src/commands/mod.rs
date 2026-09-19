@@ -18,6 +18,8 @@ pub mod pdpp_installed_connector;
 pub mod pdpp_manual_import;
 pub mod process_supervisor;
 pub mod ref_server;
+#[cfg(desktop)]
+pub mod recovery_key;
 pub mod ref_server_view;
 pub mod server;
 pub mod updates;
@@ -32,6 +34,8 @@ pub use file_ops::*;
 pub use pdpp_installed_connector::*;
 pub use pdpp_manual_import::prepare_installed_pdpp_import;
 pub use ref_server::*;
+#[cfg(desktop)]
+pub use recovery_key::*;
 pub use ref_server_view::*;
 pub use server::*;
 pub use updates::*;

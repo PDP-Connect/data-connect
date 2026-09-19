@@ -135,15 +135,60 @@ pub(crate) fn load_or_create_owner_credential(path: &Path) -> Result<String, Str
     load_or_create_owner_credential_with_store(path, &mut store)
 }
 
+/// Distinguishes "the key is missing while an encrypted vault exists" (the
+/// one failure the startup recovery flow in `unified.rs` needs to react to
+/// with a recovery window) from every other way loading the key can fail
+/// (keychain I/O errors, a corrupt app-data file, etc., which stay generic
+/// errors). A typed signal here is deliberately narrower than rewriting every
+/// `Result<_, String>` in this file: this is the one call site
+/// (`load_bootstrap_secrets` in `unified.rs`) that needs to branch on the
+/// distinction, so the blast radius of this type is exactly two functions.
+#[derive(Debug)]
+pub(crate) enum DatabaseKeyError {
+    /// An encrypted SQLite vault exists on disk but no key was found in
+    /// either the OS keychain or the app-data fallback file.
+    Missing(String),
+    Other(String),
+}
+
+impl DatabaseKeyError {
+    /// Collapse to a plain message for callers that don't need the
+    /// distinction (e.g. anywhere still matching the old `Result<_, String>`
+    /// shape, or logging).
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Missing(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Load the durable desktop database key, or create it only when the existing
 /// database is not already encrypted. Replacing a missing key for an
 /// encrypted database would permanently orphan the vault.
 pub(crate) fn load_or_create_database_encryption_key(
     path: &Path,
     database_path: &Path,
-) -> Result<String, String> {
+) -> Result<String, DatabaseKeyError> {
     let mut store = SystemKeyring::new(DATABASE_ENCRYPTION_KEYRING_USERNAME);
     load_or_create_database_encryption_key_with_store(path, database_path, &mut store)
+}
+
+/// Replace the durable database encryption key in the OS keychain (with the
+/// same 0600 app-data-file fallback every other credential in this module
+/// uses), after a recovery code has been verified to actually open the vault.
+/// Mirrors `save_owner_credential`'s shape exactly.
+pub(crate) fn save_database_encryption_key(app: &AppHandle, credential: &str) -> Result<(), String> {
+    let path = database_encryption_key_path(app)?;
+    let mut store = SystemKeyring::new(DATABASE_ENCRYPTION_KEYRING_USERNAME);
+    save_database_encryption_key_with_store(&path, &mut store, credential)
 }
 
 /// Load the durable instance credential key, or create it only when no sealed
@@ -231,18 +276,46 @@ fn load_or_create_owner_credential_with_store(
     load_or_create_secret_with_store(path, store, "Owner credential", || Ok(false), None)
 }
 
+const DATABASE_KEY_MISSING_MESSAGE: &str = "Database encryption key is missing while an encrypted SQLite vault exists. Restore the key from the OS keychain or the database-encryption-key app-data file; refusing to mint a replacement that would orphan the vault.";
+
 fn load_or_create_database_encryption_key_with_store(
     path: &Path,
     database_path: &Path,
     store: &mut impl CredentialStore,
-) -> Result<String, String> {
+) -> Result<String, DatabaseKeyError> {
     load_or_create_secret_with_store(
         path,
         store,
         "Database encryption key",
         || database_is_encrypted(database_path),
-        Some("Database encryption key is missing while an encrypted SQLite vault exists. Restore the key from the OS keychain or the database-encryption-key app-data file; refusing to mint a replacement that would orphan the vault."),
+        Some(DATABASE_KEY_MISSING_MESSAGE),
     )
+    .map_err(|message| {
+        if message == DATABASE_KEY_MISSING_MESSAGE {
+            DatabaseKeyError::Missing(message)
+        } else {
+            DatabaseKeyError::Other(message)
+        }
+    })
+}
+
+fn save_database_encryption_key_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    credential: &str,
+) -> Result<(), String> {
+    if credential.trim().is_empty() {
+        return Err("Database encryption key cannot be empty".to_string());
+    }
+
+    if store.save(credential).is_ok() {
+        if path.exists() {
+            write_owner_credential_file(path, credential)?;
+        }
+        return Ok(());
+    }
+
+    write_owner_credential_file(path, credential)
 }
 
 fn load_or_create_secret_with_store(
@@ -399,7 +472,7 @@ fn read_secret(path: &Path, label: &str) -> Result<String, String> {
     Ok(credential)
 }
 
-fn database_is_encrypted(path: &Path) -> Result<bool, String> {
+pub(crate) fn database_is_encrypted(path: &Path) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
     }
@@ -620,7 +693,44 @@ mod tests {
         )
         .expect_err("missing key must not be replaced");
 
-        assert!(error.contains("Database encryption key is missing"));
+        assert!(matches!(error, DatabaseKeyError::Missing(_)));
+        assert!(error.to_string().contains("Database encryption key is missing"));
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn saves_and_reloads_database_encryption_key_via_the_store() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring {
+            available: true,
+            ..Default::default()
+        };
+
+        save_database_encryption_key_with_store(&key_path, &mut store, "recovered-key-value")
+            .expect("saved database encryption key");
+
+        let reloaded = load_or_create_database_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("reloaded database encryption key");
+
+        assert_eq!(reloaded, "recovered-key-value");
+    }
+
+    #[test]
+    fn rejects_saving_an_empty_database_encryption_key() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let mut store = MockKeyring {
+            available: true,
+            ..Default::default()
+        };
+
+        assert!(save_database_encryption_key_with_store(&key_path, &mut store, "  ").is_err());
     }
 }
