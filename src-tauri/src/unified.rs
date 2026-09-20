@@ -105,6 +105,13 @@ impl UnifiedStatus {
 struct UnifiedRuntimeState {
     status: Mutex<UnifiedStatus>,
     console_origin: Mutex<Option<String>>,
+    /// The RI's own loopback origin from the last successful bootstrap --
+    /// mirrors `console_origin`'s role, but for the RI's port. Needed
+    /// because `HeldNgrok.forward_port` now tracks the CONSOLE's port (the
+    /// tunnel's actual forward target -- see `start_ngrok_provider`'s doc
+    /// comment), not the RI's, so the RI's own port-stability preference can
+    /// no longer piggyback on the held tunnel's state the way it used to.
+    ri_origin: Mutex<Option<String>>,
     session_cookie: Mutex<Option<String>>,
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
@@ -126,12 +133,14 @@ struct UnifiedRuntimeState {
 struct HeldNgrok {
     provider:
         crate::remote_access_ngrok::NgrokProvider<crate::remote_access::KeychainCredentialResolver>,
-    /// The loopback RI port this tunnel currently forwards to. The RI's port
-    /// is re-allocated on every `Supervisor::start`, so reuse is only valid
-    /// when the next RI instance can be brought up on this SAME port (see
+    /// The loopback CONSOLE port this tunnel currently forwards to (not the
+    /// RI's -- see `start_ngrok_provider`'s doc comment for why the console
+    /// is the correct forward target). The console's port is re-allocated on
+    /// every `Supervisor::start`, so reuse is only valid when the next
+    /// console instance can be brought up on this SAME port (see
     /// `Supervisor::start_on_port`) -- otherwise the tunnel would keep
     /// forwarding to a port nothing is listening on anymore.
-    ri_port: u16,
+    forward_port: u16,
     /// Identifies the provider settings (endpoint mode, reserved domain) this
     /// tunnel was started with. A config change that alters either requires
     /// a fresh tunnel -- reuse is only correct when the owner's request is
@@ -268,23 +277,36 @@ fn browser_console_url(app: &AppHandle) -> Result<String, String> {
     browser_url_from_runtime_origin(None)
 }
 
-/// Parse the loopback port out of a previously bootstrapped console origin
+/// Parse the loopback port out of a previously bootstrapped origin
 /// (`http://127.0.0.1:{port}`), so the NEXT `start_managed_stack` call can
-/// ask `Supervisor::start_on_port` to reuse it -- the same pattern
-/// `held_ngrok.ri_port`/`preferred_ri_port` already uses to keep the RI's
-/// port stable across a config-change restart.
+/// ask `Supervisor::start_on_port` to reuse it for either sidecar --
+/// `read_preferred_console_port` and `read_preferred_ri_port` are thin
+/// wrappers over this for `UnifiedRuntimeState.console_origin`/`ri_origin`
+/// respectively.
 ///
-/// Confirmed live, 2026-09-19: without this, the console supervisor always
-/// called plain `Supervisor::start()` (no preferred port), so a dev-domain
-/// owner's config-change restart (adopting the discovered origin) silently
-/// moved the console from one random port to another (43667 -> 44863). Any
-/// browser tab or bookmark pointed at the old port broke with "refused to
-/// connect", and since the previous window was tied to the old origin, no
-/// window reappeared automatically -- the owner had to reopen from the tray.
-/// `None` (never bootstrapped yet, or the stored origin does not parse) lets
-/// `start_on_port` fall back to its normal fresh-allocation behavior.
-fn preferred_console_port_from_origin(console_origin: Option<&str>) -> Option<u16> {
-    console_origin
+/// Confirmed live, 2026-09-19, for the console specifically: without this,
+/// the console supervisor always called plain `Supervisor::start()` (no
+/// preferred port), so a dev-domain owner's config-change restart (adopting
+/// the discovered origin) silently moved the console from one random port to
+/// another (43667 -> 44863). Any browser tab or bookmark pointed at the old
+/// port broke with "refused to connect", and since the previous window was
+/// tied to the old origin, no window reappeared automatically -- the owner
+/// had to reopen from the tray. `None` (never bootstrapped yet, or the
+/// stored origin does not parse) lets `start_on_port` fall back to its
+/// normal fresh-allocation behavior.
+///
+/// The RI needed the identical fix for a different reason, confirmed live,
+/// 2026-09-20: before `start_ngrok_provider` retargeted the tunnel to the
+/// console's port, the RI's own port stability piggybacked on
+/// `HeldNgrok.forward_port` (then still named `ri_port`) purely because that
+/// field happened to hold the RI's port -- an accidental coupling, not a
+/// deliberate mechanism, that broke the moment the tunnel's actual forward
+/// target changed. `ri_origin` in `UnifiedRuntimeState` now gives the RI the
+/// same independent, origin-based stability the console already has, rather
+/// than the RI's port stability depending on an ngrok tunnel existing at
+/// all.
+fn preferred_port_from_origin(origin: Option<&str>) -> Option<u16> {
+    origin
         .and_then(|origin| origin.parse::<tauri::Url>().ok())
         .and_then(|url| url.port())
 }
@@ -292,7 +314,13 @@ fn preferred_console_port_from_origin(console_origin: Option<&str>) -> Option<u1
 fn read_preferred_console_port(app: &AppHandle) -> Option<u16> {
     let state = app.try_state::<UnifiedRuntimeState>()?;
     let console_origin = state.console_origin.lock().ok()?.clone();
-    preferred_console_port_from_origin(console_origin.as_deref())
+    preferred_port_from_origin(console_origin.as_deref())
+}
+
+fn read_preferred_ri_port(app: &AppHandle) -> Option<u16> {
+    let state = app.try_state::<UnifiedRuntimeState>()?;
+    let ri_origin = state.ri_origin.lock().ok()?.clone();
+    preferred_port_from_origin(ri_origin.as_deref())
 }
 
 fn configured_console_url() -> Result<String, String> {
@@ -818,14 +846,15 @@ fn start_managed_stack(
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
 
     let sink = UnifiedEventSink { app: app.clone() };
-    // Reuse the RI's previous loopback port when a held ngrok tunnel is
-    // already forwarding to it -- that is what lets `reuse_or_start_ngrok_provider`
-    // below keep the tunnel (and its origin) alive across this restart
-    // instead of starting a new one purely because the RI's port moved. If
-    // the port could not be reused (something else has since bound it), the
-    // supervisor falls back to a fresh allocation and the mismatch against
-    // `held.ri_port` correctly forces a fresh tunnel too.
-    let preferred_ri_port = held_ngrok.as_ref().map(|held| held.ri_port);
+    // Reuse the RI's previous loopback port across a stack-level restart,
+    // the same way `preferred_console_port` below keeps the console's port
+    // stable -- see `preferred_port_from_origin`'s doc comment for why the
+    // RI now needs this same independent mechanism rather than piggybacking
+    // on the held ngrok tunnel's state. The console's env bakes in
+    // `PDPP_AS_URL`/`PDPP_RS_URL` pointing at wherever the RI lands, so a
+    // moved RI port would break the console's own proxy even though the
+    // tunnel's forward target (the console's port) is unaffected by it.
+    let preferred_ri_port = read_preferred_ri_port(app);
     let ri = Supervisor::new(
         ri_process_spec(
             app,
@@ -844,56 +873,20 @@ fn start_managed_stack(
     let ri_origin = format!("http://127.0.0.1:{}", ri.port());
     let rs_origin = format!("http://127.0.0.1:{}", ri.port().saturating_add(1));
 
-    // ngrok discovers its own origin only once its tunnel is up, and the RI
-    // must already be listening (on `ri.port()`, just allocated above) for
-    // ngrok to have anything to forward to -- so the tunnel starts here,
-    // between the RI and console, rather than before either. The console
-    // gets the discovered fields immediately (below); the RI itself keeps
-    // running with the empty fields it was spawned with until
-    // `apply_ngrok_tunnel_outcome` persists them and the existing
-    // remote-access config watcher restarts the whole stack with the real
-    // origin applied at RI startup too (see that function's doc comment).
-    // When this run REUSES a held tunnel instead of starting a new one, the
-    // origin does not change, so `remote_access.fields` (already loaded from
-    // disk by the caller before this function runs) already carries the
-    // SAME origin the RI was started with last time -- the RI does not need
-    // a further restart to pick it up the way a genuinely new origin would.
-    //
-    // A tunnel failure (for example `ERR_NGROK_312`, TLS endpoints on ngrok's
-    // free plan) must NOT abort the stack: the owner still needs a working
-    // console to see the failure and change providers, and the RI is already
-    // listening on loopback regardless of whether a public origin exists. So
-    // this is a `match`, not a `?` -- the error is captured and carried into
-    // the same config the console reads, rather than propagated to
-    // `bootstrap_and_open_console`.
-    let (console_remote_access, ngrok, tunnel_error) =
-        match reuse_or_start_ngrok_provider(remote_access, held_ngrok, ri.port()) {
-            Ok(Some((fields, provider, fingerprint))) => {
-                let mut with_origin = remote_access.clone();
-                with_origin.fields = fields.clone();
-                let held = HeldNgrok {
-                    provider,
-                    ri_port: ri.port(),
-                    fingerprint,
-                    fields,
-                };
-                (with_origin, Some(held), None)
-            }
-            Ok(None) => (remote_access.clone(), None, None),
-            Err(error) => {
-                log::error!("ngrok tunnel failed to start: {error}");
-                (remote_access.clone(), None, Some(error))
-            }
-        };
-    if ngrok.is_some() || tunnel_error.is_some() {
-        apply_ngrok_tunnel_outcome(app, &console_remote_access.fields, tunnel_error.as_deref());
-    }
-
-    // Reuse the console's previous port across a stack-level restart, the
-    // same way `preferred_ri_port` above keeps the RI's port stable -- see
-    // `preferred_console_port_from_origin`'s doc comment for the live bug
-    // this fixes (an owner's open tab/bookmark breaking on every
-    // config-change restart).
+    // The console starts BEFORE the tunnel, unlike the RI, because the
+    // tunnel must forward to the CONSOLE's port -- see `start_ngrok_provider`'s
+    // doc comment for why a tunnel forwarding to the bare RI left a remote
+    // visitor stuck on the RI's own JSON discovery index with no way to
+    // reach the console UI (confirmed live, 2026-09-20). The console's own
+    // env here still carries `remote_access`'s ORIGINAL fields (pre-tunnel-
+    // outcome), same as the RI always has: if this run starts a fresh
+    // tunnel, the discovered origin is not baked into this boot's console
+    // process, but `apply_ngrok_tunnel_outcome` below persists it and the
+    // existing remote-access config watcher restarts the whole stack with
+    // the real origin applied to both RI and console on the NEXT cycle --
+    // exactly the same one-restart-to-settle shape the RI has always used,
+    // now shared by the console instead of the console being privileged
+    // with same-boot knowledge the RI never had.
     let preferred_console_port = read_preferred_console_port(app);
     let console = Supervisor::new(
         console_process_spec(
@@ -902,13 +895,44 @@ fn start_managed_stack(
             &ri_origin,
             &rs_origin,
             owner_password,
-            &console_remote_access,
+            remote_access,
         ),
-        sink,
+        sink.clone(),
     )
     .start_on_port(preferred_console_port)
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
     let console_url = format!("http://127.0.0.1:{}", console.port());
+
+    // A tunnel failure (for example `ERR_NGROK_312`, TLS endpoints on ngrok's
+    // free plan) must NOT abort the stack: the owner still needs a working
+    // console to see the failure and change providers, and both sidecars are
+    // already listening on loopback regardless of whether a public origin
+    // exists. So this is a `match`, not a `?` -- the error is captured and
+    // carried into the same config the console reads, rather than
+    // propagated to `bootstrap_and_open_console`.
+    let (ngrok, tunnel_error, applied_fields) =
+        match reuse_or_start_ngrok_provider(remote_access, held_ngrok, console.port()) {
+            Ok(Some((fields, provider, fingerprint))) => {
+                let held = HeldNgrok {
+                    provider,
+                    forward_port: console.port(),
+                    fingerprint,
+                    fields: fields.clone(),
+                };
+                (Some(held), None, Some(fields))
+            }
+            Ok(None) => (None, None, None),
+            Err(error) => {
+                log::error!("ngrok tunnel failed to start: {error}");
+                (None, Some(error), None)
+            }
+        };
+    if let Some(fields) = applied_fields {
+        apply_ngrok_tunnel_outcome(app, &fields, None);
+    } else if let Some(error) = tunnel_error.as_deref() {
+        apply_ngrok_tunnel_outcome(app, &remote_access.fields, Some(error));
+    }
+
     Ok(ManagedStackStart {
         stack: UnifiedStack { ri, console },
         ngrok,
@@ -946,9 +970,23 @@ fn resolve_ngrok_options(
     Ok(Some(options))
 }
 
-/// Start a brand-new ngrok tunnel forwarding to `ri_port`, when
+/// Start a brand-new ngrok tunnel forwarding to `forward_port`, when
 /// `remote_access` selects the ngrok provider. `Ok(None)` for every other
 /// provider -- not an error, just "no tunnel to start".
+///
+/// `forward_port` is the CONSOLE's loopback port, not the RI's. Confirmed
+/// live, 2026-09-20: this tunnel used to forward to the bare RI, whose own
+/// root page is a JSON discovery index (`{"links":{"connectors":"/v1/connectors"...}`),
+/// not a usable UI -- and that RI page's own "console origin" text pointed
+/// right back at the tunnel's own public URL, a dead end with no way to
+/// reach the actual console. The console is the correct forward target
+/// because it already proxies every API surface the RI/RS expose under its
+/// own origin (`apps/console/src/app/v1/[...path]/route.ts` and its
+/// siblings for `owner`/`device`/`consent`/`oauth`/`mcp`/etc., all via
+/// `reference-proxy.ts`) -- so a remote owner gets a working UI on the bare
+/// origin, and any API client hitting `/v1/*` (or any other proxied path)
+/// still reaches the RS exactly as before, just one hop further through the
+/// console's own proxy route instead of landing on the RI directly.
 ///
 /// The authtoken is read back out of the OS keychain
 /// (`KeychainCredentialResolver`), never carried in `remote_access` itself:
@@ -961,7 +999,7 @@ fn resolve_ngrok_options(
 /// nothing outside this device can reach.
 fn start_ngrok_provider(
     remote_access: &RemoteAccessConfig,
-    ri_port: u16,
+    forward_port: u16,
 ) -> Result<
     Option<(
         crate::remote_access::ReachabilityFields,
@@ -1008,7 +1046,7 @@ fn start_ngrok_provider(
     let handle = provider.start(
         LoopbackTarget {
             host: "127.0.0.1".to_string(),
-            port: ri_port,
+            port: forward_port,
         },
         credential,
         CancellationToken::new(),
@@ -1028,18 +1066,18 @@ fn start_ngrok_provider(
 ///   reserved domain the held tunnel was started with (a different mode or
 ///   domain changes what the tunnel itself must do, which nothing short of a
 ///   new tunnel can apply).
-/// - The RI was brought up on the SAME loopback port the held tunnel already
-///   forwards to (see `Supervisor::start_on_port` in `start_managed_stack`) --
-///   otherwise the tunnel would keep forwarding to a port nothing is
-///   listening on.
+/// - The console was brought up on the SAME loopback port the held tunnel
+///   already forwards to (see `Supervisor::start_on_port` in
+///   `start_managed_stack`) -- otherwise the tunnel would keep forwarding to
+///   a port nothing is listening on.
 fn should_reuse_ngrok_tunnel(
     held_fingerprint: Option<&NgrokFingerprint>,
-    held_ri_port: Option<u16>,
+    held_forward_port: Option<u16>,
     desired_fingerprint: Option<&NgrokFingerprint>,
-    ri_port: u16,
+    forward_port: u16,
 ) -> bool {
-    match (held_fingerprint, held_ri_port, desired_fingerprint) {
-        (Some(held), Some(held_port), Some(desired)) => held == desired && held_port == ri_port,
+    match (held_fingerprint, held_forward_port, desired_fingerprint) {
+        (Some(held), Some(held_port), Some(desired)) => held == desired && held_port == forward_port,
         _ => false,
     }
 }
@@ -1059,6 +1097,18 @@ const NGROK_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `probe_ngrok_tunnel_is_live`'s doc comment for why an in-process check
 /// alone cannot catch this).
 const NGROK_ERROR_CODE_HEADER: &str = "ngrok-error-code";
+
+/// ngrok shows a one-time browser interstitial ("You are about to visit...")
+/// to any request whose `User-Agent` looks like a browser, on the free plan
+/// -- by design, not a bug (see the ngrok option copy in `remote-access.ts`
+/// for the owner-facing note about this). A request FROM this app to its own
+/// public origin (the liveness probe below) is not a real visitor and must
+/// never be shown that page: an interstitial response still returns 200 with
+/// no `ngrok-error-code` header, so without this the probe would misread a
+/// live-but-warned tunnel as dead. This exact header, sent on any request,
+/// makes ngrok's edge skip the interstitial and forward straight through.
+const NGROK_SKIP_BROWSER_WARNING_HEADER: &str = "ngrok-skip-browser-warning";
+const NGROK_SKIP_BROWSER_WARNING_VALUE: &str = "true";
 
 /// Confirm a held ngrok tunnel is still actually reachable from the public
 /// internet before trusting it enough to reuse, by making one real request
@@ -1089,7 +1139,11 @@ fn probe_ngrok_tunnel_is_live(origin: &str) -> bool {
             return false;
         }
     };
-    match client.get(origin).send() {
+    match client
+        .get(origin)
+        .header(NGROK_SKIP_BROWSER_WARNING_HEADER, NGROK_SKIP_BROWSER_WARNING_VALUE)
+        .send()
+    {
         Ok(response) => !response.headers().contains_key(NGROK_ERROR_CODE_HEADER),
         Err(error) => {
             log::warn!("Held ngrok tunnel liveness probe failed: {error}");
@@ -1103,13 +1157,13 @@ fn probe_ngrok_tunnel_is_live(origin: &str) -> bool {
 /// start a fresh one via `start_ngrok_provider` -- accepting a new random
 /// hostname on ngrok's free plan, which is unavoidable whenever the tunnel
 /// itself must actually change (no held tunnel, provider/posture turned off,
-/// settings changed, the preferred RI port could not be reused, or the held
-/// tunnel's ngrok-side session has silently died -- see
+/// settings changed, the preferred forward port could not be reused, or the
+/// held tunnel's ngrok-side session has silently died -- see
 /// `probe_ngrok_tunnel_is_live`).
 fn reuse_or_start_ngrok_provider(
     remote_access: &RemoteAccessConfig,
     held: Option<HeldNgrok>,
-    ri_port: u16,
+    forward_port: u16,
 ) -> Result<
     Option<(
         crate::remote_access::ReachabilityFields,
@@ -1124,9 +1178,9 @@ fn reuse_or_start_ngrok_provider(
 
     let reuse_candidate = should_reuse_ngrok_tunnel(
         held.as_ref().map(|held| &held.fingerprint),
-        held.as_ref().map(|held| held.ri_port),
+        held.as_ref().map(|held| held.forward_port),
         desired_fingerprint.as_ref(),
-        ri_port,
+        forward_port,
     );
 
     let reuse = reuse_candidate
@@ -1140,7 +1194,7 @@ fn reuse_or_start_ngrok_provider(
     if reuse {
         let held = held.expect("reuse is only true when held is Some");
         log::info!(
-            "Reusing the existing ngrok tunnel at {:?}; RI port {ri_port} is unchanged and the tunnel answered live",
+            "Reusing the existing ngrok tunnel at {:?}; forward port {forward_port} is unchanged and the tunnel answered live",
             held.fields.reference_origin
         );
         return Ok(Some((held.fields, held.provider, held.fingerprint)));
@@ -1153,13 +1207,13 @@ fn reuse_or_start_ngrok_provider(
                 held.fields.reference_origin
             );
         } else {
-            log::info!("ngrok settings or the RI port changed; starting a fresh tunnel");
+            log::info!("ngrok settings or the forward port changed; starting a fresh tunnel");
         }
         if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider) {
             log::error!("Failed to stop the previous ngrok tunnel before replacing it: {error}");
         }
     }
-    start_ngrok_provider(remote_access, ri_port)
+    start_ngrok_provider(remote_access, forward_port)
 }
 
 /// Persist the outcome of this run's ngrok start attempt -- either the
@@ -1692,6 +1746,7 @@ async fn finish_bootstrap(
     trusted_hosts: &str,
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
+    let ri_origin_for_state = ri_origin.clone();
     let login = match login_reference_server_with_password_and_host(
         ri_origin,
         password,
@@ -1734,6 +1789,11 @@ async fn finish_bootstrap(
             .console_origin
             .lock()
             .map_err(|_| "Unified runtime state is poisoned".to_string())? = Some(console_url);
+        *state
+            .ri_origin
+            .lock()
+            .map_err(|_| "Unified runtime state is poisoned".to_string())? =
+            Some(ri_origin_for_state);
         *state
             .session_cookie
             .lock()
@@ -2680,6 +2740,43 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn the_ngrok_tunnel_forwards_to_the_console_port_not_the_bare_ri() {
+        // Confirmed live, 2026-09-20: the tunnel used to forward to
+        // `ri.port()`, so a remote visitor following the public URL landed
+        // on the RI's own JSON discovery index (`{"links":{"connectors":
+        // "/v1/connectors"...}`), not a usable UI -- and that page's own
+        // "console origin" text pointed right back at the same public URL,
+        // a dead end. `start_managed_stack` must call
+        // `reuse_or_start_ngrok_provider` with `console.port()`, matching
+        // `start_ngrok_provider`'s doc comment on why the console -- which
+        // already proxies every RI/RS API surface under its own origin -- is
+        // the correct forward target. Asserted on source text:
+        // `start_managed_stack` resolves real staged RI/console binaries and
+        // starts real `Supervisor` processes plus a live ngrok session, none
+        // of which this file's tests otherwise fake -- unlike `fake_stack`,
+        // which only substitutes fake RI/console launcher scripts for the
+        // sidecar-lifecycle tests further below, with no ngrok involved.
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("fn start_managed_stack(")
+            .expect("start_managed_stack must exist");
+        let body_end = source[start..]
+            .find("\n/// Resolve the ngrok options")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..body_end];
+
+        assert!(
+            body.contains("reuse_or_start_ngrok_provider(remote_access, held_ngrok, console.port())"),
+            "start_managed_stack must start/reuse the ngrok tunnel targeting the console's port"
+        );
+        assert!(
+            !body.contains("reuse_or_start_ngrok_provider(remote_access, held_ngrok, ri.port())"),
+            "the ngrok tunnel must never forward to the bare RI's port again"
+        );
+    }
+
+    #[test]
     fn a_free_plan_owner_with_a_configured_dev_domain_gets_a_stable_hostname_across_restarts() {
         // The end-to-end property the brief requires a test for: a
         // free-plan owner who pasted their dev domain into settings
@@ -2731,13 +2828,14 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
-    fn should_reuse_ngrok_tunnel_when_settings_and_ri_port_are_unchanged() {
+    fn should_reuse_ngrok_tunnel_when_settings_and_forward_port_are_unchanged() {
         // The shape a config-change restart (`restart_after_remote_access_config`)
         // hits every time on a FREE ngrok plan: same provider settings, and
-        // the RI came back up on the same port (via `Supervisor::start_on_port`
-        // preferring the held tunnel's port). This is the case that must
-        // NOT create a new tunnel, or the owner's just-adopted origin goes
-        // stale before the console even loads it.
+        // the console came back up on the same port (via
+        // `Supervisor::start_on_port` preferring the held tunnel's port).
+        // This is the case that must NOT create a new tunnel, or the
+        // owner's just-adopted origin goes stale before the console even
+        // loads it.
         let fingerprint = ngrok_fingerprint();
         assert!(should_reuse_ngrok_tunnel(
             Some(&fingerprint),
@@ -2748,10 +2846,10 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
-    fn should_not_reuse_ngrok_tunnel_when_the_ri_port_changed() {
-        // The RI's preferred port could not be reused (something else bound
-        // it in the gap) -- the held tunnel is forwarding to a port nothing
-        // is listening on anymore, so it cannot be kept.
+    fn should_not_reuse_ngrok_tunnel_when_the_forward_port_changed() {
+        // The console's preferred port could not be reused (something else
+        // bound it in the gap) -- the held tunnel is forwarding to a port
+        // nothing is listening on anymore, so it cannot be kept.
         let fingerprint = ngrok_fingerprint();
         assert!(!should_reuse_ngrok_tunnel(
             Some(&fingerprint),
@@ -2803,17 +2901,30 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     /// headers precisely without pulling in a real HTTP server dependency --
     /// `probe_ngrok_tunnel_is_live` only inspects headers on the response.
     fn respond_once_with(response_head: &'static str) -> String {
+        let (url, _) = respond_once_with_and_capture_request(response_head);
+        url
+    }
+
+    /// Same as `respond_once_with`, but also returns the raw request bytes
+    /// the probe sent, so a test can assert on the REQUEST headers this
+    /// process sends (e.g. `ngrok-skip-browser-warning`), not just how it
+    /// interprets the response.
+    fn respond_once_with_and_capture_request(
+        response_head: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
         let port = listener.local_addr().expect("listener addr").port();
+        let (sender, receiver) = std::sync::mpsc::channel();
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 use std::io::{Read, Write};
                 let mut buffer = [0_u8; 1024];
-                let _ = stream.read(&mut buffer);
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let _ = sender.send(buffer[..read].to_vec());
                 let _ = stream.write_all(response_head.as_bytes());
             }
         });
-        format!("http://127.0.0.1:{port}/")
+        (format!("http://127.0.0.1:{port}/"), receiver)
     }
 
     #[test]
@@ -2843,6 +2954,29 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         // even connect" the same as "connected but ngrok says it's dead"),
         // not panic or default to true.
         assert!(!probe_ngrok_tunnel_is_live("http://127.0.0.1:1/"));
+    }
+
+    #[test]
+    fn probe_ngrok_tunnel_is_live_sends_the_skip_browser_warning_header() {
+        // Confirmed live, 2026-09-20: ngrok's free plan shows a one-time
+        // browser interstitial to any request that looks like it came from a
+        // browser. An interstitial response is a real 200 with no
+        // `ngrok-error-code` header, so a liveness probe that got shown the
+        // interstitial instead of the real origin would misread a live
+        // tunnel as reachable while never actually confirming the app
+        // behind it answered -- and this app should never see that page for
+        // its OWN requests to its OWN public origin in the first place.
+        let (origin, request_received) =
+            respond_once_with_and_capture_request("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        assert!(probe_ngrok_tunnel_is_live(&origin));
+        let request = request_received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the probe request must have been sent");
+        let request = String::from_utf8_lossy(&request).to_lowercase();
+        assert!(
+            request.contains("ngrok-skip-browser-warning"),
+            "expected the liveness probe to send ngrok-skip-browser-warning; request was:\n{request}"
+        );
     }
 
     #[test]
@@ -2969,23 +3103,22 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         // restart (adopting the discovered origin) silently moved the
         // console from port 43667 to 44863. Any open tab/bookmark broke with
         // "refused to connect". `start_managed_stack` now asks
-        // `Supervisor::start_on_port` to reuse this parsed port, the same
-        // way the RI already reuses `held_ngrok.ri_port`.
+        // `Supervisor::start_on_port` to reuse this parsed port -- the same
+        // helper the RI's own port stability now also depends on (see
+        // `read_preferred_ri_port`).
         assert_eq!(
-            preferred_console_port_from_origin(Some("http://127.0.0.1:43667")),
+            preferred_port_from_origin(Some("http://127.0.0.1:43667")),
             Some(43667)
         );
     }
 
     #[test]
-    fn no_previous_console_origin_falls_back_to_a_fresh_port_allocation() {
+    fn no_previous_origin_falls_back_to_a_fresh_port_allocation() {
         // First launch, or a stored origin that does not parse: `None` lets
-        // `start_on_port` behave exactly like `start()` always did.
-        assert_eq!(preferred_console_port_from_origin(None), None);
-        assert_eq!(
-            preferred_console_port_from_origin(Some("not a url")),
-            None
-        );
+        // `start_on_port` behave exactly like `start()` always did. Shared
+        // by both the console's and the RI's port-stability readers.
+        assert_eq!(preferred_port_from_origin(None), None);
+        assert_eq!(preferred_port_from_origin(Some("not a url")), None);
     }
 
     #[test]
