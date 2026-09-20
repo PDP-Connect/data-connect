@@ -144,6 +144,16 @@ test("both ngrok profiles are offered with opposite privacy answers", () => {
   )
 })
 
+test("the HTTPS edge ngrok option warns the owner about the first-visit interstitial", () => {
+  // Confirmed live, 2026-09-20: ngrok's free-plan interstitial appears on a
+  // remote visitor's first request from a new browser/device and is easily
+  // mistaken for a broken deployment if the owner has no warning it exists.
+  const edge = publicUrlOptionById("ngrok_https_edge_termination")
+  assert.match(edge?.planNote ?? "", /first browser visit/i)
+  assert.match(edge?.planNote ?? "", /warning page/i)
+  assert.match(edge?.planNote ?? "", /not a sign anything is broken/i)
+})
+
 test("an ngrok domain is optional and must be a bare hostname", () => {
   assert.deepEqual(validateNgrokDomain(""), { ok: true, domain: null })
   assert.deepEqual(validateNgrokDomain("   "), { ok: true, domain: null })

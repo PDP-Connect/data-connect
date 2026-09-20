@@ -129,7 +129,7 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     badge: "Provider can read your data",
     requiresAuthtoken: true,
     planNote:
-      "Works on the ngrok free plan. Every free ngrok account is assigned one stable domain (see dashboard.ngrok.com/domains) that stays the same across restarts once you enter it below; free endpoints also show an ngrok interstitial page.",
+      "Works on the ngrok free plan. Every free ngrok account is assigned one stable domain (see dashboard.ngrok.com/domains) that stays the same across restarts once you enter it below. The first browser visit from a new device shows an ngrok warning page before continuing to DataConnect -- this is ngrok, not a sign anything is broken.",
   },
   {
     id: "ngrok_tls_passthrough",
