@@ -9,10 +9,10 @@
 //! reports the origin returned by ngrok.
 
 use crate::remote_access::{
-    CancellationToken, CredentialReference, LoopbackTarget, ReachabilityFields,
-    RemoteAccessAuthentication, RemoteAccessAvailability, RemoteAccessContractConfig,
-    RemoteAccessHandle, RemoteAccessInspection, RemoteAccessPosture, RemoteAccessPrivacy,
-    RemoteAccessProvider,
+    CancellationToken, CredentialReference, DurableAddressState, LoopbackTarget,
+    ReachabilityFields, RemoteAccessAuthentication, RemoteAccessAvailability,
+    RemoteAccessContractConfig, RemoteAccessHandle, RemoteAccessInspection, RemoteAccessPosture,
+    RemoteAccessPrivacy, RemoteAccessProvider,
 };
 use ngrok::config::ForwarderBuilder;
 use ngrok::forwarder::Forwarder;
@@ -365,6 +365,40 @@ where
     fn stop(&mut self) -> Result<(), String> {
         self.stop_owned()
     }
+
+    /// ngrok's free plan assigns exactly one persistent "Dev Domain" to
+    /// every account at account creation -- there is no "zero domains"
+    /// state on free, and no purchase is required (see the ngrok-free-plan
+    /// research corpus entries). That domain is real and stable; the gap is
+    /// entirely that nothing in this codebase could tell the owner it
+    /// exists or ask them to use it, so every restart minted a fresh random
+    /// hostname instead of the one their account already has.
+    ///
+    /// This adapter has no verified way to discover that hostname on its
+    /// own: the tunnel authtoken it holds starts sessions but has no
+    /// confirmed discovery RPC for account-level resources, and ngrok's
+    /// account-management REST API (which does list domains) requires a
+    /// SEPARATE API key, not the tunnel authtoken -- confirmed the hard way
+    /// against the real API, which rejected the authtoken outright.
+    /// Deliberately not guessed at: asking the owner for a second
+    /// credential (an API key) to look up a value they can read off their
+    /// own dashboard in five seconds would be worse UX than asking for the
+    /// value itself, so this reports `AuthInsufficient` with the concrete
+    /// next step rather than pretending to discover it. If a reserved
+    /// domain is already configured (the owner already pasted their dev
+    /// domain, or a paid custom domain), that IS the durable address and is
+    /// reported as `Available` -- discovery is the only unverified part,
+    /// not the reuse of what the owner already told us.
+    fn durable_address(&self) -> DurableAddressState {
+        match self.reserved_domain.as_deref() {
+            Some(domain) => DurableAddressState::Available {
+                address: domain.to_string(),
+            },
+            None => DurableAddressState::AuthInsufficient {
+                reason: "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy your domain from dashboard.ngrok.com/domains and paste it in Settings.".to_string(),
+            },
+        }
+    }
 }
 
 impl<R> Drop for NgrokProvider<R> {
@@ -612,6 +646,46 @@ mod tests {
             NgrokEndpointMode::HttpsEdgeTermination,
         )
         .expect("provider")
+    }
+
+    #[test]
+    fn durable_address_is_available_when_a_domain_is_already_configured() {
+        // A free-plan owner who pasted their dev domain (or a paid-plan
+        // owner with a custom domain) already has a durable address --
+        // this is a stable hostname across restarts, the exact thing the
+        // brief requires a test for.
+        let provider = NgrokProvider::with_reserved_domain(
+            config(),
+            StaticResolver {
+                value: Ok(Some(CredentialReference::Stored("token".to_string()))),
+            },
+            NgrokEndpointMode::HttpsEdgeTermination,
+            Some("moderately-worthy-tetra.ngrok-free.app".to_string()),
+        )
+        .expect("provider");
+
+        assert_eq!(
+            provider.durable_address(),
+            DurableAddressState::Available {
+                address: "moderately-worthy-tetra.ngrok-free.app".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn durable_address_is_auth_insufficient_without_a_configured_domain() {
+        // No verified discovery path exists for the tunnel-authtoken-only
+        // session (see this method's doc comment): the honest answer is
+        // "can't check," with a concrete next step, never a guess at
+        // `Available` and never a silent fallback that reintroduces
+        // hostname churn.
+        let provider = provider("stored-authtoken");
+        match provider.durable_address() {
+            DurableAddressState::AuthInsufficient { reason } => {
+                assert!(reason.contains("dashboard.ngrok.com/domains"));
+            }
+            other => panic!("expected AuthInsufficient, got {other:?}"),
+        }
     }
 
     #[test]

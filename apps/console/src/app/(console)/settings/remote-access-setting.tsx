@@ -12,12 +12,13 @@ import {
 } from "./remote-access-actions.ts"
 import {
   DEFAULT_PUBLIC_URL_OPTION_ID,
+  ngrokDurableAddressState,
   offRemoteAccessConfig,
   privacyBadgeForPosture,
   publicUrlOptionById,
   publicUrlOptions,
   remoteAccessOriginDisplay,
-  validateReservedDomain,
+  validateNgrokDomain,
   validateUserSuppliedOrigin,
   type PublicUrlOption,
   type RemoteAccessConfig,
@@ -158,7 +159,7 @@ export function RemoteAccessSetting({
   const [busy, setBusy] = useState(false)
   const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
   const [authtoken, setAuthtoken] = useState("")
-  const [reservedDomain, setReservedDomain] = useState("")
+  const [ngrokDomain, setNgrokDomain] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -171,6 +172,11 @@ export function RemoteAccessSetting({
         setInspection(asInspection(nextInspection))
         setNgrokInspection(asInspection(nextNgrokInspection))
         setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
+        // Without this, an owner who already saved their ngrok domain sees
+        // a blank field on every page load and has no way to tell their
+        // domain was remembered -- exactly the "silent fallback" the
+        // durable-address states exist to prevent.
+        setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
         setLoadState("loaded")
       })
       .catch(reason => {
@@ -197,6 +203,13 @@ export function RemoteAccessSetting({
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
     [origin]
+  )
+  // Driven by the SAVED config, not the in-progress edit in `ngrokDomain` --
+  // this tells the owner what is actually active right now, the same way
+  // `activeOrigin` above reflects the saved origin rather than the draft.
+  const ngrokDurableAddress = useMemo(
+    () => ngrokDurableAddressState(config),
+    [config]
   )
   const selectedOption = useMemo(
     () => publicUrlOptionById(optionId),
@@ -295,7 +308,7 @@ export function RemoteAccessSetting({
       setError("Paste your ngrok authtoken to continue.")
       return
     }
-    const domain = validateReservedDomain(reservedDomain)
+    const domain = validateNgrokDomain(ngrokDomain)
     if (!domain.ok) {
       setError(domain.message)
       return
@@ -597,26 +610,42 @@ export function RemoteAccessSetting({
               </label>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-reserved-domain"
+                htmlFor="remote-access-ngrok-domain"
               >
-                Reserved domain (optional)
+                Your ngrok domain
                 <input
                   autoCapitalize="none"
                   autoComplete="off"
                   className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-reserved-domain"
+                  id="remote-access-ngrok-domain"
                   onChange={event =>
-                    setReservedDomain(event.currentTarget.value)
+                    setNgrokDomain(event.currentTarget.value)
                   }
-                  placeholder="vault.ngrok.app"
+                  placeholder="your-name.ngrok-free.app"
                   spellCheck={false}
                   type="text"
-                  value={reservedDomain}
+                  value={ngrokDomain}
                 />
-                <span className="pdpp-caption text-muted-foreground">
-                  Leave this empty to accept the hostname ngrok assigns. A
-                  reserved domain requires a paid ngrok plan.
-                </span>
+                {ngrokDurableAddress.kind === "available" ? (
+                  <span className="pdpp-caption text-muted-foreground">
+                    Saved. This stays your address across restarts, on the
+                    free plan or a paid one.
+                  </span>
+                ) : (
+                  <span className="pdpp-caption text-muted-foreground">
+                    Every ngrok account — including the free plan — is
+                    assigned one stable domain at signup, at no cost. This app
+                    cannot look yours up automatically, so paste it here.{" "}
+                    <OpenExternalLink
+                      className="underline"
+                      href="https://dashboard.ngrok.com/domains"
+                    >
+                      Find your domain on dashboard.ngrok.com/domains
+                    </OpenExternalLink>
+                    . Leaving this empty gets a brand-new random hostname
+                    every time DataConnect restarts.
+                  </span>
+                )}
               </label>
             </>
           ) : (
