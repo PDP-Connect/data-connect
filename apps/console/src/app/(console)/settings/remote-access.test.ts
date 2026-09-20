@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   describeTunnelError,
+  ngrokDurableAddressState,
   offRemoteAccessConfig,
   privacyBadgeForNgrokMode,
   privacyBadgeForPosture,
@@ -12,7 +13,7 @@ import {
   publicUrlOptions,
   remoteAccessOriginDisplay,
   remoteAccessRequiresOwnerPassword,
-  validateReservedDomain,
+  validateNgrokDomain,
   validateUserSuppliedOrigin,
   type RemoteAccessConfig,
 } from "./remote-access.ts"
@@ -143,10 +144,10 @@ test("both ngrok profiles are offered with opposite privacy answers", () => {
   )
 })
 
-test("a reserved domain is optional and must be a bare hostname", () => {
-  assert.deepEqual(validateReservedDomain(""), { ok: true, domain: null })
-  assert.deepEqual(validateReservedDomain("   "), { ok: true, domain: null })
-  assert.deepEqual(validateReservedDomain(" Vault.NGROK.app "), {
+test("an ngrok domain is optional and must be a bare hostname", () => {
+  assert.deepEqual(validateNgrokDomain(""), { ok: true, domain: null })
+  assert.deepEqual(validateNgrokDomain("   "), { ok: true, domain: null })
+  assert.deepEqual(validateNgrokDomain(" Vault.NGROK.app "), {
     ok: true,
     domain: "vault.ngrok.app",
   })
@@ -157,7 +158,47 @@ test("a reserved domain is optional and must be a bare hostname", () => {
     "vault",
     "-vault.ngrok.app",
   ]) {
-    assert.equal(validateReservedDomain(invalid).ok, false, invalid)
+    assert.equal(validateNgrokDomain(invalid).ok, false, invalid)
+  }
+})
+
+test("ngrokDurableAddressState is not_applicable for a non-ngrok provider", () => {
+  const config: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    provider: "user_supplied_origin",
+  }
+  assert.deepEqual(ngrokDurableAddressState(config), { kind: "not_applicable" })
+})
+
+test("ngrokDurableAddressState is available when a domain is already saved -- this is the stable-hostname-across-restarts property", () => {
+  // The config this function reads is exactly what a config-change restart
+  // persists and reloads (`RemoteAccessConfig.ngrok.reserved_domain`), so
+  // "available with this address" here is the same address every restart
+  // sees -- there is nothing time-varying in this derivation.
+  const config: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    provider: "ngrok",
+    ngrok: {
+      endpoint_mode: "https_edge_termination",
+      reserved_domain: "moderately-worthy-tetra.ngrok-free.app",
+    },
+  }
+  assert.deepEqual(ngrokDurableAddressState(config), {
+    kind: "available",
+    address: "moderately-worthy-tetra.ngrok-free.app",
+  })
+})
+
+test("ngrokDurableAddressState is auth_insufficient with a concrete next step when no domain is saved yet", () => {
+  const config: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    provider: "ngrok",
+    ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+  }
+  const state = ngrokDurableAddressState(config)
+  assert.equal(state.kind, "auth_insufficient")
+  if (state.kind === "auth_insufficient") {
+    assert.match(state.reason, /dashboard\.ngrok\.com\/domains/)
   }
 })
 

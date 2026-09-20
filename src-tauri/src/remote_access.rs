@@ -194,6 +194,63 @@ impl CredentialResolver for KeychainCredentialResolver {
     }
 }
 
+/// Whether a provider offers a durable public address -- one that survives a
+/// tunnel/session restart -- and if so, what state that address is in right
+/// now. Not every provider has this concept at all: `user_supplied_origin`
+/// has no discovery step because the owner supplies the whole origin
+/// directly, so it reports `NotApplicable` rather than being forced through
+/// states that don't apply to it. This is the check for whether the shape
+/// below is honest rather than ngrok-specific: a provider with nothing to
+/// discover must be able to say so in one line, not implement four unused
+/// branches.
+///
+/// Every variant is kept even though only a subset renders real UI today
+/// (see `DurableAddressState`'s call sites in `unified.rs`/the console) --
+/// `Provisionable` and `NotProvisionable` describe a real ngrok product
+/// state (a free account with zero domains) that does not currently occur
+/// in practice (every free-plan account is assigned one dev domain at
+/// account creation), but keeping them in the enum costs nothing and
+/// documents the shape a provider that DOES need on-demand provisioning
+/// (or a future ngrok plan change) would use, without inventing new API
+/// surface later.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DurableAddressState {
+    /// This provider has no addressing concept of its own -- the caller
+    /// supplies the full origin directly (`user_supplied_origin`).
+    NotApplicable,
+    /// Exactly one durable address exists and was discovered.
+    Available { address: String },
+    /// More than one durable address exists; the owner must choose --
+    /// never silently pick one.
+    AvailableMultiple { addresses: Vec<String> },
+    /// None exists yet, but one could be created given the credential held.
+    /// Not currently reachable for any shipped provider -- see the enum's
+    /// doc comment.
+    Provisionable,
+    /// None exists and none can be created from here. `reason` and
+    /// `action_url` must together give the owner a concrete next step.
+    /// Not currently reachable for any shipped provider -- see the enum's
+    /// doc comment.
+    NotProvisionable {
+        reason: String,
+        action_url: Option<String>,
+    },
+    /// A previously discovered/stored address no longer exists on the
+    /// provider's side (deleted, plan downgraded, expired).
+    Revoked { previous_address: String },
+    /// The held credential can start tunnels/sessions but lacks the scope
+    /// to query or manage addresses. ngrok's tunnel authtoken is exactly
+    /// this case: it starts tunnels but has no discovery RPC for the
+    /// account's assigned dev domain (a separate ngrok API key would, but
+    /// asking the owner for a second credential to look up a value they can
+    /// read off their own dashboard in five seconds is worse UX than asking
+    /// for the value itself -- see `NgrokProvider::durable_address`).
+    AuthInsufficient { reason: String },
+    /// The discovery call itself failed (network, rate limit, provider API
+    /// down) -- distinct from "no address exists."
+    DiscoveryUnreachable { reason: String },
+}
+
 pub(crate) trait RemoteAccessProvider {
     fn inspect(&self) -> RemoteAccessInspection;
 
@@ -205,6 +262,20 @@ pub(crate) trait RemoteAccessProvider {
     ) -> Result<RemoteAccessHandle, String>;
 
     fn stop(&mut self) -> Result<(), String>;
+
+    /// Describe this provider's durable-address capability given the
+    /// credential it already holds. Read-only -- never provisions anything.
+    /// `NotApplicable` is the correct, non-error answer for a provider with
+    /// no addressing concept (see `user_supplied_origin`).
+    fn durable_address(&self) -> DurableAddressState;
+
+    /// Explicitly provision a new durable address. Only meaningful when
+    /// `durable_address()` returns `Provisionable`, which no shipped
+    /// provider currently returns (see that variant's doc comment) --
+    /// deliberately left unimplemented rather than guessed at.
+    fn provision_durable_address(&mut self) -> Result<String, String> {
+        Err("this provider cannot provision a durable address".to_string())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -329,6 +400,15 @@ impl<R: CredentialResolver> RemoteAccessProvider for UserSuppliedOriginProvider<
     fn stop(&mut self) -> Result<(), String> {
         self.state = ProviderState::Stopped;
         Ok(())
+    }
+
+    fn durable_address(&self) -> DurableAddressState {
+        // The owner supplies the whole origin directly, every time -- there
+        // is nothing for this provider to discover, provision, or lose. See
+        // `DurableAddressState`'s doc comment: this is the honesty check
+        // for the abstraction, and the correct answer is one line, no
+        // forced branches.
+        DurableAddressState::NotApplicable
     }
 }
 
@@ -559,6 +639,21 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn durable_address_is_not_applicable_because_the_owner_supplies_the_whole_origin() {
+        // The honesty check for DurableAddressState: a provider with no
+        // addressing concept of its own must report exactly one variant,
+        // not be forced through discover/provision/revoke branches that
+        // don't apply to it.
+        let provider = UserSuppliedOriginProvider::new(
+            config(RemoteAccessPosture::PublicUrl),
+            StaticResolver { reference: None },
+        )
+        .expect("provider");
+
+        assert_eq!(provider.durable_address(), DurableAddressState::NotApplicable);
     }
 
     #[test]

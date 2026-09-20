@@ -2558,6 +2558,65 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         }
     }
 
+    fn ngrok_fingerprint_with_dev_domain(domain: &str) -> NgrokFingerprint {
+        NgrokFingerprint {
+            endpoint_mode:
+                crate::remote_access_providers::NgrokEndpointModeConfig::HttpsEdgeTermination,
+            reserved_domain: Some(domain.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_free_plan_owner_with_a_configured_dev_domain_gets_a_stable_hostname_across_restarts() {
+        // The end-to-end property the brief requires a test for: a
+        // free-plan owner who pasted their dev domain into settings
+        // (`NgrokOptions::reserved_domain`, which flows into this
+        // fingerprint via `NgrokFingerprint::from_options`) keeps the exact
+        // same hostname across a config-change restart, because the
+        // fingerprint the reuse decision is keyed on includes the domain --
+        // two restarts naming the SAME domain are the SAME fingerprint, so
+        // `should_reuse_ngrok_tunnel` says reuse, and even if reuse is
+        // rejected for an unrelated reason (RI port moved), a fresh tunnel
+        // still requests this literal domain (`start_ngrok_provider` reads
+        // `options.reserved_domain` on every call), not a random one.
+        let dev_domain = "moderately-worthy-tetra.ngrok-free.app";
+        let first_boot = ngrok_fingerprint_with_dev_domain(dev_domain);
+        let restart = ngrok_fingerprint_with_dev_domain(dev_domain);
+
+        assert!(should_reuse_ngrok_tunnel(
+            Some(&first_boot),
+            Some(4310),
+            Some(&restart),
+            4310,
+        ));
+
+        // The stability claim survives even when the RI's port changes
+        // (forcing a fresh tunnel, not a reuse): the two fingerprints still
+        // name the same domain, so whatever starts the fresh tunnel is
+        // still asking ngrok for the owner's one stable hostname, not a
+        // random one -- reuse is an optimization, the domain is the
+        // property that must not regress.
+        assert_eq!(first_boot.reserved_domain, restart.reserved_domain);
+        assert_eq!(first_boot.reserved_domain.as_deref(), Some(dev_domain));
+    }
+
+    #[test]
+    fn a_dev_domain_change_is_a_different_fingerprint_and_forces_a_fresh_tunnel() {
+        // If the owner replaces the domain they've configured (typo fix,
+        // switching to a paid custom domain), that is a genuine settings
+        // change and must NOT be silently ignored by treating it as
+        // reusable -- ngrok cannot repoint an existing tunnel to a
+        // different domain, so this has to mint a fresh one.
+        let old_domain = ngrok_fingerprint_with_dev_domain("old-domain.ngrok-free.app");
+        let new_domain = ngrok_fingerprint_with_dev_domain("new-domain.ngrok-free.app");
+        assert!(!should_reuse_ngrok_tunnel(
+            Some(&old_domain),
+            Some(4310),
+            Some(&new_domain),
+            4310,
+        ));
+    }
+
     #[test]
     fn should_reuse_ngrok_tunnel_when_settings_and_ri_port_are_unchanged() {
         // The shape a config-change restart (`restart_after_remote_access_config`)

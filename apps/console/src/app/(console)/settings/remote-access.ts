@@ -123,7 +123,7 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     badge: "Provider can read your data",
     requiresAuthtoken: true,
     planNote:
-      "Works on the ngrok free plan. Free endpoints show an ngrok interstitial page and get a random ngrok-free.app hostname.",
+      "Works on the ngrok free plan. Every free ngrok account is assigned one stable domain (see dashboard.ngrok.com/domains) that stays the same across restarts once you enter it below; free endpoints also show an ngrok interstitial page.",
   },
   {
     id: "ngrok_tls_passthrough",
@@ -162,11 +162,19 @@ export function publicUrlOptionById(id: string): PublicUrlOption | null {
 }
 
 /**
- * A reserved domain is optional. Empty means "let ngrok assign a hostname",
- * which the owner has accepted. A supplied value must be a bare hostname,
- * because the SDK's `domain()` takes a host and not a URL.
+ * This field is optional, but NOT because it is a paid-only nicety: ngrok's
+ * free plan assigns every account exactly one stable "Dev Domain" at account
+ * creation (see dashboard.ngrok.com/domains), reusable across tunnel
+ * restarts at no cost. Leaving this empty does NOT reuse that stable
+ * domain -- the ngrok agent SDK this app embeds has no "use my account's
+ * domain" shortcut the way ngrok's own CLI does, so an empty value here
+ * means a brand-new random `*.ngrok-free.app` hostname on every restart,
+ * which is real churn a free-plan owner does not have to accept. Entering
+ * the domain from that dashboard page (a bare hostname, no scheme/port/
+ * path, since the SDK's `domain()` takes a host and not a URL) is how a
+ * free-plan owner gets the stable address their account already has.
  */
-export function validateReservedDomain(
+export function validateNgrokDomain(
   raw: string
 ): { ok: true; domain: string | null } | InvalidOrigin {
   const value = raw.trim()
@@ -183,9 +191,57 @@ export function validateReservedDomain(
       value
     )
   ) {
-    return { ok: false, message: "Enter a valid reserved domain hostname." }
+    return { ok: false, message: "Enter a valid ngrok domain hostname." }
   }
   return { ok: true, domain: value.toLowerCase() }
+}
+
+/**
+ * The states a durable public address can be in for the ngrok provider,
+ * derived purely from `RemoteAccessConfig` -- no network call. Mirrors
+ * `DurableAddressState` in `src-tauri/src/remote_access.rs`, restricted to
+ * the subset that can actually occur today (see that enum's doc comment):
+ * `Provisionable` and `NotProvisionable` are real-but-currently-unreachable
+ * ngrok product states (a free account with zero domains, which does not
+ * happen -- every free-plan account is assigned one at creation) and are
+ * deliberately not surfaced here. `Revoked` and `DiscoveryUnreachable` need
+ * an actual reachability check this console cannot perform on its own
+ * (there is no verified API path -- see the Rust adapter's doc comment for
+ * why), so they are not derivable from config alone and are also omitted.
+ */
+export type NgrokDurableAddressState =
+  | { kind: "not_applicable" }
+  | { kind: "available"; address: string }
+  | {
+      kind: "auth_insufficient"
+      reason: string
+    }
+
+/**
+ * `config.ngrok.reserved_domain` already means "the owner has told us their
+ * stable ngrok address" -- if it is set, that field IS the durable address,
+ * with no further check needed. If it is unset, this app has no verified
+ * way to look one up automatically (ngrok's account-management API needs a
+ * separate API key, not the tunnel authtoken this app already holds, and
+ * asking for a second credential to read a value off a dashboard is worse
+ * UX than asking for the value itself), so the honest state is
+ * `auth_insufficient` with the concrete next step, never a silent guess.
+ */
+export function ngrokDurableAddressState(
+  config: RemoteAccessConfig
+): NgrokDurableAddressState {
+  if (config.provider !== "ngrok") {
+    return { kind: "not_applicable" }
+  }
+  const domain = config.ngrok?.reserved_domain
+  if (domain) {
+    return { kind: "available", address: domain }
+  }
+  return {
+    kind: "auth_insufficient",
+    reason:
+      "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy it from dashboard.ngrok.com/domains and paste it below.",
+  }
 }
 
 /** Remote postures cannot become active before the owner-password step. */
