@@ -165,3 +165,47 @@ test("settings shows no blocked-IPC error banner text", async ({ page }) => {
     'expected Settings to render without a "Plugin not found" error banner (Tauri IPC plugin missing)'
   ).not.toContain("Plugin not found")
 })
+
+test("settings does not hang on 'Reading the current remote access state', with no console errors or 404'd chunks", async ({
+  page,
+}) => {
+  // Confirmed live, 2026-09-19: a stale next-server process (running from a
+  // staged build directory a live rebuild had already replaced under it,
+  // fixed in scripts/ensure-console-stack.js) served this exact page stuck
+  // forever on "Reading the current remote access state…" because its own
+  // JS chunk 404'd -- a browser resource-loading failure the prior
+  // owner-journey assertions above did not catch, since they only check for
+  // server-rendered headings/labels that appear before the failing client
+  // fetch ever runs. This test asserts the property those did not: the page
+  // must actually finish reading remote-access state, not just render its
+  // static shell.
+  const consoleErrors: string[] = []
+  const failed404s: string[] = []
+  page.on("console", msg => {
+    if (msg.type() === "error") consoleErrors.push(msg.text())
+  })
+  page.on("response", res => {
+    if (res.status() === 404) failed404s.push(res.url())
+  })
+
+  await loginAsOwner(page)
+  await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" })
+
+  const readingState = page.getByText(
+    "Reading the current remote access state…"
+  )
+  await expect(
+    readingState,
+    "expected the loading placeholder to disappear once the client's own remote-access fetch resolves, " +
+      "not remain stuck forever"
+  ).toBeHidden({ timeout: 10_000 })
+
+  expect(
+    failed404s,
+    `expected no 404'd requests while loading Settings, found: ${JSON.stringify(failed404s)}`
+  ).toEqual([])
+  expect(
+    consoleErrors,
+    `expected no browser console errors while loading Settings, found: ${JSON.stringify(consoleErrors)}`
+  ).toEqual([])
+})

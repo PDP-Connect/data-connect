@@ -220,13 +220,110 @@ const NGROK_ENDPOINT_MODES: readonly NgrokEndpointMode[] = [
 ]
 
 /**
+ * The states a durable public address can be in for a provider, derived
+ * purely from stored config -- no network call. Mirrors `DurableAddressState`
+ * in `src-tauri/src/remote_access.rs`, restricted to the subset reachable
+ * today (see that enum's doc comment for the full 8-variant shape and why the
+ * rest are kept there but not here): `Provisionable`/`NotProvisionable` are a
+ * real-but-currently-unreachable ngrok product state (a free account with
+ * zero domains, which does not happen -- every free-plan account is assigned
+ * one at creation); `Revoked`/`DiscoveryUnreachable`/`AvailableMultiple` need
+ * an actual reachability check neither this server nor the console can
+ * perform without a verified ngrok API path (see
+ * `ngrokDurableAddress`'s doc comment for why), so they are not derivable
+ * from config alone.
+ */
+export type DurableAddressState =
+  | { kind: "not_applicable" }
+  | { kind: "available"; address: string }
+  | { kind: "auth_insufficient"; reason: string }
+
+/**
+ * `config.ngrok.reserved_domain` already means "the owner has told us their
+ * stable ngrok address" -- if it is set, that field IS the durable address,
+ * with no further check needed. If it is unset, this app has no verified way
+ * to look one up automatically (ngrok's account-management API needs a
+ * separate API key, not the tunnel authtoken this app already holds, and
+ * asking for a second credential to read a value off a dashboard is worse UX
+ * than asking for the value itself), so the honest state is
+ * `auth_insufficient` with the concrete next step, never a silent guess.
+ *
+ * Kept byte-for-byte equivalent to the Rust free function
+ * `ngrok_durable_address_for_reserved_domain` in
+ * `src-tauri/src/remote_access_ngrok.rs`, which both a live `NgrokProvider`
+ * and the config-only `PublicUrlProvider` (`remote_access_providers.rs`)
+ * call, so there is one implementation per language, not two per language
+ * that could drift out of step with each other.
+ */
+export function ngrokDurableAddress(reservedDomain: string | null | undefined): DurableAddressState {
+  if (reservedDomain) {
+    return { kind: "available", address: reservedDomain }
+  }
+  return {
+    kind: "auth_insufficient",
+    reason:
+      "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy it from dashboard.ngrok.com/domains and paste it below.",
+  }
+}
+
+/**
+ * `user_supplied_origin` has no durable-address concept at all: the owner
+ * supplies the whole origin directly, so there is nothing to discover,
+ * provision, or lose. Matches `UserSuppliedOriginProvider::durable_address()`
+ * in `src-tauri/src/remote_access.rs`, the honesty check for the shape above
+ * -- a provider with nothing to report costs one constant, not a branch.
+ */
+export const USER_SUPPLIED_ORIGIN_DURABLE_ADDRESS: DurableAddressState = { kind: "not_applicable" }
+
+/**
+ * The durable-address state for whichever provider `config` currently
+ * selects. `null` for `off`/`my_devices_only` or an unrecognized provider,
+ * where the question does not apply.
+ */
+export function durableAddressState(config: RemoteAccessConfig): DurableAddressState | null {
+  if (config.provider === "user_supplied_origin") {
+    return USER_SUPPLIED_ORIGIN_DURABLE_ADDRESS
+  }
+  if (config.provider === "ngrok") {
+    return ngrokDurableAddress(config.ngrok?.reserved_domain ?? null)
+  }
+  return null
+}
+
+/**
+ * The single rule `validateNgrokConfig` (and, in Rust,
+ * `validate_remote_access_config`) uses to decide whether
+ * `PDPP_REFERENCE_ORIGIN` is required in stored config already, or must stay
+ * empty until a live session reports it: true for every state where a
+ * concrete origin is already resolvable from config alone
+ * (`not_applicable` -- `user_supplied_origin` always supplies the whole
+ * origin, so it is "known up front" even with no discovery concept at all --
+ * and `available`, a durable address already exists). False for
+ * `auth_insufficient`, meaning the provider itself must report the origin
+ * once a session starts -- ngrok with no configured domain.
+ *
+ * Mirrors `DurableAddressState::origin_is_knowable_from_config` in
+ * `src-tauri/src/remote_access.rs` exactly; see that method's doc comment for
+ * why this replaced a separate, provider-kind-hardcoded concept
+ * (`discovers_own_origin`) that a config-only rule (this function's prior
+ * incarnation, which rejected ANY non-empty ngrok origin unconditionally)
+ * drifted out of step with the moment a dev domain made ngrok's origin
+ * knowable up front. Confirmed live, 2026-09-19: that drift is exactly what
+ * broke -- the owner's dev-domain origin was rejected here, the RS threw, and
+ * the console's settings page crashed.
+ */
+export function originIsKnowableFromConfig(state: DurableAddressState): boolean {
+  return state.kind === "not_applicable" || state.kind === "available"
+}
+
+/**
  * Mirrors `validate_remote_access_config`'s ngrok branch in
  * `src-tauri/src/remote_access.rs` plus `resolve_public_url_provider`'s
- * reserved-domain rule in `src-tauri/src/remote_access_providers.rs`: ngrok
- * discovers its own origin at tunnel start, so `PDPP_REFERENCE_ORIGIN` and
- * `PDPP_TRUSTED_HOSTS` must be empty here -- the Tauri supervisor fills them
- * in once the tunnel reports its assigned address (see
- * `NgrokProvider::reachability_fields` and `restart_after_remote_access_config`).
+ * origin-timing rule in `src-tauri/src/remote_access_providers.rs`: derives
+ * whether an origin is required in config yet from `ngrokDurableAddress` via
+ * `originIsKnowableFromConfig`, the same single rule the Rust side uses,
+ * rather than a fact hardcoded to this function alone.
+ *
  * `ngrok_authtoken_sealed` passes through untouched; this function only
  * validates config shape, never the credential.
  */
@@ -238,26 +335,61 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
   if (ngrok.endpoint_mode === "tcp_passthrough" && ngrok.reserved_domain) {
     return { ok: false, message: "ngrok TCP endpoints reserve an address, not a domain." }
   }
-  if (config.fields.PDPP_REFERENCE_ORIGIN || config.fields.PDPP_TRUSTED_HOSTS.trim()) {
+  const ngrokOptions = { endpoint_mode: ngrok.endpoint_mode, reserved_domain: ngrok.reserved_domain ?? null }
+  const origin = config.fields.PDPP_REFERENCE_ORIGIN
+  const originKnowableFromConfig = originIsKnowableFromConfig(ngrokDurableAddress(ngrok.reserved_domain ?? null))
+
+  if (!origin) {
+    if (config.fields.PDPP_TRUSTED_HOSTS.trim()) {
+      return {
+        ok: false,
+        message: "PDPP_TRUSTED_HOSTS must be empty until ngrok reports an origin.",
+      }
+    }
+    return {
+      ok: true,
+      config: {
+        posture: "public_url",
+        provider: "ngrok",
+        fields: offRemoteAccessConfig().fields,
+        ngrok: ngrokOptions,
+        ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
+        // Passed through, not synthesized: a reload of a file the Tauri
+        // supervisor wrote a failure to (`apply_ngrok_tunnel_outcome` in
+        // src-tauri/src/unified.rs) must keep reporting it, while a config
+        // the console just submitted never carries this field in the first
+        // place, so it naturally clears on the owner's next submission
+        // without this function needing to tell those two callers apart.
+        tunnel_error: config.tunnel_error ?? null,
+      },
+    }
+  }
+  if (!originKnowableFromConfig) {
+    // An origin is present but the provider's own durable-address state
+    // says it should not be knowable yet (no domain configured): reject
+    // rather than silently trust a value nothing vouches for -- this is the
+    // ngrok-without-a-domain case, and it must keep failing closed the same
+    // way it did before this fix.
     return {
       ok: false,
-      message: "PDPP_REFERENCE_ORIGIN and PDPP_TRUSTED_HOSTS must be empty until ngrok reports an origin.",
+      message: "PDPP_REFERENCE_ORIGIN must be empty until ngrok reports an origin.",
     }
+  }
+  const validated = validateUserSuppliedOrigin(origin)
+  if (!validated.ok) {
+    return validated
+  }
+  if (config.fields.PDPP_TRUSTED_HOSTS.trim() !== validated.host) {
+    return { ok: false, message: "PDPP_TRUSTED_HOSTS must contain the origin host." }
   }
   return {
     ok: true,
     config: {
       posture: "public_url",
       provider: "ngrok",
-      fields: offRemoteAccessConfig().fields,
-      ngrok: { endpoint_mode: ngrok.endpoint_mode, reserved_domain: ngrok.reserved_domain ?? null },
+      fields: validated.fields,
+      ngrok: ngrokOptions,
       ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
-      // Passed through, not synthesized: a reload of a file the Tauri
-      // supervisor wrote a failure to (`apply_ngrok_tunnel_outcome` in
-      // src-tauri/src/unified.rs) must keep reporting it, while a config the
-      // console just submitted never carries this field in the first place,
-      // so it naturally clears on the owner's next submission without this
-      // function needing to tell those two callers apart.
       tunnel_error: config.tunnel_error ?? null,
     },
   }

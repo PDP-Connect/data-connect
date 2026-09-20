@@ -102,10 +102,84 @@ impl NgrokTunnel {
     }
 }
 
+/// Drives `OwnedNgrokResources::runtime` for the tunnel's entire lifetime on
+/// a dedicated background thread, independent of the thread that started the
+/// tunnel or the thread that later stops it.
+///
+/// Why this exists -- confirmed from the ngrok crate's own source
+/// (`~/.tmp/ngrok-rust-src/ngrok/src/forwarder.rs`, `forward()`):
+/// `ForwarderBuilder::listen_and_forward()` (used by `listen_and_forward`
+/// below) calls `tunnel.listen()` to bind the endpoint -- which is what
+/// completes and lets this adapter log "ngrok tunnel is up" -- and THEN
+/// calls `tokio::spawn(async move { forward_tunnel(...) })` to start the
+/// actual byte-forwarding loop as a task on whichever Tokio runtime is
+/// current at that moment. A `current_thread` runtime (what `OwnedNgrokResources`
+/// builds) only polls its spawned tasks while a thread is actively inside
+/// `Runtime::block_on` on it -- it has exactly one worker, and that worker
+/// only runs while `block_on` is on the stack. The adapter's tunnel-start
+/// path (`start_on_runtime`) used to call `resources.runtime.block_on(...)`
+/// once, to await session-connect and `listen_and_forward` (which spawns the
+/// forwarding task right at the end, as the very last thing inside that
+/// `.await`), and then RETURN -- ending that `block_on` call and leaving the
+/// runtime with nothing driving its executor from that point on. The
+/// forwarding task was never dropped and never crashed; it was simply never
+/// polled again, so it made no progress and forwarded no traffic, while the
+/// tunnel handle's own metadata (`.url()`) was already resolved and kept
+/// reporting a URL that looked live. This is the exact contradiction
+/// confirmed live: "ngrok tunnel is up" logged successfully, curl of that
+/// same URL returned `ERR_NGROK_3200` (endpoint offline) immediately after,
+/// with no stop/error/restart logged in between.
+///
+/// The fix: after the tunnel is bound, hand the `Runtime` to a dedicated
+/// thread that calls `block_on` on a future which does not resolve until
+/// `close()` sends a shutdown signal -- keeping the executor continuously
+/// polling the already-spawned forwarding task for as long as the tunnel is
+/// held, across `start_runtime`/`close` regardless of which thread calls
+/// them. `session`/`tunnel` stay directly on `OwnedNgrokResources`, not
+/// moved into the thread's closure, because `NgrokProvider::health()` and
+/// `discover_origin()` read them synchronously from the calling thread; only
+/// the `Runtime`'s own executor-driving responsibility moves.
+struct RuntimeKeepAlive {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    thread: std::thread::JoinHandle<Runtime>,
+}
+
+impl RuntimeKeepAlive {
+    fn spawn(runtime: Runtime) -> Self {
+        let (shutdown, shutdown_received) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("ngrok-runtime-keepalive".to_string())
+            .spawn(move || {
+                runtime.block_on(async {
+                    let _ = shutdown_received.await;
+                });
+                runtime
+            })
+            .expect("spawning the ngrok runtime keep-alive thread");
+        Self { shutdown, thread }
+    }
+
+    /// Signal shutdown and reclaim the `Runtime`, blocking until the
+    /// keep-alive thread's `block_on` call actually returns. The reclaimed
+    /// runtime is still fully usable -- this only stops the indefinite
+    /// keep-alive future, not the runtime itself -- so the caller can run
+    /// its own close-sequence `block_on` on it afterward, exactly as before
+    /// this fix.
+    fn stop_and_reclaim(self) -> Runtime {
+        // A send error means the keep-alive thread already exited (e.g. it
+        // panicked) -- the join below still recovers or reports that.
+        let _ = self.shutdown.send(());
+        self.thread
+            .join()
+            .unwrap_or_else(|_| panic!("ngrok runtime keep-alive thread panicked"))
+    }
+}
+
 struct OwnedNgrokResources {
     runtime: Runtime,
     session: Option<Session>,
     tunnel: Option<NgrokTunnel>,
+    keep_alive: Option<RuntimeKeepAlive>,
 }
 
 impl OwnedNgrokResources {
@@ -117,8 +191,32 @@ impl OwnedNgrokResources {
                 runtime,
                 session: None,
                 tunnel: None,
+                keep_alive: None,
             })
             .map_err(|error| format!("could not create ngrok runtime: {error}"))
+    }
+
+    /// Start driving `self.runtime` continuously on a dedicated background
+    /// thread. Must be called once the tunnel is bound and its forwarding
+    /// task has been spawned (i.e. right after `start_on_runtime`'s
+    /// `block_on` call returns) -- see `RuntimeKeepAlive`'s doc comment for
+    /// why a gap here would leave the forwarding task unpolled.
+    fn start_keep_alive(&mut self) {
+        debug_assert!(
+            self.keep_alive.is_none(),
+            "start_keep_alive must not be called twice without an intervening close"
+        );
+        let runtime = std::mem::replace(
+            &mut self.runtime,
+            // A placeholder: immediately replaced by `close_on_runtime`'s
+            // reclaim before this one is ever used. `Runtime` has no cheap
+            // "empty" constructor, so build a real (unused) one rather than
+            // reach for `Option<Runtime>` everywhere else in this struct.
+            RuntimeBuilder::new_current_thread()
+                .build()
+                .expect("building a placeholder Tokio runtime"),
+        );
+        self.keep_alive = Some(RuntimeKeepAlive::spawn(runtime));
     }
 
     fn close(self) -> Result<(), String> {
@@ -131,6 +229,14 @@ impl OwnedNgrokResources {
     }
 
     fn close_on_runtime(mut self) -> Result<(), String> {
+        // Reclaim the runtime from the keep-alive thread before using it for
+        // the close sequence below -- `stop_and_reclaim` blocks until that
+        // thread's indefinite `block_on` actually returns, so there is no
+        // window where both the keep-alive thread and this call are driving
+        // the same runtime at once.
+        if let Some(keep_alive) = self.keep_alive.take() {
+            self.runtime = keep_alive.stop_and_reclaim();
+        }
         let result = self.runtime.block_on(async {
             let tunnel_result = match self.tunnel.as_mut() {
                 Some(tunnel) => tunnel.close().await.map_err(|error| error.to_string()),
@@ -366,38 +472,53 @@ where
         self.stop_owned()
     }
 
-    /// ngrok's free plan assigns exactly one persistent "Dev Domain" to
-    /// every account at account creation -- there is no "zero domains"
-    /// state on free, and no purchase is required (see the ngrok-free-plan
-    /// research corpus entries). That domain is real and stable; the gap is
-    /// entirely that nothing in this codebase could tell the owner it
-    /// exists or ask them to use it, so every restart minted a fresh random
-    /// hostname instead of the one their account already has.
-    ///
-    /// This adapter has no verified way to discover that hostname on its
-    /// own: the tunnel authtoken it holds starts sessions but has no
-    /// confirmed discovery RPC for account-level resources, and ngrok's
-    /// account-management REST API (which does list domains) requires a
-    /// SEPARATE API key, not the tunnel authtoken -- confirmed the hard way
-    /// against the real API, which rejected the authtoken outright.
-    /// Deliberately not guessed at: asking the owner for a second
-    /// credential (an API key) to look up a value they can read off their
-    /// own dashboard in five seconds would be worse UX than asking for the
-    /// value itself, so this reports `AuthInsufficient` with the concrete
-    /// next step rather than pretending to discover it. If a reserved
-    /// domain is already configured (the owner already pasted their dev
-    /// domain, or a paid custom domain), that IS the durable address and is
-    /// reported as `Available` -- discovery is the only unverified part,
-    /// not the reuse of what the owner already told us.
     fn durable_address(&self) -> DurableAddressState {
-        match self.reserved_domain.as_deref() {
-            Some(domain) => DurableAddressState::Available {
-                address: domain.to_string(),
-            },
-            None => DurableAddressState::AuthInsufficient {
-                reason: "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy your domain from dashboard.ngrok.com/domains and paste it in Settings.".to_string(),
-            },
-        }
+        ngrok_durable_address_for_reserved_domain(self.reserved_domain.as_deref())
+    }
+}
+
+/// ngrok's free plan assigns exactly one persistent "Dev Domain" to every
+/// account at account creation -- there is no "zero domains" state on free,
+/// and no purchase is required (see the ngrok-free-plan research corpus
+/// entries). That domain is real and stable; the gap is entirely that
+/// nothing in this codebase could tell the owner it exists or ask them to
+/// use it, so every restart minted a fresh random hostname instead of the
+/// one their account already has.
+///
+/// No verified way exists to discover that hostname automatically: the
+/// tunnel authtoken this app holds starts sessions but has no confirmed
+/// discovery RPC for account-level resources, and ngrok's account-management
+/// REST API (which does list domains) requires a SEPARATE API key, not the
+/// tunnel authtoken -- confirmed the hard way against the real API, which
+/// rejected the authtoken outright. Deliberately not guessed at: asking the
+/// owner for a second credential (an API key) to look up a value they can
+/// read off their own dashboard in five seconds would be worse UX than
+/// asking for the value itself, so this reports `AuthInsufficient` with the
+/// concrete next step rather than pretending to discover it. If a reserved
+/// domain is already configured (the owner already pasted their dev domain,
+/// or a paid custom domain), that IS the durable address and is reported as
+/// `Available` -- discovery is the only unverified part, not the reuse of
+/// what the owner already told us.
+///
+/// A free function, not a method on a live `NgrokProvider`, because
+/// `PublicUrlProvider::durable_address()` (`remote_access_providers.rs`)
+/// needs this exact same answer BEFORE a provider instance exists -- it
+/// validates stored config, which has no running session to ask. Both call
+/// sites now share one implementation instead of two copies that could
+/// drift, which is what happened to the TypeScript mirror of this same
+/// question before this fix (`validateNgrokConfig` in
+/// remote-access-config.ts treated ngrok as always origin-unknown,
+/// independent of whether a domain was configured).
+pub(crate) fn ngrok_durable_address_for_reserved_domain(
+    reserved_domain: Option<&str>,
+) -> DurableAddressState {
+    match reserved_domain {
+        Some(domain) => DurableAddressState::Available {
+            address: domain.to_string(),
+        },
+        None => DurableAddressState::AuthInsufficient {
+            reason: "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy your domain from dashboard.ngrok.com/domains and paste it in Settings.".to_string(),
+        },
     }
 }
 
@@ -452,6 +573,14 @@ fn start_on_runtime(
             return Err(error);
         }
     };
+    // The forwarding task `listen_and_forward` just spawned onto
+    // `resources.runtime` only makes progress while something is inside
+    // `Runtime::block_on` on it -- the `block_on` call above already
+    // returned, so nothing is driving it yet. Start the keep-alive thread
+    // now, before returning, so the tunnel actually carries traffic for as
+    // long as it is held. See `RuntimeKeepAlive`'s doc comment for the full
+    // mechanism and the live incident this fixes.
+    resources.start_keep_alive();
     Ok((resources, origin))
 }
 
@@ -846,5 +975,75 @@ mod tests {
         assert!(
             validate_reserved_domain("vault.ngrok.app", NgrokEndpointMode::TcpPassthrough).is_err()
         );
+    }
+
+    /// Confirmed live, 2026-09-19: "ngrok tunnel is up" logged successfully,
+    /// then curl of that exact URL returned ERR_NGROK_3200 (endpoint
+    /// offline) seconds later with no stop/error/restart logged in between.
+    /// Traced to the ngrok crate's own `forward()` (`~/.tmp/ngrok-rust-src/
+    /// ngrok/src/forwarder.rs`): it `tokio::spawn`s the actual forwarding
+    /// task onto whichever runtime is current, but this adapter's
+    /// `start_on_runtime` only drove its `current_thread` runtime for the
+    /// single `block_on` call that bound the tunnel -- once that call
+    /// returned, nothing polled the runtime's executor again, so the
+    /// forwarding task was live but never scheduled.
+    ///
+    /// A real ngrok session cannot be used in a unit test (would generate
+    /// live churn, forbidden this session), so this proves the underlying
+    /// mechanism directly: a task spawned on a `current_thread` runtime
+    /// during one `block_on` call does NOT make progress once that call
+    /// returns and nothing else drives the runtime (a bare
+    /// `tokio::time::sleep` is enough to demonstrate the starvation --
+    /// `Instant::now()` before/after with no intervening `block_on` proves
+    /// no scheduler ran), but DOES make progress once
+    /// `RuntimeKeepAlive::spawn` starts continuously driving that same
+    /// runtime on its own thread -- exactly the fix applied to the real
+    /// tunnel-forwarding task in `start_on_runtime`.
+    #[test]
+    fn a_task_spawned_during_one_block_on_call_does_not_progress_after_that_call_returns() {
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let progressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let progressed_for_task = progressed.clone();
+
+        // Spawn the task during a `block_on` call that returns immediately
+        // after spawning -- mirroring `listen_and_forward`'s `tokio::spawn`
+        // happening as the last thing inside `start_on_runtime`'s original
+        // `block_on`, with nothing awaiting the spawned task's own progress.
+        let mut runtime = runtime;
+        runtime.block_on(async {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                progressed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+
+        // The runtime is not being driven by anything right now. Give the
+        // spawned task ample real time to run if it somehow could.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !progressed.load(std::sync::atomic::Ordering::SeqCst),
+            "a task spawned during a block_on call that already returned must NOT \
+             progress on its own -- this is the exact starvation this fix corrects"
+        );
+
+        // Starting the keep-alive lets the SAME runtime's executor resume
+        // polling the already-spawned task, exactly as `start_keep_alive`
+        // does for the real tunnel's forwarding task.
+        let keep_alive = RuntimeKeepAlive::spawn(runtime);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            progressed.load(std::sync::atomic::Ordering::SeqCst),
+            "the task must complete once RuntimeKeepAlive is continuously driving its runtime"
+        );
+
+        let reclaimed = keep_alive.stop_and_reclaim();
+        // The reclaimed runtime must still be a live, usable Tokio runtime,
+        // not a shell left behind by the keep-alive thread -- `close_on_runtime`
+        // depends on this to run the tunnel/session close sequence afterward.
+        let ran_after_reclaim = reclaimed.block_on(async { 1 + 1 });
+        assert_eq!(ran_after_reclaim, 2);
     }
 }

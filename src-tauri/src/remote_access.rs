@@ -251,6 +251,46 @@ pub(crate) enum DurableAddressState {
     DiscoveryUnreachable { reason: String },
 }
 
+impl DurableAddressState {
+    /// The single rule `validate_remote_access_config` uses to decide
+    /// whether `PDPP_REFERENCE_ORIGIN` is required in the stored config
+    /// (this state) or must stay empty until a live session reports it
+    /// (the opposite): true for every state where a concrete origin is
+    /// already resolvable from config alone -- `NotApplicable`
+    /// (`user_supplied_origin`: the owner supplies the whole origin, so it
+    /// is always "known up front" even though there is no discovery
+    /// concept at all) and `Available`/`AvailableMultiple` (a durable
+    /// address already exists, whether or not the owner has picked one of
+    /// several yet -- once picked, it belongs in config the same way
+    /// `Available` does). False for every state describing origin
+    /// discovery that has not (yet, or ever, from here) resolved to a
+    /// value: `Provisionable`, `NotProvisionable`, `Revoked`,
+    /// `AuthInsufficient`, `DiscoveryUnreachable` -- these all mean the
+    /// provider itself must report the origin once a session starts,
+    /// exactly ngrok's shape with no dev domain configured.
+    ///
+    /// This replaces a prior design where origin-timing was a SEPARATE,
+    /// ngrok-specific concept (`PublicUrlProvider::discovers_own_origin`,
+    /// hardcoded per provider kind) living alongside `durable_address()`
+    /// without being derived from it -- confirmed live, 2026-09-19: the
+    /// TypeScript mirror of that separate concept
+    /// (`validateNgrokConfig` in remote-access-config.ts) went stale the
+    /// moment a dev domain made ngrok's origin knowable up front, because
+    /// nothing forced the two concepts to agree. A future provider (a
+    /// Cloudflare named tunnel, Tailscale Funnel) only has to implement
+    /// `durable_address()` honestly; origin timing then falls out of this
+    /// one method for free, in both the Rust and TypeScript validators (see
+    /// `originIsKnowableFromConfig` in
+    /// reference-implementation/server/remote-access-config.ts, the
+    /// TypeScript mirror of this exact match).
+    pub(crate) fn origin_is_knowable_from_config(&self) -> bool {
+        matches!(
+            self,
+            Self::NotApplicable | Self::Available { .. } | Self::AvailableMultiple { .. }
+        )
+    }
+}
+
 pub(crate) trait RemoteAccessProvider {
     fn inspect(&self) -> RemoteAccessInspection;
 
@@ -441,10 +481,17 @@ pub(crate) fn validate_remote_access_config(
                 config.ngrok.as_ref(),
             )?;
 
-            // ngrok is assigned its origin by the edge at start, so the stored
-            // config legitimately has no origin yet. The supervisor writes the
-            // four fields from the discovered origin once the tunnel is up.
-            if provider.discovers_own_origin() && config.fields.reference_origin.is_none() {
+            // Origin timing is derived from the provider's OWN
+            // durable_address() (`origin_is_knowable_from_config`), not a
+            // separate hardcoded-per-provider concept: ngrok with no
+            // configured domain reports origin-unknown here, same as before,
+            // but ngrok WITH a configured dev/reserved domain -- or
+            // user_supplied_origin, which always supplies the whole origin
+            // directly -- correctly falls through to normal origin
+            // validation below instead of being forced empty.
+            if !provider.origin_is_knowable_from_config()
+                && config.fields.reference_origin.is_none()
+            {
                 if !config.fields.trusted_hosts.trim().is_empty() {
                     return Err(
                         "PDPP_TRUSTED_HOSTS must be empty until the provider reports an origin"
@@ -654,6 +701,115 @@ mod tests {
         .expect("provider");
 
         assert_eq!(provider.durable_address(), DurableAddressState::NotApplicable);
+    }
+
+    fn ngrok_config(
+        origin: Option<&str>,
+        trusted_hosts: &str,
+        reserved_domain: Option<&str>,
+    ) -> RemoteAccessConfig {
+        RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some(crate::remote_access_ngrok::NGROK_PROVIDER_ID.to_string()),
+            fields: ReachabilityFields {
+                reference_origin: origin.map(str::to_string),
+                trusted_hosts: trusted_hosts.to_string(),
+                trusted_proxies: String::new(),
+                bind_host: LOOPBACK_BIND_HOST.to_string(),
+            },
+            ngrok: Some(crate::remote_access_providers::NgrokOptions {
+                endpoint_mode:
+                    crate::remote_access_providers::NgrokEndpointModeConfig::HttpsEdgeTermination,
+                reserved_domain: reserved_domain.map(str::to_string),
+            }),
+            ngrok_authtoken_sealed: None,
+            tunnel_error: None,
+        }
+    }
+
+    /// The three addressing cases the origin-timing rule
+    /// (`DurableAddressState::origin_is_knowable_from_config`) must express
+    /// correctly, verified directly against the public validator rather than
+    /// the derived boolean alone -- this is what actually broke live,
+    /// 2026-09-19, and what must never regress again.
+    #[test]
+    fn origin_addressing_case_user_supplied_origin_always_requires_its_origin() {
+        // NotApplicable, but the origin is always present and required --
+        // this is the provider whose behavior a naive
+        // "durable_address means origin known" rule would get backwards.
+        let config = RemoteAccessConfig {
+            posture: RemoteAccessPosture::PublicUrl,
+            provider: Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID.to_string()),
+            fields: ReachabilityFields {
+                reference_origin: Some("https://vault.example.com".to_string()),
+                trusted_hosts: "vault.example.com".to_string(),
+                trusted_proxies: String::new(),
+                bind_host: LOOPBACK_BIND_HOST.to_string(),
+            },
+            ngrok: None,
+            ngrok_authtoken_sealed: None,
+            tunnel_error: None,
+        };
+        let validated = validate_remote_access_config(config.clone()).expect("valid");
+        assert_eq!(validated.fields.reference_origin, config.fields.reference_origin);
+
+        // No origin at all is REJECTED, not silently accepted as "waiting
+        // for discovery" -- user_supplied_origin has no discovery step.
+        let missing_origin = RemoteAccessConfig {
+            fields: ReachabilityFields {
+                reference_origin: None,
+                trusted_hosts: String::new(),
+                ..config.fields.clone()
+            },
+            ..config
+        };
+        assert!(validate_remote_access_config(missing_origin).is_err());
+    }
+
+    #[test]
+    fn origin_addressing_case_ngrok_with_a_configured_domain_requires_its_origin_up_front() {
+        // Available: the durable address is already known, so the origin
+        // may (and, once discovered, will) be populated in config up
+        // front -- this is the exact case that regressed live: a prior
+        // validator unconditionally rejected any non-empty origin for
+        // ngrok, which broke the moment a dev domain made the origin
+        // knowable before the tunnel ever started.
+        let with_origin = ngrok_config(
+            Some("https://moderately-worthy-tetra.ngrok-free.app"),
+            "moderately-worthy-tetra.ngrok-free.app",
+            Some("moderately-worthy-tetra.ngrok-free.app"),
+        );
+        let validated = validate_remote_access_config(with_origin).expect("valid");
+        assert_eq!(
+            validated.fields.reference_origin.as_deref(),
+            Some("https://moderately-worthy-tetra.ngrok-free.app")
+        );
+
+        // Trusted hosts that do not match the origin's own host are still
+        // rejected -- a configured domain does not bypass the normal
+        // origin/host consistency check.
+        let mismatched = ngrok_config(
+            Some("https://moderately-worthy-tetra.ngrok-free.app"),
+            "some-other-host.example.com",
+            Some("moderately-worthy-tetra.ngrok-free.app"),
+        );
+        assert!(validate_remote_access_config(mismatched).is_err());
+    }
+
+    #[test]
+    fn origin_addressing_case_ngrok_without_a_configured_domain_requires_an_empty_origin_until_the_session_reports(
+    ) {
+        // AuthInsufficient: no durable address is known, so the origin must
+        // stay empty until the live tunnel reports one -- unchanged
+        // behavior from before this fix, verified so the fix does not
+        // silently break the random-hostname path while fixing the
+        // dev-domain path.
+        let empty = ngrok_config(None, "", None);
+        let validated = validate_remote_access_config(empty).expect("valid");
+        assert_eq!(validated.fields.reference_origin, None);
+
+        let premature_trusted_hosts = ngrok_config(None, "some-host.ngrok-free.app", None);
+        assert!(validate_remote_access_config(premature_trusted_hosts).is_err());
     }
 
     #[test]

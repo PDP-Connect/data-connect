@@ -635,13 +635,11 @@ export function RemoteAccessSetting({
                   <span className="pdpp-caption text-muted-foreground">
                     Every ngrok account — including the free plan — is
                     assigned one stable domain at signup, at no cost. This app
-                    cannot look yours up automatically, so paste it here.{" "}
-                    <OpenExternalLink
-                      className="underline"
-                      href="https://dashboard.ngrok.com/domains"
-                    >
-                      Find your domain on dashboard.ngrok.com/domains
-                    </OpenExternalLink>
+                    cannot look yours up automatically, so paste it here. Find
+                    yours at{" "}
+                    <span className="select-all font-mono">
+                      dashboard.ngrok.com/domains
+                    </span>
                     . Leaving this empty gets a brand-new random hostname
                     every time DataConnect restarts.
                   </span>

@@ -268,6 +268,33 @@ fn browser_console_url(app: &AppHandle) -> Result<String, String> {
     browser_url_from_runtime_origin(None)
 }
 
+/// Parse the loopback port out of a previously bootstrapped console origin
+/// (`http://127.0.0.1:{port}`), so the NEXT `start_managed_stack` call can
+/// ask `Supervisor::start_on_port` to reuse it -- the same pattern
+/// `held_ngrok.ri_port`/`preferred_ri_port` already uses to keep the RI's
+/// port stable across a config-change restart.
+///
+/// Confirmed live, 2026-09-19: without this, the console supervisor always
+/// called plain `Supervisor::start()` (no preferred port), so a dev-domain
+/// owner's config-change restart (adopting the discovered origin) silently
+/// moved the console from one random port to another (43667 -> 44863). Any
+/// browser tab or bookmark pointed at the old port broke with "refused to
+/// connect", and since the previous window was tied to the old origin, no
+/// window reappeared automatically -- the owner had to reopen from the tray.
+/// `None` (never bootstrapped yet, or the stored origin does not parse) lets
+/// `start_on_port` fall back to its normal fresh-allocation behavior.
+fn preferred_console_port_from_origin(console_origin: Option<&str>) -> Option<u16> {
+    console_origin
+        .and_then(|origin| origin.parse::<tauri::Url>().ok())
+        .and_then(|url| url.port())
+}
+
+fn read_preferred_console_port(app: &AppHandle) -> Option<u16> {
+    let state = app.try_state::<UnifiedRuntimeState>()?;
+    let console_origin = state.console_origin.lock().ok()?.clone();
+    preferred_console_port_from_origin(console_origin.as_deref())
+}
+
 fn configured_console_url() -> Result<String, String> {
     let raw = std::env::var("DATACONNECT_CONSOLE_URL")
         .unwrap_or_else(|_| DEFAULT_CONSOLE_URL.to_string());
@@ -862,6 +889,12 @@ fn start_managed_stack(
         apply_ngrok_tunnel_outcome(app, &console_remote_access.fields, tunnel_error.as_deref());
     }
 
+    // Reuse the console's previous port across a stack-level restart, the
+    // same way `preferred_ri_port` above keeps the RI's port stable -- see
+    // `preferred_console_port_from_origin`'s doc comment for the live bug
+    // this fixes (an owner's open tab/bookmark breaking on every
+    // config-change restart).
+    let preferred_console_port = read_preferred_console_port(app);
     let console = Supervisor::new(
         console_process_spec(
             &node_binary,
@@ -873,7 +906,7 @@ fn start_managed_stack(
         ),
         sink,
     )
-    .start()
+    .start_on_port(preferred_console_port)
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
     let console_url = format!("http://127.0.0.1:{}", console.port());
     Ok(ManagedStackStart {
@@ -1422,6 +1455,34 @@ fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
     }
 }
 
+/// Same sidecar teardown as `cleanup_managed_stack_on_error`, but preserves
+/// any held ngrok tunnel instead of stopping it.
+///
+/// Confirmed live, 2026-09-19: a dev-domain owner's tunnel bound successfully
+/// (`ngrok tunnel is up at https://...`), but the RI then failed to boot
+/// because the reference server's config validator rejected the very origin
+/// the tunnel had just reported (a since-fixed bug in
+/// `reference-implementation/server/remote-access-config.ts`). RI startup
+/// failing surfaces here as a `login_reference_server_with_password_and_host`
+/// or `wait_for_console` error in `finish_bootstrap` below -- and every one of
+/// those branches used to call `cleanup_managed_stack_on_error`, which stops
+/// the tunnel unconditionally. That coupling is its own defect independent of
+/// the validator bug: a bootstrap failure downstream of the tunnel (bad RI
+/// config, login timeout, console readiness, window creation) says nothing
+/// about whether the tunnel itself is healthy, and a tunnel that just proved
+/// itself live is exactly the one `reuse_or_start_ngrok_provider`'s liveness
+/// probe (`probe_ngrok_tunnel_is_live`) is designed to pick back up on the
+/// very next restart attempt -- tearing it down here only forces a fresh,
+/// unnecessary tunnel (and, for a random-hostname config, a new hostname)
+/// once the real cause is fixed and the next attempt succeeds.
+fn cleanup_managed_stack_on_error_keep_ngrok(app: &AppHandle, managed: bool) {
+    if managed {
+        if let Err(error) = stop_stack_keep_ngrok(app) {
+            log::error!("Failed to clean up unified sidecars after startup error: {error}");
+        }
+    }
+}
+
 /// Resolve the unified SQLite database path -- the same
 /// `<app-data-dir>/unified/pdpp.sqlite` path every one of `ri_environment`,
 /// `start_managed_stack`, and `load_bootstrap_secrets` needs, pulled into one
@@ -1613,6 +1674,14 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
 /// this login call -- also dialed over loopback -- must present a Host the
 /// server already trusts. Empty (posture off, or no origin discovered yet)
 /// sends whatever the URL's own authority implies, same as before.
+///
+/// Every failure branch below cleans up with
+/// `cleanup_managed_stack_on_error_keep_ngrok`, not
+/// `cleanup_managed_stack_on_error`: by this point in bootstrap the RI/console
+/// sidecars (and any ngrok tunnel) already started, so a failure here --
+/// login, console readiness, window creation -- is downstream of the tunnel
+/// and says nothing about whether the tunnel itself is healthy. See that
+/// function's doc comment for the live incident this fixes.
 async fn finish_bootstrap(
     app: &AppHandle,
     password: &str,
@@ -1632,13 +1701,13 @@ async fn finish_bootstrap(
     {
         Ok(login) => login,
         Err(error) => {
-            cleanup_managed_stack_on_error(app, managed);
+            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
             return Err(error);
         }
     };
 
     if let Err(error) = wait_for_console(&console_url).await {
-        cleanup_managed_stack_on_error(app, managed);
+        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
         return Err(error);
     }
     let console_origin = console_url
@@ -1647,14 +1716,14 @@ async fn finish_bootstrap(
     let console_origin = match console_origin {
         Ok(origin) => origin,
         Err(error) => {
-            cleanup_managed_stack_on_error(app, managed);
+            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
             return Err(error);
         }
     };
     let cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
-            cleanup_managed_stack_on_error(app, managed);
+            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
             return Err(error);
         }
     };
@@ -1673,12 +1742,12 @@ async fn finish_bootstrap(
         Ok(())
     })();
     if let Err(error) = state_update {
-        cleanup_managed_stack_on_error(app, managed);
+        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
         return Err(error);
     }
 
     if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show) {
-        cleanup_managed_stack_on_error(app, managed);
+        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
         return Err(error);
     }
     set_status(app, UnifiedStatus::Ready);
@@ -2567,6 +2636,50 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn finish_bootstrap_cleans_up_with_the_tunnel_preserving_path() {
+        // Confirmed live, 2026-09-19: a dev-domain owner's ngrok tunnel
+        // bound successfully ("ngrok tunnel is up at https://..."), but RI
+        // startup then failed on an unrelated bug (the config validator
+        // rejecting the very origin the tunnel had just reported). Every
+        // failure branch inside `finish_bootstrap` used to call
+        // `cleanup_managed_stack_on_error`, which stops any held tunnel
+        // unconditionally -- even though a failure downstream of the tunnel
+        // (login, console readiness, window creation) says nothing about
+        // whether the tunnel itself is healthy. This asserts the source
+        // text directly: every `cleanup_managed_stack_on_error` call inside
+        // `finish_bootstrap`'s body must be the tunnel-preserving variant,
+        // `cleanup_managed_stack_on_error_keep_ngrok` -- a static check that
+        // is exact where a runtime test would need a real `AppHandle`
+        // (`tauri::test::mock_app()` returns a mock-runtime handle
+        // incompatible with this file's real-runtime `AppHandle`, so a
+        // behavioral test here would need infrastructure this codebase does
+        // not otherwise build; the state manipulation
+        // `cleanup_managed_stack_on_error_keep_ngrok` performs is already
+        // covered indirectly by `stop_stack_keep_ngrok`'s existing callers).
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("async fn finish_bootstrap(")
+            .expect("finish_bootstrap must exist");
+        let body_end = source[start..]
+            .find("\n/// Recovery-window command")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..body_end];
+
+        let bare_calls = body.matches("cleanup_managed_stack_on_error(").count();
+        let keep_ngrok_calls = body.matches("cleanup_managed_stack_on_error_keep_ngrok(").count();
+        assert_eq!(
+            bare_calls, 0,
+            "finish_bootstrap must never call the tunnel-stopping cleanup directly"
+        );
+        assert!(
+            keep_ngrok_calls >= 6,
+            "expected every finish_bootstrap failure branch (6 as of this fix) to use \
+             the tunnel-preserving cleanup; found {keep_ngrok_calls}"
+        );
+    }
+
+    #[test]
     fn a_free_plan_owner_with_a_configured_dev_domain_gets_a_stable_hostname_across_restarts() {
         // The end-to-end property the brief requires a test for: a
         // free-plan owner who pasted their dev domain into settings
@@ -2847,6 +2960,31 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(
             browser_url_from_runtime_origin(None),
             Err("Console is not ready".to_string())
+        );
+    }
+
+    #[test]
+    fn a_config_change_restart_requests_the_consoles_previous_port() {
+        // Confirmed live, 2026-09-19: a dev-domain owner's config-change
+        // restart (adopting the discovered origin) silently moved the
+        // console from port 43667 to 44863. Any open tab/bookmark broke with
+        // "refused to connect". `start_managed_stack` now asks
+        // `Supervisor::start_on_port` to reuse this parsed port, the same
+        // way the RI already reuses `held_ngrok.ri_port`.
+        assert_eq!(
+            preferred_console_port_from_origin(Some("http://127.0.0.1:43667")),
+            Some(43667)
+        );
+    }
+
+    #[test]
+    fn no_previous_console_origin_falls_back_to_a_fresh_port_allocation() {
+        // First launch, or a stored origin that does not parse: `None` lets
+        // `start_on_port` behave exactly like `start()` always did.
+        assert_eq!(preferred_console_port_from_origin(None), None);
+        assert_eq!(
+            preferred_console_port_from_origin(Some("not a url")),
+            None
         );
     }
 
