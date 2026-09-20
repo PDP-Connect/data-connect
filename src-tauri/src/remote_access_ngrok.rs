@@ -366,38 +366,53 @@ where
         self.stop_owned()
     }
 
-    /// ngrok's free plan assigns exactly one persistent "Dev Domain" to
-    /// every account at account creation -- there is no "zero domains"
-    /// state on free, and no purchase is required (see the ngrok-free-plan
-    /// research corpus entries). That domain is real and stable; the gap is
-    /// entirely that nothing in this codebase could tell the owner it
-    /// exists or ask them to use it, so every restart minted a fresh random
-    /// hostname instead of the one their account already has.
-    ///
-    /// This adapter has no verified way to discover that hostname on its
-    /// own: the tunnel authtoken it holds starts sessions but has no
-    /// confirmed discovery RPC for account-level resources, and ngrok's
-    /// account-management REST API (which does list domains) requires a
-    /// SEPARATE API key, not the tunnel authtoken -- confirmed the hard way
-    /// against the real API, which rejected the authtoken outright.
-    /// Deliberately not guessed at: asking the owner for a second
-    /// credential (an API key) to look up a value they can read off their
-    /// own dashboard in five seconds would be worse UX than asking for the
-    /// value itself, so this reports `AuthInsufficient` with the concrete
-    /// next step rather than pretending to discover it. If a reserved
-    /// domain is already configured (the owner already pasted their dev
-    /// domain, or a paid custom domain), that IS the durable address and is
-    /// reported as `Available` -- discovery is the only unverified part,
-    /// not the reuse of what the owner already told us.
     fn durable_address(&self) -> DurableAddressState {
-        match self.reserved_domain.as_deref() {
-            Some(domain) => DurableAddressState::Available {
-                address: domain.to_string(),
-            },
-            None => DurableAddressState::AuthInsufficient {
-                reason: "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy your domain from dashboard.ngrok.com/domains and paste it in Settings.".to_string(),
-            },
-        }
+        ngrok_durable_address_for_reserved_domain(self.reserved_domain.as_deref())
+    }
+}
+
+/// ngrok's free plan assigns exactly one persistent "Dev Domain" to every
+/// account at account creation -- there is no "zero domains" state on free,
+/// and no purchase is required (see the ngrok-free-plan research corpus
+/// entries). That domain is real and stable; the gap is entirely that
+/// nothing in this codebase could tell the owner it exists or ask them to
+/// use it, so every restart minted a fresh random hostname instead of the
+/// one their account already has.
+///
+/// No verified way exists to discover that hostname automatically: the
+/// tunnel authtoken this app holds starts sessions but has no confirmed
+/// discovery RPC for account-level resources, and ngrok's account-management
+/// REST API (which does list domains) requires a SEPARATE API key, not the
+/// tunnel authtoken -- confirmed the hard way against the real API, which
+/// rejected the authtoken outright. Deliberately not guessed at: asking the
+/// owner for a second credential (an API key) to look up a value they can
+/// read off their own dashboard in five seconds would be worse UX than
+/// asking for the value itself, so this reports `AuthInsufficient` with the
+/// concrete next step rather than pretending to discover it. If a reserved
+/// domain is already configured (the owner already pasted their dev domain,
+/// or a paid custom domain), that IS the durable address and is reported as
+/// `Available` -- discovery is the only unverified part, not the reuse of
+/// what the owner already told us.
+///
+/// A free function, not a method on a live `NgrokProvider`, because
+/// `PublicUrlProvider::durable_address()` (`remote_access_providers.rs`)
+/// needs this exact same answer BEFORE a provider instance exists -- it
+/// validates stored config, which has no running session to ask. Both call
+/// sites now share one implementation instead of two copies that could
+/// drift, which is what happened to the TypeScript mirror of this same
+/// question before this fix (`validateNgrokConfig` in
+/// remote-access-config.ts treated ngrok as always origin-unknown,
+/// independent of whether a domain was configured).
+pub(crate) fn ngrok_durable_address_for_reserved_domain(
+    reserved_domain: Option<&str>,
+) -> DurableAddressState {
+    match reserved_domain {
+        Some(domain) => DurableAddressState::Available {
+            address: domain.to_string(),
+        },
+        None => DurableAddressState::AuthInsufficient {
+            reason: "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy your domain from dashboard.ngrok.com/domains and paste it in Settings.".to_string(),
+        },
     }
 }
 

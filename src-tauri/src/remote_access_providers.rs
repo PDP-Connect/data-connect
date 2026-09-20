@@ -92,9 +92,39 @@ impl PublicUrlProvider {
         }
     }
 
-    /// ngrok discovers its own origin at start; a user-supplied proxy cannot.
-    pub(crate) fn discovers_own_origin(&self) -> bool {
-        matches!(self, Self::Ngrok(_))
+    /// This provider's durable-address capability, computed from stored
+    /// config alone -- no running session or live provider instance exists
+    /// yet at validation time (`resolve_public_url_provider` runs before any
+    /// `RemoteAccessProvider` is constructed). Must answer the exact same
+    /// question a live `NgrokProvider::durable_address()` would once
+    /// started with the same options: both now call the shared
+    /// `ngrok_durable_address_for_reserved_domain`, so there is one
+    /// implementation, not two that can drift.
+    ///
+    /// `UserSuppliedOrigin` reports `NotApplicable` for the same reason
+    /// `UserSuppliedOriginProvider::durable_address()` does (see that
+    /// method's doc comment in `remote_access.rs`): the owner supplies the
+    /// whole origin directly, so there is no addressing concept to report.
+    pub(crate) fn durable_address(&self) -> crate::remote_access::DurableAddressState {
+        match self {
+            Self::UserSuppliedOrigin => crate::remote_access::DurableAddressState::NotApplicable,
+            Self::Ngrok(options) => {
+                crate::remote_access_ngrok::ngrok_durable_address_for_reserved_domain(
+                    options.reserved_domain.as_deref(),
+                )
+            }
+        }
+    }
+
+    /// Whether `PDPP_REFERENCE_ORIGIN` should already be present in stored
+    /// config (true) or must stay empty until a live session reports it
+    /// (false) -- the single rule `validate_remote_access_config` applies,
+    /// derived from this provider's own `durable_address()` rather than a
+    /// separate, provider-kind-keyed concept. See
+    /// `DurableAddressState::origin_is_knowable_from_config`'s doc comment
+    /// for why the two concepts were merged into one.
+    pub(crate) fn origin_is_knowable_from_config(&self) -> bool {
+        self.durable_address().origin_is_knowable_from_config()
     }
 }
 
@@ -192,7 +222,18 @@ mod tests {
         )
         .expect("resolved");
         assert_eq!(resolved.provider_id(), NGROK_PROVIDER_ID);
-        assert!(resolved.discovers_own_origin());
+        // A configured domain IS a durable address the owner already told
+        // us about -- the origin is knowable from config alone, unlike a
+        // fresh random ngrok hostname, which only the live tunnel can
+        // report. See `origin_is_knowable_from_config`'s doc comment: this
+        // is the exact case that a hardcoded "ngrok always discovers its
+        // own origin" rule got wrong.
+        assert!(resolved.origin_is_knowable_from_config());
+        assert!(matches!(
+            resolved.durable_address(),
+            crate::remote_access::DurableAddressState::Available { address }
+                if address == "vault.ngrok.app"
+        ));
     }
 
     #[test]
@@ -204,6 +245,13 @@ mod tests {
         )
         .expect("resolved");
         assert_eq!(resolved.provider_id(), NGROK_PROVIDER_ID);
+        // No domain configured: the origin is only knowable once ngrok's
+        // edge assigns one at tunnel start, same as before this fix.
+        assert!(!resolved.origin_is_knowable_from_config());
+        assert!(matches!(
+            resolved.durable_address(),
+            crate::remote_access::DurableAddressState::AuthInsufficient { .. }
+        ));
     }
 
     #[test]
@@ -246,14 +294,24 @@ mod tests {
     }
 
     #[test]
-    fn user_supplied_origin_does_not_discover_its_own_origin() {
+    fn user_supplied_origin_reports_not_applicable_but_its_origin_is_always_knowable_from_config() {
+        // The crack a single "does this provider discover its own origin"
+        // boolean cannot express cleanly: user_supplied_origin has NO
+        // durable-address concept at all (`NotApplicable`), yet its origin
+        // is always present in config, exactly like a resolved ngrok
+        // domain. `origin_is_knowable_from_config` is the derived answer
+        // both cases need, even though `durable_address()` itself differs.
         let resolved = resolve_public_url_provider(
             &RemoteAccessPosture::PublicUrl,
             Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID),
             None,
         )
         .expect("resolved");
-        assert!(!resolved.discovers_own_origin());
+        assert_eq!(
+            resolved.durable_address(),
+            crate::remote_access::DurableAddressState::NotApplicable
+        );
+        assert!(resolved.origin_is_knowable_from_config());
         assert_eq!(
             resolved.privacy(),
             RemoteAccessPrivacy::ProviderCannotReadPayload

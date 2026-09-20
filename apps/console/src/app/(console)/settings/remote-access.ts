@@ -11,18 +11,24 @@
  * lives there and this module re-exports it. Everything below this re-export
  * is console-only presentation (badges, selectable provider rows).
  */
-import type {
-  InvalidOrigin,
-  NgrokEndpointMode,
-  RemoteAccessConfig,
-  RemoteAccessPosture,
-  RemoteAccessProvider,
+import {
+  durableAddressState,
+  type DurableAddressState,
+  type InvalidOrigin,
+  type NgrokEndpointMode,
+  type RemoteAccessConfig,
+  type RemoteAccessPosture,
+  type RemoteAccessProvider,
 } from "pdpp-reference-implementation/remote-access-config"
 
 export {
+  durableAddressState,
   inspectUserSuppliedOrigin,
+  ngrokDurableAddress,
   offRemoteAccessConfig,
+  originIsKnowableFromConfig,
   validateUserSuppliedOrigin,
+  type DurableAddressState,
   type InvalidOrigin,
   type NgrokEndpointMode,
   type NgrokOptions,
@@ -197,51 +203,18 @@ export function validateNgrokDomain(
 }
 
 /**
- * The states a durable public address can be in for the ngrok provider,
- * derived purely from `RemoteAccessConfig` -- no network call. Mirrors
- * `DurableAddressState` in `src-tauri/src/remote_access.rs`, restricted to
- * the subset that can actually occur today (see that enum's doc comment):
- * `Provisionable` and `NotProvisionable` are real-but-currently-unreachable
- * ngrok product states (a free account with zero domains, which does not
- * happen -- every free-plan account is assigned one at creation) and are
- * deliberately not surfaced here. `Revoked` and `DiscoveryUnreachable` need
- * an actual reachability check this console cannot perform on its own
- * (there is no verified API path -- see the Rust adapter's doc comment for
- * why), so they are not derivable from config alone and are also omitted.
+ * Console-local convenience over the shared `durableAddressState`: the
+ * settings page only ever renders this for the ngrok domain field, so a
+ * non-ngrok provider (including `off`/`user_supplied_origin`, which
+ * `durableAddressState` answers with `null`/`not_applicable` respectively)
+ * collapses to the same `not_applicable` the field's "nothing to show" case
+ * already handles, instead of the caller needing to null-check separately.
  */
-export type NgrokDurableAddressState =
-  | { kind: "not_applicable" }
-  | { kind: "available"; address: string }
-  | {
-      kind: "auth_insufficient"
-      reason: string
-    }
-
-/**
- * `config.ngrok.reserved_domain` already means "the owner has told us their
- * stable ngrok address" -- if it is set, that field IS the durable address,
- * with no further check needed. If it is unset, this app has no verified
- * way to look one up automatically (ngrok's account-management API needs a
- * separate API key, not the tunnel authtoken this app already holds, and
- * asking for a second credential to read a value off a dashboard is worse
- * UX than asking for the value itself), so the honest state is
- * `auth_insufficient` with the concrete next step, never a silent guess.
- */
-export function ngrokDurableAddressState(
-  config: RemoteAccessConfig
-): NgrokDurableAddressState {
+export function ngrokDurableAddressState(config: RemoteAccessConfig): DurableAddressState {
   if (config.provider !== "ngrok") {
     return { kind: "not_applicable" }
   }
-  const domain = config.ngrok?.reserved_domain
-  if (domain) {
-    return { kind: "available", address: domain }
-  }
-  return {
-    kind: "auth_insufficient",
-    reason:
-      "ngrok's free plan assigns one stable domain to your account, but this app cannot look it up automatically. Copy it from dashboard.ngrok.com/domains and paste it below.",
-  }
+  return durableAddressState(config) ?? { kind: "not_applicable" }
 }
 
 /** Remote postures cannot become active before the owner-password step. */
