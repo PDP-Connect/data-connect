@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -278,6 +279,91 @@ function writeManifest(stageDirectory, profile, serverRelativePath) {
   )
 }
 
+/**
+ * Find PIDs of any running process whose current working directory resolves
+ * inside `targetDirectory`, using `/proc/<pid>/cwd` (Linux only -- macOS and
+ * Windows have no equivalent without a new dependency, and are silently
+ * skipped: see this function's caller for why that gap is acceptable).
+ *
+ * Confirmed live, 2026-09-19: this staging step used to `rmSync` +
+ * `renameSync` the target directory unconditionally, which is atomic at the
+ * filesystem level but still pulls the directory out from under any
+ * already-running server process whose `cwd` is inside it -- the OS keeps
+ * the process alive against the now-unlinked inode (its `cwd` shows
+ * `(deleted)`), so it keeps serving stale server-rendered HTML from memory
+ * while every static asset request 404s, since Next's dev/standalone server
+ * reads its build manifest and static-asset expectations once at boot and
+ * never re-reads them (see the `nextjs-deployment` research-corpus entry on
+ * version skew: the fix is one immutable build directory per process plus an
+ * atomic process/front-door cutover, never patching files under a live
+ * server). This app's normal boot sequence never hits this -- staging always
+ * runs once, before the Tauri app is launched (`beforeDevCommand`/
+ * `beforeBuildCommand`), so there is no live process to collide with. It
+ * reproduces only when this script re-runs while a PREVIOUSLY staged console
+ * process is still running against the same fixed target path, i.e. an
+ * iterative rebuild against an already-launched app -- exactly what happened
+ * here.
+ */
+export function findProcessesUsingDirectory(targetDirectory) {
+  if (process.platform !== "linux") {
+    return []
+  }
+  const procDirectory = "/proc"
+  if (!existsSync(procDirectory)) {
+    return []
+  }
+  const resolvedTarget = resolve(targetDirectory)
+  const pids = []
+  let entries
+  try {
+    entries = readdirSync(procDirectory, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+    let cwd
+    try {
+      cwd = readlinkSync(join(procDirectory, entry.name, "cwd"))
+    } catch {
+      // The process exited between readdir and readlink, or this process's
+      // /proc entry is not readable (permissions) -- either way, not a
+      // process this script can or needs to act on.
+      continue
+    }
+    if (cwd === resolvedTarget || cwd.startsWith(`${resolvedTarget}${sep}`)) {
+      pids.push(Number(entry.name))
+    }
+  }
+  return pids
+}
+
+/**
+ * Stop any process still running from inside `targetDirectory` before it is
+ * removed/replaced, so a live rebuild never leaves a server running against
+ * a directory that no longer exists on disk (see
+ * `findProcessesUsingDirectory`'s doc comment for the live incident this
+ * fixes). SIGTERM only -- this mirrors the same graceful-stop-then-timeout
+ * shape `StopPolicy` uses on the Rust side (`process_supervisor.rs`) rather
+ * than jumping straight to SIGKILL, since a `next-server` process may be
+ * mid-request. A best-effort safety net for the dev/rebuild loop, not a
+ * substitute for the Tauri supervisor's own lifecycle management of the
+ * process IT started -- this only catches an ORPHANED process from a stage
+ * directory whose owning Tauri app is no longer tracking it (e.g. a
+ * previous dev session, or an external rebuild against a directory the
+ * current process still has a handle open on).
+ */
+function stopProcessesUsingDirectory(targetDirectory) {
+  for (const pid of findProcessesUsingDirectory(targetDirectory)) {
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {
+      // Already exited, or not ours to signal (EPERM) -- either way there
+      // is nothing more this script can safely do about it.
+    }
+  }
+}
+
 export function stageConsoleStack({
   projectRoot = PROJECT_ROOT,
   profile = DEFAULT_PROFILE,
@@ -327,6 +413,16 @@ export function stageConsoleStack({
     stageSimpleIconsPackage(root, stagedRuntimeDirectory)
     writeLauncher(temporaryDirectory, serverRelativePath)
     writeManifest(temporaryDirectory, validatedProfile, serverRelativePath)
+    // Stop any orphaned process still serving from the directory this rename
+    // is about to replace -- see `stopProcessesUsingDirectory`'s doc comment.
+    // A brief settle wait lets SIGTERM actually take effect (asynchronous;
+    // this whole function is sync) before the swap, without blocking the
+    // common case (nothing running there) more than the process-scan itself
+    // costs.
+    if (existsSync(targetDirectory)) {
+      stopProcessesUsingDirectory(targetDirectory)
+      spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 200)"])
+    }
     rmSync(targetDirectory, { force: true, recursive: true })
     renameSync(temporaryDirectory, targetDirectory)
   } catch (error) {

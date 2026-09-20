@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   mkdtempSync,
@@ -13,7 +14,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { parseArgs, stageConsoleStack } from "./ensure-console-stack.js"
+import {
+  findProcessesUsingDirectory,
+  parseArgs,
+  stageConsoleStack,
+} from "./ensure-console-stack.js"
 
 function createConsoleBuildFixture() {
   const root = mkdtempSync(join(tmpdir(), "pdpp-console-stack-"))
@@ -249,4 +254,66 @@ describe("ensure console stack", () => {
       rmSync(root, { force: true, recursive: true })
     }
   })
+
+  describe.skipIf(process.platform !== "linux")(
+    "stale staged-process detection (Linux only, matching findProcessesUsingDirectory's own platform gate)",
+    () => {
+      it("finds a live process whose cwd is inside the target directory, and stops finding it once stopped", async () => {
+        // Confirmed live, 2026-09-19: a next-server process kept running
+        // against a directory ensure-console-stack.js had just replaced,
+        // serving stale HTML while every static asset 404'd. This proves the
+        // detection this fix adds actually sees a real running process by
+        // its /proc/<pid>/cwd, not a mock -- the exact mechanism the
+        // original bug depended on going undetected.
+        const directory = mkdtempSync(join(tmpdir(), "pdpp-stale-process-"))
+        try {
+          const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+            cwd: directory,
+            stdio: "ignore",
+          })
+          try {
+            await new Promise(resolve => setTimeout(resolve, 100))
+            expect(findProcessesUsingDirectory(directory)).toContain(child.pid)
+
+            child.kill("SIGTERM")
+            await new Promise(resolve => {
+              child.once("exit", resolve)
+            })
+            await new Promise(resolve => setTimeout(resolve, 50))
+            expect(findProcessesUsingDirectory(directory)).not.toContain(
+              child.pid
+            )
+          } finally {
+            if (!child.killed) child.kill("SIGKILL")
+          }
+        } finally {
+          rmSync(directory, { force: true, recursive: true })
+        }
+      })
+
+      it("does not match a process whose cwd is merely a sibling with a shared prefix", () => {
+        // /a/b-other must not match target /a/b -- a naive string-prefix
+        // check without the trailing separator would false-positive here.
+        const directory = mkdtempSync(join(tmpdir(), "pdpp-stale-process-"))
+        const sibling = `${directory}-other`
+        mkdirSync(sibling, { recursive: true })
+        try {
+          const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
+            cwd: sibling,
+            stdio: "ignore",
+          })
+          try {
+            expect(findProcessesUsingDirectory(directory)).not.toContain(
+              child.pid
+            )
+          } finally {
+            child.kill("SIGKILL")
+          }
+        } finally {
+          rmSync(directory, { force: true, recursive: true })
+          rmSync(sibling, { force: true, recursive: true })
+        }
+      })
+    }
+  )
 })
