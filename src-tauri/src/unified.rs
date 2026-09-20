@@ -11,7 +11,10 @@ use crate::commands::process_supervisor::{
     EnvironmentSpec, EventSink, LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness,
     RestartPolicy, StopPolicy, Supervisor, SupervisorError, SupervisorHandle,
 };
-use crate::commands::{attach_reference_server, login_reference_server_with_password};
+use crate::commands::{
+    attach_reference_server, login_reference_server_with_password,
+    login_reference_server_with_password_and_host,
+};
 use crate::owner_credential::{
     configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
     load_or_create_credential_encryption_key, load_or_create_database_encryption_key,
@@ -1008,12 +1011,68 @@ fn should_reuse_ngrok_tunnel(
     }
 }
 
+/// How long to wait for the held tunnel's own public origin to answer before
+/// concluding it is dead. Short: this runs synchronously on the bootstrap
+/// path before the console can open, and a live tunnel answers in well
+/// under a second -- this only needs to be long enough to not misclassify a
+/// slow-but-live edge as dead.
+const NGROK_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// ngrok's edge sets this response header on ITS OWN synthetic error pages
+/// (for example `ERR_NGROK_3200`, "endpoint is offline") -- it is never
+/// forwarded through from the local origin. Its presence, or the request
+/// failing outright, is the signal that the held tunnel's ngrok-side session
+/// has died even though nothing in this process observed that (see
+/// `probe_ngrok_tunnel_is_live`'s doc comment for why an in-process check
+/// alone cannot catch this).
+const NGROK_ERROR_CODE_HEADER: &str = "ngrok-error-code";
+
+/// Confirm a held ngrok tunnel is still actually reachable from the public
+/// internet before trusting it enough to reuse, by making one real request
+/// to its own discovered origin.
+///
+/// This is necessary, not merely cautious: reproduced live tonight against a
+/// real ngrok tunnel, the ngrok Rust SDK's `Forwarder` gives no reliable
+/// in-process signal that the edge-side session has died. Its background
+/// forwarding task only exits when the local tunnel stream itself closes
+/// (`NgrokTunnel::is_forwarding_finished`, used by `NgrokProvider::health`),
+/// but an edge session that silently drops -- observed here across a
+/// sidecar restart cycle -- leaves that task running forever, so `health()`
+/// keeps reporting the tunnel as connected while every public request to it
+/// returns ngrok's own `ERR_NGROK_3200` "endpoint is offline" page. A
+/// simultaneous loopback request to the exact same RI, presenting the exact
+/// same trusted Host, still returned 200 the whole time -- proving the RI
+/// and the fix in `isAllowedRequestHost` are correct, and the failure is
+/// entirely in the held tunnel's dead ngrok-side session. Only an actual
+/// round trip through ngrok's edge can catch this.
+fn probe_ngrok_tunnel_is_live(origin: &str) -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(NGROK_LIVENESS_PROBE_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Could not build a client to probe the held ngrok tunnel: {error}");
+            return false;
+        }
+    };
+    match client.get(origin).send() {
+        Ok(response) => !response.headers().contains_key(NGROK_ERROR_CODE_HEADER),
+        Err(error) => {
+            log::warn!("Held ngrok tunnel liveness probe failed: {error}");
+            false
+        }
+    }
+}
+
 /// Decide whether a held ngrok tunnel from a previous run can be reused for
 /// this `start_managed_stack` call (see `should_reuse_ngrok_tunnel`), or
 /// start a fresh one via `start_ngrok_provider` -- accepting a new random
 /// hostname on ngrok's free plan, which is unavoidable whenever the tunnel
 /// itself must actually change (no held tunnel, provider/posture turned off,
-/// settings changed, or the preferred RI port could not be reused).
+/// settings changed, the preferred RI port could not be reused, or the held
+/// tunnel's ngrok-side session has silently died -- see
+/// `probe_ngrok_tunnel_is_live`).
 fn reuse_or_start_ngrok_provider(
     remote_access: &RemoteAccessConfig,
     held: Option<HeldNgrok>,
@@ -1030,24 +1089,39 @@ fn reuse_or_start_ngrok_provider(
         .as_ref()
         .map(NgrokFingerprint::from_options);
 
-    let reuse = should_reuse_ngrok_tunnel(
+    let reuse_candidate = should_reuse_ngrok_tunnel(
         held.as_ref().map(|held| &held.fingerprint),
         held.as_ref().map(|held| held.ri_port),
         desired_fingerprint.as_ref(),
         ri_port,
     );
 
+    let reuse = reuse_candidate
+        && held.as_ref().is_some_and(|held| {
+            held.fields
+                .reference_origin
+                .as_deref()
+                .is_some_and(probe_ngrok_tunnel_is_live)
+        });
+
     if reuse {
-        let held = held.expect("should_reuse_ngrok_tunnel only returns true when held is Some");
+        let held = held.expect("reuse is only true when held is Some");
         log::info!(
-            "Reusing the existing ngrok tunnel at {:?}; RI port {ri_port} is unchanged",
+            "Reusing the existing ngrok tunnel at {:?}; RI port {ri_port} is unchanged and the tunnel answered live",
             held.fields.reference_origin
         );
         return Ok(Some((held.fields, held.provider, held.fingerprint)));
     }
 
     if let Some(mut held) = held {
-        log::info!("ngrok settings or the RI port changed; starting a fresh tunnel");
+        if reuse_candidate {
+            log::warn!(
+                "Held ngrok tunnel at {:?} is unreachable from the public internet; starting a fresh tunnel instead of reusing it",
+                held.fields.reference_origin
+            );
+        } else {
+            log::info!("ngrok settings or the RI port changed; starting a fresh tunnel");
+        }
         if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider) {
             log::error!("Failed to stop the previous ngrok tunnel before replacing it: {error}");
         }
@@ -1512,9 +1586,17 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         (ri_origin, console_url, true)
     };
 
-    finish_bootstrap(&app, &password, ri_origin, console_url, managed, should_show)
-        .await
-        .map_err(BootstrapFailure::from)
+    finish_bootstrap(
+        &app,
+        &password,
+        ri_origin,
+        console_url,
+        managed,
+        should_show,
+        &remote_access.fields.trusted_hosts,
+    )
+    .await
+    .map_err(BootstrapFailure::from)
 }
 
 /// The shared tail of bootstrap once an RI origin and console URL exist,
@@ -1524,6 +1606,13 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
 /// Owner login, console readiness, session cookie, runtime state, and the
 /// console window itself all happen here exactly once so the two callers
 /// can't drift.
+///
+/// `trusted_hosts` mirrors `ri_readiness_host_header`'s contract: once a
+/// public origin is configured, the reference server's own login route
+/// enforces the same trusted-Host allowlist its readiness probe does, so
+/// this login call -- also dialed over loopback -- must present a Host the
+/// server already trusts. Empty (posture off, or no origin discovered yet)
+/// sends whatever the URL's own authority implies, same as before.
 async fn finish_bootstrap(
     app: &AppHandle,
     password: &str,
@@ -1531,8 +1620,16 @@ async fn finish_bootstrap(
     console_url: String,
     managed: bool,
     should_show: bool,
+    trusted_hosts: &str,
 ) -> Result<(), String> {
-    let login = match login_reference_server_with_password(ri_origin, password).await {
+    let host_header = ri_readiness_host_header(trusted_hosts);
+    let login = match login_reference_server_with_password_and_host(
+        ri_origin,
+        password,
+        host_header.as_deref(),
+    )
+    .await
+    {
         Ok(login) => login,
         Err(error) => {
             cleanup_managed_stack_on_error(app, managed);
@@ -1736,7 +1833,16 @@ pub(crate) async fn import_database_encryption_recovery_code(
         ));
     }
 
-    finish_bootstrap(&app, &password, ri_origin, console_url, true, true).await
+    finish_bootstrap(
+        &app,
+        &password,
+        ri_origin,
+        console_url,
+        true,
+        true,
+        &remote_access.fields.trusted_hosts,
+    )
+    .await
 }
 
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
@@ -2518,6 +2624,53 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             None,
             4310,
         ));
+    }
+
+    /// Binds a loopback listener that answers exactly one HTTP request with
+    /// `response_head` and no body, then stops. Enough to control response
+    /// headers precisely without pulling in a real HTTP server dependency --
+    /// `probe_ngrok_tunnel_is_live` only inspects headers on the response.
+    fn respond_once_with(response_head: &'static str) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(response_head.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    #[test]
+    fn probe_ngrok_tunnel_is_live_true_for_an_ordinary_response() {
+        let origin = respond_once_with("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        assert!(probe_ngrok_tunnel_is_live(&origin));
+    }
+
+    #[test]
+    fn probe_ngrok_tunnel_is_live_false_when_ngrok_reports_its_own_error() {
+        // The exact shape of ngrok's edge answering for a session that has
+        // silently died: a real HTTP response (not a connection failure),
+        // carrying `ngrok-error-code` -- reproduced live tonight as
+        // ERR_NGROK_3200 "endpoint is offline" while the same request
+        // against the actual RI, over loopback, returned 200 the whole
+        // time. The RI is not in a position to ever set this header itself,
+        // so its presence is unambiguous.
+        let origin = respond_once_with(
+            "HTTP/1.1 404 Not Found\r\nngrok-error-code: ERR_NGROK_3200\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert!(!probe_ngrok_tunnel_is_live(&origin));
+    }
+
+    #[test]
+    fn probe_ngrok_tunnel_is_live_false_when_the_request_fails_outright() {
+        // No listener at all: the probe must fail closed (treat "could not
+        // even connect" the same as "connected but ngrok says it's dead"),
+        // not panic or default to true.
+        assert!(!probe_ngrok_tunnel_is_live("http://127.0.0.1:1/"));
     }
 
     #[test]
