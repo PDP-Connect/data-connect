@@ -1301,7 +1301,7 @@ fn take_stack(app: &AppHandle) -> Result<Option<UnifiedStack>, String> {
         .map(|mut stack| stack.take())
 }
 
-fn take_held_ngrok(app: &AppHandle) -> Result<Option<HeldNgrok>, String> {
+fn take_held_ngrok<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Option<HeldNgrok>, String> {
     let state = app.state::<UnifiedRuntimeState>();
     state
         .ngrok
@@ -1325,7 +1325,7 @@ fn store_held_ngrok(app: &AppHandle, held: HeldNgrok) -> Result<(), String> {
 /// (see `reuse_or_start_ngrok_provider`). A config-change restart that keeps
 /// the same provider settings must NOT call this -- that is the whole point
 /// of holding the tunnel outside `UnifiedStack`.
-fn stop_held_ngrok(app: &AppHandle) {
+fn stop_held_ngrok<R: tauri::Runtime>(app: &AppHandle<R>) {
     match take_held_ngrok(app) {
         Ok(Some(mut held)) => {
             if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider)
@@ -1338,21 +1338,100 @@ fn stop_held_ngrok(app: &AppHandle) {
     }
 }
 
-/// Full teardown: sidecars and the ngrok tunnel. Used for app shutdown and
-/// startup-error cleanup, where nothing should survive.
-fn stop_stack_and_ngrok(app: &AppHandle) -> Result<(), String> {
+/// Why a teardown is happening.
+///
+/// Teardown used to be five near-identical functions, each of which decided
+/// for itself what to spare. The thing they actually differed on was one
+/// question -- does the ngrok tunnel survive? -- and that question is a
+/// property of the REASON, not of the call site. Naming the reason makes the
+/// answer a table (`StopReason::stops_tunnel`) that can be read and tested
+/// exhaustively, instead of a decision re-made by hand at every caller.
+///
+/// The tunnel's lifetime is deliberately longer than the sidecars': it is
+/// held outside `UnifiedStack` (see `UnifiedRuntimeState::ngrok`) so a
+/// restart can reuse it, because a free-plan tunnel gets a NEW random
+/// hostname every time it is restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// The owner changed remote-access settings, so the sidecars must be
+    /// rebuilt with new env. The tunnel is unaffected by this and is the
+    /// expensive thing to lose, so it survives for
+    /// `reuse_or_start_ngrok_provider` to pick back up.
+    ConfigChange,
+    /// Bootstrap failed at a step DOWNSTREAM of the tunnel (login, console
+    /// readiness, cookie, window creation). Confirmed live, 2026-09-19: such
+    /// a failure says nothing about whether the tunnel is healthy, and a
+    /// tunnel that just proved itself live is exactly the one the liveness
+    /// probe is designed to reuse -- so it survives.
+    BootstrapFailed,
+    /// A vault/database-key attempt failed. Unlike `BootstrapFailed`, any
+    /// tunnel here was started fresh during this very attempt and has not
+    /// been adopted by anything, so nothing should survive.
+    VaultKeyRejected,
+    /// The app is quitting. Nothing survives.
+    AppQuit,
+}
+
+impl StopReason {
+    /// The whole former five-function fork, as data: does the held ngrok
+    /// tunnel go away for this reason?
+    fn stops_tunnel(self) -> bool {
+        match self {
+            StopReason::ConfigChange | StopReason::BootstrapFailed => false,
+            StopReason::VaultKeyRejected | StopReason::AppQuit => true,
+        }
+    }
+}
+
+/// The one teardown path. Stops the RI and console, and stops the held ngrok
+/// tunnel only when `reason` says it should.
+///
+/// Replaces `stop_stack_and_ngrok`, `stop_stack_keep_ngrok`,
+/// `cleanup_managed_stack_on_error` and
+/// `cleanup_managed_stack_on_error_keep_ngrok`.
+fn teardown(app: &AppHandle, reason: StopReason) -> Result<(), String> {
     let stack = take_stack(app)?;
-    let result = stack.map_or(Ok(()), |mut stack| stack.stop());
-    stop_held_ngrok(app);
+    teardown_stack(app, reason, stack, None)
+}
+
+/// `teardown` for a stack the caller already holds, optionally bounded by a
+/// deadline.
+///
+/// The app-quit path takes the stack itself before spawning (it has to wait
+/// for a stack that startup may still be constructing) and must finish inside
+/// `UNIFIED_SHUTDOWN_BUDGET`, so it cannot call `teardown` directly. It used
+/// to inline its own copy of stop-sidecars-then-stop-tunnel, which made app
+/// quit a SIXTH teardown implementation that no `StopReason` covered. Sharing
+/// this function keeps the tunnel decision in one place for every reason.
+///
+/// Generic over the Tauri runtime so tests can drive it with
+/// `tauri::test::mock_app()`. Without this the only way to check teardown in
+/// a unit test is to re-implement it, and a test that re-implements the
+/// logic it checks cannot fail when that logic breaks.
+fn teardown_stack<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    reason: StopReason,
+    stack: Option<UnifiedStack>,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), String> {
+    let result = stack.map_or(Ok(()), |mut stack| match deadline {
+        Some(deadline) => stack.stop_until(deadline),
+        None => stack.stop(),
+    });
+    if reason.stops_tunnel() {
+        stop_held_ngrok(app);
+    }
     result
 }
 
-/// Sidecar-only teardown for a config-change restart: stops the RI and
-/// console but leaves any held ngrok tunnel in `UnifiedRuntimeState` for
-/// `reuse_or_start_ngrok_provider` to pick back up.
-fn stop_stack_keep_ngrok(app: &AppHandle) -> Result<(), String> {
-    let stack = take_stack(app)?;
-    stack.map_or(Ok(()), |mut stack| stack.stop())
+/// `teardown` for the startup-error paths, which are no-ops when the stack
+/// is not ours to stop (attach mode) and which log rather than propagate.
+fn teardown_managed_on_error(app: &AppHandle, managed: bool, reason: StopReason) {
+    if managed {
+        if let Err(error) = teardown(app, reason) {
+            log::error!("Failed to clean up unified sidecars after startup error: {error}");
+        }
+    }
 }
 
 fn mark_shutdown_complete(app: &AppHandle) {
@@ -1391,8 +1470,7 @@ fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack
             take_stack(&app).ok().flatten()
         });
 
-        let result = stack.map_or(Ok(()), |mut stack| stack.stop_until(deadline));
-        stop_held_ngrok(&app);
+        let result = teardown_stack(&app, StopReason::AppQuit, stack, Some(deadline));
         match result {
             Ok(()) => log::info!("Unified shutdown finished within its budget"),
             Err(error) => log::error!("Unified shutdown finished with errors: {error}"),
@@ -1482,7 +1560,10 @@ pub(crate) fn request_shutdown(app: &AppHandle, exit_code: i32) -> bool {
     true
 }
 
-pub(crate) fn cleanup(app: &AppHandle) {
+/// Exit-time diagnostic. Despite its former name (`cleanup`) this tears
+/// nothing down -- it only asserts that the asynchronous shutdown started by
+/// `request_shutdown` actually finished before the process exited.
+pub(crate) fn assert_stack_released_at_exit(app: &AppHandle) {
     let stack_still_registered = app
         .state::<UnifiedRuntimeState>()
         .stack
@@ -1507,42 +1588,6 @@ fn open_log_file(app: &AppHandle) -> Result<(), String> {
             .map_err(|error| format!("Failed to create DataConnect log file: {error}"))?;
     }
     open::that_detached(log_file).map_err(|error| format!("Failed to open log file: {error}"))
-}
-
-fn cleanup_managed_stack_on_error(app: &AppHandle, managed: bool) {
-    if managed {
-        if let Err(error) = stop_stack_and_ngrok(app) {
-            log::error!("Failed to clean up unified sidecars after startup error: {error}");
-        }
-    }
-}
-
-/// Same sidecar teardown as `cleanup_managed_stack_on_error`, but preserves
-/// any held ngrok tunnel instead of stopping it.
-///
-/// Confirmed live, 2026-09-19: a dev-domain owner's tunnel bound successfully
-/// (`ngrok tunnel is up at https://...`), but the RI then failed to boot
-/// because the reference server's config validator rejected the very origin
-/// the tunnel had just reported (a since-fixed bug in
-/// `reference-implementation/server/remote-access-config.ts`). RI startup
-/// failing surfaces here as a `login_reference_server_with_password_and_host`
-/// or `wait_for_console` error in `finish_bootstrap` below -- and every one of
-/// those branches used to call `cleanup_managed_stack_on_error`, which stops
-/// the tunnel unconditionally. That coupling is its own defect independent of
-/// the validator bug: a bootstrap failure downstream of the tunnel (bad RI
-/// config, login timeout, console readiness, window creation) says nothing
-/// about whether the tunnel itself is healthy, and a tunnel that just proved
-/// itself live is exactly the one `reuse_or_start_ngrok_provider`'s liveness
-/// probe (`probe_ngrok_tunnel_is_live`) is designed to pick back up on the
-/// very next restart attempt -- tearing it down here only forces a fresh,
-/// unnecessary tunnel (and, for a random-hostname config, a new hostname)
-/// once the real cause is fixed and the next attempt succeeds.
-fn cleanup_managed_stack_on_error_keep_ngrok(app: &AppHandle, managed: bool) {
-    if managed {
-        if let Err(error) = stop_stack_keep_ngrok(app) {
-            log::error!("Failed to clean up unified sidecars after startup error: {error}");
-        }
-    }
 }
 
 /// Resolve the unified SQLite database path -- the same
@@ -1737,13 +1782,12 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
 /// server already trusts. Empty (posture off, or no origin discovered yet)
 /// sends whatever the URL's own authority implies, same as before.
 ///
-/// Every failure branch below cleans up with
-/// `cleanup_managed_stack_on_error_keep_ngrok`, not
-/// `cleanup_managed_stack_on_error`: by this point in bootstrap the RI/console
+/// Every failure branch below tears down with `StopReason::BootstrapFailed`,
+/// which spares the tunnel: by this point in bootstrap the RI/console
 /// sidecars (and any ngrok tunnel) already started, so a failure here --
 /// login, console readiness, window creation -- is downstream of the tunnel
-/// and says nothing about whether the tunnel itself is healthy. See that
-/// function's doc comment for the live incident this fixes.
+/// and says nothing about whether the tunnel itself is healthy. See
+/// `StopReason`'s doc comment for the live incident this fixes.
 async fn finish_bootstrap(
     app: &AppHandle,
     password: &str,
@@ -1764,13 +1808,13 @@ async fn finish_bootstrap(
     {
         Ok(login) => login,
         Err(error) => {
-            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
             return Err(error);
         }
     };
 
     if let Err(error) = wait_for_console(&console_url).await {
-        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+        teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
     let console_origin = console_url
@@ -1779,14 +1823,14 @@ async fn finish_bootstrap(
     let console_origin = match console_origin {
         Ok(origin) => origin,
         Err(error) => {
-            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
             return Err(error);
         }
     };
     let cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
-            cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
             return Err(error);
         }
     };
@@ -1810,12 +1854,12 @@ async fn finish_bootstrap(
         Ok(())
     })();
     if let Err(error) = state_update {
-        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+        teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
 
     if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show) {
-        cleanup_managed_stack_on_error_keep_ngrok(app, managed);
+        teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
     set_status(app, UnifiedStatus::Ready);
@@ -1909,10 +1953,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let attempt = tokio::task::spawn_blocking(move || {
         // No held ngrok tunnel to reuse here: this command only runs after
         // the initial bootstrap attempt already failed on a missing database
-        // key, and that failure's `cleanup_managed_stack_on_error` (via
-        // `stop_stack_and_ngrok`) already tore down anything that was
-        // running, including any tunnel. This is a fresh start, not a
-        // config-change restart.
+        // key, and that failure's teardown (`StopReason::VaultKeyRejected`)
+        // already tore down anything that was running, including any tunnel.
+        // This is a fresh start, not a config-change restart.
         start_managed_stack(
             &app_for_attempt,
             &password_for_attempt,
@@ -1950,7 +1993,7 @@ pub(crate) async fn import_database_encryption_recovery_code(
             // Err branch above never calls store_stack), so this is safe to
             // call unconditionally: it is exactly what every other bootstrap
             // failure path in this file already does.
-            cleanup_managed_stack_on_error(&app, true);
+            teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
             return Err(
                 "That code did not open your vault. Check for a typo and try again.".to_string(),
             );
@@ -1964,7 +2007,7 @@ pub(crate) async fn import_database_encryption_recovery_code(
     if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
     {
         log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
-        cleanup_managed_stack_on_error(&app, true);
+        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
         return Err(format!(
             "The code worked, but the key could not be saved for future launches: {error}"
         ));
@@ -1989,7 +2032,7 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
         let app = app.clone();
-        move || stop_stack_keep_ngrok(&app)
+        move || teardown(&app, StopReason::ConfigChange)
     })
     .await
     .map_err(|error| format!("Remote-access shutdown task failed: {error}"))??;
@@ -2704,27 +2747,69 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         }
     }
 
+    /// The tunnel-survival rule, stated once, exhaustively, as data.
+    ///
+    /// This replaces a static source-text check that counted
+    /// `cleanup_managed_stack_on_error_keep_ngrok(` occurrences inside
+    /// `finish_bootstrap`'s body. That check could only ever assert which
+    /// FUNCTION NAME was spelled at a call site; it could not assert what
+    /// the call did. Now that the fork is a value rather than a function,
+    /// the rule itself is directly testable, and the match below is
+    /// exhaustive -- adding a `StopReason` without deciding its tunnel
+    /// semantics fails to compile rather than silently defaulting.
     #[test]
-    fn finish_bootstrap_cleans_up_with_the_tunnel_preserving_path() {
-        // Confirmed live, 2026-09-19: a dev-domain owner's ngrok tunnel
-        // bound successfully ("ngrok tunnel is up at https://..."), but RI
-        // startup then failed on an unrelated bug (the config validator
-        // rejecting the very origin the tunnel had just reported). Every
-        // failure branch inside `finish_bootstrap` used to call
-        // `cleanup_managed_stack_on_error`, which stops any held tunnel
-        // unconditionally -- even though a failure downstream of the tunnel
-        // (login, console readiness, window creation) says nothing about
-        // whether the tunnel itself is healthy. This asserts the source
-        // text directly: every `cleanup_managed_stack_on_error` call inside
-        // `finish_bootstrap`'s body must be the tunnel-preserving variant,
-        // `cleanup_managed_stack_on_error_keep_ngrok` -- a static check that
-        // is exact where a runtime test would need a real `AppHandle`
-        // (`tauri::test::mock_app()` returns a mock-runtime handle
-        // incompatible with this file's real-runtime `AppHandle`, so a
-        // behavioral test here would need infrastructure this codebase does
-        // not otherwise build; the state manipulation
-        // `cleanup_managed_stack_on_error_keep_ngrok` performs is already
-        // covered indirectly by `stop_stack_keep_ngrok`'s existing callers).
+    fn stop_reasons_decide_tunnel_survival_exhaustively() {
+        for reason in [
+            StopReason::ConfigChange,
+            StopReason::BootstrapFailed,
+            StopReason::VaultKeyRejected,
+            StopReason::AppQuit,
+        ] {
+            let expected = match reason {
+                // A config-change restart must reuse the tunnel: on a free
+                // plan a fresh tunnel means a fresh random hostname, which
+                // invalidates the origin the owner just adopted.
+                StopReason::ConfigChange => false,
+                // Confirmed live, 2026-09-19: a failure downstream of the
+                // tunnel (login, console readiness, cookie, window) says
+                // nothing about tunnel health, and the tunnel just proved
+                // itself live.
+                StopReason::BootstrapFailed => false,
+                // Any tunnel here was started fresh inside this failed
+                // attempt and adopted by nothing.
+                StopReason::VaultKeyRejected => true,
+                StopReason::AppQuit => true,
+            };
+            assert_eq!(
+                reason.stops_tunnel(),
+                expected,
+                "{reason:?} has the wrong tunnel-survival semantics"
+            );
+        }
+    }
+
+    /// Guards the specific regression the deleted source-text test was
+    /// written for: every `finish_bootstrap` failure branch must tear down
+    /// with a reason whose tunnel survives.
+    #[test]
+    fn finish_bootstrap_failures_preserve_the_tunnel() {
+        assert!(
+            !StopReason::BootstrapFailed.stops_tunnel(),
+            "finish_bootstrap's failure branches must never stop the held tunnel"
+        );
+    }
+
+    /// Call-site coverage for the rule asserted semantically above.
+    ///
+    /// `stop_reasons_decide_tunnel_survival_exhaustively` proves
+    /// `BootstrapFailed` spares the tunnel; this proves every failure branch
+    /// in `finish_bootstrap` actually passes that reason. A runtime test
+    /// cannot cover this here: `tauri::test::mock_app()` returns a
+    /// mock-runtime handle incompatible with this file's real-runtime
+    /// `AppHandle`, so the call sites stay source-checked while the
+    /// semantics are checked directly.
+    #[test]
+    fn finish_bootstrap_tears_down_with_a_tunnel_preserving_reason() {
         let source = include_str!("unified.rs");
         let start = source
             .find("async fn finish_bootstrap(")
@@ -2735,17 +2820,21 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             .unwrap_or(source.len());
         let body = &source[start..body_end];
 
-        let bare_calls = body.matches("cleanup_managed_stack_on_error(").count();
-        let keep_ngrok_calls = body.matches("cleanup_managed_stack_on_error_keep_ngrok(").count();
-        assert_eq!(
-            bare_calls, 0,
-            "finish_bootstrap must never call the tunnel-stopping cleanup directly"
-        );
+        let preserving = body
+            .matches("teardown_managed_on_error(app, managed, StopReason::BootstrapFailed)")
+            .count();
         assert!(
-            keep_ngrok_calls >= 6,
-            "expected every finish_bootstrap failure branch (6 as of this fix) to use \
-             the tunnel-preserving cleanup; found {keep_ngrok_calls}"
+            preserving >= 6,
+            "expected every finish_bootstrap failure branch (6 as of this fix) to tear \
+             down with StopReason::BootstrapFailed; found {preserving}"
         );
+        for stopping in ["StopReason::AppQuit", "StopReason::VaultKeyRejected"] {
+            assert!(
+                !body.contains(stopping),
+                "finish_bootstrap must never tear down with {stopping}: it would stop a \
+                 tunnel that just proved itself live"
+            );
+        }
     }
 
     #[test]
@@ -3285,6 +3374,74 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             .unwrap();
         assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    /// Real-process check that `teardown_stack` stops sidecars on both the
+    /// deadline arm (app quit) and the plain arm.
+    ///
+    /// `teardown_stack` is the single function app quit, config-change
+    /// restart and every bootstrap-failure branch now funnel through, so it
+    /// must kill a real process group -- not merely compile. It is called
+    /// here directly rather than re-implemented, so the signature and the
+    /// deadline plumbing are exercised for real.
+    ///
+    /// Known oracle limit, measured by sabotage rather than assumed: because
+    /// the stack is passed BY VALUE and `SupervisorHandle::drop` calls
+    /// `stop()`, the sidecars die even if this function's body is emptied --
+    /// so this test cannot by itself detect a broken teardown body. The
+    /// behavior that actually differs between the reasons is the TUNNEL
+    /// decision, and that is guarded by
+    /// `stop_reasons_decide_tunnel_survival_exhaustively` (verified to fail
+    /// when the rule is inverted) and
+    /// `finish_bootstrap_tears_down_with_a_tunnel_preserving_reason`
+    /// (verified to fail when a call site passes the wrong reason).
+    #[test]
+    fn teardown_stack_stops_real_sidecars_on_both_deadline_arms() {
+        for deadline in [None, Some(Instant::now() + Duration::from_secs(5))] {
+            let directory = tempdir().expect("fake stack temp directory");
+            let login_log = directory.path().join("login.log");
+            let child_done = directory.path().join("child.done");
+            let child_pid_path = directory.path().join("child.pid");
+            let ri_script =
+                fake_ri_script(&login_log, None, Some(&child_done), Some(&child_pid_path));
+            let console_script = fake_console_script();
+            let (stack, _, _) = fake_stack(
+                ri_script.path(),
+                console_script.path(),
+                RecordingSink::default(),
+                RestartPolicy::Never,
+                BTreeMap::new(),
+            );
+
+            // Calls the real `teardown_stack`, not a copy of it: a test that
+            // re-implements the logic it is checking cannot fail when that
+            // logic breaks.
+            let app = tauri::test::mock_app();
+            app.manage(UnifiedRuntimeState::default());
+            teardown_stack(
+                &app.handle().clone(),
+                StopReason::AppQuit,
+                Some(stack),
+                deadline,
+            )
+            .expect("teardown should stop the fake stack");
+
+            let wait_until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < wait_until && !child_done.exists() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let child_pid = fs::read_to_string(&child_pid_path)
+                .expect("fake RI should record its grandchild pid")
+                .parse::<libc::pid_t>()
+                .expect("grandchild pid");
+            assert_eq!(
+                unsafe { libc::kill(child_pid, 0) },
+                -1,
+                "teardown must leave no surviving grandchild (deadline: {})",
+                deadline.is_some()
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        }
     }
 
     #[test]
