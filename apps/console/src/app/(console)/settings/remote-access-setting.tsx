@@ -22,6 +22,7 @@ import {
   validateNgrokDomain,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  type CloudflareTunnelInspection,
   type PublicUrlOption,
   type RemoteAccessConfig,
   type RemoteAccessInspection,
@@ -117,6 +118,101 @@ function asInspection(value: unknown): RemoteAccessInspection {
   }
 }
 
+/**
+ * `cloudflared_binary_present` is `boolean | null`, not folded into the
+ * shared `asInspection` normalizer above: a malformed/missing value must
+ * default to `null` ("unknown"), never silently to `false` ("checked, not
+ * installed") -- the two read very differently in the UI, and only one of
+ * them is actually backed by a real check.
+ */
+function asCloudflareTunnelInspection(value: unknown): CloudflareTunnelInspection {
+  const base = asInspection(value)
+  const candidate = (value && typeof value === "object" ? value : {}) as Partial<CloudflareTunnelInspection>
+  return {
+    ...base,
+    cloudflared_binary_present:
+      typeof candidate.cloudflared_binary_present === "boolean"
+        ? candidate.cloudflared_binary_present
+        : null,
+  }
+}
+
+/**
+ * Two different Cloudflare docs pages for two different owner needs, kept
+ * as separate constants so neither call site can drift onto the wrong one:
+ * `CLOUDFLARE_TUNNEL_SETUP_URL` is the create-a-remote-tunnel walkthrough --
+ * what produces the tunnel token this form asks for -- and
+ * `CLOUDFLARED_DOWNLOAD_URL` is the binary download page, relevant only when
+ * `cloudflared` itself is missing. Rendering the wrong one in either spot
+ * would send the owner to instructions for a problem they don't have.
+ */
+const CLOUDFLARE_TUNNEL_SETUP_URL =
+  "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel"
+const CLOUDFLARED_DOWNLOAD_URL =
+  "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/"
+
+/**
+ * The `cloudflared` binary prerequisite, shown before the owner commits to
+ * this option -- never surfaced only as a post-submit spawn error. `null`
+ * ("unknown") is a genuinely different case from `false` ("checked, not
+ * installed") -- see `CloudflareTunnelInspection`'s doc comment -- and must
+ * never be misread as a real "not installed" answer.
+ *
+ * External links route through `OpenExternalLink`, matching every other
+ * external link in this file -- see that component's doc comment. As of
+ * this writing `window.__TAURI__`/`__TAURI_INTERNALS__` are not present in
+ * the console's own window (Tauri's `invoke()` bridge does not reach this
+ * webview; see the module doc comment above), so `OpenExternalLink` falls
+ * through to a plain `target="_blank"` anchor rather than routing through
+ * the shell-open path it prefers. A general console-to-native bridge is in
+ * progress elsewhere; this deliberately does not invent a second, competing
+ * mechanism to route around that gap -- once the bridge lands,
+ * `OpenExternalLink` (and every other call site using it, including
+ * ngrok's authtoken link above) benefits automatically. The interim
+ * mitigation is the visible, `select-all` plain-text URL alongside the
+ * link, so the download page is reachable by copy-paste even while the
+ * link itself is a plain browser-tab open rather than a native shell-open.
+ */
+function CloudflaredBinaryStatus({
+  missing,
+  unknown,
+}: {
+  missing: boolean
+  unknown: boolean
+}) {
+  if (unknown) {
+    // Only reachable with an old build or a host that never ran the check
+    // (see `CloudflareTunnelInspection`'s doc comment) -- not a claim that
+    // cloudflared is installed, only that this app cannot yet say either
+    // way. `start` still fails closed with an actionable error if it turns
+    // out cloudflared is actually absent.
+    return (
+      <span className="pdpp-caption text-muted-foreground">
+        Whether cloudflared is installed could not be checked here.
+      </span>
+    )
+  }
+  if (missing) {
+    return (
+      <span className="pdpp-caption text-destructive">
+        cloudflared is not installed on this machine yet.{" "}
+        <OpenExternalLink className="underline" href={CLOUDFLARED_DOWNLOAD_URL}>
+          Download cloudflared
+        </OpenExternalLink>
+        , then come back here.{" "}
+        <span className="select-all break-all font-mono text-muted-foreground">
+          {CLOUDFLARED_DOWNLOAD_URL}
+        </span>
+      </span>
+    )
+  }
+  return (
+    <span className="pdpp-caption text-muted-foreground">
+      cloudflared is installed and ready.
+    </span>
+  )
+}
+
 const postureRows: Array<{
   posture: RemoteAccessPosture
   label: string
@@ -162,7 +258,7 @@ export function RemoteAccessSetting({
   const [ngrokInspection, setNgrokInspection] =
     useState<RemoteAccessInspection | null>(null)
   const [cloudflareTunnelInspection, setCloudflareTunnelInspection] =
-    useState<RemoteAccessInspection | null>(null)
+    useState<CloudflareTunnelInspection | null>(null)
   const [pendingPosture, setPendingPosture] =
     useState<RemoteAccessPosture | null>(null)
   const [origin, setOrigin] = useState("")
@@ -199,7 +295,7 @@ export function RemoteAccessSetting({
           setConfig(resolved)
           setInspection(asInspection(nextInspection))
           setNgrokInspection(asInspection(nextNgrokInspection))
-          setCloudflareTunnelInspection(asInspection(nextCloudflareTunnelInspection))
+          setCloudflareTunnelInspection(asCloudflareTunnelInspection(nextCloudflareTunnelInspection))
           setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
           // Without this, an owner who already saved their ngrok domain sees
           // a blank field on every page load and has no way to tell their
@@ -239,6 +335,17 @@ export function RemoteAccessSetting({
   // can be unavailable independent of the rest of the Public URL flow.
   const cloudflareTunnelUnavailable =
     !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
+  // Distinct from `cloudflareTunnelUnavailable`: that flag means "no Tauri
+  // host to supervise this at all." This one means the host IS present but
+  // found no `cloudflared` binary -- a real prerequisite the owner must
+  // install themselves before this option can work, since (unlike ngrok's
+  // embedded SDK) DataConnect bundles no binary of its own. `null`
+  // ("unknown," e.g. an unavailable desktop host, or a build predating this
+  // check) never renders as "missing" -- only a real, checked `false` does
+  // -- so this can't falsely tell an owner to install something that might
+  // already be there.
+  const cloudflaredBinaryMissing =
+    stateIsKnown && cloudflareTunnelInspection?.cloudflared_binary_present === false
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
@@ -348,6 +455,18 @@ export function RemoteAccessSetting({
         setError(
           cloudflareTunnelInspection?.reason ??
             "Cloudflare Tunnel is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
+        )
+        return
+      }
+      // Checked before the token/hostname fields, not after: an owner who
+      // pastes a real token and hostname only to have `start()` fail to
+      // spawn has already done real work for nothing. This is the same
+      // prerequisite the row-level and field-level UI below already show,
+      // enforced again here so a stale form state (e.g. cloudflared was
+      // uninstalled mid-session) can't slip a submission through.
+      if (cloudflaredBinaryMissing) {
+        setError(
+          "cloudflared is not installed on this machine yet. Install it, then come back and try again."
         )
         return
       }
@@ -681,6 +800,12 @@ export function RemoteAccessSetting({
                               "ngrok needs the DataConnect desktop app."}
                         </span>
                       ) : null}
+                      {!rowUnavailable && option.provider === "cloudflare_tunnel" ? (
+                        <CloudflaredBinaryStatus
+                          missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
+                          unknown={cloudflareTunnelInspection?.cloudflared_binary_present == null}
+                        />
+                      ) : null}
                     </span>
                   </span>
                 </label>
@@ -760,6 +885,20 @@ export function RemoteAccessSetting({
 
           {selectedOption?.provider === "cloudflare_tunnel" ? (
             <>
+              <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
+                <span className="pdpp-caption text-muted-foreground">
+                  DataConnect runs and supervises the tunnel process for you
+                  once you save this — you never start it yourself. The one
+                  thing you do need to install first is the{" "}
+                  <span className="select-all font-mono">cloudflared</span>{" "}
+                  program, which DataConnect does not bundle, unlike ngrok,
+                  which needs no separate install.
+                </span>
+                <CloudflaredBinaryStatus
+                  missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
+                  unknown={cloudflareTunnelInspection?.cloudflared_binary_present == null}
+                />
+              </div>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
                 htmlFor="remote-access-cloudflare-token"
@@ -778,16 +917,14 @@ export function RemoteAccessSetting({
                 <span className="pdpp-caption text-muted-foreground">
                   Create a tunnel in the Cloudflare dashboard, then copy its
                   token here. DataConnect stores it in your system keychain
-                  and does not ask again. Requires the{" "}
-                  <span className="select-all font-mono">cloudflared</span>{" "}
-                  binary installed on this machine.{" "}
-                  <OpenExternalLink
-                    className="underline"
-                    href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/"
-                  >
-                    Open Cloudflare Tunnel setup
+                  and does not ask again.{" "}
+                  <OpenExternalLink className="underline" href={CLOUDFLARE_TUNNEL_SETUP_URL}>
+                    Open the Cloudflare Tunnel walkthrough
                   </OpenExternalLink>
-                  .
+                  .{" "}
+                  <span className="select-all break-all font-mono">
+                    {CLOUDFLARE_TUNNEL_SETUP_URL}
+                  </span>
                 </span>
               </label>
               <label
@@ -880,7 +1017,8 @@ export function RemoteAccessSetting({
               disabled={
                 busy ||
                 (selectedOption?.provider === "ngrok" && ngrokUnavailable) ||
-                (selectedOption?.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
+                (selectedOption?.provider === "cloudflare_tunnel" &&
+                  (cloudflareTunnelUnavailable || cloudflaredBinaryMissing))
               }
               onClick={enablePublicUrl}
               type="button"

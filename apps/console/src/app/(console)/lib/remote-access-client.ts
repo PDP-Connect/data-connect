@@ -23,7 +23,11 @@ import {
   ReferenceServerUnreachableError,
   ResourceServerHttpError,
 } from "./owner-token.ts"
-import type { RemoteAccessConfig, RemoteAccessInspection } from "../settings/remote-access.ts"
+import type {
+  CloudflareTunnelInspection,
+  RemoteAccessConfig,
+  RemoteAccessInspection,
+} from "../settings/remote-access.ts"
 import { verifyDashboardSession } from "./verify-session.ts"
 
 async function remoteAccessFetch(path: string, init: RequestInit = {}): Promise<unknown> {
@@ -87,7 +91,7 @@ export async function inspectNgrokRemoteAccess(): Promise<RemoteAccessInspection
   return unwrapData(payload) as RemoteAccessInspection
 }
 
-export async function inspectCloudflareTunnelRemoteAccess(): Promise<RemoteAccessInspection> {
+export async function inspectCloudflareTunnelRemoteAccess(): Promise<CloudflareTunnelInspection> {
   const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/cloudflare_tunnel")
-  return unwrapData(payload) as RemoteAccessInspection
+  return unwrapData(payload) as CloudflareTunnelInspection
 }

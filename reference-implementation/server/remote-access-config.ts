@@ -108,6 +108,23 @@ export interface RemoteAccessInspection {
   reason: string | null
 }
 
+/**
+ * Cloudflare Tunnel's capability probe extends the shared shape with one
+ * field no other provider needs: whether the `cloudflared` binary itself is
+ * present on this machine, checked at RS-spawn time by the Tauri supervisor
+ * (`src-tauri/src/unified.rs`'s `CLOUDFLARED_BINARY_PRESENT_ENV`) and passed
+ * through as an env var, mirroring how `MANAGED_DESKTOP_HOST_ENV` already
+ * crosses the same process boundary. The owner needs to see this BEFORE
+ * picking the option and pasting a token, not discover it as a spawn
+ * failure afterward. `null` means "unknown" -- the desktop host env var was
+ * absent entirely (an old build, or a non-desktop deployment where
+ * `availability` is already `unavailable` for an unrelated reason) --
+ * distinct from `false`, which is a real, checked "not installed."
+ */
+export interface CloudflareTunnelInspection extends RemoteAccessInspection {
+  cloudflared_binary_present: boolean | null
+}
+
 export interface OriginValidation {
   ok: true
   origin: string
@@ -578,21 +595,37 @@ export function inspectNgrok(env: NodeJS.ProcessEnv = process.env): RemoteAccess
   return { availability: "available", authentication: "not_required", reason: null }
 }
 
+const CLOUDFLARED_BINARY_PRESENT_ENV = "PDPP_CLOUDFLARED_BINARY_PRESENT"
+
+function readTriStateFlag(env: NodeJS.ProcessEnv, name: string): boolean | null {
+  const raw = env[name]
+  return raw === "1" ? true : raw === "0" ? false : null
+}
+
 /**
  * Capability probe for the Cloudflare named-tunnel provider. Mirrors
  * `inspectNgrok`: it too genuinely needs a native host (a keychain slot for
  * the tunnel token and Rust-side `cloudflared` process supervision in
  * `src-tauri/src/remote_access_cloudflare.rs`), so the same
- * `MANAGED_DESKTOP_HOST_ENV` gate applies.
+ * `MANAGED_DESKTOP_HOST_ENV` gate applies. Additionally reports whether the
+ * `cloudflared` binary is installed -- see `CloudflareTunnelInspection`'s
+ * doc comment for why this must be answerable before the owner commits to
+ * this option.
  */
-export function inspectCloudflareTunnel(env: NodeJS.ProcessEnv = process.env): RemoteAccessInspection {
+export function inspectCloudflareTunnel(env: NodeJS.ProcessEnv = process.env): CloudflareTunnelInspection {
   if (!isManagedDesktopHostPresent(env)) {
     return {
       availability: "unavailable",
       authentication: "not_required",
+      cloudflared_binary_present: null,
       reason:
         "Cloudflare Tunnel needs the DataConnect desktop app: it stores your tunnel token in the OS keychain and supervises the cloudflared process natively. This deployment has no desktop host to do that, so Cloudflare Tunnel cannot be enabled here. Use \"A proxy you run\" instead.",
     }
   }
-  return { availability: "available", authentication: "not_required", reason: null }
+  return {
+    availability: "available",
+    authentication: "not_required",
+    cloudflared_binary_present: readTriStateFlag(env, CLOUDFLARED_BINARY_PRESENT_ENV),
+    reason: null,
+  }
 }

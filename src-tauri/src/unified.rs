@@ -62,6 +62,13 @@ const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
 // either, so it is exactly as unable to activate ngrok as a plain self-hosted
 // deployment, and must report the same honest "unavailable" answer.
 const MANAGED_DESKTOP_HOST_ENV: &str = "PDPP_MANAGED_DESKTOP_HOST";
+/// Set to "1" or "0" alongside `MANAGED_DESKTOP_HOST_ENV`, reporting whether
+/// `cloudflared` is on `PATH` at RS-spawn time -- see
+/// `remote_access_cloudflare::cloudflared_binary_is_installed`'s doc comment
+/// for why this must be knowable before the owner commits to the Cloudflare
+/// Tunnel option, not discovered only as a spawn failure after they submit a
+/// token.
+const CLOUDFLARED_BINARY_PRESENT_ENV: &str = "PDPP_CLOUDFLARED_BINARY_PRESENT";
 const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -723,6 +730,21 @@ fn ri_environment(
         env.insert(
             OsString::from(MANAGED_DESKTOP_HOST_ENV),
             OsString::from("1"),
+        );
+        // The owner needs to know whether `cloudflared` is already installed
+        // BEFORE they pick the Cloudflare Tunnel option and paste a token --
+        // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
+        // at the same RS-spawn boundary `MANAGED_DESKTOP_HOST_ENV` already
+        // uses, so `inspectCloudflareTunnel` (the RS-side TypeScript mirror)
+        // can fold it into the same capability probe the console already
+        // polls before rendering the provider picker.
+        env.insert(
+            OsString::from(CLOUDFLARED_BINARY_PRESENT_ENV),
+            OsString::from(if crate::remote_access_cloudflare::cloudflared_binary_is_installed() {
+                "1"
+            } else {
+                "0"
+            }),
         );
     }
     env

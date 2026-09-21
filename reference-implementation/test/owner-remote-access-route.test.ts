@@ -435,24 +435,41 @@ test("POST config rejects cloudflare_tunnel with no hostname configured", async 
 
 test("GET inspect/cloudflare_tunnel reports unavailable without a managed desktop host, and available with one", async () => {
   const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
+  const previousBinary = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
   try {
     delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
     await withMountedRoutes(async (routes) => {
       const handler = routes.get("GET /v1/owner/remote-access/inspect/cloudflare_tunnel");
       const { captured, res } = makeRes();
       await handler?.({}, res);
-      const body = captured.body as { data: { availability: string; reason: string | null } };
+      const body = captured.body as {
+        data: {
+          availability: string;
+          reason: string | null;
+          cloudflared_binary_present: boolean | null;
+        };
+      };
       assert.equal(body.data.availability, "unavailable");
       assert.match(body.data.reason ?? "", /desktop app/i);
+      // No desktop host means the binary check never ran either -- "unknown",
+      // not a false claim that it is missing.
+      assert.equal(body.data.cloudflared_binary_present, null);
     });
 
     process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
+    delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
     await withMountedRoutes(async (routes) => {
       const handler = routes.get("GET /v1/owner/remote-access/inspect/cloudflare_tunnel");
       const { captured, res } = makeRes();
       await handler?.({}, res);
       assert.deepEqual(captured.body, {
-        data: { availability: "available", authentication: "not_required", reason: null },
+        data: {
+          availability: "available",
+          authentication: "not_required",
+          cloudflared_binary_present: null,
+          reason: null,
+        },
         object: "remote_access_inspection",
       });
     });
@@ -461,6 +478,11 @@ test("GET inspect/cloudflare_tunnel reports unavailable without a managed deskto
       delete process.env.PDPP_MANAGED_DESKTOP_HOST;
     } else {
       process.env.PDPP_MANAGED_DESKTOP_HOST = previousHost;
+    }
+    if (previousBinary === undefined) {
+      delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+    } else {
+      process.env.PDPP_CLOUDFLARED_BINARY_PRESENT = previousBinary;
     }
   }
 });
