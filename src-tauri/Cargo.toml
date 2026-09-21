@@ -18,6 +18,16 @@ name = "stall_repro"
 path = "src/bin/stall_repro.rs"
 required-features = ["stall-repro"]
 
+[[bin]]
+name = "winclose_repro"
+path = "src/bin/winclose_repro.rs"
+required-features = ["stall-repro"]
+
+[[bin]]
+name = "pdeathsig_port_repro"
+path = "src/bin/pdeathsig_port_repro.rs"
+required-features = ["stall-repro"]
+
 [features]
 stall-repro = []
 
@@ -32,6 +42,7 @@ tauri = { version = "2.11", features = ["test", "unstable", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2.6"
 tauri-plugin-deep-link = "2"

@@ -34,6 +34,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::Cookie;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 
 pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
 pub(crate) const RECOVERY_WINDOW_LABEL: &str = "recovery";
@@ -422,6 +423,13 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     if let Some(main_window) = app.get_webview_window("main") {
         main_window.hide()?;
     }
+
+    // Seed the in-memory closeToTray cache once, synchronously, at startup
+    // -- before any window can receive a CloseRequested event -- so the
+    // window-event loop (which owns titlebar hit-testing/redraw) never has
+    // to do a blocking config-file read. See
+    // ai/research/desktop-app-packaging/tauri-linux-unresponsive-titlebar-is-a-tao-wayland-csd-overlay-bug-not-a-blocked-main-thread-2026.md.
+    crate::commands::init_close_to_tray_cache();
 
     // Read once, synchronously, before spawning: this is the one bootstrap
     // call that represents "the app just launched", which is the only time
@@ -2690,9 +2698,27 @@ fn create_or_update_console_window(
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            if crate::commands::read_close_to_tray_preference() {
+            // Cached, in-memory read only -- this handler runs on the
+            // GTK/tao window-event thread, which also owns titlebar
+            // hit-testing/redraw, so it must never block on disk I/O. See
+            // ai/research/desktop-app-packaging/tauri-linux-unresponsive-titlebar-is-a-tao-wayland-csd-overlay-bug-not-a-blocked-main-thread-2026.md
+            // (hypothesis H3) for why the previous `fs::read_to_string`
+            // call here was a defect regardless of whether it was the root
+            // cause of any specific reported freeze.
+            if crate::commands::cached_close_to_tray_preference() {
                 api.prevent_close();
                 let _ = window_for_close.hide();
+                // Off the window-event thread onto a blocking-friendly
+                // worker: this does a state-file read/write plus a
+                // notification-daemon round trip, both of which are
+                // exactly the kind of blocking work this handler must not
+                // do inline (see the comment above), and exactly the kind
+                // of work that must not run on a plain (non-blocking)
+                // async task either.
+                let window_for_notice = window_for_close.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    notify_close_to_tray_once(&window_for_notice);
+                });
             }
             // else: let the close proceed. With no other windows open this
             // drops to zero webview windows, which fires RunEvent::ExitRequested
@@ -2719,6 +2745,43 @@ fn create_or_update_console_window(
             .map_err(|error| format!("Failed to focus console: {error}"))?;
     }
     Ok(())
+}
+
+/// Show a one-time "DataConnect keeps running in the tray" toast the first
+/// time the window is closed-to-tray (never again after that), so a user's
+/// first "did it actually close?" moment gets an answer instead of just a
+/// window disappearing. Steady-state visibility is already covered by the
+/// tray icon's own status label (`UnifiedStatus` in the tray menu) -- this
+/// covers only the one-time first-use gap identified in
+/// ai/research/desktop-app-packaging/orphaned-sidecar-processes-need-kernel-level-lifecycle-ownership-not-just-a-catchable-signal-handler-2026.md
+/// section 5, item 5.
+///
+/// Best-effort: any failure (state-file I/O, notification permission, no
+/// notification daemon running) is logged and swallowed, never surfaced to
+/// the user or allowed to affect the close-to-tray behavior itself, which
+/// has already completed (`prevent_close` + `hide`) by the time this runs.
+fn notify_close_to_tray_once(window: &tauri::WebviewWindow) {
+    let app = window.app_handle();
+    match crate::commands::desktop_settings::mark_close_to_tray_notice_shown_if_first_time(app) {
+        Ok(true) => {
+            if let Err(error) = app
+                .notification()
+                .builder()
+                .title("DataConnect")
+                .body("DataConnect keeps running in the tray. Reopen it anytime from the tray icon, or quit from there.")
+                .show()
+            {
+                log::warn!("Failed to show close-to-tray notice: {error}");
+            }
+        }
+        Ok(false) => {
+            // Already shown in a previous session -- steady-state, not an
+            // error.
+        }
+        Err(error) => {
+            log::warn!("Failed to read/write close-to-tray notice state: {error}");
+        }
+    }
 }
 
 /// Re-clamp a window's size (and, if it now falls outside the monitor,

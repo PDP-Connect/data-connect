@@ -18,12 +18,18 @@ mod remote_access_ngrok;
 mod remote_access_providers;
 #[cfg(all(desktop, feature = "stall-repro"))]
 pub mod stall_repro;
+#[cfg(all(desktop, feature = "stall-repro"))]
+pub mod winclose_repro;
+#[cfg(all(desktop, feature = "stall-repro"))]
+pub mod pdeathsig_port_repro;
 #[cfg(desktop)]
 mod sealed_credential;
 #[cfg(desktop)]
 mod unified;
 
 pub use commands::browser_surface_host_env_pairs;
+#[cfg(all(desktop, feature = "stall-repro"))]
+pub use commands::test_support;
 
 use commands::{
     add_developer_connector_source, check_browser_available, check_connected_platforms,
@@ -98,6 +104,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())

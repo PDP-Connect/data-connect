@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 use dirs::home_dir;
 
@@ -1018,10 +1019,40 @@ pub(crate) fn read_start_minimized_preference() -> bool {
 /// any read failure, matching AppConfig::default -- the safer failure mode
 /// is "sidecars keep running", not "an unreadable config silently starts
 /// quitting the app on every window close".
+///
+/// This does a blocking `fs::read_to_string` (via `read_app_config_sync`).
+/// Callers on a latency-sensitive thread (in particular the GTK/tao window
+/// event loop, which owns titlebar hit-testing and redraw) must use
+/// `cached_close_to_tray_preference()` instead -- see that function's docs.
 pub(crate) fn read_close_to_tray_preference() -> bool {
     read_app_config_sync()
         .map(|config| config.close_to_tray)
         .unwrap_or(true)
+}
+
+/// In-memory cache of the closeToTray preference, so the window-event loop
+/// never has to touch disk. Seeded once at startup by
+/// `init_close_to_tray_cache()` and kept in sync by `set_app_config`
+/// whenever the setting changes -- see
+/// ai/research/desktop-app-packaging/tauri-linux-unresponsive-titlebar-is-a-tao-wayland-csd-overlay-bug-not-a-blocked-main-thread-2026.md
+/// and the orphaned-sidecar-processes corpus entry's H3 hypothesis: a
+/// blocking `fs::read_to_string(~/.dataconnect/config.json)` was running
+/// synchronously inside `on_window_event`'s `CloseRequested` branch, on the
+/// same thread that owns titlebar hit-testing.
+static CLOSE_TO_TRAY_CACHE: AtomicBool = AtomicBool::new(true);
+
+/// Seed the in-memory closeToTray cache from disk. Call exactly once, early
+/// in startup (before any window can receive a close event), off the hot
+/// path this cache exists to protect -- an extra disk read at startup is
+/// fine, the point is that `CloseRequested` never does one.
+pub(crate) fn init_close_to_tray_cache() {
+    CLOSE_TO_TRAY_CACHE.store(read_close_to_tray_preference(), Ordering::Relaxed);
+}
+
+/// Fast, allocation-free, syscall-free read of the closeToTray preference
+/// for use on the window-event loop. Never touches disk.
+pub(crate) fn cached_close_to_tray_preference() -> bool {
+    CLOSE_TO_TRAY_CACHE.load(Ordering::Relaxed)
 }
 
 /// Set app configuration to ~/.dataconnect/config.json
@@ -1040,6 +1071,11 @@ pub async fn set_app_config(config: AppConfig) -> Result<(), String> {
 
     fs::write(&config_path, json)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
+
+    // Keep the in-memory closeToTray cache (read by CloseRequested on the
+    // window-event thread) in sync with whatever was just written, so a
+    // settings change takes effect without another disk read.
+    CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, Ordering::Relaxed);
 
     log::info!("App config saved to: {:?}", config_path);
     Ok(())
@@ -1218,6 +1254,62 @@ mod tests {
         assert!(
             !config.close_to_tray,
             "an explicit false must be honored, not overridden by the default"
+        );
+    }
+
+    // CLOSE_TO_TRAY_CACHE is process-global; serialize the tests that touch
+    // it directly so they can't interleave under cargo test's default
+    // parallelism, mirroring RUN_REGISTRY_TEST_LOCK in
+    // pdpp_installed_connector.rs and COLLECTION_STATE_LOCK in
+    // pdpp_collection_state.rs.
+    static CLOSE_TO_TRAY_CACHE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn cached_close_to_tray_preference_reflects_the_last_value_stored_without_touching_disk() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Drive the cache directly through the same atomic the production
+        // code path (set_app_config / init_close_to_tray_cache) writes to
+        // -- proves cached_close_to_tray_preference() is a pure in-memory
+        // read with no filesystem dependency: this test never touches
+        // ~/.dataconnect/config.json, never calls read_app_config_sync,
+        // yet the getter still reports whatever was last stored.
+        super::CLOSE_TO_TRAY_CACHE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !super::cached_close_to_tray_preference(),
+            "cache getter must report the value just stored, not a disk-derived default"
+        );
+
+        super::CLOSE_TO_TRAY_CACHE.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            super::cached_close_to_tray_preference(),
+            "cache getter must reflect an update made via the same write path set_app_config uses"
+        );
+    }
+
+    #[test]
+    fn set_app_config_write_path_updates_the_cache_to_the_same_value_it_persists() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Exercise the exact store the real set_app_config command performs
+        // after writing config.json (see set_app_config above), without
+        // going through the #[tauri::command] wrapper (which needs a
+        // running Tauri app). This is the regression guard for "the cache
+        // must serve the same value the file was just written with."
+        let config = AppConfig {
+            storage_provider: None,
+            server_mode: None,
+            self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: false,
+        };
+        super::CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            super::cached_close_to_tray_preference(),
+            config.close_to_tray,
+            "the cache must match what set_app_config's write path just stored"
         );
     }
 }

@@ -718,6 +718,67 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         command.process_group(0);
     }
 
+    // Kernel-delivered backstop: make sure this child cannot outlive the
+    // app even when the app is SIGKILLed, OOM-killed, or segfaults --
+    // scenarios install_parent_signal_handlers() above cannot cover, since
+    // that is a *catchable*-signal handler on the app's own process. See
+    // ai/research/desktop-app-packaging/orphaned-sidecar-processes-need-kernel-level-lifecycle-ownership-not-just-a-catchable-signal-handler-2026.md.
+    //
+    // This is safe against the thread-scoped PDEATHSIG trap (verified with
+    // a two-arm C harness on this machine -- see the
+    // project_pdeathsig_thread_trap memory note): PDEATHSIG fires when the
+    // *spawning thread* exits, not the process. The thread that calls
+    // `command.spawn()` here is `run_supervisor`'s `{label}-supervisor`
+    // thread, which does not return after spawning -- it immediately
+    // enters `wait_for_readiness`/`monitor_ready_process`'s poll loop and
+    // stays parked there for the child's entire supervised lifetime,
+    // across restarts (the same thread loops, it is never re-spawned per
+    // restart). That thread only terminates when the child has already
+    // exited/been stopped, or when the whole app process (all its threads,
+    // including this one) is torn down together -- which is exactly the
+    // case this backstop exists to catch. It is deliberately NOT installed
+    // from a short-lived, fire-and-forget spawn helper thread, which is
+    // the shape that was proven to kill healthy children.
+    // PR_SET_PDEATHSIG is a Linux-only prctl() operation -- it does not
+    // exist in the libc crate's macOS/BSD bindings (Darwin has no prctl()
+    // syscall at all), so this backstop is gated on target_os = "linux",
+    // not the broader cfg(unix) every other Unix-wide branch in this file
+    // uses. macOS/Windows still get the userspace SIGTERM/SIGINT/SIGHUP
+    // handler (install_parent_signal_handlers) and the process-group
+    // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
+    // specific kernel-level SIGKILL/OOM/segfault backstop.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            // Runs in the forked child, before exec -- must stick to
+            // async-signal-safe calls only (raw syscalls, no allocation).
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                // Setting PDEATHSIG itself failed (should not happen on
+                // Linux for an unprivileged, non-setuid exec target).
+                // Fail closed: without this backstop the child could
+                // become an unkillable-by-us orphan, so refuse to exec
+                // rather than run unprotected.
+                return Err(io::Error::last_os_error());
+            }
+            // TOCTOU guard: if the real parent (or the long-lived thread
+            // above) already died in the narrow window between fork() and
+            // the prctl() call landing, PR_SET_PDEATHSIG is a documented
+            // no-op for that case (per man 2 pr_set_pdeathsig: "If the
+            // parent thread ... have already terminated by the time of
+            // the PR_SET_PDEATHSIG operation, then no parent-death signal
+            // is sent"). Re-check directly: if our parent is already PID 1
+            // (i.e. we were reparented before the signal could be armed),
+            // exit immediately instead of running as a silent orphan.
+            // This narrows, but cannot fully close, the race -- see the
+            // PR description / report for the honest bound on its size.
+            if libc::getppid() == 1 {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+
     let mut child = command.spawn()?;
     #[cfg(unix)]
     let process_group_id = if spec.process_group {
@@ -1375,6 +1436,187 @@ setInterval(() => {{}}, 1000);
         assert!(!child_alive, "sidecar descendant survived parent SIGTERM");
     }
 
+    /// The `STAT` field (3rd whitespace-separated field) from
+    /// `/proc/<pid>/stat`, or `None` if the process no longer exists at
+    /// all. Deliberately NOT a bare `kill(pid, 0)` existence check: per
+    /// project_pdeathsig_thread_trap, a PDEATHSIG-killed child becomes a
+    /// zombie (STAT=Z), which still "exists" as a PID and would make a
+    /// naive existence check report it as alive, inverting the verdict.
+    // Reads /proc/<pid>/stat, which only exists on Linux -- this helper
+    // (and everything built on it below) exercises the PR_SET_PDEATHSIG
+    // backstop, which is itself Linux-only. See the target_os = "linux"
+    // gate on the pre_exec block in spawn_process above.
+    #[cfg(target_os = "linux")]
+    fn proc_stat_state(pid: libc::pid_t) -> Option<char> {
+        let contents = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Format: "pid (comm) STATE ...". comm can itself contain spaces
+        // and parens, so parse from the last ')' rather than splitting
+        // naively on whitespace.
+        let after_comm = contents.rsplit_once(')')?.1;
+        after_comm.trim_start().chars().next()
+    }
+
+    /// Kills a set of PIDs on drop, unconditionally -- a panic-safe cleanup
+    /// guard. Without this, a failed assertion partway through the SIGKILL
+    /// test below would `panic!` out of the function and skip the ordinary
+    /// end-of-test cleanup calls, leaking a real `node` process (and its
+    /// child) for the remaining lifetime of the test binary. This bit a
+    /// first draft of this test directly: a flaky sanity assertion panicked
+    /// before cleanup ran, and the leaked helper/leader/child processes
+    /// were then observed still alive (and reparented) minutes later.
+    // Depends on proc_stat_state (Linux-only) to check liveness before
+    // killing; only used by the two Linux-only PDEATHSIG tests below.
+    #[cfg(target_os = "linux")]
+    struct KillOnDrop(Vec<libc::pid_t>);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            for pid in self.0.drain(..) {
+                if proc_stat_state(pid).is_some() {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
+    // Exercises PR_SET_PDEATHSIG, a Linux-only kernel mechanism (see the
+    // target_os = "linux" gate on spawn_process's pre_exec block) -- this
+    // is not a portable Unix test, unlike most of this module's #[cfg(unix)]
+    // coverage.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_sigkill_of_parent_reaps_the_direct_child_via_pdeathsig() {
+        // This is the scenario install_parent_signal_handlers() cannot
+        // cover: SIGKILL of the app's own process delivers no catchable
+        // signal to any of its threads, so the userspace SIGTERM/SIGINT/
+        // SIGHUP handler in process_supervisor.rs never runs. PDEATHSIG is
+        // a kernel-delivered signal to the CHILD, independent of whether
+        // the parent got to run any of its own code on the way down.
+        let directory = tempdir().unwrap();
+        let pid_file = directory.path().join("sidecar-pids.json");
+        let mut helper = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::process_supervisor::tests::unix_parent_signal_helper",
+                "--nocapture",
+                "--ignored",
+            ])
+            .env("DATACONNECT_PARENT_SIGNAL_HELPER", "1")
+            .env("DATACONNECT_PARENT_SIGNAL_PID_FILE", &pid_file)
+            .spawn()
+            .unwrap();
+        // Covers the helper itself: if any assertion below panics before
+        // the helper is killed by hand, this guard's Drop still cleans it
+        // up (and transitively its node leader, since a plain SIGKILL of
+        // the helper is exactly what the rest of this test does anyway).
+        let _helper_guard = KillOnDrop(vec![helper.id() as libc::pid_t]);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < deadline {
+            if let Some(status) = helper.try_wait().unwrap() {
+                panic!("parent-signal helper exited before spawning sidecar: {status}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Value = serde_json::from_str(&fs::read_to_string(&pid_file).unwrap()).unwrap();
+        let leader = pids["leader"].as_i64().unwrap() as libc::pid_t;
+        let child = pids["child"].as_i64().unwrap() as libc::pid_t;
+        // Now guard the leader/child too -- from here on, ANY panic (an
+        // assertion failure, a bad unwrap) still results in every real OS
+        // process this test created being killed when the guards drop
+        // during unwind.
+        let _leader_guard = KillOnDrop(vec![leader, child]);
+
+        // Sanity: both alive and not already zombies/gone before the kill
+        // -- otherwise this test would trivially "pass" for the wrong
+        // reason. Accept any non-terminal state (commonly 'S' sleeping or
+        // 'R' running -- Node's event loop can be observed in either
+        // depending on scheduling at the moment of the sample) rather than
+        // asserting one exact state, which is inherently racy.
+        let leader_state_before = proc_stat_state(leader);
+        assert!(
+            matches!(leader_state_before, Some(state) if state != 'Z'),
+            "leader (node) should be alive and non-zombie before the kill, was {leader_state_before:?}"
+        );
+        let child_state_before = proc_stat_state(child);
+        assert!(
+            matches!(child_state_before, Some(state) if state != 'Z'),
+            "child (node) should be alive and non-zombie before the kill, was {child_state_before:?}"
+        );
+
+        // The actual scenario: SIGKILL the parent app process directly,
+        // simulating an OOM-kill/crash. Unlike the SIGTERM test above,
+        // this signal cannot be caught by install_parent_signal_handlers's
+        // signal_hook-based thread -- that thread dies with everything
+        // else in the process, mid-signal-mask, without running a single
+        // instruction of its handler.
+        unsafe { libc::kill(helper.id() as libc::pid_t, libc::SIGKILL) };
+        let _ = helper.wait().unwrap();
+
+        // Give the kernel a moment to deliver PDEATHSIG and let the child
+        // process it (SIGKILL is not catchable by the child either, so
+        // this should be near-instant -- the poll just tolerates
+        // scheduling jitter, not a real grace period the child needs).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut leader_state = proc_stat_state(leader);
+        while Instant::now() < deadline && !matches!(leader_state, None | Some('Z')) {
+            thread::sleep(Duration::from_millis(20));
+            leader_state = proc_stat_state(leader);
+        }
+
+        // Direct child of the killed parent: PDEATHSIG was armed on this
+        // exact process in pre_exec, immediately after fork(). It must be
+        // dead (zombie, since nothing reaps it -- reaping is not this
+        // test's concern) or gone entirely. (Cleanup happens automatically
+        // via the KillOnDrop guards above regardless of this assertion's
+        // outcome.)
+        let leader_dead = matches!(leader_state, None | Some('Z'));
+        assert!(
+            leader_dead,
+            "direct child (node leader, pid {leader}) survived SIGKILL of its parent -- \
+             PDEATHSIG backstop did not fire; STAT was {leader_state:?}"
+        );
+
+        // Grandchild coverage, measured rather than assumed: `child` is
+        // the process the leader itself spawned via plain Node
+        // `child_process.spawn` (no PDEATHSIG of its own -- our
+        // `pre_exec` closure in `spawn_process` only runs for processes
+        // THIS supervisor directly forks, and Node was not told to set
+        // PR_SET_PDEATHSIG on anything it launches). PDEATHSIG is
+        // documented as per-process, not inherited to further
+        // descendants, so the honest expectation is that this grandchild
+        // is NOT reaped by our change and instead gets orphaned/
+        // reparented, exactly like before this PR. Give it the same
+        // window as the leader, then record what actually happened
+        // (this assertion documents the known gap rather than silently
+        // hoping for either outcome).
+        thread::sleep(Duration::from_millis(200));
+        let child_state = proc_stat_state(child);
+        let child_reparented = child_state.is_some()
+            && fs::read_to_string(format!("/proc/{child}/status"))
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("PPid:"))
+                        .map(|ppid| ppid.trim().to_string())
+                })
+                .map(|ppid| ppid != leader.to_string())
+                .unwrap_or(false);
+        eprintln!(
+            "[pdeathsig-test] grandchild (pid {child}) after parent SIGKILL: STAT={child_state:?} \
+             reparented_away_from_dead_leader={child_reparented} -- expected and known-uncovered: \
+             PDEATHSIG on the direct child does not propagate to processes IT spawns"
+        );
+        // Deliberately not asserted as pass/fail either way: the honest,
+        // documented answer (see the PR description and report) is "not
+        // covered by this change," not "covered" or "must be broken" --
+        // this block exists to make that gap observable in test output,
+        // not to gate CI on kernel/Node-version-dependent reparenting
+        // timing.
+    }
+
     #[test]
     fn prompt_sidecar_stop_returns_within_its_budget() {
         let script =
@@ -1679,6 +1921,101 @@ if (!fs.existsSync(marker)) {{
                 .count(),
             2
         );
+    }
+
+    /// Negative control for the PDEATHSIG addition in `spawn_process`: this
+    /// test process IS the "app" (its PID is the child's real parent), and
+    /// it stays alive throughout. If PDEATHSIG were armed from a
+    /// short-lived, fire-and-forget helper thread that returns right after
+    /// `Command::spawn()` -- the exact trap documented in
+    /// project_pdeathsig_thread_trap and guarded against by installing it
+    /// from `run_supervisor`'s long-lived `{label}-supervisor` thread
+    /// instead -- then that thread returning (which happens routinely,
+    /// once the child reaches readiness and the loop moves into
+    /// `monitor_ready_process`'s poll, and again on every timer tick of
+    /// that poll) would `PR_SET_PDEATHSIG`-kill a perfectly healthy child
+    /// even though the real parent process never died. This test lets a
+    /// real supervised child run, reach Ready, and sit in steady state for
+    /// several multiples of the supervisor's own poll interval
+    /// (`READINESS_POLL_INTERVAL` = 50ms) while this process stays alive,
+    /// and asserts the child is still alive and non-zombie at the end.
+    // Negative control for the same Linux-only PDEATHSIG backstop; see the
+    // target_os = "linux" gate on spawn_process's pre_exec block.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn healthy_child_survives_while_the_parent_process_stays_alive() {
+        let child_pid = NamedTempFile::new().unwrap();
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+fs.writeFileSync({:?}, String(process.pid));
+console.log('READY');
+setInterval(() => {{}}, 1000);
+"#,
+            child_pid.path().to_string_lossy()
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .expect("supervisor should start");
+
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < ready_deadline
+            && !states(&sink)
+                .iter()
+                .any(|event| matches!(event, LifecycleState::Ready))
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            states(&sink)
+                .iter()
+                .any(|event| matches!(event, LifecycleState::Ready)),
+            "child never reached Ready"
+        );
+        let pid = fs::read_to_string(child_pid.path())
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("child should have written its own pid");
+        let _guard = KillOnDrop(vec![pid]);
+
+        // Sit in steady state for well over 10x the poll interval the
+        // `{label}-supervisor` thread uses in monitor_ready_process's loop
+        // (READINESS_POLL_INTERVAL = 50ms) -- if PDEATHSIG had been wired
+        // to fire on that thread's per-tick wakeup/sleep cycle rather than
+        // on the app process's own death, this window is where it would
+        // show up as a spuriously killed child. Sample the child's real
+        // /proc STAT throughout, not just the lifecycle event sink, so a
+        // PDEATHSIG-induced kill (zombie) is caught directly even if it
+        // happened to race with (or get masked by) event delivery.
+        let observe_deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < observe_deadline {
+            let state = proc_stat_state(pid);
+            assert!(
+                matches!(state, Some(s) if s != 'Z'),
+                "healthy child (pid {pid}) died or zombied while its parent process was alive \
+                 -- PDEATHSIG likely fired on a spawning-thread exit rather than the app \
+                 process's own death; STAT was {state:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let events = states(&sink);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LifecycleState::Exited { .. })),
+            "a healthy child must not exit on its own while its parent process is alive: {events:?}"
+        );
+
+        handle.stop().unwrap();
     }
 
     #[test]

@@ -159,6 +159,75 @@ where
     })
 }
 
+/// Whether the one-time "DataConnect keeps running in the tray" toast has
+/// already been shown. Deliberately its own tiny file rather than a field
+/// on `AppConfig` (file_ops.rs): the console's settings UI reads/writes
+/// `AppConfig` as a full-object replace (see `set_app_config`), so a
+/// Rust-owned, JS-invisible flag living in that struct would risk being
+/// silently reset to its default the next time a user changes an unrelated
+/// setting from a partial view of the config. Same rationale as
+/// `AutostartState` above.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CloseToTrayNoticeState {
+    pub(crate) shown: bool,
+}
+
+const CLOSE_TO_TRAY_NOTICE_FILE: &str = "close_to_tray_notice.json";
+
+pub(crate) fn close_to_tray_notice_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join(crate::unified::UNIFIED_DB_DIRECTORY)
+                .join(CLOSE_TO_TRAY_NOTICE_FILE)
+        })
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// Missing file or any read/parse error both mean "not shown yet" -- the
+/// safe failure mode is showing the toast an extra time, not never showing
+/// it because of a transient disk error.
+pub(crate) fn load_close_to_tray_notice_state(path: &Path) -> CloseToTrayNoticeState {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_close_to_tray_notice_state(
+    path: &Path,
+    state: &CloseToTrayNoticeState,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create notice-state directory: {error}"))?;
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("Failed to serialize notice state: {error}"))?;
+    fs::write(path, content).map_err(|error| format!("Failed to write notice state: {error}"))
+}
+
+/// Mark the toast shown, if it has not already been recorded as shown.
+/// Returns true if this call is the one that should actually display it
+/// (i.e. it was NOT already marked shown), false otherwise -- this is what
+/// makes the notification one-time-ever rather than once-per-session.
+///
+/// Reads then writes to the same file with no lock: two `CloseRequested`
+/// events cannot fire concurrently from the same single-threaded window
+/// event loop, so a TOCTOU race is not reachable here in practice, unlike a
+/// multi-writer scenario.
+pub(crate) fn mark_close_to_tray_notice_shown_if_first_time(
+    app: &AppHandle,
+) -> Result<bool, String> {
+    let path = close_to_tray_notice_path(app)?;
+    let state = load_close_to_tray_notice_state(&path);
+    if state.shown {
+        return Ok(false);
+    }
+    save_close_to_tray_notice_state(&path, &CloseToTrayNoticeState { shown: true })?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +367,66 @@ mod tests {
         let loaded = load_autostart_state(&path).expect("load should succeed");
 
         assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn close_to_tray_notice_defaults_to_not_shown_when_file_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("close_to_tray_notice.json");
+
+        let state = load_close_to_tray_notice_state(&path);
+
+        assert!(
+            !state.shown,
+            "a missing notice-state file must mean the toast has not been shown yet"
+        );
+    }
+
+    #[test]
+    fn close_to_tray_notice_defaults_to_not_shown_on_a_corrupt_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("close_to_tray_notice.json");
+        fs::write(&path, "not json").expect("write garbage");
+
+        let state = load_close_to_tray_notice_state(&path);
+
+        assert!(
+            !state.shown,
+            "an unparsable notice-state file must fail safe to 'not shown', not panic or hide the toast forever"
+        );
+    }
+
+    #[test]
+    fn close_to_tray_notice_round_trips_through_save_and_load() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("close_to_tray_notice.json");
+
+        save_close_to_tray_notice_state(&path, &CloseToTrayNoticeState { shown: true })
+            .expect("save should succeed");
+        let loaded = load_close_to_tray_notice_state(&path);
+
+        assert!(loaded.shown);
+    }
+
+    #[test]
+    fn close_to_tray_notice_marking_shown_is_one_time_only() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("close_to_tray_notice.json");
+
+        // First call: file does not exist yet, so this is genuinely the
+        // first time -- it should report true (caller should show the
+        // toast) and persist shown = true.
+        let state = load_close_to_tray_notice_state(&path);
+        assert!(!state.shown);
+        save_close_to_tray_notice_state(&path, &CloseToTrayNoticeState { shown: true })
+            .expect("save should succeed");
+
+        // Second call: already marked shown -- must not report "first
+        // time" again.
+        let state = load_close_to_tray_notice_state(&path);
+        assert!(
+            state.shown,
+            "state must persist across a save/load cycle so the toast fires only once ever"
+        );
     }
 }

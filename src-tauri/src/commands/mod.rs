@@ -40,3 +40,23 @@ pub use recovery_key::*;
 pub use ref_server_view::*;
 pub use server::*;
 pub use updates::*;
+
+/// Thin `pub` shims over otherwise-`pub(crate)` closeToTray helpers, for use
+/// only by the `winclose_repro` throwaway verification binary (built behind
+/// the same `stall-repro` feature gate as `stall_repro.rs`), which lives in
+/// a separate binary crate and so cannot see `pub(crate)` items directly.
+/// Not part of the shipped app's public surface for anything else.
+#[cfg(all(desktop, feature = "stall-repro"))]
+pub mod test_support {
+    pub fn read_close_to_tray_preference_for_test() -> bool {
+        super::file_ops::read_close_to_tray_preference()
+    }
+
+    pub fn cached_close_to_tray_preference_for_test() -> bool {
+        super::file_ops::cached_close_to_tray_preference()
+    }
+
+    pub fn init_close_to_tray_cache_for_test() {
+        super::file_ops::init_close_to_tray_cache();
+    }
+}
