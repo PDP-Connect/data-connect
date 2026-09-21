@@ -50,9 +50,9 @@ asserting its body cannot reach `teardown`, `teardown_managed_on_error`,
 
 - `spawn_console_deep_health_watch`, the deep multi-route check (#216)
 - `spawn_origin_verification_watcher`, the tunnel reachability probe
-- `wait_for_console_with_retry`, the readiness wait (arriving in #218), which
-  is the one path that still legitimately gates startup, so it reports and
-  retries and leaves teardown to its caller
+- `wait_for_console_with_retry`, the readiness wait (#218), which is the one
+  path that still legitimately gates startup, so it reports and retries and
+  leaves teardown to its caller
 
 A runtime test would need a real `AppHandle`, which this file's other tests
 document as unavailable in the harness, so the guarantee is pinned at the
