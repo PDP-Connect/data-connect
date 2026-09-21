@@ -4,6 +4,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
+  cloudflareTunnelDurableAddressState,
   describeTunnelError,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
@@ -13,6 +14,7 @@ import {
   publicUrlOptions,
   remoteAccessOriginDisplay,
   remoteAccessRequiresOwnerPassword,
+  validateCloudflareTunnelHostname,
   validateNgrokDomain,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
@@ -153,6 +155,55 @@ test("the HTTPS edge ngrok option warns the owner about the first-visit intersti
   assert.match(edge?.planNote ?? "", /first browser visit/i)
   assert.match(edge?.planNote ?? "", /warning page/i)
   assert.match(edge?.planNote ?? "", /not a sign anything is broken/i)
+})
+
+test("Cloudflare Tunnel is offered as a selectable public URL option with an honest badge", () => {
+  const option = publicUrlOptionById("cloudflare_tunnel")
+  assert.notEqual(option, null)
+  assert.equal(option?.provider, "cloudflare_tunnel")
+  // Never soften this: Cloudflare terminates TLS at its edge for every
+  // named tunnel, no passthrough mode exists the way ngrok offers one.
+  assert.equal(option?.badge, "Provider can read your data")
+  assert.equal(option?.requiresAuthtoken, true)
+})
+
+test("the Cloudflare Tunnel option explains why it is not a Quick Tunnel", () => {
+  // This is the durable record of the rejected alternative -- see the
+  // corpus entry and report for the full reasoning (SSE unsupported, 200
+  // in-flight cap, Cloudflare's own testing-only guidance).
+  const option = publicUrlOptionById("cloudflare_tunnel")
+  assert.match(option?.planNote ?? "", /quick tunnel/i)
+  assert.match(option?.planNote ?? "", /server-sent events|sse/i)
+})
+
+test("a Cloudflare tunnel hostname is required and must be a bare hostname", () => {
+  for (const invalid of ["", "   ", "https://vault.example.com", "vault.example.com:443", "vault.example.com/mcp", "vault", "-vault.example.com"]) {
+    assert.equal(validateCloudflareTunnelHostname(invalid).ok, false, invalid)
+  }
+  assert.deepEqual(validateCloudflareTunnelHostname(" Vault.Example.COM "), {
+    ok: true,
+    hostname: "vault.example.com",
+  })
+})
+
+test("cloudflareTunnelDurableAddressState is not_applicable for a non-cloudflare provider", () => {
+  const config: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    provider: "user_supplied_origin",
+  }
+  assert.deepEqual(cloudflareTunnelDurableAddressState(config), { kind: "not_applicable" })
+})
+
+test("cloudflareTunnelDurableAddressState is always available once a hostname is configured -- unlike ngrok, there is no discovery gap", () => {
+  const config: RemoteAccessConfig = {
+    ...offRemoteAccessConfig(),
+    provider: "cloudflare_tunnel",
+    cloudflare_tunnel: { hostname: "vault.example.com" },
+  }
+  assert.deepEqual(cloudflareTunnelDurableAddressState(config), {
+    kind: "available",
+    address: "vault.example.com",
+  })
 })
 
 test("an ngrok domain is optional and must be a bare hostname", () => {

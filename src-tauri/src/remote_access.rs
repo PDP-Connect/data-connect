@@ -92,10 +92,17 @@ pub(crate) struct RemoteAccessConfig {
     /// flows into the child environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) console_port: Option<u16>,
-    /// Provider-specific options. Absent for every provider but ngrok, which
-    /// keeps the four-field contract itself provider-neutral.
+    /// Provider-specific options. Absent for every provider but ngrok and
+    /// the Cloudflare named tunnel, which keeps the four-field contract
+    /// itself provider-neutral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ngrok: Option<crate::remote_access_providers::NgrokOptions>,
+    /// The Cloudflare named-tunnel provider's hostname -- see
+    /// `remote_access_cloudflare.rs`'s module doc comment for why this is a
+    /// distinct provider from Quick Tunnels (which this app deliberately
+    /// does not support: no SSE, testing-only per Cloudflare's own docs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cloudflare_tunnel: Option<crate::remote_access_providers::CloudflareTunnelOptions>,
     /// The ngrok authtoken, sealed by the reference server's
     /// `createCredentialCipherFromEnv()` under the SAME
     /// `PDPP_CREDENTIAL_ENCRYPTION_KEY` this process generated
@@ -108,6 +115,11 @@ pub(crate) struct RemoteAccessConfig {
     /// handoff sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ngrok_authtoken_sealed: Option<String>,
+    /// The Cloudflare named-tunnel token, sealed the same way and for the
+    /// same reason as `ngrok_authtoken_sealed` above -- see that field's
+    /// doc comment for the full handoff sequence, which applies unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cloudflare_tunnel_token_sealed: Option<String>,
     /// Set by `start_managed_stack` when the selected provider's tunnel
     /// failed to start (for example ngrok's `ERR_NGROK_312`, TLS endpoints
     /// on a free plan). The stack keeps running without a public origin in
@@ -473,7 +485,9 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         fields: ReachabilityFields::loopback(),
         console_port: None,
         ngrok: None,
+        cloudflare_tunnel: None,
         ngrok_authtoken_sealed: None,
+        cloudflare_tunnel_token_sealed: None,
         tunnel_error: None,
     }
 }
@@ -497,6 +511,7 @@ pub(crate) fn validate_remote_access_config(
                 &config.posture,
                 config.provider.as_deref(),
                 config.ngrok.as_ref(),
+                config.cloudflare_tunnel.as_ref(),
             )?;
 
             // Origin timing is derived from the provider's OWN
@@ -741,7 +756,9 @@ mod tests {
                     crate::remote_access_providers::NgrokEndpointModeConfig::HttpsEdgeTermination,
                 reserved_domain: reserved_domain.map(str::to_string),
             }),
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         }
     }
@@ -767,7 +784,9 @@ mod tests {
             },
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         let validated = validate_remote_access_config(config.clone()).expect("valid");
@@ -949,7 +968,9 @@ mod tests {
             },
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
@@ -976,7 +997,9 @@ mod tests {
             },
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
@@ -997,7 +1020,9 @@ mod tests {
                 endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
                 reserved_domain: None,
             }),
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
@@ -1014,7 +1039,9 @@ mod tests {
             fields: ReachabilityFields::loopback(),
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         assert!(validate_remote_access_config(config).is_err());
@@ -1028,7 +1055,9 @@ mod tests {
             fields: ReachabilityFields::loopback(),
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         assert!(validate_remote_access_config(config).is_err());
@@ -1047,7 +1076,9 @@ mod tests {
                 endpoint_mode: NgrokEndpointModeConfig::TlsPassthrough,
                 reserved_domain: None,
             }),
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("ngrok TLS endpoint failed: ERR_NGROK_312".to_string()),
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
@@ -1065,7 +1096,9 @@ mod tests {
             fields: ReachabilityFields::loopback(),
             console_port: None,
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("a failure from a since-abandoned provider".to_string()),
         };
         let validated = validate_remote_access_config(config).expect("off config is valid");
@@ -1092,7 +1125,9 @@ mod tests {
             },
             console_port: Some(0),
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         assert!(validate_remote_access_config(config).is_err());
@@ -1111,7 +1146,9 @@ mod tests {
             },
             console_port: Some(4310),
             ngrok: None,
+            cloudflare_tunnel: None,
             ngrok_authtoken_sealed: None,
+            cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
         };
         let validated =

@@ -86,3 +86,8 @@ export async function inspectNgrokRemoteAccess(): Promise<RemoteAccessInspection
   const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/ngrok")
   return unwrapData(payload) as RemoteAccessInspection
 }
+
+export async function inspectCloudflareTunnelRemoteAccess(): Promise<RemoteAccessInspection> {
+  const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/cloudflare_tunnel")
+  return unwrapData(payload) as RemoteAccessInspection
+}

@@ -16,8 +16,22 @@
 use crate::remote_access::{
     RemoteAccessPosture, RemoteAccessPrivacy, USER_SUPPLIED_ORIGIN_PROVIDER_ID,
 };
+use crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID;
 use crate::remote_access_ngrok::{NgrokEndpointMode, NGROK_PROVIDER_ID};
 use serde::{Deserialize, Serialize};
+
+/// Options the Cloudflare named-tunnel provider consumes. Kept out of the
+/// seam's `ReachabilityFields` for the same reason `NgrokOptions` is: the
+/// four-field contract stays provider-neutral.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CloudflareTunnelOptions {
+    /// The public hostname the owner already routed to this tunnel in the
+    /// Cloudflare dashboard/API. Unlike ngrok's `reserved_domain`, this is
+    /// never optional: a named tunnel with no routed hostname is not usable
+    /// as a Public URL provider, so there is no "not yet configured" state
+    /// to represent here the way ngrok's free-plan dev domain has.
+    pub(crate) hostname: String,
+}
 
 /// Options that only the ngrok provider consumes. Kept out of the seam's
 /// `ReachabilityFields` so the contract stays provider-neutral.
@@ -73,6 +87,7 @@ impl NgrokEndpointModeConfig {
 pub(crate) enum PublicUrlProvider {
     UserSuppliedOrigin,
     Ngrok(NgrokOptions),
+    CloudflareTunnel(CloudflareTunnelOptions),
 }
 
 impl PublicUrlProvider {
@@ -80,6 +95,7 @@ impl PublicUrlProvider {
         match self {
             Self::UserSuppliedOrigin => USER_SUPPLIED_ORIGIN_PROVIDER_ID,
             Self::Ngrok(_) => NGROK_PROVIDER_ID,
+            Self::CloudflareTunnel(_) => CLOUDFLARE_TUNNEL_PROVIDER_ID,
         }
     }
 
@@ -89,6 +105,10 @@ impl PublicUrlProvider {
             // The owner runs the proxy, so no third party holds the plaintext.
             Self::UserSuppliedOrigin => RemoteAccessPrivacy::ProviderCannotReadPayload,
             Self::Ngrok(options) => options.endpoint_mode.privacy(),
+            // Cloudflare terminates TLS at its edge for every named tunnel --
+            // no passthrough mode exists the way ngrok offers one. Never
+            // soften this: it must always disclose ProviderCanReadPayload.
+            Self::CloudflareTunnel(_) => RemoteAccessPrivacy::ProviderCanReadPayload,
         }
     }
 
@@ -113,6 +133,11 @@ impl PublicUrlProvider {
                     options.reserved_domain.as_deref(),
                 )
             }
+            Self::CloudflareTunnel(options) => {
+                crate::remote_access_cloudflare::cloudflare_tunnel_durable_address(
+                    &options.hostname,
+                )
+            }
         }
     }
 
@@ -133,6 +158,7 @@ pub(crate) fn resolve_public_url_provider(
     posture: &RemoteAccessPosture,
     provider_id: Option<&str>,
     ngrok: Option<&NgrokOptions>,
+    cloudflare_tunnel: Option<&CloudflareTunnelOptions>,
 ) -> Result<PublicUrlProvider, String> {
     if !matches!(posture, RemoteAccessPosture::PublicUrl) {
         return Err("Provider selection requires the public_url posture".to_string());
@@ -152,6 +178,15 @@ pub(crate) fn resolve_public_url_provider(
             }
             Ok(PublicUrlProvider::Ngrok(options))
         }
+        Some(CLOUDFLARE_TUNNEL_PROVIDER_ID) => {
+            let options = cloudflare_tunnel
+                .ok_or_else(|| "Cloudflare tunnel requires a hostname".to_string())?
+                .clone();
+            if options.hostname.trim().is_empty() {
+                return Err("Cloudflare tunnel requires a hostname".to_string());
+            }
+            Ok(PublicUrlProvider::CloudflareTunnel(options))
+        }
         Some(other) => Err(format!("Unknown remote-access provider: {other}")),
         None => Err("Public URL requires a provider".to_string()),
     }
@@ -165,6 +200,12 @@ mod tests {
         NgrokOptions {
             endpoint_mode: mode,
             reserved_domain: domain.map(str::to_string),
+        }
+    }
+
+    fn cloudflare_tunnel(hostname: &str) -> CloudflareTunnelOptions {
+        CloudflareTunnelOptions {
+            hostname: hostname.to_string(),
         }
     }
 
@@ -200,6 +241,7 @@ mod tests {
             PublicUrlProvider::UserSuppliedOrigin,
             PublicUrlProvider::Ngrok(ngrok(NgrokEndpointModeConfig::HttpsEdgeTermination, None)),
             PublicUrlProvider::Ngrok(ngrok(NgrokEndpointModeConfig::TlsPassthrough, None)),
+            PublicUrlProvider::CloudflareTunnel(cloudflare_tunnel("vault.example.com")),
         ];
         for provider in providers {
             assert!(matches!(
@@ -219,6 +261,7 @@ mod tests {
                 NgrokEndpointModeConfig::HttpsEdgeTermination,
                 Some("vault.ngrok.app"),
             )),
+            None,
         )
         .expect("resolved");
         assert_eq!(resolved.provider_id(), NGROK_PROVIDER_ID);
@@ -242,6 +285,7 @@ mod tests {
             &RemoteAccessPosture::PublicUrl,
             Some(NGROK_PROVIDER_ID),
             Some(&ngrok(NgrokEndpointModeConfig::HttpsEdgeTermination, None)),
+            None,
         )
         .expect("resolved");
         assert_eq!(resolved.provider_id(), NGROK_PROVIDER_ID);
@@ -263,6 +307,7 @@ mod tests {
                 NgrokEndpointModeConfig::TcpPassthrough,
                 Some("vault.ngrok.app")
             )),
+            None,
         )
         .is_err());
     }
@@ -272,6 +317,7 @@ mod tests {
         assert!(resolve_public_url_provider(
             &RemoteAccessPosture::PublicUrl,
             Some(NGROK_PROVIDER_ID),
+            None,
             None,
         )
         .is_err());
@@ -283,12 +329,66 @@ mod tests {
             &RemoteAccessPosture::PublicUrl,
             Some("mystery_relay"),
             None,
+            None,
         )
         .is_err());
         assert!(resolve_public_url_provider(
             &RemoteAccessPosture::Off,
             Some(NGROK_PROVIDER_ID),
             None,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn resolves_cloudflare_tunnel_with_its_hostname() {
+        let resolved = resolve_public_url_provider(
+            &RemoteAccessPosture::PublicUrl,
+            Some(CLOUDFLARE_TUNNEL_PROVIDER_ID),
+            None,
+            Some(&cloudflare_tunnel("vault.example.com")),
+        )
+        .expect("resolved");
+        assert_eq!(resolved.provider_id(), CLOUDFLARE_TUNNEL_PROVIDER_ID);
+        // A named tunnel's hostname is always a durable address -- there is
+        // no "not yet configured" state the way ngrok's free-plan dev
+        // domain has, because the owner already routed it in Cloudflare's
+        // dashboard/API before this provider can be selected at all.
+        assert!(resolved.origin_is_knowable_from_config());
+        assert!(matches!(
+            resolved.durable_address(),
+            crate::remote_access::DurableAddressState::Available { address }
+                if address == "vault.example.com"
+        ));
+    }
+
+    #[test]
+    fn cloudflare_tunnel_privacy_always_discloses_that_the_provider_can_read_the_payload() {
+        // Cloudflare terminates TLS at its edge for every named tunnel --
+        // never soften this to "cannot read," unlike ngrok's passthrough
+        // modes which genuinely can make that claim.
+        let provider = PublicUrlProvider::CloudflareTunnel(cloudflare_tunnel("vault.example.com"));
+        assert_eq!(
+            provider.privacy(),
+            RemoteAccessPrivacy::ProviderCanReadPayload
+        );
+    }
+
+    #[test]
+    fn refuses_cloudflare_tunnel_without_a_hostname() {
+        assert!(resolve_public_url_provider(
+            &RemoteAccessPosture::PublicUrl,
+            Some(CLOUDFLARE_TUNNEL_PROVIDER_ID),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(resolve_public_url_provider(
+            &RemoteAccessPosture::PublicUrl,
+            Some(CLOUDFLARE_TUNNEL_PROVIDER_ID),
+            None,
+            Some(&cloudflare_tunnel("  ")),
         )
         .is_err());
     }
@@ -304,6 +404,7 @@ mod tests {
         let resolved = resolve_public_url_provider(
             &RemoteAccessPosture::PublicUrl,
             Some(USER_SUPPLIED_ORIGIN_PROVIDER_ID),
+            None,
             None,
         )
         .expect("resolved");

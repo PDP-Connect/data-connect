@@ -20,7 +20,7 @@
 
 export type RemoteAccessPosture = "off" | "my_devices_only" | "public_url"
 
-export type RemoteAccessProvider = "user_supplied_origin" | "ngrok"
+export type RemoteAccessProvider = "user_supplied_origin" | "ngrok" | "cloudflare_tunnel"
 
 export type NgrokEndpointMode = "https_edge_termination" | "tls_passthrough" | "tcp_passthrough"
 
@@ -34,6 +34,18 @@ export interface ReachabilityFields {
 export interface NgrokOptions {
   endpoint_mode: NgrokEndpointMode
   reserved_domain: string | null
+}
+
+/**
+ * Options the Cloudflare named-tunnel provider consumes. Unlike
+ * `NgrokOptions.reserved_domain`, `hostname` is never optional: a named
+ * tunnel with no hostname routed to it in the Cloudflare dashboard/API is
+ * not usable as a Public URL provider, so there is no "not yet configured"
+ * state to represent (see `src-tauri/src/remote_access_cloudflare.rs`'s
+ * module doc comment for why this is a named tunnel, never a Quick Tunnel).
+ */
+export interface CloudflareTunnelOptions {
+  hostname: string
 }
 
 export interface RemoteAccessConfig {
@@ -55,6 +67,7 @@ export interface RemoteAccessConfig {
    */
   console_port?: number | null
   ngrok?: NgrokOptions | null
+  cloudflare_tunnel?: CloudflareTunnelOptions | null
   /**
    * The ngrok authtoken, sealed with `createCredentialCipherFromEnv()`
    * (`stores/credential-encryption.ts`) under `PDPP_CREDENTIAL_ENCRYPTION_KEY`
@@ -68,6 +81,12 @@ export interface RemoteAccessConfig {
    * unsealed at rest, even briefly.
    */
   ngrok_authtoken_sealed?: string | null
+  /**
+   * The Cloudflare named-tunnel token, sealed the same way and for the same
+   * reason as `ngrok_authtoken_sealed` above -- see that field's doc comment
+   * for the full handoff sequence, which applies unchanged.
+   */
+  cloudflare_tunnel_token_sealed?: string | null
   /**
    * Set by `start_managed_stack` (`src-tauri/src/unified.rs`) when the
    * selected provider's tunnel failed to start -- for example ngrok's
@@ -226,10 +245,13 @@ export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: tr
   if (config.provider === "ngrok") {
     return validateNgrokConfig(config)
   }
+  if (config.provider === "cloudflare_tunnel") {
+    return validateCloudflareTunnelConfig(config)
+  }
   if (config.provider !== "user_supplied_origin") {
     return {
       ok: false,
-      message: "This route only manages the user_supplied_origin and ngrok providers.",
+      message: "This route only manages the user_supplied_origin, ngrok, and cloudflare_tunnel providers.",
     }
   }
   const origin = config.fields.PDPP_REFERENCE_ORIGIN
@@ -317,6 +339,19 @@ export function ngrokDurableAddress(reservedDomain: string | null | undefined): 
 export const USER_SUPPLIED_ORIGIN_DURABLE_ADDRESS: DurableAddressState = { kind: "not_applicable" }
 
 /**
+ * A named Cloudflare tunnel's hostname is ALWAYS a durable address the
+ * moment it is configured -- there is no "not yet configured" state the way
+ * ngrok's free-plan dev domain has, because the owner already routed the
+ * hostname to this tunnel in Cloudflare's dashboard/API before selecting
+ * this provider is even possible. Mirrors the Rust free function
+ * `cloudflare_tunnel_durable_address` in
+ * `src-tauri/src/remote_access_cloudflare.rs`.
+ */
+export function cloudflareTunnelDurableAddress(hostname: string): DurableAddressState {
+  return { kind: "available", address: hostname }
+}
+
+/**
  * The durable-address state for whichever provider `config` currently
  * selects. `null` for `off`/`my_devices_only` or an unrecognized provider,
  * where the question does not apply.
@@ -327,6 +362,9 @@ export function durableAddressState(config: RemoteAccessConfig): DurableAddressS
   }
   if (config.provider === "ngrok") {
     return ngrokDurableAddress(config.ngrok?.reserved_domain ?? null)
+  }
+  if (config.provider === "cloudflare_tunnel" && config.cloudflare_tunnel?.hostname) {
+    return cloudflareTunnelDurableAddress(config.cloudflare_tunnel.hostname)
   }
   return null
 }
@@ -437,6 +475,50 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
 }
 
 /**
+ * Mirrors `validate_remote_access_config`'s Cloudflare-tunnel branch in
+ * `src-tauri/src/remote_access.rs` (via `resolve_public_url_provider`'s
+ * Cloudflare arm in `remote_access_providers.rs`). Unlike
+ * `validateNgrokConfig`, the origin is ALWAYS knowable from config here --
+ * `cloudflareTunnelDurableAddress` never returns `auth_insufficient` -- so
+ * this function has no "origin must stay empty" branch at all: a hostname
+ * is required up front, and so is the origin once that hostname is set.
+ *
+ * `cloudflare_tunnel_token_sealed` passes through untouched, same as
+ * `ngrok_authtoken_sealed` in `validateNgrokConfig`.
+ */
+function validateCloudflareTunnelConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
+  const hostname = config.cloudflare_tunnel?.hostname?.trim()
+  if (!hostname) {
+    return { ok: false, message: "Cloudflare tunnel requires a hostname." }
+  }
+  const origin = config.fields.PDPP_REFERENCE_ORIGIN
+  if (!origin) {
+    return { ok: false, message: "Public URL requires PDPP_REFERENCE_ORIGIN." }
+  }
+  const validated = validateUserSuppliedOrigin(origin)
+  if (!validated.ok) {
+    return validated
+  }
+  if (validated.host !== hostname) {
+    return { ok: false, message: "PDPP_REFERENCE_ORIGIN must match the configured Cloudflare tunnel hostname." }
+  }
+  if (config.fields.PDPP_TRUSTED_HOSTS.trim() !== validated.host) {
+    return { ok: false, message: "PDPP_TRUSTED_HOSTS must contain the origin host." }
+  }
+  return {
+    ok: true,
+    config: {
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      fields: validated.fields,
+      cloudflare_tunnel: { hostname },
+      cloudflare_tunnel_token_sealed: config.cloudflare_tunnel_token_sealed ?? null,
+      tunnel_error: config.tunnel_error ?? null,
+    },
+  }
+}
+
+/**
  * Capability probe for the `user_supplied_origin` provider: NOT a reflection
  * of the currently stored config's posture. Matches
  * `inspect_remote_access()` in `remote_access.rs`, which always probes a
@@ -491,6 +573,25 @@ export function inspectNgrok(env: NodeJS.ProcessEnv = process.env): RemoteAccess
       authentication: "not_required",
       reason:
         "ngrok needs the DataConnect desktop app: it stores your authtoken in the OS keychain and supervises the tunnel process natively. This deployment has no desktop host to do that, so ngrok cannot be enabled here. Use \"A proxy you run\" instead.",
+    }
+  }
+  return { availability: "available", authentication: "not_required", reason: null }
+}
+
+/**
+ * Capability probe for the Cloudflare named-tunnel provider. Mirrors
+ * `inspectNgrok`: it too genuinely needs a native host (a keychain slot for
+ * the tunnel token and Rust-side `cloudflared` process supervision in
+ * `src-tauri/src/remote_access_cloudflare.rs`), so the same
+ * `MANAGED_DESKTOP_HOST_ENV` gate applies.
+ */
+export function inspectCloudflareTunnel(env: NodeJS.ProcessEnv = process.env): RemoteAccessInspection {
+  if (!isManagedDesktopHostPresent(env)) {
+    return {
+      availability: "unavailable",
+      authentication: "not_required",
+      reason:
+        "Cloudflare Tunnel needs the DataConnect desktop app: it stores your tunnel token in the OS keychain and supervises the cloudflared process natively. This deployment has no desktop host to do that, so Cloudflare Tunnel cannot be enabled here. Use \"A proxy you run\" instead.",
     }
   }
   return { availability: "available", authentication: "not_required", reason: null }

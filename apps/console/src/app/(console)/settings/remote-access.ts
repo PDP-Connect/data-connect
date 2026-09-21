@@ -13,6 +13,7 @@
  */
 import {
   durableAddressState,
+  type CloudflareTunnelOptions,
   type DurableAddressState,
   type InvalidOrigin,
   type NgrokEndpointMode,
@@ -22,6 +23,7 @@ import {
 } from "pdpp-reference-implementation/remote-access-config"
 
 export {
+  cloudflareTunnelDurableAddress,
   durableAddressState,
   inspectUserSuppliedOrigin,
   ngrokDurableAddress,
@@ -29,6 +31,7 @@ export {
   originIsKnowableFromConfig,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  type CloudflareTunnelOptions,
   type DurableAddressState,
   type InvalidOrigin,
   type NgrokEndpointMode,
@@ -109,9 +112,9 @@ export interface PublicUrlOption {
   label: string
   description: string
   badge: ProviderPrivacyBadge
-  /** True when the owner must paste an ngrok authtoken before enabling. */
+  /** True when the owner must paste a provider credential before enabling. */
   requiresAuthtoken: boolean
-  /** Stated only where ngrok's published plan limits make it load-bearing. */
+  /** Stated only where a provider's published plan limits make it load-bearing. */
   planNote: string | null
 }
 
@@ -143,6 +146,18 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     requiresAuthtoken: true,
     planNote:
       "Requires a paid ngrok plan: ngrok lists TLS endpoints as not available on the free plan.",
+  },
+  {
+    id: "cloudflare_tunnel",
+    provider: "cloudflare_tunnel",
+    ngrokMode: null,
+    label: "Cloudflare Tunnel",
+    description:
+      "Cloudflare gives this Personal Server a public HTTPS address on a hostname you control. Cloudflare terminates TLS at its edge, so it can read requests and responses.",
+    badge: "Provider can read your data",
+    requiresAuthtoken: true,
+    planNote:
+      "Requires a free Cloudflare account, a domain on Cloudflare, and the cloudflared binary installed on this machine. Deliberately not a Quick Tunnel (trycloudflare.com): Cloudflare's own docs say Quick Tunnels are testing-only, cap at 200 in-flight requests, and do not support the live sync viewer's Server-Sent Events stream.",
   },
   {
     id: "user_supplied_origin",
@@ -181,6 +196,38 @@ export function publicUrlOptionById(id: string): PublicUrlOption | null {
  * path, since the SDK's `domain()` takes a host and not a URL) is how a
  * free-plan owner gets the stable address their account already has.
  */
+/**
+ * Unlike `validateNgrokDomain`, this hostname is never optional: a named
+ * Cloudflare tunnel has no equivalent of ngrok's random-hostname fallback --
+ * the owner must have already routed a hostname to the tunnel in
+ * Cloudflare's dashboard/API, and that hostname is what this app forwards
+ * traffic to. Reuses the same bare-hostname shape check as
+ * `validateNgrokDomain`.
+ */
+export function validateCloudflareTunnelHostname(
+  raw: string
+): { ok: true; hostname: string } | InvalidOrigin {
+  const value = raw.trim()
+  if (!value) {
+    return { ok: false, message: "Enter the hostname you routed to this tunnel in Cloudflare." }
+  }
+  if (/[:/?#]/.test(value)) {
+    return {
+      ok: false,
+      message:
+        "Enter only the hostname, such as vault.example.com — no scheme, port, or path.",
+    }
+  }
+  if (
+    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(
+      value
+    )
+  ) {
+    return { ok: false, message: "Enter a valid hostname." }
+  }
+  return { ok: true, hostname: value.toLowerCase() }
+}
+
 export function validateNgrokDomain(
   raw: string
 ): { ok: true; domain: string | null } | InvalidOrigin {
@@ -213,6 +260,17 @@ export function validateNgrokDomain(
  */
 export function ngrokDurableAddressState(config: RemoteAccessConfig): DurableAddressState {
   if (config.provider !== "ngrok") {
+    return { kind: "not_applicable" }
+  }
+  return durableAddressState(config) ?? { kind: "not_applicable" }
+}
+
+/** Same console-local convenience as `ngrokDurableAddressState`, for the
+ * Cloudflare tunnel hostname field. */
+export function cloudflareTunnelDurableAddressState(
+  config: RemoteAccessConfig
+): DurableAddressState {
+  if (config.provider !== "cloudflare_tunnel") {
     return { kind: "not_applicable" }
   }
   return durableAddressState(config) ?? { kind: "not_applicable" }

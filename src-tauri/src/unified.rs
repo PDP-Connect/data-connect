@@ -174,6 +174,19 @@ struct ShutdownState {
 struct UnifiedStack {
     ri: SupervisorHandle,
     console: SupervisorHandle,
+    /// Unlike ngrok's `HeldNgrok` (held OUTSIDE `stack` in
+    /// `UnifiedRuntimeState.ngrok` so a config-change restart can reuse it
+    /// and avoid ngrok's free-tier random-hostname churn), a named
+    /// Cloudflare tunnel has a STABLE, owner-configured hostname -- there is
+    /// no churn to avoid by reusing the process across a restart, so it
+    /// lives here instead and is torn down and restarted with the RI/console
+    /// on every `start_managed_stack` call. Simpler, and equally correct:
+    /// the origin never changes across that restart either way.
+    cloudflare_tunnel: Option<
+        crate::remote_access_cloudflare::CloudflareTunnelProvider<
+            crate::remote_access::KeychainCredentialResolver,
+        >,
+    >,
 }
 
 impl UnifiedStack {
@@ -202,6 +215,13 @@ impl UnifiedStack {
                 }),
             )
         });
+        if let Some(mut provider) = self.cloudflare_tunnel.take() {
+            if let Err(error) =
+                crate::remote_access::RemoteAccessProvider::stop(&mut provider)
+            {
+                log::error!("Failed to stop the Cloudflare tunnel: {error}");
+            }
+        }
         let console_error = console_error.err().map(|error| error.to_string());
         let ri_error = ri_error.err().map(|error| error.to_string());
         match (console_error, ri_error) {
@@ -941,8 +961,42 @@ fn start_managed_stack(
         apply_ngrok_tunnel_outcome(app, &remote_access.fields, Some(error));
     }
 
+    // Cloudflare's named-tunnel hostname is stable and owner-configured
+    // (unlike ngrok's free-tier random hostname), so there is nothing to
+    // reuse across a restart the way `reuse_or_start_ngrok_provider` reuses
+    // a held tunnel -- `start_cloudflare_tunnel_provider` always starts
+    // fresh, forwarding to the CONSOLE's port (same target the ngrok tunnel
+    // above forwards to, for the same reason: a tunnel forwarding to the
+    // bare RI leaves a remote visitor stuck on the RI's JSON discovery
+    // index). A tunnel failure (missing `cloudflared` binary, bad token)
+    // must not abort the stack either, for the same reason ngrok's failure
+    // doesn't: the owner still needs a working console to see the failure
+    // and fix it. If BOTH ngrok and Cloudflare somehow produced a
+    // `tunnel_error` (should not happen -- only one provider is selected at
+    // a time), the Cloudflare message wins because it is applied second;
+    // this is a defensive ordering choice, not a claim that this can
+    // currently occur.
+    let (cloudflare_tunnel, tunnel_error, applied_fields) =
+        match start_cloudflare_tunnel_provider(remote_access, console.port()) {
+            Ok(Some((fields, provider))) => (Some(provider), None, Some(fields)),
+            Ok(None) => (None, None, None),
+            Err(error) => {
+                log::error!("Cloudflare tunnel failed to start: {error}");
+                (None, Some(error), None)
+            }
+        };
+    if let Some(fields) = applied_fields {
+        apply_ngrok_tunnel_outcome(app, &fields, None);
+    } else if let Some(error) = tunnel_error.as_deref() {
+        apply_ngrok_tunnel_outcome(app, &remote_access.fields, Some(error));
+    }
+
     Ok(ManagedStackStart {
-        stack: UnifiedStack { ri, console },
+        stack: UnifiedStack {
+            ri,
+            console,
+            cloudflare_tunnel,
+        },
         ngrok,
         ri_origin,
         console_url,
@@ -971,6 +1025,7 @@ fn resolve_ngrok_options(
         &remote_access.posture,
         remote_access.provider.as_deref(),
         remote_access.ngrok.as_ref(),
+        remote_access.cloudflare_tunnel.as_ref(),
     )?
     else {
         return Ok(None);
@@ -1062,6 +1117,90 @@ fn start_ngrok_provider(
     let fields = NgrokProvider::<KeychainCredentialResolver>::reachability_fields(&handle.origin)?;
     log::info!("ngrok tunnel is up at {}", handle.origin);
     Ok(Some((fields, provider, fingerprint)))
+}
+
+/// Start a Cloudflare named tunnel forwarding to `forward_port` (the
+/// console's port -- see the tunnel-forwards-to-the-console comment in
+/// `start_managed_stack`), when `remote_access` selects the Cloudflare
+/// tunnel provider. `Ok(None)` for
+/// every other provider -- not an error, just "no tunnel to start". Mirrors
+/// `start_ngrok_provider` above; the one structural difference is there is
+/// no fingerprint/reuse concept here (see `UnifiedStack::cloudflare_tunnel`'s
+/// doc comment for why a named tunnel's stable, owner-configured hostname
+/// makes that optimization unnecessary).
+fn start_cloudflare_tunnel_provider(
+    remote_access: &RemoteAccessConfig,
+    forward_port: u16,
+) -> Result<
+    Option<(
+        crate::remote_access::ReachabilityFields,
+        crate::remote_access_cloudflare::CloudflareTunnelProvider<
+            crate::remote_access::KeychainCredentialResolver,
+        >,
+    )>,
+    String,
+> {
+    use crate::remote_access::{
+        CancellationToken, CredentialReference, CredentialResolver, KeychainCredentialResolver,
+        LoopbackTarget, RemoteAccessContractConfig, RemoteAccessPosture, RemoteAccessProvider,
+    };
+    use crate::remote_access_cloudflare::{CloudflareTunnelProvider, CLOUDFLARE_TUNNEL_PROVIDER_ID};
+    use crate::remote_access_providers::{resolve_public_url_provider, PublicUrlProvider};
+
+    if remote_access.provider.as_deref() != Some(CLOUDFLARE_TUNNEL_PROVIDER_ID) {
+        return Ok(None);
+    }
+    if !matches!(remote_access.posture, RemoteAccessPosture::PublicUrl) {
+        return Ok(None);
+    }
+    let PublicUrlProvider::CloudflareTunnel(options) = resolve_public_url_provider(
+        &remote_access.posture,
+        remote_access.provider.as_deref(),
+        remote_access.ngrok.as_ref(),
+        remote_access.cloudflare_tunnel.as_ref(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let resolver = KeychainCredentialResolver;
+    let credential = resolver
+        .resolve(CLOUDFLARE_TUNNEL_PROVIDER_ID)
+        .map_err(|error| {
+            format!("Could not read the Cloudflare tunnel token from the keychain: {error}")
+        })?
+        .ok_or_else(|| {
+            "Cloudflare tunnel is configured but no token is stored yet. Submit one from Settings."
+                .to_string()
+        })?;
+
+    let mut provider = CloudflareTunnelProvider::new(
+        RemoteAccessContractConfig {
+            provider_id: CLOUDFLARE_TUNNEL_PROVIDER_ID.to_string(),
+            posture: RemoteAccessPosture::PublicUrl,
+            user_supplied_origin: None,
+            credential_reference: match &credential {
+                CredentialReference::Stored(token) => Some(token.clone()),
+                CredentialReference::NotRequired => None,
+            },
+        },
+        resolver,
+        options.hostname.clone(),
+    )?;
+
+    let handle = provider.start(
+        LoopbackTarget {
+            host: "127.0.0.1".to_string(),
+            port: forward_port,
+        },
+        credential,
+        CancellationToken::new(),
+    )?;
+    let fields = CloudflareTunnelProvider::<KeychainCredentialResolver>::reachability_fields(
+        &options.hostname,
+    )?;
+    log::info!("Cloudflare tunnel is up at {}", handle.origin);
+    Ok(Some((fields, provider)))
 }
 
 /// Pure reuse decision, split out from `reuse_or_start_ngrok_provider` so it
@@ -2108,6 +2247,56 @@ fn apply_pending_ngrok_authtoken(
     }
 }
 
+/// Decrypt a pending `cloudflare_tunnel_token_sealed` into the OS keychain,
+/// then blank the sealed field back to `None` on disk. Mirrors
+/// `apply_pending_ngrok_authtoken` exactly -- see that function's doc
+/// comment for the full handoff sequence and why it must run before
+/// `restart_after_remote_access_config`.
+fn apply_pending_cloudflare_tunnel_token(
+    app: &AppHandle,
+    config: RemoteAccessConfig,
+) -> RemoteAccessConfig {
+    let Some(sealed) = config.cloudflare_tunnel_token_sealed.clone() else {
+        return config;
+    };
+    let outcome = (|| -> Result<(), String> {
+        let key_path = credential_encryption_key_path(app)?;
+        let database_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+            .join(UNIFIED_DB_DIRECTORY)
+            .join(UNIFIED_DB_FILE);
+        let credential_encryption_key =
+            load_or_create_credential_encryption_key(&key_path, &database_path)?;
+        let token = crate::sealed_credential::open_sealed_credential(
+            &sealed,
+            &credential_encryption_key,
+        )
+        .map_err(|error| {
+            format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
+        })?;
+        crate::owner_credential::store_provider_credential_reference(
+            crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
+            &token,
+        )
+    })();
+    if let Err(error) = outcome {
+        log::error!("Could not apply the pending Cloudflare tunnel token: {error}");
+    }
+    let cleared = RemoteAccessConfig {
+        cloudflare_tunnel_token_sealed: None,
+        ..config
+    };
+    match save_remote_access_config(app, cleared.clone()) {
+        Ok(saved) => saved,
+        Err(error) => {
+            log::error!("Could not clear the pending Cloudflare tunnel token from disk: {error}");
+            cleared
+        }
+    }
+}
+
 pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_applied = load_remote_access_config(&app).unwrap_or_else(|error| {
@@ -2130,6 +2319,11 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             };
             let current = if current.ngrok_authtoken_sealed.is_some() {
                 apply_pending_ngrok_authtoken(&app, current)
+            } else {
+                current
+            };
+            let current = if current.cloudflare_tunnel_token_sealed.is_some() {
+                apply_pending_cloudflare_tunnel_token(&app, current)
             } else {
                 current
             };
@@ -2663,7 +2857,15 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         .start()
         .expect("fake console should become ready");
         let console_port = console.port();
-        (UnifiedStack { ri, console }, ri_port, console_port)
+        (
+            UnifiedStack {
+                ri,
+                console,
+                cloudflare_tunnel: None,
+            },
+            ri_port,
+            console_port,
+        )
     }
 
     #[test]
