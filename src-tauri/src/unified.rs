@@ -2035,6 +2035,7 @@ async fn finish_bootstrap(
         return Err(error);
     }
 
+    let console_origin_for_health_watch = console_origin.to_string();
     if let Err(error) = create_or_update_console_window(
         app,
         console_origin,
@@ -2045,6 +2046,7 @@ async fn finish_bootstrap(
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
+    spawn_console_deep_health_watch(console_origin_for_health_watch);
     set_status(app, UnifiedStatus::Ready);
     close_recovery_window(app);
     Ok(())
@@ -2633,63 +2635,90 @@ fn close_recovery_window(app: &AppHandle) {
     }
 }
 
-/// `wait_for_console` used to accept any 2xx/3xx response from `url` as
-/// proof the console was up. That is a status-code check, not a health
-/// check: a Next.js standalone server whose on-disk build directory was
-/// replaced out from under it (the incident this closes -- see #205's
-/// staging-side fix for why that directory could go stale) keeps its build
-/// manifest in memory and answers server-rendered HTML from the OLD build
-/// with a perfectly normal 200, while every static chunk that HTML
-/// references 404s against the NEW directory tree (`page_client-reference-
-/// manifest.js` missing was the concrete symptom). Tim saw `curl` return
-/// 200 on `/settings` while the page was actually broken -- the same
-/// dishonest-status shape as an ngrok tunnel reporting "up" while
-/// forwarding zero bytes: the check only proved something was listening,
-/// never that it could actually do its job.
+/// `wait_for_console` gates bootstrap: while it returns `Err`, `finish_bootstrap`
+/// tears down the whole managed stack (console + reference implementation)
+/// and retries from scratch (see `finish_bootstrap`'s caller). That makes it
+/// the one check in this file where a false negative is not merely
+/// unhelpful -- it is destructive. A prior version of this function required
+/// EVERY route in `CONSOLE_HEALTH_CHECK_PATHS` (including `/connect`, an
+/// owner-session-gated route -- see its server component's `refFetch` ->
+/// `verifyDashboardSession` call) to pass a deep asset-reference check
+/// before counting the console as up. Confirmed live: this made a
+/// perfectly healthy console -- serving `/settings` with 0 JS errors, 0
+/// 5xx -- report unhealthy forever, because the health check's bare
+/// `reqwest::Client` carries no owner session cookie and `/connect` never
+/// answers that check the way an authenticated browser tab would. The
+/// stack tore down, restarted, and repeated the same failure in a loop:
+/// the exact "console reports unhealthy" incident this whole chain of
+/// fixes exists to catch, except the health check itself was now the
+/// cause, not the cure.
 ///
-/// This closes that gap without needing to know anything about a specific
-/// stale-build failure mode: fetch a real page, pull out the FIRST static
-/// asset URL that page's own HTML references (Next always emits at least
-/// one `<script src="/_next/static/...">` -- see `extract_first_static_asset_url`),
-/// and require that exact asset to resolve too. If the shell HTML and its
-/// own referenced assets don't agree on what build is running, this fails
-/// loudly instead of reporting a healthy console that cannot render.
-///
-/// Checks more than the bare root. Each App Router route ships its own,
-/// physically separate `page_client-reference-manifest.js` file (confirmed
-/// against this repo's own `.next/server/app/` output -- `(console)/
-/// page_client-reference-manifest.js` and `(console)/connect/
-/// page_client-reference-manifest.js` are different files with different
-/// `globalThis.__RSC_MANIFEST` keys), and Next's own `loadComponents`
-/// (`load-components.js`) loads a route's manifest from disk lazily, the
-/// first time THAT route is requested in the process's lifetime, not
-/// exhaustively at boot. So a check against `/` alone proves nothing about
-/// `/connect` specifically -- it would report healthy in the exact shape of
-/// the original incident if the swap corrupted `/connect`'s generation while
-/// `/`'s happened to already be warm, or vice versa. `/connect` is checked
-/// because it's the literal route named in the `InvariantError` this whole
-/// chain of fixes (#205 then this) traces back to.
-const CONSOLE_HEALTH_CHECK_PATHS: [&str; 2] = ["", "connect"];
-
+/// So `wait_for_console` only proves LIVENESS: does the console's HTTP
+/// port answer at all, with a status that isn't a server error. That is
+/// the one fact bootstrap actually needs before it is safe to open the
+/// window and hand control to the owner -- and it is also the one fact
+/// that stays true regardless of which route happens to need a session
+/// this bare client doesn't carry. The deeper stale-build check (does the
+/// page's own referenced asset actually resolve, across more than one
+/// route) still exists -- see `spawn_console_deep_health_watch` below --
+/// but it runs AFTER the window is already open and NEVER tears anything
+/// down on failure, only logs. A health check must be able to say "I
+/// don't know" without being able to say "so I killed it."
 async fn wait_for_console(url: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + CONSOLE_WAIT_TIMEOUT;
     let mut last_error = "no attempt completed".to_string();
     while tokio::time::Instant::now() < deadline {
-        match verify_console_health_check_routes(&client, url).await {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = error,
+        match client.get(url).send().await {
+            Ok(response) if response_proves_the_server_is_alive(response.status()) => return Ok(()),
+            Ok(response) => last_error = format!("page responded {}", response.status()),
+            Err(error) => last_error = format!("page request failed: {error}"),
         }
         tokio::time::sleep(CONSOLE_POLL_INTERVAL).await;
     }
     Err(format!(
-        "Console at {url} did not serve a working page within {CONSOLE_WAIT_TIMEOUT:?}: {last_error}"
+        "Console at {url} did not answer within {CONSOLE_WAIT_TIMEOUT:?}: {last_error}"
     ))
+}
+
+/// Routes the best-effort deep health watch checks after the console window
+/// is already open. `/connect` is included deliberately, in spite of it
+/// being the exact route whose owner-session gate caused the fatal-teardown
+/// incident this file's history records -- the fix for that incident is
+/// "never fatal", not "stop checking the route that matters", and
+/// `verify_console_serves_a_real_route` now treats a 401/403 (or a
+/// redirect, which an authenticated retry will naturally follow once a
+/// session exists) as proof of life rather than a failure. See
+/// `response_proves_the_server_is_alive`.
+const CONSOLE_HEALTH_CHECK_PATHS: [&str; 2] = ["", "connect"];
+const CONSOLE_DEEP_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Runs after the console window is already open and the owner already has
+/// control. Polls `CONSOLE_HEALTH_CHECK_PATHS` on a slow interval for as
+/// long as the app runs and logs a warning on failure -- this is
+/// observability, not a gate. Nothing in this function is allowed to call
+/// `teardown_managed_on_error` or any other stack-affecting action; that is
+/// the entire point of separating it from `wait_for_console`. See
+/// `wait_for_console`'s doc comment for the incident this split exists to
+/// prevent from recurring.
+pub(crate) fn spawn_console_deep_health_watch(url: String) {
+    tauri::async_runtime::spawn(async move {
+        let client = reqwest::Client::new();
+        loop {
+            tokio::time::sleep(CONSOLE_DEEP_HEALTH_CHECK_INTERVAL).await;
+            if let Err(error) = verify_console_health_check_routes(&client, &url).await {
+                log::warn!(
+                    "Console deep health check failed (not fatal, no action taken): {error}"
+                );
+            }
+        }
+    });
 }
 
 /// One attempt across every route in `CONSOLE_HEALTH_CHECK_PATHS`. All must
 /// pass for the console to count as healthy -- see `wait_for_console`'s doc
-/// comment for why checking only one route is not enough.
+/// comment for why checking only one route is not enough, and why this
+/// function's own failures are logged, never fatal.
 async fn verify_console_health_check_routes(client: &reqwest::Client, base_url: &str) -> Result<(), String> {
     let trimmed_base = base_url.trim_end_matches('/');
     for path in CONSOLE_HEALTH_CHECK_PATHS {
@@ -2705,22 +2734,61 @@ async fn verify_console_health_check_routes(client: &reqwest::Client, base_url: 
 /// that asset too. Both requests must succeed for the console to count as
 /// genuinely serving a real route -- see `wait_for_console`'s doc comment
 /// for why a bare shell-HTML 200 is not enough.
+/// A route this process itself gates behind the owner session
+/// (`verifyDashboardSession` / `refFetch` in the console's own TypeScript --
+/// see `/connect`'s server component, which calls `listCimdClientDocuments`)
+/// answers a health-check request that carries no session cookie with a 401
+/// or 403, or Next's `redirect()` to `/owner/login`. Both are proof the
+/// server is alive and serving real application logic, not the stale-build
+/// symptom this check exists to catch (a stale build answers 200 from
+/// memory with broken asset references, not an auth challenge) -- treating
+/// either as unhealthy previously killed a perfectly working stack every
+/// time the health check reached an authenticated route without a session.
+/// See `wait_for_console`'s doc comment for the incident this caused.
+fn response_proves_the_server_is_alive(status: reqwest::StatusCode) -> bool {
+    status.is_success()
+        || status.is_redirection()
+        || status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+}
+
 async fn verify_console_serves_a_real_route(client: &reqwest::Client, url: &str) -> Result<(), String> {
     let page = client
         .get(url)
         .send()
         .await
         .map_err(|error| format!("page request failed: {error}"))?;
-    if !(page.status().is_success() || page.status().is_redirection()) {
-        return Err(format!("page responded {}", page.status()));
+    let status = page.status();
+    if !response_proves_the_server_is_alive(status) {
+        return Err(format!("page responded {status}"));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        // An auth challenge has no page to extract an asset from (and no
+        // reason to have one) -- the challenge itself is the proof of life.
+        return Ok(());
     }
     let page_url = page.url().clone();
+    // A redirect actually happened if the final URL differs from the one
+    // requested (`reqwest::Client::new()` follows redirects by default and
+    // updates `.url()` to the final landing page -- see its docs). Confirmed
+    // live against this repo's own RS: an unauthenticated `/connect`
+    // redirects to `/owner/login`, a plain server-rendered HTML page with NO
+    // Next.js build (no `/_next/` reference at all -- it is not part of the
+    // console's Next app; see `owner-login-ui.ts`). That is legitimate,
+    // proven-alive routing logic, the opposite of the stale-build symptom
+    // this check exists to catch (which answers 200 on the SAME url with a
+    // broken asset reference, never redirects anywhere). Only a same-URL
+    // response with no asset to check is treated as suspicious.
+    let followed_a_redirect = page_url.as_str() != url;
     let body = page
         .text()
         .await
         .map_err(|error| format!("failed to read page body: {error}"))?;
 
     let Some(asset_path) = extract_first_static_asset_url(&body) else {
+        if followed_a_redirect {
+            return Ok(());
+        }
         return Err("page HTML referenced no static asset to verify".to_string());
     };
     let asset_url = page_url
@@ -3213,9 +3281,21 @@ mod tests {
                                 .find(|(route_path, _)| *route_path == path)
                                 .map(|(_, response)| *response)
                                 .unwrap_or(("404 Not Found", ""));
+                            // A body prefixed "REDIRECT_TO:<path>" encodes a
+                            // real `Location` header instead of a response
+                            // body -- lets a test exercise an actual
+                            // followed redirect (reqwest::Client::new()
+                            // follows redirects by default) without adding
+                            // a whole separate response-header API to this
+                            // minimal fake server.
+                            let location_header = body
+                                .strip_prefix("REDIRECT_TO:")
+                                .map(|target| format!("Location: {target}\r\n"))
+                                .unwrap_or_default();
+                            let response_body = if location_header.is_empty() { body } else { "" };
                             let response = format!(
-                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
+                                "HTTP/1.1 {status}\r\n{location_header}Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                                response_body.len()
                             );
                             let _ = stream.write_all(response.as_bytes());
                         }
@@ -3374,6 +3454,155 @@ mod tests {
             message.contains("connect-stale.js"),
             "error should still name the specific asset that failed, got: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_treats_401_as_proof_of_life() {
+        // The actual incident this test guards against: /connect is gated
+        // behind the owner session (verifyDashboardSession -> refFetch in
+        // the console's own TypeScript), and the health check's bare
+        // reqwest::Client carries no session cookie. Rejecting a 401 as
+        // "unhealthy" made a perfectly working console fail its own health
+        // check forever, tearing down the whole stack in a loop -- see
+        // wait_for_console's doc comment for the full incident.
+        let server = FakeHttpServer::start(vec![("/connect", ("401 Unauthorized", "unauthorized"))]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/connect")).await;
+        assert!(result.is_ok(), "a 401 must count as proof the server is alive, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_treats_403_as_proof_of_life() {
+        let server = FakeHttpServer::start(vec![("/connect", ("403 Forbidden", "forbidden"))]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/connect")).await;
+        assert!(result.is_ok(), "a 403 must count as proof the server is alive, got {result:?}");
+    }
+
+    #[test]
+    fn response_proves_the_server_is_alive_covers_success_redirect_and_auth_challenge_but_not_server_error() {
+        assert!(response_proves_the_server_is_alive(reqwest::StatusCode::OK));
+        assert!(response_proves_the_server_is_alive(reqwest::StatusCode::FOUND));
+        assert!(response_proves_the_server_is_alive(reqwest::StatusCode::TEMPORARY_REDIRECT));
+        assert!(response_proves_the_server_is_alive(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(response_proves_the_server_is_alive(reqwest::StatusCode::FORBIDDEN));
+        assert!(!response_proves_the_server_is_alive(reqwest::StatusCode::NOT_FOUND));
+        assert!(!response_proves_the_server_is_alive(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(!response_proves_the_server_is_alive(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_console_succeeds_on_bare_liveness_even_when_the_page_would_fail_the_deep_asset_check() {
+        // The core of the fix: wait_for_console (the function that GATES
+        // bootstrap and can trigger a full-stack teardown on failure) must
+        // succeed on liveness alone, even against a page that would fail
+        // the deep multi-route asset-reference check (no /_next/ asset to
+        // verify here at all). Before this fix, wait_for_console called the
+        // deep check directly and would have retried this for the full
+        // CONSOLE_WAIT_TIMEOUT and then torn the stack down -- exactly the
+        // reported incident. Bootstrap does not need the deep check to
+        // proceed; it only needs to know the console answered.
+        let server = FakeHttpServer::start(vec![("/", ("200 OK", "<html><body>no next assets here</body></html>"))]);
+        let result = wait_for_console(&server.url("/")).await;
+        assert!(
+            result.is_ok(),
+            "wait_for_console must succeed on bare liveness, not require the deep asset check to pass: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_console_succeeds_against_an_owner_session_gated_401_response() {
+        // Direct regression test for the reported incident: a route gated
+        // behind an owner session (like the real /connect) answering 401 to
+        // a session-less health-check request must not be treated as a
+        // reason to keep retrying until timeout and tear the stack down.
+        let server = FakeHttpServer::start(vec![("/", ("401 Unauthorized", "unauthorized"))]);
+        let result = wait_for_console(&server.url("/")).await;
+        assert!(result.is_ok(), "wait_for_console must accept a 401 as liveness: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_console_still_fails_on_a_genuine_server_error() {
+        // The liveness-only relaxation must not become "anything counts" --
+        // a real 500 (the server itself is broken, not just gating a route)
+        // must still fail so bootstrap does not open a window onto a
+        // console that cannot serve anything at all.
+        let server = FakeHttpServer::start(vec![("/", ("500 Internal Server Error", "broken"))]);
+        let result = tokio::time::timeout(Duration::from_secs(1), wait_for_console(&server.url("/"))).await;
+        // wait_for_console retries for CONSOLE_WAIT_TIMEOUT (45s) before
+        // giving up, so bound this test's own wait rather than actually
+        // waiting out the full timeout; a real 500 must never resolve Ok
+        // within the bounded window, which is enough to prove it is not
+        // being treated as healthy.
+        assert!(
+            result.is_err() || matches!(result, Ok(Err(_))),
+            "a persistent 500 must never be treated as console liveness"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_treats_a_redirect_to_a_non_next_login_page_as_healthy() {
+        // The ACTUAL root cause, confirmed live against a real running
+        // reference server + console: an unauthenticated GET /connect
+        // returns a genuine 307 to /owner/login, a plain server-rendered
+        // HTML page (owner-login-ui.ts) that is NOT part of the console's
+        // Next.js app at all -- no /_next/ reference anywhere in it. The
+        // prior version of this check already accepted the redirect status
+        // itself, then failed on "no static asset to verify" once it
+        // followed the redirect and read the login page's body. That is
+        // legitimate proven-alive routing logic (a real page, at a real
+        // URL, doing real auth-gating), not the stale-build symptom this
+        // check exists to catch -- which always answers on the SAME url
+        // with a broken asset reference, never redirects.
+        let server = FakeHttpServer::start(vec![
+            ("/connect", ("307 Temporary Redirect", "REDIRECT_TO:/owner/login")),
+            (
+                "/owner/login",
+                (
+                    "200 OK",
+                    "<!DOCTYPE html><html><head><title>Owner sign-in</title></head><body>no next assets here, this is a plain server-rendered page</body></html>",
+                ),
+            ),
+        ]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/connect")).await;
+        assert!(
+            result.is_ok(),
+            "a redirect landing on a real, asset-free login page must count as healthy: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_still_fails_a_same_url_asset_free_response() {
+        // The redirect tolerance above must not swallow the real stale-build
+        // symptom: a response at the SAME url with no asset to check is
+        // still suspicious and must still fail.
+        let server = FakeHttpServer::start(vec![("/", ("200 OK", "<html><body>empty</body></html>"))]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
+        assert!(
+            result.is_err(),
+            "a same-url response with no asset to verify must still fail, not be waved through"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_console_succeeds_against_the_real_unauthenticated_connect_redirect_shape() {
+        // End-to-end version of the fix at the level that actually gates
+        // bootstrap: wait_for_console itself must succeed against the exact
+        // response shape /connect gives an unauthenticated request (a bare
+        // 307, no body needed -- wait_for_console does not follow redirects
+        // or read bodies at all, unlike the deep check).
+        let server = FakeHttpServer::start(vec![
+            ("/", ("307 Temporary Redirect", "REDIRECT_TO:/owner/login")),
+            ("/owner/login", ("200 OK", "<html><body>sign in</body></html>")),
+        ]);
+        let result = wait_for_console(&server.url("/")).await;
+        assert!(result.is_ok(), "wait_for_console must accept the real /connect redirect shape: {result:?}");
     }
 
     fn fake_ri_script(
@@ -3651,6 +3880,48 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                  tunnel that just proved itself live"
             );
         }
+    }
+
+    /// Source-level guard for the whole point of this fix: the deep,
+    /// multi-route health watch that runs after the console window is
+    /// already open must NEVER be able to affect the running stack. A
+    /// runtime test of the spawned task's actual behavior would need the
+    /// same real-`AppHandle` machinery `finish_bootstrap`'s failure
+    /// branches already document as untestable here (see the test above),
+    /// so this checks the one thing that matters structurally: nothing in
+    /// `spawn_console_deep_health_watch`'s body can reach
+    /// `teardown_managed_on_error`, `app.exit`, `set_status`, or any other
+    /// stack-affecting call -- only `log::warn!`.
+    #[test]
+    fn console_deep_health_watch_can_only_log_never_act() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("pub(crate) fn spawn_console_deep_health_watch(")
+            .expect("spawn_console_deep_health_watch must exist");
+        let body_end = source[start..]
+            .find("\n/// One attempt across every route")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..body_end];
+
+        for forbidden in [
+            "teardown_managed_on_error",
+            "app.exit",
+            "set_status(",
+            "StopReason::",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "spawn_console_deep_health_watch must never reach {forbidden:?} -- a \
+                 background health observation must not be able to affect a running \
+                 stack, which is the entire reason this function is separate from \
+                 wait_for_console. Found it in the function body."
+            );
+        }
+        assert!(
+            body.contains("log::warn!"),
+            "a failed deep health check must still be visible somewhere, just not fatal"
+        );
     }
 
     #[test]
