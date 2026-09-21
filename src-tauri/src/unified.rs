@@ -1234,6 +1234,14 @@ fn start_cloudflare_tunnel_provider(
     .with_lease_hook(CloudflaredLeaseObserver {
         lease: RunLeaseObserver::new(app),
     });
+    // Download-on-first-use only actually downloads when no system
+    // `cloudflared` is on PATH -- see `ensure_cloudflared_available`'s doc
+    // comment. `<app-data>/cloudflared/` mirrors `run_lease_root`'s
+    // `<app-data>/run/` shape: a per-install cache, not shared across
+    // profiles or machines.
+    if let Ok(app_data_dir) = app.path().app_data_dir() {
+        provider = provider.with_cache_dir(app_data_dir.join("cloudflared"));
+    }
 
     let handle = provider.start(
         LoopbackTarget {

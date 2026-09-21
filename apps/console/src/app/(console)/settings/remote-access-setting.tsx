@@ -8,7 +8,6 @@ import { OpenExternalLink } from "@/app/(console)/components/open-external-link.
 import { cn } from "@/lib/utils.ts"
 import {
   asCloudflareTunnelInspection,
-  cloudflaredBinaryIsMissing,
   CloudflaredBinaryStatus,
   CLOUDFLARE_TUNNEL_SETUP_URL,
 } from "./cloudflare-tunnel-prerequisite.tsx"
@@ -252,18 +251,6 @@ export function RemoteAccessSetting({
   const cloudflareTunnelUnavailable =
     !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
   // Distinct from `cloudflareTunnelUnavailable`: that flag means "no Tauri
-  // host to supervise this at all." This one means the host IS present but
-  // found no `cloudflared` binary -- a real prerequisite the owner must
-  // install themselves before this option can work, since (unlike ngrok's
-  // embedded SDK) DataConnect bundles no binary of its own. `null`
-  // ("unknown," e.g. an unavailable desktop host, or a build predating this
-  // check) never renders as "missing" -- only a real, checked `false` does
-  // -- so this can't falsely tell an owner to install something that might
-  // already be there.
-  const cloudflaredBinaryMissing = cloudflaredBinaryIsMissing(
-    stateIsKnown,
-    cloudflareTunnelInspection
-  )
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
@@ -373,18 +360,6 @@ export function RemoteAccessSetting({
         setError(
           cloudflareTunnelInspection?.reason ??
             "Cloudflare Tunnel is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
-        )
-        return
-      }
-      // Checked before the token/hostname fields, not after: an owner who
-      // pastes a real token and hostname only to have `start()` fail to
-      // spawn has already done real work for nothing. This is the same
-      // prerequisite the row-level and field-level UI below already show,
-      // enforced again here so a stale form state (e.g. cloudflared was
-      // uninstalled mid-session) can't slip a submission through.
-      if (cloudflaredBinaryMissing) {
-        setError(
-          "cloudflared is not installed on this machine yet. Install it, then come back and try again."
         )
         return
       }
@@ -721,7 +696,6 @@ export function RemoteAccessSetting({
                       {!rowUnavailable && option.provider === "cloudflare_tunnel" ? (
                         <CloudflaredBinaryStatus
                           missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
-                          unknown={cloudflareTunnelInspection?.cloudflared_binary_present == null}
                         />
                       ) : null}
                     </span>
@@ -806,15 +780,14 @@ export function RemoteAccessSetting({
               <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
                 <span className="pdpp-caption text-muted-foreground">
                   DataConnect runs and supervises the tunnel process for you
-                  once you save this — you never start it yourself. The one
-                  thing you do need to install first is the{" "}
+                  once you save this — you never start it yourself. It also
+                  downloads and verifies the{" "}
                   <span className="select-all font-mono">cloudflared</span>{" "}
-                  program, which DataConnect does not bundle, unlike ngrok,
-                  which needs no separate install.
+                  program automatically the first time you need it, unlike
+                  ngrok, which needs no separate binary at all.
                 </span>
                 <CloudflaredBinaryStatus
                   missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
-                  unknown={cloudflareTunnelInspection?.cloudflared_binary_present == null}
                 />
               </div>
               <label
@@ -935,8 +908,7 @@ export function RemoteAccessSetting({
               disabled={
                 busy ||
                 (selectedOption?.provider === "ngrok" && ngrokUnavailable) ||
-                (selectedOption?.provider === "cloudflare_tunnel" &&
-                  (cloudflareTunnelUnavailable || cloudflaredBinaryMissing))
+                (selectedOption?.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
               }
               onClick={enablePublicUrl}
               type="button"
