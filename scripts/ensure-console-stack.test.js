@@ -5,8 +5,11 @@ import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
+  existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -15,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  collectOldGenerations,
   findProcessesUsingDirectory,
   parseArgs,
   stageConsoleStack,
@@ -335,6 +339,148 @@ describe("ensure console stack", () => {
           projectRoot: root,
         })
       ).toThrow(/staged connector manifests directory is empty/)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+  it("keeps a running server's build directory intact across a restage", async () => {
+    // The incident this whole change exists for. Previously the stage
+    // deleted and replaced the fixed `console` path, which unlinked the
+    // directory a live server was running inside: the process survived
+    // against a deleted inode and served stale HTML while every chunk
+    // 404'd. Under generation directories the build a server is running
+    // from is never unlinked, so it keeps serving a COHERENT build.
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    let child
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const first = readdirSync(stageParent)
+        .filter((entry) => entry.startsWith("console-"))
+        .map((entry) => join(stageParent, entry))
+      expect(first).toHaveLength(1)
+      const runningGeneration = first[0]
+
+      // A real process whose cwd is inside that generation, exactly like a
+      // staged next-server.
+      child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        cwd: runningGeneration,
+        stdio: "ignore",
+      })
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+
+      // Restage with different content, which produces a new generation.
+      writeFileSync(
+        join(root, "apps", "console", ".next", "static", "app.js"),
+        "static-v2"
+      )
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+
+      expect(
+        existsSync(join(runningGeneration, "launch.mjs")),
+        "the generation a live server is running from must survive a restage"
+      ).toBe(true)
+      expect(
+        findProcessesUsingDirectory(runningGeneration).includes(child.pid)
+      ).toBe(true)
+    } finally {
+      child?.kill("SIGKILL")
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("publishes the stable path as a real directory, never a symlink", () => {
+    // build-prod.js and finalize-linux-appimage.js copy this exact path into
+    // the packaged app with cpSync, which PRESERVES symlinks rather than
+    // following them -- a symlinked `console` would ship a dangling link
+    // inside the bundle. Verified 2026-09-21.
+    const root = createConsoleBuildFixture()
+    try {
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      expect(lstatSync(result.stageDirectory).isSymbolicLink()).toBe(false)
+      expect(lstatSync(result.stageDirectory).isDirectory()).toBe(true)
+      expect(existsSync(join(result.stageDirectory, "launch.mjs"))).toBe(true)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("reuses one generation for unchanged content and prunes old ones", () => {
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    const generations = () =>
+      readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const afterFirst = generations()
+      // Identical content restages onto the same generation id rather than
+      // growing a new directory every rebuild.
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      expect(generations()).toEqual(afterFirst)
+
+      // Three distinct builds, with nothing running: the pruner keeps the
+      // newest two.
+      for (const value of ["v2", "v3", "v4"]) {
+        writeFileSync(
+          join(root, "apps", "console", ".next", "static", "app.js"),
+          value
+        )
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      }
+      expect(generations().length).toBeLessThanOrEqual(2)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("never prunes a generation a live process is running from", async () => {
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    let child
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const held = join(
+        stageParent,
+        readdirSync(stageParent).find((entry) => entry.startsWith("console-"))
+      )
+      child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        cwd: held,
+        stdio: "ignore",
+      })
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+
+      // keep=0 asks the pruner to remove everything; the held generation
+      // must still be refused.
+      const removed = collectOldGenerations(stageParent, 0)
+      expect(removed).not.toContain(held)
+      expect(existsSync(held)).toBe(true)
+    } finally {
+      child?.kill("SIGKILL")
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+  it("stages from cold with no prior target directory", () => {
+    // Lane unifydefault-0921 makes the unified stack the default, so a
+    // first launch on a clean machine reaches staging with no
+    // reference-stack directory at all. The generation scheme must not
+    // assume a previous generation or a pre-existing stable path.
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    try {
+      expect(existsSync(stageParent)).toBe(false)
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      expect(existsSync(join(result.stageDirectory, "launch.mjs"))).toBe(true)
+      expect(
+        readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+      ).toHaveLength(1)
     } finally {
       rmSync(root, { force: true, recursive: true })
     }

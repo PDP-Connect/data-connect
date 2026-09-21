@@ -19,6 +19,11 @@ import {
 import { spawnSync } from "node:child_process"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import {
+  KEEP_GENERATIONS,
+  collectOldStageGenerations,
+  publishStageGeneration,
+} from "./stage-generations.js"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PROJECT_ROOT = resolve(SCRIPT_DIR, "..")
@@ -666,11 +671,26 @@ export function stageReferenceStack({
       join(temporaryRoot, "manifest.json"),
       `${JSON.stringify(manifest, null, 2)}\n`
     )
-    rmSync(resolvedOutputRoot, { force: true, recursive: true })
+    // Land this build in its own immutable generation directory, then
+    // publish the stable `ri` path from it. Deleting the stable path while
+    // a server is running inside it leaves that process alive against an
+    // unlinked inode -- see the incident described in
+    // `ensure-console-stack.js`'s `findProcessesUsingDirectory` doc comment
+    // and the research-corpus entry it cites. The RI is a tsx API server
+    // rather than a Next build, so it has no static-chunk skew, but the
+    // deleted-directory hazard is identical and this also closes the window
+    // where the old rmSync-then-copy sequence left NO stable path on disk.
     mkdirSync(parent, { recursive: true })
-    copyDereferencedTree(temporaryRoot, resolvedOutputRoot)
-    assertNoSymlinks(resolvedOutputRoot)
-    verifyReferenceStackRoot(resolvedOutputRoot)
+    const generationRoot = join(
+      parent,
+      `ri-${manifest.inputs.sha256.slice(0, 12)}`
+    )
+    rmSync(generationRoot, { force: true, recursive: true })
+    copyDereferencedTree(temporaryRoot, generationRoot)
+    assertNoSymlinks(generationRoot)
+    verifyReferenceStackRoot(generationRoot)
+    publishStageGeneration(resolvedOutputRoot, generationRoot)
+    collectOldStageGenerations(parent, "ri", KEEP_GENERATIONS)
     return { manifest, reused: false, root: resolvedOutputRoot }
   } finally {
     rmSync(temporaryRoot, { force: true, recursive: true })

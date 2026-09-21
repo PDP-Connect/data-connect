@@ -196,4 +196,18 @@ describe("reference stack staging contract", () => {
       )
     ).toBe(false)
   })
+  it("the staging module resolves its own helpers at import time", async () => {
+    // Regression: an import of ./stage-generations.js was once inserted
+    // into the middle of the file, INSIDE the launchScript() template
+    // string. The module still parsed and every unit test still passed,
+    // because nothing here calls the full stage path -- but the real build
+    // died with "publishStageGeneration is not defined", and the generated
+    // launch.mjs would have shipped a bogus import. Assert both halves.
+    const module = await import("./ensure-reference-stack.js")
+    const generations = await import("./stage-generations.js")
+    expect(typeof generations.publishStageGeneration).toBe("function")
+    expect(typeof generations.collectOldStageGenerations).toBe("function")
+    expect(typeof generations.KEEP_GENERATIONS).toBe("number")
+    expect(module.launchScript()).not.toContain("stage-generations")
+  })
 })
