@@ -270,6 +270,7 @@ interface LoginResult {
   csrfCookie: string | null;
   csrfField: string | null;
   location: string | null;
+  retryAfter: string | null;
   setCookies: string[];
   status: number;
 }
@@ -294,6 +295,7 @@ async function login(asUrl: string, password: string, { returnTo = "/consent" } 
     csrfCookie: csrf.csrfCookie,
     csrfField: csrf.csrfField,
     location: resp.headers.get("location"),
+    retryAfter: resp.headers.get("retry-after"),
     setCookies,
     status: resp.status,
   };
@@ -494,6 +496,58 @@ test("owner-auth placeholder: wrong password with valid CSRF returns 401 and iss
     assert.ok(!findSetCookiePair(setCookies, "pdpp_owner_session"), "no session cookie on wrong password");
     const text = await resp.text();
     assert.ok(text.includes("Incorrect password"), "login page shows error");
+  });
+});
+
+// ── 3b. login-attempt throttling: repeated failures trip, and the owner ──────
+//        recovers without any operator/admin action ─────────────────────────
+test("owner-auth placeholder: repeated failed logins are throttled with a Retry-After", async () => {
+  await withServer(
+    { ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 }, ownerAuthPassword: TEST_PASSWORD },
+    async ({ asUrl }) => {
+      const attempt1 = await login(asUrl, "wrong-1");
+      assert.equal(attempt1.status, 401, "first wrong attempt is a normal 401");
+      const attempt2 = await login(asUrl, "wrong-2");
+      assert.equal(attempt2.status, 401, "second wrong attempt is still a normal 401");
+
+      const throttled = await login(asUrl, "wrong-3");
+      assert.equal(throttled.status, 429, "third attempt within the window is throttled, not evaluated");
+      assert.ok(throttled.retryAfter, "429 response carries a Retry-After header");
+
+      const stillThrottled = await login(asUrl, "wrong-4");
+      assert.equal(stillThrottled.status, 429, "throttling persists across further attempts within the window");
+    }
+  );
+});
+
+test("owner-auth placeholder: the legitimate owner is never permanently stranded — correct password clears the throttle immediately", async () => {
+  await withServer(
+    { ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 }, ownerAuthPassword: TEST_PASSWORD },
+    async ({ asUrl }) => {
+      await login(asUrl, "wrong-1");
+      const successAfterOneMiss = await login(asUrl, TEST_PASSWORD);
+      assert.equal(successAfterOneMiss.status, 302, "owner can still recover a typo without being throttled");
+      assert.ok(successAfterOneMiss.cookie?.startsWith("pdpp_owner_session="), "successful login issues a session");
+
+      // A subsequent sign-out-and-back-in cycle is not left waiting out the
+      // rest of the original window: a correct password clears the throttle
+      // for that key immediately (owner-login-rate-limit.test.ts covers this
+      // at the unit level; this proves it end to end through /owner/login).
+      const secondLogin = await login(asUrl, TEST_PASSWORD);
+      assert.equal(secondLogin.status, 302, "owner can sign in again without hitting a stale throttle");
+    }
+  );
+});
+
+test("owner-auth placeholder: throttling never applies to the disabled (no-password) posture", async () => {
+  await withServer({ ownerAuthLoginRateLimit: { max: 1, maxLocal: 1, windowMs: 60_000 } }, async ({ asUrl }) => {
+    // Owner auth is disabled (no password configured) — /owner/login should
+    // show the disabled page every time, never a 429, regardless of how many
+    // times it's requested.
+    for (let i = 0; i < 3; i += 1) {
+      const resp = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" } });
+      assert.equal(resp.status, 200, `GET /owner/login #${i + 1} while disabled is never throttled`);
+    }
   });
 });
 

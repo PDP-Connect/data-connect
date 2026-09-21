@@ -821,6 +821,8 @@ interface ServerOpts {
   onManualUploadValidationTask?: (task: Promise<void>) => void;
   onScheduleMutation?: (() => void) | null;
   ownerAuthForceSecureCookies?: boolean;
+  /** Login-attempt throttling for `POST /owner/login`. `false` disables it (tests only). */
+  ownerAuthLoginRateLimit?: { windowMs?: number; max?: number; maxLocal?: number } | false;
   ownerAuthPassword?: string;
   ownerAuthSameSite?: string;
   ownerAuthSessionTtlSeconds?: number;
@@ -2951,7 +2953,38 @@ function resolveOwnerAuthPlaceholderConfig(opts: ServerOpts = {}) {
         typeof sessionTtlRaw === "string" && /^[1-9]\d*$/.test(sessionTtlRaw.trim())
         ? Number(sessionTtlRaw.trim())
         : undefined;
-  return { forceSecureCookies: Boolean(forceSecureCookies), password, sameSite, sessionTtlSeconds, subjectId };
+  const loginRateLimit = resolveOwnerAuthLoginRateLimit(opts, readOwnerAuthEnv);
+  return { forceSecureCookies: Boolean(forceSecureCookies), loginRateLimit, password, sameSite, sessionTtlSeconds, subjectId };
+}
+
+function envPositiveInt(readEnv: boolean, name: string): number | undefined {
+  if (!readEnv) {
+    return undefined;
+  }
+  const raw = process.env[name];
+  if (typeof raw !== "string" || !/^[1-9]\d*$/.test(raw.trim())) {
+    return undefined;
+  }
+  return Number(raw.trim());
+}
+
+function resolveOwnerAuthLoginRateLimit(
+  opts: ServerOpts,
+  readOwnerAuthEnv: boolean
+): { windowMs?: number; max?: number; maxLocal?: number } | false {
+  // Explicit `false` (test fixtures only) disables throttling outright.
+  if (opts.ownerAuthLoginRateLimit === false) {
+    return false;
+  }
+  const fromOpts = opts.ownerAuthLoginRateLimit ?? {};
+  const max = fromOpts.max ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_MAX");
+  const maxLocal = fromOpts.maxLocal ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_MAX_LOCAL");
+  const windowMs = fromOpts.windowMs ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_WINDOW_MS");
+  return {
+    ...(max === undefined ? {} : { max }),
+    ...(maxLocal === undefined ? {} : { maxLocal }),
+    ...(windowMs === undefined ? {} : { windowMs }),
+  };
 }
 
 function buildSourceDescriptor(sourceBinding: { kind?: string; id?: string } | null = null) {
@@ -4611,6 +4644,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
       ? {}
       : { sameSite: ownerAuthConfig.sameSite as import("./owner-session.ts").OwnerSessionSameSite }),
     allowUnauthenticatedWhenDisabled: allowUnauthenticatedOwnerWhenDisabled,
+    loginRateLimit: ownerAuthConfig.loginRateLimit,
     providerName,
   });
   app.use((..._args: never[]) => {
@@ -8602,6 +8636,7 @@ export async function startServer(opts: ServerOpts = {}) {
     nekoWindowSettleProbe: opts.nekoWindowSettleProbe,
     onManualUploadValidationTask: opts.onManualUploadValidationTask,
     ownerAuthForceSecureCookies: opts.ownerAuthForceSecureCookies,
+    ownerAuthLoginRateLimit: opts.ownerAuthLoginRateLimit,
     ownerAuthPassword: opts.ownerAuthPassword,
     ownerAuthSameSite: opts.ownerAuthSameSite,
     ownerAuthSubjectId: opts.ownerAuthSubjectId,
