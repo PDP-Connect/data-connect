@@ -43,6 +43,11 @@ import {
   verifyOwnerCsrfToken,
 } from "./owner-csrf.ts";
 import {
+  createOwnerLoginRateLimiter,
+  type OwnerLoginRateLimitConfig,
+  type OwnerLoginRateLimiter,
+} from "./owner-login-rate-limit.ts";
+import {
   createOwnerSessionController,
   OWNER_SESSION_COOKIE_NAME,
   OWNER_SESSION_DEFAULT_SUBJECT_ID,
@@ -70,12 +75,15 @@ interface AuthRequestHeaders {
 
 interface AuthRequest {
   readonly body?: Record<string, unknown>;
+  readonly connection?: { readonly remoteAddress?: string };
   readonly headers: AuthRequestHeaders;
+  readonly ip?: string;
   readonly method?: string;
   readonly originalUrl?: string;
   ownerSession?: OwnerSessionPayload;
   readonly query?: Record<string, unknown>;
   readonly secure?: boolean;
+  readonly socket?: { readonly remoteAddress?: string };
   readonly url?: string;
 }
 
@@ -139,6 +147,13 @@ export interface OwnerAuthPlaceholderOptions {
    */
   csrfSecret?: OwnerCsrfSecret | null;
   forceSecureCookies?: boolean;
+  /**
+   * Login-attempt throttling config for `POST /owner/login`. Pass `false` to
+   * disable throttling entirely (test fixtures only — every real deployment
+   * should keep the default). See `owner-login-rate-limit.ts` for the
+   * research-grounded design (time-boxed, self-clearing, local/remote split).
+   */
+  loginRateLimit?: OwnerLoginRateLimitConfig | false;
   password?: string | null;
   providerName?: string;
   sameSite?: OwnerSessionSameSite;
@@ -453,6 +468,7 @@ interface OwnerAuthRouteContext {
   readonly csrfPairValid: (req: AuthRequest) => boolean;
   readonly enabled: boolean;
   readonly ensureCsrfToken: (req: AuthRequest, res: AuthResponse) => string;
+  readonly loginRateLimiter: OwnerLoginRateLimiter;
   readonly passwordMatches: (submitted: string) => boolean;
   readonly providerName: string;
   readonly resolvedSubjectId: string;
@@ -533,6 +549,37 @@ function replyCsrfFailure(req: AuthRequest, res: AuthResponse, providerName: str
         code: "csrf_token_invalid",
         message: "CSRF token missing or invalid for hosted owner form POST.",
         type: "invalid_request",
+      },
+    });
+}
+
+function replyLoginRateLimited(req: AuthRequest, res: AuthResponse, providerName: string, retryAfterSeconds: number): void {
+  res.setHeader("Retry-After", String(retryAfterSeconds));
+  if (wantsHtml(req)) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(429).send(
+      renderHostedDocument({
+        body: [
+          renderPageIntro({
+            eyebrow: "Owner sign-in",
+            lede: `Too many sign-in attempts from this address. Try again in about ${retryAfterSeconds} seconds.`,
+            title: "Slow down",
+          }),
+        ].join("\n"),
+        providerName,
+        title: `${providerName} — Slow down`,
+      })
+    );
+    return;
+  }
+  res
+    .status(429)
+    .setHeader("Content-Type", "application/json")
+    .json({
+      error: {
+        code: "owner_login_rate_limited",
+        message: "Too many sign-in attempts. Retry after the indicated delay.",
+        type: "slow_down",
       },
     });
 }
@@ -685,6 +732,17 @@ function handleOwnerLoginPost(req: AuthRequest, res: AuthResponse, context: Owne
     return;
   }
 
+  // Checked after CSRF (so an attacker cannot cheaply burn the owner's own
+  // attempt budget with CSRF-invalid junk — obtaining a valid CSRF pair
+  // costs the attacker nothing either, but only real password attempts
+  // should count against the throttle) and before the password comparison
+  // (so every guess, right or wrong, counts toward the window).
+  const retryAfterSeconds = context.loginRateLimiter.check(req);
+  if (retryAfterSeconds !== null) {
+    replyLoginRateLimited(req, res, context.providerName, retryAfterSeconds);
+    return;
+  }
+
   const submitted = req.body && typeof req.body.password === "string" ? req.body.password : "";
   if (!context.passwordMatches(submitted)) {
     const csrfToken = context.ensureCsrfToken(req, res);
@@ -699,6 +757,7 @@ function handleOwnerLoginPost(req: AuthRequest, res: AuthResponse, context: Owne
     );
     return;
   }
+  context.loginRateLimiter.recordSuccess(req);
   context.session.issueSession(res, req);
   // Rotate the CSRF cookie on auth-state change so a token captured
   // from a pre-login response cannot be reused after sign-in.
@@ -778,6 +837,7 @@ export function createOwnerAuthPlaceholder({
   forceSecureCookies = false,
   allowUnauthenticatedWhenDisabled = true,
   csrfSecret: csrfSecretOverride = null,
+  loginRateLimit = {},
 }: OwnerAuthPlaceholderOptions = {}): OwnerAuthPlaceholder {
   // `exactOptionalPropertyTypes` won't accept `undefined` in these fields,
   // so we fall back to the declared `null` sentinel the controller already
@@ -804,6 +864,15 @@ export function createOwnerAuthPlaceholder({
   // SHOULD pass an explicit `csrfSecret` (high-entropy, unrelated to
   // any user input) — but the default is the random secret.
   const csrfSecret: OwnerCsrfSecret | null = enabled ? (csrfSecretOverride ?? generateOwnerCsrfSecret()) : null;
+
+  // Disabled only for test fixtures that need deterministic unlimited
+  // attempts (`loginRateLimit: false`); every real deployment keeps the
+  // default throttle. `check` always returning `null` yields a genuine
+  // no-op, not merely a very high ceiling.
+  const loginRateLimiter: OwnerLoginRateLimiter =
+    loginRateLimit === false
+      ? { check: () => null, recordSuccess: () => undefined }
+      : createOwnerLoginRateLimiter(loginRateLimit);
 
   function ensureCsrfToken(req: AuthRequest, res: AuthResponse): string {
     if (!csrfSecret) {
@@ -891,6 +960,7 @@ export function createOwnerAuthPlaceholder({
       csrfPairValid,
       enabled,
       ensureCsrfToken,
+      loginRateLimiter,
       passwordMatches,
       providerName,
       resolvedSubjectId,
