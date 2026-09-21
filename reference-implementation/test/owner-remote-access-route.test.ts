@@ -24,6 +24,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { offRemoteAccessConfig, type RemoteAccessConfig } from "../server/remote-access-config.ts";
+import { parseReachabilityContract } from "../server/reachability-contract.ts";
 import { createRemoteAccessConfigStore } from "../server/remote-access-store.ts";
 import { mountOwnerRemoteAccess } from "../server/routes/owner-remote-access.ts";
 import { createCredentialCipherFromEnv } from "../server/stores/credential-encryption.ts";
@@ -70,7 +71,12 @@ function makeRes(): { captured: CapturedResponse; res: unknown } {
 }
 
 async function withMountedRoutes(
-  fn: (routes: FakeApp["routes"]) => Promise<void>
+  fn: (routes: FakeApp["routes"]) => Promise<void>,
+  // No test but the dedicated remote-disconnect-risk ones below sends a
+  // Host header, so isRemoteOriginRequest is false regardless of what this
+  // contract declares unless a test opts into a real referenceOrigin --
+  // an empty contract is the simplest honest default for everyone else.
+  contract = parseReachabilityContract({ env: {} })
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "owner-remote-access-route-"));
   const previousKey = process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
@@ -78,6 +84,7 @@ async function withMountedRoutes(
   try {
     const app = new FakeApp();
     mountOwnerRemoteAccess(app as unknown as Parameters<typeof mountOwnerRemoteAccess>[0], {
+      contract,
       handleError: (res, err) => {
         (res as { status: (code: number) => { json: (body: unknown) => void } })
           .status(500)
@@ -614,4 +621,138 @@ test("GET inspect/ngrok reports unavailable without a managed desktop host, and 
       process.env.PDPP_MANAGED_DESKTOP_HOST = previousHost;
     }
   }
+});
+
+// A remote-originated reconfiguration that could strand the owner: Tim's
+// exact scenario, where the settings page is itself reachable only because
+// remote access is already on. `remoteContract` below is the one place in
+// this file that declares a real `referenceOrigin`, matched against the
+// `host` header these tests send, so `isRemoteOriginRequest` genuinely
+// evaluates true rather than being vacuously false the way every other test
+// in this file leaves it.
+const remoteContract = parseReachabilityContract({
+  env: { PDPP_REFERENCE_ORIGIN: "https://vault.example.com" },
+});
+
+test("POST config refuses a remote-originated provider switch that could disconnect the owner, unless acknowledged", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const cloudflareConfig = {
+      cloudflare_tunnel: { hostname: "vault.example.com" },
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      providerCredential: "shhh-cloudflare-tunnel-token",
+    };
+    // Establish the "current" tunnel-serving config first -- a loopback
+    // request, matching how the owner originally set this up.
+    const initialPost = makeRes();
+    await postHandler?.({ body: cloudflareConfig }, initialPost.res);
+    assert.equal(initialPost.captured.status, 200);
+
+    // Now the owner (reached THROUGH that tunnel) tries to switch provider.
+    const ngrokConfig = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+      providerCredential: "shhh-ngrok-authtoken",
+    };
+    const remoteReq = { body: ngrokConfig, headers: { host: "vault.example.com" }, get: (name: string) => (name.toLowerCase() === "host" ? "vault.example.com" : undefined) };
+    const switchPost = makeRes();
+    await postHandler?.(remoteReq, switchPost.res);
+    assert.equal(switchPost.captured.status, 409);
+    assert.match(
+      String((switchPost.captured.body as { error: { message: string } }).error.message),
+      /disconnect/i
+    );
+
+    // The risky change must not have been persisted.
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    const stored = (get.captured.body as { data: RemoteAccessConfig }).data;
+    assert.equal(stored.provider, "cloudflare_tunnel");
+  }, remoteContract);
+});
+
+test("POST config allows the same remote-originated change once acknowledged", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const cloudflareConfig = {
+      cloudflare_tunnel: { hostname: "vault.example.com" },
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      providerCredential: "shhh-cloudflare-tunnel-token",
+    };
+    const initialPost = makeRes();
+    await postHandler?.({ body: cloudflareConfig }, initialPost.res);
+    assert.equal(initialPost.captured.status, 200);
+
+    const ngrokConfig = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+      providerCredential: "shhh-ngrok-authtoken",
+      acknowledgeRemoteDisconnectRisk: true,
+    };
+    const remoteReq = { body: ngrokConfig, headers: { host: "vault.example.com" }, get: (name: string) => (name.toLowerCase() === "host" ? "vault.example.com" : undefined) };
+    const switchPost = makeRes();
+    await postHandler?.(remoteReq, switchPost.res);
+    assert.equal(switchPost.captured.status, 200);
+
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    const stored = (get.captured.body as { data: RemoteAccessConfig }).data;
+    assert.equal(stored.provider, "ngrok");
+  }, remoteContract);
+});
+
+test("POST config never refuses a LOOPBACK-originated change, even one that switches provider", async () => {
+  // The desktop app's own console window, or the owner physically at the
+  // machine -- never at risk of losing the connection it is using to make
+  // the change, so this must never block.
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const cloudflareConfig = {
+      cloudflare_tunnel: { hostname: "vault.example.com" },
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      providerCredential: "shhh-cloudflare-tunnel-token",
+    };
+    const initialPost = makeRes();
+    await postHandler?.({ body: cloudflareConfig }, initialPost.res);
+    assert.equal(initialPost.captured.status, 200);
+
+    const ngrokConfig = {
+      fields: offRemoteAccessConfig().fields,
+      ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+      posture: "public_url",
+      provider: "ngrok",
+      providerCredential: "shhh-ngrok-authtoken",
+    };
+    // No Host header at all -- exactly like every other test in this file.
+    const switchPost = makeRes();
+    await postHandler?.({ body: ngrokConfig }, switchPost.res);
+    assert.equal(switchPost.captured.status, 200);
+  }, remoteContract);
 });

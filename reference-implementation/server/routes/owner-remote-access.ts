@@ -82,12 +82,14 @@ import {
   inspectCloudflareTunnel,
   inspectNgrok,
   inspectUserSuppliedOrigin,
+  wouldDisconnectRemoteOwner,
   type RemoteAccessConfig,
 } from "../remote-access-config.ts"
+import { isRemoteOriginRequest, type ReachabilityContract, type ReachabilityRequest } from "../reachability-contract.ts"
 import type { RemoteAccessConfigStore } from "../remote-access-store.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
-interface RouteRequest {
+interface RouteRequest extends ReachabilityRequest {
   readonly body?: unknown
 }
 
@@ -104,6 +106,13 @@ interface AppLike {
 }
 
 export interface MountOwnerRemoteAccessContext {
+  /**
+   * Needed only for `isRemoteOriginRequest` in the POST /config handler --
+   * see `wouldDisconnectRemoteOwner`'s doc comment for why a remote-
+   * originated change that could disconnect the owner is refused unless
+   * explicitly acknowledged.
+   */
+  contract: ReachabilityContract
   handleError: (res: unknown, err: unknown) => void
   pdppError: (res: RouteResponse, status: number, code: string, message: string, param?: string | null) => void
   requireOwner: MiddlewareHandler
@@ -114,9 +123,16 @@ export interface MountOwnerRemoteAccessContext {
 /** The POST body: a `RemoteAccessConfig` plus ngrok's plaintext authtoken,
  * present only on the wire for exactly this request -- the handler seals it
  * before anything is persisted (see `mountOwnerRemoteAccess`'s POST handler).
+ *
+ * `acknowledgeRemoteDisconnectRisk`: set by the console only after the owner
+ * has seen and dismissed the warning `wouldDisconnectRemoteOwner` triggers
+ * for a remote-originated request. Absent (not merely falsy) on every other
+ * submission, including every loopback one -- this field means nothing for
+ * a loopback request, since there is no connection to strand there.
  */
 interface RemoteAccessConfigRequestBody extends RemoteAccessConfig {
   providerCredential?: string
+  acknowledgeRemoteDisconnectRisk?: boolean
 }
 
 function isRemoteAccessConfigShaped(value: unknown): value is RemoteAccessConfigRequestBody {
@@ -155,7 +171,7 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           ctx.pdppError(res, 400, "invalid_request", "body must be a RemoteAccessConfig", null)
           return
         }
-        const { providerCredential, ...config } = req.body
+        const { providerCredential, acknowledgeRemoteDisconnectRisk, ...config } = req.body
         let toSave: RemoteAccessConfig = config
         if (config.provider === "ngrok") {
           if (!providerCredential || !providerCredential.trim()) {
@@ -196,6 +212,31 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           }
           const cipher = createCredentialCipherFromEnv()
           toSave = { ...config, cloudflare_tunnel_token_sealed: cipher.seal(providerCredential.trim()) }
+        }
+        // An owner connected THROUGH a live tunnel can reconfigure remote
+        // access entirely remotely -- the settings page is itself served
+        // over that same tunnel. Switching providers, rotating a token, or
+        // leaving public_url can tear down the very connection carrying
+        // this request, stranding the owner with no path back except
+        // physical access. Refuse unless the console has already shown the
+        // warning and the owner explicitly proceeded. See
+        // `wouldDisconnectRemoteOwner`'s doc comment for exactly which
+        // changes count as risky and why credential rotation always does.
+        if (
+          isRemoteOriginRequest(req, ctx.contract) &&
+          !acknowledgeRemoteDisconnectRisk
+        ) {
+          const current = await ctx.store.load()
+          if (wouldDisconnectRemoteOwner(current, toSave, Boolean(providerCredential))) {
+            ctx.pdppError(
+              res,
+              409,
+              "remote_access_config_would_disconnect",
+              "This change could disconnect you: you are reconfiguring remote access through the tunnel it would replace. If the new settings do not work, you will need physical access to this machine to recover. Confirm to proceed anyway.",
+              null
+            )
+            return
+          }
         }
         const saved = await ctx.store.save(toSave);
         // Never echo the sealed (or plaintext) credential back to the console.

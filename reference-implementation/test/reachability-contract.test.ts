@@ -8,6 +8,7 @@ import { resolvePublicUrl } from "../server/metadata.ts"
 import {
   ReachabilityContractError,
   evaluateReachabilityRequest,
+  isRemoteOriginRequest,
   parseReachabilityContract,
   validateReachabilityContract,
   type ReachabilityContract,
@@ -266,6 +267,51 @@ test("R6 keeps a declared origin authoritative over trusted forwarded headers", 
     resolvePublicUrl(req, "http://localhost:7662"),
     "https://vault.example"
   )
+})
+
+test("isRemoteOriginRequest is true when the request's Host is the configured public origin", () => {
+  // The exact case owner-remote-access.ts's POST /config handler needs: an
+  // owner reconfiguring remote access from the settings page they reached
+  // THROUGH the tunnel, not from the desktop app's own loopback console
+  // window.
+  const contract = hostedContract()
+  const req = request({ host: "vault.example" })
+  assert.equal(isRemoteOriginRequest(req, contract), true)
+})
+
+test("isRemoteOriginRequest is false for a loopback-originated request presenting the loopback bindHost", () => {
+  const contract = hostedContract()
+  const req = request({ host: "127.0.0.1" })
+  assert.equal(isRemoteOriginRequest(req, contract), false)
+})
+
+test("isRemoteOriginRequest is false when no referenceOrigin is configured at all", () => {
+  // An owner who never set up remote access cannot be mid-reconfiguration
+  // of a tunnel connection that does not exist -- the honest default.
+  const contract = parseReachabilityContract({ env: {} })
+  const req = request({ host: "anything.example" })
+  assert.equal(isRemoteOriginRequest(req, contract), false)
+})
+
+test("isRemoteOriginRequest is false for an unrecognized Host that matches neither loopback nor the public origin", () => {
+  const contract = hostedContract()
+  const req = request({ host: "attacker.example" })
+  assert.equal(isRemoteOriginRequest(req, contract), false)
+})
+
+test("isRemoteOriginRequest reads x-forwarded-host only from a trusted proxy peer, matching isAllowedRequestHost's own trust boundary", () => {
+  const contract = hostedContract({ PDPP_TRUSTED_PROXIES: "10.0.0.0/8" })
+  const fromTrustedProxy = request(
+    { host: "127.0.0.1", "x-forwarded-host": "vault.example" },
+    "10.1.2.3"
+  )
+  assert.equal(isRemoteOriginRequest(fromTrustedProxy, contract), true)
+
+  const fromUntrustedPeer = request(
+    { host: "127.0.0.1", "x-forwarded-host": "vault.example" },
+    "203.0.113.9"
+  )
+  assert.equal(isRemoteOriginRequest(fromUntrustedPeer, contract), false)
 })
 
 test("the four fields reject malformed proxy and bind declarations", () => {

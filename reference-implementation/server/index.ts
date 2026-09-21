@@ -7845,6 +7845,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // full rationale, including how ngrok's authtoken handoff and native
   // tunnel supervision stay split across this route and the Tauri host.
   mountOwnerRemoteAccess(app, {
+    contract: reachabilityContract,
     handleError,
     pdppError,
     requireOwner,
