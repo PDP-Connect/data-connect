@@ -110,9 +110,11 @@ pub(crate) fn save_open_external_url_queue(
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create open-external-url queue directory: {error}"))?;
     }
-    let content = serde_json::to_string_pretty(queue)
-        .map_err(|error| format!("Failed to serialize open-external-url queue: {error}"))?;
-    fs::write(path, content).map_err(|error| format!("Failed to write open-external-url queue: {error}"))
+    crate::atomic_write::write_json_atomically(
+        path,
+        queue,
+        "Failed to write open-external-url queue",
+    )
 }
 
 /// Pure core of the watcher tick: given the current queue and an "open"

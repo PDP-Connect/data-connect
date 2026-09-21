@@ -86,10 +86,15 @@ fn save_recovery_export_state(path: &Path, state: &RecoveryExportState) -> Resul
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create recovery export directory: {error}"))?;
     }
-    let content = serde_json::to_string_pretty(state)
-        .map_err(|error| format!("Failed to serialize recovery export state: {error}"))?;
-    fs::write(path, content)
-        .map_err(|error| format!("Failed to write recovery export state: {error}"))?;
+    crate::atomic_write::write_json_atomically(
+        path,
+        state,
+        "Failed to write recovery export state",
+    )?;
+    // set_permissions runs after the write, same ordering as before this
+    // atomic-write change -- narrowing this window further (e.g. by
+    // creating the temp file pre-locked to 0600) is a separate hardening
+    // task, not part of the write-corruption fix this function exists for.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

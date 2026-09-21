@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
 #[cfg(desktop)]
+mod atomic_write;
+#[cfg(desktop)]
 mod main_thread_watchdog;
 #[cfg(desktop)]
 mod owner_credential;
