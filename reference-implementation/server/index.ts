@@ -363,6 +363,7 @@ import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerOpenExternalUrl } from "./routes/owner-open-external-url.ts";
 import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
+import { mountOwnerCredentialReveal } from "./routes/owner-credential-reveal.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -6892,7 +6893,12 @@ function buildRsApp(opts: ServerOpts = {}) {
   // behavior). startServer intentionally does NOT pass the bare default here.
   // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
   const internalResource = opts.rsInternalUrl ?? null;
-  const rsOwnerSubjectId = resolveOwnerAuthPlaceholderConfig(opts).subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+  const rsOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const rsOwnerSubjectId = rsOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+  // Pure accessor for GET /v1/owner/credential/reveal (routes/owner-credential-reveal.ts):
+  // the password this process was started with, or null when owner auth is
+  // disabled. Never mints or mutates a credential.
+  const readOwnerPassword = (): string | null => rsOwnerAuthConfig.password || null;
   const trustedMetadataHosts =
     opts.trustedMetadataHosts ?? (opts.ignoreAmbientPublicUrls ? null : process.env.PDPP_TRUSTED_HOSTS);
   const rsIntrospectionCredentials = opts.rsIntrospectionCredentials ?? readIntrospectionCredentialsFromEnv();
@@ -7898,6 +7904,16 @@ function buildRsApp(opts: ServerOpts = {}) {
     store: createRecoveryKeyStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   } as unknown as Parameters<typeof mountOwnerRecoveryKey>[1]);
 
+  // Owner-authenticated HTTP route for revealing the owner's own login
+  // password, so it can be typed into a second device's login page. See
+  // routes/owner-credential-reveal.ts for the full rationale.
+  mountOwnerCredentialReveal(app, {
+    handleError,
+    readOwnerPassword,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerCredentialReveal>[1]);
+
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
   // action family, marks supported vs owner-mediated vs unsupported, and links
@@ -8719,6 +8735,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl,
     configuredProviderAuthConnectorKeys,
     controller,
+    ownerAuthPassword: opts.ownerAuthPassword,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
