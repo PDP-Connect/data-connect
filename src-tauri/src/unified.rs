@@ -445,6 +445,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     reap_orphans_from_dead_sessions(&app_handle);
     spawn_remote_access_config_watcher(app_handle.clone());
     spawn_autostart_watcher(app_handle.clone());
+    spawn_origin_verification_watcher(app_handle.clone());
     spawn_open_external_url_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
@@ -1462,6 +1463,135 @@ fn apply_ngrok_tunnel_outcome(
     if let Err(error) = save_remote_access_config(app, updated) {
         log::error!("Could not persist the ngrok tunnel outcome: {error}");
     }
+}
+
+/// Seconds between re-checks that the public origin is still reachable.
+///
+/// A tunnel is not a fact established once at startup; it is a claim that
+/// decays. ngrok's agent can lose its session, the upstream endpoint can be
+/// revoked, and the process can keep running throughout -- which is exactly
+/// the case where the app used to keep reporting "up" indefinitely.
+const ORIGIN_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How old a reachability reading may be before it stops counting as
+/// evidence. Two verification intervals, so one missed probe does not flip
+/// the status, but a watcher that has actually stopped does.
+const ORIGIN_VERIFY_STALE_AFTER: u64 = 150;
+
+/// May the app claim the public origin is reachable right now?
+///
+/// The rule the design calls for: never report a state that has not been
+/// observed. A reading counts only if it exists, says reachable, and is
+/// recent enough to still be evidence; anything else is "unknown", which is
+/// deliberately not the same as "down" and must not be rendered as healthy.
+///
+/// `now` and `stale_after` are parameters rather than read from the clock so
+/// the rule is testable without sleeping.
+fn origin_is_verified_reachable(config: &RemoteAccessConfig, now: u64, stale_after: u64) -> bool {
+    config.origin_verified.as_ref().is_some_and(|verification| {
+        verification.reachable && now.saturating_sub(verification.checked_at) <= stale_after
+    })
+}
+
+/// Record a reachability OBSERVATION for `origin`, with the time it was made.
+///
+/// Called with the result of the same `probe_ngrok_tunnel_is_live` the reuse
+/// decision already runs. Before this, that probe's answer was computed and
+/// then discarded: the app knew whether the tunnel was live and did not say
+/// so anywhere the owner could see. This is the whole fix -- not a new
+/// check, but reporting the one that already existed.
+fn record_origin_verification(app: &AppHandle, origin: &str, reachable: bool) {
+    let current = match load_remote_access_config(app) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!(
+                "Could not read the remote-access config to record a reachability check: {error}"
+            );
+            return;
+        }
+    };
+    let checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let verification = crate::remote_access::OriginVerification {
+        origin: origin.to_string(),
+        checked_at,
+        reachable,
+    };
+    if current.origin_verified.as_ref() == Some(&verification) {
+        return;
+    }
+    let updated = RemoteAccessConfig {
+        origin_verified: Some(verification),
+        ..current
+    };
+    if let Err(error) = save_remote_access_config(app, updated) {
+        log::error!("Could not persist the origin reachability check: {error}");
+    }
+}
+
+/// Re-verify the public origin on an interval, so a tunnel that dies after a
+/// successful start stops reporting as healthy.
+///
+/// Shares `probe_ngrok_tunnel_is_live` with the reuse path rather than
+/// inventing a second notion of "up", so there is exactly one definition of
+/// what reachable means.
+///
+/// Cancellation: this returns as soon as shutdown has been requested, which
+/// makes `Quitting` absorbing for this watcher -- it cannot write a fresh
+/// "verified just now" record while the stack it describes is being torn
+/// down.
+pub(crate) fn spawn_origin_verification_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(ORIGIN_VERIFY_INTERVAL).await;
+            if shutdown_has_been_requested(&app) {
+                log::debug!("Origin verification watcher stopping: shutdown requested");
+                return;
+            }
+            let Ok(config) = load_remote_access_config(&app) else {
+                continue;
+            };
+            let Some(origin) = config.fields.reference_origin.clone() else {
+                continue;
+            };
+            if origin.trim().is_empty() {
+                continue;
+            }
+            let probe_app = app.clone();
+            let probed = tauri::async_runtime::spawn_blocking(move || {
+                let reachable = probe_ngrok_tunnel_is_live(&origin);
+                (origin, reachable)
+            })
+            .await;
+            let Ok((origin, reachable)) = probed else {
+                continue;
+            };
+            if !reachable {
+                log::warn!(
+                    "Public origin {origin} did not answer a liveness probe; \
+                     status is now reported as unreachable rather than assumed up"
+                );
+            }
+            record_origin_verification(&probe_app, &origin, reachable);
+        }
+    });
+}
+
+/// Has a shutdown been requested? Used to make `Quitting` absorbing for the
+/// background watchers, which otherwise keep running (and can keep acting on
+/// the stack) for the whole shutdown budget.
+fn shutdown_has_been_requested(app: &AppHandle) -> bool {
+    app.try_state::<UnifiedRuntimeState>()
+        .and_then(|state| {
+            state
+                .shutdown
+                .lock()
+                .ok()
+                .map(|shutdown| shutdown.requested || shutdown.complete)
+        })
+        .unwrap_or(false)
 }
 
 fn store_stack(app: &AppHandle, stack: UnifiedStack) -> Result<(), String> {
@@ -2547,6 +2677,14 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
         });
         loop {
             tokio::time::sleep(REMOTE_ACCESS_CONFIG_POLL_INTERVAL).await;
+            // `Quitting` is absorbing: without this the watcher can see a
+            // config change and call `restart_after_remote_access_config`
+            // -- rebuilding the very stack shutdown is tearing down -- for
+            // the whole shutdown budget.
+            if shutdown_has_been_requested(&app) {
+                log::debug!("Remote-access config watcher stopping: shutdown requested");
+                return;
+            }
             if !remote_access_configuration_supported() {
                 continue;
             }
@@ -2626,6 +2764,10 @@ pub(crate) fn spawn_autostart_watcher(app: AppHandle) {
                 log::warn!("Autostart watcher tick failed: {error}");
             }
             tokio::time::sleep(AUTOSTART_STATE_POLL_INTERVAL).await;
+            if shutdown_has_been_requested(&app) {
+                log::debug!("Autostart watcher stopping: shutdown requested");
+                return;
+            }
         }
     });
 }
@@ -2682,6 +2824,10 @@ pub(crate) fn spawn_open_external_url_watcher(app: AppHandle) {
                 log::warn!("Open-external-url watcher tick failed: {error}");
             }
             tokio::time::sleep(OPEN_EXTERNAL_URL_POLL_INTERVAL).await;
+            if shutdown_has_been_requested(&app) {
+                log::debug!("Open-external-url watcher stopping: shutdown requested");
+                return;
+            }
         }
     });
 }
@@ -4017,6 +4163,143 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         // even connect" the same as "connected but ngrok says it's dead"),
         // not panic or default to true.
         assert!(!probe_ngrok_tunnel_is_live("http://127.0.0.1:1/"));
+    }
+
+    /// An observer must never be able to destroy what it observes.
+    ///
+    /// #208 proved this is not theoretical: a health check that could reach
+    /// `teardown_managed_on_error` reported a WORKING console as unhealthy
+    /// (its startup page is server-rendered and has no `/_next/` asset) and
+    /// took the whole stack down in a loop. #216 fixes that case and makes
+    /// the rule structural for the console's deep check.
+    ///
+    /// The origin-verification watcher here is the same shape -- a periodic
+    /// health probe -- so it carries the same guarantee, enforced the same
+    /// way: nothing in its body may reach a call that stops the stack,
+    /// exits the app, or changes user-visible status. The worst a failed
+    /// probe may do is record `reachable: false` and log. A source-level
+    /// check because a runtime test of the spawned task needs a real
+    /// `AppHandle`, which this file's other tests already document as
+    /// unavailable here.
+    #[test]
+    fn the_origin_watcher_cannot_tear_down_what_it_observes() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("pub(crate) fn spawn_origin_verification_watcher")
+            .expect("the origin verification watcher must exist");
+        let end = source[start..]
+            .find("\n/// Has a shutdown been requested?")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        for forbidden in [
+            "teardown(",
+            "teardown_managed_on_error",
+            "app.exit",
+            "set_status",
+            "request_shutdown",
+            "stop_held_ngrok",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the origin verification watcher must never reach {forbidden}: a health \
+                 check that can stop the stack turns a false negative into an outage \
+                 (see #208)"
+            );
+        }
+    }
+
+    /// Shutdown is absorbing for the background watchers.
+    ///
+    /// Each watcher is an infinite `loop` with a discarded `JoinHandle`, so
+    /// before this they kept running for the whole shutdown budget. The
+    /// remote-access one is the dangerous case: it can call
+    /// `restart_after_remote_access_config` and rebuild the very stack
+    /// shutdown is tearing down. This asserts the guard every watcher now
+    /// consults, rather than the loops themselves (which need a real
+    /// `AppHandle`).
+    #[test]
+    fn watchers_stop_once_shutdown_is_requested() {
+        let source = include_str!("unified.rs");
+        for watcher in [
+            "pub(crate) fn spawn_remote_access_config_watcher",
+            "pub(crate) fn spawn_autostart_watcher",
+            "pub(crate) fn spawn_open_external_url_watcher",
+            "pub(crate) fn spawn_origin_verification_watcher",
+        ] {
+            let start = source
+                .find(watcher)
+                .unwrap_or_else(|| panic!("{watcher} must exist"));
+            let body = &source[start..start + 1600];
+            assert!(
+                body.contains("shutdown_has_been_requested"),
+                "{watcher} must stop once shutdown is requested, or it can act \
+                 on the stack while it is being torn down"
+            );
+        }
+    }
+
+    /// An absent verification must never read as healthy.
+    ///
+    /// This is the whole point of the field: the old `tunnel_error: None`
+    /// meant "the last start returned Ok" and was indistinguishable from
+    /// "verified just now", which is how "the tunnel is up" got logged
+    /// while it forwarded zero bytes.
+    #[test]
+    fn an_unverified_origin_is_not_reported_as_reachable() {
+        let config = crate::remote_access::off_remote_access_config();
+        assert!(
+            config.origin_verified.is_none(),
+            "remote access off must carry no reachability claim"
+        );
+        assert!(
+            !origin_is_verified_reachable(&config, 0, ORIGIN_VERIFY_STALE_AFTER),
+            "an origin nobody has checked must not read as reachable"
+        );
+    }
+
+    /// A reading that is too old is not evidence any more.
+    #[test]
+    fn a_stale_verification_decays_to_unverified() {
+        let mut config = crate::remote_access::off_remote_access_config();
+        config.origin_verified = Some(crate::remote_access::OriginVerification {
+            origin: "https://example.ngrok-free.app".to_string(),
+            checked_at: 1_000,
+            reachable: true,
+        });
+        // Fresh: inside the staleness window.
+        assert!(origin_is_verified_reachable(
+            &config,
+            1_000 + ORIGIN_VERIFY_STALE_AFTER - 1,
+            ORIGIN_VERIFY_STALE_AFTER
+        ));
+        // Stale: the same reading, later. Still "reachable: true" on disk,
+        // but no longer something the app is entitled to claim.
+        assert!(
+            !origin_is_verified_reachable(
+                &config,
+                1_000 + ORIGIN_VERIFY_STALE_AFTER + 1,
+                ORIGIN_VERIFY_STALE_AFTER
+            ),
+            "a reading older than the staleness window must decay to unverified"
+        );
+    }
+
+    /// A failed probe reports unreachable rather than leaving the last
+    /// success in place.
+    #[test]
+    fn an_unreachable_probe_is_reported_not_swallowed() {
+        let mut config = crate::remote_access::off_remote_access_config();
+        config.origin_verified = Some(crate::remote_access::OriginVerification {
+            origin: "https://example.ngrok-free.app".to_string(),
+            checked_at: 1_000,
+            reachable: false,
+        });
+        assert!(
+            !origin_is_verified_reachable(&config, 1_001, ORIGIN_VERIFY_STALE_AFTER),
+            "a probe that failed must not read as reachable"
+        );
     }
 
     #[test]
