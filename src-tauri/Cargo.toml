@@ -32,6 +32,7 @@ tauri = { version = "2.11", features = ["test", "unstable", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2.6"
 tauri-plugin-deep-link = "2"
