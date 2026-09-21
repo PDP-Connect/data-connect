@@ -433,6 +433,103 @@ test("POST config rejects cloudflare_tunnel with no hostname configured", async 
   });
 });
 
+test("POST config rejects a cloudflare_tunnel submission when the binary is confirmed missing, before the credential is even checked", async () => {
+  const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
+  const previousBinary = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+  try {
+    // A real, checked "not installed" -- not "unknown" (see the inspect
+    // test below for that case). This is the exact bypass the console's
+    // own client-side submit guard cannot close on its own: a direct POST
+    // (a stale page, a compromised session token) with a real credential
+    // must still be rejected here, server-side, the one place that
+    // actually persists the config. A managed desktop host must be present
+    // too -- inspectCloudflareTunnel short-circuits to
+    // cloudflared_binary_present: null ("unknown") without one, regardless
+    // of PDPP_CLOUDFLARED_BINARY_PRESENT, matching the GET inspect test
+    // below.
+    process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
+    process.env.PDPP_CLOUDFLARED_BINARY_PRESENT = "0";
+    await withMountedRoutes(async (routes) => {
+      const postHandler = routes.get("POST /v1/owner/remote-access/config");
+      const getHandler = routes.get("GET /v1/owner/remote-access/config");
+      const cloudflareConfig = {
+        cloudflare_tunnel: { hostname: "vault.example.com" },
+        fields: {
+          PDPP_BIND_HOST: "127.0.0.1",
+          PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+          PDPP_TRUSTED_HOSTS: "vault.example.com",
+          PDPP_TRUSTED_PROXIES: "",
+        },
+        posture: "public_url",
+        provider: "cloudflare_tunnel",
+        // A real, present credential -- proves the binary check runs and
+        // rejects BEFORE the credential is inspected at all, not merely in
+        // addition to a missing-credential rejection.
+        providerCredential: "shhh-cloudflare-tunnel-token",
+      };
+
+      const post = makeRes();
+      await postHandler?.({ body: cloudflareConfig }, post.res);
+      assert.equal(post.captured.status, 400);
+      assert.match(
+        String((post.captured.body as { error: { message: string } }).error.message),
+        /cloudflared is not installed/
+      );
+
+      const get = makeRes();
+      await getHandler?.({}, get.res);
+      assert.deepEqual(get.captured.body, { data: offRemoteAccessConfig(), object: "remote_access_config" });
+    });
+  } finally {
+    if (previousHost === undefined) {
+      delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    } else {
+      process.env.PDPP_MANAGED_DESKTOP_HOST = previousHost;
+    }
+    if (previousBinary === undefined) {
+      delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+    } else {
+      process.env.PDPP_CLOUDFLARED_BINARY_PRESENT = previousBinary;
+    }
+  }
+});
+
+test("POST config accepts a cloudflare_tunnel submission when binary presence is unknown, not a false claim of missing", async () => {
+  const previous = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+  try {
+    // Unset entirely -- inspectCloudflareTunnel reads this as null
+    // ("unknown"), the same value an old build or a non-desktop deployment
+    // would report. null must never be treated as "missing": that would
+    // block a submission the owner has no way to explain or work around.
+    delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+    await withMountedRoutes(async (routes) => {
+      const postHandler = routes.get("POST /v1/owner/remote-access/config");
+      const cloudflareConfig = {
+        cloudflare_tunnel: { hostname: "vault.example.com" },
+        fields: {
+          PDPP_BIND_HOST: "127.0.0.1",
+          PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+          PDPP_TRUSTED_HOSTS: "vault.example.com",
+          PDPP_TRUSTED_PROXIES: "",
+        },
+        posture: "public_url",
+        provider: "cloudflare_tunnel",
+        providerCredential: "shhh-cloudflare-tunnel-token",
+      };
+
+      const post = makeRes();
+      await postHandler?.({ body: cloudflareConfig }, post.res);
+      assert.equal(post.captured.status, 200);
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
+    } else {
+      process.env.PDPP_CLOUDFLARED_BINARY_PRESENT = previous;
+    }
+  }
+});
+
 test("GET inspect/cloudflare_tunnel reports unavailable without a managed desktop host, and available with one", async () => {
   const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
   const previousBinary = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
