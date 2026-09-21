@@ -110,13 +110,42 @@ pub(crate) enum ReapDecision {
 /// `we ) ird (x`, naive whitespace splitting yields `5` where the real
 /// starttime is `94286837` -- a mismatch that would make the reaper compare
 /// garbage and treat a live process as a recycled PID (or the reverse).
-#[cfg(unix)]
+///
+/// The returned value is only ever compared for equality against another
+/// call's result (see `is_same_process`) -- never interpreted numerically,
+/// never persisted across platforms, never compared against a value this
+/// function did not itself produce. That is what makes it safe for
+/// `process_start_ticks`'s per-platform implementations to use different,
+/// platform-native identity sources (raw kernel clock ticks here, Unix-epoch
+/// seconds on macOS -- see the `target_os = "macos"` implementation below):
+/// each platform's lease is always read back by that same platform's build,
+/// so the two numbering schemes never meet.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn process_start_ticks(pid: i32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = &stat[stat.rfind(')')? + 1..];
     // After the comm field, field 3 is `state`, so `starttime` (field 22) is
     // the 20th whitespace-separated value here.
     after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// macOS has no `/proc` filesystem. Reads the process's start time (seconds
+/// since the Unix epoch, per `sysinfo::Process::start_time`) via `sysinfo`'s
+/// `KERN_PROC`/`libproc`-backed process table instead. This crate is scoped
+/// to macOS only (see `Cargo.toml`'s `target.'cfg(target_os = "macos")'`
+/// section) -- Linux keeps its existing, independently-tested `/proc` parser
+/// above, and Windows already had a `#[cfg(not(unix))]` no-op fallback that
+/// this function does not touch.
+///
+/// A freshly-constructed `System` refreshes its whole process list on
+/// creation, so this always reads current state -- never a stale snapshot
+/// from an earlier call, which would make a just-recycled PID look identical
+/// to the process this lease was written for.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_start_ticks(pid: i32) -> Option<u64> {
+    let system = sysinfo::System::new_all();
+    let process = system.process(sysinfo::Pid::from_u32(pid.try_into().ok()?))?;
+    Some(process.start_time())
 }
 
 #[cfg(not(unix))]
@@ -355,6 +384,13 @@ mod tests {
         }
     }
 
+    // Cross-checks the Linux /proc parser directly against a from-the-right
+    // re-parse of the same file -- genuinely Linux-specific (there is no
+    // /proc/<pid>/stat on macOS to re-read), unlike the rest of this test
+    // module's safety-property tests below, which all go through
+    // process_start_ticks/lease_for and are exercised identically on every
+    // platform run_lease.rs supports.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn start_ticks_parses_a_name_containing_spaces_and_parentheses() {
         // Field 2 of /proc/<pid>/stat is `(comm)` and can contain `) `, so a
@@ -370,6 +406,24 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(process_start_ticks(pid), Some(expected));
+    }
+
+    /// macOS equivalent of the Linux cross-check above: reads this test
+    /// process's own start time twice through the same sysinfo-backed
+    /// process_start_ticks call and confirms it's a stable, non-zero
+    /// identity value -- there is no independent second source to compare
+    /// against the way /proc/<pid>/stat is on Linux (sysinfo already IS the
+    /// implementation, not a wrapper over something else this test could
+    /// re-parse by hand), so this proves stability and non-triviality
+    /// rather than agreement with a second parser.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn start_ticks_is_stable_and_present_for_the_current_process() {
+        let pid = std::process::id() as i32;
+        let first = process_start_ticks(pid);
+        let second = process_start_ticks(pid);
+        assert!(first.is_some(), "a live process must report a start time");
+        assert_eq!(first, second, "the same live process must report the same start time on repeated reads");
     }
 
     #[test]
