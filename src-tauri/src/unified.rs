@@ -2499,20 +2499,108 @@ fn close_recovery_window(app: &AppHandle) {
     }
 }
 
+/// `wait_for_console` used to accept any 2xx/3xx response from `url` as
+/// proof the console was up. That is a status-code check, not a health
+/// check: a Next.js standalone server whose on-disk build directory was
+/// replaced out from under it (the incident this closes -- see #205's
+/// staging-side fix for why that directory could go stale) keeps its build
+/// manifest in memory and answers server-rendered HTML from the OLD build
+/// with a perfectly normal 200, while every static chunk that HTML
+/// references 404s against the NEW directory tree (`page_client-reference-
+/// manifest.js` missing was the concrete symptom). Tim saw `curl` return
+/// 200 on `/settings` while the page was actually broken -- the same
+/// dishonest-status shape as an ngrok tunnel reporting "up" while
+/// forwarding zero bytes: the check only proved something was listening,
+/// never that it could actually do its job.
+///
+/// This closes that gap without needing to know anything about a specific
+/// stale-build failure mode: fetch a real page, pull out the FIRST static
+/// asset URL that page's own HTML references (Next always emits at least
+/// one `<script src="/_next/static/...">` -- see `extract_first_static_asset_url`),
+/// and require that exact asset to resolve too. If the shell HTML and its
+/// own referenced assets don't agree on what build is running, this fails
+/// loudly instead of reporting a healthy console that cannot render.
 async fn wait_for_console(url: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + CONSOLE_WAIT_TIMEOUT;
+    let mut last_error = "no attempt completed".to_string();
     while tokio::time::Instant::now() < deadline {
-        if let Ok(response) = client.get(url).send().await {
-            if response.status().is_success() || response.status().is_redirection() {
-                return Ok(());
-            }
+        match verify_console_serves_a_real_route(&client, url).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
         }
         tokio::time::sleep(CONSOLE_POLL_INTERVAL).await;
     }
     Err(format!(
-        "Console did not answer {url} within {CONSOLE_WAIT_TIMEOUT:?}"
+        "Console at {url} did not serve a working page within {CONSOLE_WAIT_TIMEOUT:?}: {last_error}"
     ))
+}
+
+/// One attempt: fetch `url`, extract a static asset it references, fetch
+/// that asset too. Both requests must succeed for the console to count as
+/// genuinely serving a real route -- see `wait_for_console`'s doc comment
+/// for why a bare shell-HTML 200 is not enough.
+async fn verify_console_serves_a_real_route(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    let page = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("page request failed: {error}"))?;
+    if !(page.status().is_success() || page.status().is_redirection()) {
+        return Err(format!("page responded {}", page.status()));
+    }
+    let page_url = page.url().clone();
+    let body = page
+        .text()
+        .await
+        .map_err(|error| format!("failed to read page body: {error}"))?;
+
+    let Some(asset_path) = extract_first_static_asset_url(&body) else {
+        return Err("page HTML referenced no static asset to verify".to_string());
+    };
+    let asset_url = page_url
+        .join(&asset_path)
+        .map_err(|error| format!("could not resolve asset URL {asset_path:?}: {error}"))?;
+
+    let asset = client
+        .get(asset_url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("asset request to {asset_url} failed: {error}"))?;
+    if !asset.status().is_success() {
+        return Err(format!(
+            "page HTML referenced {asset_url}, which responded {} -- the running build's HTML and its own assets disagree, the exact stale-build symptom this check exists to catch",
+            asset.status()
+        ));
+    }
+    Ok(())
+}
+
+/// Pull the first `/_next/static/...` (or any `/_next/...`) asset path out
+/// of a Next.js page's `src="..."` / `href="..."` attributes. Kept as a
+/// pure string function, separate from the network calls in
+/// `verify_console_serves_a_real_route`, so the extraction logic itself can
+/// be unit-tested against real captured HTML without a running server.
+fn extract_first_static_asset_url(html: &str) -> Option<String> {
+    const NEEDLE: &str = "/_next/";
+    let mut search_from = 0usize;
+    while let Some(relative_start) = html[search_from..].find(NEEDLE) {
+        let start = search_from + relative_start;
+        // The needle must be the start of a quoted attribute value
+        // (src="..." or href="...") -- reject a bare text mention so this
+        // can't be fooled by, say, a copyright comment containing the
+        // string "/_next/".
+        let quote_ok = start > 0
+            && matches!(html.as_bytes()[start - 1], b'"' | b'\'');
+        if quote_ok {
+            let quote = html.as_bytes()[start - 1];
+            if let Some(end_offset) = html[start..].find(quote as char) {
+                return Some(html[start..start + end_offset].to_string());
+            }
+        }
+        search_from = start + NEEDLE.len();
+    }
+    None
 }
 
 fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>, String> {
@@ -2760,6 +2848,191 @@ mod tests {
         let script = NamedTempFile::new().expect("fake launcher file");
         fs::write(script.path(), source).expect("fake launcher source");
         script
+    }
+
+    // Captured verbatim from this repo's own `apps/console/.next/server/
+    // app/_global-error.html` (a real Next.js standalone-mode server-
+    // rendered response), so this test exercises the real HTML shape, not
+    // a hand-simplified fixture that might not match what Next actually
+    // emits.
+    const REAL_NEXT_HTML_FRAGMENT: &str = r#"<!DOCTYPE html><html id="__next_error__"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/webpack-1965db51f108a349.js"/><script src="/_next/static/chunks/87c73c54-fe9448718f10265c.js" async=""></script></head><body></body></html>"#;
+
+    #[test]
+    fn extract_first_static_asset_url_finds_the_preload_link_in_real_next_html() {
+        assert_eq!(
+            extract_first_static_asset_url(REAL_NEXT_HTML_FRAGMENT),
+            Some("/_next/static/chunks/webpack-1965db51f108a349.js".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_first_static_asset_url_prefers_the_first_reference_in_document_order() {
+        let html = r#"<html><head><script src="/_next/static/chunks/a.js"></script><script src="/_next/static/chunks/b.js"></script></head></html>"#;
+        assert_eq!(
+            extract_first_static_asset_url(html),
+            Some("/_next/static/chunks/a.js".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_first_static_asset_url_ignores_an_unquoted_mention() {
+        // A copyright string or comment containing the literal text must
+        // not be mistaken for a real asset reference -- only a quoted
+        // attribute value counts.
+        let html = "<!-- built from /_next/internal-tooling --><html></html>";
+        assert_eq!(extract_first_static_asset_url(html), None);
+    }
+
+    #[test]
+    fn extract_first_static_asset_url_returns_none_for_a_page_with_no_next_assets() {
+        assert_eq!(
+            extract_first_static_asset_url("<html><body>plain</body></html>"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_first_static_asset_url_handles_single_quoted_attributes() {
+        let html = r#"<script src='/_next/static/chunks/single-quoted.js'></script>"#;
+        assert_eq!(
+            extract_first_static_asset_url(html),
+            Some("/_next/static/chunks/single-quoted.js".to_string())
+        );
+    }
+
+    /// A minimal single-connection-at-a-time raw-TCP HTTP server for testing
+    /// `verify_console_serves_a_real_route` against real network I/O without
+    /// pulling in a full Node fixture (the `node_script` pattern
+    /// `process_supervisor.rs` uses for its `Readiness::HttpGet` tests) --
+    /// this only needs to serve two fixed, scripted responses, so a raw
+    /// listener is simpler than shelling out. Serves requests on a
+    /// background thread until `shutdown` is called; each response is
+    /// looked up by exact request path from `routes`.
+    struct FakeHttpServer {
+        addr: std::net::SocketAddr,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FakeHttpServer {
+        /// `routes` maps a request path (e.g. `"/"`) to `(status_line,
+        /// body)`, e.g. `("200 OK", "<html>...")`.
+        fn start(routes: Vec<(&'static str, (&'static str, &'static str))>) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake http server");
+            listener.set_nonblocking(true).expect("nonblocking listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let shutdown_for_thread = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                use std::io::{Read, Write};
+                while !shutdown_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .ok();
+                            let mut buf = [0u8; 4096];
+                            let read = stream.read(&mut buf).unwrap_or(0);
+                            let request = String::from_utf8_lossy(&buf[..read]);
+                            let path = request
+                                .lines()
+                                .next()
+                                .and_then(|line| line.split_whitespace().nth(1))
+                                .unwrap_or("/");
+                            let (status, body) = routes
+                                .iter()
+                                .find(|(route_path, _)| *route_path == path)
+                                .map(|(_, response)| *response)
+                                .unwrap_or(("404 Not Found", ""));
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                addr,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("http://{}{path}", self.addr)
+        }
+    }
+
+    impl Drop for FakeHttpServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_passes_when_the_page_and_its_own_asset_both_resolve() {
+        let server = FakeHttpServer::start(vec![
+            (
+                "/",
+                (
+                    "200 OK",
+                    r#"<html><head><script src="/_next/static/chunks/app.js"></script></head></html>"#,
+                ),
+            ),
+            ("/_next/static/chunks/app.js", ("200 OK", "console.log(1)")),
+        ]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_fails_the_exact_stale_build_shape_html_200_asset_404() {
+        // This is the actual incident: the shell HTML answers 200 from a
+        // build the process still has in memory, but the asset that same
+        // HTML references 404s because the on-disk directory moved under
+        // it. A bare status-code check on `/` alone would call this
+        // healthy; this function must not.
+        let server = FakeHttpServer::start(vec![(
+            "/",
+            (
+                "200 OK",
+                r#"<html><head><script src="/_next/static/chunks/stale-chunk.js"></script></head></html>"#,
+            ),
+        )]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
+        assert!(result.is_err(), "expected the stale-build shape to be rejected");
+        let message = result.unwrap_err();
+        assert!(
+            message.contains("stale-chunk.js"),
+            "error should name the asset that failed, got: {message}"
+        );
+        assert!(
+            message.contains("404"),
+            "error should surface the asset's real status, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_console_serves_a_real_route_fails_honestly_when_the_page_has_no_asset_to_check() {
+        // A page whose HTML never references a /_next/ asset at all --
+        // this function must refuse to call that a pass rather than
+        // silently skipping the check it exists to perform.
+        let server = FakeHttpServer::start(vec![("/", ("200 OK", "<html><body>empty</body></html>"))]);
+        let client = reqwest::Client::new();
+        let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no static asset"));
     }
 
     fn fake_ri_script(
