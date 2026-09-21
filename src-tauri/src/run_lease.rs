@@ -423,7 +423,10 @@ mod tests {
         let first = process_start_ticks(pid);
         let second = process_start_ticks(pid);
         assert!(first.is_some(), "a live process must report a start time");
-        assert_eq!(first, second, "the same live process must report the same start time on repeated reads");
+        assert_eq!(
+            first, second,
+            "the same live process must report the same start time on repeated reads"
+        );
     }
 
     #[test]
@@ -452,6 +455,53 @@ mod tests {
                 .join("console.json")
                 .exists(),
             "a live child's lease must be left in place"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Composition with #205's immutable staging generations.
+    ///
+    /// After a restage the previous generation directory still exists on
+    /// disk with a live server inside it, which is exactly what that change
+    /// is for. A superseded generation must not therefore start reading as
+    /// an orphan. It cannot: the reaper never inspects a build directory,
+    /// a cwd, or `reference-stack` at all -- it decides purely on pid,
+    /// `/proc` starttime and owner liveness. This pins that, so a future
+    /// change cannot quietly add a directory-based heuristic that would
+    /// kill a healthy sidecar running from an older generation.
+    #[test]
+    fn a_process_in_a_superseded_generation_is_not_an_orphan() {
+        let directory = tempdir().expect("temp app data");
+        let generations = directory.path().join("reference-stack");
+        let superseded = generations.join("console-oldgen");
+        fs::create_dir_all(&superseded).expect("superseded generation");
+        fs::create_dir_all(generations.join("console-newgen")).expect("current generation");
+
+        let mut child = Command::new("sleep")
+            .arg("300")
+            .current_dir(&superseded)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a process inside the superseded generation");
+
+        let self_pid = std::process::id() as i32;
+        let lease = lease_for(&child, "console", self_pid);
+        lease.publish(directory.path()).expect("publish");
+
+        // A different app pid runs the reaper, so only the owner-alive check
+        // can save this child -- not the "owner is me" shortcut.
+        let decisions = reap_orphans(directory.path(), self_pid + 1);
+        assert_eq!(decisions[0].1, ReapDecision::SkippedOwnerAlive);
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "a live sidecar running from a superseded generation must survive"
+        );
+        assert!(
+            superseded.exists(),
+            "the reaper must not delete build directories; that is the staging pruner's job"
         );
         let _ = child.kill();
         let _ = child.wait();
