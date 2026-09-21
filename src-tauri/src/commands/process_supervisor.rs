@@ -739,7 +739,15 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     // case this backstop exists to catch. It is deliberately NOT installed
     // from a short-lived, fire-and-forget spawn helper thread, which is
     // the shape that was proven to kill healthy children.
-    #[cfg(unix)]
+    // PR_SET_PDEATHSIG is a Linux-only prctl() operation -- it does not
+    // exist in the libc crate's macOS/BSD bindings (Darwin has no prctl()
+    // syscall at all), so this backstop is gated on target_os = "linux",
+    // not the broader cfg(unix) every other Unix-wide branch in this file
+    // uses. macOS/Windows still get the userspace SIGTERM/SIGINT/SIGHUP
+    // handler (install_parent_signal_handlers) and the process-group
+    // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
+    // specific kernel-level SIGKILL/OOM/segfault backstop.
+    #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
@@ -1434,7 +1442,11 @@ setInterval(() => {{}}, 1000);
     /// project_pdeathsig_thread_trap, a PDEATHSIG-killed child becomes a
     /// zombie (STAT=Z), which still "exists" as a PID and would make a
     /// naive existence check report it as alive, inverting the verdict.
-    #[cfg(unix)]
+    // Reads /proc/<pid>/stat, which only exists on Linux -- this helper
+    // (and everything built on it below) exercises the PR_SET_PDEATHSIG
+    // backstop, which is itself Linux-only. See the target_os = "linux"
+    // gate on the pre_exec block in spawn_process above.
+    #[cfg(target_os = "linux")]
     fn proc_stat_state(pid: libc::pid_t) -> Option<char> {
         let contents = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         // Format: "pid (comm) STATE ...". comm can itself contain spaces
@@ -1452,10 +1464,12 @@ setInterval(() => {{}}, 1000);
     /// first draft of this test directly: a flaky sanity assertion panicked
     /// before cleanup ran, and the leaked helper/leader/child processes
     /// were then observed still alive (and reparented) minutes later.
-    #[cfg(unix)]
+    // Depends on proc_stat_state (Linux-only) to check liveness before
+    // killing; only used by the two Linux-only PDEATHSIG tests below.
+    #[cfg(target_os = "linux")]
     struct KillOnDrop(Vec<libc::pid_t>);
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
             for pid in self.0.drain(..) {
@@ -1466,7 +1480,11 @@ setInterval(() => {{}}, 1000);
         }
     }
 
-    #[cfg(unix)]
+    // Exercises PR_SET_PDEATHSIG, a Linux-only kernel mechanism (see the
+    // target_os = "linux" gate on spawn_process's pre_exec block) -- this
+    // is not a portable Unix test, unlike most of this module's #[cfg(unix)]
+    // coverage.
+    #[cfg(target_os = "linux")]
     #[test]
     fn unix_sigkill_of_parent_reaps_the_direct_child_via_pdeathsig() {
         // This is the scenario install_parent_signal_handlers() cannot
@@ -1921,7 +1939,9 @@ if (!fs.existsSync(marker)) {{
     /// several multiples of the supervisor's own poll interval
     /// (`READINESS_POLL_INTERVAL` = 50ms) while this process stays alive,
     /// and asserts the child is still alive and non-zombie at the end.
-    #[cfg(unix)]
+    // Negative control for the same Linux-only PDEATHSIG backstop; see the
+    // target_os = "linux" gate on spawn_process's pre_exec block.
+    #[cfg(target_os = "linux")]
     #[test]
     fn healthy_child_survives_while_the_parent_process_stays_alive() {
         let child_pid = NamedTempFile::new().unwrap();
