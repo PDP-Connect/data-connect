@@ -16,6 +16,8 @@ mod remote_access_cloudflare;
 mod remote_access_ngrok;
 #[cfg(desktop)]
 mod remote_access_providers;
+#[cfg(desktop)]
+mod run_lease;
 #[cfg(all(desktop, feature = "stall-repro"))]
 pub mod stall_repro;
 #[cfg(all(desktop, feature = "stall-repro"))]

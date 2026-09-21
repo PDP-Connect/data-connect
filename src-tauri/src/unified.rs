@@ -440,6 +440,9 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // passes should_show = true regardless of this preference.
     let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
+    // Before anything is spawned: a previous session's orphan may still be
+    // holding the loopback port this session is about to ask for.
+    reap_orphans_from_dead_sessions(&app_handle);
     spawn_remote_access_config_watcher(app_handle.clone());
     spawn_autostart_watcher(app_handle.clone());
     spawn_open_external_url_watcher(app_handle.clone());
@@ -905,6 +908,12 @@ fn start_managed_stack(
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
 
     let sink = UnifiedEventSink { app: app.clone() };
+    // One observer per supervisor (each owns its own label's lease file).
+    // Built here rather than passed in so a lease-directory failure degrades
+    // to "no lease for this run" instead of failing the whole stack start:
+    // a missing lease costs cleanup on a later boot, while a failed start
+    // costs the owner their session.
+    let lease_observer = || RunLeaseObserver::new(app);
     // Reuse the RI's previous loopback port across a stack-level restart,
     // the same way `preferred_console_port` below keeps the console's port
     // stable -- see `preferred_port_from_origin`'s doc comment for why the
@@ -927,6 +936,7 @@ fn start_managed_stack(
         ),
         sink.clone(),
     )
+    .with_observer(lease_observer())
     .start_on_port(preferred_ri_port)
     .map_err(|error| format!("Failed to start staged RI: {error}"))?;
     let ri_origin = format!("http://127.0.0.1:{}", ri.port());
@@ -958,6 +968,7 @@ fn start_managed_stack(
         ),
         sink.clone(),
     )
+    .with_observer(lease_observer())
     .start_on_port(preferred_console_port)
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
     let console_url = format!("http://127.0.0.1:{}", console.port());
@@ -1008,7 +1019,7 @@ fn start_managed_stack(
     // this is a defensive ordering choice, not a claim that this can
     // currently occur.
     let (cloudflare_tunnel, tunnel_error, applied_fields) =
-        match start_cloudflare_tunnel_provider(remote_access, console.port()) {
+        match start_cloudflare_tunnel_provider(app, remote_access, console.port()) {
             Ok(Some((fields, provider))) => (Some(provider), None, Some(fields)),
             Ok(None) => (None, None, None),
             Err(error) => {
@@ -1160,6 +1171,7 @@ fn start_ngrok_provider(
 /// doc comment for why a named tunnel's stable, owner-configured hostname
 /// makes that optimization unnecessary).
 fn start_cloudflare_tunnel_provider(
+    app: &AppHandle,
     remote_access: &RemoteAccessConfig,
     forward_port: u16,
 ) -> Result<
@@ -1217,7 +1229,10 @@ fn start_cloudflare_tunnel_provider(
         },
         resolver,
         options.hostname.clone(),
-    )?;
+    )?
+    .with_lease_hook(CloudflaredLeaseObserver {
+        lease: RunLeaseObserver::new(app),
+    });
 
     let handle = provider.start(
         LoopbackTarget {
@@ -1765,6 +1780,140 @@ fn open_log_file(app: &AppHandle) -> Result<(), String> {
 /// `start_managed_stack`, and `load_bootstrap_secrets` needs, pulled into one
 /// place so the recovery-key command/watcher (`commands/recovery_key.rs`) can
 /// resolve it identically without re-deriving the join by hand.
+/// Where run leases live: `<app-data>/run/<label>.json`.
+///
+/// Resolved from the same `app_data_dir()` every other piece of app state
+/// uses, so a lease is per-install and travels with the data it describes.
+pub(crate) fn run_lease_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// Keeps one run lease in step with a supervised child.
+///
+/// The supervisor restarts children on its own, so this republishes on every
+/// spawn (each restart is a new pid) and revokes when the supervisor finally
+/// stops. A lease that outlives its process is not dangerous -- the reaper
+/// verifies the pid's identity before acting -- but it is noise, and a lease
+/// that is missing while the process runs is a real orphan risk.
+struct RunLeaseObserver {
+    /// `None` when the app-data directory could not be resolved. The
+    /// observer then does nothing rather than failing the spawn: a missing
+    /// lease costs cleanup on a later boot, a failed start costs the owner
+    /// their session.
+    app_data_dir: Option<PathBuf>,
+    owner_pid: i32,
+    owner_started_at_ticks: u64,
+}
+
+impl RunLeaseObserver {
+    fn new(app: &AppHandle) -> Self {
+        let owner_pid = std::process::id() as i32;
+        let app_data_dir = run_lease_root(app)
+            .inspect_err(|error| {
+                log::warn!("Run leases are disabled for this session: {error}");
+            })
+            .ok();
+        Self {
+            app_data_dir,
+            owner_pid,
+            owner_started_at_ticks: crate::run_lease::process_start_ticks(owner_pid).unwrap_or(0),
+        }
+    }
+}
+
+impl crate::commands::process_supervisor::ProcessObserver for RunLeaseObserver {
+    fn spawned(&self, label: &str, pid: u32, pgid: Option<i32>, port: u16) {
+        let Some(app_data_dir) = self.app_data_dir.as_deref() else {
+            return;
+        };
+        let pid = pid as i32;
+        // Read the child's own start time rather than trusting "now": the
+        // reaper compares this exact value to decide whether a pid still
+        // belongs to us, so it has to come from the same source
+        // (/proc/<pid>/stat) the reaper will read later.
+        let Some(started_at_ticks) = crate::run_lease::process_start_ticks(pid) else {
+            log::warn!(
+                "Could not read the start time of '{label}' (pid {pid}); skipping its run lease"
+            );
+            return;
+        };
+        let lease = crate::run_lease::RunLease {
+            label: label.to_string(),
+            pid,
+            pgid,
+            started_at_ticks,
+            owner_pid: self.owner_pid,
+            owner_started_at_ticks: self.owner_started_at_ticks,
+            port: Some(port),
+        };
+        if let Err(error) = lease.publish(app_data_dir) {
+            // A missing lease costs cleanup on a later boot; it does not stop
+            // this session working, so it must not fail the spawn.
+            log::warn!("Failed to publish the run lease for '{label}': {error}");
+        }
+    }
+
+    fn reaped(&self, label: &str) {
+        let Some(app_data_dir) = self.app_data_dir.as_deref() else {
+            return;
+        };
+        if let Err(error) = crate::run_lease::RunLease::revoke(app_data_dir, label) {
+            log::warn!("Failed to revoke the run lease for '{label}': {error}");
+        }
+    }
+}
+
+/// Label for the `cloudflared` child's run lease.
+///
+/// `cloudflared` is the only Public URL provider that spawns an OS process:
+/// ngrok is an embedded Rust SDK whose tunnel dies with this process's own
+/// threads, so it has nothing to orphan and needs no lease.
+pub(crate) const CLOUDFLARED_LEASE_LABEL: &str = "cloudflared";
+
+/// Adapts the cloudflared provider's start/stop hook onto the same run-lease
+/// machinery the supervised sidecars use.
+struct CloudflaredLeaseObserver {
+    lease: RunLeaseObserver,
+}
+
+impl crate::remote_access_cloudflare::CloudflaredLeaseHook for CloudflaredLeaseObserver {
+    fn started(&self, pid: u32, pgid: Option<i32>, forwarded_port: u16) {
+        use crate::commands::process_supervisor::ProcessObserver;
+        // `forwarded_port` is the console's port, not a port cloudflared
+        // binds itself; recorded for diagnosis only, and the reaper never
+        // kills by port.
+        self.lease
+            .spawned(CLOUDFLARED_LEASE_LABEL, pid, pgid, forwarded_port);
+    }
+
+    fn stopped(&self) {
+        use crate::commands::process_supervisor::ProcessObserver;
+        self.lease.reaped(CLOUDFLARED_LEASE_LABEL);
+    }
+}
+
+/// Reap sidecars left behind by app sessions that died without cleaning up.
+///
+/// Runs once at startup, BEFORE any sidecar is spawned, so a port an orphan
+/// was holding is free by the time this session asks for one. Never kills a
+/// process belonging to a live session -- see `run_lease::decide`.
+pub(crate) fn reap_orphans_from_dead_sessions(app: &AppHandle) {
+    let Ok(app_data_dir) = run_lease_root(app) else {
+        log::warn!("Could not resolve the app-data directory; skipping orphan reaping");
+        return;
+    };
+    let decisions = crate::run_lease::reap_orphans(&app_data_dir, std::process::id() as i32);
+    let reaped = decisions
+        .iter()
+        .filter(|(_, decision)| matches!(decision, crate::run_lease::ReapDecision::Reaped { .. }))
+        .count();
+    if reaped > 0 {
+        log::info!("Reaped {reaped} orphaned sidecar(s) left by earlier app sessions");
+    }
+}
+
 pub(crate) fn unified_database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app
         .path()

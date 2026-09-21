@@ -303,9 +303,40 @@ impl Drop for ProcessGroupRegistration {
     }
 }
 
+/// Notified whenever a supervised child is spawned or reaped, with the
+/// identity an outside observer needs to find that process again.
+///
+/// Separate from `EventSink` because lifecycle events describe STATE
+/// (`Starting`, `Ready`, `Exited`) for the UI, while this describes IDENTITY
+/// (pid, pgid, port) for cleanup. The supervisor restarts children on its
+/// own, so a caller that recorded a pid once from `start_on_port`'s return
+/// value would be holding a stale pid after the first crash-restart; this
+/// fires on every spawn and every reap, including restarts.
+///
+/// Deliberately knows nothing about run leases or Tauri: the supervisor is
+/// generic process-supervision machinery and should not grow a dependency on
+/// where the app happens to store its state.
+pub trait ProcessObserver: Send + Sync {
+    /// A child has just been spawned. `pgid` is `None` when the spec did not
+    /// ask for its own process group.
+    fn spawned(&self, label: &str, pid: u32, pgid: Option<i32>, port: u16);
+    /// A child has exited and been reaped; anything recorded for it under
+    /// `label` is now stale.
+    fn reaped(&self, label: &str);
+}
+
+/// Default observer for callers that do not want the notifications.
+struct NoopObserver;
+
+impl ProcessObserver for NoopObserver {
+    fn spawned(&self, _label: &str, _pid: u32, _pgid: Option<i32>, _port: u16) {}
+    fn reaped(&self, _label: &str) {}
+}
+
 pub struct Supervisor {
     spec: ProcessSpec,
     sink: Arc<dyn EventSink>,
+    observer: Arc<dyn ProcessObserver>,
 }
 
 impl Supervisor {
@@ -316,7 +347,18 @@ impl Supervisor {
         Self {
             spec,
             sink: Arc::new(sink),
+            observer: Arc::new(NoopObserver),
         }
+    }
+
+    /// Watch this supervisor's spawns and reaps. Used to keep an on-disk run
+    /// lease in step with the process that is actually running.
+    pub fn with_observer<O>(mut self, observer: O) -> Self
+    where
+        O: ProcessObserver + 'static,
+    {
+        self.observer = Arc::new(observer);
+        self
     }
 
     pub fn with_tauri_events(spec: ProcessSpec, app: AppHandle) -> Self {
@@ -366,13 +408,21 @@ impl Supervisor {
         let (ready_sender, ready_receiver) = mpsc::channel();
         let thread_state = Arc::clone(&state);
         let thread_sink = Arc::clone(&self.sink);
+        let thread_observer = Arc::clone(&self.observer);
         let spec = self.spec;
         let stop_budget = spec.stop.total;
 
         thread::Builder::new()
             .name(format!("{}-supervisor", spec.label))
             .spawn(move || {
-                run_supervisor(spec, port, thread_state, thread_sink, ready_sender);
+                run_supervisor(
+                    spec,
+                    port,
+                    thread_state,
+                    thread_sink,
+                    thread_observer,
+                    ready_sender,
+                );
             })
             .map_err(SupervisorError::Io)?;
 
@@ -472,10 +522,29 @@ fn run_supervisor(
     port: u16,
     state: Arc<SupervisorState>,
     sink: Arc<dyn EventSink>,
+    observer: Arc<dyn ProcessObserver>,
     ready_sender: mpsc::Sender<Result<(), String>>,
 ) {
     let mut restart_count = 0;
     let mut readiness_reported = false;
+
+    // Every `return` below is a terminal exit of this supervisor, and each
+    // one is preceded by `state.finish()`. Announcing the reap from a guard
+    // means a new exit path cannot silently forget to do it and leave a
+    // lease pointing at a dead pid.
+    struct ReapGuard<'a> {
+        observer: &'a Arc<dyn ProcessObserver>,
+        label: &'a str,
+    }
+    impl Drop for ReapGuard<'_> {
+        fn drop(&mut self) {
+            self.observer.reaped(self.label);
+        }
+    }
+    let _reap_guard = ReapGuard {
+        observer: &observer,
+        label: &spec.label,
+    };
 
     loop {
         if state.stopping.load(Ordering::Acquire) {
@@ -509,6 +578,7 @@ fn run_supervisor(
             }
         };
 
+        let spawned_pid = spawned.child.id();
         if let Ok(mut child) = state.child.lock() {
             *child = Some(spawned.child);
             #[cfg(unix)]
@@ -520,6 +590,17 @@ fn run_supervisor(
             state.finish();
             return;
         }
+
+        // Announce identity as soon as the child exists, before readiness:
+        // a process that spawns and then hangs without ever becoming ready
+        // is exactly the kind that gets left behind, so it must be
+        // recoverable too. Fires again after every crash-restart, because
+        // each restart is a new pid.
+        #[cfg(unix)]
+        let spawned_pgid = spawned.process_group_id.map(|pgid| pgid as i32);
+        #[cfg(not(unix))]
+        let spawned_pgid = None;
+        observer.spawned(&spec.label, spawned_pid, spawned_pgid, port);
 
         match wait_for_readiness(&spec.readiness, port, &state, &spawned.stdout_lines) {
             ReadinessOutcome::Ready => {
