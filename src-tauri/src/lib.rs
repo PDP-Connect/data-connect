@@ -251,7 +251,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 #[cfg(desktop)]
                 if unified::is_enabled() {
-                    unified::cleanup(app);
+                    unified::assert_stack_released_at_exit(app);
                 }
                 cleanup_browser_surface_host(app);
                 cleanup_personal_server();
