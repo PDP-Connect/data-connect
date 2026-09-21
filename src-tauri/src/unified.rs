@@ -2278,6 +2278,12 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// to a caller that might restart the tunnel with it directly) to start the
 /// tunnel, so the keychain write must already be durable by the time that
 /// runs.
+///
+/// Synchronous like `load_bootstrap_secrets` above, for the same reason: it
+/// calls `load_or_create_credential_encryption_key`, which can block on a
+/// D-Bus round trip to the OS keychain. Its caller in
+/// `spawn_remote_access_config_watcher` must run it inside
+/// `tokio::task::spawn_blocking`, never inline on the watcher's async task.
 fn apply_pending_ngrok_authtoken(
     app: &AppHandle,
     config: RemoteAccessConfig,
@@ -2392,12 +2398,34 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 }
             };
             let current = if current.ngrok_authtoken_sealed.is_some() {
-                apply_pending_ngrok_authtoken(&app, current)
+                let blocking_app = app.clone();
+                match tokio::task::spawn_blocking(move || {
+                    apply_pending_ngrok_authtoken(&blocking_app, current)
+                })
+                .await
+                {
+                    Ok(config) => config,
+                    Err(error) => {
+                        log::error!("Pending ngrok authtoken task failed: {error}");
+                        continue;
+                    }
+                }
             } else {
                 current
             };
             let current = if current.cloudflare_tunnel_token_sealed.is_some() {
-                apply_pending_cloudflare_tunnel_token(&app, current)
+                let blocking_app = app.clone();
+                match tokio::task::spawn_blocking(move || {
+                    apply_pending_cloudflare_tunnel_token(&blocking_app, current)
+                })
+                .await
+                {
+                    Ok(config) => config,
+                    Err(error) => {
+                        log::error!("Pending Cloudflare tunnel token task failed: {error}");
+                        continue;
+                    }
+                }
             } else {
                 current
             };
@@ -3875,6 +3903,112 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(
             events.lock().expect("events lock").as_slice(),
             ["set_cookie", "navigate"]
+        );
+    }
+
+    /// Proves the actual mechanism the fix relies on: on a `current_thread`
+    /// runtime (one worker thread, same shape of starvation risk the real
+    /// watcher's task faces on a shared multi-threaded runtime), a blocking
+    /// call made INLINE on an async task starves every other task on that
+    /// runtime -- e.g. a concurrent `tokio::time::interval` -- for the full
+    /// duration of the blocking call. The same blocking call wrapped in
+    /// `tokio::task::spawn_blocking` (what `spawn_remote_access_config_watcher`
+    /// now does) runs on Tokio's separate blocking-thread pool and does NOT
+    /// starve the interval.
+    ///
+    /// Cannot force the real OS keychain call inside
+    /// `load_or_create_credential_encryption_key` to be slow (no injection
+    /// seam at that call site, and this environment's D-Bus secret-service
+    /// call fails fast rather than hanging), so this stands a real
+    /// `std::thread::sleep` in for "a blocking OS call in flight" -- the
+    /// exact class of operation `apply_pending_ngrok_authtoken` and
+    /// `apply_pending_cloudflare_tunnel_token` perform. This isolates the
+    /// causal claim (spawn_blocking keeps the runtime responsive; inline
+    /// does not) from the specific blocking call site.
+    ///
+    /// Does not call `apply_pending_ngrok_authtoken` /
+    /// `apply_pending_cloudflare_tunnel_token` directly: both take
+    /// `&AppHandle<Wry>` (the concrete default runtime), and
+    /// `tauri::test::mock_app()` only ever produces `AppHandle<MockRuntime>`
+    /// -- there is no seam to drive the real functions with a real
+    /// `AppHandle<Wry>` outside a running desktop app. Generalizing them to
+    /// `AppHandle<R: Runtime>` (as `teardown_stack` already is, for the same
+    /// reason) would make that possible, but is out of scope for this
+    /// minimal fix.
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_blocking_keeps_the_runtime_responsive_while_inline_blocking_does_not() {
+        const SIMULATED_KEYCHAIN_LATENCY: Duration = Duration::from_millis(200);
+        const INTERVAL_TICK: Duration = Duration::from_millis(20);
+        // A tick delayed by less than this is "the runtime stayed
+        // responsive"; delayed by roughly SIMULATED_KEYCHAIN_LATENCY or more
+        // is "the blocking call starved it". Comfortably between the two.
+        const STARVATION_BOUND: Duration = Duration::from_millis(80);
+
+        // Runs `work` concurrently (via `tokio::join!`, not sequential
+        // `.await`s -- sequential awaits would measure `work`'s own duration
+        // regardless of starvation, not whether the ticker made progress
+        // WHILE `work` ran) with a periodic ticker on the same
+        // current_thread runtime, and returns how long after start the
+        // ticker's second tick landed. The first tick fires immediately on
+        // creation and proves nothing; the second is the one starvation
+        // would delay.
+        async fn second_tick_delay_during<F, Fut>(work: F) -> Duration
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = ()>,
+        {
+            let started = Instant::now();
+            let second_tick_at = Arc::new(Mutex::new(None));
+            let recorder = Arc::clone(&second_tick_at);
+            let ticker = async move {
+                let mut interval = tokio::time::interval(INTERVAL_TICK);
+                interval.tick().await; // first tick fires immediately
+                interval.tick().await; // this is the one that can be starved
+                *recorder.lock().expect("second tick lock") = Some(started.elapsed());
+            };
+
+            tokio::join!(ticker, work());
+
+            let recorded = *second_tick_at.lock().expect("second tick lock");
+            recorded.expect("ticker must have recorded its second tick")
+        }
+
+        // Old (buggy) shape: the blocking call runs inline on the async
+        // task, occupying the runtime's only worker thread. The interval
+        // ticker is a separate task on the SAME current_thread runtime
+        // (joined concurrently, not sequenced after), so it cannot make
+        // progress until the blocking call returns -- pushing its second
+        // tick out to roughly SIMULATED_KEYCHAIN_LATENCY.
+        let delay_while_inline = second_tick_delay_during(|| async {
+            std::thread::sleep(SIMULATED_KEYCHAIN_LATENCY);
+        })
+        .await;
+        assert!(
+            delay_while_inline >= SIMULATED_KEYCHAIN_LATENCY,
+            "an inline blocking call must starve every other task on a \
+             current_thread runtime for its full duration -- this is the \
+             defect this PR fixes, reproduced directly; second tick landed \
+             at {delay_while_inline:?}, expected >= {SIMULATED_KEYCHAIN_LATENCY:?}"
+        );
+
+        // Fixed shape: the same blocking call wrapped in spawn_blocking.
+        // Tokio's blocking-thread pool runs it off the runtime's worker
+        // thread, so the interval ticker keeps ticking on schedule.
+        let delay_while_spawn_blocking = second_tick_delay_during(|| async {
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(SIMULATED_KEYCHAIN_LATENCY);
+            })
+            .await
+            .expect("blocking task should not panic");
+        })
+        .await;
+        assert!(
+            delay_while_spawn_blocking < STARVATION_BOUND,
+            "spawn_blocking must let the runtime keep serving other tasks \
+             (e.g. the config-watcher's own poll loop, or any other timer \
+             sharing the runtime) while the blocking call is in flight; \
+             second tick landed at {delay_while_spawn_blocking:?}, expected \
+             < {STARVATION_BOUND:?}"
         );
     }
 }
