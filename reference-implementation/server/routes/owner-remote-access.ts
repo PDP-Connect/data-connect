@@ -166,6 +166,30 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           toSave = { ...config, ngrok_authtoken_sealed: cipher.seal(providerCredential.trim()) }
         }
         if (config.provider === "cloudflare_tunnel") {
+          // Checked before the credential, matching the order the console's
+          // own submit guard uses (remote-access-setting.tsx): a missing
+          // binary is the more fundamental problem. Only an exact `false`
+          // (a real, checked "not installed") rejects -- `null` ("unknown",
+          // e.g. no managed desktop host) must never be misread as "missing"
+          // and block a submission the owner has no way to explain, the same
+          // tri-state policy the console UI already enforces client-side.
+          // This route is the one path that actually persists the config;
+          // the console's own check is real but bypassable (a stale page, a
+          // direct API call, a compromised session token) and was the only
+          // enforcement before this, which let a config with no binary
+          // present be saved successfully -- the exact "commit before you
+          // fail" bug this provider's UI exists to prevent, just reachable
+          // by skipping the button instead of using it.
+          if (inspectCloudflareTunnel().cloudflared_binary_present === false) {
+            ctx.pdppError(
+              res,
+              400,
+              "remote_access_config_invalid",
+              "cloudflared is not installed on this machine yet. Install it, then try again.",
+              null
+            )
+            return
+          }
           if (!providerCredential || !providerCredential.trim()) {
             ctx.pdppError(res, 400, "remote_access_config_invalid", "cloudflare_tunnel requires providerCredential (the tunnel token).", null)
             return

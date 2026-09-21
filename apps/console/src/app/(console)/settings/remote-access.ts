@@ -31,6 +31,7 @@ export {
   originIsKnowableFromConfig,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  type CloudflareTunnelInspection,
   type CloudflareTunnelOptions,
   type DurableAddressState,
   type InvalidOrigin,

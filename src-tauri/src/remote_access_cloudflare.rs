@@ -15,18 +15,87 @@
 //! cloudflare-named-tunnels-support-sse-and-need-a-token-plus-a-dns-zone-quick-tunnels-are-testing-only.md`
 //! for the primary-source citations.
 //!
-//! Unlike ngrok (an embedded Rust SDK, no subprocess), a Cloudflare named
-//! tunnel requires supervising an external `cloudflared` binary: the owner
-//! creates the tunnel and its public-hostname route in the Cloudflare
+//! Unlike ngrok (an embedded Rust SDK compiled directly into this app --
+//! zero external binary, zero install step, zero subprocess), a Cloudflare
+//! named tunnel requires supervising an external `cloudflared` process: the
+//! owner creates the tunnel and its public-hostname route in the Cloudflare
 //! dashboard/API themselves (this app has no Cloudflare account credential
 //! and does not attempt to automate account-level tunnel creation), pastes
 //! the resulting tunnel token and the hostname it configured into Settings,
-//! and this adapter runs `cloudflared tunnel run --token <TOKEN>` as a child
-//! process forwarding to the loopback target. The hostname is therefore
-//! `Available` from config alone -- exactly like ngrok with a configured dev
-//! domain -- because the owner told Cloudflare what hostname routes to this
-//! tunnel when they created the route, not because this adapter discovered
+//! and this adapter runs `cloudflared tunnel run` as a child process
+//! forwarding to the loopback target. The hostname is therefore `Available`
+//! from config alone -- exactly like ngrok with a configured dev domain --
+//! because the owner told Cloudflare what hostname routes to this tunnel
+//! when they created the route, not because this adapter discovered
 //! anything at runtime.
+//!
+//! ## Docker was investigated and deliberately rejected as a fallback
+//!
+//! Cloudflare's own dashboard offers a Docker-based "Install and run"
+//! command (`docker run cloudflare/cloudflared:latest tunnel
+//! --no-autoupdate run --token <TOKEN>`) as an alternative to a native
+//! install, which raised the question of whether this adapter should fall
+//! back to Docker when `cloudflared` itself is absent. A real Docker-mode
+//! implementation was built and tested against a live Docker Engine before
+//! this decision was made, not guessed at from the outside; the tested
+//! result is exactly what made the "no" call the right one:
+//!
+//! - **Host loopback is NOT reachable from a container by default on
+//!   Linux.** Confirmed against a real Docker Engine: default bridge
+//!   network + `127.0.0.1` fails, `host.docker.internal` fails (a Docker
+//!   Desktop convenience absent on native Linux Docker Engine),
+//!   `--add-host host.docker.internal:host-gateway` fails to reach a
+//!   service bound specifically to `127.0.0.1`. Only `--network host`
+//!   works, and that means the container loses Docker's normal network
+//!   isolation from the host for as long as it runs -- a real security
+//!   posture change, not a free workaround.
+//! - **A `docker run` client process dying does NOT stop the container.**
+//!   Confirmed directly: `SIGKILL`ing the host-side `docker run` process
+//!   (even with `--rm`) leaves the container running under `dockerd`,
+//!   because the container's lifecycle belongs to the daemon, not the
+//!   client process this adapter would spawn. `PR_SET_PDEATHSIG` (the
+//!   `winclose-0920` fix for native sidecar orphaning) cannot reach a
+//!   Docker-mode tunnel at all -- Docker mode would need its own,
+//!   structurally different orphan-reconciliation mechanism (a
+//!   deterministic container name plus an explicit `docker stop`/`docker
+//!   rm` reconciliation step on every start), a second failure class this
+//!   codebase does not otherwise have.
+//! - **Docker also requires a running daemon as a third dependency**,
+//!   layered on top of the `cloudflared`-equivalent binary check --
+//!   detecting "Docker CLI present" is not the same as "Docker actually
+//!   works right now," and a daemon that's stopped or permission-denied
+//!   fails informatively only once `start()` is actually attempted.
+//! - **First-run image pull latency** is real (measured ~3s for the
+//!   ~62MB `cloudflare/cloudflared:latest` image on a fast connection;
+//!   untested on a slow one) on top of everything else.
+//!
+//! Tim's own assessment, independently confirmed by this investigation:
+//! Docker is the MOST complex option here, not a shortcut -- strictly more
+//! moving parts (binary + daemon + host-network plumbing + a second orphan
+//! class + pull latency) than the native path it would be a fallback for,
+//! and ngrok's zero-install embedded-SDK shape is the real bar to compare
+//! against, not `cloudflared` alone. The realistic first-run state for a
+//! Cloudflare owner is simply "`cloudflared` is absent," and the
+//! highest-value response to that is honest prerequisite detection with a
+//! clear download path BEFORE the owner commits to the option (see
+//! `cloudflared_binary_is_installed`), not a second, more complex install
+//! mechanism. If Docker support is revisited later, this investigation's
+//! findings (especially the container-lifecycle and host-networking
+//! results) are the starting point, not something to re-derive.
+//!
+//! **Security: the tunnel token is never passed as a CLI argument.**
+//! Cloudflare's own dashboard-provided command puts the token in
+//! `--token <TOKEN>`, which is visible to any other process on the machine
+//! via `ps`/`/proc/<pid>/cmdline` -- a real, verified leak (confirmed: any
+//! local process can read a sibling's full argv this way). `cloudflared`
+//! documents `--token`'s environment-variable equivalent, `$TUNNEL_TOKEN`
+//! (confirmed working against the real binary, v2026.9.1, via
+//! `cloudflared tunnel run --help`), so this adapter sets `TUNNEL_TOKEN` in
+//! the child's environment instead and never puts the token on the command
+//! line at all -- the same keychain-storage, never-logged,
+//! never-plaintext-on-disk treatment the ngrok authtoken already gets (see
+//! `stored_token` and the shared `CredentialResolver`/OS-keychain seam in
+//! `remote_access.rs`).
 
 use crate::remote_access::{
     CancellationToken, CredentialReference, DurableAddressState, LoopbackTarget,
@@ -252,8 +321,18 @@ where
 
         let url = format!("{}://{}:{}", "http", target.host, target.port);
         let mut command = Command::new(CLOUDFLARED_BINARY);
+        // The tunnel token is NEVER a CLI argument -- argv is readable by
+        // any local process via `ps`/`/proc/<pid>/cmdline`. `cloudflared`
+        // documents `--token`'s environment-variable equivalent,
+        // `$TUNNEL_TOKEN` (confirmed against the real v2026.9.1 binary via
+        // `cloudflared tunnel run --help`), so this sets `TUNNEL_TOKEN` in
+        // the child's environment instead and never puts the token on the
+        // command line at all -- the same treatment the ngrok authtoken
+        // already gets (keychain storage, never logged, never plaintext on
+        // disk; see the module doc comment).
         command
-            .args(["tunnel", "run", "--token", &token, "--url", &url])
+            .args(["tunnel", "run", "--url", &url])
+            .env("TUNNEL_TOKEN", &token)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -348,6 +427,37 @@ pub(crate) fn cloudflare_tunnel_durable_address(hostname: &str) -> DurableAddres
     DurableAddressState::Available {
         address: hostname.to_string(),
     }
+}
+
+/// Whether `cloudflared` is resolvable on `PATH` right now, WITHOUT spawning
+/// it. A plain `PATH` search rather than `CloudflareTunnelProvider::start`'s
+/// `Command::spawn` + `io::ErrorKind::NotFound` mapping: the owner needs this
+/// answer BEFORE they commit to the Cloudflare Tunnel option and paste a
+/// token, not as a spawn failure discovered only after they submit the form
+/// (which is what `start`'s check alone would leave them with). Cheap and
+/// synchronous -- no process is created here, only a filesystem existence
+/// check per `PATH` entry, the same shape `std::process::Command` itself uses
+/// internally to resolve a bare program name.
+///
+/// A `cloudflared.exe` fallback fires on Windows even though this app has no
+/// current Windows-specific packaging story for it, matching how
+/// `stage_development_node_sidecar` (`build.rs`) already branches on target
+/// OS for the analogous `node`/`node.exe` lookup.
+pub(crate) fn cloudflared_binary_is_installed() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| binary_is_on_path(&path))
+}
+
+/// The pure PATH-search half of `cloudflared_binary_is_installed`, split
+/// out so a test can supply a controlled `PATH` value instead of mutating
+/// the real process environment (unsafe to do in parallel test runs --
+/// `PATH` is process-global).
+fn binary_is_on_path(path: &std::ffi::OsStr) -> bool {
+    let binary_name = if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        CLOUDFLARED_BINARY
+    };
+    std::env::split_paths(path).any(|directory| directory.join(binary_name).is_file())
 }
 
 fn spawn_output_watcher(
@@ -640,5 +750,48 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         watch_stream(BufReader::new(&sample[..]), tx);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// The owner needs to know cloudflared is missing BEFORE picking this
+    /// option, not as a post-submit spawn error -- this is the exact check
+    /// `ri_environment` (`unified.rs`) runs at RS-spawn time to populate
+    /// `PDPP_CLOUDFLARED_BINARY_PRESENT`. Uses a controlled `PATH` value
+    /// (`binary_is_on_path`) rather than the real process `PATH`, since
+    /// mutating that would be unsafe across parallel test threads.
+    #[test]
+    fn binary_is_on_path_finds_a_real_executable_in_a_controlled_path_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary_name = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
+        let binary_path = dir.path().join(binary_name);
+        std::fs::write(&binary_path, b"#!/bin/sh\n").expect("write fake binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let path_value = std::ffi::OsString::from(dir.path());
+        assert!(binary_is_on_path(&path_value));
+    }
+
+    #[test]
+    fn binary_is_on_path_is_false_when_no_path_entry_has_it() {
+        let dir = tempfile::tempdir().expect("empty tempdir");
+        let path_value = std::ffi::OsString::from(dir.path());
+        assert!(!binary_is_on_path(&path_value));
+    }
+
+    #[test]
+    fn binary_is_on_path_checks_every_entry_in_a_multi_directory_path() {
+        let empty_dir = tempfile::tempdir().expect("empty tempdir");
+        let binary_dir = tempfile::tempdir().expect("binary tempdir");
+        let binary_name = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
+        std::fs::write(binary_dir.path().join(binary_name), b"#!/bin/sh\n")
+            .expect("write fake binary");
+
+        let joined = std::env::join_paths([empty_dir.path(), binary_dir.path()])
+            .expect("join_paths");
+        assert!(binary_is_on_path(&joined));
     }
 }
