@@ -7,6 +7,12 @@ import { useEffect, useMemo, useState } from "react"
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import { cn } from "@/lib/utils.ts"
 import {
+  asCloudflareTunnelInspection,
+  cloudflaredBinaryIsMissing,
+  CloudflaredBinaryStatus,
+  CLOUDFLARE_TUNNEL_SETUP_URL,
+} from "./cloudflare-tunnel-prerequisite.tsx"
+import {
   loadRemoteAccessStateAction,
   setRemoteAccessConfigAction,
 } from "./remote-access-actions.ts"
@@ -118,101 +124,6 @@ function asInspection(value: unknown): RemoteAccessInspection {
   }
 }
 
-/**
- * `cloudflared_binary_present` is `boolean | null`, not folded into the
- * shared `asInspection` normalizer above: a malformed/missing value must
- * default to `null` ("unknown"), never silently to `false` ("checked, not
- * installed") -- the two read very differently in the UI, and only one of
- * them is actually backed by a real check.
- */
-function asCloudflareTunnelInspection(value: unknown): CloudflareTunnelInspection {
-  const base = asInspection(value)
-  const candidate = (value && typeof value === "object" ? value : {}) as Partial<CloudflareTunnelInspection>
-  return {
-    ...base,
-    cloudflared_binary_present:
-      typeof candidate.cloudflared_binary_present === "boolean"
-        ? candidate.cloudflared_binary_present
-        : null,
-  }
-}
-
-/**
- * Two different Cloudflare docs pages for two different owner needs, kept
- * as separate constants so neither call site can drift onto the wrong one:
- * `CLOUDFLARE_TUNNEL_SETUP_URL` is the create-a-remote-tunnel walkthrough --
- * what produces the tunnel token this form asks for -- and
- * `CLOUDFLARED_DOWNLOAD_URL` is the binary download page, relevant only when
- * `cloudflared` itself is missing. Rendering the wrong one in either spot
- * would send the owner to instructions for a problem they don't have.
- */
-const CLOUDFLARE_TUNNEL_SETUP_URL =
-  "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel"
-const CLOUDFLARED_DOWNLOAD_URL =
-  "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/"
-
-/**
- * The `cloudflared` binary prerequisite, shown before the owner commits to
- * this option -- never surfaced only as a post-submit spawn error. `null`
- * ("unknown") is a genuinely different case from `false` ("checked, not
- * installed") -- see `CloudflareTunnelInspection`'s doc comment -- and must
- * never be misread as a real "not installed" answer.
- *
- * External links route through `OpenExternalLink`, matching every other
- * external link in this file -- see that component's doc comment. As of
- * this writing `window.__TAURI__`/`__TAURI_INTERNALS__` are not present in
- * the console's own window (Tauri's `invoke()` bridge does not reach this
- * webview; see the module doc comment above), so `OpenExternalLink` falls
- * through to a plain `target="_blank"` anchor rather than routing through
- * the shell-open path it prefers. A general console-to-native bridge is in
- * progress elsewhere; this deliberately does not invent a second, competing
- * mechanism to route around that gap -- once the bridge lands,
- * `OpenExternalLink` (and every other call site using it, including
- * ngrok's authtoken link above) benefits automatically. The interim
- * mitigation is the visible, `select-all` plain-text URL alongside the
- * link, so the download page is reachable by copy-paste even while the
- * link itself is a plain browser-tab open rather than a native shell-open.
- */
-function CloudflaredBinaryStatus({
-  missing,
-  unknown,
-}: {
-  missing: boolean
-  unknown: boolean
-}) {
-  if (unknown) {
-    // Only reachable with an old build or a host that never ran the check
-    // (see `CloudflareTunnelInspection`'s doc comment) -- not a claim that
-    // cloudflared is installed, only that this app cannot yet say either
-    // way. `start` still fails closed with an actionable error if it turns
-    // out cloudflared is actually absent.
-    return (
-      <span className="pdpp-caption text-muted-foreground">
-        Whether cloudflared is installed could not be checked here.
-      </span>
-    )
-  }
-  if (missing) {
-    return (
-      <span className="pdpp-caption text-destructive">
-        cloudflared is not installed on this machine yet.{" "}
-        <OpenExternalLink className="underline" href={CLOUDFLARED_DOWNLOAD_URL}>
-          Download cloudflared
-        </OpenExternalLink>
-        , then come back here.{" "}
-        <span className="select-all break-all font-mono text-muted-foreground">
-          {CLOUDFLARED_DOWNLOAD_URL}
-        </span>
-      </span>
-    )
-  }
-  return (
-    <span className="pdpp-caption text-muted-foreground">
-      cloudflared is installed and ready.
-    </span>
-  )
-}
-
 const postureRows: Array<{
   posture: RemoteAccessPosture
   label: string
@@ -295,7 +206,12 @@ export function RemoteAccessSetting({
           setConfig(resolved)
           setInspection(asInspection(nextInspection))
           setNgrokInspection(asInspection(nextNgrokInspection))
-          setCloudflareTunnelInspection(asCloudflareTunnelInspection(nextCloudflareTunnelInspection))
+          setCloudflareTunnelInspection(
+            asCloudflareTunnelInspection(
+              asInspection(nextCloudflareTunnelInspection),
+              nextCloudflareTunnelInspection
+            )
+          )
           setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
           // Without this, an owner who already saved their ngrok domain sees
           // a blank field on every page load and has no way to tell their
@@ -344,8 +260,10 @@ export function RemoteAccessSetting({
   // check) never renders as "missing" -- only a real, checked `false` does
   // -- so this can't falsely tell an owner to install something that might
   // already be there.
-  const cloudflaredBinaryMissing =
-    stateIsKnown && cloudflareTunnelInspection?.cloudflared_binary_present === false
+  const cloudflaredBinaryMissing = cloudflaredBinaryIsMissing(
+    stateIsKnown,
+    cloudflareTunnelInspection
+  )
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
