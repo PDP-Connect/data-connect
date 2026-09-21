@@ -7,14 +7,28 @@
  * open-external-link.tsx -> owner-open-external-url.ts ->
  * open_external_url.rs).
  *
- * The prior `OpenExternalLink` test (open-external-link.test.ts) only
- * regex-matched the component's source text and passed while every one of
- * the 35 call sites was dead in the shipped app -- PR #186's
- * `shell:allow-open` capability grant merged, and `window.__TAURI__` was
- * still undefined in the real console window. This spec instead drives a
- * REAL browser against a REAL running console + reference server and
- * asserts on the network request the click actually produces, not on
- * source text.
+ * THIS SPEC PREVIOUSLY PASSED FIVE TIMES WHILE EVERY ONE OF THE 35 CALL
+ * SITES WAS COMPLETELY DEAD IN THE REAL SHIPPED APP. Its `markAsTauriRuntime`
+ * helper injected `window.__TAURI_INTERNALS__ = {}` before every test ran --
+ * a flag that is ALWAYS ABSENT in the real console window (Tauri Discussion
+ * #2650: `WebviewUrl::External` never gets Tauri's IPC injection, so neither
+ * `__TAURI__` nor `__TAURI_INTERNALS__` is ever set there, in any build).
+ * The component's `isTauriRuntime()` gate checked exactly those two flags,
+ * so this spec was testing a synthetic condition engineered to make the
+ * gate pass -- it never once exercised the actual, unmodified runtime
+ * condition a real click hits. Confirmed directly against a real running
+ * app, not assumed: the gate always evaluated false there, so the bridge
+ * never fired, for every build since #200 merged.
+ *
+ * The fix removed the gate entirely -- the bridge is attempted
+ * unconditionally now, with a `window.open` fallback for whichever case it
+ * fails in (plain browser tab, desktop app not running). That makes a PLAIN
+ * Playwright browser -- no injected flags, no synthetic runtime markers --
+ * the CORRECT test of the real behavior for the first time: this is what
+ * the click looks like in the actual shipped console, not a stand-in for
+ * it. Keep it that way. If a future change reintroduces a runtime gate,
+ * this spec should fail loudly rather than quietly get "fixed" by injecting
+ * whatever flag makes it pass again.
  *
  * This test cannot exercise the Rust half (open::that_detached actually
  * spawning a system-browser process) -- Playwright drives a plain browser
@@ -63,28 +77,9 @@ async function loginAsOwner(
   await page.waitForLoadState("networkidle")
 }
 
-/**
- * `OpenExternalLink` only routes through the bridge when
- * `isTauriRuntime()` is true (`"__TAURI__" in window ||
- * "__TAURI_INTERNALS__" in window`). A plain browser -- which is what
- * Playwright drives here, same limitation `owner-journey.spec.ts`
- * documents -- is not the Tauri webview, so this injects the same runtime
- * marker the real console window carries, forcing the click through the
- * exact code path the packaged app uses instead of the plain-browser
- * target="_blank" fallback.
- */
-async function markAsTauriRuntime(
-  page: import("@playwright/test").Page
-): Promise<void> {
-  await page.addInitScript(() => {
-    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
-  })
-}
-
-test("clicking an external link inside the Tauri runtime POSTs to the owner open-external-url bridge, not a dead invoke()", async ({
+test("clicking an external link in a real (unmodified) browser POSTs to the owner open-external-url bridge, not a dead invoke()", async ({
   page,
 }) => {
-  await markAsTauriRuntime(page)
   await loginAsOwner(page)
   await page.goto(`${BASE_URL}/settings`, { waitUntil: "networkidle" })
 
