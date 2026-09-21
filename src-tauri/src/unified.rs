@@ -2520,12 +2520,29 @@ fn close_recovery_window(app: &AppHandle) {
 /// and require that exact asset to resolve too. If the shell HTML and its
 /// own referenced assets don't agree on what build is running, this fails
 /// loudly instead of reporting a healthy console that cannot render.
+///
+/// Checks more than the bare root. Each App Router route ships its own,
+/// physically separate `page_client-reference-manifest.js` file (confirmed
+/// against this repo's own `.next/server/app/` output -- `(console)/
+/// page_client-reference-manifest.js` and `(console)/connect/
+/// page_client-reference-manifest.js` are different files with different
+/// `globalThis.__RSC_MANIFEST` keys), and Next's own `loadComponents`
+/// (`load-components.js`) loads a route's manifest from disk lazily, the
+/// first time THAT route is requested in the process's lifetime, not
+/// exhaustively at boot. So a check against `/` alone proves nothing about
+/// `/connect` specifically -- it would report healthy in the exact shape of
+/// the original incident if the swap corrupted `/connect`'s generation while
+/// `/`'s happened to already be warm, or vice versa. `/connect` is checked
+/// because it's the literal route named in the `InvariantError` this whole
+/// chain of fixes (#205 then this) traces back to.
+const CONSOLE_HEALTH_CHECK_PATHS: [&str; 2] = ["", "connect"];
+
 async fn wait_for_console(url: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + CONSOLE_WAIT_TIMEOUT;
     let mut last_error = "no attempt completed".to_string();
     while tokio::time::Instant::now() < deadline {
-        match verify_console_serves_a_real_route(&client, url).await {
+        match verify_console_health_check_routes(&client, url).await {
             Ok(()) => return Ok(()),
             Err(error) => last_error = error,
         }
@@ -2534,6 +2551,20 @@ async fn wait_for_console(url: &str) -> Result<(), String> {
     Err(format!(
         "Console at {url} did not serve a working page within {CONSOLE_WAIT_TIMEOUT:?}: {last_error}"
     ))
+}
+
+/// One attempt across every route in `CONSOLE_HEALTH_CHECK_PATHS`. All must
+/// pass for the console to count as healthy -- see `wait_for_console`'s doc
+/// comment for why checking only one route is not enough.
+async fn verify_console_health_check_routes(client: &reqwest::Client, base_url: &str) -> Result<(), String> {
+    let trimmed_base = base_url.trim_end_matches('/');
+    for path in CONSOLE_HEALTH_CHECK_PATHS {
+        let route_url = format!("{trimmed_base}/{path}");
+        verify_console_serves_a_real_route(client, &route_url)
+            .await
+            .map_err(|error| format!("route {route_url}: {error}"))?;
+    }
+    Ok(())
 }
 
 /// One attempt: fetch `url`, extract a static asset it references, fetch
@@ -3033,6 +3064,78 @@ mod tests {
         let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no static asset"));
+    }
+
+    #[tokio::test]
+    async fn verify_console_health_check_routes_passes_when_every_checked_route_is_healthy() {
+        let server = FakeHttpServer::start(vec![
+            (
+                "/",
+                (
+                    "200 OK",
+                    r#"<html><head><script src="/_next/static/chunks/root.js"></script></head></html>"#,
+                ),
+            ),
+            ("/_next/static/chunks/root.js", ("200 OK", "console.log('root')")),
+            (
+                "/connect",
+                (
+                    "200 OK",
+                    r#"<html><head><script src="/_next/static/chunks/connect.js"></script></head></html>"#,
+                ),
+            ),
+            ("/_next/static/chunks/connect.js", ("200 OK", "console.log('connect')")),
+        ]);
+        let client = reqwest::Client::new();
+        let result = verify_console_health_check_routes(&client, &server.url("")).await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_console_health_check_routes_catches_a_route_specific_failure_the_root_alone_would_miss() {
+        // Each App Router route has its OWN client-reference manifest, loaded
+        // from disk lazily on that route's first request in the process's
+        // lifetime (see this module's `CONSOLE_HEALTH_CHECK_PATHS` doc
+        // comment) -- so a healthy `/` proves nothing about `/connect`
+        // specifically. This is the actual incident's shape one level up:
+        // the root looks completely fine, but the route a user actually
+        // needs (the one named in the real `InvariantError`) is broken.
+        // Checking only `/` would report this console healthy; it must not.
+        let server = FakeHttpServer::start(vec![
+            (
+                "/",
+                (
+                    "200 OK",
+                    r#"<html><head><script src="/_next/static/chunks/root.js"></script></head></html>"#,
+                ),
+            ),
+            ("/_next/static/chunks/root.js", ("200 OK", "console.log('root')")),
+            (
+                "/connect",
+                (
+                    "200 OK",
+                    r#"<html><head><script src="/_next/static/chunks/connect-stale.js"></script></head></html>"#,
+                ),
+            ),
+            // Deliberately no route registered for connect-stale.js -- the
+            // FakeHttpServer's default 404 fallback stands in for the exact
+            // incident shape (HTML 200, its own referenced asset 404).
+        ]);
+        let client = reqwest::Client::new();
+        let result = verify_console_health_check_routes(&client, &server.url("")).await;
+        assert!(
+            result.is_err(),
+            "a broken /connect must fail the combined check even though / is healthy"
+        );
+        let message = result.unwrap_err();
+        assert!(
+            message.contains("/connect"),
+            "error should name which route failed, got: {message}"
+        );
+        assert!(
+            message.contains("connect-stale.js"),
+            "error should still name the specific asset that failed, got: {message}"
+        );
     }
 
     fn fake_ri_script(
