@@ -51,6 +51,7 @@ test("save persists a valid public_url config and load reads it back", async () 
       },
       posture: "public_url",
       provider: "user_supplied_origin",
+      console_port: 4310,
     };
 
     const saved = await store.save(config);
@@ -59,6 +60,26 @@ test("save persists a valid public_url config and load reads it back", async () 
 
     const onDisk = JSON.parse(await readFile(join(dir, "remote-access.json"), "utf8"));
     assert.deepEqual(onDisk, config);
+  });
+});
+
+test("save persists a config without a pinned port as console_port: null", async () => {
+  await withTempDir(async (dir) => {
+    const store = createRemoteAccessConfigStore(dir);
+    const config: RemoteAccessConfig = {
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "user_supplied_origin",
+    };
+
+    const saved = await store.save(config);
+    assert.equal(saved.console_port, null);
+    assert.equal((await store.load()).console_port, null);
   });
 });
 

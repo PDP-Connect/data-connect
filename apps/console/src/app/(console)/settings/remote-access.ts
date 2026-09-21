@@ -27,6 +27,7 @@ export {
   ngrokDurableAddress,
   offRemoteAccessConfig,
   originIsKnowableFromConfig,
+  validatePinnedConsolePort,
   validateUserSuppliedOrigin,
   type DurableAddressState,
   type InvalidOrigin,

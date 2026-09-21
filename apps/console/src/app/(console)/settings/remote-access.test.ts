@@ -14,6 +14,7 @@ import {
   remoteAccessOriginDisplay,
   remoteAccessRequiresOwnerPassword,
   validateNgrokDomain,
+  validatePinnedConsolePort,
   validateUserSuppliedOrigin,
   type RemoteAccessConfig,
 } from "./remote-access.ts"
@@ -231,6 +232,7 @@ test("off is a loopback-only empty contract", () => {
       PDPP_TRUSTED_PROXIES: "",
       PDPP_BIND_HOST: "127.0.0.1",
     },
+    console_port: null,
   })
 })
 
@@ -319,4 +321,21 @@ test("a tunnel_error takes priority over a stale origin left from a previous suc
     })
   )
   assert.equal(display.kind, "error")
+})
+
+test("a blank pinned-port input means no pin, not an error", () => {
+  assert.deepEqual(validatePinnedConsolePort(""), { ok: true, port: null })
+  assert.deepEqual(validatePinnedConsolePort("   "), { ok: true, port: null })
+})
+
+test("a pinned port must be a valid TCP port number", () => {
+  assert.deepEqual(validatePinnedConsolePort("4310"), {
+    ok: true,
+    port: 4310,
+  })
+  for (const invalid of ["0", "-1", "65536", "abc", "4310.5", "80px"]) {
+    assert.equal(validatePinnedConsolePort(invalid).ok, false, invalid)
+  }
+  // Surrounding whitespace is tolerated, matching validateUserSuppliedOrigin's trim.
+  assert.deepEqual(validatePinnedConsolePort(" 80 "), { ok: true, port: 80 })
 })
