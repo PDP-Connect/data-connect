@@ -339,6 +339,16 @@ export function findProcessesUsingDirectory(targetDirectory) {
       // process this script can or needs to act on.
       continue
     }
+    // readlink on an unlinked directory (exactly the state this function's
+    // own doc comment describes: cwd shows "(deleted)") appends that literal
+    // suffix to the path. Strip it so a process already stranded by an
+    // earlier restage -- the precise scenario this whole staging change
+    // exists to prevent going forward -- is still found and can still be
+    // signalled to stop, instead of being silently invisible to an exact
+    // string match forever. Matches stage-generations.js's
+    // findProcessesUsingDirectory, which already does this; this function
+    // predates that module and had fallen out of sync with it.
+    cwd = cwd.replace(/ \(deleted\)$/, "")
     if (cwd === resolvedTarget || cwd.startsWith(`${resolvedTarget}${sep}`)) {
       pids.push(Number(entry.name))
     }
