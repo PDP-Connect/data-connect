@@ -23,11 +23,11 @@
  *     that fact (it's a documented default) lock the real owner out by
  *     spamming failed logins from anywhere.
  *   - Local/private-network callers get a much looser threshold than remote
- *     callers, using the same private-network classification the DCR rate
- *     limiter already exempts local callers with
- *     (`isLocalOrPrivateRequestOrigin` in `metadata.ts`). A stale ngrok tab
- *     left open on the owner's own LAN should not compete with the strict
- *     policy built for the public tunnel.
+ *     callers, classified from the connection's actual source IP (never the
+ *     declared `Host` header, which a remote attacker controls -- see
+ *     `isLocalOrPrivateOwnerLoginRequest` below). A stale ngrok tab left
+ *     open on the owner's own LAN should not compete with the strict policy
+ *     built for the public tunnel.
  *   - No dependency on password-derived state: the counter is purely
  *     request-shaped (IP + timestamp), so it never logs or persists the
  *     password, a hash, or any derived secret.
@@ -105,24 +105,30 @@ function isPrivateNetworkHostname(hostname: string): boolean {
   return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
 }
 
-// Deliberately re-derives the request's declared host rather than importing
-// `isLocalOrPrivateRequestOrigin` from `metadata.ts`: that helper expects an
-// Express-shaped `req.get(name)` + `req.protocol`, a different duck type
-// than this module's minimal, independently-testable request shape
-// (matching the narrow-interface convention `owner-auth.ts` already uses).
-// Both ultimately classify the same private-IP/loopback ranges as
-// `reachability-contract.ts`'s `isPrivateOrLoopbackOriginHost`.
-function isLocalOrPrivateOwnerLoginRequest(req: OwnerLoginRateLimitRequest): boolean {
-  const host = req.headers.host;
-  if (!host) {
-    return false;
-  }
-  const hostname = host.split(":")[0] ?? "";
-  return isPrivateNetworkHostname(hostname);
-}
-
 function requestKey(req: OwnerLoginRateLimitRequest): string {
   return req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown";
+}
+
+// Classifies from the connection's actual source address (the same value
+// `requestKey` uses), NOT the declared `Host` header. `Host` is
+// attacker-controlled on every incoming request -- a remote caller over the
+// public tunnel can simply send `Host: localhost` and would otherwise
+// qualify for `maxLocal`, a ~12x looser ceiling than the one this throttle
+// exists to enforce against remote callers. Cloudflare Tunnel forwards the
+// client's original `Host` unmodified by default (no `httpHostHeader`
+// override configured in `remote_access_cloudflare.rs`), so this is not a
+// theoretical gap. `req.ip`/`socket.remoteAddress` reflect the actual TCP
+// peer the server accepted the connection from, which a client cannot spoof
+// at the application layer. (`isLocalOrPrivateRequestOrigin` in
+// `metadata.ts` is Host-based by design for its own purpose -- resolving a
+// *displayable* public URL, not gating a security control -- so it is not
+// reused here even by IP.)
+function isLocalOrPrivateOwnerLoginRequest(req: OwnerLoginRateLimitRequest): boolean {
+  const key = requestKey(req);
+  if (key === "unknown") {
+    return false;
+  }
+  return isPrivateNetworkHostname(key);
 }
 
 interface AttemptWindow {

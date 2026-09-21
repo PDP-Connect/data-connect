@@ -16,6 +16,12 @@ function remoteReq(ip = "203.0.113.7"): OwnerLoginRateLimitRequest {
 }
 
 function localReq(ip = "127.0.0.1"): OwnerLoginRateLimitRequest {
+  // `host` is deliberately NOT what makes this "local" -- classification is
+  // by the connection's actual source IP (see owner-login-rate-limit.ts),
+  // since `Host` is attacker-controlled on every incoming request. A
+  // hostname is still included here to prove that: see the spoofed-Host
+  // test below, which sends this same hostname from a remote IP and expects
+  // it to be throttled at the strict ceiling anyway.
   return { headers: { host: "localhost:5180" }, ip };
 }
 
@@ -61,26 +67,33 @@ test("owner login rate limit: local/private-network callers get a looser thresho
   assert.ok(limiter.check(req), "local caller is still eventually throttled, just at a higher ceiling");
 });
 
-test("owner login rate limit: distinguishes local from remote purely by declared Host, independent of IP", () => {
+test("owner login rate limit: distinguishes local from remote by actual source IP, never by the declared Host header", () => {
   const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, windowMs: 60_000 });
-  const remote = remoteReq("198.51.100.9");
-  const local = localReq("198.51.100.9");
+  const remoteIp = "198.51.100.9";
+  const remote = remoteReq(remoteIp);
+  // Same remote IP, but with a `localhost` Host header -- exactly what a
+  // remote attacker over the public tunnel could send to try to qualify for
+  // maxLocal. `Host` must be ignored for this classification: the request
+  // is still throttled at the strict `max` ceiling because the connection's
+  // real source IP is not a private-network address.
+  const spoofedHost: OwnerLoginRateLimitRequest = { headers: { host: "localhost:5180" }, ip: remoteIp };
   assert.equal(limiter.check(remote), null, "remote attempt 1 allowed");
-  assert.ok(limiter.check(remote), "remote attempt 2 throttled at the strict ceiling");
-  // Same IP as `remote` (the bucket is shared — key derivation is by IP
-  // only), but the *threshold* re-evaluates per call from the current
-  // request's Host classification: the shared bucket's count (1) is below
-  // maxLocal, so a local-hostname call against that same IP still passes.
-  // 4 more local calls exhaust maxLocal (5) from the bucket's existing count
-  // of 1.
-  for (let i = 0; i < 4; i += 1) {
-    assert.equal(
-      limiter.check(local),
-      null,
-      `local-hostname attempt ${i + 1} allowed under maxLocal despite sharing the remote request's IP`
-    );
+  assert.ok(
+    limiter.check(spoofedHost),
+    "a spoofed 'Host: localhost' header from a real remote IP does not grant the loose maxLocal ceiling"
+  );
+});
+
+test("owner login rate limit: a genuinely local source IP gets maxLocal regardless of the declared Host header", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, windowMs: 60_000 });
+  // Real loopback IP, but with a Host header that looks like a public
+  // tunnel hostname -- classification must still follow the actual source
+  // IP, not the declared Host, in both directions.
+  const req: OwnerLoginRateLimitRequest = { headers: { host: "owner.example-tunnel.dev" }, ip: "127.0.0.1" };
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(limiter.check(req), null, `local-IP attempt ${i + 1} allowed under maxLocal`);
   }
-  assert.ok(limiter.check(local), "local-hostname call is throttled once the shared bucket reaches maxLocal");
+  assert.ok(limiter.check(req), "local-IP caller is still eventually throttled, just at the looser ceiling");
 });
 
 test("owner login rate limit: different source IPs are tracked independently", () => {
