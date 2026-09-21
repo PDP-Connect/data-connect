@@ -344,12 +344,17 @@ describe("ensure console stack", () => {
     }
   })
   it("keeps a running server's build directory intact across a restage", async () => {
-    // The incident this whole change exists for. Previously the stage
-    // deleted and replaced the fixed `console` path, which unlinked the
-    // directory a live server was running inside: the process survived
-    // against a deleted inode and served stale HTML while every chunk
-    // 404'd. Under generation directories the build a server is running
-    // from is never unlinked, so it keeps serving a COHERENT build.
+    // Scope correction (2026-09-21): this proves a generation directory is
+    // never unlinked by a later restage, which is what makes a build
+    // durable on disk. It does NOT prove the shipped app's running server
+    // keeps serving coherently, because that server's cwd is the STABLE
+    // path, not a generation -- `resolve_staged_root` in unified.rs hands
+    // `reference-stack/<sidecar>` to `console_process_spec`'s
+    // `cwd: Some(root.to_path_buf())`. Measured for the stable-path case:
+    // a relative read after a restage gives ENOENT and an absolute read
+    // transparently returns the NEW content, so neither is "the old build,
+    // coherently". See the stable-path test below for what is actually
+    // guaranteed there.
     const root = createConsoleBuildFixture()
     const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
     let child

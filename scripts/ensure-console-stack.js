@@ -24,6 +24,7 @@ import { isMainModule } from "./is-main-module.js"
 import {
   KEEP_GENERATIONS,
   collectOldStageGenerations,
+  findProcessesUsingDirectory,
   publishStageGeneration,
 } from "./stage-generations.js"
 
@@ -312,49 +313,12 @@ function writeManifest(stageDirectory, profile, serverRelativePath) {
  * iterative rebuild against an already-launched app -- exactly what happened
  * here.
  */
-export function findProcessesUsingDirectory(targetDirectory) {
-  if (process.platform !== "linux") {
-    return []
-  }
-  const procDirectory = "/proc"
-  if (!existsSync(procDirectory)) {
-    return []
-  }
-  const resolvedTarget = resolve(targetDirectory)
-  const pids = []
-  let entries
-  try {
-    entries = readdirSync(procDirectory, { withFileTypes: true })
-  } catch {
-    return []
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
-    let cwd
-    try {
-      cwd = readlinkSync(join(procDirectory, entry.name, "cwd"))
-    } catch {
-      // The process exited between readdir and readlink, or this process's
-      // /proc entry is not readable (permissions) -- either way, not a
-      // process this script can or needs to act on.
-      continue
-    }
-    // readlink on an unlinked directory (exactly the state this function's
-    // own doc comment describes: cwd shows "(deleted)") appends that literal
-    // suffix to the path. Strip it so a process already stranded by an
-    // earlier restage -- the precise scenario this whole staging change
-    // exists to prevent going forward -- is still found and can still be
-    // signalled to stop, instead of being silently invisible to an exact
-    // string match forever. Matches stage-generations.js's
-    // findProcessesUsingDirectory, which already does this; this function
-    // predates that module and had fallen out of sync with it.
-    cwd = cwd.replace(/ \(deleted\)$/, "")
-    if (cwd === resolvedTarget || cwd.startsWith(`${resolvedTarget}${sep}`)) {
-      pids.push(Number(entry.name))
-    }
-  }
-  return pids
-}
+// Re-exported from the shared module rather than reimplemented here. The
+// two copies had already drifted once: this file's version did not strip
+// readlink's "(deleted)" suffix, so a process stranded by an earlier
+// in-place restage -- the exact case this staging change exists for -- was
+// invisible to it. One implementation, one place to fix.
+export { findProcessesUsingDirectory }
 
 /**
  * Stop any process still running from inside `targetDirectory` before it is
