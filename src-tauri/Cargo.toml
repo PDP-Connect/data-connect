@@ -116,6 +116,21 @@ signal-hook = "0.4.4"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_UI_Controls"] }
 
+# RETIRE THIS PATCH WHEN (checked 2026-09-21 against the crates.io sparse index,
+# https://index.crates.io/ta/ur/tauri-runtime-wry and https://index.crates.io/ta/ur/tauri
+# -- re-run the same query to check again):
+#   EITHER a published, STABLE (non-alpha) tauri 2.x release depends on a
+#   tauri-runtime-wry release whose own `tao` requirement is `>= 0.37`
+#   (as of this check, the newest stable tauri-runtime-wry is 2.11.4, published
+#   2026-06-30, requiring tao "^0.35.0"; the newest stable tauri is 2.11.6,
+#   published 2026-09-19, still pinned to tauri-runtime-wry "^2.11.4"; the only
+#   published tauri-runtime-wry releases requiring tao ">=0.37" are
+#   3.0.0-alpha.0/1/2, which are not stable),
+#   OR this app migrates to Tauri 3.0 stable (not alpha).
+# Until then, no real upgrade path exists -- this fork patch is the only way to
+# get the Wayland titlebar hit-testing fix (tao#1046/#1122,
+# tauri-apps/tauri#13440) onto the current stable Tauri 2.x line.
+#
 # Fork-patch to relax tauri-runtime-wry's `tao = "^0.35.0"` requirement so we can
 # pull tao >=0.36, which fixes an unconditional Wayland CSD EventBox overlay
 # (tao#1046/#1122, tauri-apps/tauri#13440) that breaks titlebar button
