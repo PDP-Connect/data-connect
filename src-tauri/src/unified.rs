@@ -40,8 +40,25 @@ pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
 pub(crate) const RECOVERY_WINDOW_LABEL: &str = "recovery";
 const TRAY_ICON_ID: &str = "dataconnect-tray";
 const DEFAULT_CONSOLE_URL: &str = "http://localhost:3001";
+/// How long one readiness ROUND waits before reporting the console as not
+/// yet answering. Reaching it is not a verdict that the console is broken
+/// -- see `wait_for_console_with_retry`.
 const CONSOLE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const CONSOLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Total time a console is given to answer across all rounds before
+/// bootstrap gives up.
+///
+/// A fixed 45s budget whose failure mode is a destructive teardown is the
+/// shape that cost real debugging time: a console that is merely SLOW gets
+/// killed, and killing it does not make the next attempt faster. Ten
+/// minutes is chosen to sit well above a cold first boot (a from-scratch
+/// console build is tens of seconds on a warm machine and minutes on a
+/// cold one), so the timeout stops being a race against machine speed.
+const CONSOLE_TOTAL_WAIT_BUDGET: Duration = Duration::from_secs(600);
+/// Pause between readiness rounds, doubling up to `CONSOLE_RETRY_MAX_BACKOFF`.
+const CONSOLE_RETRY_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+const CONSOLE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 const UNIFIED_PROFILE_ENV: &str = "TAURI_PROFILE";
 const DEFAULT_PROFILE: &str = "release";
 const RI_LABEL: &str = "reference-implementation";
@@ -1983,10 +2000,22 @@ async fn finish_bootstrap(
         }
     };
 
-    if let Err(error) = wait_for_console(&console_url).await {
+    // A slow console is not a broken console. This retries with backoff for
+    // the whole `CONSOLE_TOTAL_WAIT_BUDGET` and only reaches teardown once
+    // waiting provably cannot help -- the sidecars are gone, or the budget
+    // is spent. See `wait_for_console_with_retry`.
+    if let Err(error) = wait_for_console_with_retry(
+        &console_url,
+        || managed_stack_is_registered(app, managed),
+        CONSOLE_TOTAL_WAIT_BUDGET,
+        CONSOLE_WAIT_TIMEOUT,
+    )
+    .await
+    {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
+
     let console_origin = console_url
         .parse()
         .map_err(|error| format!("Invalid console URL: {error}"));
@@ -2682,8 +2711,14 @@ fn close_recovery_window(app: &AppHandle) {
 /// down on failure, only logs. A health check must be able to say "I
 /// don't know" without being able to say "so I killed it."
 async fn wait_for_console(url: &str) -> Result<(), String> {
+    wait_for_console_round(url, CONSOLE_WAIT_TIMEOUT).await
+}
+
+/// One readiness round with an explicit budget, so tests can exercise the
+/// retry behaviour without waiting out the production round length.
+async fn wait_for_console_round(url: &str, round_timeout: Duration) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + CONSOLE_WAIT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + round_timeout;
     let mut last_error = "no attempt completed".to_string();
     while tokio::time::Instant::now() < deadline {
         match client.get(url).send().await {
@@ -2694,8 +2729,90 @@ async fn wait_for_console(url: &str) -> Result<(), String> {
         tokio::time::sleep(CONSOLE_POLL_INTERVAL).await;
     }
     Err(format!(
-        "Console at {url} did not answer within {CONSOLE_WAIT_TIMEOUT:?}: {last_error}"
+        "Console at {url} did not answer within {round_timeout:?}: {last_error}"
     ))
+}
+
+/// Is a managed sidecar stack still registered with the app?
+///
+/// Used as the "waiting longer could still help" signal while the console
+/// starts. The stack is taken out of `UnifiedRuntimeState` by every
+/// teardown path, so its absence means the supervisor is no longer running
+/// these sidecars and no amount of further polling will produce a console.
+/// In attach mode there is no managed stack to lose, so this reports true
+/// and the total budget alone bounds the wait.
+fn managed_stack_is_registered(app: &AppHandle, managed: bool) -> bool {
+    if !managed {
+        return true;
+    }
+    app.try_state::<UnifiedRuntimeState>()
+        .and_then(|state| state.stack.lock().ok().map(|stack| stack.is_some()))
+        .unwrap_or(false)
+}
+
+/// Wait for the console to answer, retrying with backoff, and only give up
+/// when the console PROCESS is gone or the total budget is spent.
+///
+/// The principle this enforces, earned the hard way: **an observation
+/// mechanism must never be able to destroy the thing it observes.** #216
+/// neutralised the deep multi-route check, which could report a working
+/// console unhealthy and tear the stack down. This closes the same PATTERN
+/// one level up: `wait_for_console`'s own fixed 45s bare-liveness timeout
+/// still fed an unconditional, non-retrying `teardown_managed_on_error`.
+/// A console that is merely SLOW would be killed for being slow, and the
+/// kill makes the retry strictly worse, not better -- the next attempt
+/// starts from nothing.
+///
+/// So a round that times out is now a REPORT ("not answering yet"), not a
+/// verdict. Rounds repeat with exponential backoff until either the
+/// console answers, the total budget is spent, or `console_is_running`
+/// says the process itself has exited -- the one condition where waiting
+/// longer genuinely cannot help, and the only one that should end in
+/// teardown.
+async fn wait_for_console_with_retry<IsRunning>(
+    url: &str,
+    console_is_running: IsRunning,
+    total_budget: Duration,
+    round_timeout: Duration,
+) -> Result<(), String>
+where
+    IsRunning: Fn() -> bool,
+{
+    let started = tokio::time::Instant::now();
+    let mut backoff = CONSOLE_RETRY_INITIAL_BACKOFF;
+    let mut round = 1u32;
+    let mut last_error;
+
+    loop {
+        match wait_for_console_round(url, round_timeout).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+
+        // The process is gone: more waiting cannot help, and the supervisor
+        // has already surfaced the real reason.
+        if !console_is_running() {
+            return Err(format!(
+                "Console process exited before it answered: {last_error}"
+            ));
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= total_budget {
+            return Err(format!(
+                "Console at {url} did not answer within {total_budget:?} across {round} \
+                 attempts: {last_error}"
+            ));
+        }
+
+        log::warn!(
+            "Console has not answered after {elapsed:?} (attempt {round}); it is still \
+             running, so retrying in {backoff:?} rather than stopping it: {last_error}"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(CONSOLE_RETRY_MAX_BACKOFF);
+        round += 1;
+    }
 }
 
 /// Routes the best-effort deep health watch checks after the console window
@@ -3269,6 +3386,54 @@ mod tests {
     }
 
     impl FakeHttpServer {
+        /// Answers 503 until `ready` flips to true, then 200.
+        ///
+        /// Models a console that is still starting: the port is bound (so
+        /// the connection succeeds) but the app is not serving yet, which
+        /// is exactly the state a cold boot sits in for a while.
+        fn start_gated(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake http server");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let shutdown_for_thread = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                use std::io::{Read, Write};
+                while !shutdown_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                            let mut buf = [0u8; 4096];
+                            let _ = stream.read(&mut buf).unwrap_or(0);
+                            let serving = ready.load(std::sync::atomic::Ordering::SeqCst);
+                            let status = if serving {
+                                "200 OK"
+                            } else {
+                                "503 Service Unavailable"
+                            };
+                            let body = if serving { "<html>up</html>" } else { "" };
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                addr,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
         /// `routes` maps a request path (e.g. `"/"`) to `(status_line,
         /// body)`, e.g. `("200 OK", "<html>...")`.
         fn start(routes: Vec<(&'static str, (&'static str, &'static str))>) -> Self {
@@ -3510,6 +3675,99 @@ mod tests {
         assert!(!response_proves_the_server_is_alive(
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         ));
+    }
+
+    /// The retry wrapper itself must never be able to stop the stack.
+    ///
+    /// The same structural rule #216 established for the deep health
+    /// watch, applied one level up to the readiness wait. Teardown is the
+    /// CALLER's decision, made only after this function has exhausted
+    /// every non-destructive option; this function may report and retry,
+    /// never destroy.
+    #[test]
+    fn the_console_wait_cannot_tear_down_what_it_observes() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("async fn wait_for_console_with_retry")
+            .expect("the retry wrapper must exist");
+        let end = source[start..]
+            .find("\n/// Routes the best-effort deep health watch")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        for forbidden in [
+            "teardown(",
+            "teardown_managed_on_error",
+            "app.exit",
+            "set_status",
+            "request_shutdown",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the console readiness wait must never reach {forbidden}: a check that \
+                 can stop what it is checking turns slowness into an outage"
+            );
+        }
+    }
+
+    /// A console that is merely SLOW must not be killed for being slow.
+    ///
+    /// This is the residual the reviewer caught after #216: the deep check
+    /// could no longer tear the stack down, but `wait_for_console`'s own
+    /// fixed 45s bare-liveness timeout still fed an unconditional,
+    /// non-retrying teardown. A cold first boot that needs longer than one
+    /// round would therefore be destroyed on a perfectly healthy machine,
+    /// and destroying it makes the next attempt start from nothing.
+    ///
+    /// Here the console answers nothing for the first round and then comes
+    /// up. With retry it must succeed; the round timeout is a report, not
+    /// a verdict.
+    #[tokio::test]
+    async fn a_slow_but_healthy_console_survives_and_is_not_torn_down() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = FakeHttpServer::start_gated(ready.clone());
+        // Flip to serving only after the first round has already timed out.
+        let flip = ready.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            flip.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let result = wait_for_console_with_retry(
+            &server.url("/"),
+            || true, // the console process is alive the whole time
+            Duration::from_secs(20),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a slow console that comes up must be waited for, not torn down: {result:?}"
+        );
+    }
+
+    /// The one case where waiting provably cannot help: the console process
+    /// is gone. Then, and only then, may this give up (and its caller tear
+    /// down).
+    #[tokio::test]
+    async fn a_dead_console_process_stops_the_wait_instead_of_burning_the_budget() {
+        let started = tokio::time::Instant::now();
+        let result = wait_for_console_with_retry(
+            "http://127.0.0.1:1/",
+            || false, // the supervisor no longer has these sidecars
+            Duration::from_secs(600),
+            Duration::from_millis(300),
+        )
+        .await;
+        let error = result.expect_err("a dead console must not report ready");
+        assert!(
+            error.contains("exited before it answered"),
+            "the error should name the real reason, got: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "a dead console must fail fast rather than waiting out the full budget"
+        );
     }
 
     #[tokio::test]
