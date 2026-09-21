@@ -83,15 +83,49 @@ pub(crate) fn autostart_state_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-pub(crate) fn load_autostart_state(path: &Path) -> Result<Option<AutostartState>, String> {
+/// What `load_autostart_state` found on disk. Distinguishes a state file
+/// that never existed from one that existed but was empty/unparseable --
+/// both mean "treat as absent and seed a fresh default", but the watcher
+/// tick logs and reacts to them differently. `Missing` needs no repair (the
+/// next `save_autostart_state` call will create it as part of normal
+/// operation); `Corrupt` means a stale, invalid file is sitting on disk
+/// RIGHT NOW and must be overwritten before the next tick, or the same
+/// parse failure recurs forever -- see `tick_autostart_watcher`.
+pub(crate) enum LoadedAutostartState {
+    Present(AutostartState),
+    Missing,
+    /// The file existed but its content was empty or failed to parse (e.g.
+    /// a zero-byte file left by a process killed mid-write). Carries the
+    /// underlying error for logging.
+    Corrupt(String),
+}
+
+/// A zero-byte or otherwise unparseable `autostart.json` is an ordinary,
+/// expected artifact of this process being killed mid-write (a crash, a
+/// `kill -9`, or a rebuild terminating the dev binary) -- NOT a fatal
+/// condition. Treating it as fatal is exactly what produced the reported
+/// incident: an infinite "Autostart watcher tick failed: Failed to parse
+/// autostart state: EOF while parsing a value at line 1 column 0" loop that
+/// never recovered because nothing ever rewrote the file.
+///
+/// This function itself never fails on a parse error -- it reports
+/// `Corrupt` instead, so the caller can fall back to the default state and
+/// self-heal the file (see `tick_autostart_watcher` in `unified.rs`). It
+/// still returns `Err` for a genuine read failure (e.g. a permissions
+/// error), which is a different, real problem that retrying blindly would
+/// not fix either.
+pub(crate) fn load_autostart_state(path: &Path) -> Result<LoadedAutostartState, String> {
     if !path.exists() {
-        return Ok(None);
+        return Ok(LoadedAutostartState::Missing);
     }
     let content = fs::read_to_string(path)
         .map_err(|error| format!("Failed to read autostart state: {error}"))?;
-    serde_json::from_str(&content)
-        .map(Some)
-        .map_err(|error| format!("Failed to parse autostart state: {error}"))
+    match serde_json::from_str(&content) {
+        Ok(state) => Ok(LoadedAutostartState::Present(state)),
+        Err(error) => Ok(LoadedAutostartState::Corrupt(format!(
+            "Failed to parse autostart state: {error}"
+        ))),
+    }
 }
 
 pub(crate) fn save_autostart_state(path: &Path, state: &AutostartState) -> Result<(), String> {
@@ -99,9 +133,7 @@ pub(crate) fn save_autostart_state(path: &Path, state: &AutostartState) -> Resul
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create autostart state directory: {error}"))?;
     }
-    let content = serde_json::to_string_pretty(state)
-        .map_err(|error| format!("Failed to serialize autostart state: {error}"))?;
-    fs::write(path, content).map_err(|error| format!("Failed to write autostart state: {error}"))
+    crate::atomic_write::write_json_atomically(path, state, "Failed to write autostart state")
 }
 
 /// Pure core of the autostart watcher tick: given the OS-independent
@@ -202,9 +234,7 @@ pub(crate) fn save_close_to_tray_notice_state(
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create notice-state directory: {error}"))?;
     }
-    let content = serde_json::to_string_pretty(state)
-        .map_err(|error| format!("Failed to serialize notice state: {error}"))?;
-    fs::write(path, content).map_err(|error| format!("Failed to write notice state: {error}"))
+    crate::atomic_write::write_json_atomically(path, state, "Failed to write notice state")
 }
 
 /// Mark the toast shown, if it has not already been recorded as shown.
@@ -356,17 +386,105 @@ mod tests {
         save_autostart_state(&path, &state).expect("save should succeed");
         let loaded = load_autostart_state(&path).expect("load should succeed");
 
-        assert_eq!(loaded, Some(state));
+        match loaded {
+            LoadedAutostartState::Present(loaded_state) => assert_eq!(loaded_state, state),
+            LoadedAutostartState::Missing => panic!("expected Present, got Missing"),
+            LoadedAutostartState::Corrupt(error) => {
+                panic!("expected Present, got Corrupt({error})")
+            }
+        }
     }
 
     #[test]
-    fn a_missing_state_file_loads_as_none() {
+    fn a_missing_state_file_loads_as_missing() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("autostart.json");
 
         let loaded = load_autostart_state(&path).expect("load should succeed");
 
-        assert_eq!(loaded, None);
+        assert!(matches!(loaded, LoadedAutostartState::Missing));
+    }
+
+    /// Reproduces the reported incident directly: a process killed mid-write
+    /// (a crash, `kill -9`, or a rebuild terminating the dev binary) can
+    /// leave `autostart.json` truncated to zero bytes. `path.exists()` is
+    /// still true, so `load_autostart_state` reads it, and
+    /// `serde_json::from_str("")` fails with exactly the error Tim saw on
+    /// his machine: "EOF while parsing a value at line 1 column 0".
+    ///
+    /// Before the fix, this surfaced as `Err(...)` from `load_autostart_state`
+    /// itself, which `tick_autostart_watcher` propagated as a hard failure
+    /// with no recovery -- the "Autostart watcher tick failed" log line
+    /// this whole fix exists to stop repeating forever. After the fix,
+    /// `load_autostart_state` never fails on a parse error: it reports
+    /// `Corrupt` (carrying the same underlying message, still asserted
+    /// below) so the caller can fall back to a default and self-heal the
+    /// file, which `tick_autostart_watcher`'s own test coverage in
+    /// `unified.rs` verifies end-to-end.
+    #[test]
+    fn an_empty_state_file_is_reported_as_corrupt_not_a_hard_error() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("autostart.json");
+        fs::write(&path, "").expect("write zero-byte file");
+
+        let result = load_autostart_state(&path)
+            .expect("a corrupt file must not fail load_autostart_state itself");
+
+        match result {
+            LoadedAutostartState::Corrupt(error) => {
+                assert!(
+                    error.contains("EOF while parsing a value"),
+                    "expected the exact serde_json EOF message Tim saw, got: {error}"
+                );
+            }
+            LoadedAutostartState::Missing => {
+                panic!("expected Corrupt for a zero-byte file, got Missing")
+            }
+            LoadedAutostartState::Present(_) => {
+                panic!("expected Corrupt for a zero-byte file, got Present")
+            }
+        }
+    }
+
+    /// End-to-end proof of the self-heal: drives the exact sequence
+    /// `tick_autostart_watcher` (`unified.rs`) performs against a
+    /// zero-byte file -- load (sees Corrupt), fall back to `None` the same
+    /// way the watcher does, run it through `apply_autostart_desired_state`
+    /// (which seeds a fresh default from `is_enabled()`, same as a
+    /// never-before-seen file), then save. Confirms the important part of
+    /// the fix that a bare "swallow the error and keep polling" would miss:
+    /// the file on disk is NO LONGER corrupt afterward, so the next tick's
+    /// `load_autostart_state` reads it as `Present`, not `Corrupt` again.
+    /// `tick_autostart_watcher` itself is not unit-tested directly because
+    /// it requires a real `AppHandle`; this covers the same pure sequence
+    /// its doc comment says it delegates to.
+    #[test]
+    fn a_corrupt_state_file_self_heals_on_the_next_tick_sequence() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("autostart.json");
+        fs::write(&path, "").expect("write zero-byte file");
+
+        let current = match load_autostart_state(&path).expect("load should not hard-fail") {
+            LoadedAutostartState::Corrupt(_) => None,
+            LoadedAutostartState::Missing => {
+                panic!("expected Corrupt for a zero-byte file, got Missing")
+            }
+            LoadedAutostartState::Present(_) => {
+                panic!("expected Corrupt for a zero-byte file, got Present")
+            }
+        };
+        let healed = apply_autostart_desired_state(current, || Ok(false), || Ok(()), || Ok(()))
+            .expect("seeding a fresh default should succeed");
+        save_autostart_state(&path, &healed).expect("self-heal write should succeed");
+
+        let reloaded = load_autostart_state(&path).expect("reload after self-heal should succeed");
+        match reloaded {
+            LoadedAutostartState::Present(state) => assert_eq!(state, healed),
+            LoadedAutostartState::Missing => panic!("self-heal write did not create the file"),
+            LoadedAutostartState::Corrupt(error) => {
+                panic!("file is still corrupt after the self-heal write: {error}")
+            }
+        }
     }
 
     #[test]

@@ -592,10 +592,11 @@ pub(crate) fn save_remote_access_config(
             format!("Failed to create remote-access configuration directory: {error}")
         })?;
     }
-    let content = serde_json::to_string_pretty(&config)
-        .map_err(|error| format!("Failed to serialize remote-access configuration: {error}"))?;
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write remote-access configuration: {error}"))?;
+    crate::atomic_write::write_json_atomically(
+        &path,
+        &config,
+        "Failed to write remote-access configuration",
+    )?;
     Ok(config)
 }
 

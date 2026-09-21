@@ -2484,12 +2484,29 @@ pub(crate) fn spawn_autostart_watcher(app: AppHandle) {
 fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
     use crate::commands::desktop_settings::{
         apply_autostart_desired_state, autostart_state_path, load_autostart_state,
-        save_autostart_state,
+        save_autostart_state, LoadedAutostartState,
     };
     use tauri_plugin_autostart::ManagerExt;
 
     let path = autostart_state_path(app)?;
-    let current = load_autostart_state(&path)?;
+    // A missing file needs no repair (normal on first-ever launch); a
+    // CORRUPT file (e.g. zero bytes from a process killed mid-write) is
+    // repaired immediately below by seeding+persisting the default state,
+    // so the identical parse failure cannot recur on the next tick. This
+    // is the fix for the reported incident: before this, a corrupt file
+    // was a hard error with no recovery, so the same "Failed to parse
+    // autostart state: EOF while parsing a value at line 1 column 0"
+    // fired every ~3s forever.
+    let current = match load_autostart_state(&path)? {
+        LoadedAutostartState::Present(state) => Some(state),
+        LoadedAutostartState::Missing => None,
+        LoadedAutostartState::Corrupt(error) => {
+            log::warn!(
+                "Autostart state file was empty or corrupt ({error}); resetting it to a fresh default instead of retrying the same parse failure forever"
+            );
+            None
+        }
+    };
     let manager = app.autolaunch();
     let next = apply_autostart_desired_state(
         current,
