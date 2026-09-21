@@ -10,7 +10,11 @@ import {
   asCloudflareTunnelInspection,
   cloudflaredBinaryIsMissing,
   CloudflaredBinaryStatus,
+  CloudflareTunnelConnectionBanner,
+  CloudflareTunnelSetupSteps,
+  CloudflareTunnelTokenStatus,
   CLOUDFLARE_TUNNEL_SETUP_URL,
+  useCloudflareTunnelConnectionStatus,
 } from "./cloudflare-tunnel-prerequisite.tsx"
 import {
   loadRemoteAccessStateAction,
@@ -28,6 +32,7 @@ import {
   validateNgrokDomain,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  wouldDisconnectRemoteOwner,
   type CloudflareTunnelInspection,
   type PublicUrlOption,
   type RemoteAccessConfig,
@@ -188,6 +193,19 @@ export function RemoteAccessSetting({
   >(null)
   const [cloudflareToken, setCloudflareToken] = useState("")
   const [cloudflareHostname, setCloudflareHostname] = useState("")
+  const cloudflareTunnelConnection = useCloudflareTunnelConnectionStatus(loadRemoteAccessState)
+  // Set only when a submitted change is BOTH risky (wouldDisconnectRemoteOwner)
+  // AND this browser tab is itself loaded from the remote origin -- the
+  // owner reached this settings page THROUGH the tunnel a provider switch,
+  // token rotation, or posture change could tear down. Holds the exact
+  // config that was about to be saved, so confirming resubmits it unchanged
+  // plus the acknowledgement flag, rather than re-deriving it from form
+  // state a second time (which could drift if the owner edited a field
+  // between the warning appearing and confirming).
+  const [pendingRiskyConfig, setPendingRiskyConfig] = useState<{
+    config: RemoteAccessConfig
+    providerCredential?: string
+  } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -329,6 +347,100 @@ export function RemoteAccessSetting({
    * credential to set for either. ngrok's authtoken is a provider credential,
    * not an owner credential; see the module doc comment above.
    */
+  /**
+   * True only when THIS browser tab is itself loaded from the configured
+   * public origin -- the client-side mirror of the reference server's
+   * `isRemoteOriginRequest` (`reachability-contract.ts`), which the POST
+   * route re-checks authoritatively regardless of what this returns. This
+   * is a pre-submit UX signal only (show the warning before the owner does
+   * real work, not after a round trip), never the source of truth: the
+   * route's own check is what actually protects the owner if this is wrong
+   * or bypassed (a stale tab, a differently-configured proxy in front).
+   */
+  const isBrowserOnRemoteOrigin = (): boolean => {
+    if (typeof window === "undefined") return false
+    const origin = config.fields.PDPP_REFERENCE_ORIGIN
+    if (!origin) return false
+    try {
+      return new URL(origin).hostname === window.location.hostname
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Shared save path for both Tauri-backed providers (ngrok, Cloudflare
+   * Tunnel): checks `wouldDisconnectRemoteOwner` before saving when this
+   * tab is on the remote origin, and if risky, shows a confirmation instead
+   * of saving immediately -- see `pendingRiskyConfig`'s doc comment. The
+   * reference server's POST route enforces the same check authoritatively
+   * (`owner-remote-access.ts`), so a bypass here (an old cached bundle, a
+   * race) still cannot silently strand the owner; it would instead surface
+   * the route's 409 as a plain error, which is safe, just less polished.
+   */
+  const performSave = (
+    nextConfig: RemoteAccessConfig,
+    providerCredential: string | undefined,
+    onSuccess: (result: { config: RemoteAccessConfig }) => void
+  ) => {
+    if (
+      isBrowserOnRemoteOrigin() &&
+      wouldDisconnectRemoteOwner(config, nextConfig, providerCredential !== undefined)
+    ) {
+      setPendingRiskyConfig({ config: nextConfig, providerCredential })
+      return
+    }
+    setBusy(true)
+    setError(null)
+    void saveRemoteAccessConfig(nextConfig, providerCredential)
+      .then(result => {
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        setConfig(asConfig(result.config))
+        onSuccess(result)
+      })
+      .catch(reason => setError(String(reason)))
+      .finally(() => setBusy(false))
+  }
+
+  /**
+   * Resubmits `pendingRiskyConfig` exactly as it was built, plus the
+   * acknowledgement flag the route requires to bypass its own 409. Runs the
+   * SAME success handling every direct `performSave` call does (drop a
+   * submitted token from state, clear `pendingPosture`, start the
+   * connection poll for Cloudflare) by re-deriving which provider this was
+   * and calling the matching cleanup. All three providers can reach this
+   * path: `user_supplied_origin` has no credential to drop but its origin
+   * can still change under a remote owner, which is exactly the case
+   * `wouldDisconnectRemoteOwner` also flags for it.
+   */
+  const confirmRiskyChangeAndSave = () => {
+    if (!pendingRiskyConfig) return
+    const { config: nextConfig, providerCredential } = pendingRiskyConfig
+    setPendingRiskyConfig(null)
+    setBusy(true)
+    setError(null)
+    void saveRemoteAccessConfig(nextConfig, providerCredential, true)
+      .then(result => {
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        setConfig(asConfig(result.config))
+        setPendingPosture(null)
+        if (nextConfig.provider === "cloudflare_tunnel") {
+          setCloudflareToken("")
+          cloudflareTunnelConnection.start()
+        } else if (nextConfig.provider === "ngrok") {
+          setAuthtoken("")
+        }
+      })
+      .catch(reason => setError(String(reason)))
+      .finally(() => setBusy(false))
+  }
+
   const enablePublicUrl = () => {
     const option = publicUrlOptionById(optionId)
     if (!option) {
@@ -352,19 +464,9 @@ export function RemoteAccessSetting({
         fields: configuredOriginValidation.fields,
         console_port: portValidation.port,
       }
-      setBusy(true)
-      setError(null)
-      void saveRemoteAccessConfig(nextConfig)
-        .then(result => {
-          if (!result.ok) {
-            setError(result.message)
-            return
-          }
-          setConfig(asConfig(result.config))
-          setPendingPosture(null)
-        })
-        .catch(reason => setError(String(reason)))
-        .finally(() => setBusy(false))
+      performSave(nextConfig, undefined, () => {
+        setPendingPosture(null)
+      })
       return
     }
 
@@ -407,22 +509,19 @@ export function RemoteAccessSetting({
         fields: offRemoteAccessConfig().fields,
         cloudflare_tunnel: { hostname: hostname.hostname },
       }
-      setBusy(true)
-      setError(null)
-      void saveRemoteAccessConfig(nextConfig, cloudflareToken.trim())
-        .then(result => {
-          if (!result.ok) {
-            setError(result.message)
-            return
-          }
-          setConfig(asConfig(result.config))
-          setPendingPosture(null)
-          // The token is now sealed at rest and only the desktop host's
-          // config watcher can decrypt it; drop the copy here.
-          setCloudflareToken("")
-        })
-        .catch(reason => setError(String(reason)))
-        .finally(() => setBusy(false))
+      performSave(nextConfig, cloudflareToken.trim(), () => {
+        setPendingPosture(null)
+        // The token is now sealed at rest and only the desktop host's
+        // config watcher can decrypt it; drop the copy here.
+        setCloudflareToken("")
+        // The save response only confirms the config was PERSISTED, not
+        // that cloudflared actually connected -- that happens
+        // asynchronously (the desktop host's config watcher restarts the
+        // stack, then `start()` spends up to 30s watching for cloudflared
+        // to report a registered connection). Poll for the real outcome
+        // instead of leaving the owner on an indefinite "waiting" state.
+        cloudflareTunnelConnection.start()
+      })
       return
     }
 
@@ -454,23 +553,13 @@ export function RemoteAccessSetting({
       },
     }
 
-    setBusy(true)
-    setError(null)
-    void saveRemoteAccessConfig(nextConfig, authtoken.trim())
-      .then(result => {
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        setConfig(asConfig(result.config))
-        setPendingPosture(null)
-        // The authtoken is now sealed at rest and only the desktop host's
-        // config watcher can decrypt it (see the module doc comment); drop
-        // the copy here.
-        setAuthtoken("")
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusy(false))
+    performSave(nextConfig, authtoken.trim(), () => {
+      setPendingPosture(null)
+      // The authtoken is now sealed at rest and only the desktop host's
+      // config watcher can decrypt it (see the module doc comment); drop
+      // the copy here.
+      setAuthtoken("")
+    })
   }
 
   return (
@@ -627,6 +716,43 @@ export function RemoteAccessSetting({
         >
           {error}
         </p>
+      ) : null}
+
+      {pendingRiskyConfig ? (
+        <div
+          aria-label="Confirm a change that could disconnect you"
+          className="grid gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-3"
+          role="alertdialog"
+        >
+          <p className="pdpp-caption font-semibold text-destructive">
+            This could disconnect you
+          </p>
+          <p className="pdpp-caption text-foreground/90">
+            You reached this settings page through the tunnel this change
+            would replace. If the new settings do not work, you will need
+            physical access to this machine to recover — there is no other
+            way back in. Double-check the token and hostname above before
+            continuing.
+          </p>
+          <div className="flex gap-2">
+            <button
+              className="justify-self-start rounded-md border border-destructive/60 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
+              disabled={busy}
+              onClick={confirmRiskyChangeAndSave}
+              type="button"
+            >
+              Save anyway
+            </button>
+            <button
+              className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              disabled={busy}
+              onClick={() => setPendingRiskyConfig(null)}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {pendingPosture === "public_url" ? (
@@ -817,6 +943,12 @@ export function RemoteAccessSetting({
                   unknown={cloudflareTunnelInspection?.cloudflared_binary_present == null}
                 />
               </div>
+              <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
+                <span className="pdpp-caption font-medium text-foreground/90">
+                  New to Cloudflare Tunnel? Follow these steps:
+                </span>
+                <CloudflareTunnelSetupSteps />
+              </div>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
                 htmlFor="remote-access-cloudflare-token"
@@ -832,6 +964,7 @@ export function RemoteAccessSetting({
                   type="password"
                   value={cloudflareToken}
                 />
+                <CloudflareTunnelTokenStatus token={cloudflareToken} />
                 <span className="pdpp-caption text-muted-foreground">
                   Create a tunnel in the Cloudflare dashboard, then copy its
                   token here. DataConnect stores it in your system keychain
@@ -865,9 +998,13 @@ export function RemoteAccessSetting({
                   The hostname you routed to this tunnel in the Cloudflare
                   dashboard. Unlike ngrok's free plan, a Cloudflare tunnel has
                   no random-hostname fallback — this is required, and it
-                  stays your address across restarts.
+                  stays your address across restarts. A token and hostname
+                  that belong to different tunnels will still let cloudflared
+                  connect, but requests to this hostname will 404 — double
+                  check both came from the same tunnel in the dashboard.
                 </span>
               </label>
+              <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
             </>
           ) : null}
 

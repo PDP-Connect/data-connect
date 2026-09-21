@@ -502,6 +502,50 @@ export function isAllowedRequestHost(
   return contract.trustedHosts.some(pattern => hostMatches(pattern, request))
 }
 
+/**
+ * Whether this specific request's `Host` header names the PUBLIC
+ * (`referenceOrigin`) address rather than this process's own loopback bind
+ * address -- the same distinction `isAllowedRequestHost` already makes
+ * internally to decide whether to accept the request at all, surfaced here
+ * as its own answer for a narrower question: not "is this request allowed"
+ * (already enforced upstream, before a route handler ever runs) but "did
+ * the owner reach this SPECIFIC route through the tunnel, on the far side
+ * of the very connection a remote-access config change could tear down."
+ *
+ * Exists for `owner-remote-access.ts`'s POST /config handler: an owner
+ * connected through a live Cloudflare or ngrok tunnel can reconfigure
+ * remote access entirely remotely (the settings page is itself served over
+ * that same tunnel), but switching providers, rotating a token, or turning
+ * remote access off can tear down the very tunnel carrying the request that
+ * asked for the change -- with no warning today. This is the primitive that
+ * change needs: a request arriving on `referenceOrigin` is exactly a
+ * request that could lose its own connection if the change it is asking for
+ * succeeds; a request arriving on loopback (the desktop app's own console
+ * window, or `curl` on the same machine) never can.
+ *
+ * `false` whenever there is no configured `referenceOrigin` at all (an
+ * owner who has never set up remote access cannot be reconfiguring their
+ * way out of a connection that does not exist) or when the request's Host
+ * cannot be parsed -- the honest default is "not remote," never a guess.
+ */
+export function isRemoteOriginRequest(
+  req: ReachabilityRequest,
+  contract: ReachabilityContract
+): boolean {
+  if (!contract.referenceOrigin) {
+    return false
+  }
+  const fromTrustedProxy = isTrustedProxyPeer(req, contract.trustedProxies)
+  const rawHost = fromTrustedProxy
+    ? (headerValue(req, "x-forwarded-host") ?? headerValue(req, "host"))
+    : headerValue(req, "host")
+  const request = parseRequestHost(rawHost)
+  if (!request) {
+    return false
+  }
+  return hostMatches(originHostPattern(contract.referenceOrigin), request)
+}
+
 function isPrivateOrLoopbackOriginHost(hostname: string): boolean {
   const normalized = normalizeHostname(stripBrackets(hostname))
   if (isLoopbackOriginHost(normalized) || normalized.endsWith(".local")) {

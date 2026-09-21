@@ -62,11 +62,12 @@ export async function loadRemoteAccessStateAction(): Promise<{
 
 export async function setRemoteAccessConfigAction(
   config: RemoteAccessConfig,
-  providerCredential?: string
+  providerCredential?: string,
+  acknowledgeRemoteDisconnectRisk?: boolean
 ): Promise<RemoteAccessActionResult> {
   await requireDashboardAccess("/settings")
   try {
-    const saved = await setRemoteAccessConfig(config, providerCredential)
+    const saved = await setRemoteAccessConfig(config, providerCredential, acknowledgeRemoteDisconnectRisk)
     return { config: saved, ok: true }
   } catch (err) {
     return { message: actionMessage(err), ok: false }

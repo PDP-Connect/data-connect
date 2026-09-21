@@ -72,10 +72,18 @@ export async function getRemoteAccessConfig(): Promise<RemoteAccessConfig> {
 
 export async function setRemoteAccessConfig(
   config: RemoteAccessConfig,
-  providerCredential?: string
+  providerCredential?: string,
+  acknowledgeRemoteDisconnectRisk?: boolean
 ): Promise<RemoteAccessConfig> {
+  const body: Record<string, unknown> = { ...config }
+  if (providerCredential !== undefined) {
+    body.providerCredential = providerCredential
+  }
+  if (acknowledgeRemoteDisconnectRisk) {
+    body.acknowledgeRemoteDisconnectRisk = true
+  }
   const payload = await remoteAccessFetch("/v1/owner/remote-access/config", {
-    body: JSON.stringify(providerCredential === undefined ? config : { ...config, providerCredential }),
+    body: JSON.stringify(body),
     method: "POST",
   })
   return unwrapData(payload) as RemoteAccessConfig

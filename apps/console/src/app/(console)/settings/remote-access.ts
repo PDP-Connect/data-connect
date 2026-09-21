@@ -31,6 +31,7 @@ export {
   originIsKnowableFromConfig,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  wouldDisconnectRemoteOwner,
   type CloudflareTunnelInspection,
   type CloudflareTunnelOptions,
   type DurableAddressState,

@@ -245,6 +245,84 @@ export function validatePinnedConsolePort(raw: string): { ok: true; port: number
  * edge assigns the origin at tunnel start, same as
  * `validate_remote_access_config`'s `discovers_own_origin` branch).
  */
+/**
+ * Whether persisting `next` in place of `current`, given whether this
+ * submission carries a fresh provider credential, risks tearing down the
+ * very connection an owner reached this route through. Exists for
+ * `owner-remote-access.ts`'s POST /config handler, paired with
+ * `isRemoteOriginRequest` (`reachability-contract.ts`): if the request is
+ * remote AND this returns true, the config change could strand the owner
+ * with no path back except physical access to the machine -- Tim's exact
+ * scenario.
+ *
+ * `submittingCredential` has to be an explicit input, not inferred by
+ * diffing `current` against `next`: neither `ngrok_authtoken_sealed` nor
+ * `cloudflare_tunnel_token_sealed` round-trips through this comparison (the
+ * route seals a fresh plaintext credential on every ngrok/cloudflare_tunnel
+ * submission -- see `owner-remote-access.ts`'s POST handler -- so `next`
+ * never contains the OLD sealed value to compare against), and there is no
+ * cheap way to tell "the resubmitted token happens to be identical" from
+ * "it changed" without decrypting and comparing plaintext, which is more
+ * invasive than this check warrants. A fresh credential could always be
+ * wrong even when the hostname/domain did not change, so ANY submitted
+ * credential for a provider that needs one is treated as risky -- not just
+ * a changed hostname.
+ *
+ * Deliberately narrower than "any config change": a change that needs no
+ * credential at all and keeps the SAME provider and hostname/domain (for
+ * example, only re-pinning `console_port`) does not risk disconnection,
+ * because the Tauri config watcher
+ * (`spawn_remote_access_config_watcher`, `src-tauri/src/unified.rs`) only
+ * restarts the stack when the persisted config actually differs from what
+ * is already running, and an unchanged provider/hostname pair with no new
+ * credential reconnects to the exact same tunnel, not a new one that could
+ * fail. The genuinely risky changes are: leaving `public_url` entirely
+ * (posture change), switching which provider serves the tunnel, changing
+ * that provider's hostname/domain, or submitting any fresh credential.
+ *
+ * A provider CHANGE is flagged even when `current`'s provider had no
+ * working tunnel (e.g. `tunnel_error` was already set): the safe default is
+ * to warn, not to guess whether the owner is currently connected through
+ * it. `isRemoteOriginRequest` already answered the question that matters --
+ * this request itself arrived on the public origin, so SOMETHING is
+ * currently serving it -- so there is no cheaply-available extra evidence
+ * that would justify skipping the warning.
+ */
+export function wouldDisconnectRemoteOwner(
+  current: RemoteAccessConfig,
+  next: RemoteAccessConfig,
+  submittingCredential: boolean
+): boolean {
+  if (current.posture !== "public_url") {
+    // Nothing to disconnect FROM -- there was no remote tunnel serving this
+    // request's own connection in the first place. (In practice
+    // `isRemoteOriginRequest` already implies `current.posture ===
+    // "public_url"`, since a remote origin can only exist if a tunnel is
+    // configured -- this is a defensive, independent check, not a
+    // redundant one to remove.)
+    return false
+  }
+  if (next.posture !== "public_url") {
+    return true
+  }
+  if (next.provider !== current.provider) {
+    return true
+  }
+  if (submittingCredential) {
+    return true
+  }
+  if (current.provider === "ngrok") {
+    return current.ngrok?.reserved_domain !== next.ngrok?.reserved_domain
+  }
+  if (current.provider === "cloudflare_tunnel") {
+    return current.cloudflare_tunnel?.hostname !== next.cloudflare_tunnel?.hostname
+  }
+  if (current.provider === "user_supplied_origin") {
+    return current.fields.PDPP_REFERENCE_ORIGIN !== next.fields.PDPP_REFERENCE_ORIGIN
+  }
+  return false
+}
+
 export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
   if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
     return { ok: false, message: "Remote access must keep PDPP_BIND_HOST at 127.0.0.1." }
