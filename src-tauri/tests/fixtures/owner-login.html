@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>PDPP Reference Provider — Owner sign-in</title>
+<link rel="stylesheet" href="/__pdpp/hosted-ui.css" />
+</head>
+<body data-pdpp-hosted-ui>
+<main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
+<header class="hosted-ui-header">
+  <svg class="hosted-ui-mark" viewBox="0 0 200 200" width="28" height="28" role="img" aria-label="PDPP"><path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="oklch(0.52 0.11 45)"/><path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="oklch(0.58 0.18 253)"/><circle cx="105" cy="73" r="18" fill="oklch(0.985 0.005 85)"/></svg>
+  <span class="hosted-ui-wordmark">PDPP</span>
+  <span class="hosted-ui-instance-monogram" aria-hidden="true">PR</span>
+  <span class="hosted-ui-provider" aria-label="Provider">PDPP Reference Provider</span>
+</header>
+<section class="hosted-ui-intro"><span class="pdpp-eyebrow">Owner sign-in</span>
+<h1 id="hosted-ui-page-title" class="pdpp-display">Sign in to PDPP Reference Provider</h1>
+<p class="pdpp-body-lg">This is the local placeholder owner auth for the reference implementation. It is not a full auth product.</p></section>
+<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Owner sign-in">
+  <input type="hidden" name="_csrf" value="d7QiWqoRw3aCmzM7GXVZYKPaNm8I5Riq2q22K4iXe9M.jXpyWXgsYjDkHOoKjSGG85kHsmbnJTKp88PlegLqERQ" />
+  <input type="hidden" name="return_to" value="/owner/login" />
+  
+  <div class="hosted-ui-field">
+    <label for="hosted-ui-password">Owner password</label>
+    <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
+  </div>
+  <div class="hosted-ui-actions">
+    <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
+  </div>
+  <p class="hosted-ui-footnote">Configured via <code>PDPP_OWNER_PASSWORD</code>. Clear this placeholder with <code>POST /owner/logout</code>.</p>
+</form>
+</main>
+</body>
+</html>

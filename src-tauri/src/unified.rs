@@ -2707,8 +2707,8 @@ async fn verify_console_serves_a_real_route(client: &reqwest::Client, url: &str)
         .await
         .map_err(|error| format!("failed to read page body: {error}"))?;
 
-    let Some(asset_path) = extract_first_static_asset_url(&body) else {
-        return Err("page HTML referenced no static asset to verify".to_string());
+    let Some(asset_path) = extract_first_verifiable_asset_url(&body) else {
+        return Err("page HTML referenced no asset to verify".to_string());
     };
     let asset_url = page_url
         .join(&asset_path)
@@ -2734,9 +2734,37 @@ async fn verify_console_serves_a_real_route(client: &reqwest::Client, url: &str)
 /// `verify_console_serves_a_real_route`, so the extraction logic itself can
 /// be unit-tested against real captured HTML without a running server.
 fn extract_first_static_asset_url(html: &str) -> Option<String> {
-    const NEEDLE: &str = "/_next/";
+    extract_quoted_attribute_path(html, "/_next/")
+}
+
+/// Pick an asset this page actually references, to fetch back as proof the
+/// running build is internally consistent.
+///
+/// Prefers a `/_next/` asset, because a Next build's own hashed chunk is
+/// the most build-specific thing on the page and therefore the sharpest
+/// detector of the stale-build symptom #208 was written for. Falls back to
+/// any same-origin `src=`/`href=` path.
+///
+/// The fallback is not a weakening; it is what makes the check applicable
+/// at all on the page the console actually serves at startup. Confirmed
+/// live 2026-09-21: the console proxies `/` to the reference server's
+/// `/owner/login` whenever nobody is signed in, and that page is
+/// server-rendered Fastify HTML (`hosted-ui.ts`) with no `/_next/`
+/// reference anywhere -- it links `/__pdpp/hosted-ui.css`. Treating "no
+/// `/_next/` asset" as failure made the check impossible to satisfy on
+/// every unauthenticated launch, so `finish_bootstrap` tore the whole
+/// stack down in a loop (three consoles started and stopped in one
+/// session, none ever reachable).
+fn extract_first_verifiable_asset_url(html: &str) -> Option<String> {
+    extract_quoted_attribute_path(html, "/_next/")
+        .or_else(|| extract_quoted_attribute_path(html, "/"))
+}
+
+/// Find the first quoted `src=`/`href=` attribute value starting with
+/// `needle`.
+fn extract_quoted_attribute_path(html: &str, needle: &str) -> Option<String> {
     let mut search_from = 0usize;
-    while let Some(relative_start) = html[search_from..].find(NEEDLE) {
+    while let Some(relative_start) = html[search_from..].find(needle) {
         let start = search_from + relative_start;
         // The needle must be the start of a quoted attribute value
         // (src="..." or href="...") -- reject a bare text mention so this
@@ -2750,7 +2778,7 @@ fn extract_first_static_asset_url(html: &str) -> Option<String> {
                 return Some(html[start..start + end_offset].to_string());
             }
         }
-        search_from = start + NEEDLE.len();
+        search_from = start + needle.len();
     }
     None
 }
@@ -3065,6 +3093,108 @@ mod tests {
     const REAL_NEXT_HTML_FRAGMENT: &str = r#"<!DOCTYPE html><html id="__next_error__"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/webpack-1965db51f108a349.js"/><script src="/_next/static/chunks/87c73c54-fe9448718f10265c.js" async=""></script></head><body></body></html>"#;
 
     #[test]
+    /// Reproduces the startup hang reported 2026-09-21.
+    ///
+    /// The console's `/` proxies to the reference server's `/owner/login`
+    /// on any unauthenticated launch, and that page is server-rendered
+    /// Fastify HTML (`reference-implementation/server/hosted-ui.ts`) with
+    /// ZERO `/_next/` references -- it links one plain stylesheet. The
+    /// `/_next/`-only extractor therefore returned None, `wait_for_console`
+    /// treated that as failure, and `finish_bootstrap` tore the whole stack
+    /// down. Observed three times in one session (ports 44213, 40969, ...):
+    /// console starts, serves, and is stopped together with the RI.
+    #[test]
+    fn the_owner_login_page_has_a_verifiable_asset() {
+        // The real shape from hosted-ui.ts's renderHostedUiPage.
+        let login_html = concat!(
+            "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"system\">\n<head>\n",
+            "<meta charset=\"utf-8\" />\n",
+            "<title>Sign in</title>\n",
+            "<link rel=\"stylesheet\" href=\"/__pdpp/hosted-ui.css\" />\n",
+            "</head>\n<body><main>Sign in</main></body>\n</html>\n"
+        );
+        assert_eq!(
+            extract_first_verifiable_asset_url(login_html),
+            Some("/__pdpp/hosted-ui.css".to_string()),
+            "the owner-login page links a real stylesheet; refusing to verify it \
+             is what stopped the stack on every unauthenticated launch"
+        );
+    }
+
+    /// End-to-end against a real server, not a fake one.
+    ///
+    /// Serves the exact captured login page plus its real stylesheet, and
+    /// runs the SAME `verify_console_serves_a_real_route` the startup path
+    /// calls. Before the fallback this returned Err and
+    /// `finish_bootstrap` tore the whole stack down.
+    #[tokio::test]
+    async fn verify_console_accepts_the_real_owner_login_page() {
+        let html = include_str!("../tests/fixtures/owner-login.html");
+        let server = FakeHttpServer::start(vec![
+            ("/", ("200 OK", html)),
+            ("/__pdpp/hosted-ui.css", ("200 OK", ":root{}")),
+        ]);
+        let client = reqwest::Client::new();
+        verify_console_serves_a_real_route(&client, &server.url("/"))
+            .await
+            .expect("the console's real startup page must verify");
+    }
+
+    /// The same assertion against a page captured from a LIVE reference
+    /// server, not a hand-written fixture.
+    ///
+    /// Captured 2026-09-21 from `GET /owner/login` on a running RI: 2274
+    /// bytes, zero `/_next/` references, exactly one asset
+    /// (`/__pdpp/hosted-ui.css`, which that server answers 200 for). This
+    /// is the page the console serves at `/` on every unauthenticated
+    /// launch, so it is the page the readiness check must be able to
+    /// verify.
+    #[test]
+    fn a_real_captured_login_page_is_verifiable() {
+        let html = include_str!("../tests/fixtures/owner-login.html");
+        assert_eq!(
+            html.matches("/_next/").count(),
+            0,
+            "fixture must be the non-Next server-rendered page"
+        );
+        assert_eq!(
+            extract_first_verifiable_asset_url(html),
+            Some("/__pdpp/hosted-ui.css".to_string())
+        );
+        assert_eq!(
+            extract_first_static_asset_url(html),
+            None,
+            "the /_next/-only extractor finds nothing here -- this is exactly \
+             why startup looped before the fallback existed"
+        );
+    }
+
+    /// A page that references nothing at all is still a failure: the check
+    /// must not silently skip the verification it exists to perform.
+    #[test]
+    fn a_page_referencing_no_asset_at_all_is_still_unverifiable() {
+        assert_eq!(
+            extract_first_verifiable_asset_url("<html><body>bare</body></html>"),
+            None
+        );
+    }
+
+    /// Next.js pages keep working, and `/_next/` still wins when both are
+    /// present, so the stale-build symptom #208 exists to catch is still
+    /// caught by the most build-specific asset on the page.
+    #[test]
+    fn a_next_asset_is_preferred_over_a_plain_stylesheet() {
+        let html = concat!(
+            "<link rel=\"stylesheet\" href=\"/site.css\" />",
+            "<link rel=\"preload\" href=\"/_next/static/chunk.js\" />"
+        );
+        assert_eq!(
+            extract_first_verifiable_asset_url(html),
+            Some("/_next/static/chunk.js".to_string())
+        );
+    }
+
+    #[test]
     fn extract_first_static_asset_url_finds_the_preload_link_in_real_next_html() {
         assert_eq!(
             extract_first_static_asset_url(REAL_NEXT_HTML_FRAGMENT),
@@ -3232,14 +3362,18 @@ mod tests {
 
     #[tokio::test]
     async fn verify_console_serves_a_real_route_fails_honestly_when_the_page_has_no_asset_to_check() {
-        // A page whose HTML never references a /_next/ asset at all --
-        // this function must refuse to call that a pass rather than
-        // silently skipping the check it exists to perform.
+        // A page whose HTML references no asset at all -- this function
+        // must refuse to call that a pass rather than silently skipping
+        // the check it exists to perform. Note the bar is "no asset",
+        // not "no /_next/ asset": the console's own startup page links a
+        // plain stylesheet and no Next chunk, and treating THAT as
+        // unverifiable is what stopped the stack on every unauthenticated
+        // launch (see `the_owner_login_page_has_a_verifiable_asset`).
         let server = FakeHttpServer::start(vec![("/", ("200 OK", "<html><body>empty</body></html>"))]);
         let client = reqwest::Client::new();
         let result = verify_console_serves_a_real_route(&client, &server.url("/")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("no static asset"));
+        assert!(result.unwrap_err().contains("no asset to verify"));
     }
 
     #[tokio::test]
