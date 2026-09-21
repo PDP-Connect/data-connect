@@ -28,6 +28,11 @@ name = "pdeathsig_port_repro"
 path = "src/bin/pdeathsig_port_repro.rs"
 required-features = ["stall-repro"]
 
+[[bin]]
+name = "titlebar_repro"
+path = "src/bin/titlebar_repro.rs"
+required-features = ["stall-repro"]
+
 [features]
 stall-repro = []
 
@@ -84,3 +89,31 @@ scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 signal-hook = "0.4.4"
+
+# Fork-patch to relax tauri-runtime-wry's `tao = "^0.35.0"` requirement so we can
+# pull tao >=0.36, which fixes an unconditional Wayland CSD EventBox overlay
+# (tao#1046/#1122, tauri-apps/tauri#13440) that breaks titlebar button
+# hit-testing after a window is hidden and re-shown. No published tauri 2.x
+# release pulls tao >=0.36 (that lands only on the 3.0.0-alpha line, which
+# would require migrating ~15 tauri-plugin-* deps to their own 3.0-alpha
+# releases -- several don't have one). This patches only tauri-runtime-wry's
+# Cargo.toml manifest (one line, the `tao` version requirement) in a
+# `--depth 1` clone of the tauri-apps/tauri monorepo pinned at tag
+# tauri-runtime-wry-v2.11.4 (commit ca90b46b2e2cbbc981dae1b809f4af4343fe0558).
+# No Rust source was modified in the fork. tauri-runtime and tauri-utils must
+# be patched from the same source in lockstep because they are path-sibling
+# dependencies of tauri-runtime-wry inside that monorepo checkout -- patching
+# tauri-runtime-wry alone causes cargo to pull a second, differently-sourced
+# copy of tauri-runtime, which Rust then treats as a distinct type from the
+# one tauri itself uses (`the trait tauri_runtime::Runtime<EventLoopMessage>
+# is not implemented for tauri_runtime_wry::Wry<EventLoopMessage>`).
+#
+# Reproduce the fork:
+#   git clone --depth 1 --branch tauri-runtime-wry-v2.11.4 \
+#     https://github.com/tauri-apps/tauri.git tauri-fork
+#   # edit crates/tauri-runtime-wry/Cargo.toml:
+#   #   tao = { version = "0.35.0", ... } -> tao = { version = ">=0.35.0, <0.38.0", ... }
+[patch.crates-io]
+tauri-runtime = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-runtime" }
+tauri-utils = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-utils" }
+tauri-runtime-wry = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-runtime-wry" }
