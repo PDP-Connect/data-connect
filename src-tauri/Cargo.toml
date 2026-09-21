@@ -97,23 +97,36 @@ signal-hook = "0.4.4"
 # release pulls tao >=0.36 (that lands only on the 3.0.0-alpha line, which
 # would require migrating ~15 tauri-plugin-* deps to their own 3.0-alpha
 # releases -- several don't have one). This patches only tauri-runtime-wry's
-# Cargo.toml manifest (one line, the `tao` version requirement) in a
-# `--depth 1` clone of the tauri-apps/tauri monorepo pinned at tag
-# tauri-runtime-wry-v2.11.4 (commit ca90b46b2e2cbbc981dae1b809f4af4343fe0558).
-# No Rust source was modified in the fork. tauri-runtime and tauri-utils must
-# be patched from the same source in lockstep because they are path-sibling
-# dependencies of tauri-runtime-wry inside that monorepo checkout -- patching
+# Cargo.toml manifest (one line, the `tao` version requirement), starting
+# from the tauri-apps/tauri monorepo pinned at tag tauri-runtime-wry-v2.11.4
+# (commit ca90b46b2e2cbbc981dae1b809f4af4343fe0558). No Rust source was
+# modified. tauri-runtime and tauri-utils must be patched from the same
+# source in lockstep because they are path-sibling dependencies of
+# tauri-runtime-wry inside that monorepo checkout -- patching
 # tauri-runtime-wry alone causes cargo to pull a second, differently-sourced
 # copy of tauri-runtime, which Rust then treats as a distinct type from the
 # one tauri itself uses (`the trait tauri_runtime::Runtime<EventLoopMessage>
 # is not implemented for tauri_runtime_wry::Wry<EventLoopMessage>`).
 #
-# Reproduce the fork:
-#   git clone --depth 1 --branch tauri-runtime-wry-v2.11.4 \
+# A local `path = "..."` patch was tried first and built locally, but fails
+# in CI (and on any other machine) with "failed to load source for
+# dependency `tauri-runtime`... No such file or directory" -- a path patch
+# resolves to an absolute filesystem path that only exists on the machine
+# that created it. Fixed by publishing the one-line manifest change to a
+# real, network-reachable git remote and patching from there instead, with
+# an explicit commit pin (never a mutable branch ref) so the resolved
+# dependency is reproducible.
+#
+# Fork: https://github.com/tnunamak/tauri, branch
+# `tao-0.37-compat-for-dataconnect`, pinned at commit
+# 1598c1df37f87fe76a08ed18e0b8fa7b270c3d16 (one commit ahead of
+# tauri-runtime-wry-v2.11.4 / ca90b46b2e2cbbc981dae1b809f4af4343fe0558,
+# containing only the `tao` version-range relaxation below). Reproduce:
+#   git clone --branch tauri-runtime-wry-v2.11.4 \
 #     https://github.com/tauri-apps/tauri.git tauri-fork
 #   # edit crates/tauri-runtime-wry/Cargo.toml:
 #   #   tao = { version = "0.35.0", ... } -> tao = { version = ">=0.35.0, <0.38.0", ... }
 [patch.crates-io]
-tauri-runtime = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-runtime" }
-tauri-utils = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-utils" }
-tauri-runtime-wry = { path = "/home/tnunamak/.tmp/tao-fork-work/tauri-fork/crates/tauri-runtime-wry" }
+tauri-runtime = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
+tauri-utils = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
+tauri-runtime-wry = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
