@@ -87,6 +87,7 @@ import { createFileLocalConnectorSourceStore } from "./connector-install/local-s
 import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
 import { createAppConfigStore } from "./app-config-store.ts";
 import { createAutostartStore } from "./autostart-store.ts";
+import { createOpenExternalUrlStore } from "./open-external-url-store.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
@@ -360,6 +361,7 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
+import { mountOwnerOpenExternalUrl } from "./routes/owner-open-external-url.ts";
 import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
 import {
   mountRefApprovals,
@@ -7834,6 +7836,21 @@ function buildRsApp(opts: ServerOpts = {}) {
     requireToken,
     store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
+
+  // Owner-authenticated HTTP route that opens a link in the owner's system
+  // browser, replacing the console's dead `@tauri-apps/plugin-shell`
+  // `open()` call (`OpenExternalLink`,
+  // apps/console/src/app/(console)/components/open-external-link.tsx). See
+  // routes/owner-open-external-url.ts for the full threat model: strict
+  // https-only scheme validation happens in the route before anything is
+  // queued, and again in Rust before the OS opener is called.
+  mountOwnerOpenExternalUrl(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createOpenExternalUrlStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerOpenExternalUrl>[1]);
 
   // Owner-authenticated HTTP route for exporting the desktop database
   // encryption key as a printable recovery code. See
