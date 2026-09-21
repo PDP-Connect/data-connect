@@ -55,6 +55,18 @@ import {
 import { join, resolve } from "node:path"
 
 /**
+ * Synchronous in-process sleep. Measured 2026-09-21: using `spawnSync` to
+ * launch a whole new Node process as a poll tick (the original approach)
+ * costs ~50ms of process-spawn overhead on top of the intended interval --
+ * that overhead compounds across a poll loop into multi-second waits for a
+ * process that actually exited almost immediately, which defeats the point
+ * of polling instead of sleeping a fixed duration.
+ */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
  * How many generations to keep per sidecar. Two covers the case this
  * exists for: a previous build still has a server running from it while
  * the next one is staged.
@@ -104,14 +116,103 @@ export function findProcessesUsingDirectory(targetDirectory, procRoot = "/proc")
 }
 
 /**
+ * Block (synchronously) until every pid in `pids` is confirmed gone, or
+ * `timeoutMs` elapses -- whichever first. Polls process liveness rather
+ * than sleeping a fixed duration: measured live 2026-09-21 (three real
+ * incidents against the console, most recently within the hour --
+ * `InvariantError: client reference manifest for route "/connect" does not
+ * exist`, a 500 that blocked testing), a fixed sleep-then-swap is not
+ * actually load-bearing -- a server mid-request (or one that does not exit
+ * cleanly on the first SIGTERM at all) can still be alive, with its own
+ * module/file resolution mid-flight against the directory tree, at the
+ * exact moment the swap below runs underneath it. There is no
+ * "has released this specific directory" signal from outside a process on
+ * Linux short of confirming the PID itself is gone, so this polls
+ * liveness -- the strongest check actually available -- instead of
+ * guessing a duration.
+ */
+function waitForProcessesToExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let remaining = pids
+  while (remaining.length > 0 && Date.now() < deadline) {
+    sleepSync(25)
+    remaining = remaining.filter((pid) => isProcessAlive(pid))
+  }
+  return remaining
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Stop any process still running from inside `targetDirectory`, so a
+ * restage never leaves a server running against a directory tree that is
+ * about to be swapped out from under it (see this module's own doc comment
+ * for the live incident this fixes). Graceful SIGTERM first, escalating to
+ * SIGKILL only for whatever is still alive after `gracefulTimeoutMs` --
+ * ACTUALLY WAITS for the process to be gone (polled, see
+ * `waitForProcessesToExit`) rather than a fixed sleep that may or may not
+ * be long enough. A best-effort safety net for the dev/rebuild loop, not a
+ * substitute for the Tauri supervisor's own lifecycle management of the
+ * process IT started -- this only catches a process still bound to a stage
+ * directory whose owning app session is no longer tracking it as "the one
+ * to stop before restaging" (e.g. a previous dev session, or an iterative
+ * rebuild against an already-launched app).
+ */
+export function stopProcessesUsingDirectory(targetDirectory, gracefulTimeoutMs = 3000) {
+  const pids = findProcessesUsingDirectory(targetDirectory)
+  if (pids.length === 0) return
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {
+      // Already exited, or not ours to signal (EPERM) -- either way there
+      // is nothing more this script can safely do about it.
+    }
+  }
+  const stillAlive = waitForProcessesToExit(pids, gracefulTimeoutMs)
+  for (const pid of stillAlive) {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {
+      // Already exited in the gap between the poll and this call.
+    }
+  }
+  // A final short wait for the OS to actually reap the SIGKILLed
+  // processes (kill(pid, 0) can still briefly report a zombie as
+  // "alive"); the swap below does not depend on this succeeding --
+  // findProcessesUsingDirectory strips "(deleted)" so a process that
+  // somehow outlives even SIGKILL's effect is still found and stopped on
+  // the NEXT restage rather than silently forgotten.
+  waitForProcessesToExit(stillAlive, 500)
+}
+
+/**
  * Point the stable `<parent>/<name>` path at `generationDirectory` by
  * materialising a copy beside it and renaming it into place.
  *
- * The rename is atomic, so a reader never sees a partially-populated
+ * Stops whatever is currently running from `targetDirectory` FIRST, and
+ * blocks until it is confirmed gone -- this is load-bearing for
+ * correctness, not merely cleanup: a live process whose cwd is the stable
+ * path can still be serving requests, with module/file resolution against
+ * that exact directory tree in flight, at the moment the swap below
+ * replaces it. `stopProcessesUsingDirectory`'s doc comment has the full
+ * incident detail.
+ *
+ * The rename itself is atomic, so a reader never sees a partially-populated
  * stable path -- unlike the previous delete-then-copy, which left no
  * directory there at all for the duration of the copy.
  */
 export function publishStageGeneration(targetDirectory, generationDirectory) {
+  if (existsSync(targetDirectory)) {
+    stopProcessesUsingDirectory(targetDirectory)
+  }
   const swapDirectory = `${targetDirectory}.swap-${process.pid}`
   rmSync(swapDirectory, { force: true, recursive: true })
   cpSync(generationDirectory, swapDirectory, {

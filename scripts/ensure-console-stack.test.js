@@ -394,52 +394,36 @@ describe("ensure console stack", () => {
     }
   })
 
-  it("documents the STABLE-path case (the real production cwd), which relative-path reads inside it do NOT survive coherently", async () => {
-    // IMPORTANT SCOPE NOTE, found during independent review: the test above
-    // ("keeps a running server's build directory intact...") exercises a
-    // process whose cwd is inside a GENERATION directory -- but that is
-    // never what actually happens in the shipped app. unified.rs's
-    // resolve_staged_root resolves the fixed `reference-stack/<sidecar>`
-    // path (this test's `result.stageDirectory`, i.e. the STABLE path), and
-    // the Rust supervisor spawns launch.mjs with THAT exact path as its
-    // `cwd` (`cwd: Some(root.to_path_buf())` in console_process_spec/
-    // ri_process_spec). No real process's cwd is ever `console-<hash>`.
+  it("stops a live server at the STABLE path (the real production cwd) before restaging it, even one that ignores SIGTERM", async () => {
+    // IMPORTANT SCOPE NOTE, found during independent review, fixed in this
+    // same pass: the test above ("keeps a running server's build directory
+    // intact...") exercises a process whose cwd is inside a GENERATION
+    // directory -- but that is never what actually happens in the shipped
+    // app. unified.rs's resolve_staged_root resolves the fixed
+    // `reference-stack/<sidecar>` path (this test's `result.stageDirectory`,
+    // i.e. the STABLE path), and the Rust supervisor spawns launch.mjs with
+    // THAT exact path as its `cwd` (`cwd: Some(root.to_path_buf())` in
+    // console_process_spec/ri_process_spec). No real process's cwd is ever
+    // `console-<hash>`.
     //
-    // This test reproduces the real scenario instead: a live process with
-    // cwd AT THE STABLE PATH when a restage's rmSync+renameSync replaces
-    // what that path's directory entry points to. Measured directly
-    // (2026-09-21, isolated Node repro, not assumed): after a
-    // recursive rmSync of a directory a live process has as its cwd, a
-    // RELATIVE-path read from inside that process (`fs.readFileSync(
-    // "sub/file.txt")`, i.e. exactly how a Next.js server resolves an
-    // asset request against its own process.cwd()) fails with ENOENT --
-    // the recursive removal unlinks every file inside the directory tree,
-    // not just the top-level entry, so there is no "still-intact old
-    // content" for a relative lookup to find, even though the directory
-    // inode itself survives via the open cwd reference. A SEPARATE repro
-    // with an ABSOLUTE path captured once at process start (also a
-    // plausible Next.js resolution strategy) instead transparently returns
-    // the NEW content, re-resolved through the live filesystem namespace at
-    // read time -- neither outcome is "the old build, coherently, as
-    // before" the way this PR's prose claims for the stable-path case
-    // specifically (its own committed regression test only proves this for
-    // the generation-directory case, which no real process ever uses).
+    // Measured directly (2026-09-21, isolated Node repro): a fixed
+    // sleep-then-swap did NOT reliably protect a live process at the STABLE
+    // path -- a relative-path read from inside such a process fails with
+    // ENOENT after an unguarded restage (recursive rmSync unlinks every
+    // file, not just the top directory entry), and an absolute-path read
+    // instead silently serves the NEW content. Neither is "the old build,
+    // coherently." Traced to three real incidents against the actual
+    // console, most recently within the hour of this fix --
+    // `InvariantError: client reference manifest for route "/connect" does
+    // not exist`, a 500 that blocked testing.
     //
-    // This does not mean the fix does nothing: it still prevents the
-    // original bug's WORST failure mode (a directory that briefly does not
-    // exist at all during the swap window, since rmSync+renameSync here is
-    // near-atomic and the swap is prepared before either call) and it does
-    // give the NEXT restage's process a clean start. But for an old process
-    // still alive and serving from the stable path across a restage, its
-    // behavior is closer to "unpredictable, depends on the app's own path-
-    // resolution style" than "guaranteed coherent old build." Flagging this
-    // precisely rather than silently asserting the stronger claim the PR
-    // prose makes, since Tim explicitly needs to know this cannot regress
-    // the exact bug he hit twice -- and the honest answer is: the
-    // generation-directory scheme still helps (a NEW server launched after
-    // the restage gets a real, complete, verified build), but a server
-    // that was ALREADY RUNNING from the stable path when the restage
-    // happens is not proven safe by this PR's own tests.
+    // The fix: `publishStageGeneration` (stage-generations.js) now stops
+    // whatever is running from the stable path and BLOCKS UNTIL CONFIRMED
+    // GONE (polled liveness, escalating SIGTERM -> SIGKILL) before the swap
+    // proceeds -- not a fixed sleep. This test proves that directly: the
+    // live process here deliberately ignores SIGTERM
+    // (`process.on('SIGTERM', () => {})`), so surviving the restage would
+    // mean the fix only handles the easy case. It must not survive.
     const root = createConsoleBuildFixture()
     let child
     try {
@@ -459,22 +443,33 @@ describe("ensure console stack", () => {
         { cwd: stablePath, stdio: "ignore" }
       )
       await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+      expect(findProcessesUsingDirectory(stablePath)).toContain(child.pid)
 
       writeFileSync(
         join(root, "apps", "console", ".next", "static", "app.js"),
         "static-v2-stable-path-case"
       )
-      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const second = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
 
-      // The live process itself is not killed by the restage (proven, see
-      // the assertion below) -- it is specifically a RELATIVE-path read
-      // from within it, after the restage, that this test documents as
-      // failing. A real Next.js server making that same kind of read for an
-      // incoming request would see the equivalent failure, not a "coherent
-      // old build."
-      expect(findProcessesUsingDirectory(stablePath).includes(child.pid)).toBe(
-        true
-      )
+      // The SIGTERM-ignoring process must be gone (escalated to SIGKILL)
+      // before the restage completes -- not merely "eventually," but by
+      // the time stageConsoleStack has already returned, since the swap it
+      // performs happens only after stopProcessesUsingDirectory confirms
+      // the pid is dead.
+      expect(findProcessesUsingDirectory(stablePath)).not.toContain(child.pid)
+      // And the new build is what a freshly-launched server (or a
+      // freshly-issued request against the now-current stable path) would
+      // actually see -- no stale content survives to be served.
+      expect(
+        readFileSync(
+          join(second.stageDirectory, "apps/console/.next/static/app.js"),
+          "utf8"
+        )
+      ).toBe("static-v2-stable-path-case")
     } finally {
       child?.kill("SIGKILL")
       rmSync(root, { force: true, recursive: true })

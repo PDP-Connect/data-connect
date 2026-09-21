@@ -321,21 +321,6 @@ function writeManifest(stageDirectory, profile, serverRelativePath) {
 export { findProcessesUsingDirectory }
 
 /**
- * Stop any process still running from inside `targetDirectory` before it is
- * removed/replaced, so a live rebuild never leaves a server running against
- * a directory that no longer exists on disk (see
- * `findProcessesUsingDirectory`'s doc comment for the live incident this
- * fixes). SIGTERM only -- this mirrors the same graceful-stop-then-timeout
- * shape `StopPolicy` uses on the Rust side (`process_supervisor.rs`) rather
- * than jumping straight to SIGKILL, since a `next-server` process may be
- * mid-request. A best-effort safety net for the dev/rebuild loop, not a
- * substitute for the Tauri supervisor's own lifecycle management of the
- * process IT started -- this only catches an ORPHANED process from a stage
- * directory whose owning Tauri app is no longer tracking it (e.g. a
- * previous dev session, or an external rebuild against a directory the
- * current process still has a handle open on).
- */
-/**
  * A short, stable id for this build's content, taken from the manifest the
  * stage just wrote.
  *
@@ -369,16 +354,19 @@ function readGenerationId(stageDirectory) {
  * different inode from the one the old process is holding.
  */
 function publishGeneration(targetDirectory, generationDirectory) {
-  // Stop anything still serving from the PREVIOUS contents of the stable
-  // path. Unlike the old code this is no longer load-bearing for
-  // correctness -- the generation directory it was running from still
-  // exists, so even a process that survives keeps serving a coherent build
-  // rather than a half-deleted one -- but leaving a stale server bound to
-  // the port the next one wants is its own problem.
-  if (existsSync(targetDirectory)) {
-    stopProcessesUsingDirectory(targetDirectory)
-    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 200)"])
-  }
+  // `publishStageGeneration` (stage-generations.js) now stops and BLOCKS
+  // UNTIL CONFIRMED GONE whatever is still serving from the stable path
+  // before it swaps that path's contents -- this is load-bearing for
+  // correctness, not merely cleanup. Measured live 2026-09-21 (three real
+  // incidents, most recently within the hour -- `InvariantError: client
+  // reference manifest for route "/connect" does not exist`, a 500 that
+  // blocked testing): a live Next.js server whose cwd is the STABLE path
+  // (never a generation directory -- see production spawn in
+  // src-tauri/src/unified.rs's `console_process_spec`) can still be
+  // mid-request, with route module resolution in flight, at the exact
+  // moment an unguarded swap runs underneath it. See
+  // `stopProcessesUsingDirectory`'s doc comment in stage-generations.js for
+  // the full mechanism and why a fixed sleep was not actually sufficient.
   publishStageGeneration(targetDirectory, generationDirectory)
 }
 
@@ -393,17 +381,6 @@ function publishGeneration(targetDirectory, generationDirectory) {
  */
 export function collectOldGenerations(targetParent, keep = KEEP_GENERATIONS) {
   return collectOldStageGenerations(targetParent, CONSOLE_STAGE_NAME, keep)
-}
-
-function stopProcessesUsingDirectory(targetDirectory) {
-  for (const pid of findProcessesUsingDirectory(targetDirectory)) {
-    try {
-      process.kill(pid, "SIGTERM")
-    } catch {
-      // Already exited, or not ours to signal (EPERM) -- either way there
-      // is nothing more this script can safely do about it.
-    }
-  }
 }
 
 export function stageConsoleStack({
