@@ -2004,6 +2004,13 @@ async fn finish_bootstrap(
             return Err(error);
         }
     };
+    let bridge_marker_cookie = match desktop_bridge_marker_cookie(&console_origin) {
+        Ok(cookie) => cookie,
+        Err(error) => {
+            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
+            return Err(error);
+        }
+    };
 
     let state_update = (|| -> Result<(), String> {
         let state = app.state::<UnifiedRuntimeState>();
@@ -2028,7 +2035,13 @@ async fn finish_bootstrap(
         return Err(error);
     }
 
-    if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show) {
+    if let Err(error) = create_or_update_console_window(
+        app,
+        console_origin,
+        cookie,
+        bridge_marker_cookie,
+        should_show,
+    ) {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
@@ -2767,15 +2780,57 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
         .build())
 }
 
-fn set_cookie_then_navigate<SetCookie, Navigate>(
-    set_cookie: SetCookie,
+/// Name of the cookie that tells the console it is running inside THIS
+/// process's Tauri webview, not a plain browser tab pointed at the same
+/// origin. `OpenExternalLink` (`apps/console/.../open-external-link.tsx`)
+/// reads this via `document.cookie` to decide whether to route a link click
+/// through the owner-authenticated open-external-url bridge instead of
+/// letting a bare `target="_blank"` anchor handle it.
+///
+/// Why this exists: the console window is `WebviewUrl::External`, so Tauri
+/// never injects `__TAURI__`/`__TAURI_INTERNALS__` into it (Tauri
+/// Discussion #2650) -- there is no Tauri-provided signal the page can read
+/// to tell it's inside the app. An earlier version of `OpenExternalLink`
+/// checked for `__TAURI__`/`__TAURI_INTERNALS__` directly, which is exactly
+/// backwards: it gated the bridge behind the one symbol whose ABSENCE is
+/// the entire reason the bridge had to exist, so the guard always evaluated
+/// false and the bridge code after it never ran in the shipped app (every
+/// `OpenExternalLink` click silently fell through to a no-op anchor).
+/// Confirmed live against a running desktop build: `window.__TAURI__` and
+/// `window.__TAURI_INTERNALS__` are both `undefined` in the console window,
+/// exactly as this module's other doc comments already said, and the
+/// detection check just wasn't reading its own documentation.
+///
+/// This cookie is set by `create_or_update_console_window` below, the ONE
+/// place this process ever puts the console origin into a webview it
+/// controls -- a plain browser tab visiting the same URL from outside the
+/// app never goes through that code path, so it never receives this
+/// cookie. Unlike `pdpp_owner_session`, this cookie carries no secret (it
+/// is a fixed marker value, not a credential) and is intentionally NOT
+/// HttpOnly, since its only job is to be read by client JS.
+const DESKTOP_BRIDGE_COOKIE_NAME: &str = "pdpp_desktop_bridge";
+
+fn desktop_bridge_marker_cookie(url: &tauri::Url) -> Result<Cookie<'static>, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Console URL has no cookie host".to_string())?
+        .to_string();
+    Ok(Cookie::build((DESKTOP_BRIDGE_COOKIE_NAME, "1"))
+        .domain(host)
+        .path("/")
+        .http_only(false)
+        .build())
+}
+
+fn set_cookies_then_navigate<SetCookies, Navigate>(
+    set_cookies: SetCookies,
     navigate: Navigate,
 ) -> Result<(), String>
 where
-    SetCookie: FnOnce() -> Result<(), String>,
+    SetCookies: FnOnce() -> Result<(), String>,
     Navigate: FnOnce() -> Result<(), String>,
 {
-    set_cookie()?;
+    set_cookies()?;
     navigate()
 }
 
@@ -2783,14 +2838,18 @@ fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookie: Cookie<'static>,
+    bridge_marker_cookie: Cookie<'static>,
     should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
-        set_cookie_then_navigate(
+        set_cookies_then_navigate(
             || {
                 window
                     .set_cookie(cookie.clone())
-                    .map_err(|error| format!("Failed to set owner session cookie: {error}"))
+                    .map_err(|error| format!("Failed to set owner session cookie: {error}"))?;
+                window
+                    .set_cookie(bridge_marker_cookie.clone())
+                    .map_err(|error| format!("Failed to set desktop bridge marker cookie: {error}"))
             },
             || {
                 window
@@ -2829,11 +2888,14 @@ fn create_or_update_console_window(
             .build()
             .map_err(|error| format!("Failed to create console window: {error}"))?;
 
-    set_cookie_then_navigate(
+    set_cookies_then_navigate(
         || {
             window
                 .set_cookie(cookie)
-                .map_err(|error| format!("Failed to set owner session cookie: {error}"))
+                .map_err(|error| format!("Failed to set owner session cookie: {error}"))?;
+            window
+                .set_cookie(bridge_marker_cookie)
+                .map_err(|error| format!("Failed to set desktop bridge marker cookie: {error}"))
         },
         || {
             window
@@ -4259,7 +4321,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let set_events = Arc::clone(&events);
         let navigate_events = Arc::clone(&events);
 
-        set_cookie_then_navigate(
+        set_cookies_then_navigate(
             || {
                 set_events
                     .lock()
@@ -4386,5 +4448,30 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
              second tick landed at {delay_while_spawn_blocking:?}, expected \
              < {STARVATION_BOUND:?}"
         );
+    }
+
+    #[test]
+    fn desktop_bridge_marker_cookie_is_not_http_only_and_carries_a_fixed_marker() {
+        // OpenExternalLink reads this cookie via document.cookie in the
+        // browser, which HttpOnly would block entirely. It must also carry
+        // no owner secret -- its only job is to prove this window came from
+        // create_or_update_console_window, not to authenticate anything.
+        let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
+        let cookie = desktop_bridge_marker_cookie(&url).expect("marker cookie");
+        assert_eq!(cookie.name(), DESKTOP_BRIDGE_COOKIE_NAME);
+        assert_eq!(cookie.value(), "1");
+        assert_eq!(cookie.http_only(), Some(false));
+    }
+
+    #[test]
+    fn owner_session_cookie_stays_http_only_unlike_the_bridge_marker() {
+        // Regression guard: the two cookies now set together at the same
+        // call site must not accidentally converge on the same HttpOnly
+        // setting -- the session cookie carries a real credential and must
+        // stay unreadable by page JS even though the marker cookie next to
+        // it must not.
+        let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
+        let cookie = owner_session_cookie(&url, "session-value").expect("session cookie");
+        assert_eq!(cookie.http_only(), Some(true));
     }
 }
