@@ -154,6 +154,17 @@ impl OwnedCloudflaredProcess {
     }
 }
 
+/// Notified when the `cloudflared` child starts and stops, so the app can
+/// keep a durable record of it.
+///
+/// A trait object rather than a direct call into the run-lease module: this
+/// provider is constructed in tests without an app-data directory, and the
+/// remote-access seam should not depend on where app state lives.
+pub(crate) trait CloudflaredLeaseHook: Send + Sync {
+    fn started(&self, pid: u32, pgid: Option<i32>, forwarded_port: u16);
+    fn stopped(&self);
+}
+
 /// The concrete Cloudflare named-tunnel provider. `R` is the existing
 /// keychain-backed credential resolver from the provider seam, holding the
 /// tunnel token the owner pasted in Settings.
@@ -162,6 +173,7 @@ pub(crate) struct CloudflareTunnelProvider<R> {
     credential_resolver: R,
     hostname: String,
     process: Option<OwnedCloudflaredProcess>,
+    lease_hook: Option<Box<dyn CloudflaredLeaseHook>>,
 }
 
 impl<R> CloudflareTunnelProvider<R> {
@@ -189,7 +201,18 @@ impl<R> CloudflareTunnelProvider<R> {
             credential_resolver,
             hostname,
             process: None,
+            lease_hook: None,
         })
+    }
+
+    /// Record this tunnel's child process in a run lease, so a later app
+    /// session can reap it if this one dies without stopping it.
+    pub(crate) fn with_lease_hook<H>(mut self, hook: H) -> Self
+    where
+        H: CloudflaredLeaseHook + 'static,
+    {
+        self.lease_hook = Some(Box::new(hook));
+        self
     }
 
     pub(crate) fn health(&mut self) -> CloudflareTunnelHealth {
@@ -254,11 +277,14 @@ impl<R> CloudflareTunnelProvider<R> {
         #[cfg(unix)]
         {
             let pid = process.child.id() as libc::pid_t;
-            // SAFETY: sending SIGTERM to a PID this process owns (its own
-            // child) is always sound; a graceful shutdown lets cloudflared
+            // SAFETY: sending SIGTERM to a process group this process owns
+            // (its own child is the group leader, see `process_group(0)` in
+            // `start`) is always sound; a graceful shutdown lets cloudflared
             // deregister the tunnel from Cloudflare's edge before exiting.
+            // Signalling the GROUP rather than the bare pid also reaches
+            // anything cloudflared spawned for itself.
             unsafe {
-                libc::kill(pid, libc::SIGTERM);
+                libc::kill(-pid, libc::SIGTERM);
             }
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -273,6 +299,9 @@ impl<R> CloudflareTunnelProvider<R> {
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => return Err(format!("cloudflared stop failed: {error}")),
             }
+        }
+        if let Some(hook) = &self.lease_hook {
+            hook.stopped();
         }
         Ok(())
     }
@@ -337,6 +366,16 @@ where
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Put cloudflared in its own process group, matching the RI and
+        // console sidecars. Without this, `stop_owned` below can only signal
+        // the one pid, and a reaper cleaning up after a dead session cannot
+        // reach anything cloudflared itself spawned.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
         let mut child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!(
@@ -383,6 +422,17 @@ where
                 let _ = child.wait();
                 return Err("cloudflared exited before reporting a connection".to_string());
             }
+        }
+
+        if let Some(hook) = &self.lease_hook {
+            let pid = child.id();
+            // The child is its own group leader (process_group(0) above), so
+            // the pgid equals the pid.
+            #[cfg(unix)]
+            let pgid = Some(pid as i32);
+            #[cfg(not(unix))]
+            let pgid = None;
+            hook.started(pid, pgid, target.port);
         }
 
         self.process = Some(OwnedCloudflaredProcess {

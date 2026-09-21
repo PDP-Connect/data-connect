@@ -156,3 +156,17 @@ windows = { version = "0.61", features = ["Win32_UI_Controls"] }
 tauri-runtime = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
 tauri-utils = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
 tauri-runtime-wry = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# run_lease.rs's process-identity check has no /proc filesystem to read on
+# macOS (Linux keeps its existing hand-rolled /proc/<pid>/stat parser,
+# untouched; Windows already has its own #[cfg(not(unix))] no-op path in the
+# same module and does not need this).
+#
+# Pinned to 0.38, not the newer 0.39 line: 0.39 requires Rust 1.95, above
+# this crate's own declared rust-version = "1.88" (Cargo.toml, package
+# section) and above the 1.94.0 toolchain available in this review's
+# sandbox, which cannot compile 0.39 at all. 0.38.4 requires exactly 1.88,
+# matching this crate's MSRV -- verified against crates.io's published
+# rust_version per release, not assumed.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }

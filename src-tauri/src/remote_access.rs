@@ -131,6 +131,37 @@ pub(crate) struct RemoteAccessConfig {
     /// stale failure from a since-abandoned provider never lingers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tunnel_error: Option<String>,
+    /// When the public origin was last PROVED reachable, and by what.
+    ///
+    /// `tunnel_error: None` above only ever meant "the last start call
+    /// returned Ok". It never expired, so a tunnel that died minutes later
+    /// kept reporting healthy forever -- the canonical dishonest-status
+    /// case: "the tunnel is up" logged while it forwarded zero bytes.
+    ///
+    /// This field is the opposite shape: an OBSERVATION carrying the time
+    /// it was made, so a consumer can tell "verified 20 seconds ago" from
+    /// "nobody has checked since startup". Absent means exactly the latter
+    /// -- unverified -- and must never be read as healthy. See
+    /// `unified::origin_is_verified_reachable` for the point-of-use rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_verified: Option<OriginVerification>,
+}
+
+/// A single, timestamped reachability observation for the public origin.
+///
+/// Deliberately not a bool: every claim carries when it was checked and
+/// which origin it was taken against, so a stale reading can decay to
+/// "unknown" at the point of use instead of silently reading as healthy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct OriginVerification {
+    /// The origin that was probed, so a reading is never attributed to a
+    /// hostname it was not taken against (a free-plan ngrok tunnel mints a
+    /// new one on every restart).
+    pub(crate) origin: String,
+    /// Unix seconds when the probe ran.
+    pub(crate) checked_at: u64,
+    /// Whether the origin answered as a live tunnel at that moment.
+    pub(crate) reachable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,6 +520,10 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         ngrok_authtoken_sealed: None,
         cloudflare_tunnel_token_sealed: None,
         tunnel_error: None,
+        // Remote access is off: no origin, so no reachability claim. Cleared
+        // alongside `tunnel_error` so a stale "reachable" reading from a
+        // since-abandoned provider never lingers in the UI.
+        origin_verified: None,
     }
 }
 
@@ -761,6 +796,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         }
     }
 
@@ -789,6 +825,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         let validated = validate_remote_access_config(config.clone()).expect("valid");
         assert_eq!(validated.fields.reference_origin, config.fields.reference_origin);
@@ -973,6 +1010,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         let serialized = serde_json::to_value(config).expect("serialized remote access config");
         assert_eq!(serialized["posture"], "public_url");
@@ -1002,6 +1040,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         assert!(validate_remote_access_config(config.clone()).is_err());
         config.fields.trusted_hosts = "vault.example".to_string();
@@ -1025,6 +1064,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
         // The origin stays empty until the adapter reports the assigned URL.
@@ -1044,6 +1084,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }
@@ -1060,6 +1101,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }
@@ -1081,6 +1123,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("ngrok TLS endpoint failed: ERR_NGROK_312".to_string()),
+            origin_verified: None,
         };
         let validated = validate_remote_access_config(config).expect("ngrok config is valid");
         assert_eq!(
@@ -1101,6 +1144,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("a failure from a since-abandoned provider".to_string()),
+            origin_verified: None,
         };
         let validated = validate_remote_access_config(config).expect("off config is valid");
         assert_eq!(validated.tunnel_error, None);
@@ -1130,6 +1174,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         assert!(validate_remote_access_config(config).is_err());
     }
@@ -1151,6 +1196,7 @@ mod tests {
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
+            origin_verified: None,
         };
         let validated =
             validate_remote_access_config(config).expect("pinned port config is valid");

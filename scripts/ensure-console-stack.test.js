@@ -5,8 +5,11 @@ import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
+  existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -15,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  collectOldGenerations,
   findProcessesUsingDirectory,
   parseArgs,
   stageConsoleStack,
@@ -335,6 +339,235 @@ describe("ensure console stack", () => {
           projectRoot: root,
         })
       ).toThrow(/staged connector manifests directory is empty/)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+  it("keeps a running server's build directory intact across a restage", async () => {
+    // Scope correction (2026-09-21): this proves a generation directory is
+    // never unlinked by a later restage, which is what makes a build
+    // durable on disk. It does NOT prove the shipped app's running server
+    // keeps serving coherently, because that server's cwd is the STABLE
+    // path, not a generation -- `resolve_staged_root` in unified.rs hands
+    // `reference-stack/<sidecar>` to `console_process_spec`'s
+    // `cwd: Some(root.to_path_buf())`. Measured for the stable-path case:
+    // a relative read after a restage gives ENOENT and an absolute read
+    // transparently returns the NEW content, so neither is "the old build,
+    // coherently". See the stable-path test below for what is actually
+    // guaranteed there.
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    let child
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const first = readdirSync(stageParent)
+        .filter((entry) => entry.startsWith("console-"))
+        .map((entry) => join(stageParent, entry))
+      expect(first).toHaveLength(1)
+      const runningGeneration = first[0]
+
+      // A real process whose cwd is inside that generation, exactly like a
+      // staged next-server.
+      child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        cwd: runningGeneration,
+        stdio: "ignore",
+      })
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+
+      // Restage with different content, which produces a new generation.
+      writeFileSync(
+        join(root, "apps", "console", ".next", "static", "app.js"),
+        "static-v2"
+      )
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+
+      expect(
+        existsSync(join(runningGeneration, "launch.mjs")),
+        "the generation a live server is running from must survive a restage"
+      ).toBe(true)
+      expect(
+        findProcessesUsingDirectory(runningGeneration).includes(child.pid)
+      ).toBe(true)
+    } finally {
+      child?.kill("SIGKILL")
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("stops a live server at the STABLE path (the real production cwd) before restaging it, even one that ignores SIGTERM", async () => {
+    // IMPORTANT SCOPE NOTE, found during independent review, fixed in this
+    // same pass: the test above ("keeps a running server's build directory
+    // intact...") exercises a process whose cwd is inside a GENERATION
+    // directory -- but that is never what actually happens in the shipped
+    // app. unified.rs's resolve_staged_root resolves the fixed
+    // `reference-stack/<sidecar>` path (this test's `result.stageDirectory`,
+    // i.e. the STABLE path), and the Rust supervisor spawns launch.mjs with
+    // THAT exact path as its `cwd` (`cwd: Some(root.to_path_buf())` in
+    // console_process_spec/ri_process_spec). No real process's cwd is ever
+    // `console-<hash>`.
+    //
+    // Measured directly (2026-09-21, isolated Node repro): a fixed
+    // sleep-then-swap did NOT reliably protect a live process at the STABLE
+    // path -- a relative-path read from inside such a process fails with
+    // ENOENT after an unguarded restage (recursive rmSync unlinks every
+    // file, not just the top directory entry), and an absolute-path read
+    // instead silently serves the NEW content. Neither is "the old build,
+    // coherently." Traced to three real incidents against the actual
+    // console, most recently within the hour of this fix --
+    // `InvariantError: client reference manifest for route "/connect" does
+    // not exist`, a 500 that blocked testing.
+    //
+    // The fix: `publishStageGeneration` (stage-generations.js) now stops
+    // whatever is running from the stable path and BLOCKS UNTIL CONFIRMED
+    // GONE (polled liveness, escalating SIGTERM -> SIGKILL) before the swap
+    // proceeds -- not a fixed sleep. This test proves that directly: the
+    // live process here deliberately ignores SIGTERM
+    // (`process.on('SIGTERM', () => {})`), so surviving the restage would
+    // mean the fix only handles the easy case. It must not survive.
+    const root = createConsoleBuildFixture()
+    let child
+    try {
+      const first = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      const stablePath = first.stageDirectory
+
+      child = spawn(
+        process.execPath,
+        [
+          "-e",
+          "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30000)",
+        ],
+        { cwd: stablePath, stdio: "ignore" }
+      )
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+      expect(findProcessesUsingDirectory(stablePath)).toContain(child.pid)
+
+      writeFileSync(
+        join(root, "apps", "console", ".next", "static", "app.js"),
+        "static-v2-stable-path-case"
+      )
+      const second = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+
+      // The SIGTERM-ignoring process must be gone (escalated to SIGKILL)
+      // before the restage completes -- not merely "eventually," but by
+      // the time stageConsoleStack has already returned, since the swap it
+      // performs happens only after stopProcessesUsingDirectory confirms
+      // the pid is dead.
+      expect(findProcessesUsingDirectory(stablePath)).not.toContain(child.pid)
+      // And the new build is what a freshly-launched server (or a
+      // freshly-issued request against the now-current stable path) would
+      // actually see -- no stale content survives to be served.
+      expect(
+        readFileSync(
+          join(second.stageDirectory, "apps/console/.next/static/app.js"),
+          "utf8"
+        )
+      ).toBe("static-v2-stable-path-case")
+    } finally {
+      child?.kill("SIGKILL")
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("publishes the stable path as a real directory, never a symlink", () => {
+    // build-prod.js and finalize-linux-appimage.js copy this exact path into
+    // the packaged app with cpSync, which PRESERVES symlinks rather than
+    // following them -- a symlinked `console` would ship a dangling link
+    // inside the bundle. Verified 2026-09-21.
+    const root = createConsoleBuildFixture()
+    try {
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      expect(lstatSync(result.stageDirectory).isSymbolicLink()).toBe(false)
+      expect(lstatSync(result.stageDirectory).isDirectory()).toBe(true)
+      expect(existsSync(join(result.stageDirectory, "launch.mjs"))).toBe(true)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("reuses one generation for unchanged content and prunes old ones", () => {
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    const generations = () =>
+      readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const afterFirst = generations()
+      // Identical content restages onto the same generation id rather than
+      // growing a new directory every rebuild.
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      expect(generations()).toEqual(afterFirst)
+
+      // Three distinct builds, with nothing running: the pruner keeps the
+      // newest two.
+      for (const value of ["v2", "v3", "v4"]) {
+        writeFileSync(
+          join(root, "apps", "console", ".next", "static", "app.js"),
+          value
+        )
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      }
+      expect(generations().length).toBeLessThanOrEqual(2)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("never prunes a generation a live process is running from", async () => {
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    let child
+    try {
+      stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      const held = join(
+        stageParent,
+        readdirSync(stageParent).find((entry) => entry.startsWith("console-"))
+      )
+      child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        cwd: held,
+        stdio: "ignore",
+      })
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+
+      // keep=0 asks the pruner to remove everything; the held generation
+      // must still be refused.
+      const removed = collectOldGenerations(stageParent, 0)
+      expect(removed).not.toContain(held)
+      expect(existsSync(held)).toBe(true)
+    } finally {
+      child?.kill("SIGKILL")
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+  it("stages from cold with no prior target directory", () => {
+    // Lane unifydefault-0921 makes the unified stack the default, so a
+    // first launch on a clean machine reaches staging with no
+    // reference-stack directory at all. The generation scheme must not
+    // assume a previous generation or a pre-existing stable path.
+    const root = createConsoleBuildFixture()
+    const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
+    try {
+      expect(existsSync(stageParent)).toBe(false)
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      expect(existsSync(join(result.stageDirectory, "launch.mjs"))).toBe(true)
+      expect(
+        readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+      ).toHaveLength(1)
     } finally {
       rmSync(root, { force: true, recursive: true })
     }
