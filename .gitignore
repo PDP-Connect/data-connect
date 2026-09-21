@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 src-tauri/binaries/pdpp-node-*
 src-tauri/binaries/pdpp-node-LICENSE
+src-tauri/binaries/pdpp-cloudflared-*
+src-tauri/binaries/pdpp-cloudflared-LICENSE
 dist
 dist-ssr
 *.local

@@ -601,6 +601,79 @@ fn resolve_node_binary(resource_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The exact byte sequence `build.rs::stage_development_cloudflared_sidecar`
+/// writes when no real `cloudflared` was available to stage -- must stay
+/// byte-identical to that function's `PLACEHOLDER_MARKER`. Only the first
+/// line is checked (`starts_with`): the destination file could theoretically
+/// be replaced by `scripts/stage-pdpp-cloudflared.mjs` with a real binary of
+/// a similar-but-different size, and this must never treat a real binary
+/// that happens to start with unrelated bytes as a placeholder, but checking
+/// only the marker LINE (not requiring a byte-for-byte whole-file match) is
+/// enough to reliably reject the one placeholder shape this build ever
+/// produces.
+const CLOUDFLARED_SIDECAR_PLACEHOLDER_MARKER: &[u8] = b"PDPP_CLOUDFLARED_SIDECAR_PLACEHOLDER\n";
+
+/// Finds a bundled `cloudflared` sidecar the way `resolve_node_binary` finds
+/// the bundled Node runtime -- same search roots, same target-triple-suffixed
+/// naming (`pdpp-cloudflared-<target>[.exe]`) -- but returns `None` (not an
+/// error) both when no sidecar file exists at all AND when the file that
+/// exists is `build.rs`'s placeholder marker rather than a real, staged
+/// binary (see that function's doc comment for why a dev build without a
+/// system `cloudflared` on `PATH` still needs SOME file at this path).
+/// Reading a few dozen bytes to check for the marker is cheap and happens at
+/// most once per app start, so this does not try to distinguish "placeholder"
+/// from "corrupt download" -- both fail closed to `None`, which callers
+/// already treat as "no bundled sidecar, fall through" (see
+/// `start_cloudflare_tunnel_provider`, which prefers a SYSTEM `cloudflared`
+/// over this bundled one when both are present -- the owner may want to
+/// control which cloudflared version runs, the same way ngrok never
+/// overrides a system Node the way this sidecar does not override a system
+/// cloudflared).
+fn resolve_cloudflared_binary(resource_dir: &Path) -> Option<PathBuf> {
+    let binary_roots = [
+        resource_dir.join("binaries"),
+        resource_dir.join("_up_").join("binaries"),
+        resource_dir.to_path_buf(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries"),
+    ];
+    let is_placeholder = |candidate: &Path| -> bool {
+        let Ok(bytes) = fs::read(candidate) else {
+            return false;
+        };
+        bytes.starts_with(CLOUDFLARED_SIDECAR_PLACEHOLDER_MARKER)
+    };
+    for root in binary_roots {
+        for name in ["pdpp-cloudflared", "pdpp-cloudflared.exe"] {
+            let candidate = root.join(name);
+            if candidate.is_file() && !is_placeholder(&candidate) {
+                return Some(candidate);
+            }
+        }
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        let mut sidecars = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate.is_file()
+                    && candidate
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("pdpp-cloudflared-")
+                                && !name.ends_with("-LICENSE")
+                        })
+            })
+            .collect::<Vec<_>>();
+        sidecars.sort();
+        if let Some(sidecar) = sidecars.into_iter().find(|candidate| !is_placeholder(candidate)) {
+            return Some(sidecar);
+        }
+    }
+    None
+}
+
 fn env_map(entries: Vec<(OsString, OsString)>) -> BTreeMap<OsString, OsString> {
     entries.into_iter().collect()
 }
@@ -999,7 +1072,7 @@ fn start_managed_stack(
     // this is a defensive ordering choice, not a claim that this can
     // currently occur.
     let (cloudflare_tunnel, tunnel_error, applied_fields) =
-        match start_cloudflare_tunnel_provider(remote_access, console.port()) {
+        match start_cloudflare_tunnel_provider(app, remote_access, console.port()) {
             Ok(Some((fields, provider))) => (Some(provider), None, Some(fields)),
             Ok(None) => (None, None, None),
             Err(error) => {
@@ -1151,6 +1224,7 @@ fn start_ngrok_provider(
 /// doc comment for why a named tunnel's stable, owner-configured hostname
 /// makes that optimization unnecessary).
 fn start_cloudflare_tunnel_provider(
+    app: &AppHandle,
     remote_access: &RemoteAccessConfig,
     forward_port: u16,
 ) -> Result<
@@ -1209,6 +1283,21 @@ fn start_cloudflare_tunnel_provider(
         resolver,
         options.hostname.clone(),
     )?;
+    // Prefer a system `cloudflared` over the bundled sidecar when both are
+    // present: an owner who installed their own copy may want to control
+    // which version runs (security patches, a beta they are testing), the
+    // same reason this app never tries to override a system Node either.
+    // The bundled sidecar exists for the common case -- no system install at
+    // all, which `cloudflared_binary_is_installed`'s doc comment already
+    // establishes is the realistic first-run state -- not to force a
+    // specific version on an owner who deliberately chose one.
+    if !crate::remote_access_cloudflare::cloudflared_binary_is_installed() {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            if let Some(sidecar) = resolve_cloudflared_binary(&resource_dir) {
+                provider = provider.with_binary_path(sidecar);
+            }
+        }
+    }
 
     let handle = provider.start(
         LoopbackTarget {
@@ -3374,6 +3463,44 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
         assert!(is_valid_profile("release"));
         assert!(!is_valid_profile("../release"));
+    }
+
+    #[test]
+    fn resolve_cloudflared_binary_finds_a_real_staged_sidecar() {
+        let directory = tempdir().expect("cloudflared sidecar temp directory");
+        let binaries = directory.path().join("binaries");
+        fs::create_dir_all(&binaries).expect("binaries directory");
+        let sidecar = binaries.join("pdpp-cloudflared-x86_64-unknown-linux-gnu");
+        fs::write(&sidecar, b"#!/bin/sh\necho fake cloudflared\n").expect("staged sidecar");
+
+        assert_eq!(
+            resolve_cloudflared_binary(directory.path()),
+            Some(sidecar)
+        );
+    }
+
+    /// The exact case `build.rs::stage_development_cloudflared_sidecar`
+    /// exists for: no system `cloudflared` was on `PATH` at build time, so
+    /// the destination Tauri's `externalBin` resource copy requires holds
+    /// the placeholder marker, not a real binary. This must resolve to
+    /// `None` (never spawn the placeholder), the same as if no file existed
+    /// at all.
+    #[test]
+    fn resolve_cloudflared_binary_rejects_the_build_placeholder_marker() {
+        let directory = tempdir().expect("cloudflared sidecar temp directory");
+        let binaries = directory.path().join("binaries");
+        fs::create_dir_all(&binaries).expect("binaries directory");
+        let sidecar = binaries.join("pdpp-cloudflared-x86_64-unknown-linux-gnu");
+        fs::write(&sidecar, CLOUDFLARED_SIDECAR_PLACEHOLDER_MARKER)
+            .expect("staged placeholder");
+
+        assert_eq!(resolve_cloudflared_binary(directory.path()), None);
+    }
+
+    #[test]
+    fn resolve_cloudflared_binary_is_none_when_nothing_is_staged() {
+        let directory = tempdir().expect("empty temp directory");
+        assert_eq!(resolve_cloudflared_binary(directory.path()), None);
     }
 
     #[test]

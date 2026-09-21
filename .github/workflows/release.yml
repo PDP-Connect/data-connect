@@ -131,6 +131,10 @@ jobs:
         shell: bash
         run: node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}" --expected-platform "${{ matrix.node_platform }}" --expected-arch "${{ matrix.node_arch }}"
 
+      - name: Stage cloudflared sidecar
+        shell: bash
+        run: node scripts/stage-pdpp-cloudflared.mjs --target "${{ matrix.target }}"
+
       - name: Install Linux bundle dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -207,6 +211,7 @@ jobs:
         run: |
           set -euo pipefail
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-cloudflared-${{ matrix.target }}
           codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;

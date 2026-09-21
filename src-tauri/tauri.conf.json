@@ -40,7 +40,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
-    "externalBin": ["binaries/pdpp-node"],
+    "externalBin": ["binaries/pdpp-node", "binaries/pdpp-cloudflared"],
     "targets": ["dmg", "app", "nsis", "appimage", "deb"],
     "icon": [
       "icons/32x32.png",
@@ -68,7 +68,8 @@
       "../pdpp-runtime/": "pdpp-runtime/",
       "target/release/reference-stack/ri/": "reference-stack/ri/",
       "target/release/reference-stack/console/": "reference-stack/console/",
-      "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE"
+      "binaries/pdpp-node-LICENSE": "licenses/pdpp-node-LICENSE",
+      "binaries/pdpp-cloudflared-LICENSE": "licenses/pdpp-cloudflared-LICENSE"
     },
     "linux": {
       "deb": {

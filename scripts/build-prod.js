@@ -32,6 +32,7 @@ import { platform, arch } from "os"
 import { stageConsoleStack } from "./ensure-console-stack.js"
 import { stageReferenceStack } from "./ensure-reference-stack.js"
 import { nativeTauriTarget, stagePdppNode } from "./stage-pdpp-node.mjs"
+import { stagePdppCloudflared } from "./stage-pdpp-cloudflared.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, "..")
@@ -143,6 +144,16 @@ async function build() {
   const stagedNode = DRY_RUN
     ? { executable: process.execPath }
     : stagePdppNode({ ...tauriTarget, projectRoot: ROOT })
+  // Real network download + checksum verification -- see that function's
+  // doc comment. A DRY_RUN build never runs this, matching how it skips
+  // stagePdppNode above: no real sidecar is needed to just exercise the
+  // build script's control flow.
+  if (!DRY_RUN) {
+    await stagePdppCloudflared({
+      target: tauriTarget.target,
+      projectRoot: ROOT,
+    })
+  }
 
   // 1. Install playwright-runner dependencies
   log("Installing playwright-runner dependencies...")

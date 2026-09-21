@@ -14,10 +14,37 @@ describe("tauri manual-install config", () => {
       }
     }
 
-    expect(document.bundle?.externalBin).toEqual(["binaries/pdpp-node"])
+    expect(document.bundle?.externalBin).toContain("binaries/pdpp-node")
     expect(document.bundle?.resources?.["binaries/pdpp-node-LICENSE"]).toBe(
       "licenses/pdpp-node-LICENSE"
     )
+  })
+
+  it("bundles cloudflared as a second Tauri sidecar, so no manual install is required", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: {
+        externalBin?: string[]
+        resources?: Record<string, string>
+      }
+    }
+
+    expect(document.bundle?.externalBin).toContain("binaries/pdpp-cloudflared")
+    expect(
+      document.bundle?.resources?.["binaries/pdpp-cloudflared-LICENSE"]
+    ).toBe("licenses/pdpp-cloudflared-LICENSE")
+  })
+
+  it("ships exactly these two sidecars -- a third would need its own review, not silent addition", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { externalBin?: string[] }
+    }
+
+    expect(document.bundle?.externalBin).toEqual([
+      "binaries/pdpp-node",
+      "binaries/pdpp-cloudflared",
+    ])
   })
 
   it("preserves the packaged Playwright browser directory tree", () => {
