@@ -18,6 +18,7 @@ import {
   publicUrlOptionById,
   publicUrlOptions,
   remoteAccessOriginDisplay,
+  validateCloudflareTunnelHostname,
   validateNgrokDomain,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
@@ -62,13 +63,15 @@ function asConfig(value: unknown): RemoteAccessConfig {
     posture: candidate.posture,
     provider:
       candidate.provider === "user_supplied_origin" ||
-      candidate.provider === "ngrok"
+      candidate.provider === "ngrok" ||
+      candidate.provider === "cloudflare_tunnel"
         ? candidate.provider
         : null,
     fields: candidate.fields ?? offRemoteAccessConfig().fields,
     console_port:
       typeof candidate.console_port === "number" ? candidate.console_port : null,
     ngrok: candidate.ngrok ?? null,
+    cloudflare_tunnel: candidate.cloudflare_tunnel ?? null,
     tunnel_error:
       typeof candidate.tunnel_error === "string" ? candidate.tunnel_error : null,
   }
@@ -78,6 +81,9 @@ function asConfig(value: unknown): RemoteAccessConfig {
 function activeOption(config: RemoteAccessConfig): PublicUrlOption | null {
   if (config.provider === "user_supplied_origin") {
     return publicUrlOptionById("user_supplied_origin")
+  }
+  if (config.provider === "cloudflare_tunnel") {
+    return publicUrlOptionById("cloudflare_tunnel")
   }
   if (config.provider === "ngrok" && config.ngrok) {
     return (
@@ -155,6 +161,8 @@ export function RemoteAccessSetting({
   )
   const [ngrokInspection, setNgrokInspection] =
     useState<RemoteAccessInspection | null>(null)
+  const [cloudflareTunnelInspection, setCloudflareTunnelInspection] =
+    useState<RemoteAccessInspection | null>(null)
   const [pendingPosture, setPendingPosture] =
     useState<RemoteAccessPosture | null>(null)
   const [origin, setOrigin] = useState("")
@@ -171,34 +179,41 @@ export function RemoteAccessSetting({
   const [effectiveConsolePort, setEffectiveConsolePort] = useState<
     number | null
   >(null)
+  const [cloudflareToken, setCloudflareToken] = useState("")
+  const [cloudflareHostname, setCloudflareHostname] = useState("")
 
   useEffect(() => {
     let cancelled = false
     setLoadState("loading")
     void loadRemoteAccessState()
-      .then(({
-        config: nextConfig,
-        effectiveConsolePort: nextPort,
-        inspection: nextInspection,
-        ngrokInspection: nextNgrokInspection,
-      }) => {
-        if (cancelled) return
-        const resolved = asConfig(nextConfig)
-        setConfig(resolved)
-        setInspection(asInspection(nextInspection))
-        setNgrokInspection(asInspection(nextNgrokInspection))
-        setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
-        // Without this, an owner who already saved their ngrok domain sees
-        // a blank field on every page load and has no way to tell their
-        // domain was remembered -- exactly the "silent fallback" the
-        // durable-address states exist to prevent.
-        setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
-        setPinnedPort(
-          resolved.console_port != null ? String(resolved.console_port) : ""
-        )
-        setEffectiveConsolePort(nextPort ?? null)
-        setLoadState("loaded")
-      })
+      .then(
+        ({
+          config: nextConfig,
+          effectiveConsolePort: nextPort,
+          inspection: nextInspection,
+          ngrokInspection: nextNgrokInspection,
+          cloudflareTunnelInspection: nextCloudflareTunnelInspection,
+        }) => {
+          if (cancelled) return
+          const resolved = asConfig(nextConfig)
+          setConfig(resolved)
+          setInspection(asInspection(nextInspection))
+          setNgrokInspection(asInspection(nextNgrokInspection))
+          setCloudflareTunnelInspection(asInspection(nextCloudflareTunnelInspection))
+          setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
+          // Without this, an owner who already saved their ngrok domain sees
+          // a blank field on every page load and has no way to tell their
+          // domain was remembered -- exactly the "silent fallback" the
+          // durable-address states exist to prevent.
+          setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
+          setCloudflareHostname(resolved.cloudflare_tunnel?.hostname ?? "")
+          setPinnedPort(
+            resolved.console_port != null ? String(resolved.console_port) : ""
+          )
+          setEffectiveConsolePort(nextPort ?? null)
+          setLoadState("loaded")
+        }
+      )
       .catch(reason => {
         if (cancelled) return
         // The route exists but this request could not answer it. Report the
@@ -219,6 +234,11 @@ export function RemoteAccessSetting({
   // its tunnel). Kept separate from `desktopUnavailable` so an ngrok-only
   // outage does not blank-disable the whole Public URL flow.
   const ngrokUnavailable = !stateIsKnown || ngrokInspection?.availability === "unavailable"
+  // Same shape as `ngrokUnavailable`, for the Cloudflare tunnel row: it too
+  // needs a native host (keychain + `cloudflared` process supervision) and
+  // can be unavailable independent of the rest of the Public URL flow.
+  const cloudflareTunnelUnavailable =
+    !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
@@ -317,6 +337,52 @@ export function RemoteAccessSetting({
           }
           setConfig(asConfig(result.config))
           setPendingPosture(null)
+        })
+        .catch(reason => setError(String(reason)))
+        .finally(() => setBusy(false))
+      return
+    }
+
+    if (option.provider === "cloudflare_tunnel") {
+      if (cloudflareTunnelUnavailable) {
+        setError(
+          cloudflareTunnelInspection?.reason ??
+            "Cloudflare Tunnel is only available in the DataConnect desktop app. Use \"A proxy you run\" here instead."
+        )
+        return
+      }
+      if (!cloudflareToken.trim()) {
+        setError("Paste your Cloudflare tunnel token to continue.")
+        return
+      }
+      const hostname = validateCloudflareTunnelHostname(cloudflareHostname)
+      if (!hostname.ok) {
+        setError(hostname.message)
+        return
+      }
+      // The hostname is already the durable origin -- unlike ngrok, there is
+      // no discovery step, but the four fields still stay empty here: the
+      // Tauri supervisor's `start_cloudflare_tunnel_provider` is what fills
+      // them in once the tunnel is confirmed to have actually started.
+      const nextConfig: RemoteAccessConfig = {
+        posture: "public_url",
+        provider: "cloudflare_tunnel",
+        fields: offRemoteAccessConfig().fields,
+        cloudflare_tunnel: { hostname: hostname.hostname },
+      }
+      setBusy(true)
+      setError(null)
+      void saveRemoteAccessConfig(nextConfig, cloudflareToken.trim())
+        .then(result => {
+          if (!result.ok) {
+            setError(result.message)
+            return
+          }
+          setConfig(asConfig(result.config))
+          setPendingPosture(null)
+          // The token is now sealed at rest and only the desktop host's
+          // config watcher can decrypt it; drop the copy here.
+          setCloudflareToken("")
         })
         .catch(reason => setError(String(reason)))
         .finally(() => setBusy(false))
@@ -551,11 +617,14 @@ export function RemoteAccessSetting({
             </span>
             {publicUrlOptions.map(option => {
               const chosen = optionId === option.id
-              // Only ngrok can be unavailable independent of the whole
-              // Public URL flow (see `ngrokUnavailable` above) -- a proxy
-              // the owner runs has no native dependency and is never
+              // Only ngrok and the Cloudflare tunnel can be unavailable
+              // independent of the whole Public URL flow (see
+              // `ngrokUnavailable`/`cloudflareTunnelUnavailable` above) -- a
+              // proxy the owner runs has no native dependency and is never
               // disabled by this check.
-              const rowUnavailable = option.provider === "ngrok" && ngrokUnavailable
+              const rowUnavailable =
+                (option.provider === "ngrok" && ngrokUnavailable) ||
+                (option.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
               return (
                 <label
                   className={cn(
@@ -605,8 +674,11 @@ export function RemoteAccessSetting({
                       ) : null}
                       {rowUnavailable ? (
                         <span className="pdpp-caption text-destructive">
-                          {ngrokInspection?.reason ??
-                            "ngrok needs the DataConnect desktop app."}
+                          {option.provider === "cloudflare_tunnel"
+                            ? cloudflareTunnelInspection?.reason ??
+                              "Cloudflare Tunnel needs the DataConnect desktop app."
+                            : ngrokInspection?.reason ??
+                              "ngrok needs the DataConnect desktop app."}
                         </span>
                       ) : null}
                     </span>
@@ -616,7 +688,7 @@ export function RemoteAccessSetting({
             })}
           </div>
 
-          {selectedOption?.requiresAuthtoken ? (
+          {selectedOption?.provider === "ngrok" ? (
             <>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
@@ -684,7 +756,67 @@ export function RemoteAccessSetting({
                 )}
               </label>
             </>
-          ) : (
+          ) : null}
+
+          {selectedOption?.provider === "cloudflare_tunnel" ? (
+            <>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-cloudflare-token"
+              >
+                Cloudflare tunnel token
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-cloudflare-token"
+                  onChange={event => setCloudflareToken(event.currentTarget.value)}
+                  spellCheck={false}
+                  type="password"
+                  value={cloudflareToken}
+                />
+                <span className="pdpp-caption text-muted-foreground">
+                  Create a tunnel in the Cloudflare dashboard, then copy its
+                  token here. DataConnect stores it in your system keychain
+                  and does not ask again. Requires the{" "}
+                  <span className="select-all font-mono">cloudflared</span>{" "}
+                  binary installed on this machine.{" "}
+                  <OpenExternalLink
+                    className="underline"
+                    href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/"
+                  >
+                    Open Cloudflare Tunnel setup
+                  </OpenExternalLink>
+                  .
+                </span>
+              </label>
+              <label
+                className="grid gap-1 pdpp-caption text-foreground"
+                htmlFor="remote-access-cloudflare-hostname"
+              >
+                Your tunnel hostname
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+                  id="remote-access-cloudflare-hostname"
+                  onChange={event => setCloudflareHostname(event.currentTarget.value)}
+                  placeholder="vault.example.com"
+                  spellCheck={false}
+                  type="text"
+                  value={cloudflareHostname}
+                />
+                <span className="pdpp-caption text-muted-foreground">
+                  The hostname you routed to this tunnel in the Cloudflare
+                  dashboard. Unlike ngrok's free plan, a Cloudflare tunnel has
+                  no random-hostname fallback — this is required, and it
+                  stays your address across restarts.
+                </span>
+              </label>
+            </>
+          ) : null}
+
+          {selectedOption?.provider === "user_supplied_origin" ? (
             <>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
@@ -733,7 +865,7 @@ export function RemoteAccessSetting({
                 </span>
               </label>
             </>
-          )}
+          ) : null}
           <div className="flex flex-wrap justify-end gap-2">
             <button
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
@@ -745,7 +877,11 @@ export function RemoteAccessSetting({
             </button>
             <button
               className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
-              disabled={busy || (selectedOption?.provider === "ngrok" && ngrokUnavailable)}
+              disabled={
+                busy ||
+                (selectedOption?.provider === "ngrok" && ngrokUnavailable) ||
+                (selectedOption?.provider === "cloudflare_tunnel" && cloudflareTunnelUnavailable)
+              }
               onClick={enablePublicUrl}
               type="button"
             >

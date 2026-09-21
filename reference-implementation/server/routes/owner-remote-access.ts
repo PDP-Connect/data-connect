@@ -3,10 +3,11 @@
 
 // Owner-authenticated HTTP routes for the remote-access providers:
 //
-//   GET  /v1/owner/remote-access/config          -> current RemoteAccessConfig
-//   POST /v1/owner/remote-access/config          -> validate + persist a new config
-//   GET  /v1/owner/remote-access/inspect         -> user_supplied_origin availability probe
-//   GET  /v1/owner/remote-access/inspect/ngrok   -> ngrok availability probe
+//   GET  /v1/owner/remote-access/config                      -> current RemoteAccessConfig
+//   POST /v1/owner/remote-access/config                      -> validate + persist a new config
+//   GET  /v1/owner/remote-access/inspect                     -> user_supplied_origin availability probe
+//   GET  /v1/owner/remote-access/inspect/ngrok               -> ngrok availability probe
+//   GET  /v1/owner/remote-access/inspect/cloudflare_tunnel   -> Cloudflare named-tunnel availability probe
 //
 // Auth: owner bearer (`pdpp_token_kind: "owner"`), the SAME guard every other
 // `/v1/owner/*` route uses (`requireToken` + `requireOwner`; see
@@ -78,6 +79,7 @@
 
 import { createCredentialCipherFromEnv } from "../stores/credential-encryption.ts"
 import {
+  inspectCloudflareTunnel,
   inspectNgrok,
   inspectUserSuppliedOrigin,
   type RemoteAccessConfig,
@@ -163,9 +165,17 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           const cipher = createCredentialCipherFromEnv()
           toSave = { ...config, ngrok_authtoken_sealed: cipher.seal(providerCredential.trim()) }
         }
+        if (config.provider === "cloudflare_tunnel") {
+          if (!providerCredential || !providerCredential.trim()) {
+            ctx.pdppError(res, 400, "remote_access_config_invalid", "cloudflare_tunnel requires providerCredential (the tunnel token).", null)
+            return
+          }
+          const cipher = createCredentialCipherFromEnv()
+          toSave = { ...config, cloudflare_tunnel_token_sealed: cipher.seal(providerCredential.trim()) }
+        }
         const saved = await ctx.store.save(toSave);
-        // Never echo the sealed (or plaintext) authtoken back to the console.
-        const { ngrok_authtoken_sealed: _sealed, ...safeSaved } = saved
+        // Never echo the sealed (or plaintext) credential back to the console.
+        const { ngrok_authtoken_sealed: _sealed, cloudflare_tunnel_token_sealed: _cfSealed, ...safeSaved } = saved
         res.json({ data: safeSaved, object: "remote_access_config" })
       } catch (err) {
         if (err instanceof Error) {
@@ -190,6 +200,14 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
     ...guarded,
     (_req: RouteRequest, res: RouteResponse) => {
       res.json({ data: inspectNgrok(), object: "remote_access_inspection" })
+    }
+  )
+
+  app.get(
+    "/v1/owner/remote-access/inspect/cloudflare_tunnel",
+    ...guarded,
+    (_req: RouteRequest, res: RouteResponse) => {
+      res.json({ data: inspectCloudflareTunnel(), object: "remote_access_inspection" })
     }
   )
 }

@@ -11,6 +11,8 @@ mod recovery_code;
 #[cfg(desktop)]
 mod remote_access;
 #[cfg(desktop)]
+mod remote_access_cloudflare;
+#[cfg(desktop)]
 mod remote_access_ngrok;
 #[cfg(desktop)]
 mod remote_access_providers;
