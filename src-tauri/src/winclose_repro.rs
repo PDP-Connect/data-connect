@@ -67,6 +67,7 @@ pub fn run() {
     let mode_for_handler = mode.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
+            let started = std::time::Instant::now();
             eprintln!("[winclose-repro] CloseRequested handler: BEGIN");
             let should_hide = if mode_for_handler == "old" {
                 // Pre-fix shape: blocking fs::read_to_string on the
@@ -80,7 +81,17 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window_for_close.hide();
             }
-            eprintln!("[winclose-repro] CloseRequested handler: END");
+            // Internal Instant timing, not external shell timestamps --
+            // an external `date` piped around this process's stdout is
+            // dominated by pipe/process scheduling noise (measured: ~500ms
+            // of shell-side jitter around a handler that is actually
+            // microseconds), so it cannot distinguish a real block from
+            // shell overhead. This measures only the handler body itself,
+            // on the same thread, with no cross-process noise.
+            eprintln!(
+                "[winclose-repro] CloseRequested handler: END elapsed_micros={}",
+                started.elapsed().as_micros()
+            );
         }
     });
 
