@@ -4165,6 +4165,51 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!probe_ngrok_tunnel_is_live("http://127.0.0.1:1/"));
     }
 
+    /// An observer must never be able to destroy what it observes.
+    ///
+    /// #208 proved this is not theoretical: a health check that could reach
+    /// `teardown_managed_on_error` reported a WORKING console as unhealthy
+    /// (its startup page is server-rendered and has no `/_next/` asset) and
+    /// took the whole stack down in a loop. #216 fixes that case and makes
+    /// the rule structural for the console's deep check.
+    ///
+    /// The origin-verification watcher here is the same shape -- a periodic
+    /// health probe -- so it carries the same guarantee, enforced the same
+    /// way: nothing in its body may reach a call that stops the stack,
+    /// exits the app, or changes user-visible status. The worst a failed
+    /// probe may do is record `reachable: false` and log. A source-level
+    /// check because a runtime test of the spawned task needs a real
+    /// `AppHandle`, which this file's other tests already document as
+    /// unavailable here.
+    #[test]
+    fn the_origin_watcher_cannot_tear_down_what_it_observes() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("pub(crate) fn spawn_origin_verification_watcher")
+            .expect("the origin verification watcher must exist");
+        let end = source[start..]
+            .find("\n/// Has a shutdown been requested?")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        for forbidden in [
+            "teardown(",
+            "teardown_managed_on_error",
+            "app.exit",
+            "set_status",
+            "request_shutdown",
+            "stop_held_ngrok",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the origin verification watcher must never reach {forbidden}: a health \
+                 check that can stop the stack turns a false negative into an outage \
+                 (see #208)"
+            );
+        }
+    }
+
     /// Shutdown is absorbing for the background watchers.
     ///
     /// Each watcher is an infinite `loop` with a discarded `JoinHandle`, so
