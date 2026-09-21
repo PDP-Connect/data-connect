@@ -116,17 +116,32 @@ pub(crate) fn save_open_external_url_queue(
 }
 
 /// Pure core of the watcher tick: given the current queue and an "open"
-/// effect as a closure, decide which requests were just applied. Kept
-/// separate from the `AppHandle`-driven polling loop in `../unified.rs` so
-/// it can run under a unit test without a real Tauri runtime or a real OS
-/// opener, mirroring `desktop_settings::apply_autostart_desired_state`.
+/// effect as a closure, open every pending request and return the set of
+/// ids that were actually processed (opened, or refused for a bad scheme --
+/// either way, done with). Kept separate from the `AppHandle`-driven polling
+/// loop in `../unified.rs` so it can run under a unit test without a real
+/// Tauri runtime or a real OS opener, mirroring
+/// `desktop_settings::apply_autostart_desired_state`.
+///
+/// Returns only the processed ids, NOT a replacement queue -- the watcher
+/// (`tick_open_external_url_watcher` in `../unified.rs`) re-reads the queue
+/// file immediately before writing and removes just these ids from whatever
+/// is on disk at that moment. `server/open-external-url-store.ts::enqueue`
+/// does an unlocked read-modify-write on the same file from the Node
+/// process, so a naive "read once, process, write back
+/// OpenExternalUrlQueue::default()" here could silently clobber a request
+/// Node appended in the gap between this function's read and the watcher's
+/// write -- the owner's click would just do nothing, no error, no log.
+/// Removing only the ids this call actually consumed keeps that race from
+/// losing data even though neither side takes a file lock.
 pub(crate) fn apply_pending_open_external_url_requests<O>(
-    queue: OpenExternalUrlQueue,
+    queue: &OpenExternalUrlQueue,
     mut open: O,
-) -> OpenExternalUrlQueue
+) -> Vec<u64>
 where
     O: FnMut(&str) -> Result<(), String>,
 {
+    let mut processed = Vec::with_capacity(queue.pending.len());
     for request in &queue.pending {
         match validate_external_url(&request.url) {
             Ok(()) => {
@@ -142,8 +157,9 @@ where
                 );
             }
         }
+        processed.push(request.id);
     }
-    OpenExternalUrlQueue::default()
+    processed
 }
 
 #[cfg(test)]
@@ -187,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_pending_requests_opens_every_valid_entry_and_drains_the_queue() {
+    fn apply_pending_requests_opens_every_valid_entry_and_reports_all_ids_processed() {
         let mut opened = Vec::new();
         let queue = OpenExternalUrlQueue {
             pending: vec![
@@ -195,26 +211,26 @@ mod tests {
                 OpenExternalUrlRequest { id: 2, url: "https://b.example".into() },
             ],
         };
-        let next = apply_pending_open_external_url_requests(queue, |url| {
+        let processed = apply_pending_open_external_url_requests(&queue, |url| {
             opened.push(url.to_string());
             Ok(())
         });
         assert_eq!(opened, vec!["https://a.example", "https://b.example"]);
-        assert!(next.pending.is_empty());
+        assert_eq!(processed, vec![1, 2]);
     }
 
     #[test]
-    fn apply_pending_requests_refuses_a_non_https_entry_without_opening_it() {
+    fn apply_pending_requests_refuses_a_non_https_entry_without_opening_it_but_still_reports_it_processed() {
         let mut opened = Vec::new();
         let queue = OpenExternalUrlQueue {
             pending: vec![OpenExternalUrlRequest { id: 1, url: "file:///etc/passwd".into() }],
         };
-        let next = apply_pending_open_external_url_requests(queue, |url| {
+        let processed = apply_pending_open_external_url_requests(&queue, |url| {
             opened.push(url.to_string());
             Ok(())
         });
         assert!(opened.is_empty(), "a file: URL must never reach the OS opener");
-        assert!(next.pending.is_empty());
+        assert_eq!(processed, vec![1], "a refused entry is still done with, not retried forever");
     }
 
     #[test]
@@ -226,12 +242,12 @@ mod tests {
                 OpenExternalUrlRequest { id: 2, url: "https://ok.example".into() },
             ],
         };
-        let next = apply_pending_open_external_url_requests(queue, |url| {
+        let processed = apply_pending_open_external_url_requests(&queue, |url| {
             opened.push(url.to_string());
             Ok(())
         });
         assert_eq!(opened, vec!["https://ok.example"]);
-        assert!(next.pending.is_empty());
+        assert_eq!(processed, vec![1, 2]);
     }
 
     #[test]
@@ -257,5 +273,49 @@ mod tests {
         let loaded = load_open_external_url_queue(&path).expect("load should succeed");
 
         assert!(loaded.pending.is_empty());
+    }
+
+    /// Regression test for the cross-process race an independent review
+    /// flagged: `server/open-external-url-store.ts::enqueue` does an
+    /// unlocked read-modify-write on this same file from the Node side. If
+    /// the watcher tick (`tick_open_external_url_watcher` in `../unified.rs`)
+    /// blindly wrote back whatever queue it started the tick with -- or
+    /// worse, an unconditional empty queue, as the earlier version of this
+    /// function did -- a request Node appended after this function's `open`
+    /// closures ran but before the watcher's write would be silently lost:
+    /// no error, no log, the owner's click just does nothing. This test
+    /// exercises the exact re-read-before-write pattern the watcher now
+    /// uses: apply against a snapshot, but remove only the processed ids
+    /// from a LATER read that already contains a request appended during
+    /// processing.
+    #[test]
+    fn removing_only_processed_ids_from_a_later_read_preserves_a_request_enqueued_mid_tick() {
+        let snapshot = OpenExternalUrlQueue {
+            pending: vec![OpenExternalUrlRequest { id: 1, url: "https://a.example".into() }],
+        };
+        let processed = apply_pending_open_external_url_requests(&snapshot, |_| Ok(()));
+        assert_eq!(processed, vec![1]);
+
+        // Simulate Node's enqueue() landing a new request (id 2) on disk
+        // during the window between the watcher's initial read and its
+        // write -- the exact race the review flagged.
+        let queue_on_disk_now = OpenExternalUrlQueue {
+            pending: vec![
+                OpenExternalUrlRequest { id: 1, url: "https://a.example".into() },
+                OpenExternalUrlRequest { id: 2, url: "https://b.example".into() },
+            ],
+        };
+
+        let remaining: Vec<OpenExternalUrlRequest> = queue_on_disk_now
+            .pending
+            .into_iter()
+            .filter(|request| !processed.contains(&request.id))
+            .collect();
+
+        assert_eq!(
+            remaining.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![2],
+            "the request enqueued mid-tick must survive the write, not be silently dropped"
+        );
     }
 }

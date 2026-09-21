@@ -2466,6 +2466,17 @@ pub(crate) fn spawn_open_external_url_watcher(app: AppHandle) {
     });
 }
 
+/// Reads the queue, opens every currently-pending request, then re-reads the
+/// queue immediately before writing and removes only the ids just
+/// processed -- NOT an unconditional empty write. `server/open-external-
+/// url-store.ts::enqueue` does an unlocked read-modify-write on this same
+/// file from the Node process; without this re-read, a request Node
+/// appended in the gap between this tick's first read and its write would
+/// be silently clobbered (the owner's click would just do nothing -- no
+/// error, no log). See `commands/open_external_url.rs`'s
+/// `apply_pending_open_external_url_requests` doc comment and its
+/// `removing_only_processed_ids_from_a_later_read_preserves_a_request_
+/// enqueued_mid_tick` regression test for the exact race this closes.
 fn tick_open_external_url_watcher(app: &AppHandle) -> Result<(), String> {
     use crate::commands::open_external_url::{
         apply_pending_open_external_url_requests, load_open_external_url_queue,
@@ -2477,10 +2488,19 @@ fn tick_open_external_url_watcher(app: &AppHandle) -> Result<(), String> {
     if queue.pending.is_empty() {
         return Ok(());
     }
-    let next = apply_pending_open_external_url_requests(queue, |url| {
+    let processed = apply_pending_open_external_url_requests(&queue, |url| {
         open::that_detached(url).map_err(|error| format!("Failed to open {url}: {error}"))
     });
-    save_open_external_url_queue(&path, &next)
+
+    let current = load_open_external_url_queue(&path)?;
+    let remaining = crate::commands::open_external_url::OpenExternalUrlQueue {
+        pending: current
+            .pending
+            .into_iter()
+            .filter(|request| !processed.contains(&request.id))
+            .collect(),
+    };
+    save_open_external_url_queue(&path, &remaining)
 }
 
 /// Open the standalone recovery-code entry window, or focus it if it's
