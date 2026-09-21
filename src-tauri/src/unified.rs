@@ -427,6 +427,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     let app_handle = app.handle().clone();
     spawn_remote_access_config_watcher(app_handle.clone());
     spawn_autostart_watcher(app_handle.clone());
+    spawn_open_external_url_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
@@ -2438,6 +2439,48 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
         },
     )?;
     save_autostart_state(&path, &next)
+}
+
+const OPEN_EXTERNAL_URL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Poll `open-external-url-queue.json` (under `PDPP_DATA_DIR`, same
+/// directory as `autostart.json`/`remote-access.json`) for links the console
+/// asked to have opened in the system browser and hand each one to
+/// `open::that_detached`. Modeled on `spawn_autostart_watcher` above: same
+/// poll-a-shared-file shape, same rationale (only this Rust process can
+/// perform the native action; the console's `http://127.0.0.1:{port}`
+/// window never gets Tauri's `invoke()` bridge, so it cannot call this
+/// directly -- see `commands/open_external_url.rs`'s module doc for the full
+/// chain). A 200ms interval (vs. autostart's 3s) because this drives a
+/// user-visible link click, not a background settings toggle -- a 3s stall
+/// between "click" and "browser tab appears" would read as a dead link
+/// again.
+pub(crate) fn spawn_open_external_url_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Err(error) = tick_open_external_url_watcher(&app) {
+                log::warn!("Open-external-url watcher tick failed: {error}");
+            }
+            tokio::time::sleep(OPEN_EXTERNAL_URL_POLL_INTERVAL).await;
+        }
+    });
+}
+
+fn tick_open_external_url_watcher(app: &AppHandle) -> Result<(), String> {
+    use crate::commands::open_external_url::{
+        apply_pending_open_external_url_requests, load_open_external_url_queue,
+        open_external_url_queue_path, save_open_external_url_queue,
+    };
+
+    let path = open_external_url_queue_path(app)?;
+    let queue = load_open_external_url_queue(&path)?;
+    if queue.pending.is_empty() {
+        return Ok(());
+    }
+    let next = apply_pending_open_external_url_requests(queue, |url| {
+        open::that_detached(url).map_err(|error| format!("Failed to open {url}: {error}"))
+    });
+    save_open_external_url_queue(&path, &next)
 }
 
 /// Open the standalone recovery-code entry window, or focus it if it's
