@@ -440,20 +440,21 @@ test("POST config rejects cloudflare_tunnel with no hostname configured", async 
   });
 });
 
-test("POST config rejects a cloudflare_tunnel submission when the binary is confirmed missing, before the credential is even checked", async () => {
+test("POST config accepts a cloudflare_tunnel submission even when the binary is confirmed missing, since it downloads automatically at spawn time", async () => {
   const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
   const previousBinary = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;
   try {
-    // A real, checked "not installed" -- not "unknown" (see the inspect
-    // test below for that case). This is the exact bypass the console's
-    // own client-side submit guard cannot close on its own: a direct POST
-    // (a stale page, a compromised session token) with a real credential
-    // must still be rejected here, server-side, the one place that
-    // actually persists the config. A managed desktop host must be present
-    // too -- inspectCloudflareTunnel short-circuits to
-    // cloudflared_binary_present: null ("unknown") without one, regardless
-    // of PDPP_CLOUDFLARED_BINARY_PRESENT, matching the GET inspect test
-    // below.
+    // Download-on-first-use (`ensure_cloudflared_available`,
+    // src-tauri/src/remote_access_cloudflare.rs) makes a missing binary a
+    // non-blocking case: `start()` downloads and checksum-verifies a real
+    // copy automatically the first time this provider actually runs, so
+    // this route must not reject a submission just because
+    // cloudflared_binary_present reads false at submit time -- that reading
+    // only reflects whether a SYSTEM install exists on PATH right now, not
+    // whether this provider can start. Rejecting here would tell the owner
+    // to do something ("install it, then try again") the app is about to
+    // do for them, and block the exact submission download-on-first-use
+    // exists to make normal.
     process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
     process.env.PDPP_CLOUDFLARED_BINARY_PRESENT = "0";
     await withMountedRoutes(async (routes) => {
@@ -469,23 +470,17 @@ test("POST config rejects a cloudflare_tunnel submission when the binary is conf
         },
         posture: "public_url",
         provider: "cloudflare_tunnel",
-        // A real, present credential -- proves the binary check runs and
-        // rejects BEFORE the credential is inspected at all, not merely in
-        // addition to a missing-credential rejection.
         providerCredential: "shhh-cloudflare-tunnel-token",
       };
 
       const post = makeRes();
       await postHandler?.({ body: cloudflareConfig }, post.res);
-      assert.equal(post.captured.status, 400);
-      assert.match(
-        String((post.captured.body as { error: { message: string } }).error.message),
-        /cloudflared is not installed/
-      );
+      assert.equal(post.captured.status, 200);
 
       const get = makeRes();
       await getHandler?.({}, get.res);
-      assert.deepEqual(get.captured.body, { data: offRemoteAccessConfig(), object: "remote_access_config" });
+      const savedConfig = (get.captured.body as { data: { provider?: string } }).data;
+      assert.equal(savedConfig.provider, "cloudflare_tunnel");
     });
   } finally {
     if (previousHost === undefined) {
