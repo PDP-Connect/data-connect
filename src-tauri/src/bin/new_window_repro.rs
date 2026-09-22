@@ -118,13 +118,21 @@ fn main() {
                         .expect("lock")
                         .push(format!("{url} allowed={allowed}"));
                     let _ = std::io::stderr().flush();
-                    if !allowed {
-                        if url.scheme() == "https" {
-                            if let Err(error) = open::that_detached(url.as_str()) {
-                                eprintln!("[nav-repro] open::that_detached failed: {error}");
-                            } else {
-                                eprintln!("[nav-repro] open::that_detached called for {url}");
-                            }
+                    if !allowed && url.scheme() == "https" {
+                        // See src/unified.rs's OPEN_EXTERNAL_DRY_RUN_ENV_VAR
+                        // doc comment: open::that_detached shells out to
+                        // xdg-open, which reaches the owner's REAL desktop
+                        // session regardless of this process's own DISPLAY --
+                        // an isolated Xvfb display does not contain it. A
+                        // verification run of this binary must set
+                        // PDPP_OPEN_EXTERNAL_DRY_RUN=1 or it will pop a tab
+                        // in a real browser, confirmed the hard way.
+                        if std::env::var("PDPP_OPEN_EXTERNAL_DRY_RUN").as_deref() == Ok("1") {
+                            eprintln!("[nav-repro] dry run: would open {url}");
+                        } else if let Err(error) = open::that_detached(url.as_str()) {
+                            eprintln!("[nav-repro] open::that_detached failed: {error}");
+                        } else {
+                            eprintln!("[nav-repro] open::that_detached called for {url}");
                         }
                     }
                     allowed

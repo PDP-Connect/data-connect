@@ -3254,6 +3254,26 @@ fn is_console_origin(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
         && url.port_or_known_default() == console_origin.port_or_known_default()
 }
 
+/// Set to `1` to make `decide_console_navigation` log what it WOULD open
+/// instead of actually calling `open::that_detached` -- for verification
+/// runs (this file's own unit tests, a standalone repro binary, or a
+/// scripted click against a real build) that need to prove the decision
+/// fires correctly without launching the OS's real system browser. `open::
+/// that_detached` shells out to `xdg-open` on Linux, which talks to
+/// whatever desktop session is actually running, NOT the `DISPLAY` the
+/// calling process was launched with -- wrapping a verification run in an
+/// isolated Xvfb display does not contain this, confirmed the hard way: an
+/// earlier verification run under this exact wrapper still opened a tab in
+/// the owner's real, already-running browser, because `xdg-open`'s
+/// single-instance handoff reaches the owner's live session regardless of
+/// which display launched the calling process. Unset (the production
+/// default) leaves behavior unchanged.
+const OPEN_EXTERNAL_DRY_RUN_ENV_VAR: &str = "PDPP_OPEN_EXTERNAL_DRY_RUN";
+
+fn open_external_dry_run_is_enabled() -> bool {
+    std::env::var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR).as_deref() == Ok("1")
+}
+
 /// Logs every navigation decision at `info`, unconditionally -- no debug
 /// build needed -- so a real click against a packaged app is independently
 /// checkable from the ordinary app log, not just from this file's own unit
@@ -3269,11 +3289,15 @@ fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> b
         return true;
     }
     if url.scheme() == "https" {
-        match open::that_detached(url.as_str()) {
-            Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
-            Err(error) => log::error!(
-                "on_navigation: url={url} decision=opened-externally failed to open: {error}"
-            ),
+        if open_external_dry_run_is_enabled() {
+            log::info!("on_navigation: url={url} decision=opened-externally (dry run: would open {url})");
+        } else {
+            match open::that_detached(url.as_str()) {
+                Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
+                Err(error) => log::error!(
+                    "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+                ),
+            }
         }
     } else {
         log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
@@ -5458,13 +5482,14 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 
     #[test]
     fn decide_console_navigation_denies_non_https_external_urls() {
-        // The handler must reject file:/javascript:/data: before ever
-        // reaching open::that_detached -- these tests confirm navigation is
-        // always denied (the in-app window never follows them) regardless
-        // of scheme.
+        // Every scheme here is denied WITHOUT ever reaching
+        // open::that_detached -- that call only happens for `https:`, gated
+        // above this loop -- so none of these need the dry-run env var.
+        // `https:` itself is covered separately, below, with the dry-run
+        // gate set, so this process never shells out to the real OS opener
+        // during a test run.
         let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
         for scheme_url in [
-            "https://pdpp.dev/",
             "http://127.0.0.1:1/",
             "file:///etc/passwd",
             "javascript:alert(1)",
@@ -5476,5 +5501,34 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                  (return false) for external url {scheme_url:?}"
             );
         }
+    }
+
+    #[test]
+    fn decide_console_navigation_denies_https_external_url_without_opening_a_real_browser() {
+        // The only test in this file that exercises the https: branch of
+        // decide_console_navigation, which is the one branch that can call
+        // open::that_detached -- a real OS-level side effect this process
+        // must never trigger during a test run (confirmed the hard way: an
+        // earlier verification run DID pop a tab in a real desktop session
+        // despite running under an isolated display, because xdg-open's
+        // single-instance handoff ignores the calling process's DISPLAY).
+        // Sets PDPP_OPEN_EXTERNAL_DRY_RUN=1 for the duration of this one
+        // assertion and restores the prior value afterward. No other test in
+        // this file reads that variable, so this is not a real race even
+        // though env vars are process-global under parallel test execution.
+        let previous = std::env::var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR).ok();
+        std::env::set_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR, "1");
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        let url: tauri::Url = "https://pdpp.dev/".parse().expect("external url");
+        let allowed = decide_console_navigation(&url, &console);
+        match previous {
+            Some(value) => std::env::set_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR, value),
+            None => std::env::remove_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR),
+        }
+        assert!(
+            !allowed,
+            "decide_console_navigation must still deny in-app navigation for an \
+             https: external url even in dry-run mode"
+        );
     }
 }
