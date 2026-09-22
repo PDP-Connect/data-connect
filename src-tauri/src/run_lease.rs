@@ -91,6 +91,9 @@ pub(crate) enum ReapDecision {
     /// The owning app session is still running: this is a live session's
     /// child. Never touched.
     SkippedOwnerAlive,
+    /// The lease does not contain enough owner identity to establish that
+    /// its owner is dead. Never touched.
+    SkippedOwnerIdentityUnknown,
     /// The process in the lease is gone; only the file needed removing.
     RemovedStaleFile,
     /// The PID is alive but is not the process the lease describes (its
@@ -250,8 +253,21 @@ pub(crate) fn decide(lease: &RunLease, self_pid: i32) -> ReapDecision {
     // 1. Is the owning session still alive? A live owner means this is its
     //    child, running exactly as intended. This check comes first because
     //    it is the one that prevents the only harmful outcome.
-    let owner_is_this_app = lease.owner_pid == self_pid;
-    if !owner_is_this_app && is_same_process(lease.owner_pid, lease.owner_started_at_ticks) {
+    // The current process is definitively live, even when its starttime was
+    // unavailable when the lease was written. This also makes self_pid a
+    // meaningful safety input rather than a special case that skips the
+    // owner check.
+    if lease.owner_pid == self_pid {
+        return ReapDecision::SkippedOwnerAlive;
+    }
+
+    // A zero owner starttime is the persisted fallback used when some other
+    // owner's identity could not be read. It cannot prove that the owner is
+    // dead, so the conservative action is to leave the child and lease alone.
+    if lease.owner_started_at_ticks == 0 {
+        return ReapDecision::SkippedOwnerIdentityUnknown;
+    }
+    if is_same_process(lease.owner_pid, lease.owner_started_at_ticks) {
         return ReapDecision::SkippedOwnerAlive;
     }
 
@@ -319,6 +335,14 @@ pub(crate) fn reap_orphans(app_data_dir: &Path, self_pid: i32) -> Vec<(String, R
                     lease.owner_pid
                 );
             }
+            ReapDecision::SkippedOwnerIdentityUnknown => {
+                log::debug!(
+                    "Leaving '{}' (pid {}) alone: its app session {} has unknown identity",
+                    lease.label,
+                    lease.pid,
+                    lease.owner_pid
+                );
+            }
             ReapDecision::SkippedPidRecycled => {
                 log::warn!(
                     "Lease for '{}' points at pid {}, which now belongs to a different \
@@ -361,14 +385,39 @@ mod tests {
     use std::process::{Command, Stdio};
     use tempfile::tempdir;
 
-    fn spawn_sleeper() -> std::process::Child {
-        Command::new("sleep")
-            .arg("300")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn a test process")
+    struct TestChild(std::process::Child);
+
+    impl std::ops::Deref for TestChild {
+        type Target = std::process::Child;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for TestChild {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn spawn_sleeper() -> TestChild {
+        TestChild(
+            Command::new("sleep")
+                .arg("300")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a test process"),
+        )
     }
 
     fn lease_for(child: &std::process::Child, label: &str, owner_pid: i32) -> RunLease {
@@ -460,6 +509,31 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[test]
+    fn the_current_live_owner_is_never_reaped() {
+        // The old self_pid exclusion classified a live owner's child as orphaned.
+        let child = spawn_sleeper();
+        let self_pid = std::process::id() as i32;
+        let mut lease = lease_for(&child, "console", self_pid);
+        assert_ne!(lease.owner_started_at_ticks, 0);
+        assert_eq!(decide(&lease, self_pid), ReapDecision::SkippedOwnerAlive);
+
+        lease.owner_started_at_ticks = 0;
+        assert_eq!(decide(&lease, self_pid), ReapDecision::SkippedOwnerAlive);
+    }
+
+    #[test]
+    fn an_unknown_owner_identity_is_never_reaped() {
+        // Production records zero when it cannot read the owner's starttime.
+        let child = spawn_sleeper();
+        let mut lease = lease_for(&child, "console", 1);
+        lease.owner_started_at_ticks = 0;
+
+        let decision = decide(&lease, std::process::id() as i32);
+
+        assert_eq!(decision, ReapDecision::SkippedOwnerIdentityUnknown);
+    }
+
     /// Composition with #205's immutable staging generations.
     ///
     /// After a restage the previous generation directory still exists on
@@ -478,14 +552,16 @@ mod tests {
         fs::create_dir_all(&superseded).expect("superseded generation");
         fs::create_dir_all(generations.join("console-newgen")).expect("current generation");
 
-        let mut child = Command::new("sleep")
-            .arg("300")
-            .current_dir(&superseded)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn a process inside the superseded generation");
+        let mut child = TestChild(
+            Command::new("sleep")
+                .arg("300")
+                .current_dir(&superseded)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a process inside the superseded generation"),
+        );
 
         let self_pid = std::process::id() as i32;
         let lease = lease_for(&child, "console", self_pid);
