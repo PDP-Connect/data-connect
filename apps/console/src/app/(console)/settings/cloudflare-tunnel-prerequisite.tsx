@@ -131,6 +131,13 @@ export const CLOUDFLARED_DOWNLOAD_URL =
  * "present" here for exactly that reason: there is no longer a real-world
  * case where the owner needs to act before submitting, only a case where
  * `start()` might need a little longer the first time.
+ *
+ * External links route through `OpenExternalLink`, matching every other
+ * external link in the settings page -- see that component's doc comment
+ * for how the desktop console opens this in the owner's system browser
+ * (Rust's `on_navigation` handler, no client-side involvement). The
+ * visible, `select-all` plain-text URL alongside the link stays regardless,
+ * so the download page is reachable by copy-paste too.
  */
 export function CloudflaredBinaryStatus({
   missing,

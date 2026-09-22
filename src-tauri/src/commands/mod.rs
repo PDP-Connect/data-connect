@@ -11,7 +11,6 @@ pub mod file_ops;
 pub(crate) mod oci;
 pub(crate) mod oci_catalog;
 pub(crate) mod oci_verify;
-pub(crate) mod open_external_url;
 pub mod pdpp_browser;
 pub mod pdpp_collection_state;
 pub mod pdpp_connector;

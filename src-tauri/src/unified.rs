@@ -463,7 +463,6 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     spawn_remote_access_config_watcher(app_handle.clone());
     spawn_autostart_watcher(app_handle.clone());
     spawn_origin_verification_watcher(app_handle.clone());
-    spawn_open_external_url_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
@@ -2320,14 +2319,6 @@ async fn finish_bootstrap(
             return Err(error);
         }
     };
-    let bridge_marker_cookie = match desktop_bridge_marker_cookie(&console_origin) {
-        Ok(cookie) => cookie,
-        Err(error) => {
-            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
-            return Err(error);
-        }
-    };
-
     let state_update = (|| -> Result<(), String> {
         let state = app.state::<UnifiedRuntimeState>();
         *state
@@ -2352,13 +2343,8 @@ async fn finish_bootstrap(
     }
 
     let console_origin_for_health_watch = console_origin.to_string();
-    if let Err(error) = create_or_update_console_window(
-        app,
-        console_origin,
-        cookie,
-        bridge_marker_cookie,
-        should_show,
-    ) {
+    if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show)
+    {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
@@ -2896,72 +2882,6 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
     save_autostart_state(&path, &next)
 }
 
-const OPEN_EXTERNAL_URL_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-/// Poll `open-external-url-queue.json` (under `PDPP_DATA_DIR`, same
-/// directory as `autostart.json`/`remote-access.json`) for links the console
-/// asked to have opened in the system browser and hand each one to
-/// `open::that_detached`. Modeled on `spawn_autostart_watcher` above: same
-/// poll-a-shared-file shape, same rationale (only this Rust process can
-/// perform the native action; the console's `http://127.0.0.1:{port}`
-/// window never gets Tauri's `invoke()` bridge, so it cannot call this
-/// directly -- see `commands/open_external_url.rs`'s module doc for the full
-/// chain). A 200ms interval (vs. autostart's 3s) because this drives a
-/// user-visible link click, not a background settings toggle -- a 3s stall
-/// between "click" and "browser tab appears" would read as a dead link
-/// again.
-pub(crate) fn spawn_open_external_url_watcher(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            if let Err(error) = tick_open_external_url_watcher(&app) {
-                log::warn!("Open-external-url watcher tick failed: {error}");
-            }
-            tokio::time::sleep(OPEN_EXTERNAL_URL_POLL_INTERVAL).await;
-            if shutdown_has_been_requested(&app) {
-                log::debug!("Open-external-url watcher stopping: shutdown requested");
-                return;
-            }
-        }
-    });
-}
-
-/// Reads the queue, opens every currently-pending request, then re-reads the
-/// queue immediately before writing and removes only the ids just
-/// processed -- NOT an unconditional empty write. `server/open-external-
-/// url-store.ts::enqueue` does an unlocked read-modify-write on this same
-/// file from the Node process; without this re-read, a request Node
-/// appended in the gap between this tick's first read and its write would
-/// be silently clobbered (the owner's click would just do nothing -- no
-/// error, no log). See `commands/open_external_url.rs`'s
-/// `apply_pending_open_external_url_requests` doc comment and its
-/// `removing_only_processed_ids_from_a_later_read_preserves_a_request_
-/// enqueued_mid_tick` regression test for the exact race this closes.
-fn tick_open_external_url_watcher(app: &AppHandle) -> Result<(), String> {
-    use crate::commands::open_external_url::{
-        apply_pending_open_external_url_requests, load_open_external_url_queue,
-        open_external_url_queue_path, save_open_external_url_queue,
-    };
-
-    let path = open_external_url_queue_path(app)?;
-    let queue = load_open_external_url_queue(&path)?;
-    if queue.pending.is_empty() {
-        return Ok(());
-    }
-    let processed = apply_pending_open_external_url_requests(&queue, |url| {
-        open::that_detached(url).map_err(|error| format!("Failed to open {url}: {error}"))
-    });
-
-    let current = load_open_external_url_queue(&path)?;
-    let remaining = crate::commands::open_external_url::OpenExternalUrlQueue {
-        pending: current
-            .pending
-            .into_iter()
-            .filter(|request| !processed.contains(&request.id))
-            .collect(),
-    };
-    save_open_external_url_queue(&path, &remaining)
-}
-
 /// Open the standalone recovery-code entry window, or focus it if it's
 /// already open (a repeat bootstrap failure, e.g. after a rejected code,
 /// must not stack duplicate windows).
@@ -3322,46 +3242,104 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
         .build())
 }
 
-/// Name of the cookie that tells the console it is running inside THIS
-/// process's Tauri webview, not a plain browser tab pointed at the same
-/// origin. `OpenExternalLink` (`apps/console/.../open-external-link.tsx`)
-/// reads this via `document.cookie` to decide whether to route a link click
-/// through the owner-authenticated open-external-url bridge instead of
-/// letting a bare `target="_blank"` anchor handle it.
+/// Opens an external link clicked inside the console window in the owner's
+/// real system browser, instead of navigating the console window itself
+/// away from the console entirely.
 ///
-/// Why this exists: the console window is `WebviewUrl::External`, so Tauri
-/// never injects `__TAURI__`/`__TAURI_INTERNALS__` into it (Tauri
-/// Discussion #2650) -- there is no Tauri-provided signal the page can read
-/// to tell it's inside the app. An earlier version of `OpenExternalLink`
-/// checked for `__TAURI__`/`__TAURI_INTERNALS__` directly, which is exactly
-/// backwards: it gated the bridge behind the one symbol whose ABSENCE is
-/// the entire reason the bridge had to exist, so the guard always evaluated
-/// false and the bridge code after it never ran in the shipped app (every
-/// `OpenExternalLink` click silently fell through to a no-op anchor).
-/// Confirmed live against a running desktop build: `window.__TAURI__` and
-/// `window.__TAURI_INTERNALS__` are both `undefined` in the console window,
-/// exactly as this module's other doc comments already said, and the
-/// detection check just wasn't reading its own documentation.
+/// This is `on_navigation`, which fires on every navigation attempt inside
+/// the webview -- including a plain `<a>` click with no `target="_blank"`
+/// needed, unlike `on_new_window` (which only fires for `window.open()`,
+/// confirmed NOT to fire for anchor activation on WebKitGTK by an actual
+/// click in Tim's real build: a plain `target="_blank"` anchor did nothing,
+/// twice, across two design rounds). `on_navigation` has no such gap: it is
+/// the same hook Tauri's own docs recommend for navigation allowlisting,
+/// and it requires no trusted user-gesture context the way `window.open()`
+/// does (WebKit blocks `window.open` from synthetic/untrusted event
+/// contexts, which independently made that path hard to verify without a
+/// real human click).
 ///
-/// This cookie is set by `create_or_update_console_window` below, the ONE
-/// place this process ever puts the console origin into a webview it
-/// controls -- a plain browser tab visiting the same URL from outside the
-/// app never goes through that code path, so it never receives this
-/// cookie. Unlike `pdpp_owner_session`, this cookie carries no secret (it
-/// is a fixed marker value, not a credential) and is intentionally NOT
-/// HttpOnly, since its only job is to be read by client JS.
-const DESKTOP_BRIDGE_COOKIE_NAME: &str = "pdpp_desktop_bridge";
+/// Returning `false` cancels the navigation; the console window itself
+/// never navigates away. Returning `true` lets it proceed normally --
+/// required for the console's OWN pages (moving between `/settings`,
+/// `/connect`, etc., and the one-time initial `window.navigate(url)` call
+/// in `create_or_update_console_window` below, which this same handler also
+/// sees). `is_console_origin` below is what tells the two cases apart: same
+/// scheme+host+port as the console's own origin is allowed through
+/// unconditionally; anything else is treated as an external link.
+///
+/// Three prior fixes (#186's capability grant, #200's `"__TAURI__" in
+/// window` check, #209's `pdpp_desktop_bridge` marker cookie) all died the
+/// same way: a JS-side check deciding whether to attempt the native path,
+/// which either evaluated false unconditionally (#186, #200) or measurably
+/// never received the signal it was waiting for (#209 -- the cookie never
+/// landed in the real webview's cookie store before the page ran). This
+/// handler has no such check to fail: it is attached to the window object
+/// itself in Rust at construction time, independent of anything the page's
+/// own JS can observe or get wrong.
+///
+/// `https:` only for anything treated as external -- this is the one place
+/// a URL from the console can reach `open::that_detached` at all, so the
+/// allowlist lives entirely here now. Rejects `file:`, `javascript:`,
+/// `data:`, and deliberately excludes `http:` too (which would let a
+/// compromised page target loopback services via the OS opener) -- the
+/// same rationale the now-deleted HTTP-bridge design's `open_external_url.
+/// rs::validate_external_url` used, just enforced once here instead of
+/// twice across a process boundary that no longer exists.
+fn is_console_origin(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
+    url.scheme() == console_origin.scheme()
+        && url.host_str() == console_origin.host_str()
+        && url.port_or_known_default() == console_origin.port_or_known_default()
+}
 
-fn desktop_bridge_marker_cookie(url: &tauri::Url) -> Result<Cookie<'static>, String> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| "Console URL has no cookie host".to_string())?
-        .to_string();
-    Ok(Cookie::build((DESKTOP_BRIDGE_COOKIE_NAME, "1"))
-        .domain(host)
-        .path("/")
-        .http_only(false)
-        .build())
+/// Set to `1` to make `decide_console_navigation` log what it WOULD open
+/// instead of actually calling `open::that_detached` -- for verification
+/// runs (this file's own unit tests, a standalone repro binary, or a
+/// scripted click against a real build) that need to prove the decision
+/// fires correctly without launching the OS's real system browser. `open::
+/// that_detached` shells out to `xdg-open` on Linux, which talks to
+/// whatever desktop session is actually running, NOT the `DISPLAY` the
+/// calling process was launched with -- wrapping a verification run in an
+/// isolated Xvfb display does not contain this, confirmed the hard way: an
+/// earlier verification run under this exact wrapper still opened a tab in
+/// the owner's real, already-running browser, because `xdg-open`'s
+/// single-instance handoff reaches the owner's live session regardless of
+/// which display launched the calling process. Unset (the production
+/// default) leaves behavior unchanged.
+const OPEN_EXTERNAL_DRY_RUN_ENV_VAR: &str = "PDPP_OPEN_EXTERNAL_DRY_RUN";
+
+fn open_external_dry_run_is_enabled() -> bool {
+    std::env::var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR).as_deref() == Ok("1")
+}
+
+/// Logs every navigation decision at `info`, unconditionally -- no debug
+/// build needed -- so a real click against a packaged app is independently
+/// checkable from the ordinary app log, not just from this file's own unit
+/// tests. Three outcomes, one line each: `allowed-internal` (navigation
+/// matches the console's own origin, proceeds normally),
+/// `opened-externally` (denied in-app, handed to `open::that_detached`),
+/// `refused` (denied, non-`https:` scheme, nothing opened). This is the
+/// single place all three are decided, so this is also the single place
+/// that needs to log them.
+fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
+    if is_console_origin(url, console_origin) {
+        log::info!("on_navigation: url={url} decision=allowed-internal");
+        return true;
+    }
+    if url.scheme() == "https" {
+        if open_external_dry_run_is_enabled() {
+            log::info!("on_navigation: url={url} decision=opened-externally (dry run: would open {url})");
+        } else {
+            match open::that_detached(url.as_str()) {
+                Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
+                Err(error) => log::error!(
+                    "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+                ),
+            }
+        }
+    } else {
+        log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
+    }
+    false
 }
 
 fn set_cookies_then_navigate<SetCookies, Navigate>(
@@ -3380,7 +3358,6 @@ fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookie: Cookie<'static>,
-    bridge_marker_cookie: Cookie<'static>,
     should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
@@ -3388,10 +3365,7 @@ fn create_or_update_console_window(
             || {
                 window
                     .set_cookie(cookie.clone())
-                    .map_err(|error| format!("Failed to set owner session cookie: {error}"))?;
-                window
-                    .set_cookie(bridge_marker_cookie.clone())
-                    .map_err(|error| format!("Failed to set desktop bridge marker cookie: {error}"))
+                    .map_err(|error| format!("Failed to set owner session cookie: {error}"))
             },
             || {
                 window
@@ -3413,6 +3387,7 @@ fn create_or_update_console_window(
     let blank_url: tauri::Url = "about:blank"
         .parse()
         .map_err(|error| format!("Failed to create blank console URL: {error}"))?;
+    let console_origin_for_navigation = url.clone();
     let window =
         WebviewWindowBuilder::new(app, CONSOLE_WINDOW_LABEL, WebviewUrl::External(blank_url))
             .title("DataConnect")
@@ -3427,6 +3402,11 @@ fn create_or_update_console_window(
             // larger than a small display (checked on creation only).
             .prevent_overflow()
             .center()
+            // See `decide_console_navigation`'s doc comment for why this
+            // exists and why it lives here (set once, on the builder, at
+            // the console window's own construction) rather than as
+            // anything the page's JS decides.
+            .on_navigation(move |url| decide_console_navigation(url, &console_origin_for_navigation))
             .build()
             .map_err(|error| format!("Failed to create console window: {error}"))?;
 
@@ -3434,10 +3414,7 @@ fn create_or_update_console_window(
         || {
             window
                 .set_cookie(cookie)
-                .map_err(|error| format!("Failed to set owner session cookie: {error}"))?;
-            window
-                .set_cookie(bridge_marker_cookie)
-                .map_err(|error| format!("Failed to set desktop bridge marker cookie: {error}"))
+                .map_err(|error| format!("Failed to set owner session cookie: {error}"))
         },
         || {
             window
@@ -5556,27 +5533,121 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
-    fn desktop_bridge_marker_cookie_is_not_http_only_and_carries_a_fixed_marker() {
-        // OpenExternalLink reads this cookie via document.cookie in the
-        // browser, which HttpOnly would block entirely. It must also carry
-        // no owner secret -- its only job is to prove this window came from
-        // create_or_update_console_window, not to authenticate anything.
-        let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
-        let cookie = desktop_bridge_marker_cookie(&url).expect("marker cookie");
-        assert_eq!(cookie.name(), DESKTOP_BRIDGE_COOKIE_NAME);
-        assert_eq!(cookie.value(), "1");
-        assert_eq!(cookie.http_only(), Some(false));
-    }
-
-    #[test]
-    fn owner_session_cookie_stays_http_only_unlike_the_bridge_marker() {
-        // Regression guard: the two cookies now set together at the same
-        // call site must not accidentally converge on the same HttpOnly
-        // setting -- the session cookie carries a real credential and must
-        // stay unreadable by page JS even though the marker cookie next to
-        // it must not.
+    fn owner_session_cookie_is_http_only() {
+        // Carries a real credential, so it must stay unreadable by page JS.
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_session_cookie(&url, "session-value").expect("session cookie");
         assert_eq!(cookie.http_only(), Some(true));
+    }
+
+    /// Source-level guard for the whole point of this fix: nothing in the
+    /// console window's construction may gate `decide_console_navigation`
+    /// behind a client-observable signal. Three prior fixes (#186, #200,
+    /// #209) all failed by adding exactly that kind of check; this pins
+    /// that the replacement handler is wired directly into the builder,
+    /// unconditionally.
+    #[test]
+    fn console_window_wires_on_navigation_unconditionally() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("fn create_or_update_console_window(")
+            .expect("create_or_update_console_window must exist");
+        let body = &source[start..];
+        assert!(
+            body.contains(
+                ".on_navigation(move |url| decide_console_navigation(url, &console_origin_for_navigation))"
+            ),
+            "create_or_update_console_window must attach on_navigation unconditionally on \
+             the WebviewWindowBuilder -- no cookie, no runtime detection, nothing that can \
+             fail closed the way #209's marker cookie did"
+        );
+    }
+
+    #[test]
+    fn is_console_origin_matches_scheme_host_and_port_only() {
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        assert!(is_console_origin(
+            &"http://127.0.0.1:4310/settings".parse().expect("same-origin url"),
+            &console
+        ));
+        assert!(!is_console_origin(
+            &"http://127.0.0.1:9999/".parse().expect("different port"),
+            &console
+        ));
+        assert!(!is_console_origin(
+            &"https://127.0.0.1:4310/".parse().expect("different scheme"),
+            &console
+        ));
+        assert!(!is_console_origin(
+            &"http://pdpp.dev:4310/".parse().expect("different host"),
+            &console
+        ));
+    }
+
+    #[test]
+    fn decide_console_navigation_allows_the_consoles_own_origin() {
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        for path in ["/", "/settings", "/connect"] {
+            let url: tauri::Url = format!("http://127.0.0.1:4310{path}")
+                .parse()
+                .expect("console-origin url");
+            assert!(
+                decide_console_navigation(&url, &console),
+                "navigation within the console's own origin ({path}) must be allowed, \
+                 or the owner could never move around the console at all"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_console_navigation_denies_non_https_external_urls() {
+        // Every scheme here is denied WITHOUT ever reaching
+        // open::that_detached -- that call only happens for `https:`, gated
+        // above this loop -- so none of these need the dry-run env var.
+        // `https:` itself is covered separately, below, with the dry-run
+        // gate set, so this process never shells out to the real OS opener
+        // during a test run.
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        for scheme_url in [
+            "http://127.0.0.1:1/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            let url: tauri::Url = scheme_url.parse().expect("test url");
+            assert!(
+                !decide_console_navigation(&url, &console),
+                "decide_console_navigation must always deny in-app navigation \
+                 (return false) for external url {scheme_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_console_navigation_denies_https_external_url_without_opening_a_real_browser() {
+        // The only test in this file that exercises the https: branch of
+        // decide_console_navigation, which is the one branch that can call
+        // open::that_detached -- a real OS-level side effect this process
+        // must never trigger during a test run (confirmed the hard way: an
+        // earlier verification run DID pop a tab in a real desktop session
+        // despite running under an isolated display, because xdg-open's
+        // single-instance handoff ignores the calling process's DISPLAY).
+        // Sets PDPP_OPEN_EXTERNAL_DRY_RUN=1 for the duration of this one
+        // assertion and restores the prior value afterward. No other test in
+        // this file reads that variable, so this is not a real race even
+        // though env vars are process-global under parallel test execution.
+        let previous = std::env::var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR).ok();
+        std::env::set_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR, "1");
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        let url: tauri::Url = "https://pdpp.dev/".parse().expect("external url");
+        let allowed = decide_console_navigation(&url, &console);
+        match previous {
+            Some(value) => std::env::set_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR, value),
+            None => std::env::remove_var(OPEN_EXTERNAL_DRY_RUN_ENV_VAR),
+        }
+        assert!(
+            !allowed,
+            "decide_console_navigation must still deny in-app navigation for an \
+             https: external url even in dry-run mode"
+        );
     }
 }
