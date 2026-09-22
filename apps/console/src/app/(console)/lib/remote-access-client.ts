@@ -91,3 +91,13 @@ export async function inspectCloudflareTunnelRemoteAccess(): Promise<RemoteAcces
   const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/cloudflare_tunnel")
   return unwrapData(payload) as RemoteAccessInspection
 }
+
+/**
+ * `reason` carries the detected LAN IP when `availability` is `"available"`
+ * -- not an error message in that case (see
+ * `owner-remote-access.ts`'s `my_devices_only` inspect route).
+ */
+export async function inspectMyDevicesOnlyRemoteAccess(): Promise<RemoteAccessInspection> {
+  const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect/my_devices_only")
+  return unwrapData(payload) as RemoteAccessInspection
+}

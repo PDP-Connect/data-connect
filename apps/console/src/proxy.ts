@@ -9,6 +9,71 @@ import { normalizeDashboardReturnTo } from "@/app/(console)/lib/return-to.ts";
 const referenceTopology = resolveReferenceTopology();
 const AS_PROXY_TARGET = referenceTopology.asInternalUrl;
 
+/**
+ * Host-header allowlist for this process's own listener, active ONLY when
+ * `HOSTNAME` (set by `src-tauri/src/unified.rs`'s `console_process_spec`)
+ * is non-loopback -- i.e. only for the `my_devices_only` posture. Every
+ * other posture keeps `HOSTNAME=127.0.0.1` and this check never activates,
+ * so existing behavior for the loopback-only case is unchanged.
+ *
+ * This is the same allowlist-and-reject shape as the reference server's
+ * `isAllowedRequestHost` (`reference-implementation/server/
+ * reachability-contract.ts`), and exists for the same reason: a browser on
+ * this LAN visiting an attacker's page can be made to send a request to
+ * this listener with an attacker-chosen Host header (DNS rebinding). Before
+ * this posture existed, the console had no Host check at all because it
+ * was never reachable from anything but this same machine's loopback
+ * interface -- binding a LAN address changes that, so this check exists
+ * specifically to close the gap `my_devices_only` opens. See the fixes for
+ * CVE-2025-49596 (Anthropic's MCP Inspector) and GHSA-89vp-x53w-74fx (Rust
+ * MCP SDK), both the same missing-Host-check-on-a-locally-bound-HTTP-server
+ * shape, both fixed by adding exactly this kind of allowlist.
+ */
+function isLoopbackBindHost(bindHost: string): boolean {
+  return (
+    bindHost === "" ||
+    bindHost === "127.0.0.1" ||
+    bindHost === "localhost" ||
+    bindHost === "::1"
+  );
+}
+
+function requestHostname(host: string): string {
+  const withoutPort = host.split(":")[0] ?? host;
+  return withoutPort.toLowerCase();
+}
+
+/**
+ * Pure predicate behind `isAllowedConsoleHost`, parameterized for testing
+ * without mutating `process.env` (module-level constants below are read
+ * once at import time, so a test cannot override them after the fact).
+ */
+export function isAllowedConsoleHostFor(
+  requestHost: string,
+  bindHost: string,
+  trustedHosts: readonly string[]
+): boolean {
+  if (isLoopbackBindHost(bindHost)) {
+    return true;
+  }
+  const hostname = requestHostname(requestHost);
+  return (
+    hostname === bindHost.trim().toLowerCase() ||
+    trustedHosts.some(trusted => trusted.trim().toLowerCase() === hostname)
+  );
+}
+
+const CONSOLE_BIND_HOST = process.env.HOSTNAME?.trim() ?? "";
+const CONSOLE_TRUSTED_HOSTS = (process.env.PDPP_TRUSTED_HOSTS ?? "")
+  .split(",")
+  .map(host => host.trim())
+  .filter(Boolean);
+
+function isAllowedConsoleHost(request: NextRequest): boolean {
+  const host = request.headers.get("host") ?? request.nextUrl.host;
+  return isAllowedConsoleHostFor(host, CONSOLE_BIND_HOST, CONSOLE_TRUSTED_HOSTS);
+}
+
 // Optimistic auth gate at the proxy layer (Next.js 16 BFF pattern). When
 // owner-auth is on and the BFF process holds the password, we could HMAC-
 // verify here too — but the documented topology allows split deployments
@@ -83,6 +148,10 @@ function resolveReferenceProxyTarget(pathname: string): string | null {
 }
 
 export default function proxy(request: NextRequest) {
+  if (!isAllowedConsoleHost(request)) {
+    return new NextResponse("Host not allowed", { status: 403 });
+  }
+
   // AS-proxied protocol paths first, so paths that share a prefix with an owner
   // section (notably `/grants/:id/revoke`) are rewritten to the AS rather than
   // caught by the owner-page gate below.

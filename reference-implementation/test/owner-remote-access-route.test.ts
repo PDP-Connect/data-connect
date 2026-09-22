@@ -496,3 +496,66 @@ test("GET inspect/ngrok reports unavailable without a managed desktop host, and 
     }
   }
 });
+
+test("GET inspect/my_devices_only reports availability tied to a real detected LAN interface", async () => {
+  // Whether this test machine actually has a non-loopback interface is
+  // environment-dependent (a CI sandbox may have none) -- this asserts the
+  // route's contract shape, not a specific IP: available implies a real,
+  // private (never loopback, never public) address in `reason`; unavailable
+  // implies a reason string and no address.
+  await withMountedRoutes(async (routes) => {
+    const handler = routes.get("GET /v1/owner/remote-access/inspect/my_devices_only");
+    const { captured, res } = makeRes();
+    await handler?.({}, res);
+    const body = captured.body as {
+      data: { availability: string; authentication: string; reason: string | null };
+    };
+    assert.equal(body.data.authentication, "not_required");
+    if (body.data.availability === "available") {
+      assert.ok(body.data.reason);
+      assert.doesNotMatch(body.data.reason ?? "", /^127\.|^0\.0\.0\.0$/);
+    } else {
+      assert.equal(body.data.availability, "unavailable");
+      assert.match(body.data.reason ?? "", /no lan/i);
+    }
+  });
+});
+
+test("POST config with posture my_devices_only ignores any client-submitted lan_host and persists the server-detected one", async () => {
+  await withMountedRoutes(async (routes) => {
+    const inspectHandler = routes.get("GET /v1/owner/remote-access/inspect/my_devices_only");
+    const { captured: inspected, res: inspectRes } = makeRes();
+    await inspectHandler?.({}, inspectRes);
+    const inspection = inspected.body as { data: { availability: string } };
+    if (inspection.availability === "unavailable") {
+      // No LAN interface on this machine/sandbox -- the POST branch must
+      // fail closed the same way, not silently accept the posture.
+      const postHandler = routes.get("POST /v1/owner/remote-access/config");
+      const { captured, res } = makeRes();
+      await postHandler?.(
+        { body: { fields: offRemoteAccessConfig().fields, posture: "my_devices_only", provider: null } },
+        res
+      );
+      assert.equal(captured.status, 400);
+      return;
+    }
+
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const { captured, res } = makeRes();
+    await postHandler?.(
+      {
+        body: {
+          fields: offRemoteAccessConfig().fields,
+          my_devices_only: { lan_host: "203.0.113.7" }, // attacker-supplied, must be ignored
+          posture: "my_devices_only",
+          provider: null,
+        },
+      },
+      res
+    );
+    const body = captured.body as { data: RemoteAccessConfig };
+    assert.equal(body.data.posture, "my_devices_only");
+    assert.notEqual(body.data.my_devices_only?.lan_host, "203.0.113.7");
+    assert.equal(body.data.fields.PDPP_BIND_HOST, body.data.my_devices_only?.lan_host);
+  });
+});

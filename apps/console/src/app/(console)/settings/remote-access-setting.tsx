@@ -72,6 +72,7 @@ function asConfig(value: unknown): RemoteAccessConfig {
       typeof candidate.console_port === "number" ? candidate.console_port : null,
     ngrok: candidate.ngrok ?? null,
     cloudflare_tunnel: candidate.cloudflare_tunnel ?? null,
+    my_devices_only: candidate.my_devices_only ?? null,
     tunnel_error:
       typeof candidate.tunnel_error === "string" ? candidate.tunnel_error : null,
   }
@@ -131,7 +132,7 @@ const postureRows: Array<{
     posture: "my_devices_only",
     label: "My devices only",
     description:
-      "Private device access. The secure embedded provider is not available yet.",
+      "Reachable from other devices on this network. No third party is involved -- the owner password is the only gate.",
   },
   {
     posture: "public_url",
@@ -163,6 +164,8 @@ export function RemoteAccessSetting({
     useState<RemoteAccessInspection | null>(null)
   const [cloudflareTunnelInspection, setCloudflareTunnelInspection] =
     useState<RemoteAccessInspection | null>(null)
+  const [myDevicesOnlyInspection, setMyDevicesOnlyInspection] =
+    useState<RemoteAccessInspection | null>(null)
   const [pendingPosture, setPendingPosture] =
     useState<RemoteAccessPosture | null>(null)
   const [origin, setOrigin] = useState("")
@@ -193,6 +196,7 @@ export function RemoteAccessSetting({
           inspection: nextInspection,
           ngrokInspection: nextNgrokInspection,
           cloudflareTunnelInspection: nextCloudflareTunnelInspection,
+          myDevicesOnlyInspection: nextMyDevicesOnlyInspection,
         }) => {
           if (cancelled) return
           const resolved = asConfig(nextConfig)
@@ -200,6 +204,7 @@ export function RemoteAccessSetting({
           setInspection(asInspection(nextInspection))
           setNgrokInspection(asInspection(nextNgrokInspection))
           setCloudflareTunnelInspection(asInspection(nextCloudflareTunnelInspection))
+          setMyDevicesOnlyInspection(asInspection(nextMyDevicesOnlyInspection))
           setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
           // Without this, an owner who already saved their ngrok domain sees
           // a blank field on every page load and has no way to tell their
@@ -239,6 +244,12 @@ export function RemoteAccessSetting({
   // can be unavailable independent of the rest of the Public URL flow.
   const cloudflareTunnelUnavailable =
     !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
+  // "My devices only" needs a detected LAN network interface -- unavailable
+  // (e.g. no network connection) is a real, distinct state from every other
+  // row's `desktopUnavailable`, so it gets its own inspection the same way
+  // ngrok/Cloudflare Tunnel do.
+  const myDevicesOnlyUnavailable =
+    !stateIsKnown || myDevicesOnlyInspection?.availability === "unavailable"
   const activeOrigin = config.fields.PDPP_REFERENCE_ORIGIN
   const configuredOriginValidation = useMemo(
     () => validateUserSuppliedOrigin(origin),
@@ -274,7 +285,35 @@ export function RemoteAccessSetting({
         .finally(() => setBusy(false))
       return
     }
-    if (nextPosture === "my_devices_only") return
+    if (nextPosture === "my_devices_only") {
+      if (myDevicesOnlyUnavailable) {
+        setError(
+          myDevicesOnlyInspection?.reason ??
+            "No LAN network interface was detected on this machine."
+        )
+        return
+      }
+      setBusy(true)
+      // The LAN address is detected server-side, never submitted from here
+      // (see owner-remote-access.ts's my_devices_only POST branch) -- the
+      // fields below are placeholders the server overwrites with real,
+      // freshly detected values before validating and persisting.
+      void saveRemoteAccessConfig({
+        posture: "my_devices_only",
+        provider: null,
+        fields: offRemoteAccessConfig().fields,
+      })
+        .then(result => {
+          if (!result.ok) {
+            setError(result.message)
+            return
+          }
+          setConfig(asConfig(result.config))
+        })
+        .catch(reason => setError(String(reason)))
+        .finally(() => setBusy(false))
+      return
+    }
     setPendingPosture(nextPosture)
     setOrigin(activeOrigin ?? "")
   }
@@ -470,7 +509,8 @@ export function RemoteAccessSetting({
         {postureRows.map(row => {
           // No row is selected until a real config has been read.
           const selected = stateIsKnown && config.posture === row.posture
-          const unavailable = row.posture === "my_devices_only"
+          const unavailable =
+            row.posture === "my_devices_only" && myDevicesOnlyUnavailable
           return (
             <label
               className={cn(
@@ -511,6 +551,32 @@ export function RemoteAccessSetting({
           )
         })}
       </div>
+
+      {stateIsKnown && config.posture === "my_devices_only" ? (
+        <div
+          className="grid gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-3"
+          role="alert"
+        >
+          <p className="pdpp-caption font-medium text-destructive">
+            This Personal Server is reachable from every device on this
+            network.
+          </p>
+          <p className="pdpp-caption text-muted-foreground">
+            No third party is involved and nothing is relayed off this
+            network, but the owner password is the only thing standing
+            between this network and the Personal Server. Do not enable this
+            on a network you do not trust (shared Wi-Fi, a coffee shop, a
+            workplace you do not administer).
+          </p>
+          <p className="break-all font-mono text-xs text-foreground/80">
+            {myDevicesOnlyInspection?.availability === "available"
+              ? `http://${myDevicesOnlyInspection.reason}${
+                  effectiveConsolePort != null ? `:${effectiveConsolePort}` : ""
+                }`
+              : "Detecting this machine's network address…"}
+          </p>
+        </div>
+      ) : null}
 
       {stateIsKnown && config.posture === "public_url" ? (
         <div className="grid gap-2 rounded-md border border-border/70 bg-muted/10 px-3 py-3">

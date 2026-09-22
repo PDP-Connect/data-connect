@@ -6,6 +6,7 @@
 import {
   getRemoteAccessConfig,
   inspectCloudflareTunnelRemoteAccess,
+  inspectMyDevicesOnlyRemoteAccess,
   inspectNgrokRemoteAccess,
   inspectRemoteAccess,
   setRemoteAccessConfig,
@@ -43,20 +44,24 @@ export async function loadRemoteAccessStateAction(): Promise<{
   inspection: Awaited<ReturnType<typeof inspectRemoteAccess>>
   ngrokInspection: Awaited<ReturnType<typeof inspectNgrokRemoteAccess>>
   cloudflareTunnelInspection: Awaited<ReturnType<typeof inspectCloudflareTunnelRemoteAccess>>
+  myDevicesOnlyInspection: Awaited<ReturnType<typeof inspectMyDevicesOnlyRemoteAccess>>
 }> {
   await requireDashboardAccess("/settings")
-  const [config, inspection, ngrokInspection, cloudflareTunnelInspection] = await Promise.all([
-    getRemoteAccessConfig(),
-    inspectRemoteAccess(),
-    inspectNgrokRemoteAccess(),
-    inspectCloudflareTunnelRemoteAccess(),
-  ])
+  const [config, inspection, ngrokInspection, cloudflareTunnelInspection, myDevicesOnlyInspection] =
+    await Promise.all([
+      getRemoteAccessConfig(),
+      inspectRemoteAccess(),
+      inspectNgrokRemoteAccess(),
+      inspectCloudflareTunnelRemoteAccess(),
+      inspectMyDevicesOnlyRemoteAccess(),
+    ])
   return {
     config,
     effectiveConsolePort: effectiveConsolePort(),
     inspection,
     ngrokInspection,
     cloudflareTunnelInspection,
+    myDevicesOnlyInspection,
   }
 }
 

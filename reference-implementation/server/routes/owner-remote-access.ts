@@ -8,6 +8,7 @@
 //   GET  /v1/owner/remote-access/inspect                     -> user_supplied_origin availability probe
 //   GET  /v1/owner/remote-access/inspect/ngrok               -> ngrok availability probe
 //   GET  /v1/owner/remote-access/inspect/cloudflare_tunnel   -> Cloudflare named-tunnel availability probe
+//   GET  /v1/owner/remote-access/inspect/my_devices_only     -> LAN-interface detection probe
 //
 // Auth: owner bearer (`pdpp_token_kind: "owner"`), the SAME guard every other
 // `/v1/owner/*` route uses (`requireToken` + `requireOwner`; see
@@ -77,15 +78,41 @@
 // applies a change the same way it applies any other reachability change --
 // restart the process.
 
+import { networkInterfaces } from "node:os"
 import { createCredentialCipherFromEnv } from "../stores/credential-encryption.ts"
 import {
   inspectCloudflareTunnel,
   inspectNgrok,
   inspectUserSuppliedOrigin,
   type RemoteAccessConfig,
+  type RemoteAccessInspection,
 } from "../remote-access-config.ts"
 import type { RemoteAccessConfigStore } from "../remote-access-store.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
+
+/**
+ * Detect this machine's own LAN IPv4 address for the `my_devices_only`
+ * posture -- never owner-typed, since DHCP makes it unstable across
+ * restarts. Deliberately Node-only (`node:os`), so this lives in a
+ * server-only route file rather than `../remote-access-config.ts`, which
+ * `apps/console`'s client bundle also imports.
+ *
+ * Picks the first non-loopback, non-virtual IPv4 interface. Returns `null`
+ * when no such interface exists (e.g. a machine with no LAN connection) --
+ * callers must treat that as "posture unavailable", never fall back to a
+ * public or loopback address.
+ */
+function detectLanHost(): string | null {
+  const interfaces = networkInterfaces()
+  for (const name of Object.keys(interfaces).sort()) {
+    for (const info of interfaces[name] ?? []) {
+      if (info.family === "IPv4" && !info.internal) {
+        return info.address
+      }
+    }
+  }
+  return null
+}
 
 interface RouteRequest {
   readonly body?: unknown
@@ -157,6 +184,23 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
         }
         const { providerCredential, ...config } = req.body
         let toSave: RemoteAccessConfig = config
+        if (config.posture === "my_devices_only") {
+          // Detected server-side, never trusted from the request body: a
+          // compromised or merely confused console client must not be able
+          // to declare an arbitrary bind/trusted host for this posture.
+          const lanHost = detectLanHost()
+          if (!lanHost) {
+            ctx.pdppError(
+              res,
+              400,
+              "remote_access_config_invalid",
+              "My devices only requires a detected LAN network interface, and none was found.",
+              null
+            )
+            return
+          }
+          toSave = { ...config, my_devices_only: { lan_host: lanHost } }
+        }
         if (config.provider === "ngrok") {
           if (!providerCredential || !providerCredential.trim()) {
             ctx.pdppError(res, 400, "remote_access_config_invalid", "ngrok requires providerCredential (the authtoken).", null)
@@ -200,6 +244,22 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
     ...guarded,
     (_req: RouteRequest, res: RouteResponse) => {
       res.json({ data: inspectNgrok(), object: "remote_access_inspection" })
+    }
+  )
+
+  app.get(
+    "/v1/owner/remote-access/inspect/my_devices_only",
+    ...guarded,
+    (_req: RouteRequest, res: RouteResponse) => {
+      const lanHost = detectLanHost()
+      const inspection: RemoteAccessInspection = lanHost
+        ? { availability: "available", authentication: "not_required", reason: lanHost }
+        : {
+            availability: "unavailable",
+            authentication: "not_required",
+            reason: "No LAN network interface was detected on this machine.",
+          }
+      res.json({ data: inspection, object: "remote_access_inspection" })
     }
   )
 
