@@ -8,6 +8,7 @@ import {
   describeTunnelError,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
+  originVerificationDisplay,
   privacyBadgeForNgrokMode,
   privacyBadgeForPosture,
   publicUrlOptionById,
@@ -18,6 +19,7 @@ import {
   validateNgrokDomain,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
+  type OriginVerification,
   type RemoteAccessConfig,
 } from "./remote-access.ts"
 
@@ -390,4 +392,78 @@ test("a pinned port must be a valid TCP port number", () => {
   }
   // Surrounding whitespace is tolerated, matching validateUserSuppliedOrigin's trim.
   assert.deepEqual(validatePinnedConsolePort(" 80 "), { ok: true, port: 80 })
+})
+
+function cloudflareConfigWith(originVerified: OriginVerification | null): RemoteAccessConfig {
+  return {
+    posture: "public_url",
+    provider: "cloudflare_tunnel",
+    fields: {
+      PDPP_BIND_HOST: "127.0.0.1",
+      PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+      PDPP_TRUSTED_HOSTS: "vault.example.com",
+      PDPP_TRUSTED_PROXIES: "",
+    },
+    cloudflare_tunnel: { hostname: "vault.example.com" },
+    origin_verified: originVerified,
+  }
+}
+
+const OWNER_MAINTAINED = { kind: "owner_maintained", where_to_set: "the dashboard" } as const
+
+function observation(overrides: Partial<OriginVerification> = {}): OriginVerification {
+  return {
+    origin: "https://vault.example.com",
+    checked_at: 1_000,
+    stale_after: 150,
+    outcome: { kind: "reaches_this_console" },
+    binding: OWNER_MAINTAINED,
+    agent: "running",
+    ...overrides,
+  }
+}
+
+test("an origin nobody has checked is unverified, never healthy", () => {
+  const display = originVerificationDisplay(cloudflareConfigWith(null), 1_000)
+  assert.deepEqual(display, { reading: { kind: "unverified" }, binding: null, agentExited: false })
+})
+
+test("a fresh proof reads as reaching this console", () => {
+  const display = originVerificationDisplay(cloudflareConfigWith(observation()), 1_000 + 149)
+  assert.deepEqual(display.reading, { kind: "reaches_this_console", checkedAt: 1_000 })
+  assert.deepEqual(display.binding, OWNER_MAINTAINED)
+})
+
+test("a reading older than its own staleness window decays to stale, keeping the binding", () => {
+  const display = originVerificationDisplay(cloudflareConfigWith(observation()), 1_000 + 151)
+  assert.deepEqual(display.reading, { kind: "stale", checkedAt: 1_000 })
+  // Who owns the route does not decay: it is the provider's property.
+  assert.deepEqual(display.binding, OWNER_MAINTAINED)
+})
+
+test("the 2026-09-22 misroute is reported, not swallowed", () => {
+  const display = originVerificationDisplay(
+    cloudflareConfigWith(observation({ outcome: { kind: "reaches_something_else", status: 404 } })),
+    1_010
+  )
+  assert.deepEqual(display.reading, { kind: "reaches_something_else", checkedAt: 1_000, status: 404 })
+})
+
+test("an unreachable origin carries its reason, and an exited agent is surfaced", () => {
+  const display = originVerificationDisplay(
+    cloudflareConfigWith(
+      observation({ outcome: { kind: "unreachable", reason: "connection refused" }, agent: "exited" })
+    ),
+    1_010
+  )
+  assert.deepEqual(display.reading, { kind: "unreachable", checkedAt: 1_000, reason: "connection refused" })
+  assert.equal(display.agentExited, true)
+})
+
+test("a reading taken against another origin says nothing about this one", () => {
+  const display = originVerificationDisplay(
+    cloudflareConfigWith(observation({ origin: "https://old.example.com" })),
+    1_010
+  )
+  assert.deepEqual(display, { reading: { kind: "unverified" }, binding: null, agentExited: false })
 })

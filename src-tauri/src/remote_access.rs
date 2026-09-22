@@ -146,10 +146,31 @@ pub(crate) struct RemoteAccessConfig {
     /// This field is the opposite shape: an OBSERVATION carrying the time
     /// it was made, so a consumer can tell "verified 20 seconds ago" from
     /// "nobody has checked since startup". Absent means exactly the latter
-    /// -- unverified -- and must never be read as healthy. See
-    /// `unified::origin_is_verified_reachable` for the point-of-use rule.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// -- unverified -- and must never be read as healthy. The point of use
+    /// is the console's `originVerificationDisplay`, which applies
+    /// `stale_after` from the record itself.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_observation"
+    )]
     pub(crate) origin_verified: Option<OriginVerification>,
+}
+
+/// Read an observation field, discarding it when its stored shape is not
+/// the current one.
+///
+/// An observation is re-taken every verification interval, so a record
+/// written by an older build (for example the `reachable: bool` shape
+/// before `outcome` existed) is worth nothing. Failing the whole config
+/// load over it would stop the stack from reading the owner's actual
+/// settings, which is the opposite of observe-only.
+fn deserialize_observation<'de, D>(deserializer: D) -> Result<Option<OriginVerification>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// A single, timestamped reachability observation for the public origin.
@@ -165,8 +186,78 @@ pub(crate) struct OriginVerification {
     pub(crate) origin: String,
     /// Unix seconds when the probe ran.
     pub(crate) checked_at: u64,
-    /// Whether the origin answered as a live tunnel at that moment.
-    pub(crate) reachable: bool,
+    /// How many seconds after `checked_at` this reading still counts as
+    /// evidence. Carried in the record so the console applies the same
+    /// staleness rule the supervisor chose, instead of a second copy of
+    /// the number.
+    pub(crate) stale_after: u64,
+    /// What answered at the public origin.
+    pub(crate) outcome: OriginProbeOutcome,
+    /// Who holds the mapping from the public origin to this computer, for
+    /// the provider in use when the reading was taken. The console renders
+    /// its guidance from this answer, never from the provider id.
+    pub(crate) binding: OriginBinding,
+    /// The provider's local agent at the same moment, if it runs one.
+    /// `None` for a provider with nothing running in this process (the
+    /// owner's own reverse proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<TunnelAgentHealth>,
+}
+
+/// What answered at the public origin when the supervisor sent it an
+/// origin-proof challenge (see `unified::probe_public_origin`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OriginProbeOutcome {
+    /// The response proved it came from THIS console: it answered a fresh
+    /// challenge with the per-boot key only this console process holds.
+    ReachesThisConsole,
+    /// Something answered, but it could not prove it is this console: a
+    /// stale route to an old port, a different service, or a provider edge
+    /// error page. `status` is the HTTP status it answered with.
+    ReachesSomethingElse { status: u16 },
+    /// Nothing answered: DNS, TLS, connection, or timeout failure.
+    Unreachable { reason: String },
+}
+
+/// Who owns the mapping from the public origin to this computer's loopback
+/// console.
+///
+/// A provider capability, answered per `PublicUrlProvider` variant the same
+/// way `privacy()` and `durable_address()` are. It decides what the app may
+/// claim: when the app supplies the mapping it may say it set one; when
+/// someone else holds it, the app can only report what the origin-proof
+/// probe observed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OriginBinding {
+    /// The app gives the provider the loopback target when the tunnel
+    /// starts, and the provider forwards there. A wrong target is fixed by
+    /// restarting the tunnel.
+    AppSupplied,
+    /// The mapping lives outside this app (a provider's control plane or
+    /// the owner's own reverse proxy). Anything the app passes is advisory
+    /// at best. The owner must set it at `where_to_set`, and it breaks when
+    /// the console's port changes.
+    OwnerMaintained { where_to_set: String },
+}
+
+/// The provider's local agent -- the process or in-process session that
+/// carries tunnel traffic on this machine.
+///
+/// Deliberately says nothing about the public side: an agent can run while
+/// its edge session is dead (ngrok) or while the provider routes the
+/// hostname somewhere else (a dashboard-managed Cloudflare tunnel). Only
+/// `OriginProbeOutcome` speaks for the public origin.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TunnelAgentHealth {
+    /// No agent was started, or it was stopped on purpose.
+    Stopped,
+    /// The agent is running.
+    Running,
+    /// The agent was started and has since exited without being stopped.
+    Exited,
 }
 
 /// Options the `MyDevicesOnly` posture consumes: no provider, no vendor, no
