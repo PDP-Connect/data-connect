@@ -166,30 +166,19 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           toSave = { ...config, ngrok_authtoken_sealed: cipher.seal(providerCredential.trim()) }
         }
         if (config.provider === "cloudflare_tunnel") {
-          // Checked before the credential, matching the order the console's
-          // own submit guard uses (remote-access-setting.tsx): a missing
-          // binary is the more fundamental problem. Only an exact `false`
-          // (a real, checked "not installed") rejects -- `null` ("unknown",
-          // e.g. no managed desktop host) must never be misread as "missing"
-          // and block a submission the owner has no way to explain, the same
-          // tri-state policy the console UI already enforces client-side.
-          // This route is the one path that actually persists the config;
-          // the console's own check is real but bypassable (a stale page, a
-          // direct API call, a compromised session token) and was the only
-          // enforcement before this, which let a config with no binary
-          // present be saved successfully -- the exact "commit before you
-          // fail" bug this provider's UI exists to prevent, just reachable
-          // by skipping the button instead of using it.
-          if (inspectCloudflareTunnel().cloudflared_binary_present === false) {
-            ctx.pdppError(
-              res,
-              400,
-              "remote_access_config_invalid",
-              "cloudflared is not installed on this machine yet. Install it, then try again.",
-              null
-            )
-            return
-          }
+          // A missing cloudflared binary is no longer a submission blocker:
+          // `ensure_cloudflared_available` (src-tauri/src/remote_access_cloudflare.rs)
+          // downloads and checksum-verifies a real copy automatically the
+          // first time this provider actually starts, when no system
+          // install is on PATH. Rejecting the config here on
+          // `cloudflared_binary_present === false` would refuse a
+          // perfectly valid submission -- the exact case download-on-
+          // first-use exists to make normal -- and tell the owner to do
+          // something ("install it, then try again") the app is about to
+          // do for them. If the download itself fails at spawn time
+          // (no network, an unsupported platform), `start()` surfaces that
+          // as a real, actionable `tunnel_error` instead, the same failure
+          // surface ngrok's own credential/spawn failures already use.
           if (!providerCredential || !providerCredential.trim()) {
             ctx.pdppError(res, 400, "remote_access_config_invalid", "cloudflare_tunnel requires providerCredential (the tunnel token).", null)
             return
