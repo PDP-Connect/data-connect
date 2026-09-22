@@ -77,24 +77,22 @@ describe("console window capabilities", () => {
     expect(hasFs).toBe(false)
   })
 
-  it("grants shell:allow-open so outbound links open the system browser", () => {
-    const stringPermissions = document.permissions.filter(
-      permission => typeof permission === "string"
-    )
-
-    expect(stringPermissions).toContain("shell:allow-open")
-  })
-
-  it("does not grant shell access beyond opening links", () => {
+  it("grants no shell capability at all -- outbound links are opened by Rust's on_navigation handler, not invoke()", () => {
+    // shell:allow-open (#186) never worked here: this window is
+    // WebviewUrl::External, which never receives Tauri's invoke() bridge
+    // (Tauri Discussion #2650), so no capability grant mediated through it
+    // can ever be reachable. The actual fix
+    // (decide_console_navigation/on_navigation, src-tauri/src/unified.rs)
+    // intercepts navigation at the webview level in Rust, independent of
+    // any capability grant -- this asserts the dead grant is gone, not
+    // replaced with something else equally unreachable.
     const stringPermissions = document.permissions.filter(
       (permission): permission is string => typeof permission === "string"
     )
 
-    const shellPermissions = stringPermissions.filter(permission =>
-      permission.startsWith("shell:")
-    )
+    const hasShell = stringPermissions.some(permission => permission.startsWith("shell:"))
 
-    expect(shellPermissions).toEqual(["shell:allow-open"])
+    expect(hasShell).toBe(false)
   })
 })
 

@@ -33,6 +33,11 @@ name = "titlebar_repro"
 path = "src/bin/titlebar_repro.rs"
 required-features = ["stall-repro"]
 
+[[bin]]
+name = "new_window_repro"
+path = "src/bin/new_window_repro.rs"
+required-features = ["stall-repro"]
+
 [features]
 stall-repro = []
 
