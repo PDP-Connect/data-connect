@@ -36,6 +36,7 @@ export {
   type CloudflareTunnelOptions,
   type DurableAddressState,
   type InvalidOrigin,
+  type MyDevicesOnlyOptions,
   type NgrokEndpointMode,
   type NgrokOptions,
   type OriginValidation,
@@ -55,7 +56,7 @@ export {
  */
 export type PrivacyBadge =
   | "No provider - this device only"
-  | "Unavailable - no provider yet"
+  | "No provider - reachable from your local network only"
   | "Depends on your proxy - it can read your data unless it passes TLS through"
 
 export function privacyBadgeForPosture(
@@ -66,11 +67,12 @@ export function privacyBadgeForPosture(
     // imply a third party that is not there.
     case "off":
       return "No provider - this device only"
-    // Not selectable (no embedded provider ships yet). Asserting a privacy
-    // property for something that cannot be chosen would be a claim about
-    // software that does not exist.
+    // Still no third party -- the console binds this machine's own LAN
+    // address instead of loopback, so any device on the same network can
+    // reach it. The owner password is the only gate; see the settings UI's
+    // persistent warning banner for that tradeoff.
     case "my_devices_only":
-      return "Unavailable - no provider yet"
+      return "No provider - reachable from your local network only"
     // The owner supplies this endpoint. Whether the operator reads plaintext
     // depends on that proxy's TLS termination, which we cannot verify.
     case "public_url":
