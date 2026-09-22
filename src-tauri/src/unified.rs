@@ -3254,17 +3254,29 @@ fn is_console_origin(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
         && url.port_or_known_default() == console_origin.port_or_known_default()
 }
 
+/// Logs every navigation decision at `info`, unconditionally -- no debug
+/// build needed -- so a real click against a packaged app is independently
+/// checkable from the ordinary app log, not just from this file's own unit
+/// tests. Three outcomes, one line each: `allowed-internal` (navigation
+/// matches the console's own origin, proceeds normally),
+/// `opened-externally` (denied in-app, handed to `open::that_detached`),
+/// `refused` (denied, non-`https:` scheme, nothing opened). This is the
+/// single place all three are decided, so this is also the single place
+/// that needs to log them.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
     if is_console_origin(url, console_origin) {
+        log::info!("on_navigation: url={url} decision=allowed-internal");
         return true;
     }
-    log::info!("[bridge-diag] on_navigation intercepted external url={url}");
     if url.scheme() == "https" {
-        if let Err(error) = open::that_detached(url.as_str()) {
-            log::error!("Failed to open external link {url}: {error}");
+        match open::that_detached(url.as_str()) {
+            Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
+            Err(error) => log::error!(
+                "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+            ),
         }
     } else {
-        log::warn!("Refusing to open a non-https link from the console window: {url}");
+        log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
     }
     false
 }
