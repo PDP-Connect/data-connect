@@ -1311,6 +1311,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "gtk",
  "hex",
  "keyring",
  "libc",
@@ -1350,7 +1351,6 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "windows 0.61.3",
  "zip",
 ]
 
@@ -7188,7 +7188,8 @@ dependencies = [
 [[package]]
 name = "tauri-runtime"
 version = "2.11.3"
-source = "git+https://github.com/tnunamak/tauri?rev=1598c1df37f87fe76a08ed18e0b8fa7b270c3d16#1598c1df37f87fe76a08ed18e0b8fa7b270c3d16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0b4bc95aed361b0019067d189a1174a603d460d0f6c72606512d59fc9c12ec8"
 dependencies = [
  "cookie",
  "dpi",
@@ -7212,7 +7213,8 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-wry"
 version = "2.11.4"
-source = "git+https://github.com/tnunamak/tauri?rev=1598c1df37f87fe76a08ed18e0b8fa7b270c3d16#1598c1df37f87fe76a08ed18e0b8fa7b270c3d16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e6fac707727b7a2f48e4ded90976324267371073edbb415ffb73bb0458d203f"
 dependencies = [
  "gtk",
  "http",
@@ -7237,7 +7239,8 @@ dependencies = [
 [[package]]
 name = "tauri-utils"
 version = "2.9.3"
-source = "git+https://github.com/tnunamak/tauri?rev=1598c1df37f87fe76a08ed18e0b8fa7b270c3d16#1598c1df37f87fe76a08ed18e0b8fa7b270c3d16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e176a18e67764923c4f1ce66f25ae4abe5f688384d5eb1a0fa6c77f3d90f887"
 dependencies = [
  "anyhow",
  "brotli",

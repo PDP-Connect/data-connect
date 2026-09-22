@@ -30,6 +30,8 @@ pub mod pdeathsig_port_repro;
 mod sealed_credential;
 #[cfg(desktop)]
 mod unified;
+#[cfg(target_os = "linux")]
+pub mod wayland_titlebar;
 
 pub use commands::browser_surface_host_env_pairs;
 #[cfg(all(desktop, feature = "stall-repro"))]
@@ -137,6 +139,9 @@ pub fn run() {
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
         None,
     ));
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.plugin(wayland_titlebar::init());
 
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
