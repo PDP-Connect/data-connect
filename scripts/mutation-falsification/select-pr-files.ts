@@ -125,7 +125,6 @@ export type ExclusionReason =
   | "outside_cohort"
   | "test_file"
   | "excluded_tooling"
-  | "no_mutable_change"
 
 /** One `git diff` name-status record, already parsed out of the NUL-delimited stream. */
 export interface DiffEntry {
@@ -908,25 +907,17 @@ export function freezeIntent(input: {
 
     const ranges = [...(input.hunks?.get(path) ?? [])]
     if (ranges.length === 0) {
-      // The caller selected this file, so the evidence has to say which of
-      // its lines were mutated; there is no reading of "none" that a
-      // completed run could honestly report. Whole-file scope is reserved
-      // for added files (handled above), so this is not that case falling
-      // through -- it is a MODIFIED file whose diff produced no mutable
-      // surface at head: a pure rename (git attributes the whole content
-      // to the rename, no `@@` hunk at all), or a modification whose only
-      // hunks are pure deletions (a `newCount` of 0 -- removing an import,
-      // a function, a call site -- contributes no range by design; see
-      // `parseUnifiedZeroHunks`'s doc comment for why: deleted content
-      // cannot carry a fault into head). Both legitimately change zero
-      // lines AT HEAD, so this drops the file from the diff rather than
-      // mutating it whole -- exactly what a pure rename with no hunks was
-      // already excluded for by not appearing in the hunks map at all; a
-      // pure-deletion-only modification reaches this same outcome through
-      // a different path (it DOES appear in diff status M, just with an
-      // empty range list), and both belong in `excluded`, not a crash.
-      excluded.push({ path, reason: "no_mutable_change" })
-      continue
+      // Failing here is the point. The caller selected this file, so the
+      // evidence has to say which of its lines were mutated; there is no
+      // reading of "none" that a completed run could honestly report. A revision
+      // that legitimately changes no line of a selected file -- a pure rename --
+      // must drop it from the diff rather than have it silently mutated whole.
+      throw new Error(
+        `${relative} was selected for mutation (status ${status || "unknown"}) but has no ` +
+          `changed line ranges. Whole-file scope is reserved for added files; a selected file ` +
+          `with no derived ranges cannot be scoped, and silently mutating it in full would ` +
+          `report evidence this revision's diff does not support.`
+      )
     }
     scope.push({ path: relative, kind: "changed_ranges", ranges })
     mutate.push(...toMutateEntries(relative, ranges))
