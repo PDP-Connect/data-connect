@@ -527,7 +527,7 @@ test("POST config with posture my_devices_only ignores any client-submitted lan_
     const { captured: inspected, res: inspectRes } = makeRes();
     await inspectHandler?.({}, inspectRes);
     const inspection = inspected.body as { data: { availability: string } };
-    if (inspection.availability === "unavailable") {
+    if (inspection.data.availability === "unavailable") {
       // No LAN interface on this machine/sandbox -- the POST branch must
       // fail closed the same way, not silently accept the posture.
       const postHandler = routes.get("POST /v1/owner/remote-access/config");
