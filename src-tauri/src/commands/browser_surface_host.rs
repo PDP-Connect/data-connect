@@ -277,9 +277,9 @@ pub fn cleanup_browser_surface_host(app: &AppHandle) {
 }
 
 pub fn unified_stack_enabled() -> bool {
-    std::env::var("DATACONNECT_UNIFIED_STACK")
-        .map(|value| value == "1")
-        .unwrap_or(false)
+    std::env::var("DATACONNECT_LEGACY_STACK")
+        .map(|value| value != "1")
+        .unwrap_or(true)
 }
 
 fn host_token() -> String {

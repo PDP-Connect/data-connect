@@ -1,10 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The opt-in tray agent and authenticated console webview.
+//! The default tray agent and authenticated console webview.
 //!
-//! The opt-in path owns the staged reference stack and the authenticated
-//! console webview. Explicit RI/console URLs remain an attach-only development
+//! This path owns the staged reference stack and the authenticated console
+//! webview, and runs by default. `DATACONNECT_LEGACY_STACK=1` opts a
+//! developer out, back to the legacy `main` window, kept only as a design
+//! reference. Explicit RI/console URLs remain an attach-only development
 //! escape hatch.
 
 use crate::commands::process_supervisor::{
@@ -281,13 +283,16 @@ fn tray_action_for_menu_id(id: &str) -> TrayAction {
     }
 }
 
-/// Return the opt-in flag without treating any other value as enabled.
-pub(crate) fn enabled_for_value(value: Option<&str>) -> bool {
+/// Return whether the legacy opt-out flag disables the unified stack, without
+/// treating any other value as a disable. Unified is the default; setting
+/// `DATACONNECT_LEGACY_STACK=1` is a deliberate developer opt-out kept for
+/// design reference, never a supported end-user path.
+pub(crate) fn disabled_for_value(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
 pub(crate) fn is_enabled() -> bool {
-    enabled_for_value(std::env::var("DATACONNECT_UNIFIED_STACK").ok().as_deref())
+    !disabled_for_value(std::env::var("DATACONNECT_LEGACY_STACK").ok().as_deref())
 }
 
 pub(crate) fn remote_access_configuration_supported() -> bool {
@@ -4347,11 +4352,11 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
-    fn unified_stack_requires_exact_one_flag() {
-        assert!(enabled_for_value(Some("1")));
-        assert!(!enabled_for_value(Some("0")));
-        assert!(!enabled_for_value(Some("true")));
-        assert!(!enabled_for_value(None));
+    fn legacy_stack_opt_out_requires_exact_one_flag() {
+        assert!(disabled_for_value(Some("1")));
+        assert!(!disabled_for_value(Some("0")));
+        assert!(!disabled_for_value(Some("true")));
+        assert!(!disabled_for_value(None));
     }
 
     #[test]
