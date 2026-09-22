@@ -2708,6 +2708,41 @@ fn apply_pending_cloudflare_tunnel_token(
     }
 }
 
+/// The view of `RemoteAccessConfig` that actually warrants a stack restart
+/// if it changes -- everything EXCEPT `origin_verified`.
+///
+/// `origin_verified` is a pure observation
+/// (`spawn_origin_verification_watcher` writes a fresh `checked_at`
+/// timestamp to it every `ORIGIN_VERIFY_INTERVAL`, 60s, whether or not
+/// reachability actually changed), never an owner-initiated request. Before
+/// this function existed, `spawn_remote_access_config_watcher`'s
+/// `current == last_applied` compared the WHOLE struct, `origin_verified`
+/// included -- so every 60s reachability write looked exactly like a real
+/// config change, and every restart it triggered rebuilt the stack, which
+/// on its next boot re-armed the origin-verification watcher for another
+/// write 60s later. A self-sustaining restart loop with no owner action
+/// anywhere in it: confirmed live on Tim's machine, four teardowns and
+/// climbing, ~60s apart -- matching `ORIGIN_VERIFY_INTERVAL` almost exactly
+/// once restart overhead is accounted for. `apply_ngrok_tunnel_outcome`'s
+/// own doc comment already establishes the right shape for a write that
+/// must not retry-storm (settle after exactly one restart via an
+/// idempotent write) -- `origin_verified` cannot use that same fix because
+/// its value is SUPPOSED to change every interval; excluding it from what
+/// the watcher compares is the correct fix for a field that changing is
+/// never itself news.
+///
+/// This is the same defect family as #208 (health-check-driven teardown)
+/// and #216's fix for it: a mechanism that exists to OBSERVE state ending
+/// up DESTROYING the state it observes. The general principle -- reporting
+/// a fact must never be allowed to double as an action that changes the
+/// system the fact describes -- applies here exactly as it did there.
+fn restart_relevant_config(config: &RemoteAccessConfig) -> RemoteAccessConfig {
+    RemoteAccessConfig {
+        origin_verified: None,
+        ..config.clone()
+    }
+}
+
 pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_applied = load_remote_access_config(&app).unwrap_or_else(|error| {
@@ -2768,7 +2803,12 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             } else {
                 current
             };
-            if current == last_applied {
+            if restart_relevant_config(&current) == restart_relevant_config(&last_applied) {
+                // Still update `last_applied` to the latest full config
+                // (origin_verified included) so the NEXT comparison's
+                // baseline reflects reality, without treating this tick as
+                // a restart-worthy change.
+                last_applied = current;
                 continue;
             }
             log::info!("Remote-access config changed on disk; restarting the managed stack");
@@ -4854,6 +4894,96 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             !origin_is_verified_reachable(&config, 1_001, ORIGIN_VERIFY_STALE_AFTER),
             "a probe that failed must not read as reachable"
         );
+    }
+
+    /// Confirmed live on Tim's machine, 2026-09-21: `spawn_origin_verification_watcher`
+    /// writes a fresh `checked_at` to `origin_verified` every
+    /// `ORIGIN_VERIFY_INTERVAL` (60s) regardless of whether reachability
+    /// actually changed. Before `restart_relevant_config` existed, the
+    /// config watcher's `current == last_applied` compared the WHOLE
+    /// struct, so every one of those writes looked exactly like a real
+    /// config change -- an observer's routine write triggering the
+    /// destroyer it feeds. Two config values that differ ONLY in
+    /// `origin_verified` must be equal once run through
+    /// `restart_relevant_config`, regardless of how many times
+    /// `checked_at` advances.
+    #[test]
+    fn origin_verification_timestamp_alone_is_not_a_restart_relevant_change() {
+        let mut base = crate::remote_access::off_remote_access_config();
+        base.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        base.provider = Some("cloudflare_tunnel".to_string());
+        base.fields.reference_origin = Some("https://vault.example.com".to_string());
+
+        let mut first_check = base.clone();
+        first_check.origin_verified = Some(crate::remote_access::OriginVerification {
+            origin: "https://vault.example.com".to_string(),
+            checked_at: 1_000,
+            reachable: true,
+        });
+
+        let mut second_check = base.clone();
+        second_check.origin_verified = Some(crate::remote_access::OriginVerification {
+            origin: "https://vault.example.com".to_string(),
+            checked_at: 1_060,
+            reachable: true,
+        });
+
+        assert_ne!(
+            first_check, second_check,
+            "the raw structs must genuinely differ (checked_at advanced) -- \
+             otherwise this test would not be exercising the real bug"
+        );
+        assert_eq!(
+            restart_relevant_config(&first_check),
+            restart_relevant_config(&second_check),
+            "a config that differs only in origin_verified's timestamp must \
+             read as unchanged for restart purposes"
+        );
+    }
+
+    /// N restarts cannot chain: simulates the exact loop from Tim's log
+    /// (config-change restart -> boot re-establishes origin_verified with a
+    /// fresh timestamp -> watcher tick -> should NOT restart again) for
+    /// several cycles, and asserts the watcher's restart-worthy comparison
+    /// only fires once, on the first REAL change, never again for the
+    /// timestamp-only writes that follow.
+    #[test]
+    fn a_restart_cannot_cause_the_next_restart_via_origin_verification_writes() {
+        let mut last_applied = crate::remote_access::off_remote_access_config();
+        let mut current = last_applied.clone();
+        current.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        current.provider = Some("cloudflare_tunnel".to_string());
+        current.fields.reference_origin = Some("https://vault.example.com".to_string());
+
+        // The one real, owner-initiated change: must be seen as a restart.
+        assert_ne!(
+            restart_relevant_config(&current),
+            restart_relevant_config(&last_applied)
+        );
+        last_applied = current.clone();
+
+        // Simulate the origin-verification watcher writing a fresh
+        // timestamp on every subsequent tick, the way it does every 60s in
+        // the real app -- none of these five writes may register as a
+        // restart-worthy change against the baseline set above.
+        for tick in 0..5u64 {
+            let mut observed = last_applied.clone();
+            observed.origin_verified = Some(crate::remote_access::OriginVerification {
+                origin: "https://vault.example.com".to_string(),
+                checked_at: 1_000 + tick * 60,
+                reachable: true,
+            });
+            assert_eq!(
+                restart_relevant_config(&observed),
+                restart_relevant_config(&last_applied),
+                "tick {tick}: an origin-verification write alone must never \
+                 be read as a config change worth restarting for"
+            );
+            // Matches the real loop: last_applied still advances to the
+            // latest full config even when no restart happens, so a LATER
+            // genuine change is still detected against current reality.
+            last_applied = observed;
+        }
     }
 
     #[test]
