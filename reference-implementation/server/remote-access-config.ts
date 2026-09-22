@@ -28,12 +28,31 @@ export interface ReachabilityFields {
   PDPP_REFERENCE_ORIGIN: string | null
   PDPP_TRUSTED_HOSTS: string
   PDPP_TRUSTED_PROXIES: string
-  PDPP_BIND_HOST: "127.0.0.1"
+  /**
+   * Loopback for every posture except `my_devices_only`, where this is the
+   * machine's own LAN IP (see `MyDevicesOnlyOptions`) -- never `0.0.0.0`
+   * ("0.0.0.0 Day" lets a malicious website reach an all-interfaces bind
+   * from the browser; a specific LAN IP does not have that exposure).
+   */
+  PDPP_BIND_HOST: string
 }
 
 export interface NgrokOptions {
   endpoint_mode: NgrokEndpointMode
   reserved_domain: string | null
+}
+
+/**
+ * Options the `my_devices_only` posture consumes: no provider, no vendor,
+ * no daemon -- just the machine's own LAN IP, detected at launch (DHCP makes
+ * it unstable across restarts, so this is never owner-typed the way
+ * `user_supplied_origin`'s origin is). `lan_host` must be a private/
+ * link-local address (RFC1918 or IPv4 link-local); a detected address that
+ * turns out to be public (e.g. a cloud VM with no private interface) must
+ * refuse this posture rather than silently bind a public interface.
+ */
+export interface MyDevicesOnlyOptions {
+  lan_host: string
 }
 
 /**
@@ -68,6 +87,7 @@ export interface RemoteAccessConfig {
   console_port?: number | null
   ngrok?: NgrokOptions | null
   cloudflare_tunnel?: CloudflareTunnelOptions | null
+  my_devices_only?: MyDevicesOnlyOptions | null
   /**
    * The ngrok authtoken, sealed with `createCredentialCipherFromEnv()`
    * (`stores/credential-encryption.ts`) under `PDPP_CREDENTIAL_ENCRYPTION_KEY`
@@ -231,6 +251,72 @@ export function validatePinnedConsolePort(raw: string): { ok: true; port: number
 }
 
 /**
+ * True for an RFC1918 IPv4 address, IPv4 link-local, or an IPv6 ULA/
+ * link-local address -- NEVER true for loopback or `0.0.0.0`. This is the
+ * "real LAN interface" check for `my_devices_only`: it must reject a
+ * loopback address masquerading as a LAN host, and it must reject a
+ * detected address that turns out to be public (e.g. a cloud VM with no
+ * private interface), so this posture never silently binds a public one.
+ */
+function isPrivateLanHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase()
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized)
+  if (ipv4) {
+    const first = Number(ipv4[1])
+    const second = Number(ipv4[2])
+    return (
+      first === 10 ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 169 && second === 254)
+    )
+  }
+  return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")
+}
+
+/**
+ * Validate the `my_devices_only` posture: no provider, no daemon, no third
+ * party -- the console and reference server bind the machine's own LAN
+ * address instead of loopback, so devices on the same network reach it
+ * directly. `lan_host` is detected at launch (see
+ * `src-tauri/src/remote_access.rs`'s LAN-detection helper), never
+ * owner-typed, since DHCP makes it unstable across restarts.
+ *
+ * The owner password stays mandatory -- `resolveOwnerExposurePosture`
+ * (`owner-exposure-posture.ts`) already fails closed whenever the bind host
+ * is non-loopback, and binding a LAN address triggers that same gate.
+ */
+function validateMyDevicesOnlyConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
+  const lanHost = config.my_devices_only?.lan_host?.trim()
+  if (!lanHost) {
+    return { ok: false, message: "My devices only requires a detected LAN address." }
+  }
+  if (!isPrivateLanHost(lanHost)) {
+    return {
+      ok: false,
+      message: "My devices only requires a private network address; the detected address is not on a private range.",
+    }
+  }
+  const port = config.console_port
+  const origin = port != null ? `http://${lanHost}:${port}` : `http://${lanHost}`
+  return {
+    ok: true,
+    config: {
+      posture: "my_devices_only",
+      provider: null,
+      fields: {
+        PDPP_REFERENCE_ORIGIN: origin,
+        PDPP_TRUSTED_HOSTS: lanHost,
+        PDPP_TRUSTED_PROXIES: "",
+        PDPP_BIND_HOST: lanHost,
+      },
+      console_port: config.console_port ?? null,
+      my_devices_only: { lan_host: lanHost },
+    },
+  }
+}
+
+/**
  * Validate a full `RemoteAccessConfig` the way `set_remote_access_config` /
  * `configure_remote_access` do in `src-tauri/src/remote_access.rs`, for both
  * providers this route family now owns: `user_supplied_origin` end to end,
@@ -239,8 +325,10 @@ export function validatePinnedConsolePort(raw: string): { ok: true; port: number
  * before it ever reaches this function).
  *
  * Kept byte-for-byte equivalent to the Rust validator's `PublicUrl` branch:
- * bind host must stay loopback; `user_supplied_origin` requires the origin to
- * pass `validateUserSuppliedOrigin` with `PDPP_TRUSTED_HOSTS` equal to the
+ * bind host must stay loopback for `off`/`public_url`; `my_devices_only` is
+ * the one posture allowed a private LAN bind host instead (see
+ * `validateMyDevicesOnlyConfig`). `user_supplied_origin` requires the origin
+ * to pass `validateUserSuppliedOrigin` with `PDPP_TRUSTED_HOSTS` equal to the
  * origin's host; ngrok is accepted with empty reachability fields (the ngrok
  * edge assigns the origin at tunnel start, same as
  * `validate_remote_access_config`'s `discovers_own_origin` branch).
@@ -324,17 +412,20 @@ export function wouldDisconnectRemoteOwner(
 }
 
 export function validateRemoteAccessConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
-  if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
-    return { ok: false, message: "Remote access must keep PDPP_BIND_HOST at 127.0.0.1." }
-  }
   if (config.console_port != null && !isValidPinnedPort(config.console_port)) {
     return { ok: false, message: "Pinned console port must be an integer between 1 and 65535." }
   }
   if (config.posture === "off") {
+    if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
+      return { ok: false, message: "Remote access must keep PDPP_BIND_HOST at 127.0.0.1." }
+    }
     return { ok: true, config: offRemoteAccessConfig() }
   }
   if (config.posture === "my_devices_only") {
-    return { ok: false, message: "My devices only is unavailable until a private-overlay provider is bundled." }
+    return validateMyDevicesOnlyConfig(config)
+  }
+  if (config.fields.PDPP_BIND_HOST !== "127.0.0.1") {
+    return { ok: false, message: "Remote access must keep PDPP_BIND_HOST at 127.0.0.1." }
   }
   // public_url
   if (config.provider === "ngrok") {

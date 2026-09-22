@@ -103,6 +103,11 @@ pub(crate) struct RemoteAccessConfig {
     /// does not support: no SSE, testing-only per Cloudflare's own docs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) cloudflare_tunnel: Option<crate::remote_access_providers::CloudflareTunnelOptions>,
+    /// The detected LAN address for the `MyDevicesOnly` posture -- see
+    /// `detect_lan_host()`. Never owner-typed (DHCP makes it unstable across
+    /// restarts), always re-detected at validation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) my_devices_only: Option<MyDevicesOnlyOptions>,
     /// The ngrok authtoken, sealed by the reference server's
     /// `createCredentialCipherFromEnv()` under the SAME
     /// `PDPP_CREDENTIAL_ENCRYPTION_KEY` this process generated
@@ -162,6 +167,55 @@ pub(crate) struct OriginVerification {
     pub(crate) checked_at: u64,
     /// Whether the origin answered as a live tunnel at that moment.
     pub(crate) reachable: bool,
+}
+
+/// Options the `MyDevicesOnly` posture consumes: no provider, no vendor, no
+/// daemon -- just this machine's own LAN address. See `detect_lan_host()`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct MyDevicesOnlyOptions {
+    pub(crate) lan_host: String,
+}
+
+/// True for an RFC1918 IPv4 address, IPv4 link-local, or an IPv6 ULA/
+/// link-local address -- never loopback or `0.0.0.0`. Mirrors the TS
+/// `isPrivateLanHost` in `reference-implementation/server/remote-access-config.ts`
+/// exactly (same four IPv4 ranges, same IPv6 prefix checks).
+pub(crate) fn is_private_lan_host(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => {
+            let [first, second, ..] = v4.octets();
+            first == 10
+                || (first == 172 && (16..=31).contains(&second))
+                || (first == 192 && second == 168)
+                || (first == 169 && second == 254)
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let first = segments[0];
+            (0xfc00..=0xfdff).contains(&first) || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Detect this machine's own LAN IPv4 address for the `MyDevicesOnly`
+/// posture -- never owner-typed, since DHCP makes it unstable across
+/// restarts. No LAN-detection crate is added for this: connecting a UDP
+/// socket to a public address (never sending anything) and reading
+/// `local_addr()` is the portable way to learn the outbound-facing local
+/// address without a new dependency or platform-specific interface
+/// enumeration. The target address (a Cloudflare resolver) is never
+/// contacted -- `connect` on a UDP socket only selects a local route, no
+/// packet leaves the machine.
+///
+/// Returns `None` when no such route exists (no network connection) or the
+/// resolved local address is not actually private -- callers must treat
+/// both as "posture unavailable" and never fall back to a public or
+/// loopback address.
+pub(crate) fn detect_lan_host() -> Option<IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    is_private_lan_host(address).then_some(address)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -417,7 +471,7 @@ impl<R: CredentialResolver> RemoteAccessProvider for UserSuppliedOriginProvider<
             ),
             RemoteAccessPosture::MyDevicesOnly => (
                 RemoteAccessAvailability::Unavailable,
-                Some("no private-overlay provider is bundled yet".to_string()),
+                Some("my_devices_only has no user_supplied_origin provider to inspect".to_string()),
             ),
             RemoteAccessPosture::PublicUrl => match self.config.user_supplied_origin {
                 Some(_) => (RemoteAccessAvailability::Available, None),
@@ -517,6 +571,55 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         console_port: None,
         ngrok: None,
         cloudflare_tunnel: None,
+        my_devices_only: None,
+        ngrok_authtoken_sealed: None,
+        cloudflare_tunnel_token_sealed: None,
+        tunnel_error: None,
+    }
+}
+
+/// Validate the `MyDevicesOnly` posture: re-detect the LAN host rather than
+/// trusting whatever `config.my_devices_only` carried in (mirrors the TS
+/// route handler's `detectLanHost()` override in `owner-remote-access.ts`),
+/// so a stale or tampered value on disk can never persist. The owner
+/// password stays mandatory -- `resolveOwnerExposurePosture`
+/// (`reference-implementation/server/owner-exposure-posture.ts`) already
+/// fails closed for any non-loopback bind host, and this posture's bind
+/// host is never loopback once accepted.
+fn validate_my_devices_only_config(
+    config: RemoteAccessConfig,
+) -> Result<RemoteAccessConfig, String> {
+    let lan_host = detect_lan_host()
+        .ok_or_else(|| "My devices only requires a detected LAN network interface".to_string())?;
+    Ok(my_devices_only_config_for_host(config.console_port, lan_host))
+}
+
+/// The pure half of `validate_my_devices_only_config`: given an already-
+/// resolved (and already-verified-private) LAN address, build the
+/// `RemoteAccessConfig` to persist. Split out so tests can exercise this
+/// without a real network interface for `detect_lan_host()` to find.
+fn my_devices_only_config_for_host(
+    console_port: Option<u16>,
+    lan_host: IpAddr,
+) -> RemoteAccessConfig {
+    let host = lan_host.to_string();
+    let origin = match console_port {
+        Some(port) => format!("http://{host}:{port}"),
+        None => format!("http://{host}"),
+    };
+    RemoteAccessConfig {
+        posture: RemoteAccessPosture::MyDevicesOnly,
+        provider: None,
+        fields: ReachabilityFields {
+            reference_origin: Some(origin),
+            trusted_hosts: host.clone(),
+            trusted_proxies: String::new(),
+            bind_host: host.clone(),
+        },
+        console_port,
+        ngrok: None,
+        cloudflare_tunnel: None,
+        my_devices_only: Some(MyDevicesOnlyOptions { lan_host: host }),
         ngrok_authtoken_sealed: None,
         cloudflare_tunnel_token_sealed: None,
         tunnel_error: None,
@@ -530,18 +633,21 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
 pub(crate) fn validate_remote_access_config(
     config: RemoteAccessConfig,
 ) -> Result<RemoteAccessConfig, String> {
-    if config.fields.bind_host != LOOPBACK_BIND_HOST {
-        return Err("Remote access must keep PDPP_BIND_HOST at 127.0.0.1".to_string());
-    }
     if config.console_port == Some(0) {
         return Err("Pinned console port cannot be zero".to_string());
     }
     match config.posture {
-        RemoteAccessPosture::Off => Ok(off_remote_access_config()),
-        RemoteAccessPosture::MyDevicesOnly => {
-            Err("My devices only is unavailable until a private-overlay provider is bundled".into())
+        RemoteAccessPosture::Off => {
+            if config.fields.bind_host != LOOPBACK_BIND_HOST {
+                return Err("Remote access must keep PDPP_BIND_HOST at 127.0.0.1".to_string());
+            }
+            Ok(off_remote_access_config())
         }
+        RemoteAccessPosture::MyDevicesOnly => validate_my_devices_only_config(config),
         RemoteAccessPosture::PublicUrl => {
+            if config.fields.bind_host != LOOPBACK_BIND_HOST {
+                return Err("Remote access must keep PDPP_BIND_HOST at 127.0.0.1".to_string());
+            }
             let provider = crate::remote_access_providers::resolve_public_url_provider(
                 &config.posture,
                 config.provider.as_deref(),
@@ -731,6 +837,75 @@ mod tests {
     }
 
     #[test]
+    fn is_private_lan_host_accepts_rfc1918_and_link_local_only() {
+        for address in ["10.0.0.5", "172.16.4.1", "172.31.255.255", "192.168.1.20", "169.254.1.1"] {
+            assert!(
+                is_private_lan_host(address.parse().unwrap()),
+                "{address} should be a private LAN host"
+            );
+        }
+    }
+
+    #[test]
+    fn is_private_lan_host_rejects_loopback_and_public_addresses() {
+        for address in ["127.0.0.1", "8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "0.0.0.0"] {
+            assert!(
+                !is_private_lan_host(address.parse().unwrap()),
+                "{address} must not be treated as a private LAN host"
+            );
+        }
+    }
+
+    #[test]
+    fn is_private_lan_host_accepts_ipv6_ula_and_link_local_only() {
+        assert!(is_private_lan_host("fd00::1".parse().unwrap()));
+        assert!(is_private_lan_host("fe80::1".parse().unwrap()));
+        assert!(!is_private_lan_host("::1".parse().unwrap()));
+        assert!(!is_private_lan_host("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn my_devices_only_config_derives_origin_and_bind_host_from_the_detected_address() {
+        let lan_host: IpAddr = "192.168.1.42".parse().unwrap();
+        let built = my_devices_only_config_for_host(Some(4310), lan_host);
+        assert_eq!(built.posture, RemoteAccessPosture::MyDevicesOnly);
+        assert_eq!(built.provider, None);
+        assert_eq!(
+            built.fields.reference_origin,
+            Some("http://192.168.1.42:4310".to_string())
+        );
+        assert_eq!(built.fields.trusted_hosts, "192.168.1.42");
+        assert_eq!(built.fields.bind_host, "192.168.1.42");
+        assert_eq!(
+            built.my_devices_only,
+            Some(MyDevicesOnlyOptions {
+                lan_host: "192.168.1.42".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn my_devices_only_config_without_a_pinned_port_omits_it_from_the_origin() {
+        let lan_host: IpAddr = "10.0.0.7".parse().unwrap();
+        let built = my_devices_only_config_for_host(None, lan_host);
+        assert_eq!(
+            built.fields.reference_origin,
+            Some("http://10.0.0.7".to_string())
+        );
+    }
+
+    #[test]
+    fn off_and_public_url_still_require_exact_loopback_bind_host() {
+        let mut off = off_remote_access_config();
+        off.fields.bind_host = "192.168.1.5".to_string();
+        assert!(validate_remote_access_config(off).is_err());
+
+        let mut public_url = ngrok_config(None, "", None);
+        public_url.fields.bind_host = "192.168.1.5".to_string();
+        assert!(validate_remote_access_config(public_url).is_err());
+    }
+
+    #[test]
     fn validates_https_user_supplied_origin() {
         let mut invalid = config(RemoteAccessPosture::PublicUrl);
         invalid.user_supplied_origin = Some("http://example.vana.test".to_string());
@@ -793,6 +968,7 @@ mod tests {
                 reserved_domain: reserved_domain.map(str::to_string),
             }),
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -822,6 +998,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1007,6 +1184,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1037,6 +1215,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1061,6 +1240,7 @@ mod tests {
                 reserved_domain: None,
             }),
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1081,6 +1261,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1098,6 +1279,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1120,6 +1302,7 @@ mod tests {
                 reserved_domain: None,
             }),
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("ngrok TLS endpoint failed: ERR_NGROK_312".to_string()),
@@ -1141,6 +1324,7 @@ mod tests {
             console_port: None,
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: Some("a failure from a since-abandoned provider".to_string()),
@@ -1171,6 +1355,7 @@ mod tests {
             console_port: Some(0),
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,
@@ -1193,6 +1378,7 @@ mod tests {
             console_port: Some(4310),
             ngrok: None,
             cloudflare_tunnel: None,
+            my_devices_only: None,
             ngrok_authtoken_sealed: None,
             cloudflare_tunnel_token_sealed: None,
             tunnel_error: None,

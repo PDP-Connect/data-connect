@@ -95,9 +95,10 @@ test("off does not imply a provider exists", () => {
   assert.doesNotMatch(badge, /\bproxy\b/i)
 })
 
-test("my_devices_only asserts no privacy property while it cannot be selected", () => {
+test("my_devices_only asserts no provider and no unverifiable privacy guarantee", () => {
   const badge = privacyBadgeForPosture("my_devices_only")
-  assert.match(badge, /unavailable/i)
+  assert.match(badge, /no provider/i)
+  assert.match(badge, /local network/i)
   assert.doesNotMatch(badge, /read your data/i)
 })
 

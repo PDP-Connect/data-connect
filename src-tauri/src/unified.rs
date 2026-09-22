@@ -792,9 +792,21 @@ fn console_process_spec(
     owner_password: &str,
     remote_access: &RemoteAccessConfig,
 ) -> ProcessSpec {
+    // The console is the only process a LAN device ever connects to
+    // directly (AS/RS stay internal loopback-only, see `ri_process_spec`'s
+    // doc comment) -- so `my_devices_only` binding a LAN address means THIS
+    // listener, not the RS's `PDPP_BIND_HOST`, even though both end up
+    // carrying the same detected address via `remote_access.fields`. Every
+    // other posture keeps today's hardcoded loopback exactly as before.
+    let console_hostname = match remote_access.posture {
+        crate::remote_access::RemoteAccessPosture::MyDevicesOnly => {
+            remote_access.fields.bind_host.clone()
+        }
+        _ => "127.0.0.1".to_string(),
+    };
     let mut env = env_map(vec![
         (OsString::from("NODE_ENV"), OsString::from("production")),
-        (OsString::from("HOSTNAME"), OsString::from("127.0.0.1")),
+        (OsString::from("HOSTNAME"), OsString::from(console_hostname)),
         (OsString::from("PORT"), OsString::from("{port}")),
         (OsString::from("PDPP_AS_URL"), OsString::from(ri_origin)),
         (OsString::from("PDPP_RS_URL"), OsString::from(rs_origin)),
