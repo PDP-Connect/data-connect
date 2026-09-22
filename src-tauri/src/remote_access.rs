@@ -575,6 +575,10 @@ pub(crate) fn off_remote_access_config() -> RemoteAccessConfig {
         ngrok_authtoken_sealed: None,
         cloudflare_tunnel_token_sealed: None,
         tunnel_error: None,
+        // Remote access is off: no origin, so no reachability claim. Cleared
+        // alongside `tunnel_error` so a stale "reachable" reading from a
+        // since-abandoned provider never lingers in the UI.
+        origin_verified: None,
     }
 }
 
