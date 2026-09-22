@@ -17,9 +17,11 @@ import {
   type DurableAddressState,
   type InvalidOrigin,
   type NgrokEndpointMode,
+  type OriginBinding,
   type RemoteAccessConfig,
   type RemoteAccessPosture,
   type RemoteAccessProvider,
+  type TunnelAgentHealth,
 } from "pdpp-reference-implementation/remote-access-config"
 
 export {
@@ -29,6 +31,7 @@ export {
   ngrokDurableAddress,
   offRemoteAccessConfig,
   originIsKnowableFromConfig,
+  parseOriginVerification,
   validatePinnedConsolePort,
   validateUserSuppliedOrigin,
   wouldDisconnectRemoteOwner,
@@ -39,12 +42,16 @@ export {
   type MyDevicesOnlyOptions,
   type NgrokEndpointMode,
   type NgrokOptions,
+  type OriginBinding,
+  type OriginProbeOutcome,
   type OriginValidation,
+  type OriginVerification,
   type ReachabilityFields,
   type RemoteAccessConfig,
   type RemoteAccessInspection,
   type RemoteAccessPosture,
   type RemoteAccessProvider,
+  type TunnelAgentHealth,
 } from "pdpp-reference-implementation/remote-access-config"
 
 /**
@@ -360,4 +367,62 @@ export function remoteAccessOriginDisplay(
   }
   const origin = config.fields.PDPP_REFERENCE_ORIGIN
   return origin ? { kind: "origin", origin } : { kind: "waiting" }
+}
+
+/**
+ * What the Public URL panel may say about where the public origin leads,
+ * as a pure function of the persisted config and the current time. The
+ * point of use for the supervisor's `origin_verified` observation.
+ *
+ * - `reading` is what the origin-proof probe saw, or `unverified`/`stale`
+ *   when there is no current evidence. Neither of those is healthy, and
+ *   neither is "down": the app has simply not observed it.
+ * - `binding` is the provider's own answer to "who owns the route from the
+ *   public origin to this computer" (`PublicUrlProvider::origin_binding`).
+ *   The panel renders its guidance from this, never from the provider id.
+ *   It is still shown on a stale reading: it is a property of the provider,
+ *   not of the moment.
+ * - `agentExited`: the provider's local agent was started and has stopped.
+ *
+ * A reading taken against a different origin (the owner changed hostname or
+ * provider) says nothing about this one, not even its binding, so it counts
+ * as unverified.
+ */
+export type OriginReading =
+  | { kind: "unverified" }
+  | { kind: "stale"; checkedAt: number }
+  | { kind: "reaches_this_console"; checkedAt: number }
+  | { kind: "reaches_something_else"; checkedAt: number; status: number }
+  | { kind: "unreachable"; checkedAt: number; reason: string }
+
+export interface OriginVerificationDisplay {
+  reading: OriginReading
+  binding: OriginBinding | null
+  agentExited: boolean
+}
+
+export function originVerificationDisplay(
+  config: RemoteAccessConfig,
+  nowSeconds: number
+): OriginVerificationDisplay {
+  const origin = config.fields.PDPP_REFERENCE_ORIGIN
+  const verification = config.origin_verified
+  if (config.posture !== "public_url" || !origin || !verification || verification.origin !== origin) {
+    return { reading: { kind: "unverified" }, binding: null, agentExited: false }
+  }
+  const agent: TunnelAgentHealth | null = verification.agent ?? null
+  const base = { binding: verification.binding, agentExited: agent === "exited" }
+  const checkedAt = verification.checked_at
+  if (nowSeconds - checkedAt > verification.stale_after) {
+    return { ...base, reading: { kind: "stale", checkedAt } }
+  }
+  const outcome = verification.outcome
+  switch (outcome.kind) {
+    case "reaches_this_console":
+      return { ...base, reading: { kind: "reaches_this_console", checkedAt } }
+    case "reaches_something_else":
+      return { ...base, reading: { kind: "reaches_something_else", checkedAt, status: outcome.status } }
+    case "unreachable":
+      return { ...base, reading: { kind: "unreachable", checkedAt, reason: outcome.reason } }
+  }
 }

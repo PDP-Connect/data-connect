@@ -120,6 +120,102 @@ export interface RemoteAccessConfig {
    * provider never lingers on screen.
    */
   tunnel_error?: string | null
+  /**
+   * The desktop supervisor's latest observation of the public origin
+   * (`record_origin_verification` in `src-tauri/src/unified.rs`): what
+   * answered its origin-proof challenge, when, and who owns the mapping from
+   * the public origin to this computer. Written only by the supervisor.
+   * `RemoteAccessConfigStore.save` never persists it from a request, and
+   * `load` returns it only when it parses (`parseOriginVerification`).
+   * Absent means nobody has checked, which must never render as healthy.
+   */
+  origin_verified?: OriginVerification | null
+}
+
+/** Mirrors `OriginProbeOutcome` in `src-tauri/src/remote_access.rs`. */
+export type OriginProbeOutcome =
+  | { kind: "reaches_this_console" }
+  | { kind: "reaches_something_else"; status: number }
+  | { kind: "unreachable"; reason: string }
+
+/**
+ * Mirrors `OriginBinding` in `src-tauri/src/remote_access.rs`, answered by
+ * `PublicUrlProvider::origin_binding`. The console renders guidance from
+ * this answer, never from the provider id.
+ */
+export type OriginBinding =
+  | { kind: "app_supplied" }
+  | { kind: "owner_maintained"; where_to_set: string }
+
+/** Mirrors `TunnelAgentHealth` in `src-tauri/src/remote_access.rs`. */
+export type TunnelAgentHealth = "stopped" | "running" | "exited"
+
+/** Mirrors `OriginVerification` in `src-tauri/src/remote_access.rs`. */
+export interface OriginVerification {
+  origin: string
+  /** Unix seconds. */
+  checked_at: number
+  /** Seconds after `checked_at` the reading still counts as evidence. */
+  stale_after: number
+  outcome: OriginProbeOutcome
+  binding: OriginBinding
+  agent?: TunnelAgentHealth | null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function parseOriginProbeOutcome(value: unknown): OriginProbeOutcome | null {
+  if (!isRecord(value)) return null
+  if (value.kind === "reaches_this_console") return { kind: "reaches_this_console" }
+  if (value.kind === "reaches_something_else" && Number.isInteger(value.status)) {
+    return { kind: "reaches_something_else", status: value.status as number }
+  }
+  if (value.kind === "unreachable" && typeof value.reason === "string") {
+    return { kind: "unreachable", reason: value.reason }
+  }
+  return null
+}
+
+function parseOriginBinding(value: unknown): OriginBinding | null {
+  if (!isRecord(value)) return null
+  if (value.kind === "app_supplied") return { kind: "app_supplied" }
+  if (value.kind === "owner_maintained" && typeof value.where_to_set === "string" && value.where_to_set.trim()) {
+    return { kind: "owner_maintained", where_to_set: value.where_to_set }
+  }
+  return null
+}
+
+/**
+ * Read the supervisor's observation, or `null` if it is absent or in any
+ * shape other than the current one. An observation is re-taken every
+ * minute, so a record from an older build is worth nothing -- and a guessed
+ * reading is worse than none, because the console would render it.
+ */
+export function parseOriginVerification(value: unknown): OriginVerification | null {
+  if (!isRecord(value)) return null
+  const outcome = parseOriginProbeOutcome(value.outcome)
+  const binding = parseOriginBinding(value.binding)
+  if (
+    typeof value.origin !== "string" ||
+    !Number.isFinite(value.checked_at) ||
+    !Number.isFinite(value.stale_after) ||
+    !outcome ||
+    !binding
+  ) {
+    return null
+  }
+  const agent =
+    value.agent === "stopped" || value.agent === "running" || value.agent === "exited" ? value.agent : null
+  return {
+    origin: value.origin,
+    checked_at: value.checked_at as number,
+    stale_after: value.stale_after as number,
+    outcome,
+    binding,
+    agent,
+  }
 }
 
 export interface RemoteAccessInspection {

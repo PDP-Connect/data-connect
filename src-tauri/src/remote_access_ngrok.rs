@@ -12,7 +12,7 @@ use crate::remote_access::{
     CancellationToken, CredentialReference, DurableAddressState, LoopbackTarget,
     ReachabilityFields, RemoteAccessAuthentication, RemoteAccessAvailability,
     RemoteAccessContractConfig, RemoteAccessHandle, RemoteAccessInspection, RemoteAccessPosture,
-    RemoteAccessPrivacy, RemoteAccessProvider,
+    RemoteAccessPrivacy, RemoteAccessProvider, TunnelAgentHealth,
 };
 use ngrok::config::ForwarderBuilder;
 use ngrok::forwarder::Forwarder;
@@ -61,13 +61,6 @@ impl NgrokEndpointMode {
             }
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NgrokHealth {
-    Stopped,
-    Connected,
-    ProviderDown,
 }
 
 enum NgrokTunnel {
@@ -310,9 +303,9 @@ impl<R> NgrokProvider<R> {
 
     /// Report the SDK-backed health state without treating a missing local
     /// session as a provider failure.
-    pub(crate) fn health(&mut self) -> NgrokHealth {
+    pub(crate) fn health(&mut self) -> TunnelAgentHealth {
         let Some(resources) = self.resources.as_mut() else {
-            return NgrokHealth::Stopped;
+            return TunnelAgentHealth::Stopped;
         };
         health_from_state(
             resources.tunnel.is_some(),
@@ -726,11 +719,11 @@ fn verify_discovered_origin(origin: &str) -> Result<String, String> {
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
-fn health_from_state(has_tunnel: bool, forwarding_finished: bool) -> NgrokHealth {
+fn health_from_state(has_tunnel: bool, forwarding_finished: bool) -> TunnelAgentHealth {
     match (has_tunnel, forwarding_finished) {
-        (false, _) => NgrokHealth::Stopped,
-        (true, true) => NgrokHealth::ProviderDown,
-        (true, false) => NgrokHealth::Connected,
+        (false, _) => TunnelAgentHealth::Stopped,
+        (true, true) => TunnelAgentHealth::Exited,
+        (true, false) => TunnelAgentHealth::Running,
     }
 }
 
@@ -839,7 +832,7 @@ mod tests {
             cancellation,
         );
         assert!(result.is_err());
-        assert_eq!(provider.health(), NgrokHealth::Stopped);
+        assert_eq!(provider.health(), TunnelAgentHealth::Stopped);
     }
 
     #[test]
@@ -912,17 +905,17 @@ mod tests {
     #[test]
     fn restart_and_stop_are_limited_to_owned_resources() {
         let mut provider = provider("stored-authtoken");
-        assert_eq!(provider.health(), NgrokHealth::Stopped);
+        assert_eq!(provider.health(), TunnelAgentHealth::Stopped);
         assert_eq!(provider.discover_origin().unwrap(), None);
         provider.stop().expect("idempotent stop");
-        assert_eq!(provider.health(), NgrokHealth::Stopped);
+        assert_eq!(provider.health(), TunnelAgentHealth::Stopped);
     }
 
     #[test]
     fn provider_down_is_reported_when_the_owned_forwarder_finishes() {
-        assert_eq!(health_from_state(true, true), NgrokHealth::ProviderDown);
-        assert_eq!(health_from_state(true, false), NgrokHealth::Connected);
-        assert_eq!(health_from_state(false, false), NgrokHealth::Stopped);
+        assert_eq!(health_from_state(true, true), TunnelAgentHealth::Exited);
+        assert_eq!(health_from_state(true, false), TunnelAgentHealth::Running);
+        assert_eq!(health_from_state(false, false), TunnelAgentHealth::Stopped);
     }
 
     #[test]

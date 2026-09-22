@@ -816,6 +816,10 @@ fn console_process_spec(
             OsString::from("PDPP_OWNER_PASSWORD"),
             OsString::from(owner_password),
         ),
+        (
+            OsString::from(ORIGIN_PROOF_KEY_ENV),
+            OsString::from(origin_proof_key()),
+        ),
     ]);
     env.extend(remote_access.fields.environment());
     ProcessSpec {
@@ -1289,7 +1293,14 @@ fn start_cloudflare_tunnel_provider(
     let fields = CloudflareTunnelProvider::<KeychainCredentialResolver>::reachability_fields(
         &options.hostname,
     )?;
-    log::info!("Cloudflare tunnel is up at {}", handle.origin);
+    // Registered with the provider is all this start proves. Where the
+    // hostname leads is not the adapter's to set (see
+    // `PublicUrlProvider::origin_binding`), so it is not claimed here; the
+    // origin verification watcher reports it.
+    log::info!(
+        "cloudflared registered a tunnel connection for {}; whether it reaches this console is not yet verified",
+        handle.origin
+    );
     Ok(Some((fields, provider)))
 }
 
@@ -1319,73 +1330,173 @@ fn should_reuse_ngrok_tunnel(
     }
 }
 
-/// How long to wait for the held tunnel's own public origin to answer before
-/// concluding it is dead. Short: this runs synchronously on the bootstrap
-/// path before the console can open, and a live tunnel answers in well
-/// under a second -- this only needs to be long enough to not misclassify a
-/// slow-but-live edge as dead.
-const NGROK_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// ngrok's edge sets this response header on ITS OWN synthetic error pages
-/// (for example `ERR_NGROK_3200`, "endpoint is offline") -- it is never
-/// forwarded through from the local origin. Its presence, or the request
-/// failing outright, is the signal that the held tunnel's ngrok-side session
-/// has died even though nothing in this process observed that (see
-/// `probe_ngrok_tunnel_is_live`'s doc comment for why an in-process check
-/// alone cannot catch this).
-const NGROK_ERROR_CODE_HEADER: &str = "ngrok-error-code";
+/// How long to wait for the public origin to answer before concluding
+/// nothing is there. Short: the ngrok reuse decision runs this synchronously
+/// on the bootstrap path before the console can open, and a live tunnel
+/// answers in well under a second -- this only needs to be long enough to
+/// not misclassify a slow-but-live edge as dead.
+const ORIGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// ngrok shows a one-time browser interstitial ("You are about to visit...")
 /// to any request whose `User-Agent` looks like a browser, on the free plan
 /// -- by design, not a bug (see the ngrok option copy in `remote-access.ts`
 /// for the owner-facing note about this). A request FROM this app to its own
-/// public origin (the liveness probe below) is not a real visitor and must
-/// never be shown that page: an interstitial response still returns 200 with
-/// no `ngrok-error-code` header, so without this the probe would misread a
-/// live-but-warned tunnel as dead. This exact header, sent on any request,
+/// public origin (the probe below) is not a real visitor and must never be
+/// shown that page: the interstitial would stand between the probe and the
+/// console's origin-proof answer. This exact header, sent on any request,
 /// makes ngrok's edge skip the interstitial and forward straight through.
+/// Every other provider ignores an unknown request header, so the probe
+/// sends it unconditionally rather than branching on the provider.
 const NGROK_SKIP_BROWSER_WARNING_HEADER: &str = "ngrok-skip-browser-warning";
 const NGROK_SKIP_BROWSER_WARNING_VALUE: &str = "true";
 
-/// Confirm a held ngrok tunnel is still actually reachable from the public
-/// internet before trusting it enough to reuse, by making one real request
-/// to its own discovered origin.
+/// The console route that answers an origin-proof challenge
+/// (`apps/console/src/app/api/origin-proof/route.ts`). Served by the console
+/// itself, never proxied to the RI: a public origin that reaches the bare RI
+/// port is exactly one of the misroutes this must catch.
+const ORIGIN_PROOF_PATH: &str = "/api/origin-proof";
+
+/// The console's environment variable holding this process's origin-proof
+/// key. Listed in `CONSOLE_RUNTIME_ENV` (`scripts/ensure-console-stack.js`).
+const ORIGIN_PROOF_KEY_ENV: &str = "PDPP_ORIGIN_PROOF_KEY";
+
+/// A random key generated once per app process and given only to the
+/// console this process starts. It is not a credential: it grants nothing
+/// and guards nothing. It lets the console prove "I am the console this
+/// process started" in a way an old console on a stale port, the RI, a
+/// different DataConnect, or anything that once saw an answer cannot
+/// imitate, because the probe sends a fresh challenge every time and the
+/// key itself never leaves loopback.
+fn origin_proof_key() -> &'static str {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut bytes = [0_u8; 32];
+        // A failed OS RNG leaves the key all zeros. The proof then still
+        // identifies "a DataConnect console" but no longer "this one". That
+        // weakens the check; it does not make it claim more than it did.
+        if let Err(error) = getrandom::fill(&mut bytes) {
+            log::warn!("Could not generate the origin-proof key: {error}");
+        }
+        hex::encode(bytes)
+    })
+}
+
+/// HMAC-SHA256 (RFC 2104) over `message`, hex-encoded. Written out over the
+/// `sha2` crate already in the tree instead of adding an `hmac` dependency
+/// for one call; pinned by the RFC 4231 test vector in this file's tests.
+/// The console computes the same value with Node's `createHmac`.
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut block_key = [0_u8; BLOCK];
+    if key.len() > BLOCK {
+        block_key[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(block_key.map(|byte| byte ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(block_key.map(|byte| byte ^ 0x5c));
+    outer.update(inner.finalize());
+    hex::encode(outer.finalize())
+}
+
+/// Ask `origin` to prove it is this process's console, and report what
+/// answered.
 ///
-/// This is necessary, not merely cautious: reproduced live tonight against a
-/// real ngrok tunnel, the ngrok Rust SDK's `Forwarder` gives no reliable
-/// in-process signal that the edge-side session has died. Its background
-/// forwarding task only exits when the local tunnel stream itself closes
-/// (`NgrokTunnel::is_forwarding_finished`, used by `NgrokProvider::health`),
-/// but an edge session that silently drops -- observed here across a
-/// sidecar restart cycle -- leaves that task running forever, so `health()`
-/// keeps reporting the tunnel as connected while every public request to it
-/// returns ngrok's own `ERR_NGROK_3200` "endpoint is offline" page. A
-/// simultaneous loopback request to the exact same RI, presenting the exact
-/// same trusted Host, still returned 200 the whole time -- proving the RI
-/// and the fix in `isAllowedRequestHost` are correct, and the failure is
-/// entirely in the held tunnel's dead ngrok-side session. Only an actual
-/// round trip through ngrok's edge can catch this.
-fn probe_ngrok_tunnel_is_live(origin: &str) -> bool {
+/// Provider-neutral: it is an HTTP round trip through whatever the public
+/// origin leads to, the same for every provider. That is the point. Two
+/// failures were each invisible to an in-process check:
+///
+/// - ngrok: the SDK's `Forwarder` gives no reliable in-process signal that
+///   the edge-side session has died. Its forwarding task only exits when
+///   the local tunnel stream closes (`NgrokTunnel::is_forwarding_finished`),
+///   but an edge session that silently drops leaves that task running while
+///   every public request gets ngrok's `ERR_NGROK_3200` "endpoint is
+///   offline" page (reproduced live, 2026-09-20).
+/// - Cloudflare: a dashboard-managed tunnel ignores the `--url` the adapter
+///   passes, so `cloudflared` stays connected and healthy while the
+///   hostname routes to a console port from before a rebuild, answering
+///   with some other service's 404 (reproduced live, 2026-09-22).
+///
+/// The previous check counted any response without an ngrok error header
+/// as "reachable", so it passed the second case. Only a fresh challenge
+/// answered with this process's key shows that the origin reaches THIS
+/// console.
+///
+/// Redirects are not followed: the proof route never redirects, so a
+/// redirect means something else answered (an access gateway, a login
+/// page), and its status says more than wherever it led would.
+fn probe_public_origin(origin: &str, key: &str) -> crate::remote_access::OriginProbeOutcome {
+    use crate::remote_access::OriginProbeOutcome;
+    let challenge = {
+        let mut bytes = [0_u8; 16];
+        let _ = getrandom::fill(&mut bytes);
+        hex::encode(bytes)
+    };
     let client = match reqwest::blocking::Client::builder()
-        .timeout(NGROK_LIVENESS_PROBE_TIMEOUT)
+        .timeout(ORIGIN_PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
         Err(error) => {
-            log::warn!("Could not build a client to probe the held ngrok tunnel: {error}");
-            return false;
+            return OriginProbeOutcome::Unreachable {
+                reason: format!("could not build an HTTP client: {error}"),
+            }
         }
     };
-    match client
-        .get(origin)
+    let url = format!(
+        "{}{ORIGIN_PROOF_PATH}?challenge={challenge}",
+        origin.trim_end_matches('/')
+    );
+    let response = match client
+        .get(url)
         .header(NGROK_SKIP_BROWSER_WARNING_HEADER, NGROK_SKIP_BROWSER_WARNING_VALUE)
         .send()
     {
-        Ok(response) => !response.headers().contains_key(NGROK_ERROR_CODE_HEADER),
+        Ok(response) => response,
         Err(error) => {
-            log::warn!("Held ngrok tunnel liveness probe failed: {error}");
-            false
+            return OriginProbeOutcome::Unreachable {
+                reason: error_chain(&error.without_url()),
+            }
         }
+    };
+    let status = response.status().as_u16();
+    let body = response.text().unwrap_or_default();
+    classify_origin_proof(
+        status,
+        &body,
+        &hmac_sha256_hex(key.as_bytes(), challenge.as_bytes()),
+    )
+}
+
+/// `reqwest`'s own message is only "error sending request"; the cause the
+/// owner can act on (DNS, TLS, refused) is further down the source chain.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
+/// The pure half of `probe_public_origin`: did the answer carry the proof?
+fn classify_origin_proof(
+    status: u16,
+    body: &str,
+    expected_proof: &str,
+) -> crate::remote_access::OriginProbeOutcome {
+    use crate::remote_access::OriginProbeOutcome;
+    if status == 200 && body.trim() == expected_proof {
+        OriginProbeOutcome::ReachesThisConsole
+    } else {
+        OriginProbeOutcome::ReachesSomethingElse { status }
     }
 }
 
@@ -1395,8 +1506,7 @@ fn probe_ngrok_tunnel_is_live(origin: &str) -> bool {
 /// hostname on ngrok's free plan, which is unavoidable whenever the tunnel
 /// itself must actually change (no held tunnel, provider/posture turned off,
 /// settings changed, the preferred forward port could not be reused, or the
-/// held tunnel's ngrok-side session has silently died -- see
-/// `probe_ngrok_tunnel_is_live`).
+/// held tunnel no longer reaches this console -- see `probe_public_origin`).
 fn reuse_or_start_ngrok_provider(
     remote_access: &RemoteAccessConfig,
     held: Option<HeldNgrok>,
@@ -1425,7 +1535,10 @@ fn reuse_or_start_ngrok_provider(
             held.fields
                 .reference_origin
                 .as_deref()
-                .is_some_and(probe_ngrok_tunnel_is_live)
+                .is_some_and(|origin| {
+                    probe_public_origin(origin, origin_proof_key())
+                        == crate::remote_access::OriginProbeOutcome::ReachesThisConsole
+                })
         });
 
     if reuse {
@@ -1516,34 +1629,26 @@ fn apply_ngrok_tunnel_outcome(
 /// the case where the app used to keep reporting "up" indefinitely.
 const ORIGIN_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
 
-/// How old a reachability reading may be before it stops counting as
-/// evidence. Two verification intervals, so one missed probe does not flip
-/// the status, but a watcher that has actually stopped does.
+/// How old a reading may be before it stops counting as evidence. Two
+/// verification intervals, so one missed probe does not flip the status,
+/// but a watcher that has actually stopped does. Written into every record
+/// (`OriginVerification::stale_after`) so the console decays a reading by
+/// the same rule instead of keeping its own copy of the number.
 const ORIGIN_VERIFY_STALE_AFTER: u64 = 150;
 
-/// May the app claim the public origin is reachable right now?
+/// Record an OBSERVATION of the public origin, with the time it was made.
 ///
-/// The rule the design calls for: never report a state that has not been
-/// observed. A reading counts only if it exists, says reachable, and is
-/// recent enough to still be evidence; anything else is "unknown", which is
-/// deliberately not the same as "down" and must not be rendered as healthy.
-///
-/// `now` and `stale_after` are parameters rather than read from the clock so
-/// the rule is testable without sleeping.
-fn origin_is_verified_reachable(config: &RemoteAccessConfig, now: u64, stale_after: u64) -> bool {
-    config.origin_verified.as_ref().is_some_and(|verification| {
-        verification.reachable && now.saturating_sub(verification.checked_at) <= stale_after
-    })
-}
-
-/// Record a reachability OBSERVATION for `origin`, with the time it was made.
-///
-/// Called with the result of the same `probe_ngrok_tunnel_is_live` the reuse
-/// decision already runs. Before this, that probe's answer was computed and
-/// then discarded: the app knew whether the tunnel was live and did not say
-/// so anywhere the owner could see. This is the whole fix -- not a new
-/// check, but reporting the one that already existed.
-fn record_origin_verification(app: &AppHandle, origin: &str, reachable: bool) {
+/// Before this, the probe's answer was computed and then discarded, and
+/// the record that did exist was never read by the console: the app knew
+/// whether the tunnel was live and did not say so anywhere the owner could
+/// see.
+fn record_origin_verification(
+    app: &AppHandle,
+    origin: &str,
+    outcome: crate::remote_access::OriginProbeOutcome,
+    binding: crate::remote_access::OriginBinding,
+    agent: Option<crate::remote_access::TunnelAgentHealth>,
+) {
     let current = match load_remote_access_config(app) {
         Ok(config) => config,
         Err(error) => {
@@ -1560,7 +1665,10 @@ fn record_origin_verification(app: &AppHandle, origin: &str, reachable: bool) {
     let verification = crate::remote_access::OriginVerification {
         origin: origin.to_string(),
         checked_at,
-        reachable,
+        stale_after: ORIGIN_VERIFY_STALE_AFTER,
+        outcome,
+        binding,
+        agent,
     };
     if current.origin_verified.as_ref() == Some(&verification) {
         return;
@@ -1574,12 +1682,41 @@ fn record_origin_verification(app: &AppHandle, origin: &str, reachable: bool) {
     }
 }
 
-/// Re-verify the public origin on an interval, so a tunnel that dies after a
-/// successful start stops reporting as healthy.
+/// Read the selected provider's local agent health, if this process holds
+/// one. The first runtime caller of either adapter's `health()`; before
+/// this, both were reachable only from tests.
 ///
-/// Shares `probe_ngrok_tunnel_is_live` with the reuse path rather than
-/// inventing a second notion of "up", so there is exactly one definition of
-/// what reachable means.
+/// Observe-only and non-blocking: `try_lock`, so a tick that lands during a
+/// stack restart reports `None` (no reading) instead of waiting on, or
+/// interfering with, the restart. `health()` takes `&mut self` only to poll
+/// a join handle or an exit flag; it never stops or restarts anything.
+///
+/// The two lookups mirror where each adapter's runtime lives today (see
+/// `UnifiedRuntimeState::ngrok` and `UnifiedStack::cloudflare_tunnel`);
+/// at most one is ever populated, because only one provider is selected.
+fn read_tunnel_agent_health(app: &AppHandle) -> Option<crate::remote_access::TunnelAgentHealth> {
+    let state = app.try_state::<UnifiedRuntimeState>()?;
+    if let Ok(mut held) = state.ngrok.try_lock() {
+        if let Some(held) = held.as_mut() {
+            return Some(held.provider.health());
+        }
+    }
+    let mut stack = state.stack.try_lock().ok()?;
+    stack
+        .as_mut()?
+        .cloudflare_tunnel
+        .as_mut()
+        .map(|tunnel| tunnel.health())
+}
+
+/// Re-verify the public origin on an interval, so a tunnel that dies after a
+/// successful start stops reporting as healthy, and a route that never
+/// reached this console is reported instead of assumed.
+///
+/// Uses `probe_public_origin`, the same check the ngrok reuse path uses, so
+/// there is exactly one definition of what reaching the console means. The
+/// binding recorded next to it comes from the provider's own
+/// `origin_binding()` answer; nothing here branches on the provider.
 ///
 /// Cancellation: this returns as soon as shutdown has been requested, which
 /// makes `Quitting` absorbing for this watcher -- it cannot write a fresh
@@ -1602,22 +1739,34 @@ pub(crate) fn spawn_origin_verification_watcher(app: AppHandle) {
             if origin.trim().is_empty() {
                 continue;
             }
-            let probe_app = app.clone();
-            let probed = tauri::async_runtime::spawn_blocking(move || {
-                let reachable = probe_ngrok_tunnel_is_live(&origin);
-                (origin, reachable)
-            })
-            .await;
-            let Ok((origin, reachable)) = probed else {
+            // Only a Public URL provider has a binding to report; any other
+            // posture has nothing public to verify.
+            let Ok(provider) = crate::remote_access_providers::resolve_public_url_provider(
+                &config.posture,
+                config.provider.as_deref(),
+                config.ngrok.as_ref(),
+                config.cloudflare_tunnel.as_ref(),
+            ) else {
                 continue;
             };
-            if !reachable {
+            let binding = provider.origin_binding();
+            let agent = read_tunnel_agent_health(&app);
+            let probe_app = app.clone();
+            let probed = tauri::async_runtime::spawn_blocking(move || {
+                let outcome = probe_public_origin(&origin, origin_proof_key());
+                (origin, outcome)
+            })
+            .await;
+            let Ok((origin, outcome)) = probed else {
+                continue;
+            };
+            if outcome != crate::remote_access::OriginProbeOutcome::ReachesThisConsole {
                 log::warn!(
-                    "Public origin {origin} did not answer a liveness probe; \
-                     status is now reported as unreachable rather than assumed up"
+                    "Public origin {origin} did not prove it reaches this console ({outcome:?}); \
+                     reported as such rather than assumed up"
                 );
             }
-            record_origin_verification(&probe_app, &origin, reachable);
+            record_origin_verification(&probe_app, &origin, outcome, binding, agent);
         }
     });
 }
@@ -4816,8 +4965,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 
     /// Binds a loopback listener that answers exactly one HTTP request with
     /// `response_head` and no body, then stops. Enough to control response
-    /// headers precisely without pulling in a real HTTP server dependency --
-    /// `probe_ngrok_tunnel_is_live` only inspects headers on the response.
+    /// headers precisely without pulling in a real HTTP server dependency.
     fn respond_once_with(response_head: &'static str) -> String {
         let (url, _) = respond_once_with_and_capture_request(response_head);
         url
@@ -4845,35 +4993,6 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         (format!("http://127.0.0.1:{port}/"), receiver)
     }
 
-    #[test]
-    fn probe_ngrok_tunnel_is_live_true_for_an_ordinary_response() {
-        let origin = respond_once_with("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        assert!(probe_ngrok_tunnel_is_live(&origin));
-    }
-
-    #[test]
-    fn probe_ngrok_tunnel_is_live_false_when_ngrok_reports_its_own_error() {
-        // The exact shape of ngrok's edge answering for a session that has
-        // silently died: a real HTTP response (not a connection failure),
-        // carrying `ngrok-error-code` -- reproduced live tonight as
-        // ERR_NGROK_3200 "endpoint is offline" while the same request
-        // against the actual RI, over loopback, returned 200 the whole
-        // time. The RI is not in a position to ever set this header itself,
-        // so its presence is unambiguous.
-        let origin = respond_once_with(
-            "HTTP/1.1 404 Not Found\r\nngrok-error-code: ERR_NGROK_3200\r\nContent-Length: 0\r\n\r\n",
-        );
-        assert!(!probe_ngrok_tunnel_is_live(&origin));
-    }
-
-    #[test]
-    fn probe_ngrok_tunnel_is_live_false_when_the_request_fails_outright() {
-        // No listener at all: the probe must fail closed (treat "could not
-        // even connect" the same as "connected but ngrok says it's dead"),
-        // not panic or default to true.
-        assert!(!probe_ngrok_tunnel_is_live("http://127.0.0.1:1/"));
-    }
-
     /// An observer must never be able to destroy what it observes.
     ///
     /// #208 proved this is not theoretical: a health check that could reach
@@ -4886,36 +5005,60 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     /// health probe -- so it carries the same guarantee, enforced the same
     /// way: nothing in its body may reach a call that stops the stack,
     /// exits the app, or changes user-visible status. The worst a failed
-    /// probe may do is record `reachable: false` and log. A source-level
+    /// probe may do is record what it observed and log. A source-level
     /// check because a runtime test of the spawned task needs a real
     /// `AppHandle`, which this file's other tests already document as
     /// unavailable here.
     #[test]
     fn the_origin_watcher_cannot_tear_down_what_it_observes() {
         let source = include_str!("unified.rs");
-        let start = source
-            .find("pub(crate) fn spawn_origin_verification_watcher")
-            .expect("the origin verification watcher must exist");
-        let end = source[start..]
-            .find("\n/// Has a shutdown been requested?")
-            .map(|offset| start + offset)
-            .unwrap_or(source.len());
-        let body = &source[start..end];
-
-        for forbidden in [
-            "teardown(",
-            "teardown_managed_on_error",
-            "app.exit",
-            "set_status",
-            "request_shutdown",
-            "stop_held_ngrok",
-        ] {
+        // The watcher plus everything it calls that lives in this file: the
+        // recorder and the agent-health reader (one contiguous block ending
+        // at the shutdown guard), and the probe (its own block).
+        let regions = [
+            (
+                "fn record_origin_verification(",
+                "\n/// Has a shutdown been requested?",
+            ),
+            (
+                "const ORIGIN_PROBE_TIMEOUT",
+                "\n/// Decide whether a held ngrok tunnel",
+            ),
+        ];
+        for (from, to) in regions {
+            let start = source
+                .find(from)
+                .unwrap_or_else(|| panic!("{from} must exist"));
+            let end = source[start..]
+                .find(to)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{to} must follow {from}"));
+            let body = &source[start..end];
             assert!(
-                !body.contains(forbidden),
-                "the origin verification watcher must never reach {forbidden}: a health \
-                 check that can stop the stack turns a false negative into an outage \
-                 (see #208)"
+                from != "fn record_origin_verification("
+                    || body.contains("pub(crate) fn spawn_origin_verification_watcher"),
+                "the scanned region must include the watcher itself"
             );
+
+            for forbidden in [
+                "teardown(",
+                "teardown_managed_on_error",
+                "app.exit",
+                "set_status",
+                "request_shutdown",
+                "stop_held_ngrok",
+                "stop_owned",
+                "stop_stack",
+                "RemoteAccessProvider::stop",
+                ".start(",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "the origin verification watcher must never reach {forbidden}: a health \
+                     check that can stop the stack turns a false negative into an outage \
+                     (see #208)"
+                );
+            }
         }
     }
 
@@ -4949,6 +5092,19 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         }
     }
 
+    /// A reading that proved the origin reaches this console, taken at
+    /// `checked_at`.
+    fn verification_at(origin: &str, checked_at: u64) -> crate::remote_access::OriginVerification {
+        crate::remote_access::OriginVerification {
+            origin: origin.to_string(),
+            checked_at,
+            stale_after: ORIGIN_VERIFY_STALE_AFTER,
+            outcome: crate::remote_access::OriginProbeOutcome::ReachesThisConsole,
+            binding: crate::remote_access::OriginBinding::AppSupplied,
+            agent: None,
+        }
+    }
+
     /// The exact incident: `spawn_remote_access_config_watcher` must not
     /// restart the stack just because `spawn_origin_verification_watcher`
     /// recorded a fresh reachability observation. Reproduces the actual
@@ -4962,19 +5118,12 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     fn an_origin_verification_write_does_not_look_like_a_restart_worthy_change() {
         let base = crate::remote_access::off_remote_access_config();
         let earlier = RemoteAccessConfig {
-            origin_verified: Some(crate::remote_access::OriginVerification {
-                origin: "https://example.ngrok-free.app".to_string(),
-                checked_at: 1_000,
-                reachable: true,
-            }),
+            origin_verified: Some(verification_at("https://example.ngrok-free.app", 1_000)),
             ..base.clone()
         };
         let later = RemoteAccessConfig {
-            origin_verified: Some(crate::remote_access::OriginVerification {
-                origin: "https://example.ngrok-free.app".to_string(),
-                checked_at: 1_060, // one ORIGIN_VERIFY_INTERVAL tick later
-                reachable: true,
-            }),
+            // One ORIGIN_VERIFY_INTERVAL tick later.
+            origin_verified: Some(verification_at("https://example.ngrok-free.app", 1_060)),
             ..base
         };
 
@@ -5017,11 +5166,10 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 
         for tick in 0..5u64 {
             let mut observed = last_applied.clone();
-            observed.origin_verified = Some(crate::remote_access::OriginVerification {
-                origin: "https://vault.example.com".to_string(),
-                checked_at: 1_000 + tick * 60,
-                reachable: true,
-            });
+            observed.origin_verified = Some(verification_at(
+                "https://vault.example.com",
+                1_000 + tick * 60,
+            ));
             assert_eq!(
                 restart_relevant_view(&observed),
                 restart_relevant_view(&last_applied),
@@ -5031,88 +5179,233 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         }
     }
 
-    /// An absent verification must never read as healthy.
-    ///
-    /// This is the whole point of the field: the old `tunnel_error: None`
-    /// meant "the last start returned Ok" and was indistinguishable from
-    /// "verified just now", which is how "the tunnel is up" got logged
-    /// while it forwarded zero bytes.
+    /// A record in the shape the console reads: `kind`-tagged outcome and
+    /// binding, snake_case agent health, and the staleness window. Pinned
+    /// because the console parses this JSON by hand
+    /// (`parseOriginVerification` in the console's `remote-access.ts`).
     #[test]
-    fn an_unverified_origin_is_not_reported_as_reachable() {
-        let config = crate::remote_access::off_remote_access_config();
-        assert!(
-            config.origin_verified.is_none(),
-            "remote access off must carry no reachability claim"
-        );
-        assert!(
-            !origin_is_verified_reachable(&config, 0, ORIGIN_VERIFY_STALE_AFTER),
-            "an origin nobody has checked must not read as reachable"
+    fn an_origin_verification_serializes_in_the_shape_the_console_reads() {
+        let verification = crate::remote_access::OriginVerification {
+            origin: "https://vault.example.com".to_string(),
+            checked_at: 1_000,
+            stale_after: ORIGIN_VERIFY_STALE_AFTER,
+            outcome: crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 404 },
+            binding: crate::remote_access::OriginBinding::OwnerMaintained {
+                where_to_set: "the dashboard".to_string(),
+            },
+            agent: Some(crate::remote_access::TunnelAgentHealth::Running),
+        };
+        assert_eq!(
+            serde_json::to_value(&verification).expect("serialize"),
+            serde_json::json!({
+                "origin": "https://vault.example.com",
+                "checked_at": 1_000,
+                "stale_after": 150,
+                "outcome": { "kind": "reaches_something_else", "status": 404 },
+                "binding": { "kind": "owner_maintained", "where_to_set": "the dashboard" },
+                "agent": "running",
+            })
         );
     }
 
-    /// A reading that is too old is not evidence any more.
+    /// A record written by an older build must not stop the config from
+    /// loading. The pre-change shape (`reachable: bool`, no `outcome`) is on
+    /// disk on every machine that ran the previous build; failing to parse
+    /// it would hide the owner's real settings behind an observation that
+    /// is re-taken within a minute anyway.
     #[test]
-    fn a_stale_verification_decays_to_unverified() {
-        let mut config = crate::remote_access::off_remote_access_config();
-        config.origin_verified = Some(crate::remote_access::OriginVerification {
-            origin: "https://example.ngrok-free.app".to_string(),
-            checked_at: 1_000,
-            reachable: true,
+    fn an_origin_verification_in_an_older_shape_is_discarded_not_fatal() {
+        let stored = serde_json::json!({
+            "posture": "public_url",
+            "provider": "cloudflare_tunnel",
+            "fields": {
+                "PDPP_REFERENCE_ORIGIN": "https://vault.example.com",
+                "PDPP_TRUSTED_HOSTS": "vault.example.com",
+                "PDPP_TRUSTED_PROXIES": "",
+                "PDPP_BIND_HOST": "127.0.0.1",
+            },
+            "cloudflare_tunnel": { "hostname": "vault.example.com" },
+            "origin_verified": {
+                "origin": "https://vault.example.com",
+                "checked_at": 1_000,
+                "reachable": true,
+            },
         });
-        // Fresh: inside the staleness window.
-        assert!(origin_is_verified_reachable(
-            &config,
-            1_000 + ORIGIN_VERIFY_STALE_AFTER - 1,
-            ORIGIN_VERIFY_STALE_AFTER
-        ));
-        // Stale: the same reading, later. Still "reachable: true" on disk,
-        // but no longer something the app is entitled to claim.
-        assert!(
-            !origin_is_verified_reachable(
-                &config,
-                1_000 + ORIGIN_VERIFY_STALE_AFTER + 1,
-                ORIGIN_VERIFY_STALE_AFTER
+        let config: RemoteAccessConfig =
+            serde_json::from_value(stored).expect("an old observation must not fail the load");
+        assert_eq!(config.origin_verified, None);
+        assert_eq!(
+            config.fields.reference_origin.as_deref(),
+            Some("https://vault.example.com")
+        );
+    }
+
+    /// RFC 4231, test case 2. The console computes the same function with
+    /// Node's `createHmac`; if this is wrong, no console can ever prove
+    /// itself and every origin reads as misrouted.
+    #[test]
+    fn hmac_sha256_matches_the_rfc_4231_test_vector() {
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // RFC 4231 test case 6: a key longer than the block size is hashed
+        // first.
+        assert_eq!(
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
             ),
-            "a reading older than the staleness window must decay to unverified"
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }
 
-    /// A failed probe reports unreachable rather than leaving the last
-    /// success in place.
+    /// The same triple is pinned in the console route's test
+    /// (`apps/console/src/app/api/origin-proof/route.test.ts`), so the two
+    /// implementations cannot drift apart without one suite failing.
     #[test]
-    fn an_unreachable_probe_is_reported_not_swallowed() {
-        let mut config = crate::remote_access::off_remote_access_config();
-        config.origin_verified = Some(crate::remote_access::OriginVerification {
-            origin: "https://example.ngrok-free.app".to_string(),
-            checked_at: 1_000,
-            reachable: false,
+    fn the_console_and_the_supervisor_agree_on_the_proof() {
+        assert_eq!(
+            hmac_sha256_hex(b"this-process-key", b"00112233445566778899aabbccddeeff"),
+            "63cdbd95f7ede15df13f1fc676b443da4e43951477d5fa2da44bfd9f3949fe55"
+        );
+    }
+
+    /// A fake console: answers one request to the origin-proof route with
+    /// the HMAC of the request's challenge under `key`, like
+    /// `apps/console/src/app/api/origin-proof/route.ts` does.
+    fn serve_origin_proof_once(key: &'static str) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let _ = sender.send(buffer[..read].to_vec());
+                let challenge = request
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|target| target.split("challenge=").nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                let proof = hmac_sha256_hex(key.as_bytes(), challenge.as_bytes());
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{proof}",
+                        proof.len()
+                    )
+                    .as_bytes(),
+                );
+            }
         });
-        assert!(
-            !origin_is_verified_reachable(&config, 1_001, ORIGIN_VERIFY_STALE_AFTER),
-            "a probe that failed must not read as reachable"
-        );
+        (format!("http://127.0.0.1:{port}"), receiver)
     }
 
     #[test]
-    fn probe_ngrok_tunnel_is_live_sends_the_skip_browser_warning_header() {
-        // Confirmed live, 2026-09-20: ngrok's free plan shows a one-time
-        // browser interstitial to any request that looks like it came from a
-        // browser. An interstitial response is a real 200 with no
-        // `ngrok-error-code` header, so a liveness probe that got shown the
-        // interstitial instead of the real origin would misread a live
-        // tunnel as reachable while never actually confirming the app
-        // behind it answered -- and this app should never see that page for
-        // its OWN requests to its OWN public origin in the first place.
-        let (origin, request_received) =
-            respond_once_with_and_capture_request("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        assert!(probe_ngrok_tunnel_is_live(&origin));
+    fn the_origin_reaches_this_console_only_when_it_answers_with_this_key() {
+        let (origin, request_received) = serve_origin_proof_once("this-process-key");
+        assert_eq!(
+            probe_public_origin(&origin, "this-process-key"),
+            crate::remote_access::OriginProbeOutcome::ReachesThisConsole
+        );
         let request = request_received
             .recv_timeout(Duration::from_secs(1))
             .expect("the probe request must have been sent");
         let request = String::from_utf8_lossy(&request).to_lowercase();
         assert!(
+            request.starts_with("get /api/origin-proof?challenge="),
+            "the probe must ask the console's own proof route; request was:\n{request}"
+        );
+        // Confirmed live, 2026-09-20: ngrok's free plan shows a one-time
+        // browser interstitial to browser-looking requests, which would
+        // stand between this probe and the console's answer.
+        assert!(
             request.contains("ngrok-skip-browser-warning"),
-            "expected the liveness probe to send ngrok-skip-browser-warning; request was:\n{request}"
+            "expected the probe to send ngrok-skip-browser-warning; request was:\n{request}"
+        );
+    }
+
+    /// Another DataConnect console (a second install, or this app's console
+    /// from a different process) answers the route, but with a different
+    /// key. It is not THIS console.
+    #[test]
+    fn a_different_consoles_answer_is_not_proof() {
+        let (origin, _) = serve_origin_proof_once("another-process-key");
+        assert_eq!(
+            probe_public_origin(&origin, "this-process-key"),
+            crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 200 }
+        );
+    }
+
+    /// The 2026-09-22 incident: a dashboard-managed Cloudflare route still
+    /// pointing at a port from before a rebuild, where some other service
+    /// now answers with a JSON 404. The old check counted this as reachable
+    /// because it carried no ngrok error header.
+    #[test]
+    fn a_stale_route_answering_with_another_services_404_is_reported_as_misrouted() {
+        let origin = respond_once_with(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"error\":\"not_found\"}",
+        );
+        assert_eq!(
+            probe_public_origin(origin.trim_end_matches('/'), "this-process-key"),
+            crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 404 }
+        );
+    }
+
+    /// Something that answers every path with 200 (the RI's JSON index, a
+    /// parked-domain page, a provider interstitial) is still not proof.
+    #[test]
+    fn an_ordinary_200_page_is_not_proof() {
+        let origin = respond_once_with("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        assert_eq!(
+            probe_public_origin(&origin, "this-process-key"),
+            crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 200 }
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_reported_not_followed() {
+        let origin = respond_once_with(
+            "HTTP/1.1 302 Found\r\nLocation: https://login.example.com/\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert_eq!(
+            probe_public_origin(&origin, "this-process-key"),
+            crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 302 }
+        );
+    }
+
+    #[test]
+    fn an_origin_nothing_answers_is_unreachable_with_a_reason() {
+        let outcome = probe_public_origin("http://127.0.0.1:1", "this-process-key");
+        let crate::remote_access::OriginProbeOutcome::Unreachable { reason } = outcome else {
+            panic!("expected Unreachable, got {outcome:?}");
+        };
+        assert!(!reason.trim().is_empty());
+    }
+
+    #[test]
+    fn the_console_receives_this_processs_origin_proof_key() {
+        let spec = console_process_spec(
+            Path::new("/tmp/pdpp-node"),
+            Path::new("/tmp/console"),
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+            "owner-password",
+            &crate::remote_access::off_remote_access_config(),
+        );
+        let debug = format!("{:?}", spec.env);
+        assert!(
+            debug.contains(ORIGIN_PROOF_KEY_ENV),
+            "the console must be started with {ORIGIN_PROOF_KEY_ENV}; env was {debug}"
+        );
+        assert_eq!(origin_proof_key().len(), 64);
+        assert_eq!(
+            origin_proof_key(),
+            origin_proof_key(),
+            "one key per process"
         );
     }
 

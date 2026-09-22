@@ -22,8 +22,18 @@
 //! dashboard/API themselves (this app has no Cloudflare account credential
 //! and does not attempt to automate account-level tunnel creation), pastes
 //! the resulting tunnel token and the hostname it configured into Settings,
-//! and this adapter runs `cloudflared tunnel run` as a child process
-//! forwarding to the loopback target. The hostname is therefore `Available`
+//! and this adapter runs `cloudflared tunnel run` as a child process.
+//!
+//! **The adapter does not own where the hostname points.** It passes the
+//! loopback target as `--url`, but a tunnel created in the dashboard is
+//! remotely managed: its public-hostname route (the "Service" URL) lives in
+//! Cloudflare's control plane and overrides `--url` without any error. Only
+//! a locally managed tunnel honors `--url`. The token does not say which
+//! kind of tunnel it is, so `PublicUrlProvider::origin_binding` reports
+//! `OwnerMaintained` and the app never claims the route is correct. The
+//! origin-proof probe in `unified.rs` checks it instead. `--url` is still
+//! passed because it is correct for a locally managed tunnel and ignored by
+//! the other kind. The hostname is therefore `Available`
 //! from config alone -- exactly like ngrok with a configured dev domain --
 //! because the owner told Cloudflare what hostname routes to this tunnel
 //! when they created the route, not because this adapter discovered
@@ -113,7 +123,7 @@ use crate::remote_access::{
     CancellationToken, CredentialReference, DurableAddressState, LoopbackTarget,
     ReachabilityFields, RemoteAccessAuthentication, RemoteAccessAvailability,
     RemoteAccessContractConfig, RemoteAccessHandle, RemoteAccessInspection, RemoteAccessPosture,
-    RemoteAccessPrivacy, RemoteAccessProvider,
+    RemoteAccessPrivacy, RemoteAccessProvider, TunnelAgentHealth,
 };
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -137,13 +147,6 @@ const PRIVACY: RemoteAccessPrivacy = RemoteAccessPrivacy::ProviderCanReadPayload
 
 fn privacy() -> RemoteAccessPrivacy {
     PRIVACY
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CloudflareTunnelHealth {
-    Stopped,
-    Connected,
-    ProviderDown,
 }
 
 struct OwnedCloudflaredProcess {
@@ -243,14 +246,14 @@ impl<R> CloudflareTunnelProvider<R> {
         self
     }
 
-    pub(crate) fn health(&mut self) -> CloudflareTunnelHealth {
+    pub(crate) fn health(&mut self) -> TunnelAgentHealth {
         let Some(process) = self.process.as_mut() else {
-            return CloudflareTunnelHealth::Stopped;
+            return TunnelAgentHealth::Stopped;
         };
         if process.is_running() {
-            CloudflareTunnelHealth::Connected
+            TunnelAgentHealth::Running
         } else {
-            CloudflareTunnelHealth::ProviderDown
+            TunnelAgentHealth::Exited
         }
     }
 
@@ -1033,7 +1036,7 @@ mod tests {
             cancellation,
         );
         assert!(result.is_err());
-        assert_eq!(provider.health(), CloudflareTunnelHealth::Stopped);
+        assert_eq!(provider.health(), TunnelAgentHealth::Stopped);
     }
 
     /// A missing/unreachable `cloudflared` binary must produce a clear,

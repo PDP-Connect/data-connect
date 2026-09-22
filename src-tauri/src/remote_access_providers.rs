@@ -151,6 +151,50 @@ impl PublicUrlProvider {
     pub(crate) fn origin_is_knowable_from_config(&self) -> bool {
         self.durable_address().origin_is_knowable_from_config()
     }
+
+    /// Who owns the mapping from the public origin to this computer's
+    /// console. Knowing the public ADDRESS (`durable_address`) is a
+    /// different question from knowing where that address LEADS: a
+    /// Cloudflare hostname is known from config, yet the app cannot set its
+    /// route.
+    ///
+    /// Answered from stored config alone, like every other method here. No
+    /// variant needs a runtime answer: see the Cloudflare arm for the one
+    /// case where the mode could differ.
+    pub(crate) fn origin_binding(&self) -> crate::remote_access::OriginBinding {
+        use crate::remote_access::OriginBinding;
+        match self {
+            // The owner's own reverse proxy decides where the origin leads.
+            // Not a third variant: every consequence the owner sees is the
+            // same as for a provider's control plane (the app cannot set it,
+            // a changed console port breaks it, only a probe can confirm
+            // it). The port pin is a separate setting, not a different
+            // binding.
+            Self::UserSuppliedOrigin => OriginBinding::OwnerMaintained {
+                where_to_set: "the upstream (target) setting of your reverse proxy".to_string(),
+            },
+            // The SDK's forwarder is handed the loopback URL at listen time
+            // and ngrok's edge sends the agent endpoint's traffic to it;
+            // nothing on ngrok's side can redirect it elsewhere.
+            Self::Ngrok(_) => OriginBinding::AppSupplied,
+            // A dashboard-created tunnel is remotely managed, and its route
+            // silently overrides the `--url` the adapter passes (seen on a
+            // live tunnel on 2026-09-22: zero local config pushes, traffic
+            // still going to a port from before a rebuild). A locally
+            // managed tunnel would honor `--url`, but the token does not say
+            // which kind it is, and finding out would need either
+            // Cloudflare's management API (a new credential and network
+            // dependency) or parsing cloudflared's log text (brittle across
+            // versions). So this is a constant: it states what the app can
+            // guarantee, and the origin-proof probe reports what is actually
+            // true, including when `--url` happened to be honored.
+            Self::CloudflareTunnel(_) => OriginBinding::OwnerMaintained {
+                where_to_set: "the Service URL of this hostname's route, in the Cloudflare \
+                               dashboard (Networks > Tunnels > this tunnel > Routes)"
+                    .to_string(),
+            },
+        }
+    }
 }
 
 /// Resolve the stored provider id plus options into a selectable provider.
@@ -391,6 +435,40 @@ mod tests {
             Some(&cloudflare_tunnel("  ")),
         )
         .is_err());
+    }
+
+    #[test]
+    fn origin_binding_is_answered_per_provider_and_only_ngrok_supplies_its_own() {
+        use crate::remote_access::OriginBinding;
+        let cases = [
+            (PublicUrlProvider::UserSuppliedOrigin, false),
+            (
+                PublicUrlProvider::Ngrok(ngrok(
+                    NgrokEndpointModeConfig::HttpsEdgeTermination,
+                    None,
+                )),
+                true,
+            ),
+            (
+                PublicUrlProvider::Ngrok(ngrok(NgrokEndpointModeConfig::TlsPassthrough, None)),
+                true,
+            ),
+            (
+                PublicUrlProvider::CloudflareTunnel(cloudflare_tunnel("vault.example.com")),
+                false,
+            ),
+        ];
+        for (provider, app_supplied) in cases {
+            match provider.origin_binding() {
+                OriginBinding::AppSupplied => assert!(app_supplied, "{provider:?}"),
+                OriginBinding::OwnerMaintained { where_to_set } => {
+                    assert!(!app_supplied, "{provider:?}");
+                    // The owner-facing copy renders this verbatim as the
+                    // place to act, so it can never be blank.
+                    assert!(!where_to_set.trim().is_empty(), "{provider:?}");
+                }
+            }
+        }
     }
 
     #[test]

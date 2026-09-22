@@ -16,6 +16,7 @@ import {
   CLOUDFLARE_TUNNEL_SETUP_URL,
   useCloudflareTunnelConnectionStatus,
 } from "./cloudflare-tunnel-prerequisite.tsx"
+import { OriginVerificationStatus } from "./origin-verification-status.tsx"
 import {
   loadRemoteAccessStateAction,
   setRemoteAccessConfigAction,
@@ -24,6 +25,8 @@ import {
   DEFAULT_PUBLIC_URL_OPTION_ID,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
+  originVerificationDisplay,
+  parseOriginVerification,
   privacyBadgeForPosture,
   publicUrlOptionById,
   publicUrlOptions,
@@ -87,6 +90,7 @@ function asConfig(value: unknown): RemoteAccessConfig {
     my_devices_only: candidate.my_devices_only ?? null,
     tunnel_error:
       typeof candidate.tunnel_error === "string" ? candidate.tunnel_error : null,
+    origin_verified: parseOriginVerification(candidate.origin_verified),
   }
 }
 
@@ -313,6 +317,12 @@ export function RemoteAccessSetting({
   )
   const runningOption = useMemo(() => activeOption(config), [config])
   const originDisplay = useMemo(() => remoteAccessOriginDisplay(config), [config])
+  // Evaluated against the clock when the config loads: a reading that was
+  // already stale then is shown as stale, never as verified.
+  const originVerification = useMemo(
+    () => originVerificationDisplay(config, Math.floor(Date.now() / 1000)),
+    [config]
+  )
 
   const choosePosture = (nextPosture: RemoteAccessPosture) => {
     setError(null)
@@ -761,28 +771,27 @@ export function RemoteAccessSetting({
                 : "Waiting for the provider to report an address…"}
             </p>
           )}
-          {config.provider === "cloudflare_tunnel" &&
-          cloudflareTunnelConnection.status.phase === "connected" ? (
-            // Deliberately gated on the tunnel's real CONNECTED phase, not
-            // `originDisplay` -- the config's origin is derived from the
-            // hostname at save time (see `validateCloudflareTunnelConfig`)
-            // and is present well before cloudflared has actually
-            // connected, so keying this off the origin alone would tell the
-            // owner to go check a dashboard route before there is even a
-            // live tunnel to route to.
-            <p className="pdpp-caption text-muted-foreground">
-              This hostname returns 404 until you add a route to it in the
-              Cloudflare dashboard's Routes tab for this tunnel, pointing at{" "}
-              <span className="select-all font-mono">http://localhost:PORT</span> (any
-              port -- DataConnect connects the tunnel to the right one itself).{" "}
-              <OpenExternalLink className="underline" href={CLOUDFLARE_TUNNEL_SETUP_URL}>
-                Open the Cloudflare Tunnel dashboard
-              </OpenExternalLink>
-              .
-            </p>
+          {originDisplay.kind === "origin" ? (
+            // Where the address actually leads, from the supervisor's
+            // origin-proof probe, and what the owner must do about it, from
+            // the provider's own `binding` answer. This replaced a
+            // Cloudflare-only line claiming "any port -- DataConnect connects
+            // the tunnel to the right one itself", which is false for a
+            // dashboard-managed tunnel: its route overrides the port
+            // DataConnect passes.
+            <OriginVerificationStatus
+              consolePort={effectiveConsolePort}
+              consolePortPinned={config.console_port != null}
+              display={originVerification}
+              origin={originDisplay.origin}
+            />
           ) : null}
           {config.provider === "user_supplied_origin" &&
-          effectiveConsolePort != null ? (
+          effectiveConsolePort != null &&
+          // Fallback for a host with no desktop supervisor, which never
+          // records a binding; otherwise `OriginVerificationStatus` above
+          // already says where to point the proxy.
+          originVerification.binding === null ? (
             <p className="pdpp-caption text-muted-foreground">
               Point your proxy at{" "}
               <span className="font-mono text-foreground/80">

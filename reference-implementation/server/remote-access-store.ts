@@ -22,6 +22,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   offRemoteAccessConfig,
+  parseOriginVerification,
   type RemoteAccessConfig,
   validateRemoteAccessConfig,
 } from "./remote-access-config.ts"
@@ -60,11 +61,21 @@ export function createRemoteAccessConfigStore(dataDir: string): RemoteAccessConf
     if (!validated.ok) {
       throw new Error(`Stored remote-access configuration is invalid: ${validated.message}`)
     }
-    return validated.config
+    // Validation rebuilds the owner's settings and drops everything else,
+    // including the supervisor's observation. Re-attach it here, on the read
+    // path only, so the console can show what the supervisor saw. Only for
+    // a Public URL: no other posture has a public origin to verify.
+    const originVerified =
+      validated.config.posture === "public_url"
+        ? parseOriginVerification((parsed as { origin_verified?: unknown }).origin_verified)
+        : null
+    return originVerified ? { ...validated.config, origin_verified: originVerified } : validated.config
   }
 
   async function save(config: RemoteAccessConfig): Promise<RemoteAccessConfig> {
-    const validated = validateRemoteAccessConfig(config)
+    // An observation is the supervisor's to write, never a request's.
+    const { origin_verified: _observation, ...ownerConfig } = config
+    const validated = validateRemoteAccessConfig(ownerConfig)
     if (!validated.ok) {
       throw new Error(validated.message)
     }

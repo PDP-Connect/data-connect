@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -320,5 +320,77 @@ test("load surfaces a corrupted file as an error rather than a silent off defaul
     const { writeFile } = await import("node:fs/promises");
     await writeFile(join(dir, "remote-access.json"), "not json", "utf8");
     await assert.rejects(store.load(), /Failed to parse/);
+  });
+});
+
+// The supervisor writes `origin_verified` into the same file
+// (`record_origin_verification` in src-tauri/src/unified.rs). This is the
+// exact JSON its serialization test pins
+// (`an_origin_verification_serializes_in_the_shape_the_console_reads`).
+const SUPERVISOR_OBSERVATION = {
+  origin: "https://vault.example.com",
+  checked_at: 1_000,
+  stale_after: 150,
+  outcome: { kind: "reaches_something_else", status: 404 },
+  binding: { kind: "owner_maintained", where_to_set: "the dashboard" },
+  agent: "running",
+};
+
+const CLOUDFLARE_ON_DISK = {
+  posture: "public_url",
+  provider: "cloudflare_tunnel",
+  fields: {
+    PDPP_BIND_HOST: "127.0.0.1",
+    PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+    PDPP_TRUSTED_HOSTS: "vault.example.com",
+    PDPP_TRUSTED_PROXIES: "",
+  },
+  cloudflare_tunnel: { hostname: "vault.example.com" },
+};
+
+test("load returns the supervisor's origin observation so the console can show it", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, "remote-access.json"),
+      JSON.stringify({ ...CLOUDFLARE_ON_DISK, origin_verified: SUPERVISOR_OBSERVATION })
+    );
+    const loaded = await createRemoteAccessConfigStore(dir).load();
+    assert.deepEqual(loaded.origin_verified, SUPERVISOR_OBSERVATION);
+  });
+});
+
+test("load drops an observation in an older shape instead of guessing at it", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, "remote-access.json"),
+      JSON.stringify({
+        ...CLOUDFLARE_ON_DISK,
+        origin_verified: { origin: "https://vault.example.com", checked_at: 1_000, reachable: true },
+      })
+    );
+    const loaded = await createRemoteAccessConfigStore(dir).load();
+    assert.equal(loaded.origin_verified, undefined);
+    assert.equal(loaded.fields.PDPP_REFERENCE_ORIGIN, "https://vault.example.com");
+  });
+});
+
+test("save never persists an observation that arrived in a request", async () => {
+  await withTempDir(async (dir) => {
+    const store = createRemoteAccessConfigStore(dir);
+    const forged = {
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "user_supplied_origin",
+      origin_verified: { ...SUPERVISOR_OBSERVATION, outcome: { kind: "reaches_this_console" } },
+    } as RemoteAccessConfig;
+    const saved = await store.save(forged);
+    assert.equal(saved.origin_verified, undefined);
+    const onDisk = JSON.parse(await readFile(join(dir, "remote-access.json"), "utf8"));
+    assert.equal(onDisk.origin_verified, undefined);
   });
 });

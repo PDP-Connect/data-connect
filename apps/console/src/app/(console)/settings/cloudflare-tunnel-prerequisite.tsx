@@ -503,10 +503,14 @@ export function CloudflareTunnelConnectionBanner({
     )
   }
   if (status.phase === "connected") {
+    // Only the tunnel is claimed here. Whether the hostname leads to this
+    // DataConnect is decided by the route in Cloudflare's dashboard, which
+    // DataConnect does not control; `OriginVerificationStatus` reports it.
     return (
       <p className="pdpp-caption text-foreground" role="status">
-        Connected —{" "}
-        <span className="select-all break-all font-mono">{status.origin}</span>
+        Tunnel connected for{" "}
+        <span className="select-all break-all font-mono">{status.origin}</span>. Whether this
+        address reaches DataConnect is shown below.
       </p>
     )
   }
