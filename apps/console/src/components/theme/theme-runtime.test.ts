@@ -18,12 +18,12 @@ import { THEME_KEY } from "./theme-state.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 // theme-provider.tsx is a re-export shim; the real implementation lives in
-// packages/operator-ui so that both apps share one source of truth.
-const PROVIDER_FILE = `${HERE}../../../../../packages/operator-ui/src/components/theme/theme-provider.tsx`;
+// reference-implementation/vendor/operator-ui so that both apps share one source of truth.
+const PROVIDER_FILE = `${HERE}../../../../../reference-implementation/vendor/operator-ui/src/components/theme/theme-provider.tsx`;
 const LAYOUT_FILE = `${HERE}../../app/layout.tsx`;
-const BRAND_PRIMITIVE_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/tokens/primitive.css`;
-const BRAND_INDEX_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/index.css`;
-const STATUS_BADGE_CSS_FILE = `${HERE}../../../../../packages/operator-ui/src/components/status-badge.css`;
+const BRAND_PRIMITIVE_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/tokens/primitive.css`;
+const BRAND_INDEX_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/index.css`;
+const STATUS_BADGE_CSS_FILE = `${HERE}../../../../../reference-implementation/vendor/operator-ui/src/components/status-badge.css`;
 
 const NEXT_THEMES_IMPORT = /from "next-themes"/;
 const NEXT_THEMES_PROVIDER = /ThemeProvider as NextThemesProvider/;
