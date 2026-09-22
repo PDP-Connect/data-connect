@@ -4866,6 +4866,45 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
     }
 
+    /// N restarts cannot chain: simulates one real, owner-initiated change
+    /// followed by several consecutive origin-verification writes (the way
+    /// `spawn_origin_verification_watcher` writes one every
+    /// `ORIGIN_VERIFY_INTERVAL` in production) and asserts none of the
+    /// follow-up writes register as restart-worthy against the baseline
+    /// set by the one real change. The prior test proves a single pair of
+    /// configs compares equal; this proves the loop actually settles
+    /// instead of merely not firing once.
+    #[test]
+    fn repeated_origin_verification_writes_after_a_real_change_never_chain_into_more_restarts() {
+        let mut last_applied = crate::remote_access::off_remote_access_config();
+        let mut current = last_applied.clone();
+        current.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        current.provider = Some("cloudflare_tunnel".to_string());
+        current.fields.reference_origin = Some("https://vault.example.com".to_string());
+
+        assert_ne!(
+            restart_relevant_view(&current),
+            restart_relevant_view(&last_applied),
+            "the one real, owner-initiated change must still be seen as restart-worthy"
+        );
+        last_applied = current.clone();
+
+        for tick in 0..5u64 {
+            let mut observed = last_applied.clone();
+            observed.origin_verified = Some(crate::remote_access::OriginVerification {
+                origin: "https://vault.example.com".to_string(),
+                checked_at: 1_000 + tick * 60,
+                reachable: true,
+            });
+            assert_eq!(
+                restart_relevant_view(&observed),
+                restart_relevant_view(&last_applied),
+                "tick {tick}: an origin-verification write alone must never be read as a \
+                 config change worth restarting for, no matter how many ticks accumulate"
+            );
+        }
+    }
+
     /// An absent verification must never read as healthy.
     ///
     /// This is the whole point of the field: the old `tunnel_error: None`
