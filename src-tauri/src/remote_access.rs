@@ -679,19 +679,42 @@ pub(crate) fn validate_remote_access_config(
                 return Ok(config);
             }
 
-            let origin = config
-                .fields
-                .reference_origin
-                .as_deref()
-                .ok_or_else(|| "Public URL requires PDPP_REFERENCE_ORIGIN".to_string())?;
-            validate_origin(origin)?;
-            let trusted_hosts = config.fields.trusted_hosts.trim();
-            let parsed_origin = reqwest::Url::parse(origin)
+            // A Cloudflare named tunnel is the one provider whose origin is
+            // knowable from config WITHOUT the console ever submitting one:
+            // the origin is exactly `https://` + the hostname the owner
+            // already routed to this tunnel in Cloudflare's dashboard. The
+            // console cannot supply an origin this app is supposed to
+            // compute, so derive both `PDPP_REFERENCE_ORIGIN` and
+            // `PDPP_TRUSTED_HOSTS` here instead of demanding them as input --
+            // same reasoning as `my_devices_only_config_for_host` deriving
+            // its origin from a detected `lan_host` rather than trusting a
+            // client-submitted one. This only fires when the console truly
+            // sent nothing (the real submission shape); an origin the client
+            // DID submit still goes through the normal host-match check
+            // below, so a stale or hand-edited value can never silently
+            // diverge from the hostname.
+            let derived = config.fields.reference_origin.is_none();
+            let origin = match config.fields.reference_origin.clone() {
+                Some(origin) => origin,
+                None => match config.cloudflare_tunnel.as_ref() {
+                    Some(options) => format!("https://{}", options.hostname),
+                    None => return Err("Public URL requires PDPP_REFERENCE_ORIGIN".to_string()),
+                },
+            };
+            validate_origin(&origin)?;
+            let parsed_origin = reqwest::Url::parse(&origin)
                 .map_err(|error| format!("Invalid PDPP_REFERENCE_ORIGIN: {error}"))?;
             let host = parsed_origin
                 .host_str()
                 .ok_or_else(|| "PDPP_REFERENCE_ORIGIN has no host".to_string())?;
-            if trusted_hosts != host {
+            let mut config = config;
+            if derived {
+                // Derived just now: trust our own derivation for
+                // `PDPP_TRUSTED_HOSTS` too, rather than requiring the console
+                // to also submit a value it would only be echoing back.
+                config.fields.reference_origin = Some(origin);
+                config.fields.trusted_hosts = host.to_string();
+            } else if config.fields.trusted_hosts.trim() != host {
                 return Err("PDPP_TRUSTED_HOSTS must contain the origin host".to_string());
             }
             Ok(config)

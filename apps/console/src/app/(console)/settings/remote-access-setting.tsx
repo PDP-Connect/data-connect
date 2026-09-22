@@ -247,6 +247,20 @@ export function RemoteAccessSetting({
           )
           setEffectiveConsolePort(nextPort ?? null)
           setLoadState("loaded")
+          // Resume showing progress after a page reload mid-connect --
+          // otherwise a Cloudflare config with no origin yet and no
+          // reported failure renders as the same static "Waiting for the
+          // provider to report an address…" line forever, with no
+          // indication anything is still happening. This is exactly what
+          // the settings-triggered console restart produces: the window
+          // reloads Settings while cloudflared may still be connecting.
+          if (
+            resolved.provider === "cloudflare_tunnel" &&
+            !resolved.fields.PDPP_REFERENCE_ORIGIN &&
+            !resolved.tunnel_error
+          ) {
+            cloudflareTunnelConnection.start()
+          }
         }
       )
       .catch(reason => {
@@ -260,7 +274,7 @@ export function RemoteAccessSetting({
     return () => {
       cancelled = true
     }
-  }, [loadRemoteAccessState])
+  }, [loadRemoteAccessState, cloudflareTunnelConnection.start])
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
@@ -515,9 +529,12 @@ export function RemoteAccessSetting({
         return
       }
       // The hostname is already the durable origin -- unlike ngrok, there is
-      // no discovery step, but the four fields still stay empty here: the
-      // Tauri supervisor's `start_cloudflare_tunnel_provider` is what fills
-      // them in once the tunnel is confirmed to have actually started.
+      // no discovery step. The four fields are left empty here anyway: the
+      // reference server's validator (`validateCloudflareTunnelConfig`,
+      // `reference-implementation/server/remote-access-config.ts`) derives
+      // and persists PDPP_REFERENCE_ORIGIN/PDPP_TRUSTED_HOSTS from the
+      // hostname itself, so the console never needs to compute or echo back
+      // a value it has no way to construct correctly.
       const nextConfig: RemoteAccessConfig = {
         posture: "public_url",
         provider: "cloudflare_tunnel",
@@ -529,12 +546,14 @@ export function RemoteAccessSetting({
         // The token is now sealed at rest and only the desktop host's
         // config watcher can decrypt it; drop the copy here.
         setCloudflareToken("")
-        // The save response only confirms the config was PERSISTED, not
-        // that cloudflared actually connected -- that happens
-        // asynchronously (the desktop host's config watcher restarts the
-        // stack, then `start()` spends up to 30s watching for cloudflared
-        // to report a registered connection). Poll for the real outcome
-        // instead of leaving the owner on an indefinite "waiting" state.
+        // The saved config's PDPP_REFERENCE_ORIGIN is the address cloudflared
+        // will serve once connected, not proof it IS connected yet -- the
+        // desktop host's config watcher still has to restart the stack and
+        // spawn cloudflared, which can take real time. Poll for the actual
+        // connection outcome (`CloudflareTunnelConnectionBanner`, rendered
+        // in BOTH this form and the steady-state summary below, survives
+        // `pendingPosture` clearing) instead of letting the collapsing form
+        // make a real "still connecting" state look like silent success.
         cloudflareTunnelConnection.start()
       })
       return
@@ -721,6 +740,20 @@ export function RemoteAccessSetting({
                 </button>
               ) : null}
             </div>
+          ) : config.provider === "cloudflare_tunnel" &&
+            cloudflareTunnelConnection.status.phase !== "idle" ? (
+            // Grounded in the same real "Registered tunnel connection"
+            // signal the form above polls for (`CloudflareTunnelConnectionBanner`),
+            // not a static line -- this is what stays on screen once
+            // `pendingPosture` clears and the form collapses, which is
+            // exactly when an owner who just saved needs to see progress
+            // instead of a state that never updates itself. `idle` is
+            // excluded deliberately: it means no poll ever ran this session
+            // (a normal page load of an ALREADY-connected tunnel, since the
+            // load effect above only calls `start()` when the origin is
+            // still missing) -- falling through to the plain origin line
+            // below is correct there, not a gap.
+            <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
           ) : (
             <p className="break-all font-mono text-xs text-foreground/80">
               {originDisplay.kind === "origin"
@@ -728,6 +761,26 @@ export function RemoteAccessSetting({
                 : "Waiting for the provider to report an address…"}
             </p>
           )}
+          {config.provider === "cloudflare_tunnel" &&
+          cloudflareTunnelConnection.status.phase === "connected" ? (
+            // Deliberately gated on the tunnel's real CONNECTED phase, not
+            // `originDisplay` -- the config's origin is derived from the
+            // hostname at save time (see `validateCloudflareTunnelConfig`)
+            // and is present well before cloudflared has actually
+            // connected, so keying this off the origin alone would tell the
+            // owner to go check a dashboard route before there is even a
+            // live tunnel to route to.
+            <p className="pdpp-caption text-muted-foreground">
+              This hostname returns 404 until you add a route to it in the
+              Cloudflare dashboard's Routes tab for this tunnel, pointing at{" "}
+              <span className="select-all font-mono">http://localhost:PORT</span> (any
+              port -- DataConnect connects the tunnel to the right one itself).{" "}
+              <OpenExternalLink className="underline" href={CLOUDFLARE_TUNNEL_SETUP_URL}>
+                Open the Cloudflare Tunnel dashboard
+              </OpenExternalLink>
+              .
+            </p>
+          ) : null}
           {config.provider === "user_supplied_origin" &&
           effectiveConsolePort != null ? (
             <p className="pdpp-caption text-muted-foreground">

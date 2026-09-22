@@ -666,8 +666,17 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
  * Cloudflare arm in `remote_access_providers.rs`). Unlike
  * `validateNgrokConfig`, the origin is ALWAYS knowable from config here --
  * `cloudflareTunnelDurableAddress` never returns `auth_insufficient` -- so
- * this function has no "origin must stay empty" branch at all: a hostname
- * is required up front, and so is the origin once that hostname is set.
+ * this function has no "origin must stay empty" branch at all. But
+ * "knowable" means DERIVABLE from the hostname the owner already typed, not
+ * "the console must also submit it": the origin is exactly `https://` +
+ * hostname, so this function computes it via `validateUserSuppliedOrigin`
+ * rather than requiring the console to send a `PDPP_REFERENCE_ORIGIN` it has
+ * no way to construct correctly itself (query strings, ports, trailing
+ * slashes) -- the same reason `validateMyDevicesOnlyConfig` synthesizes its
+ * origin from `lan_host` instead of trusting a client-submitted one. A
+ * `PDPP_REFERENCE_ORIGIN` already present in `config.fields` that disagrees
+ * with the hostname is still rejected, so a stale or hand-edited value can
+ * never silently diverge from what this provider will actually serve.
  *
  * `cloudflare_tunnel_token_sealed` passes through untouched, same as
  * `ngrok_authtoken_sealed` in `validateNgrokConfig`.
@@ -677,19 +686,13 @@ function validateCloudflareTunnelConfig(config: RemoteAccessConfig): { ok: true;
   if (!hostname) {
     return { ok: false, message: "Cloudflare tunnel requires a hostname." }
   }
-  const origin = config.fields.PDPP_REFERENCE_ORIGIN
-  if (!origin) {
-    return { ok: false, message: "Public URL requires PDPP_REFERENCE_ORIGIN." }
-  }
-  const validated = validateUserSuppliedOrigin(origin)
+  const submittedOrigin = config.fields.PDPP_REFERENCE_ORIGIN?.trim()
+  const validated = validateUserSuppliedOrigin(submittedOrigin || `https://${hostname}`)
   if (!validated.ok) {
     return validated
   }
   if (validated.host !== hostname) {
     return { ok: false, message: "PDPP_REFERENCE_ORIGIN must match the configured Cloudflare tunnel hostname." }
-  }
-  if (config.fields.PDPP_TRUSTED_HOSTS.trim() !== validated.host) {
-    return { ok: false, message: "PDPP_TRUSTED_HOSTS must contain the origin host." }
   }
   return {
     ok: true,
