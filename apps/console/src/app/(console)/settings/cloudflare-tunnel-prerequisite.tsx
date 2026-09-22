@@ -236,6 +236,23 @@ export function CloudflareTunnelDomainRequirement() {
  * <TOKEN>` command on the Docker path Cloudflare's dashboard also offers)
  * that embeds the token inside it, so the owner has to know to copy only
  * the value after `--token`, not the whole command.
+ *
+ * Two more gaps added after a live run-through hit both: (1) Cloudflare's
+ * own dashboard disables its "Continue" button on the install-method step
+ * until it detects a live tunnel connection -- but that connection only
+ * exists once DataConnect has actually run cloudflared, which only happens
+ * after the owner clicks Enable below. Read left-to-right, steps 2-3 look
+ * like they must finish inside the dashboard before step 5 (paste into
+ * DataConnect) even though step 3's real order is: copy the token, come
+ * here and click Enable, THEN go back and let the dashboard see the
+ * connection. Step 3 now says this explicitly, so the owner does not sit at
+ * a Cloudflare screen waiting for a "Continue" button that cannot light up
+ * yet. (2) tunnels and zones are scoped per Cloudflare account, and a
+ * hostname on the wrong account's zone gives a real but useless error --
+ * "This domain isn't a zone on your account" -- confirmed live, from an
+ * owner whose tunnel and target zone were on different Cloudflare accounts.
+ * Step 1 now says explicitly to use the SAME account for both the tunnel
+ * and the hostname's zone.
  */
 export function CloudflareTunnelSetupSteps() {
   return (
@@ -246,7 +263,9 @@ export function CloudflareTunnelSetupSteps() {
           Cloudflare Tunnel dashboard
         </OpenExternalLink>{" "}
         and sign in to the Cloudflare account you want this Personal Server
-        to route through.
+        to route through. Use the account that owns the domain you plan to
+        use as the hostname below — a tunnel on one Cloudflare account
+        cannot route a hostname whose zone lives on a different account.
       </li>
       <li>
         Under <span className="font-medium text-foreground/90">Networking → Tunnels</span>,
@@ -259,7 +278,11 @@ export function CloudflareTunnelSetupSteps() {
         Copy only that value — everything after{" "}
         <span className="select-all font-mono">--token</span>, not the whole command — and
         paste it into the token field below. You do not need to run that
-        command yourself; DataConnect runs cloudflared for you.
+        command yourself; DataConnect runs cloudflared for you. Cloudflare's
+        own "Continue" button on this dashboard step stays disabled until it
+        sees a live connection, which will not happen until you finish step 5
+        below and click Enable — leave this dashboard tab open, come back to
+        it once cloudflared is running.
       </li>
       <li>
         Still in the dashboard, open the tunnel's{" "}
@@ -274,10 +297,14 @@ export function CloudflareTunnelSetupSteps() {
         the right one itself.
       </li>
       <li>
-        Paste that same hostname into the hostname field below. This step
-        matters: a token and hostname that do not both point at the same
-        tunnel will connect but never actually reach this Personal Server —
-        see the note below the hostname field.
+        Paste that same hostname into the hostname field below, then click
+        Enable. This step matters: a token and hostname that do not both
+        point at the same tunnel will connect but never actually reach this
+        Personal Server — see the note below the hostname field. The
+        hostname will 404 until BOTH this route exists in the dashboard AND
+        cloudflared is actually running, so a 404 right after enabling does
+        not mean something is broken — go back and finish the Routes step
+        above if you have not already.
       </li>
     </ol>
   )

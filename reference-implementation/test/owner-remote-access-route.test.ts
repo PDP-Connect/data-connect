@@ -440,6 +440,63 @@ test("POST config rejects cloudflare_tunnel with no hostname configured", async 
   });
 });
 
+test("POST config derives PDPP_REFERENCE_ORIGIN and PDPP_TRUSTED_HOSTS from the hostname when the console submits neither -- the actual console payload", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    // Matches apps/console's remote-access-setting.tsx exactly: the console
+    // never fills PDPP_REFERENCE_ORIGIN/PDPP_TRUSTED_HOSTS for this
+    // provider, since it has no way to compute them itself. Regression for
+    // the live 400: "Public URL requires PDPP_REFERENCE_ORIGIN."
+    const cloudflareConfig = {
+      cloudflare_tunnel: { hostname: "vault.example.com" },
+      fields: offRemoteAccessConfig().fields,
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      providerCredential: "shhh-cloudflare-tunnel-token",
+    };
+
+    const post = makeRes();
+    await postHandler?.({ body: cloudflareConfig }, post.res);
+    assert.equal(post.captured.status, 200);
+    const postedBody = post.captured.body as { data: RemoteAccessConfig };
+    assert.equal(postedBody.data.fields.PDPP_REFERENCE_ORIGIN, "https://vault.example.com");
+    assert.equal(postedBody.data.fields.PDPP_TRUSTED_HOSTS, "vault.example.com");
+
+    const get = makeRes();
+    await getHandler?.({}, get.res);
+    const storedBody = get.captured.body as { data: RemoteAccessConfig };
+    assert.equal(storedBody.data.fields.PDPP_REFERENCE_ORIGIN, "https://vault.example.com");
+    assert.equal(storedBody.data.fields.PDPP_TRUSTED_HOSTS, "vault.example.com");
+  });
+});
+
+test("POST config rejects a cloudflare_tunnel submission whose explicit PDPP_REFERENCE_ORIGIN disagrees with the hostname", async () => {
+  await withMountedRoutes(async (routes) => {
+    const postHandler = routes.get("POST /v1/owner/remote-access/config");
+    const cloudflareConfig = {
+      cloudflare_tunnel: { hostname: "vault.example.com" },
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://wrong.example.com",
+        PDPP_TRUSTED_HOSTS: "wrong.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "cloudflare_tunnel",
+      providerCredential: "shhh-cloudflare-tunnel-token",
+    };
+
+    const post = makeRes();
+    await postHandler?.({ body: cloudflareConfig }, post.res);
+    assert.equal(post.captured.status, 400);
+    assert.match(
+      String((post.captured.body as { error: { message: string } }).error.message),
+      /must match the configured Cloudflare tunnel hostname/
+    );
+  });
+});
+
 test("POST config accepts a cloudflare_tunnel submission even when the binary is confirmed missing, since it downloads automatically at spawn time", async () => {
   const previousHost = process.env.PDPP_MANAGED_DESKTOP_HOST;
   const previousBinary = process.env.PDPP_CLOUDFLARED_BINARY_PRESENT;

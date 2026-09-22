@@ -470,7 +470,9 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     spawn_origin_verification_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(failure) = bootstrap_and_open_console(app_handle.clone(), should_show).await {
+        if let Err(failure) =
+            bootstrap_and_open_console(app_handle.clone(), should_show, None).await
+        {
             handle_bootstrap_failure(&app_handle, "Unified DataConnect startup", failure);
         }
     });
@@ -484,7 +486,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(failure) = bootstrap_and_open_console(app.clone(), true).await {
+        if let Err(failure) = bootstrap_and_open_console(app.clone(), true, None).await {
             handle_bootstrap_failure(&app, "Opening the DataConnect console", failure);
         }
     });
@@ -2190,7 +2192,11 @@ impl From<String> for BootstrapFailure {
     }
 }
 
-async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result<(), BootstrapFailure> {
+async fn bootstrap_and_open_console(
+    app: AppHandle,
+    should_show: bool,
+    preserved_path: Option<String>,
+) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
@@ -2252,6 +2258,7 @@ async fn bootstrap_and_open_console(app: AppHandle, should_show: bool) -> Result
         managed,
         should_show,
         &remote_access.fields.trusted_hosts,
+        preserved_path,
     )
     .await
     .map_err(BootstrapFailure::from)
@@ -2286,6 +2293,7 @@ async fn finish_bootstrap(
     managed: bool,
     should_show: bool,
     trusted_hosts: &str,
+    preserved_path: Option<String>,
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
@@ -2360,8 +2368,12 @@ async fn finish_bootstrap(
     }
 
     let console_origin_for_health_watch = console_origin.to_string();
-    if let Err(error) = create_or_update_console_window(app, console_origin, cookie, should_show)
-    {
+    // `console_origin` is the bare, freshly-resolved origin this process
+    // just started listening on -- see `console_url_preserving_path`'s doc
+    // comment for why the navigation target's scheme/host/port must ALWAYS
+    // come from here and never from `preserved_path`.
+    let navigate_to = console_url_preserving_path(&console_origin, preserved_path.as_deref());
+    if let Err(error) = create_or_update_console_window(app, navigate_to, cookie, should_show) {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
@@ -2525,14 +2537,58 @@ pub(crate) async fn import_database_encryption_recovery_code(
         true,
         true,
         &remote_access.fields.trusted_hosts,
+        // Recovery always lands the owner at root: there is no "page they
+        // were on" to return to -- the recovery window is a distinct
+        // surface from the console, and the console had never successfully
+        // opened yet in this session.
+        None,
     )
     .await
+}
+
+/// The console window's current path+query, read BEFORE `teardown()` runs --
+/// once teardown starts the window (and whatever page it was showing) is
+/// gone, so this has to happen first or there is nothing left to read.
+/// Never fails the caller: a missing window, an unreadable URL, or a path
+/// that fails `ConsolePathAndQuery::parse`'s validation all fall back to
+/// `None` (root) rather than blocking or erroring the restart -- per
+/// `console_url_preserving_path`'s doc comment, reopening at root is a
+/// papercut, failing to reopen at all is a brick.
+fn console_path_before_restart(app: &AppHandle) -> Option<String> {
+    let window = app.get_webview_window(CONSOLE_WINDOW_LABEL)?;
+    let url = window
+        .url()
+        .inspect_err(|error| {
+            log::warn!("console_path_before_restart: could not read the console window's URL, falling back to root: {error}");
+        })
+        .ok()?;
+    let mut path_and_query = url.path().to_string();
+    if let Some(query) = url.query() {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+    match ConsolePathAndQuery::parse(&path_and_query) {
+        Some(_) => Some(path_and_query),
+        None => {
+            // `Url::path()` on a URL this process itself just navigated to
+            // should never fail this validation -- if it somehow does
+            // (a future `tauri::Url` behavior change, a scheme this
+            // function was not written against), fail closed rather than
+            // propagate a shape `console_url_preserving_path` was not
+            // proven safe for.
+            log::warn!(
+                "console_path_before_restart: console URL path {path_and_query:?} failed validation, falling back to root"
+            );
+            None
+        }
+    }
 }
 
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
     if !remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".into());
     }
+    let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
         let app = app.clone();
@@ -2552,7 +2608,7 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     // not the moment to also introduce new recovery-window UI; the tray
     // status still reaches NeedsRecovery on the NEXT natural bootstrap
     // attempt (app relaunch or "Open console"), which does open it.
-    bootstrap_and_open_console(app, true)
+    bootstrap_and_open_console(app, true, preserved_path)
         .await
         .map_err(|failure| match failure {
             BootstrapFailure::NeedsRecovery => {
@@ -3369,6 +3425,74 @@ where
 {
     set_cookies()?;
     navigate()
+}
+
+/// A path+query string safe to append to a FRESH console origin this
+/// process just built (never to a URL parsed from anywhere else). Rejects
+/// anything that is not exactly one leading `/` followed by no further `/`
+/// at the start (which would make it protocol-relative, e.g. `//evil.example`
+/// resolving off-host per the browser's own URL-resolution rules -- the
+/// same class of bug as the `is_local_url` CVE documented in
+/// `local/HOST-BRIDGE-DESIGN-0918.md`) and rejects any backslash (some
+/// browser/webview URL parsers normalize `\` to `/`, which can smuggle a
+/// second slash past a naive `starts_with("//")` check).
+///
+/// Deliberately a NEWTYPE, not a bare `String`: the only way to get one is
+/// through `parse`, which enforces the invariant once, so nothing downstream
+/// can accidentally construct or receive an unvalidated path here — the
+/// compiler, not code review, is what stops a future caller from skipping
+/// validation.
+struct ConsolePathAndQuery(String);
+
+impl ConsolePathAndQuery {
+    fn parse(raw: &str) -> Option<Self> {
+        if !raw.starts_with('/') || raw.starts_with("//") || raw.contains('\\') {
+            return None;
+        }
+        Some(Self(raw.to_string()))
+    }
+}
+
+/// Rebuilds a console URL to navigate to after a restart: the origin ALWAYS
+/// comes from `console_origin` (the freshly resolved `http://127.0.0.1:{new
+/// port}` this process just started listening on, never from anything
+/// carried over) — only the path+query may survive from `previous_path`.
+/// This is the one place scheme/host/port could leak from an untrusted
+/// source into the URL this app navigates its own authenticated webview to,
+/// so it is structured so that cannot happen even if a caller passes a
+/// malicious `previous_path`: `ConsolePathAndQuery::parse` is the only
+/// entry point for the path half, and it fails closed to `console_origin`
+/// unchanged (no path) rather than erroring, matching "reopening at root is
+/// a papercut, refusing to reopen is a brick."
+fn console_url_preserving_path(
+    console_origin: &tauri::Url,
+    previous_path: Option<&str>,
+) -> tauri::Url {
+    let Some(raw) = previous_path else {
+        return console_origin.clone();
+    };
+    let Some(path_and_query) = ConsolePathAndQuery::parse(raw) else {
+        log::warn!(
+            "console_url_preserving_path: rejected path {raw:?} for restart redirect, falling back to root"
+        );
+        return console_origin.clone();
+    };
+    let mut url = console_origin.clone();
+    // `set_path` alone would percent-encode a literal `?` in the query
+    // string into the path segment; splitting query off first keeps it in
+    // `Url`'s own query slot, which is what `Url`'s output rendering and
+    // every consumer of this URL (the webview, `is_console_origin`) expects.
+    match path_and_query.0.split_once('?') {
+        Some((path, query)) => {
+            url.set_path(path);
+            url.set_query(Some(query));
+        }
+        None => {
+            url.set_path(&path_and_query.0);
+            url.set_query(None);
+        }
+    }
+    url
 }
 
 fn create_or_update_console_window(
@@ -5599,6 +5723,172 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             &"http://pdpp.dev:4310/".parse().expect("different host"),
             &console
         ));
+    }
+
+    /// A restart from a real, non-root Settings visit returns to that exact
+    /// path -- the whole point of `console_url_preserving_path`.
+    #[test]
+    fn console_url_preserving_path_restores_a_real_path() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        let result = console_url_preserving_path(&new_origin, Some("/settings"));
+        assert_eq!(result.scheme(), "http");
+        assert_eq!(result.host_str(), Some("127.0.0.1"));
+        assert_eq!(result.port(), Some(9999));
+        assert_eq!(result.path(), "/settings");
+    }
+
+    /// Query strings survive too, and are kept out of the path segment
+    /// (`Url::set_path` would otherwise percent-encode a literal `?`).
+    #[test]
+    fn console_url_preserving_path_keeps_path_and_query_separate() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        let result = console_url_preserving_path(&new_origin, Some("/sources?tab=all"));
+        assert_eq!(result.path(), "/sources");
+        assert_eq!(result.query(), Some("tab=all"));
+    }
+
+    /// No previous path (first launch, recovery import) leaves the origin
+    /// exactly as given -- no `/` appended, no change at all.
+    #[test]
+    fn console_url_preserving_path_with_no_previous_path_is_the_origin_unchanged() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        assert_eq!(console_url_preserving_path(&new_origin, None), new_origin);
+    }
+
+    /// The security property this function exists to guarantee: ONLY
+    /// path+query may come from `previous_path`; the origin always comes
+    /// from `console_origin` (the fresh port this process just bound), and
+    /// a hostile `previous_path` can degrade the result to root but can
+    /// NEVER change the scheme, host, or port. Same class of bug as the
+    /// `is_local_url` CVE (GHSA-7gmj-67g7-phm9,
+    /// `local/HOST-BRIDGE-DESIGN-0918.md`): a path is not allowed to become
+    /// an origin.
+    #[test]
+    fn console_url_preserving_path_fails_closed_on_a_hostile_previous_path() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        for hostile in [
+            "//evil.example",
+            "//evil.example/settings",
+            "/x\\y",
+            "\\\\evil.example",
+            "https://evil.example/settings",
+            "",
+        ] {
+            let result = console_url_preserving_path(&new_origin, Some(hostile));
+            assert_eq!(
+                result.scheme(),
+                "http",
+                "scheme must stay loopback http for hostile input {hostile:?}"
+            );
+            assert_eq!(
+                result.host_str(),
+                Some("127.0.0.1"),
+                "host must stay loopback for hostile input {hostile:?}"
+            );
+            assert_eq!(
+                result.port(),
+                Some(9999),
+                "port must stay the NEW console port for hostile input {hostile:?}"
+            );
+            assert_eq!(
+                result.path(),
+                "/",
+                "a rejected path must fall back to root, not partially apply, for {hostile:?}"
+            );
+        }
+    }
+
+    /// A well-formed path is still rejected as hostile if it happens to
+    /// embed a backslash anywhere (not just as a smuggled leading slash) --
+    /// `ConsolePathAndQuery::parse` rejects the whole string, not just the
+    /// prefix, per its own doc comment about parser-normalization tricks.
+    #[test]
+    fn console_path_and_query_rejects_any_embedded_backslash() {
+        assert!(ConsolePathAndQuery::parse("/settings\\..\\etc").is_none());
+    }
+
+    /// The specific input `starts_with("//")` exists to catch: a
+    /// protocol-relative path resolves against a DIFFERENT HOST when a
+    /// browser/webview applies it to a base URL (`//evil.example/settings`
+    /// against `http://127.0.0.1:9999/` resolves to
+    /// `http://evil.example/settings`, not `http://127.0.0.1:9999//evil.example/settings`).
+    /// Asserted directly on `parse` (not only end-to-end through
+    /// `console_url_preserving_path`) so a future refactor that deletes the
+    /// `starts_with("//")` clause fails a test that names exactly what it
+    /// protects against, not just a generic "falls back to root" check that
+    /// could pass for the wrong reason.
+    #[test]
+    fn console_path_and_query_rejects_protocol_relative_paths() {
+        assert!(ConsolePathAndQuery::parse("//evil.example/settings").is_none());
+        assert!(ConsolePathAndQuery::parse("//evil.example").is_none());
+    }
+
+    /// An absolute URL with no leading `/` at all (a scheme, then a host)
+    /// is rejected by the SAME `!raw.starts_with('/')` clause that rejects
+    /// a bare hostname -- `parse` never inspects the string for a scheme
+    /// separately, so this and the plain-hostname case are one rule, not
+    /// two independently-maintained ones.
+    #[test]
+    fn console_path_and_query_rejects_an_absolute_url() {
+        assert!(ConsolePathAndQuery::parse("http://evil.example/settings").is_none());
+    }
+
+    #[test]
+    fn console_path_and_query_accepts_a_normal_single_segment_path() {
+        assert!(ConsolePathAndQuery::parse("/settings").is_some());
+        assert!(ConsolePathAndQuery::parse("/sources/add?x=1").is_some());
+        assert!(ConsolePathAndQuery::parse("/").is_some());
+    }
+
+    /// End-to-end: a hostile `previous_path` fed through the full
+    /// `console_url_preserving_path` call (not just `ConsolePathAndQuery::parse`
+    /// in isolation) must still produce a URL whose ORIGIN is the loopback
+    /// console -- asserting the origin, not merely that `parse` returned
+    /// `None`, is what would catch a regression where a future edit
+    /// bypasses `parse` entirely (e.g. a caller that falls back to
+    /// `format!("{console_origin}{previous_path}")` on some other branch).
+    #[test]
+    fn console_url_preserving_path_keeps_a_protocol_relative_previous_path_on_the_loopback_origin()
+    {
+        let console_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("console url");
+        let result =
+            console_url_preserving_path(&console_origin, Some("//evil.example/settings"));
+        assert_eq!(result.scheme(), "http");
+        assert_eq!(result.host_str(), Some("127.0.0.1"));
+        assert_eq!(result.port(), Some(9999));
+        assert_ne!(result.host_str(), Some("evil.example"));
+        assert_eq!(result.path(), "/");
+    }
+
+    /// `console_path_before_restart` needs a real `AppHandle` with a live
+    /// webview window, which `tauri::test::mock_app()` cannot provide (same
+    /// limitation `finish_bootstrap_tears_down_with_a_tunnel_preserving_reason`
+    /// documents) -- so this proves the ordering property source-side: the
+    /// window's URL must be read BEFORE `teardown` runs, because teardown
+    /// destroys the window (and whatever page it was showing) that read
+    /// would otherwise have nothing left to look at.
+    #[test]
+    fn restart_after_remote_access_config_reads_the_console_path_before_teardown() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("pub(crate) async fn restart_after_remote_access_config(")
+            .expect("restart_after_remote_access_config must exist");
+        let end = source[start..]
+            .find("\nconst REMOTE_ACCESS_CONFIG_POLL_INTERVAL")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        let path_read_pos = body
+            .find("console_path_before_restart(&app)")
+            .expect("restart_after_remote_access_config must call console_path_before_restart");
+        let teardown_pos = body
+            .find("move || teardown(&app, StopReason::ConfigChange)")
+            .expect("restart_after_remote_access_config must call teardown");
+        assert!(
+            path_read_pos < teardown_pos,
+            "console_path_before_restart must run before teardown -- teardown destroys the \
+             window whose URL it needs to read"
+        );
     }
 
     #[test]
