@@ -629,6 +629,58 @@ describe("freezeIntent line-range scope", () => {
     ])
   })
 
+  it("excludes rather than crashes a modified file whose only hunks were pure deletions", () => {
+    // The real incident this test pins: waspflow/on-new-window-link-bridge-0921
+    // (PR #228) modified server/index.ts by removing two import lines and one
+    // route-mount call, adding nothing. `git diff -U0` on a pure-deletion hunk
+    // reports newCount=0, so `parseUnifiedZeroHunks` correctly contributes no
+    // range for it (see that function's doc comment) -- but `freezeIntent`
+    // still had this file in its selected-files list (status M, inside the
+    // cohort, a production extension), found zero ranges for it, and threw:
+    // "server/index.ts was selected for mutation (status M) but has no changed
+    // line ranges." That crashed the whole mutation job, not just this file,
+    // on a revision that deleted code and touched nothing else in the cohort.
+    // The file legitimately changed zero lines AT HEAD (deleted content isn't
+    // there to mutate), which this file's own doc comments already say is
+    // exactly the case that belongs in `excluded`, not a thrown error.
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ("M\0reference-implementation/server/index.ts\0"),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map(),
+    })
+    expect(intent.mutate).toEqual([])
+    expect(intent.applicability).toBe("not_applicable")
+    expect(intent.excluded).toEqual([
+      { path: "reference-implementation/server/index.ts", reason: "no_mutable_change" },
+    ])
+  })
+
+  it("still mutates the other selected files in a revision where one file has no mutable change", () => {
+    // A pure-deletion-only file must not swallow every OTHER file's evidence
+    // -- it is excluded individually, the same as a deleted or renamed file,
+    // not treated as a reason to abort the whole selection.
+    const intent = freezeIntent({
+      cohort: referenceCohort,
+      baseCommit: "base",
+      headCommit: "head",
+      diff: parseNameStatusZ(
+        "M\0reference-implementation/server/index.ts\0M\0reference-implementation/server/real-change.ts\0"
+      ),
+      executionInputs: { ...inputs, cohortRoot: "reference-implementation" },
+      hunks: new Map([
+        ["reference-implementation/server/real-change.ts", [{ startLine: 10, endLine: 12 }]],
+      ]),
+    })
+    expect(intent.mutate).toEqual(["server/real-change.ts:10-12"])
+    expect(intent.applicability).toBe("applicable")
+    expect(intent.excluded).toEqual([
+      { path: "reference-implementation/server/index.ts", reason: "no_mutable_change" },
+    ])
+  })
+
   it("covers the scope in the digest, so the mutated lines cannot be restated later", () => {
     const common = {
       cohort: referenceCohort,
