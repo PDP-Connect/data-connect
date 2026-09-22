@@ -307,9 +307,95 @@ test("proxy aliases require connector-scoped operator authority", () => {
   );
   assert.equal(authorized.HTTP_PROXY, "upper");
   assert.equal(authorized.http_proxy, "lower");
-  assert.equal(env.PDPP_CHATGPT_BROWSER_LOGIN_TIMEOUT_MS, "30000");
-  assert.equal(env.PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS, "10000");
-  assert.equal(env.PDPP_CHATGPT_DETAIL_INITIAL_CONCURRENCY_PROBE, undefined);
+  // Tuning knobs are connector-owned, not platform keys: another connector
+  // does not receive them.
+  assert.equal(env.PDPP_CHATGPT_BROWSER_LOGIN_TIMEOUT_MS, undefined);
+  assert.equal(env.PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS, undefined);
+  const owner = compose(
+    {},
+    {
+      PDPP_CHATGPT_BROWSER_LOGIN_TIMEOUT_MS: "30000",
+      PDPP_CHATGPT_DETAIL_INITIAL_CONCURRENCY_PROBE: "10",
+      PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS: "10000",
+    },
+    { connectorId: "chatgpt" }
+  );
+  assert.equal(owner.PDPP_CHATGPT_BROWSER_LOGIN_TIMEOUT_MS, "30000");
+  assert.equal(owner.PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS, "10000");
+  assert.equal(owner.PDPP_CHATGPT_DETAIL_INITIAL_CONCURRENCY_PROBE, undefined);
+});
+
+test("a first-party manifest declares tuning keys inside its own namespace only", () => {
+  const manifest = {
+    runtime_requirements: {
+      tuning_environment: [
+        "PDPP_STRAVA_PAGE_SIZE",
+        "PDPP_STRAVA",
+        "PDPP_STRAVAX_PAGE_SIZE",
+        "PDPP_GMAIL_MAX_ATTACHMENT_BYTES",
+        "PDPP_OWNER_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+      ],
+    },
+  };
+  const sourceEnv = {
+    AWS_SECRET_ACCESS_KEY: "aws-secret",
+    PDPP_GMAIL_MAX_ATTACHMENT_BYTES: "1024",
+    PDPP_OWNER_TOKEN: "owner-secret",
+    PDPP_STRAVA: "bare",
+    PDPP_STRAVA_PAGE_SIZE: "50",
+    PDPP_STRAVAX_PAGE_SIZE: "neighbor",
+  };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "strava" }), { PDPP_STRAVA_PAGE_SIZE: "50" });
+});
+
+test("a declaring manifest replaces the transitional tuning table, even when empty", () => {
+  const sourceEnv = { PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "250", PDPP_CHATGPT_NEW_KNOB: "on" };
+
+  assert.deepEqual(compose({}, sourceEnv, { connectorId: "chatgpt" }), { PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "250" });
+  assert.deepEqual(
+    compose({ runtime_requirements: { tuning_environment: ["PDPP_CHATGPT_NEW_KNOB"] } }, sourceEnv, {
+      connectorId: "chatgpt",
+    }),
+    { PDPP_CHATGPT_NEW_KNOB: "on" }
+  );
+  assert.deepEqual(
+    compose({ runtime_requirements: { tuning_environment: [] } }, sourceEnv, { connectorId: "chatgpt" }),
+    {}
+  );
+});
+
+test("a third-party manifest cannot select an ambient tuning value without an operator binding", () => {
+  const connectorId = "https://registry.example.com/connectors/database";
+  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_DATABASE_URL", "EXAMPLE_PAGE_SIZE"] } };
+  const sourceEnv = { EXAMPLE_PAGE_SIZE: "25", PDPP_DATABASE_URL: "postgres://secret" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId }), {});
+  // Unknown bare identities get no namespace either.
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
+  assert.deepEqual(
+    compose(manifest, sourceEnv, {
+      approvedBindings: [processBinding("EXAMPLE_PAGE_SIZE", "EXAMPLE_PAGE_SIZE", "EXAMPLE_PAGE_SIZE", connectorId)],
+      connectorId,
+    }),
+    { EXAMPLE_PAGE_SIZE: "25" }
+  );
+});
+
+test("an operator binding overrides a declared tuning key", () => {
+  const env = compose(
+    { runtime_requirements: { tuning_environment: ["PDPP_STRAVA_PAGE_SIZE"] } },
+    { OPERATOR_STRAVA_PAGE_SIZE: "200", PDPP_STRAVA_PAGE_SIZE: "50" },
+    {
+      approvedBindings: [
+        processBinding("PDPP_STRAVA_PAGE_SIZE", "PDPP_STRAVA_PAGE_SIZE", "OPERATOR_STRAVA_PAGE_SIZE", "strava"),
+      ],
+      connectorId: "strava",
+    }
+  );
+
+  assert.equal(env.PDPP_STRAVA_PAGE_SIZE, "200");
 });
 
 test("connection fragments are reduced to connector-owned keys", () => {
@@ -570,4 +656,24 @@ test("manifest-declared local path overrides cross the child boundary without am
   assert.equal(env.CLAUDE_CODE_HOME, "/fixture/home");
   assert.equal(env.CLAUDE_CODE_PROJECTS_DIR, "/fixture/projects");
   assert.equal(env.SECRET, undefined);
+});
+
+test("a tuning key belongs to the connector with the most specific namespace", () => {
+  const manifest = {
+    runtime_requirements: {
+      tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
+    },
+  };
+  const sourceEnv = { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20", PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps" }), { PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" });
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps-data-portability" }), {
+    PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20",
+  });
+});
+
+test("a connector key that names an Object.prototype member composes without tuning keys", () => {
+  for (const connectorId of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    assert.deepEqual(compose({}, { PATH: "/usr/bin" }, { connectorId }), { PATH: "/usr/bin" });
+  }
 });
