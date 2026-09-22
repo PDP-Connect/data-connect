@@ -2700,6 +2700,42 @@ fn apply_pending_cloudflare_tunnel_token(
     }
 }
 
+/// The view of `RemoteAccessConfig` that actually decides whether
+/// `spawn_remote_access_config_watcher` should restart the stack.
+///
+/// `origin_verified` (`OriginVerification`, written by
+/// `record_origin_verification` on every `ORIGIN_VERIFY_INTERVAL` tick --
+/// currently 60s) carries a `checked_at` TIMESTAMP the app itself rewrites
+/// on every reachability check, whether or not reachability actually
+/// changed. Comparing the whole struct with `==` (the derived `PartialEq`,
+/// which includes this field) meant the watcher's own downstream OBSERVER
+/// (`spawn_origin_verification_watcher`) rewriting a timestamp looked
+/// identical to an owner editing the file -- the watcher restarted the
+/// entire managed stack roughly every 60 seconds, forever, for as long as
+/// remote access was on. Confirmed live 2026-09-22: this is why remote
+/// access was left OFF on Tim's machine. Same defect FAMILY as #208 (a
+/// health check tearing down what it observes) and the pre-#218
+/// `wait_for_console` (a timeout tearing down what it observes) -- here the
+/// observer and the actor are two different watchers sharing one file, and
+/// the actor's blunt whole-struct equality check could not tell "the app's
+/// own other watcher just recorded an observation" from "the owner changed
+/// something that needs a real restart."
+///
+/// `apply_ngrok_tunnel_outcome` (above) already solved this correctly for
+/// its own writes back to this same file -- it compares only `fields` and
+/// `tunnel_error` before writing, specifically so a config-watcher restart
+/// settles instead of looping. This function generalizes that same
+/// discipline to the READ side: strip every field this app itself
+/// populates as an OBSERVATION (currently just `origin_verified`) before
+/// comparing, so only a change an owner actually made -- or a real ngrok/
+/// Cloudflare outcome landing -- looks like a change worth restarting for.
+fn restart_relevant_view(config: &RemoteAccessConfig) -> RemoteAccessConfig {
+    RemoteAccessConfig {
+        origin_verified: None,
+        ..config.clone()
+    }
+}
+
 pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut last_applied = load_remote_access_config(&app).unwrap_or_else(|error| {
@@ -2760,7 +2796,8 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             } else {
                 current
             };
-            if current == last_applied {
+            if restart_relevant_view(&current) == restart_relevant_view(&last_applied) {
+                last_applied = current;
                 continue;
             }
             log::info!("Remote-access config changed on disk; restarting the managed stack");
@@ -4784,6 +4821,49 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                  on the stack while it is being torn down"
             );
         }
+    }
+
+    /// The exact incident: `spawn_remote_access_config_watcher` must not
+    /// restart the stack just because `spawn_origin_verification_watcher`
+    /// recorded a fresh reachability observation. Reproduces the actual
+    /// live bug -- two configs identical except for `origin_verified`'s
+    /// `checked_at` timestamp, which advances every ~60s in production --
+    /// and confirms this fails against the derived whole-struct `==` (the
+    /// bug that shipped) while passing through `restart_relevant_view`
+    /// (the fix). Confirmed to fail if `restart_relevant_view` is reverted
+    /// to `config.clone()` (i.e. stops stripping `origin_verified`).
+    #[test]
+    fn an_origin_verification_write_does_not_look_like_a_restart_worthy_change() {
+        let base = crate::remote_access::off_remote_access_config();
+        let earlier = RemoteAccessConfig {
+            origin_verified: Some(crate::remote_access::OriginVerification {
+                origin: "https://example.ngrok-free.app".to_string(),
+                checked_at: 1_000,
+                reachable: true,
+            }),
+            ..base.clone()
+        };
+        let later = RemoteAccessConfig {
+            origin_verified: Some(crate::remote_access::OriginVerification {
+                origin: "https://example.ngrok-free.app".to_string(),
+                checked_at: 1_060, // one ORIGIN_VERIFY_INTERVAL tick later
+                reachable: true,
+            }),
+            ..base
+        };
+
+        assert_ne!(
+            earlier, later,
+            "the two configs must actually differ (by checked_at only), or this test is not \
+             exercising the bug"
+        );
+        assert_eq!(
+            restart_relevant_view(&earlier),
+            restart_relevant_view(&later),
+            "an origin-verification timestamp advancing must not look like a restart-worthy \
+             change -- this is the exact mechanism that kept restarting the stack every ~60s \
+             and left remote access off on a real machine"
+        );
     }
 
     /// An absent verification must never read as healthy.
