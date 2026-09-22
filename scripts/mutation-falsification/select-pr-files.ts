@@ -125,6 +125,7 @@ export type ExclusionReason =
   | "outside_cohort"
   | "test_file"
   | "excluded_tooling"
+  | "no_mutable_change"
 
 /** One `git diff` name-status record, already parsed out of the NUL-delimited stream. */
 export interface DiffEntry {
@@ -905,19 +906,43 @@ export function freezeIntent(input: {
       continue
     }
 
-    const ranges = [...(input.hunks?.get(path) ?? [])]
-    if (ranges.length === 0) {
-      // Failing here is the point. The caller selected this file, so the
-      // evidence has to say which of its lines were mutated; there is no
-      // reading of "none" that a completed run could honestly report. A revision
-      // that legitimately changes no line of a selected file -- a pure rename --
-      // must drop it from the diff rather than have it silently mutated whole.
+    // `Map.get` distinguishes "no entry for this path" from "an entry whose
+    // ranges are empty" -- `parseUnifiedZeroHunks` only ever inserts a path
+    // when `git diff -U0` emits a `+++ b/<path>` header for it at all, so an
+    // ABSENT entry means git supplied no hunk output whatsoever (a
+    // 100%-similarity rename: the file's bytes are identical at head, and
+    // its being selected as changed at all is exactly the anomaly this
+    // scoping exists to catch). A PRESENT entry with an empty array means
+    // git did emit hunks for the file, and every one of them was a pure
+    // deletion (`newCount` 0 -- see `parseUnifiedZeroHunks`'s doc comment:
+    // deleted content cannot carry a fault into head, so it contributes no
+    // range by design). These are not the same fact and must not collapse
+    // into the same branch: the first is a signal something is wrong with
+    // what the diff even claims changed; the second is an ordinary,
+    // legitimate code change (removing dead code) that happens to leave
+    // nothing mutable behind.
+    const entry = input.hunks?.get(path)
+    if (entry === undefined) {
+      // The caller selected this file, so the evidence has to say which of
+      // its lines were mutated; there is no reading of "none" that a
+      // completed run could honestly report. A revision that legitimately
+      // changes no line of a selected file -- a pure rename -- must drop it
+      // from the diff rather than have it silently mutated whole.
       throw new Error(
         `${relative} was selected for mutation (status ${status || "unknown"}) but has no ` +
           `changed line ranges. Whole-file scope is reserved for added files; a selected file ` +
           `with no derived ranges cannot be scoped, and silently mutating it in full would ` +
           `report evidence this revision's diff does not support.`
       )
+    }
+    const ranges = [...entry]
+    if (ranges.length === 0) {
+      // A modification whose diff exists but whose every hunk is a pure
+      // deletion changed zero lines AT HEAD -- there is nothing left to
+      // mutate, the same fact a deleted or renamed-with-no-content-change
+      // file already records via `excluded`, not a crash.
+      excluded.push({ path, reason: "no_mutable_change" })
+      continue
     }
     scope.push({ path: relative, kind: "changed_ranges", ranges })
     mutate.push(...toMutateEntries(relative, ranges))
