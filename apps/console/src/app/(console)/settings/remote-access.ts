@@ -156,12 +156,27 @@ export const publicUrlOptions: readonly PublicUrlOption[] = [
     provider: "cloudflare_tunnel",
     ngrokMode: null,
     label: "Cloudflare Tunnel",
+    // The exact line Tim's own confusion traces to: he read an earlier
+    // version of this description, went to the Cloudflare dashboard, typed
+    // a made-up hostname, and only THERE learned Cloudflare needed a domain
+    // he already owned -- "i thought cloudflare would give me a random
+    // hostname". Unlike ngrok (which DOES assign a free hostname), a named
+    // Cloudflare tunnel never does; that contrast has to be explicit here,
+    // in the same sentence, or an owner comparing the two options cannot
+    // see it before picking one and leaving the app.
     description:
-      "Cloudflare gives this Personal Server a public HTTPS address on a hostname you control. Cloudflare terminates TLS at its edge, so it can read requests and responses.",
+      "Cloudflare gives this Personal Server a public HTTPS address on a DOMAIN YOU ALREADY OWN on Cloudflare — for example vault.example.com. Unlike ngrok, Cloudflare does not assign you a free hostname; you bring your own domain. Cloudflare terminates TLS at its edge, so it can read requests and responses.",
     badge: "Provider can read your data",
     requiresAuthtoken: true,
+    // "the cloudflared binary installed on this machine" was dropped:
+    // DataConnect downloads and verifies it automatically now (see
+    // `ensure_cloudflared_available`, `remote_access_cloudflare.rs`), so
+    // stating it as a requirement here was actively misleading -- this
+    // exact line is what sent Tim to install cloudflared manually via apt
+    // before ever opening this option, defeating the feature that exists
+    // specifically to remove that step.
     planNote:
-      "Requires a free Cloudflare account, a domain on Cloudflare, and the cloudflared binary installed on this machine. Deliberately not a Quick Tunnel (trycloudflare.com): Cloudflare's own docs say Quick Tunnels are testing-only, cap at 200 in-flight requests, and do not support the live sync viewer's Server-Sent Events stream.",
+      "Requires a free Cloudflare account and a domain already added to it. Deliberately not a Quick Tunnel (trycloudflare.com), which Cloudflare's own docs say is testing-only and does not support the live sync viewer's Server-Sent Events stream.",
   },
   {
     id: "user_supplied_origin",

@@ -10,6 +10,7 @@ import {
   asCloudflareTunnelInspection,
   CloudflaredBinaryStatus,
   CloudflareTunnelConnectionBanner,
+  CloudflareTunnelDomainRequirement,
   CloudflareTunnelSetupSteps,
   CloudflareTunnelTokenStatus,
   CLOUDFLARE_TUNNEL_SETUP_URL,
@@ -970,24 +971,29 @@ export function RemoteAccessSetting({
           {selectedOption?.provider === "cloudflare_tunnel" ? (
             <>
               <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
-                <span className="pdpp-caption text-muted-foreground">
-                  DataConnect runs and supervises the tunnel process for you
-                  once you save this — you never start it yourself. It also
-                  downloads and verifies the{" "}
-                  <span className="select-all font-mono">cloudflared</span>{" "}
-                  program automatically the first time you need it, unlike
-                  ngrok, which needs no separate binary at all.
-                </span>
+                <CloudflareTunnelDomainRequirement />
                 <CloudflaredBinaryStatus
                   missing={cloudflareTunnelInspection?.cloudflared_binary_present === false}
                 />
               </div>
-              <div className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
-                <span className="pdpp-caption font-medium text-foreground/90">
-                  New to Cloudflare Tunnel? Follow these steps:
-                </span>
-                <CloudflareTunnelSetupSteps />
-              </div>
+              {/* A <details> disclosure, not an always-visible block: the
+                  five-step dashboard walkthrough is real, necessary
+                  guidance for someone who has never created a Cloudflare
+                  tunnel, but rendering it unconditionally, ahead of the
+                  fields it explains, is exactly the "wall of text" an
+                  owner skims past without reading -- confirmed live this
+                  mattered (Tim: "that page is a wall of text"). Collapsed
+                  by default so the visible surface for someone who already
+                  knows what to do is just the two fields below; the full
+                  steps are one click away, not a scroll away. */}
+              <details className="grid gap-1 rounded-md border border-border/70 bg-muted/10 px-3 py-2">
+                <summary className="cursor-pointer pdpp-caption font-medium text-foreground/90">
+                  New to Cloudflare Tunnel? Show the setup steps
+                </summary>
+                <div className="pt-1">
+                  <CloudflareTunnelSetupSteps />
+                </div>
+              </details>
               <label
                 className="grid gap-1 pdpp-caption text-foreground"
                 htmlFor="remote-access-cloudflare-token"
@@ -1034,12 +1040,11 @@ export function RemoteAccessSetting({
                   value={cloudflareHostname}
                 />
                 <span className="pdpp-caption text-muted-foreground">
-                  The hostname you routed to this tunnel in the Cloudflare
-                  dashboard. Unlike ngrok's free plan, a Cloudflare tunnel has
-                  no random-hostname fallback — this is required, and it
-                  stays your address across restarts. A token and hostname
-                  that belong to different tunnels will still let cloudflared
-                  connect, but requests to this hostname will 404 — double
+                  A subdomain of a domain on your Cloudflare account, e.g.{" "}
+                  <span className="select-all font-mono">vault.example.com</span> — not a
+                  name Cloudflare picks for you. It stays your address across restarts. A
+                  token and hostname that belong to different tunnels will still let
+                  cloudflared connect, but requests to this hostname will 404 — double
                   check both came from the same tunnel in the dashboard.
                 </span>
               </label>
