@@ -126,13 +126,18 @@ function assertNoSymlinks(root, current = root) {
   }
 }
 
-function walkFiles(root, current = root, output = []) {
+function walkFiles(root, { current = root, skipNodeModules = false, output = [] } = {}) {
   for (const entry of readdirSync(current, { withFileTypes: true }).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   )) {
+    // Prune before recursing, not after: skipNodeModules avoids walking a
+    // dependency tree only to discard it. stagedFileHashes needs the real
+    // staged node_modules, so it omits skipNodeModules.
+    if (skipNodeModules && entry.name === "node_modules") continue
     const filePath = join(current, entry.name)
     const fileStats = statSync(filePath)
-    if (fileStats.isDirectory()) walkFiles(root, filePath, output)
+    if (fileStats.isDirectory())
+      walkFiles(root, { current: filePath, skipNodeModules, output })
     else if (fileStats.isFile()) output.push(filePath)
   }
   return output
@@ -151,7 +156,13 @@ function sourceInputFiles(projectRoot) {
   return [
     join(projectRoot, "package.json"),
     join(projectRoot, "package-lock.json"),
-    ...roots.flatMap(root => (existsSync(root) ? walkFiles(root) : [])),
+    // The recipe itself is a behavior-affecting input: changing it must
+    // invalidate any cache built under the old recipe.
+    join(projectRoot, "scripts", "ensure-reference-stack.js"),
+    join(projectRoot, "scripts", "stage-generations.js"),
+    ...roots.flatMap(root =>
+      existsSync(root) ? walkFiles(root, { skipNodeModules: true }) : []
+    ),
   ]
     .filter(
       filePath =>
@@ -629,6 +640,15 @@ export function stageReferenceStack({
       existingManifest.node?.version === version &&
       existingManifest.inputs?.sha256 === sourceInputHash(resolvedProjectRoot)
     ) {
+      // Matching inputs do not prove output integrity. Do not automatically
+      // replace corrupt output: a live process may still be reading it.
+      try {
+        verifyReferenceStackRoot(resolvedOutputRoot)
+      } catch (error) {
+        fail(
+          `staged root at ${resolvedOutputRoot} matches the expected build but failed integrity verification (${error instanceof Error ? error.message : error}). Stop the app using this directory, move it aside, then rerun to restage.`
+        )
+      }
       console.log(
         `[ensure-reference-stack] staged root is current: ${resolvedOutputRoot}`
       )

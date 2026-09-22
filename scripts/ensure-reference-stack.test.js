@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -10,6 +10,7 @@ import {
   launchScript,
   pruneForeignPlatformPrebuilds,
   referenceStackRoot,
+  stageReferenceStack,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
 import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
@@ -54,6 +55,9 @@ function fixtureRoot() {
     join(root, "node_modules", "sqlite-vec", "build", "Release", "vec0.so"),
     "vec\n"
   )
+  mkdirSync(join(root, "scripts"), { recursive: true })
+  writeFileSync(join(root, "scripts", "ensure-reference-stack.js"), "// recipe v1\n")
+  writeFileSync(join(root, "scripts", "stage-generations.js"), "// helper v1\n")
   return root
 }
 
@@ -209,5 +213,121 @@ describe("reference stack staging contract", () => {
     expect(typeof generations.collectOldStageGenerations).toBe("function")
     expect(typeof generations.KEEP_GENERATIONS).toBe("number")
     expect(module.launchScript()).not.toContain("stage-generations")
+  })
+
+  it("reuses a valid staged root whose manifest matches the current build", () => {
+    const root = fixtureRoot()
+    writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    const manifest = buildManifest({
+      nodeBinary: process.execPath,
+      projectRoot: root,
+      stageRoot: root,
+      target: "linux-x64",
+      profile: "debug",
+    })
+    writeFileSync(
+      join(root, "manifest.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`
+    )
+
+    const result = stageReferenceStack({
+      projectRoot: root,
+      outputRoot: root,
+      nodeBinary: process.execPath,
+      target: "linux-x64",
+      profile: "debug",
+    })
+
+    expect(result).toEqual({ manifest, reused: true, root })
+  })
+
+  it("fails closed, without deleting anything, on a stage that matches by metadata but is missing a required file", () => {
+    // A corrupt/incomplete stage can still match on metadata (interrupted
+    // publish, partial disk write, external deletion of one file). Cache
+    // reuse must reject it instead of trusting metadata alone.
+    const root = fixtureRoot()
+    writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    const manifest = buildManifest({
+      nodeBinary: process.execPath,
+      projectRoot: root,
+      stageRoot: root,
+      target: "linux-x64",
+      profile: "debug",
+    })
+    writeFileSync(
+      join(root, "manifest.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`
+    )
+    // Prove the fixture is genuinely valid before corrupting it, so the
+    // throw below is caused by the deletion, not a broken fixture.
+    expect(verifyReferenceStackRoot(root)).toEqual(manifest)
+
+    rmSync(join(root, "launch.mjs"))
+
+    expect(() =>
+      stageReferenceStack({
+        projectRoot: root,
+        outputRoot: root,
+        nodeBinary: process.execPath,
+        target: "linux-x64",
+        profile: "debug",
+      })
+    ).toThrow(/failed integrity verification.*Stop the app.*move it aside/s)
+    // Fail-closed must not touch the corrupt tree: no destructive recovery.
+    expect(existsSync(root)).toBe(true)
+    expect(JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"))).toEqual(manifest)
+    expect(readFileSync(join(root, "node_modules", "tsx", "package.json"), "utf8")).toBe("{}\n")
+  })
+
+  for (const recipeFile of ["ensure-reference-stack.js", "stage-generations.js"]) {
+    it(`invalidates the cache when ${recipeFile} changes`, () => {
+      const root = fixtureRoot()
+      writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+      const before = buildManifest({
+        nodeBinary: process.execPath,
+        projectRoot: root,
+        stageRoot: root,
+        target: "linux-x64",
+        profile: "debug",
+      })
+      writeFileSync(join(root, "scripts", recipeFile), "// changed\n")
+      const after = buildManifest({
+        nodeBinary: process.execPath,
+        projectRoot: root,
+        stageRoot: root,
+        target: "linux-x64",
+        profile: "debug",
+      })
+      expect(after.inputs.sha256).not.toBe(before.inputs.sha256)
+    })
+  }
+
+  it("prunes a symlinked node_modules before traversing into it (cycle-safe)", () => {
+    // Only the source tree carries the cycle: staged dependencies must
+    // still be traversed and hashed for integrity.
+    const project = fixtureRoot()
+    const cyclePath = join(project, "reference-implementation", "node_modules")
+    symlinkSync(project, cyclePath, process.platform === "win32" ? "junction" : "dir")
+    writeFileSync(join(project, "package-lock.json"), '{"lockfileVersion":3}\n')
+    const stage = fixtureRoot()
+    writeFileSync(join(stage, "package-lock.json"), '{"lockfileVersion":3}\n')
+    writeFileSync(join(stage, "launch.mjs"), launchScript(), { mode: 0o755 })
+
+    const manifest = buildManifest({
+        nodeBinary: process.execPath,
+        projectRoot: project,
+        stageRoot: stage,
+        target: "linux-x64",
+        profile: "debug",
+      })
+    expect(manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "node_modules/tsx/package.json" }),
+    ]))
+    writeFileSync(join(stage, "manifest.json"), `${JSON.stringify(manifest)}\n`)
+    expect(verifyReferenceStackRoot(stage)).toEqual(manifest)
+    writeFileSync(join(stage, "node_modules", "tsx", "package.json"), '{"changed":true}\n')
+    expect(() => verifyReferenceStackRoot(stage)).toThrow(/manifest file hashes/)
   })
 })
