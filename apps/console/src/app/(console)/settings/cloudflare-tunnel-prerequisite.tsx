@@ -132,6 +132,18 @@ export const CLOUDFLARED_DOWNLOAD_URL =
  * case where the owner needs to act before submitting, only a case where
  * `start()` might need a little longer the first time.
  *
+ * The `missing` copy leads with the automatic action, not the manual
+ * escape hatch -- confirmed live this mattered: an earlier version led
+ * with "cloudflared is not installed... if it fails, you can install
+ * cloudflared yourself instead" in one flowing sentence, and Tim clicked
+ * the manual-install link without reading past "not installed", then
+ * installed cloudflared by hand via apt before ever letting the automatic
+ * download run. The fix this component embeds now: state the automatic
+ * behavior as the ONLY visible sentence in the normal weight, and push the
+ * manual fallback onto its own smaller, visually secondary line -- a
+ * skimming reader hits "DataConnect downloads it for you" first and has
+ * nothing to click past it.
+ *
  * External links route through `OpenExternalLink`, matching every other
  * external link in the settings page -- see that component's doc comment
  * for how the desktop console opens this in the owner's system browser
@@ -146,21 +158,52 @@ export function CloudflaredBinaryStatus({
 }) {
   if (missing) {
     return (
-      <span className="pdpp-caption text-muted-foreground">
-        cloudflared is not installed on this machine yet — DataConnect will
-        download and verify it automatically the first time you save this.
-        That download needs network access; if it fails, you can{" "}
-        <OpenExternalLink className="underline" href={CLOUDFLARED_DOWNLOAD_URL}>
-          install cloudflared yourself
-        </OpenExternalLink>{" "}
-        instead.
-      </span>
+      <div className="grid gap-0.5">
+        <span className="pdpp-caption text-muted-foreground">
+          DataConnect will download and verify cloudflared for you the first time you save
+          this.
+        </span>
+        <span className="pdpp-caption text-muted-foreground/70">
+          Needs network access.{" "}
+          <OpenExternalLink className="underline" href={CLOUDFLARED_DOWNLOAD_URL}>
+            Install it yourself instead
+          </OpenExternalLink>{" "}
+          if that fails.
+        </span>
+      </div>
     )
   }
   return (
     <span className="pdpp-caption text-muted-foreground">
       cloudflared is installed and ready.
     </span>
+  )
+}
+
+/**
+ * Standalone and ALWAYS visible -- deliberately not folded into
+ * `CloudflareTunnelSetupSteps` below, which is collapsed behind a
+ * disclosure to fix the "wall of text" problem (see that component's doc
+ * comment). This fact cannot be allowed to collapse with it: confirmed
+ * live, an owner expecting ngrok's model (the provider assigns a free
+ * hostname) went to the Cloudflare dashboard, typed a made-up hostname,
+ * and only there learned Cloudflare requires a domain already on the
+ * account -- Cloudflare's own dashboard error is "This domain isn't a
+ * zone on your account". Named Cloudflare tunnels never assign a
+ * hostname; only Quick Tunnels do, and this app deliberately does not
+ * support those (no SSE -- see the module doc comment in
+ * `remote_access_cloudflare.rs`). The picker row's own `description`
+ * (`remote-access.ts`) states this too, for an owner comparing options
+ * before selecting one; this repeats it here, at the point where the
+ * owner is about to act on it and leave the app for the dashboard.
+ */
+export function CloudflareTunnelDomainRequirement() {
+  return (
+    <p className="pdpp-caption text-muted-foreground">
+      You need a domain you already own on Cloudflare, for example{" "}
+      <span className="select-all font-mono">vault.example.com</span>. Cloudflare does not
+      assign you a free hostname the way ngrok does — you bring your own domain.
+    </p>
   )
 }
 
@@ -172,6 +215,15 @@ export function CloudflaredBinaryStatus({
  * Written for someone who has never created a Cloudflare tunnel, per Tim's
  * standing bar that this has to work for an owner who cannot ask an agent
  * what to paste.
+ *
+ * Collapsed behind a `<details>` disclosure at its call site
+ * (`remote-access-setting.tsx`), not rendered unconditionally: confirmed
+ * live that an always-visible five-step walkthrough, ahead of the fields
+ * it explains, is exactly the "wall of text" an owner skims past without
+ * reading (Tim: "that page is a wall of text"). The one fact that cannot
+ * collapse along with these steps -- the domain requirement -- is its own
+ * component, `CloudflareTunnelDomainRequirement` above, rendered
+ * unconditionally at the same call site.
  *
  * Numbered against Cloudflare's own dashboard flow (Networking > Tunnels >
  * Create a tunnel > name it > choose an install method > Add a public

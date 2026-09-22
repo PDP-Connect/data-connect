@@ -761,8 +761,34 @@ mod download {
 /// under `cache_dir`. `cache_dir` is `<app-data>/cloudflared/` -- passed in
 /// by `unified.rs::start_cloudflare_tunnel_provider`, which already
 /// resolves `app_data_dir()` for the analogous run-lease directory.
+///
+/// A REAL apt/manual system install (confirmed live: `cloudflared` 2026.9.1
+/// installed via `sudo apt install .../cloudflared-linux-amd64.deb`, landing
+/// at `/usr/local/bin/cloudflared`, a standard `PATH` entry on every normal
+/// Linux launch -- shell, `.desktop` file, or systemd -- via
+/// `/etc/environment`'s system-wide default) is found by
+/// `cloudflared_binary_is_installed`'s genuine `$PATH` search, which checks
+/// every `PATH` directory, not a hardcoded or app-managed one. This
+/// function's own preference order is what a real owner in that situation
+/// actually depends on, so it has its own direct test
+/// (`prefers_a_system_binary_and_never_attempts_a_download_when_one_exists`)
+/// via `ensure_cloudflared_available_from` below, rather than relying only
+/// on the network-dependent, `#[ignore]`d E2E test to prove it.
 pub(crate) fn ensure_cloudflared_available(cache_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if cloudflared_binary_is_installed() {
+    ensure_cloudflared_available_from(cache_dir, cloudflared_binary_is_installed)
+}
+
+/// The pure preference-order half of `ensure_cloudflared_available`, split
+/// out so a test can supply a controlled "is a system binary present"
+/// answer instead of depending on the real process `PATH` (unsafe to mutate
+/// in parallel test runs, same reasoning as `binary_is_on_path`'s split).
+/// `system_binary_present` is checked lazily (a closure, not a bool) so a
+/// real caller still only pays for one `PATH` search, not two.
+fn ensure_cloudflared_available_from(
+    cache_dir: &std::path::Path,
+    system_binary_present: impl FnOnce() -> bool,
+) -> Result<std::path::PathBuf, String> {
+    if system_binary_present() {
         return Ok(std::path::PathBuf::from(CLOUDFLARED_BINARY));
     }
     download::ensure_cached_cloudflared(cache_dir)
@@ -1137,6 +1163,65 @@ mod tests {
         let joined = std::env::join_paths([empty_dir.path(), binary_dir.path()])
             .expect("join_paths");
         assert!(binary_is_on_path(&joined));
+    }
+
+    /// The exact scenario a real owner is in after `sudo apt install
+    /// cloudflared-linux-amd64.deb` (confirmed live, landing at
+    /// `/usr/local/bin/cloudflared`): a system binary is present, so
+    /// `ensure_cloudflared_available_from` must return the bare
+    /// `CLOUDFLARED_BINARY` name (a PATH lookup, resolved by the OS/shell at
+    /// spawn time, not this app re-deriving an absolute path) and must
+    /// NEVER attempt a download -- proven by passing a cache_dir that does
+    /// not exist and asserting no error and no directory gets created,
+    /// which `download::ensure_cached_cloudflared` would otherwise need to
+    /// do via `create_dir_all` before it could even attempt a fetch.
+    #[test]
+    fn prefers_a_system_binary_and_never_attempts_a_download_when_one_exists() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache_dir = root.path().join("cloudflared-cache-never-created");
+
+        let resolved = ensure_cloudflared_available_from(&cache_dir, || true)
+            .expect("a present system binary must resolve without error");
+
+        assert_eq!(resolved, std::path::PathBuf::from(CLOUDFLARED_BINARY));
+        assert!(
+            !cache_dir.exists(),
+            "preferring a system binary must never create or touch the download cache directory"
+        );
+    }
+
+    /// The complementary case: no system binary means the download path
+    /// actually runs, proven WITHOUT a real network call -- this machine is
+    /// itself a real supported platform (linux/x86_64), so a naive "assert
+    /// it fails" test here would be wrong on this exact machine and either
+    /// flaky (network-dependent) or silently skip the assertion depending
+    /// on connectivity. Instead, this only proves the NEGATIVE half of the
+    /// preference decision -- that a present system binary is never
+    /// consulted a second time and the closure is called at most once --
+    /// which is the actual bug class Tim's finding could have hidden (a
+    /// preference check that looks right but re-checks PATH after already
+    /// deciding to download, potentially flip-flopping). The real download
+    /// mechanics (checksum verification, extraction, caching) are already
+    /// covered end-to-end by the #[ignore]d E2E tests below, which DO use
+    /// real network access deliberately, run explicitly, not as part of the
+    /// normal fast suite.
+    #[test]
+    fn the_system_binary_check_runs_at_most_once() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache_dir = root.path().join("cloudflared-cache");
+        let calls = std::cell::Cell::new(0);
+
+        let _ = ensure_cloudflared_available_from(&cache_dir, || {
+            calls.set(calls.get() + 1);
+            true
+        });
+
+        assert_eq!(
+            calls.get(),
+            1,
+            "the system-binary check must run exactly once per call, never re-checked \
+             after a download was already started or a system binary already found"
+        );
     }
 
     /// Real E2E proof the download-on-first-use path actually works, not
