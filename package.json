@@ -114,6 +114,7 @@
   "overrides": {
     "@huggingface/transformers": {
       "sharp": "^0.35.4"
-    }
+    },
+    "qs": "^6.15.2"
   }
 }
