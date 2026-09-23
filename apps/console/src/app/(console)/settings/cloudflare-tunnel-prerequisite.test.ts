@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import test from "node:test"
+import { fileURLToPath } from "node:url"
 import {
   CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON,
   CLOUDFLARE_TUNNEL_POLL_TIMEOUT_REASON,
@@ -16,6 +18,8 @@ import { offRemoteAccessConfig } from "./remote-access.ts"
 // previously-observed ID here rather than an arbitrary one keeps this test
 // traceable to something that actually happened, not just plausible-looking
 // fiction.
+const HERE = fileURLToPath(new URL(".", import.meta.url))
+
 const REAL_TUNNEL_ID = "f0b57337-ae5b-493d-a9af-949a334f28b0"
 
 function encodeToken(payload: Record<string, unknown>): string {
@@ -161,4 +165,13 @@ test("nextConnectionStatus gives up on repeated fetch failures once the poll win
     phase: "failed",
     reason: CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON,
   })
+})
+
+test("the tunnel walkthrough URL is only ever a link target, never unclickable text", async () => {
+  // Printed as text beside the link, it looks clickable and is not.
+  for (const file of ["cloudflare-tunnel-prerequisite.tsx", "remote-access-setting.tsx"]) {
+    const source = await readFile(`${HERE}${file}`, "utf8")
+    assert.match(source, /href=\{CLOUDFLARE_TUNNEL_SETUP_URL\}/, `${file} must link the walkthrough`)
+    assert.doesNotMatch(source, /(?<!=)\{\s*CLOUDFLARE_TUNNEL_SETUP_URL\s*\}/, `${file} prints the URL as text`)
+  }
 })
