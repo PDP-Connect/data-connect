@@ -146,7 +146,7 @@ export type OriginProbeOutcome =
  */
 export type OriginBinding =
   | { kind: "app_supplied" }
-  | { kind: "owner_maintained"; where_to_set: string }
+  | { kind: "owner_maintained"; where_to_set: string; action_url: string | null }
 
 /** Mirrors `TunnelAgentHealth` in `src-tauri/src/remote_access.rs`. */
 export type TunnelAgentHealth = "stopped" | "running" | "exited"
@@ -183,7 +183,12 @@ function parseOriginBinding(value: unknown): OriginBinding | null {
   if (!isRecord(value)) return null
   if (value.kind === "app_supplied") return { kind: "app_supplied" }
   if (value.kind === "owner_maintained" && typeof value.where_to_set === "string" && value.where_to_set.trim()) {
-    return { kind: "owner_maintained", where_to_set: value.where_to_set }
+    // Absent in records from builds before the link existed. Only an
+    // `https:` link is kept: the console renders it as an anchor, and the
+    // desktop webview opens nothing else externally.
+    const action_url =
+      typeof value.action_url === "string" && value.action_url.startsWith("https://") ? value.action_url : null
+    return { kind: "owner_maintained", where_to_set: value.where_to_set, action_url }
   }
   return null
 }

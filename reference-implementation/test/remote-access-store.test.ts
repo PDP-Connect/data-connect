@@ -332,7 +332,11 @@ const SUPERVISOR_OBSERVATION = {
   checked_at: 1_000,
   stale_after: 150,
   outcome: { kind: "reaches_something_else", status: 404 },
-  binding: { kind: "owner_maintained", where_to_set: "the dashboard" },
+  binding: {
+    kind: "owner_maintained",
+    where_to_set: "the dashboard",
+    action_url: "https://dash.example.com/tunnels",
+  },
   agent: "running",
 };
 
@@ -356,6 +360,48 @@ test("load returns the supervisor's origin observation so the console can show i
     );
     const loaded = await createRemoteAccessConfigStore(dir).load();
     assert.deepEqual(loaded.origin_verified, SUPERVISOR_OBSERVATION);
+  });
+});
+
+test("load reads a binding without a link, as the previous build wrote it, as having none", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, "remote-access.json"),
+      JSON.stringify({
+        ...CLOUDFLARE_ON_DISK,
+        origin_verified: {
+          ...SUPERVISOR_OBSERVATION,
+          binding: { kind: "owner_maintained", where_to_set: "the dashboard" },
+        },
+      })
+    );
+    const loaded = await createRemoteAccessConfigStore(dir).load();
+    assert.deepEqual(loaded.origin_verified?.binding, {
+      kind: "owner_maintained",
+      where_to_set: "the dashboard",
+      action_url: null,
+    });
+  });
+});
+
+test("load drops a link that is not https instead of rendering it", async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(
+      join(dir, "remote-access.json"),
+      JSON.stringify({
+        ...CLOUDFLARE_ON_DISK,
+        origin_verified: {
+          ...SUPERVISOR_OBSERVATION,
+          binding: { kind: "owner_maintained", where_to_set: "the dashboard", action_url: "javascript:alert(1)" },
+        },
+      })
+    );
+    const loaded = await createRemoteAccessConfigStore(dir).load();
+    assert.deepEqual(loaded.origin_verified?.binding, {
+      kind: "owner_maintained",
+      where_to_set: "the dashboard",
+      action_url: null,
+    });
   });
 });
 
