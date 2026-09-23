@@ -1,7 +1,6 @@
 const TOP_LEVEL_REGEX_1 = /^(started|in_progress)$/;
 const TOP_LEVEL_REGEX_2 = /interval_seconds/;
 const TOP_LEVEL_REGEX_3 = /^(assisted|manual_only|unattended)$/;
-const TOP_LEVEL_REGEX_4 = /@pdpp\/polyfill-connectors\/connectors\/ynab\/index\.(ts|js)$/;
 const TOP_LEVEL_REGEX_5 = /manual runs|background-safe|scheduling is disabled/;
 const TOP_LEVEL_REGEX_6 = /background-safe/;
 const TOP_LEVEL_REGEX_7 = /manual runs|background-safe|paused/;
@@ -28,17 +27,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { listOperations, validateRequest } from "@pdpp/reference-contract";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch, type SourceObject } from "../lib/spine.ts";
 import { createAttention } from "../runtime/attention.ts";
-import { resolveDefaultConnectorPath } from "../runtime/controller.ts";
+import { resolveActiveInstallFirstConnectorPath } from "../runtime/controller.ts";
+import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
+import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -874,15 +874,21 @@ test("POST /_ref/connectors/:connectorId/run starts an async background run and 
   });
 });
 
-test("runtime controller resolves shipped polyfill connectors from TypeScript entrypoints", () => {
-  const ynabManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "ynab.json");
-  if (!ynabManifestEntry) {
-    throw new Error("no polyfill manifest found for ynab.json");
+test("runtime controller resolves an installed catalog connector to its verified entrypoint", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-ref-installed-entrypoint-"));
+  try {
+    const { records, store } = await installCollectionProfiles(dataDir, [readCollectionProfileFixture("ynab")]);
+    const connectorPath = await resolveActiveInstallFirstConnectorPath(
+      "ynab",
+      undefined,
+      undefined,
+      createFileLocalConnectorSourceStore(dataDir),
+      store
+    );
+    assert.equal(connectorPath, join(records[0]?.root ?? "", "dist", "collection-profile.mjs"));
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
   }
-  const ynabManifest = ynabManifestEntry.manifest as { connector_id: string };
-  const connectorPath = resolveDefaultConnectorPath(ynabManifest.connector_id);
-  assert.ok(connectorPath, "ynab should resolve to a runnable local connector path");
-  assert.match(connectorPath, TOP_LEVEL_REGEX_4);
 });
 
 test("POST /_ref/connectors/:connectorId/run returns 409 when the connector already has an active run", async () => {

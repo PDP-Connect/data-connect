@@ -82,11 +82,10 @@ async function withReviewedCompactionResidueFixture<T>(fn: () => T | Promise<T>)
 // connector under test.
 //
 // @pdpp/polyfill-connectors's shipped manifests are checked FIRST: that
-// package is the real first-party manifest source registerConnector()/
-// polyfill-manifest-reconcile.ts registers into the DB catalog at runtime
-// (see defaultPolyfillManifestsDir in polyfill-manifest-reconcile.ts), so it
-// is the one production getConnectorManifest actually resolves for a real
-// connection. reference-implementation/fixtures/seed-manifests/ is a SEPARATE, older
+// pinned development package carries the first-party connector manifests
+// whose published profiles the verified installs register into the DB
+// catalog at runtime, so it stands in for what production
+// getConnectorManifest resolves for a real connection. reference-implementation/fixtures/seed-manifests/ is a SEPARATE, older
 // "reference fixture" set used only by `pdpp seed`'s demo connectors
 // (defaultReferenceFixturesDir) and must not shadow the real manifest here.
 const REFERENCE_FIXTURE_MANIFESTS_DIR = fileURLToPath(new URL("../fixtures/seed-manifests", import.meta.url));
