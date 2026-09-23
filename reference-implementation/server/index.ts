@@ -26,7 +26,6 @@ import type { ProviderAuthManifestLike } from "./polyfill-connectors-runtime.ts"
 import {
   loadCredentialProbeHelpers,
   loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
-  readPolyfillManifests,
 } from "./polyfill-connectors-runtime.ts";
 import {
   evaluateStreamHealthAuthority,
@@ -159,7 +158,7 @@ import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
-import { canonicalConnectorKey, isInternalConnectorId, legacyLocalAliasMap } from "./connector-key.ts";
+import { canonicalConnectorKey, isInternalConnectorId } from "./connector-key.ts";
 import {
   CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS,
   createResumableConnectorMaintenanceSweep,
@@ -189,7 +188,7 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
-import { LOCAL_COLLECTOR_PROVEN_KEYS } from "./generated/connector-registry.generated.ts";
+import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -1408,33 +1407,19 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
   return `${prefix}_${randomBytes(bytes).toString("base64url")}`;
 }
 
-// Canonical local-collector connector_key -> its manifest's filename. Both
-// sides are manifest-derived, never hand-listed: LOCAL_COLLECTOR_PROVEN_KEYS
-// is every manifest declaring capabilities.proven.local_collector, and
-// legacyLocalAliasMap() carries the historical snake_case bundle id those
-// manifest files are still named after (`claude_code.json`). The catalog row,
-// the connector_instances row, and the record storage target all use the
-// canonical key (`claude-code`) so a legacy-alias enroll cannot fork the
-// connector type away from its canonical identity.
-const REFERENCE_LOCAL_CONNECTOR_MANIFEST_FILENAMES: ReadonlyMap<string, string> = new Map(
-  LOCAL_COLLECTOR_PROVEN_KEYS.map((connectorKey) => {
-    const legacyAlias = Object.entries(legacyLocalAliasMap()).find(([, canonical]) => canonical === connectorKey)?.[0];
-    return [connectorKey, `${legacyAlias ?? connectorKey}.json`];
-  })
-);
-
+// The local collector runs these connectors on the owner's device, so the
+// enrollment manifest is the pinned Collection Profile the collector installs
+// (see local-collector-profiles.ts), keyed by canonical connector_key. The
+// catalog row, the connector_instances row, and the record storage target all
+// use the canonical key (`claude-code`) so a legacy-alias enroll cannot fork
+// the connector type away from its canonical identity.
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
-  const entryName = REFERENCE_LOCAL_CONNECTOR_MANIFEST_FILENAMES.get(connectorKey);
-  if (!entryName) {
-    return null;
-  }
   try {
-    const entry = readPolyfillManifests().find((candidate) => candidate.file === entryName);
-    if (!entry) {
-      throw new Error(`no polyfill manifest found for ${entryName}`);
+    const manifest = readLocalCollectorProfile(connectorKey);
+    if (!manifest) {
+      return null;
     }
-    const manifest = entry.manifest as Record<string, unknown>;
     return {
       ...manifest,
       connector_id: connectorKey,

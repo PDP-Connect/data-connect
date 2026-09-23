@@ -251,6 +251,9 @@ function isSharedLibraryRelativeConnectorModulePath(resolvedRelPath: string): bo
 const MANIFEST_ROOTS = [
   "reference-implementation/fixtures/seed-manifests",
   "node_modules/@pdpp/polyfill-connectors/manifests",
+  // The pinned Collection Profiles @pdpp/local-collector installs, and a pin
+  // record per profile; see server/local-collector-profiles.ts.
+  "reference-implementation/server/local-collector-profiles",
 ];
 
 function isUnderManifestRoot(resolvedRelPath: string): boolean {

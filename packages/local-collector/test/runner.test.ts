@@ -19,6 +19,7 @@ import {
   BUNDLED_CONNECTOR_VERSIONS,
   BUNDLED_CONNECTORS,
   buildConnectorSpec,
+  COLLECTION_PROFILE_ROOT,
   buildLocalOutboxDoctor,
   type CliOptions,
   CollectorInterruptedAbort,
@@ -52,6 +53,7 @@ import {
   runLogout,
   runSetup,
   summarizeRunResultForCli,
+  UNPINNED_CONNECTOR_IDS,
   writeLocalCollectorProfile,
 } from "../bin/pdpp-local-collector.ts";
 // Use a tsx-loader-style import indirectly: the runner module is .ts, so
@@ -82,6 +84,11 @@ const PUBLISHED_POSTURE = Object.freeze({
 });
 
 import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, CollectorUsageError } from "../src/errors.ts";
+import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
+
+const CLAUDE_CODE_DIGEST_DIR = (
+  COLLECTION_PROFILE_PINS.find((pin) => pin.connectorId === "claude_code")?.digest ?? ""
+).replace(":", "-");
 
 const FRESH_DEVICE_TOKEN_PATTERN = /PDPP_LOCAL_DEVICE_TOKEN="fresh-token"/;
 const FRESH_DEVICE_ID_PATTERN = /PDPP_LOCAL_DEVICE_ID="fresh-device"/;
@@ -116,12 +123,11 @@ test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
   assert.match(COLLECTOR_PROTOCOL_VERSION, /^\d+$/);
 });
 
-test("bundled connectors registry contains every supported local connector", () => {
+test("bundled connectors registry contains every local connector with a pinned Collection Profile", () => {
   assert.deepEqual([...BUNDLED_CONNECTOR_IDS].sort(), [
     "apple_photos",
     "claude_code",
     "codex",
-    "google_messages",
     "google_takeout",
     "imessage",
   ]);
@@ -130,7 +136,34 @@ test("bundled connectors registry contains every supported local connector", () 
   assert.ok(BUNDLED_CONNECTORS.imessage);
   assert.ok(BUNDLED_CONNECTORS.google_takeout);
   assert.ok(BUNDLED_CONNECTORS.apple_photos);
-  assert.ok(BUNDLED_CONNECTORS.google_messages);
+  // google_messages has a local-collector definition, but data-connectors does
+  // not publish a signed Collection Profile for it (it needs gmcli, and the
+  // artifact builder has no tool layer yet), so there is nothing to install.
+  assert.deepEqual([...UNPINNED_CONNECTOR_IDS], ["google_messages"]);
+  assert.equal(BUNDLED_CONNECTORS.google_messages, undefined);
+});
+
+test("an unpinned connector is refused by name, not as an unknown id", () => {
+  const options = parseArgs([
+    "run",
+    "--base-url",
+    "http://127.0.0.1:7662",
+    "--connector",
+    "google-messages",
+    "--device-id",
+    "device-1",
+    "--device-token",
+    "token-1",
+    "--connection-id",
+    "src-gm",
+  ]);
+  assert.throws(
+    () => buildConnectorSpec(options),
+    (error: unknown) =>
+      error instanceof CollectorUsageError &&
+      /connector 'google-messages' has no published, signed Collection Profile yet/.test(error.message) &&
+      /Supported: claude_code, codex, google_takeout, imessage, apple_photos\./.test(error.message)
+  );
 });
 
 test.skip("bundled registry is assembled from the connector-owned definitions (runtime names no connector)", async () => {
@@ -198,13 +231,10 @@ test("bundled connector entries declare filesystem binding as required", () => {
   }
 });
 
-test.skip("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
-  // Skipped post-Move-R: reads packages/polyfill-connectors/manifests/{id}.json,
-  // the per-connector manifest registry for pdpp's whole connector ecosystem
-  // (not just the 6 bundled connectors) — Move A content, correctly out of
-  // scope here, same reasoning as this file's other skipped registry-drift
-  // test and collector-definitions-snapshot-drift.test.ts. See Phase 0
-  // evidence row A25 for the cross-repo-CI mechanism this is reinstated under.
+test("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
+  // Reads each connector's pinned Collection Profile (the manifest of the
+  // release the collector installs), which the reference server keeps under
+  // reference-implementation/server/local-collector-profiles/.
   //
   // Local-device collectors push records from a device outbox and write no
   // spine run, so the connection-health rollup can only project a non-`unknown`
@@ -221,7 +251,10 @@ test.skip("bundled connector defaults request coverage_diagnostics whenever the 
   for (const id of BUNDLED_CONNECTOR_IDS) {
     const entry = getBundledConnector(id);
     assert.ok(entry, `entry for ${id}`);
-    const manifestPath = new URL(`../../polyfill-connectors/manifests/${id}.json`, import.meta.url);
+    const manifestPath = new URL(
+      `../../../reference-implementation/server/local-collector-profiles/${id.replaceAll("_", "-")}.json`,
+      import.meta.url
+    );
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     const declaresCoverageDiagnostics = manifest.streams.some((stream) => stream.name === "coverage_diagnostics");
     if (!declaresCoverageDiagnostics) {
@@ -234,13 +267,21 @@ test.skip("bundled connector defaults request coverage_diagnostics whenever the 
   }
 });
 
-test.skip("bundled connector default streams are all manifest-declared (no undeclared stream requested)", async () => {
-  // Skipped post-Move-R: same reason as the test above — needs
-  // packages/polyfill-connectors/manifests/{id}.json (Move A content).
+test("bundled connector default streams are all manifest-declared (no undeclared stream requested)", async () => {
+  // Reads each connector's pinned Collection Profile, as the test above does.
   for (const id of BUNDLED_CONNECTOR_IDS) {
     const entry = getBundledConnector(id);
     assert.ok(entry, `entry for ${id}`);
-    const manifestPath = join(import.meta.dirname, "..", "..", "polyfill-connectors", "manifests", `${id}.json`);
+    const manifestPath = join(
+      import.meta.dirname,
+      "..",
+      "..",
+      "..",
+      "reference-implementation",
+      "server",
+      "local-collector-profiles",
+      `${id.replaceAll("_", "-")}.json`
+    );
     // biome-ignore lint/performance/noAwaitInLoops: each iteration reads an independent connector manifest fixture; sequential reads keep the per-id assertion failure attributable.
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     const declared = new Set(manifest.streams.map((stream) => stream.name));
@@ -2114,7 +2155,7 @@ test("pdpp-local-collector run --connector claude_code resolves to the bundled d
   assert.equal(spec.runtime_requirements.bindings.filesystem?.required, true);
 });
 
-test("resolveExecutionRoot resolves a monorepo-dev bundled entrypoint (sibling package) to the repository root", () => {
+test("resolveExecutionRoot runs a pinned connector from its installed release", () => {
   const options = parseArgs([
     "run",
     "--base-url",
@@ -2129,11 +2170,13 @@ test("resolveExecutionRoot resolves a monorepo-dev bundled entrypoint (sibling p
     "src-claude",
   ]);
   const spec = buildConnectorSpec(options);
-  // In a monorepo checkout with no built `dist/`, the bundled entrypoint
-  // resolves to the sibling `packages/polyfill-connectors` source tree —
-  // beneath the repo root, not beneath `packages/local-collector` itself.
+  // The entrypoint is the installed Collection Profile's module, outside both
+  // the package and the repository, so the child runs from the directory that
+  // holds it.
+  assert.equal(spec.command, process.execPath);
+  assert.equal(spec.args[0], join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs"));
   const executionRoot = resolveExecutionRoot(spec);
-  assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
+  assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
 
 test("resolveExecutionRoot resolves a published-shape bundled entrypoint under the local-collector package root", () => {
