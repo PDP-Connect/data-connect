@@ -915,6 +915,12 @@ fn console_process_spec(
             OsString::from(stable_port.to_string()),
         ),
     ]);
+    if let Some(provider) = remote_access.provider.as_deref() {
+        env.insert(
+            OsString::from("PDPP_ACTIVE_TUNNEL_PROVIDER"),
+            OsString::from(provider),
+        );
+    }
     env.extend(remote_access.fields.environment());
     ProcessSpec {
         label: CONSOLE_LABEL.to_string(),
@@ -5633,6 +5639,27 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             origin_proof_key(),
             origin_proof_key(),
             "one key per process"
+        );
+    }
+
+    #[test]
+    fn the_console_receives_the_active_tunnel_provider_when_configured() {
+        let mut remote_access = crate::remote_access::off_remote_access_config();
+        remote_access.provider = Some(crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID.to_string());
+        let spec = console_process_spec(
+            Path::new("/tmp/pdpp-node"),
+            Path::new("/tmp/console"),
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+            "owner-password",
+            &remote_access,
+            crate::console_port::DEFAULT_CONSOLE_PORT,
+        );
+        assert_eq!(
+            spec.env.vars.get(std::ffi::OsStr::new("PDPP_ACTIVE_TUNNEL_PROVIDER")),
+            Some(&OsString::from(
+                crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID
+            ))
         );
     }
 
