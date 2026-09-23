@@ -504,6 +504,29 @@ export async function inspectActiveConnector(
   }
 }
 
+/**
+ * Every active install whose recorded bytes still verify, in store order.
+ * A record that fails verification is reported, never returned, so a caller
+ * that discovers profiles by manifest cannot read an unverified one.
+ */
+export async function listVerifiedActiveConnectors(store: ConnectorInstallStore): Promise<{
+  readonly invalid: readonly { readonly connectorId: string; readonly reason: string }[];
+  readonly verified: readonly ConnectorInstallRecord[];
+}> {
+  const invalid: { connectorId: string; reason: string }[] = [];
+  const verified: ConnectorInstallRecord[] = [];
+  for (const record of await store.listActive()) {
+    // biome-ignore lint/performance/noAwaitInLoops: Sequential keeps store order and bounds concurrent file hashing.
+    const inspected = await inspectActiveConnector(store, record.connectorId);
+    if (inspected.status === "active") {
+      verified.push(inspected.record);
+    } else if (inspected.status === "invalid") {
+      invalid.push({ connectorId: record.connectorId, reason: inspected.reason });
+    }
+  }
+  return { invalid, verified };
+}
+
 /** Returns a runnable installed entrypoint only after every recorded byte check passes. */
 export async function resolveActiveConnectorPath(
   store: ConnectorInstallStore,

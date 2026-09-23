@@ -154,7 +154,6 @@ interface OptionalModuleMap {
   readonly manualUpload: Record<string, unknown> | null;
   readonly ntfy: Record<string, unknown> | null;
   readonly options: Record<string, unknown> | null;
-  readonly resolve: Record<string, unknown> | null;
   readonly roster: Record<string, unknown> | null;
 }
 
@@ -196,33 +195,12 @@ const optionalModules: OptionalModuleMap = {
   manualUpload: requireOptional("@pdpp/polyfill-connectors/manual-upload-validation"),
   ntfy: requireOptional("@pdpp/polyfill-connectors/ntfy"),
   options: requireOptional("@pdpp/polyfill-connectors/connector-options-schema"),
-  resolve: requireOptional("@pdpp/polyfill-connectors/resolve"),
   roster: requireOptional("@pdpp/polyfill-connectors/connector-conformance-roster"),
 };
 
 export function readPolyfillManifests(): readonly PolyfillManifestEntry[] {
   const read = optionalModules.manifests?.readPolyfillManifests;
   return typeof read === "function" ? (read() as readonly PolyfillManifestEntry[]) : [];
-}
-
-export function resolveConnectorImplementation(connectorId: string): {
-  readonly brandIcon: string;
-  readonly entry: string;
-  readonly manifest: Record<string, unknown>;
-} {
-  const resolve = optionalModules.resolve?.resolveConnectorImplementation;
-  if (typeof resolve === "function") {
-    return resolve(connectorId) as {
-      readonly brandIcon: string;
-      readonly entry: string;
-      readonly manifest: Record<string, unknown>;
-    };
-  }
-  const error = new Error(`No catalog-installed connector implementation is available for ${connectorId}`) as Error & {
-    code: string;
-  };
-  error.code = "ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND";
-  throw error;
 }
 
 export const PRODUCTION_READY_CONNECTORS: Readonly<Record<string, { readonly testFile: string }>> =

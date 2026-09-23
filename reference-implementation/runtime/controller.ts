@@ -29,11 +29,7 @@ import {
   projectBrowserSurfaceLease,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
-import {
-  notifyNtfy,
-  readPolyfillManifests,
-  resolveConnectorImplementation,
-} from "../server/polyfill-connectors-runtime.ts";
+import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
@@ -88,6 +84,7 @@ import {
 import type { ConnectorEnvironmentBinding } from "./connector-child-environment.ts";
 import { runConnector } from "./index.ts";
 import {
+  type ConnectorInstallStore,
   createConnectorInstallStore,
   inspectActiveConnector,
 } from "../server/connector-install/index.ts";
@@ -1085,8 +1082,6 @@ interface ManifestFingerprint {
   readonly version: string;
 }
 let referenceFixtureFingerprints: Map<string, ManifestFingerprint> | null = null;
-let polyfillManifestFingerprints: Map<string, ManifestFingerprint> | null = null;
-let polyfillConnectorPaths: Map<string, string> | null = null;
 const MAX_RECOVERY_CONTINUATION_ENVELOPES = 12;
 const RECOVERY_CONTINUATION_PENDING_READ_LIMIT = 100;
 // Minimum gap between two self-launched recovery continuations for the same
@@ -1229,10 +1224,6 @@ function fingerprintManifest(manifest: ConnectorManifest | null | undefined): Ma
   return { streams: streamNames.join(","), version };
 }
 
-function fingerprintsEqual(a: ManifestFingerprint | null, b: ManifestFingerprint | null): boolean {
-  return !!(a && b && a.version === b.version && a.streams === b.streams);
-}
-
 function addConnectorLookupKey(keys: string[], key: unknown): void {
   if (typeof key !== "string") {
     return;
@@ -1348,144 +1339,47 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
   return entries;
 }
 
-// Resolve an optional catalog connector's runnable (spawnable) entry-point
-// path, given its manifest's connector_id. Returns null when no installed
-// compatibility runtime has a built implementation for this ID.
+// Resolve the fallback connector-implementation path for a controller-managed
+// run that has no active install.
 //
-// The optional runtime's resolver returns a file:// URL string, safe for
-// `import()` directly; converted to a filesystem path here because this
-// file's downstream consumer (runtime/index.ts's connector spawn) takes a
-// path, not a URL. Unknown IDs fail closed and are treated the same as the
-// old "no on-disk implementation" case.
-function resolvePolyfillConnectorEntryPoint(connectorId: string): string | null {
-  try {
-    return fileURLToPath(resolveConnectorImplementation(connectorId).entry);
-  } catch (err) {
-    if (err instanceof Error && (err as { code?: unknown }).code === "ERR_PDPP_CONNECTOR_IMPLEMENTATION_NOT_FOUND") {
-      return null;
-    }
-    throw err;
-  }
-}
-
-// Index one polyfill manifest file into the connector-path and fingerprint
-// maps. No-op for non-JSON files, connectors without a shipped implementation,
-// malformed manifests, or manifests missing a usable connector_id.
-function indexPolyfillManifestFile(
-  entry: { readonly file: string; readonly manifest: Record<string, unknown> },
-  paths: Map<string, string>,
-  fingerprints: Map<string, ManifestFingerprint>
-): void {
-  if (!entry.file.endsWith(".json")) {
-    return;
-  }
-  try {
-    const manifest = entry.manifest as ConnectorManifest | null;
-    if (!manifest || typeof manifest !== "object") {
-      return;
-    }
-    const connectorId = (manifest as { connector_id?: unknown } | null)?.connector_id;
-    if (typeof connectorId !== "string" || !connectorId.trim()) {
-      return;
-    }
-    const trimmedId = connectorId.trim();
-    const connectorPath = resolvePolyfillConnectorEntryPoint(trimmedId);
-    if (!connectorPath) {
-      return;
-    }
-    setManifestLookupAliases(paths, trimmedId, manifest, connectorPath);
-    const fp = fingerprintManifest(manifest);
-    if (fp) {
-      setManifestLookupAliases(fingerprints, trimmedId, manifest, fp);
-    }
-  } catch {
-    // Ignore malformed manifests when building the local connector-path map.
-  }
-}
-
-function loadPolyfillConnectorPaths(): Map<string, string> {
-  if (polyfillConnectorPaths) {
-    return polyfillConnectorPaths;
-  }
-  const paths = new Map<string, string>();
-  const fingerprints = new Map<string, ManifestFingerprint>();
-  for (const entry of readPolyfillManifests()) {
-    indexPolyfillManifestFile(entry, paths, fingerprints);
-  }
-  polyfillConnectorPaths = paths;
-  polyfillManifestFingerprints = fingerprints;
-  return paths;
-}
-
-function loadPolyfillManifestFingerprints(): Map<string, ManifestFingerprint> {
-  if (!polyfillManifestFingerprints) {
-    loadPolyfillConnectorPaths();
-  }
-  return polyfillManifestFingerprints ?? new Map<string, ManifestFingerprint>();
-}
-
-// Resolve the connector-implementation path for a controller-managed run.
-//
-// Why this is non-trivial: the reference fixture manifests in
-// reference-implementation/fixtures/seed-manifests/ and optional catalog
-// manifests can share a `connector_id` (for example, GitHub). The reference
-// fixture is served by the seed connector at
-// reference-implementation/connectors/seed/index.ts, while an installed
-// catalog connector is selected from the active install record. Silently
-// preferring the seed on collision caused a protocol violation: the seed
-// GitHub fixture emits a `commits` PROGRESS stream that the catalog manifest
-// does not declare.
-//
-// Rules applied here, in order:
-//   1. When the caller passes the active manifest, compare a stable
-//      fingerprint (version + sorted stream names) against the reference
-//      fixture and optional catalog manifests for that connector_id:
-//        - match the catalog connector → catalog connector path;
-//        - match the reference → seed connector path;
-//   2. No match, or no manifest provided: prefer the catalog connector when
-//      it exists. The seed is a fixture kept for explicit reference fixture
-//      manifests and tests.
-//   3. Fall back to the seed connector only when the reference fixture has
-//      a manifest for this connector_id. Unknown ids resolve to null.
+// Catalog connectors execute only from an install record (see
+// resolveActiveInstallFirstConnectorPath below); this resolver never looks
+// for connector code outside that record. What remains is the seed connector
+// at reference-implementation/connectors/seed/index.ts, which serves the
+// reference fixture manifests in reference-implementation/fixtures/seed-manifests/.
+// Those fixtures can share a `connector_id` with a catalog manifest (for
+// example, GitHub). Running the seed for a catalog manifest writes the
+// fixture's synthetic records into the owner's data, so the seed is returned
+// only when the active manifest's fingerprint (version + sorted stream names)
+// matches the reference fixture's. A catalog manifest with no active install,
+// a missing manifest, and an unknown id all resolve to null, and the
+// controller refuses the run.
 export function resolveDefaultConnectorPath(connectorId: string, manifest?: ConnectorManifest): string | null {
-  const referenceFingerprints = loadReferenceFixtureFingerprints();
-  const polyfillFingerprints = loadPolyfillManifestFingerprints();
-  const polyfillPaths = loadPolyfillConnectorPaths();
-  const lookupKeys = connectorLookupKeys(connectorId, manifest ?? null);
-  const polyfillPath = getFirstByConnectorLookupKey(polyfillPaths, lookupKeys);
-  const referenceFingerprint = getFirstByConnectorLookupKey(referenceFingerprints, lookupKeys);
-  const polyfillFingerprint = getFirstByConnectorLookupKey(polyfillFingerprints, lookupKeys);
-  const hasReferenceFixture = referenceFingerprint !== null;
-
+  const referenceFingerprint = getFirstByConnectorLookupKey(
+    loadReferenceFixtureFingerprints(),
+    connectorLookupKeys(connectorId, manifest ?? null)
+  );
   const activeFingerprint = fingerprintManifest(manifest ?? null);
-  if (activeFingerprint) {
-    if (polyfillPath && fingerprintsEqual(activeFingerprint, polyfillFingerprint)) {
-      return polyfillPath;
-    }
-    if (hasReferenceFixture && fingerprintsEqual(activeFingerprint, referenceFingerprint)) {
-      return SEED_CONNECTOR_PATH;
-    }
-  }
-
-  if (polyfillPath) {
-    return polyfillPath;
-  }
-  if (hasReferenceFixture) {
-    return SEED_CONNECTOR_PATH;
-  }
-  return null;
+  return referenceFingerprint &&
+    activeFingerprint &&
+    referenceFingerprint.version === activeFingerprint.version &&
+    referenceFingerprint.streams === activeFingerprint.streams
+    ? SEED_CONNECTOR_PATH
+    : null;
 }
 
-// OCI installs are an additive, fail-closed overlay. Only an absent active
-// record falls through to the optional catalog/seed resolver; a corrupt or
-// path-escaping active record stops resolution instead of being bypassed.
+// OCI installs are the only source of catalog connector code, and they fail
+// closed. Only an absent active record falls through to the seed resolver; a
+// corrupt or path-escaping active record stops resolution instead of being
+// bypassed.
 const activeConnectorInstallStore = createConnectorInstallStore();
 const localConnectorSourceStore = createFileLocalConnectorSourceStore();
 export async function resolveActiveInstallFirstConnectorPath(
   connectorId: string,
   manifest?: ConnectorManifest,
   _options?: RunNowOptions,
-  localStore: LocalConnectorSourceStore = localConnectorSourceStore
+  localStore: LocalConnectorSourceStore = localConnectorSourceStore,
+  installStore: ConnectorInstallStore = activeConnectorInstallStore
 ): Promise<string | null> {
   const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
   if (local.status === "invalid") {
@@ -1494,7 +1388,7 @@ export async function resolveActiveInstallFirstConnectorPath(
   if (local.status === "active") {
     return local.path;
   }
-  const active = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
+  const active = await inspectActiveConnector(installStore, connectorId);
   if (active.status === "invalid") {
     throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
   }
@@ -1508,8 +1402,6 @@ export async function resolveActiveInstallFirstConnectorPath(
 // would mask later ones.
 export function __resetControllerPathResolverCachesForTests(): void {
   referenceFixtureFingerprints = null;
-  polyfillManifestFingerprints = null;
-  polyfillConnectorPaths = null;
 }
 
 // ─── Schedule helpers ───────────────────────────────────────────────────────
@@ -3916,7 +3808,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
         ? activeInstall.path
         : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
-      throw new ControllerError(`No runnable connector implementation is available for ${connectorId}`, "not_found");
+      throw new ControllerError(
+        `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
+        "not_found"
+      );
     }
     return {
       connectorPath,
