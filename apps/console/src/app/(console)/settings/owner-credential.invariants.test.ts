@@ -13,8 +13,41 @@ const PAGE_FILE = `${HERE}page.tsx`
 
 test("the settings page mounts the Owner password section with the owner credential component", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
+  assert.match(page, /export default async function SettingsPage/)
+  assert.match(page, /canShowOwnerCredentialRevealSetting\(\)/)
+  assert.match(page, /await canShowOwnerCredentialRevealSetting\(\)/)
+  assert.match(page, /showOwnerCredentialReveal \? \(/)
   assert.match(page, /<OwnerCredentialSetting \/>/)
   assert.match(page, /title="Owner password"/)
+})
+
+test("the owner password section is hidden unless the desktop generated-credential marker is present", async () => {
+  const client = await readFile(`${HERE}../lib/owner-credential-client.ts`, "utf8")
+  assert.match(client, /process\.env\.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated"/)
+  assert.match(client, /ownerCredentialRevealProofCookie\(\)\) !== null/)
+})
+
+test("the reveal client uses the desktop-set reveal cookie, not request Host, as local provenance", async () => {
+  const client = await readFile(`${HERE}../lib/owner-credential-client.ts`, "utf8")
+  assert.match(client, /x-pdpp-local-owner-credential-reveal-proof/)
+  assert.match(client, /pdpp_owner_credential_reveal/)
+  assert.match(client, /cookies\(\)/)
+  assert.match(client, /ownerCredentialRevealHeadersForCookie\(await ownerCredentialRevealProofCookie\(\)\)/)
+  assert.doesNotMatch(client, /headers\(\)/)
+  assert.doesNotMatch(client, /requestHeaders\.get\("host"\)/)
+  assert.doesNotMatch(client, /x-forwarded-host/)
+})
+
+test("the reveal client omits proof headers when the local reveal cookie is absent", async () => {
+  const client = await readFile(`${HERE}../lib/owner-credential-client.ts`, "utf8")
+  assert.match(client, /const proof = cookieValue\?\.trim\(\)/)
+  assert.match(client, /return proof \? \{ \[LOCAL_REVEAL_PROOF_HEADER\]: proof \} : \{\}/)
+})
+
+test("the reveal client forwards the cookie value as the proof for RI verification", async () => {
+  const client = await readFile(`${HERE}../lib/owner-credential-client.ts`, "utf8")
+  assert.match(client, /ownerCredentialRevealHeadersForCookie\(cookieValue/)
+  assert.match(client, /\[LOCAL_REVEAL_PROOF_HEADER\]: proof/)
 })
 
 test("the warning copy is about screen visibility, not custody of a written-down copy", async () => {

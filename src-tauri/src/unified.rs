@@ -83,6 +83,10 @@ const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
 // either, so it is exactly as unable to activate ngrok as a plain self-hosted
 // deployment, and must report the same honest "unavailable" answer.
 const MANAGED_DESKTOP_HOST_ENV: &str = "PDPP_MANAGED_DESKTOP_HOST";
+const OWNER_PASSWORD_SOURCE_ENV: &str = "PDPP_OWNER_PASSWORD_SOURCE";
+const OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED: &str = "desktop_generated";
+const OWNER_CREDENTIAL_REVEAL_PROOF_ENV: &str = "PDPP_OWNER_CREDENTIAL_REVEAL_PROOF";
+const OWNER_CREDENTIAL_REVEAL_COOKIE: &str = "pdpp_owner_credential_reveal";
 /// Set to "1" or "0" alongside `MANAGED_DESKTOP_HOST_ENV`, reporting whether
 /// `cloudflared` is on `PATH` at RS-spawn time -- see
 /// `remote_access_cloudflare::cloudflared_binary_is_installed`'s doc comment
@@ -721,6 +725,8 @@ fn ri_process_spec(
     root: &Path,
     data_dir: &Path,
     owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
+    owner_credential_reveal_proof: &str,
     credential_encryption_key: &str,
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
@@ -728,6 +734,8 @@ fn ri_process_spec(
     let mut env = ri_environment(
         data_dir,
         owner_password,
+        owner_password_source,
+        owner_credential_reveal_proof,
         credential_encryption_key,
         database_encryption_key,
     );
@@ -783,6 +791,8 @@ fn ri_readiness_host_header(trusted_hosts: &str) -> Option<String> {
 fn ri_environment(
     data_dir: &Path,
     owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
+    owner_credential_reveal_proof: &str,
     credential_encryption_key: &str,
     database_encryption_key: &str,
 ) -> BTreeMap<OsString, OsString> {
@@ -810,6 +820,10 @@ fn ri_environment(
             OsString::from(database_encryption_key),
         ),
         (
+            OsString::from(OWNER_CREDENTIAL_REVEAL_PROOF_ENV),
+            OsString::from(owner_credential_reveal_proof),
+        ),
+        (
             OsString::from("PDPP_BIND_HOST"),
             OsString::from("127.0.0.1"),
         ),
@@ -831,6 +845,12 @@ fn ri_environment(
             OsString::from(MANAGED_DESKTOP_HOST_ENV),
             OsString::from("1"),
         );
+        if matches!(owner_password_source, OwnerPasswordSource::DesktopGenerated) {
+            env.insert(
+                OsString::from(OWNER_PASSWORD_SOURCE_ENV),
+                OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED),
+            );
+        }
         // The owner needs to know whether `cloudflared` is already installed
         // BEFORE they pick the Cloudflare Tunnel option and paste a token --
         // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
@@ -856,6 +876,7 @@ fn console_process_spec(
     ri_origin: &str,
     rs_origin: &str,
     owner_password: &str,
+    owner_credential_reveal_proof: &str,
     remote_access: &RemoteAccessConfig,
     stable_port: u16,
 ) -> ProcessSpec {
@@ -884,6 +905,10 @@ fn console_process_spec(
         (
             OsString::from(ORIGIN_PROOF_KEY_ENV),
             OsString::from(origin_proof_key()),
+        ),
+        (
+            OsString::from(OWNER_CREDENTIAL_REVEAL_PROOF_ENV),
+            OsString::from(owner_credential_reveal_proof),
         ),
         (
             OsString::from(crate::console_port::STABLE_PORT_ENV),
@@ -979,6 +1004,7 @@ struct ManagedStackStart {
 fn start_managed_stack(
     app: &AppHandle,
     owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
     credential_encryption_key: &str,
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
@@ -1015,6 +1041,7 @@ fn start_managed_stack(
         .join(UNIFIED_DB_DIRECTORY);
     fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
+    let owner_credential_reveal_proof = owner_credential_reveal_proof_key()?;
 
     let sink = UnifiedEventSink { app: app.clone() };
     // One observer per supervisor (each owns its own label's lease file).
@@ -1039,6 +1066,8 @@ fn start_managed_stack(
             &ri_root,
             &data_dir,
             owner_password,
+            owner_password_source,
+            owner_credential_reveal_proof,
             credential_encryption_key,
             database_encryption_key,
             remote_access,
@@ -1084,6 +1113,7 @@ fn start_managed_stack(
             &ri_origin,
             &rs_origin,
             owner_password,
+            owner_credential_reveal_proof,
             remote_access,
             console_port_plan.stable,
         ),
@@ -1468,6 +1498,22 @@ fn origin_proof_key() -> &'static str {
         }
         hex::encode(bytes)
     })
+}
+
+/// A random proof generated once per app process for owner-password reveal.
+/// Unlike `origin_proof_key`, this is authorization material: the RI accepts
+/// it before returning the generated owner password. If the OS RNG fails,
+/// startup must fail closed rather than fall back to a predictable value.
+fn owner_credential_reveal_proof_key() -> Result<&'static str, String> {
+    static KEY: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .map(|()| hex::encode(bytes))
+            .map_err(|error| format!("Could not generate the owner credential reveal proof: {error}"))
+    })
+    .as_deref()
+    .map_err(ToString::to_string)
 }
 
 /// HMAC-SHA256 (RFC 2104) over `message`, hex-encoded. Written out over the
@@ -2343,9 +2389,16 @@ pub(crate) fn unified_database_path(app: &AppHandle) -> Result<PathBuf, String> 
 /// load_or_create_*_encryption_key siblings, all backed by SystemKeyring.
 struct BootstrapSecrets {
     password: String,
+    owner_password_source: OwnerPasswordSource,
     remote_access: RemoteAccessConfig,
     credential_encryption_key: Option<String>,
     database_encryption_key: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum OwnerPasswordSource {
+    Configured,
+    DesktopGenerated,
 }
 
 /// Load `BootstrapSecrets` synchronously. Must run inside spawn_blocking:
@@ -2366,7 +2419,13 @@ fn load_bootstrap_secrets(
         owner_credential_path(app).map_err(DatabaseKeyError::Other)?;
     let stored_credential =
         load_or_create_owner_credential(&credential_path).map_err(DatabaseKeyError::Other)?;
-    let password = configured_owner_password().unwrap_or(stored_credential);
+    let configured_password = configured_owner_password();
+    let owner_password_source = if configured_password.is_some() {
+        OwnerPasswordSource::Configured
+    } else {
+        OwnerPasswordSource::DesktopGenerated
+    };
+    let password = configured_password.unwrap_or(stored_credential);
     let remote_access = if attach_mode {
         off_remote_access_config()
     } else {
@@ -2399,6 +2458,7 @@ fn load_bootstrap_secrets(
 
     Ok(BootstrapSecrets {
         password,
+        owner_password_source,
         remote_access,
         credential_encryption_key,
         database_encryption_key,
@@ -2441,6 +2501,7 @@ async fn bootstrap_and_open_console(
     let secrets_app = app.clone();
     let BootstrapSecrets {
         password,
+        owner_password_source,
         remote_access,
         credential_encryption_key,
         database_encryption_key,
@@ -2471,6 +2532,7 @@ async fn bootstrap_and_open_console(
             start_managed_stack(
                 &app_for_sidecars,
                 &password_for_sidecar,
+                owner_password_source,
                 &credential_encryption_key_for_sidecar,
                 &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
@@ -2575,12 +2637,23 @@ async fn finish_bootstrap(
             return Err(error);
         }
     };
-    let cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
+    let owner_cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
             teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
             return Err(error);
         }
+    };
+    let reveal_cookie = if managed {
+        match owner_credential_reveal_proof_key().and_then(|proof| owner_credential_reveal_cookie(&console_origin, proof)) {
+            Ok(cookie) => Some(cookie),
+            Err(error) => {
+                teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
+                return Err(error);
+            }
+        }
+    } else {
+        None
     };
     let state_update = (|| -> Result<(), String> {
         let state = app.state::<UnifiedRuntimeState>();
@@ -2611,7 +2684,12 @@ async fn finish_bootstrap(
     // comment for why the navigation target's scheme/host/port must ALWAYS
     // come from here and never from `preserved_path`.
     let navigate_to = console_url_preserving_path(&console_origin, preserved_path.as_deref());
-    if let Err(error) = create_or_update_console_window(app, navigate_to, cookie, should_show) {
+    let mut cookies = vec![owner_cookie];
+    if let Some(cookie) = reveal_cookie {
+        cookies.push(cookie);
+    }
+
+    if let Err(error) = create_or_update_console_window(app, navigate_to, cookies, should_show) {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
@@ -2713,6 +2791,11 @@ pub(crate) async fn import_database_encryption_recovery_code(
         start_managed_stack(
             &app_for_attempt,
             &password_for_attempt,
+            if configured_owner_password().is_some() {
+                OwnerPasswordSource::Configured
+            } else {
+                OwnerPasswordSource::DesktopGenerated
+            },
             &credential_encryption_key,
             &candidate_key_for_attempt,
             &remote_access_for_attempt,
@@ -3553,6 +3636,16 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
         .build())
 }
 
+fn owner_credential_reveal_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>, String> {
+    let _host = url
+        .host_str()
+        .ok_or_else(|| "Console URL has no cookie host".to_string())?;
+    Ok(Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
+        .path("/")
+        .http_only(true)
+        .build())
+}
+
 /// Opens an external link clicked inside the console window in the owner's
 /// real system browser, instead of navigating the console window itself
 /// away from the console entirely.
@@ -3736,15 +3829,18 @@ fn console_url_preserving_path(
 fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
-    cookie: Cookie<'static>,
+    cookies: Vec<Cookie<'static>>,
     should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
         set_cookies_then_navigate(
             || {
-                window
-                    .set_cookie(cookie.clone())
-                    .map_err(|error| format!("Failed to set owner session cookie: {error}"))
+                for cookie in &cookies {
+                    window
+                        .set_cookie(cookie.clone())
+                        .map_err(|error| format!("Failed to set console cookie: {error}"))?;
+                }
+                Ok(())
             },
             || {
                 window
@@ -3791,9 +3887,12 @@ fn create_or_update_console_window(
 
     set_cookies_then_navigate(
         || {
-            window
-                .set_cookie(cookie)
-                .map_err(|error| format!("Failed to set owner session cookie: {error}"))
+            for cookie in cookies {
+                window
+                    .set_cookie(cookie)
+                    .map_err(|error| format!("Failed to set console cookie: {error}"))?;
+            }
+            Ok(())
         },
         || {
             window
@@ -5516,6 +5615,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            "reveal-proof",
             &crate::remote_access::off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -5523,6 +5623,10 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(
             debug.contains(ORIGIN_PROOF_KEY_ENV),
             "the console must be started with {ORIGIN_PROOF_KEY_ENV}; env was {debug}"
+        );
+        assert!(
+            debug.contains(OWNER_CREDENTIAL_REVEAL_PROOF_ENV),
+            "the console must receive the dedicated owner reveal proof; env was {debug}"
         );
         assert_eq!(origin_proof_key().len(), 64);
         assert_eq!(
@@ -5537,9 +5641,12 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let owner_password = "owner-password-test";
         let credential_key = "credential-key-test";
         let database_key = "database-key-test";
+        let reveal_proof = "reveal-proof-test";
         let environment = ri_environment(
             Path::new("/tmp/unified"),
             owner_password,
+            OwnerPasswordSource::DesktopGenerated,
+            reveal_proof,
             credential_key,
             database_key,
         );
@@ -5554,6 +5661,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
         let debug = format!("{:?}", EnvironmentSpec::cleared(environment));
         assert!(!debug.contains(owner_password));
+        assert!(!debug.contains(reveal_proof));
         assert!(!debug.contains(credential_key));
         assert!(!debug.contains(database_key));
     }
@@ -5573,6 +5681,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            "reveal-proof-test",
             &remote_access,
             4310,
         );
@@ -5584,6 +5693,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            "reveal-proof-test",
             &off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -5600,6 +5710,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            "reveal-proof-test",
             &off_remote_access_config(),
             38739,
         );
@@ -6118,6 +6229,17 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         // Carries a real credential, so it must stay unreadable by page JS.
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_session_cookie(&url, "session-value").expect("session cookie");
+        assert_eq!(cookie.http_only(), Some(true));
+    }
+
+    #[test]
+    fn owner_credential_reveal_cookie_is_host_only_and_http_only() {
+        let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
+        let cookie = owner_credential_reveal_cookie(&url, "reveal-proof").expect("reveal cookie");
+        assert_eq!(cookie.name(), OWNER_CREDENTIAL_REVEAL_COOKIE);
+        assert_eq!(cookie.value(), "reveal-proof");
+        assert_eq!(cookie.domain(), None);
+        assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
     }
 
