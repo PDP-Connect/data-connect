@@ -176,6 +176,7 @@ test("SessionAccumulator: stores only bounded scalar summary fields", () => {
 		"message_count",
 		"project_path",
 		"started_at",
+		"title",
 		"user_type",
 		"version",
 	]);

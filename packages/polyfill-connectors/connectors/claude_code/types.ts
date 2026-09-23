@@ -9,6 +9,7 @@ import type { LocalJsonlPhysicalCursorV1 } from "../../src/local-jsonl-cursor.ts
 
 export interface JsonlObject {
 	agentId?: string | null;
+	aiTitle?: string | null;
 	attachment?: {
 		hookName?: string | null;
 		toolUseID?: string | null;
@@ -18,6 +19,7 @@ export interface JsonlObject {
 	cwd?: string;
 	entrypoint?: string;
 	gitBranch?: string;
+	imagePasteIds?: unknown;
 	isSidechain?: boolean | null;
 	message?: unknown;
 	parentUuid?: string | null;
@@ -44,6 +46,7 @@ export interface SessionAccumulator {
 	message_count: number;
 	project_path: string;
 	started_at: string | null;
+	title: string | null;
 	user_type: string | null;
 	version: string | null;
 }
@@ -57,6 +60,7 @@ export interface JsonlObservations {
 	lastTimestamp: string | null;
 	messageCount: number;
 	sessionId: string | null;
+	title: string | null;
 	userType: string | null;
 	version: string | null;
 }
@@ -113,6 +117,7 @@ export interface ClaudeCodeState {
 	sessions?: Partial<ClaudeSessionsCursorV1>;
 	skills?: { file_mtimes?: Record<string, number> };
 	slash_commands?: { file_mtimes?: Record<string, number> };
+	usage?: { file_mtimes?: Record<string, number> };
 	// Inventory streams (backup_inventory, cache_inventory, config_inventory,
 	// file_history) persist a per-stream fingerprint cursor so an unchanged
 	// store does not re-version on every run when only mtime/size ticks.

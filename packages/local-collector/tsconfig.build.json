@@ -63,6 +63,7 @@
     "../polyfill-connectors/src/shutdown-hook.ts",
     "../polyfill-connectors/src/streaming-target-registration.ts",
     "../polyfill-connectors/src/terminal-error.ts",
+    "../polyfill-connectors/src/youtube-watch-history.ts",
     // @pdpp/collector-runtime's local-device-client.ts has always imported
     // canonicalTerminalRunCommitEnvelope from @pdpp/reference-contract/common
     // as a real runtime dependency (flagged, not introduced, by engine-split
