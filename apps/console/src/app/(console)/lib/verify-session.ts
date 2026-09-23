@@ -17,9 +17,11 @@
  * Behavior: when this process holds `PDPP_OWNER_PASSWORD` (controller
  * `enabled`), HMAC-validate the cookie and redirect to /owner/login on miss.
  * Otherwise, pass through and let the AS be authoritative. This preserves the
- * documented open local-dev mode when owner-auth is disabled, and still keeps
- * split deployments safe because the AS revalidates every downstream `_ref`
- * and `/v1/*` request.
+ * documented open local-dev mode when owner-auth is disabled. In split
+ * deployments the AS revalidates the forwarded cookie on every `_ref`
+ * request. `/v1/*` requests carry the owner bearer instead, and the RS checks
+ * only that bearer, so `getOwnerToken()` asks the AS to admit the current
+ * request before it hands the bearer out (see owner-token.ts).
  *
  * Memoized with React's `cache()` so a single render that fans out to many
  * sibling fetchers verifies once, not N times. The memoization key is the

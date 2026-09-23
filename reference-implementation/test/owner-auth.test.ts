@@ -841,3 +841,34 @@ test("owner-auth placeholder: logout clears the session cookie", async () => {
     assert.ok(setCookie?.includes("Max-Age=0"), "cookie is expired");
   });
 });
+
+// ── /owner/session: the admission check a cookie-forwarding server asks ──────
+test("owner-auth placeholder: enabled — GET /owner/session admits only a valid session", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const check = (cookie?: string) =>
+      fetch(`${asUrl}/owner/session`, {
+        headers: { Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+        redirect: "manual",
+      });
+
+    const anonymous = await check();
+    assert.equal(anonymous.status, 401);
+    assert.equal(((await anonymous.json()) as { error?: { code?: string } }).error?.code, "owner_session_required");
+
+    const { cookie } = await login(asUrl, TEST_PASSWORD);
+    assert.ok(cookie);
+    const admitted = await check(cookie);
+    assert.equal(admitted.status, 204);
+    assert.equal(await admitted.text(), "");
+
+    const tampered = await check(`${cookie}x`);
+    assert.equal(tampered.status, 401);
+  });
+});
+
+test("owner-auth placeholder: disabled on loopback — GET /owner/session admits open local dev", async () => {
+  await withServer({}, async ({ asUrl }) => {
+    const resp = await fetch(`${asUrl}/owner/session`, { headers: { Accept: "application/json" } });
+    assert.equal(resp.status, 204);
+  });
+});
