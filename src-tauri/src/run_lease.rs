@@ -301,61 +301,85 @@ pub(crate) fn reap_orphans(app_data_dir: &Path, self_pid: i32) -> Vec<(String, R
             .and_then(|stem| stem.to_str())
             .unwrap_or("unknown")
             .to_string();
-
-        let Some(lease) = parsed else {
-            let _ = fs::remove_file(&path);
-            decisions.push((label, ReapDecision::RemovedUnreadable));
-            continue;
-        };
-
-        let decision = decide(&lease, self_pid);
-        match &decision {
-            ReapDecision::Reaped { pid, pgid } => {
-                log::warn!(
-                    "Reaping orphaned '{}' (pid {}) left by app session {}; it was holding {}",
-                    lease.label,
-                    pid,
-                    lease.owner_pid,
-                    lease
-                        .port
-                        .map(|port| format!("port {port}"))
-                        .unwrap_or_else(|| "no recorded port".to_string())
-                );
-                kill_orphan(*pid, *pgid);
-                let _ = fs::remove_file(&path);
-            }
-            ReapDecision::RemovedStaleFile | ReapDecision::RemovedUnreadable => {
-                let _ = fs::remove_file(&path);
-            }
-            ReapDecision::SkippedOwnerAlive => {
-                log::debug!(
-                    "Leaving '{}' (pid {}) alone: its app session {} is still running",
-                    lease.label,
-                    lease.pid,
-                    lease.owner_pid
-                );
-            }
-            ReapDecision::SkippedOwnerIdentityUnknown => {
-                log::debug!(
-                    "Leaving '{}' (pid {}) alone: its app session {} has unknown identity",
-                    lease.label,
-                    lease.pid,
-                    lease.owner_pid
-                );
-            }
-            ReapDecision::SkippedPidRecycled => {
-                log::warn!(
-                    "Lease for '{}' points at pid {}, which now belongs to a different \
-                     process; leaving it alone and dropping the lease",
-                    lease.label,
-                    lease.pid
-                );
-                let _ = fs::remove_file(&path);
-            }
-        }
-        decisions.push((label, decision));
+        decisions.push((label, act_on_lease(&path, parsed, self_pid)));
     }
     decisions
+}
+
+/// Reap the orphan recorded under one label, leaving every other lease alone.
+///
+/// For a caller that owns a single role and must not act on the others'
+/// leases. `None` means no lease exists for `label`: nothing is recorded, so
+/// nothing is provably ours to reap.
+pub(crate) fn reap_orphan_with_label(
+    app_data_dir: &Path,
+    label: &str,
+    self_pid: i32,
+) -> Option<ReapDecision> {
+    let path = RunLease::path_for(app_data_dir, label);
+    if !path.is_file() {
+        return None;
+    }
+    let parsed = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<RunLease>(&text).ok());
+    Some(act_on_lease(&path, parsed, self_pid))
+}
+
+/// Carry out `decide` for one lease file: kill only on `Reaped`, and remove
+/// the file whenever it no longer describes a process worth tracking.
+fn act_on_lease(path: &Path, parsed: Option<RunLease>, self_pid: i32) -> ReapDecision {
+    let Some(lease) = parsed else {
+        let _ = fs::remove_file(path);
+        return ReapDecision::RemovedUnreadable;
+    };
+
+    let decision = decide(&lease, self_pid);
+    match &decision {
+        ReapDecision::Reaped { pid, pgid } => {
+            log::warn!(
+                "Reaping orphaned '{}' (pid {}) left by app session {}; it was holding {}",
+                lease.label,
+                pid,
+                lease.owner_pid,
+                lease
+                    .port
+                    .map(|port| format!("port {port}"))
+                    .unwrap_or_else(|| "no recorded port".to_string())
+            );
+            kill_orphan(*pid, *pgid);
+            let _ = fs::remove_file(path);
+        }
+        ReapDecision::RemovedStaleFile | ReapDecision::RemovedUnreadable => {
+            let _ = fs::remove_file(path);
+        }
+        ReapDecision::SkippedOwnerAlive => {
+            log::debug!(
+                "Leaving '{}' (pid {}) alone: its app session {} is still running",
+                lease.label,
+                lease.pid,
+                lease.owner_pid
+            );
+        }
+        ReapDecision::SkippedOwnerIdentityUnknown => {
+            log::debug!(
+                "Leaving '{}' (pid {}) alone: its app session {} has unknown identity",
+                lease.label,
+                lease.pid,
+                lease.owner_pid
+            );
+        }
+        ReapDecision::SkippedPidRecycled => {
+            log::warn!(
+                "Lease for '{}' points at pid {}, which now belongs to a different \
+                 process; leaving it alone and dropping the lease",
+                lease.label,
+                lease.pid
+            );
+            let _ = fs::remove_file(path);
+        }
+    }
+    decision
 }
 
 /// SIGKILL an orphan, preferring its process group so a Node server's own

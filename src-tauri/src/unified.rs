@@ -480,10 +480,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         tray_builder = tray_builder.icon(icon);
     }
     tray_builder.build(app)?;
-
-    if let Some(main_window) = app.get_webview_window("main") {
-        main_window.hide()?;
-    }
+    report_unhandled_deep_links(app);
 
     // Seed the in-memory closeToTray cache once, synchronously, at startup
     // -- before any window can receive a CloseRequested event -- so the
@@ -516,6 +513,34 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         }
     });
     Ok(())
+}
+
+/// Unified mode does not build the legacy window, which is the only consumer
+/// of `vana://` links. Record each one received so a dropped link shows in
+/// the log instead of vanishing. Whether unified mode should serve these
+/// links is an open product decision; this boundary only reports.
+fn report_unhandled_deep_links(app: &tauri::App) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        for url in &urls {
+            log::warn!("{}", unhandled_deep_link_notice(url));
+        }
+    }
+    app.deep_link().on_open_url(|event| {
+        for url in &event.urls() {
+            log::warn!("{}", unhandled_deep_link_notice(url));
+        }
+    });
+}
+
+/// Log line for an unhandled deep link. Grant links carry a session secret
+/// in the query, so only the scheme and host are included.
+fn unhandled_deep_link_notice(url: &tauri::Url) -> String {
+    format!(
+        "Ignoring a {}://{} link: unified mode has no handler for incoming links",
+        url.scheme(),
+        url.host_str().unwrap_or("")
+    )
 }
 
 pub(crate) fn focus_or_bootstrap(app: AppHandle) {
@@ -3804,8 +3829,9 @@ fn create_or_update_console_window(
             }
             // else: let the close proceed. With no other windows open this
             // drops to zero webview windows, which fires RunEvent::ExitRequested
-            // (handled in lib.rs -> request_shutdown), so disabling the
-            // preference still gets a clean sidecar shutdown, not a bare kill.
+            // with no exit code. lib.rs keeps unified mode resident in the
+            // tray for that case, as it was while a hidden legacy window
+            // existed; the tray's Quit is what reaches request_shutdown.
         }
     });
     // tauri-plugin-window-state restores a saved SIZE in physical pixels with
@@ -3969,6 +3995,16 @@ mod tests {
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
+
+    #[test]
+    fn unhandled_deep_link_notice_omits_the_grant_secret() {
+        let url: tauri::Url = "vana://connect?sessionId=s-1&secret=hunter2&scopes=a"
+            .parse()
+            .expect("url");
+        let notice = unhandled_deep_link_notice(&url);
+        assert!(notice.contains("vana://connect"), "{notice}");
+        assert!(!notice.contains("hunter2") && !notice.contains("s-1"), "{notice}");
+    }
 
     #[derive(Clone, Default)]
     struct RecordingSink(Arc<Mutex<Vec<ProcessLifecycleEvent>>>);

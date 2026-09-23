@@ -70,6 +70,23 @@ use commands::export_database_encryption_recovery_code;
 use unified::import_database_encryption_recovery_code;
 use tauri::{Listener, Manager};
 
+/// Label of the legacy desktop app's window, declared in tauri.conf.json.
+const LEGACY_MAIN_WINDOW_LABEL: &str = "main";
+
+/// Build the legacy `main` window from its tauri.conf.json declaration.
+fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == LEGACY_MAIN_WINDOW_LABEL)
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("tauri.conf.json declares no legacy `main` window"))?;
+    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
@@ -181,6 +198,19 @@ pub fn run() {
                 unified::setup(app)?;
             }
 
+            // Runtime composition is decided here, once. The legacy `main`
+            // window is `"create": false` in tauri.conf.json because a
+            // window Tauri builds from config loads the legacy app and mounts
+            // its hooks before this hook runs; hiding it afterwards leaves
+            // that runtime live. It is built only when legacy mode is chosen.
+            #[cfg(desktop)]
+            let legacy = !unified::is_enabled();
+            #[cfg(not(desktop))]
+            let legacy = true;
+            if legacy {
+                create_legacy_main_window(app)?;
+            }
+
             // Listen for close window events from connectors
             let app_handle = app.handle().clone();
             app.listen("connector-close-window", move |event| {
@@ -270,9 +300,19 @@ pub fn run() {
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {
                 #[cfg(desktop)]
-                if unified::is_enabled() && unified::request_shutdown(app, code.unwrap_or_default())
-                {
-                    api.prevent_exit();
+                if unified::is_enabled() {
+                    match code {
+                        // The last window closed. Unified mode stays resident
+                        // in the tray; only an explicit exit (tray Quit) stops
+                        // it. The legacy `main` window used to provide this
+                        // by never closing while hidden.
+                        None => api.prevent_exit(),
+                        Some(code) => {
+                            if unified::request_shutdown(app, code) {
+                                api.prevent_exit();
+                            }
+                        }
+                    }
                 }
             }
             tauri::RunEvent::Exit => {
@@ -288,4 +328,38 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tauri builds every config window marked `create` before the setup
+    /// hook runs, so the legacy frontend would load and mount its hooks even
+    /// in unified mode. Built from the real tauri.conf.json context, the app
+    /// must start with no window at all; the setup hook alone chooses.
+    #[test]
+    fn startup_builds_no_window_before_composition_is_chosen() {
+        let mut app = tauri::test::mock_builder()
+            .build(tauri::generate_context!())
+            .expect("build the app from tauri.conf.json");
+        // Tauri builds config windows when the event loop first runs, not
+        // in `build`. One iteration runs that step.
+        #[allow(deprecated)]
+        app.run_iteration(|_, _| {});
+        assert!(
+            app.webview_windows().is_empty(),
+            "config created windows before setup: {:?}",
+            app.webview_windows().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn legacy_mode_still_builds_the_declared_main_window() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::generate_context!())
+            .expect("build the app from tauri.conf.json");
+        create_legacy_main_window(&app).expect("build the legacy window");
+        assert!(app.get_webview_window(LEGACY_MAIN_WINDOW_LABEL).is_some());
+    }
 }
