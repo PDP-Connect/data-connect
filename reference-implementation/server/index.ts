@@ -364,7 +364,10 @@ import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
 import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
-import { mountOwnerCredentialReveal } from "./routes/owner-credential-reveal.ts";
+import {
+  hasLocalOwnerCredentialRevealProof,
+  mountOwnerCredentialReveal,
+} from "./routes/owner-credential-reveal.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -6929,6 +6932,9 @@ function buildRsApp(opts: ServerOpts = {}) {
   // the password this process was started with, or null when owner auth is
   // disabled. Never mints or mutates a credential.
   const readOwnerPassword = (): string | null => rsOwnerAuthConfig.password || null;
+  const ownerCredentialRevealEnabled =
+    process.env.PDPP_MANAGED_DESKTOP_HOST === "1" && process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated";
+  const ownerCredentialRevealProof = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF?.trim() || null;
   const trustedMetadataHosts =
     opts.trustedMetadataHosts ?? (opts.ignoreAmbientPublicUrls ? null : process.env.PDPP_TRUSTED_HOSTS);
   const rsIntrospectionCredentials = opts.rsIntrospectionCredentials ?? readIntrospectionCredentialsFromEnv();
@@ -7935,6 +7941,8 @@ function buildRsApp(opts: ServerOpts = {}) {
   // routes/owner-credential-reveal.ts for the full rationale.
   mountOwnerCredentialReveal(app, {
     handleError,
+    isEligibleForReveal: (req) =>
+      ownerCredentialRevealEnabled && hasLocalOwnerCredentialRevealProof(req, ownerCredentialRevealProof),
     readOwnerPassword,
     requireOwner,
     requireToken,

@@ -9,6 +9,7 @@
  * session cookie, then call the resource server directly.
  */
 
+import { cookies } from "next/headers"
 import { describeErrorText } from "./describe-error.ts"
 import {
   getOwnerToken,
@@ -18,6 +19,27 @@ import {
 } from "./owner-token.ts"
 import { verifyDashboardSession } from "./verify-session.ts"
 
+const LOCAL_REVEAL_PROOF_HEADER = "x-pdpp-local-owner-credential-reveal-proof"
+const LOCAL_REVEAL_COOKIE = "pdpp_owner_credential_reveal"
+
+export function ownerCredentialRevealHeadersForCookie(cookieValue: string | null | undefined): HeadersInit {
+  const proof = cookieValue?.trim()
+  return proof ? { [LOCAL_REVEAL_PROOF_HEADER]: proof } : {}
+}
+
+async function ownerCredentialRevealProofCookie(): Promise<string | null> {
+  const cookieStore = await cookies()
+  return cookieStore.get(LOCAL_REVEAL_COOKIE)?.value ?? null
+}
+
+async function localRevealHeaders(): Promise<HeadersInit> {
+  return ownerCredentialRevealHeadersForCookie(await ownerCredentialRevealProofCookie())
+}
+
+export async function canShowOwnerCredentialRevealSetting(): Promise<boolean> {
+  return process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" && (await ownerCredentialRevealProofCookie()) !== null
+}
+
 export async function revealOwnerCredential(): Promise<string> {
   await verifyDashboardSession()
   const token = await getOwnerToken()
@@ -25,7 +47,7 @@ export async function revealOwnerCredential(): Promise<string> {
   try {
     response = await fetch(`${getRsInternalUrl()}/v1/owner/credential/reveal`, {
       cache: "no-store",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...(await localRevealHeaders()) },
     })
   } catch (err) {
     // biome-ignore lint/style/useErrorCause: matches recovery-key-client.ts precedent.

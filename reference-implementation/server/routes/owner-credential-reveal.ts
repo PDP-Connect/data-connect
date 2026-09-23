@@ -49,6 +49,7 @@ import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 interface RouteRequest {
   readonly body?: unknown
+  readonly headers?: Record<string, string | string[] | undefined>
 }
 
 interface RouteResponse {
@@ -64,6 +65,7 @@ interface AppLike {
 
 export interface MountOwnerCredentialRevealContext {
   handleError: (res: unknown, err: unknown) => void
+  isEligibleForReveal: (req: RouteRequest) => boolean
   /**
    * Reads the owner password this process was started with, or `null` when
    * owner auth is disabled (no password configured). Never mints or
@@ -76,12 +78,36 @@ export interface MountOwnerCredentialRevealContext {
 }
 
 const OWNER_AUTH_DISABLED_MESSAGE = "Owner auth is not enabled on this deployment; there is no password to reveal."
+const OWNER_CREDENTIAL_REVEAL_UNAVAILABLE_MESSAGE = "Owner credential reveal is not available on this deployment."
+const LOCAL_REVEAL_PROOF_HEADER = "x-pdpp-local-owner-credential-reveal-proof"
+
+export function localOwnerCredentialRevealProofHeader(proof: string): Record<string, string> {
+  return { [LOCAL_REVEAL_PROOF_HEADER]: proof }
+}
+
+export function hasLocalOwnerCredentialRevealProof(req: RouteRequest, proof: string | null): boolean {
+  if (!proof) {
+    return false
+  }
+  const header = req.headers?.[LOCAL_REVEAL_PROOF_HEADER]
+  return Array.isArray(header) ? header.includes(proof) : header === proof
+}
 
 export function mountOwnerCredentialReveal(app: AppLike, ctx: MountOwnerCredentialRevealContext): void {
   const guarded = [ctx.requireToken, ctx.requireOwner] as const
 
-  app.get("/v1/owner/credential/reveal", ...guarded, (_req: RouteRequest, res: RouteResponse) => {
+  app.get("/v1/owner/credential/reveal", ...guarded, (req: RouteRequest, res: RouteResponse) => {
     try {
+      if (!ctx.isEligibleForReveal(req)) {
+        res.status(404).json({
+          error: {
+            code: "owner_credential_reveal_unavailable",
+            message: OWNER_CREDENTIAL_REVEAL_UNAVAILABLE_MESSAGE,
+            type: "invalid_request",
+          },
+        })
+        return
+      }
       const password = ctx.readOwnerPassword()
       if (password === null) {
         res.status(404).json({
