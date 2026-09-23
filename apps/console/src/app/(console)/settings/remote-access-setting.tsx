@@ -1115,10 +1115,7 @@ export function RemoteAccessSetting({
                   <OpenExternalLink className="underline" href={CLOUDFLARE_TUNNEL_SETUP_URL}>
                     Open the Cloudflare Tunnel walkthrough
                   </OpenExternalLink>
-                  .{" "}
-                  <span className="select-all break-all font-mono">
-                    {CLOUDFLARE_TUNNEL_SETUP_URL}
-                  </span>
+                  .
                 </span>
               </label>
               <label
