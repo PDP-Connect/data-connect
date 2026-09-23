@@ -27,7 +27,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -41,7 +41,7 @@ import { createFileLocalConnectorSourceStore } from "../server/connector-install
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
-const SEED_CONNECTOR_PATH_REGEX = /reference-implementation\/connectors\/seed\/index\.ts$/;
+const SEED_CONNECTOR_RELATIVE_PATH = join("connectors", "seed", "index.ts");
 const INVALID_INSTALL_REGEX = /Active connector install is invalid for github/;
 
 interface FixtureManifest extends ConnectorManifest {
@@ -99,9 +99,9 @@ test("resolves the installed GitHub profile when the active manifest is the cata
       installStore
     );
     assert.equal(resolved, join(records[0]?.root ?? "", "dist", "collection-profile.mjs"));
-    assert.doesNotMatch(
-      resolved ?? "",
-      SEED_CONNECTOR_PATH_REGEX,
+    assert.notEqual(
+      resolved && relative(REFERENCE_IMPL_DIR, resolved),
+      SEED_CONNECTOR_RELATIVE_PATH,
       "an installed GitHub run must not fall through to the reference seed fixture"
     );
     // Without a manifest hint the install record still wins over the seed.
@@ -129,7 +129,11 @@ test("resolves reference seed when active manifest is the reference GitHub fixtu
   const referenceGithub = readManifest(REFERENCE_MANIFESTS_DIR, "github.json");
   const resolved = resolveDefaultConnectorPath(referenceGithub.connector_id, referenceGithub);
   assert.ok(resolved, "reference GitHub fixture must still resolve");
-  assert.match(resolved, SEED_CONNECTOR_PATH_REGEX, `expected reference seed, got ${resolved}`);
+  assert.equal(
+    relative(REFERENCE_IMPL_DIR, resolved),
+    SEED_CONNECTOR_RELATIVE_PATH,
+    `expected reference seed, got ${resolved}`
+  );
 });
 
 test("a catalog GitHub manifest with no active install fails closed instead of running the seed", async () => {
@@ -187,5 +191,9 @@ test("resolves canonical connector keys for URL-shaped reference fixture manifes
   };
   const resolved = resolveDefaultConnectorPath(canonicalKey, storedManifest);
   assert.ok(resolved, "canonical spotify key must resolve to a runnable connector path");
-  assert.match(resolved, SEED_CONNECTOR_PATH_REGEX, `expected reference seed for canonical spotify key, got ${resolved}`);
+  assert.equal(
+    relative(REFERENCE_IMPL_DIR, resolved),
+    SEED_CONNECTOR_RELATIVE_PATH,
+    `expected reference seed for canonical spotify key, got ${resolved}`
+  );
 });
