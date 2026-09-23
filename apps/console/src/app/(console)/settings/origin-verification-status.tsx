@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import type { OriginVerificationDisplay } from "./remote-access.ts"
 
 function checkedTime(checkedAt: number): string {
@@ -68,7 +69,16 @@ export function OriginVerificationStatus({
               , pointing at <span className="select-all font-mono text-foreground/80">{target}</span>
             </>
           ) : null}
-          . The console address below says whether this port stays the same across restarts.
+          .{" "}
+          {binding.action_url ? (
+            <>
+              <OpenExternalLink className="underline" href={binding.action_url}>
+                Open in browser
+              </OpenExternalLink>
+              .{" "}
+            </>
+          ) : null}
+          The console address below says whether this port stays the same across restarts.
         </p>
       ) : binding?.kind === "app_supplied" && misrouted ? (
         <p className="pdpp-caption text-muted-foreground">

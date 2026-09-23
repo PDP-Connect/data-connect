@@ -410,7 +410,7 @@ function cloudflareConfigWith(originVerified: OriginVerification | null): Remote
   }
 }
 
-const OWNER_MAINTAINED = { kind: "owner_maintained", where_to_set: "the dashboard" } as const
+const OWNER_MAINTAINED = { kind: "owner_maintained", where_to_set: "the dashboard", action_url: null } as const
 
 function observation(overrides: Partial<OriginVerification> = {}): OriginVerification {
   return {

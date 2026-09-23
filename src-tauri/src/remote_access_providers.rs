@@ -172,6 +172,7 @@ impl PublicUrlProvider {
             // binding.
             Self::UserSuppliedOrigin => OriginBinding::OwnerMaintained {
                 where_to_set: "the upstream (target) setting of your reverse proxy".to_string(),
+                action_url: None,
             },
             // The SDK's forwarder is handed the loopback URL at listen time
             // and ngrok's edge sends the agent endpoint's traffic to it;
@@ -190,8 +191,14 @@ impl PublicUrlProvider {
             // true, including when `--url` happened to be honored.
             Self::CloudflareTunnel(_) => OriginBinding::OwnerMaintained {
                 where_to_set: "the Service URL of this hostname's route, in the Cloudflare \
-                               dashboard (Networks > Tunnels > this tunnel > Routes)"
+                               dashboard (Networking > Tunnels > this tunnel > Routes)"
                     .to_string(),
+                // The link Cloudflare's own tunnel docs use for "Networking >
+                // Tunnels". `:account` is a placeholder the dashboard fills
+                // with the signed-in account, and the `to` path survives
+                // the login redirect. It lands on the tunnel list, not the
+                // route, so `where_to_set` keeps the rest of the path.
+                action_url: Some("https://dash.cloudflare.com/?to=/:account/tunnels".to_string()),
             },
         }
     }
@@ -461,14 +468,41 @@ mod tests {
         for (provider, app_supplied) in cases {
             match provider.origin_binding() {
                 OriginBinding::AppSupplied => assert!(app_supplied, "{provider:?}"),
-                OriginBinding::OwnerMaintained { where_to_set } => {
+                OriginBinding::OwnerMaintained {
+                    where_to_set,
+                    action_url,
+                } => {
                     assert!(!app_supplied, "{provider:?}");
                     // The owner-facing copy renders this verbatim as the
                     // place to act, so it can never be blank.
                     assert!(!where_to_set.trim().is_empty(), "{provider:?}");
+                    // The console renders it as a link, and the webview
+                    // opens only `https:` links externally.
+                    if let Some(url) = action_url {
+                        assert!(url.starts_with("https://"), "{provider:?}");
+                    }
                 }
             }
         }
+    }
+
+    /// A reverse proxy the owner runs has no page this app could link to,
+    /// so its binding carries prose alone. Cloudflare's carries a link.
+    #[test]
+    fn only_a_provider_with_a_dashboard_supplies_an_action_url() {
+        use crate::remote_access::OriginBinding;
+        let action_url = |provider: PublicUrlProvider| match provider.origin_binding() {
+            OriginBinding::OwnerMaintained { action_url, .. } => action_url,
+            OriginBinding::AppSupplied => panic!("{provider:?} is app-supplied"),
+        };
+        assert_eq!(action_url(PublicUrlProvider::UserSuppliedOrigin), None);
+        assert_eq!(
+            action_url(PublicUrlProvider::CloudflareTunnel(cloudflare_tunnel(
+                "vault.example.com"
+            )))
+            .as_deref(),
+            Some("https://dash.cloudflare.com/?to=/:account/tunnels")
+        );
     }
 
     #[test]

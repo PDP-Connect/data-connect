@@ -239,8 +239,15 @@ pub(crate) enum OriginBinding {
     /// The mapping lives outside this app (a provider's control plane or
     /// the owner's own reverse proxy). Anything the app passes is advisory
     /// at best. The owner must set it at `where_to_set`, and it breaks when
-    /// the console's port changes.
-    OwnerMaintained { where_to_set: String },
+    /// the console's port changes. `where_to_set` and `action_url` must
+    /// together give the owner a concrete next step: `action_url` is a page
+    /// that gets them closer to that place, when one exists (a reverse proxy
+    /// the owner runs has none). It may land short of the exact setting, so
+    /// `where_to_set` must still say how to get there from it.
+    OwnerMaintained {
+        where_to_set: String,
+        action_url: Option<String>,
+    },
 }
 
 /// The provider's local agent -- the process or in-process session that

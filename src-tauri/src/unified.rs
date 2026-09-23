@@ -5292,6 +5292,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             outcome: crate::remote_access::OriginProbeOutcome::ReachesSomethingElse { status: 404 },
             binding: crate::remote_access::OriginBinding::OwnerMaintained {
                 where_to_set: "the dashboard".to_string(),
+                action_url: Some("https://dash.example.com/tunnels".to_string()),
             },
             agent: Some(crate::remote_access::TunnelAgentHealth::Running),
         };
@@ -5302,9 +5303,30 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 "checked_at": 1_000,
                 "stale_after": 150,
                 "outcome": { "kind": "reaches_something_else", "status": 404 },
-                "binding": { "kind": "owner_maintained", "where_to_set": "the dashboard" },
+                "binding": {
+                    "kind": "owner_maintained",
+                    "where_to_set": "the dashboard",
+                    "action_url": "https://dash.example.com/tunnels",
+                },
                 "agent": "running",
             })
+        );
+    }
+
+    /// A binding stored before `action_url` existed reads as "no link", so
+    /// the observation already on disk keeps its guidance.
+    #[test]
+    fn an_owner_maintained_binding_without_an_action_url_still_parses() {
+        let binding: crate::remote_access::OriginBinding = serde_json::from_value(
+            serde_json::json!({ "kind": "owner_maintained", "where_to_set": "the dashboard" }),
+        )
+        .expect("a binding from the previous build must parse");
+        assert_eq!(
+            binding,
+            crate::remote_access::OriginBinding::OwnerMaintained {
+                where_to_set: "the dashboard".to_string(),
+                action_url: None,
+            }
         );
     }
 
