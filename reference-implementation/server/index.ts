@@ -3014,7 +3014,7 @@ function resolveOwnerAuthLoginRateLimit(
     ...(maxLocal === undefined ? {} : { maxLocal }),
     ...(windowMs === undefined ? {} : { windowMs }),
     trustedProxies:
-      fromOpts.trustedProxies ?? opts.trustedProxies ?? (readOwnerAuthEnv ? process.env.PDPP_TRUSTED_PROXIES : null),
+      fromOpts.trustedProxies ?? opts.trustedProxies ?? (readOwnerAuthEnv ? process.env.PDPP_TRUSTED_PROXIES : null) ?? null,
   };
 }
 
