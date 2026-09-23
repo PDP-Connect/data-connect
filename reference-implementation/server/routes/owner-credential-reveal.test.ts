@@ -33,7 +33,11 @@ function response(): TestResponse {
   };
 }
 
-function mountedRoute(isEligibleForReveal: (req: { headers?: Record<string, string> }) => boolean) {
+function mountedRoute(
+  isEligibleForReveal: (req: {
+    headers?: Record<string, string | string[] | undefined>
+  }) => boolean
+) {
   const handlers: unknown[] = [];
   const app = {
     get(_path: string, ...args: unknown[]) {
@@ -47,8 +51,8 @@ function mountedRoute(isEligibleForReveal: (req: { headers?: Record<string, stri
     },
     isEligibleForReveal,
     readOwnerPassword: () => "desktop-generated-password",
-    requireOwner: (_req, _res, next) => next?.(),
-    requireToken: (_req, _res, next) => next?.(),
+    requireOwner: (...args: unknown[]) => (args[2] as (() => void) | undefined)?.(),
+    requireToken: (...args: unknown[]) => (args[2] as (() => void) | undefined)?.(),
   });
   return handlers as Handler[];
 }
