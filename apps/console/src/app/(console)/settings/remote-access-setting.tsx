@@ -3,9 +3,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import { cn } from "@/lib/utils.ts"
+import { LiveReadAt, useLiveQuery } from "../components/live-provider.tsx"
 import {
   asCloudflareTunnelInspection,
   CloudflaredBinaryStatus,
@@ -176,9 +177,15 @@ export function RemoteAccessSetting({
   // The default config above is a placeholder, not state we have read. Until a
   // load succeeds, we must not paint it as the real posture: rendering "Off"
   // for an unknown state is what let the dishonest badge go unnoticed.
-  const [loadState, setLoadState] = useState<"loading" | "loaded" | "failed">(
-    "loading"
-  )
+  //
+  // `remote-access` is a live topic: a change from another tab, another
+  // device, or the desktop supervisor (tunnel_error, origin verification)
+  // refetches this state within about a second.
+  const remoteAccess = useLiveQuery("remote-access", loadRemoteAccessState)
+  // A failed refetch keeps the last read on screen, with the error shown
+  // until a later read succeeds.
+  const loadState: "loading" | "loaded" | "failed" =
+    remoteAccess.data !== undefined ? "loaded" : remoteAccess.isError ? "failed" : "loading"
   const [inspection, setInspection] = useState<RemoteAccessInspection | null>(
     null
   )
@@ -224,73 +231,83 @@ export function RemoteAccessSetting({
     providerCredential?: string
   } | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    setLoadState("loading")
-    void loadRemoteAccessState()
-      .then(
-        ({
-          config: nextConfig,
-          effectiveConsolePort: nextPort,
-          stableConsolePort: nextStablePort,
-          inspection: nextInspection,
-          ngrokInspection: nextNgrokInspection,
-          cloudflareTunnelInspection: nextCloudflareTunnelInspection,
-          myDevicesOnlyInspection: nextMyDevicesOnlyInspection,
-        }) => {
-          if (cancelled) return
-          const resolved = asConfig(nextConfig)
-          setConfig(resolved)
-          setInspection(asInspection(nextInspection))
-          setNgrokInspection(asInspection(nextNgrokInspection))
-          setCloudflareTunnelInspection(
-            asCloudflareTunnelInspection(
-              asInspection(nextCloudflareTunnelInspection),
-              nextCloudflareTunnelInspection
-            )
-          )
-          setMyDevicesOnlyInspection(asInspection(nextMyDevicesOnlyInspection))
-          setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
-          // Without this, an owner who already saved their ngrok domain sees
-          // a blank field on every page load and has no way to tell their
-          // domain was remembered -- exactly the "silent fallback" the
-          // durable-address states exist to prevent.
-          setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
-          setCloudflareHostname(resolved.cloudflare_tunnel?.hostname ?? "")
-          setPinnedPort(
-            resolved.console_port != null ? String(resolved.console_port) : ""
-          )
-          setEffectiveConsolePort(nextPort ?? null)
-          setStableConsolePort(nextStablePort ?? null)
-          setLoadState("loaded")
-          // Resume showing progress after a page reload mid-connect --
-          // otherwise a Cloudflare config with no origin yet and no
-          // reported failure renders as the same static "Waiting for the
-          // provider to report an address…" line forever, with no
-          // indication anything is still happening. This is exactly what
-          // the settings-triggered console restart produces: the window
-          // reloads Settings while cloudflared may still be connecting.
-          if (
-            resolved.provider === "cloudflare_tunnel" &&
-            !resolved.fields.PDPP_REFERENCE_ORIGIN &&
-            !resolved.tunnel_error
-          ) {
-            cloudflareTunnelConnection.start()
-          }
-        }
-      )
-      .catch(reason => {
-        if (cancelled) return
-        // The route exists but this request could not answer it. Report the
-        // failure instead of falling back to a default that looks real.
-        setError(String(reason))
-        setLoadState("failed")
-      })
+  // Form drafts are seeded from the saved state, but only while the Public
+  // URL form is closed: a refetch must not overwrite what the owner is typing.
+  const draftOpenRef = useRef(false)
+  draftOpenRef.current = pendingPosture !== null
+  const resumedConnectRef = useRef(false)
+  const startCloudflareConnect = cloudflareTunnelConnection.start
 
-    return () => {
-      cancelled = true
+  useEffect(() => {
+    const next = remoteAccess.data
+    if (!next) return
+    const {
+      config: nextConfig,
+      effectiveConsolePort: nextPort,
+      stableConsolePort: nextStablePort,
+      inspection: nextInspection,
+      ngrokInspection: nextNgrokInspection,
+      cloudflareTunnelInspection: nextCloudflareTunnelInspection,
+      myDevicesOnlyInspection: nextMyDevicesOnlyInspection,
+    } = next
+    const resolved = asConfig(nextConfig)
+    setConfig(resolved)
+    setInspection(asInspection(nextInspection))
+    setNgrokInspection(asInspection(nextNgrokInspection))
+    setCloudflareTunnelInspection(
+      asCloudflareTunnelInspection(
+        asInspection(nextCloudflareTunnelInspection),
+        nextCloudflareTunnelInspection
+      )
+    )
+    setMyDevicesOnlyInspection(asInspection(nextMyDevicesOnlyInspection))
+    setEffectiveConsolePort(nextPort ?? null)
+    setStableConsolePort(nextStablePort ?? null)
+    if (!draftOpenRef.current) {
+      setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
+      // Without this, an owner who already saved their ngrok domain sees
+      // a blank field on every page load and has no way to tell their
+      // domain was remembered -- exactly the "silent fallback" the
+      // durable-address states exist to prevent.
+      setNgrokDomain(resolved.ngrok?.reserved_domain ?? "")
+      setCloudflareHostname(resolved.cloudflare_tunnel?.hostname ?? "")
+      setPinnedPort(
+        resolved.console_port != null ? String(resolved.console_port) : ""
+      )
     }
-  }, [loadRemoteAccessState, cloudflareTunnelConnection.start])
+    // Resume showing progress after a page reload mid-connect --
+    // otherwise a Cloudflare config with no origin yet and no
+    // reported failure renders as the same static "Waiting for the
+    // provider to report an address…" line forever, with no
+    // indication anything is still happening. This is exactly what
+    // the settings-triggered console restart produces: the window
+    // reloads Settings while cloudflared may still be connecting.
+    // Only on the first read: `start` resets its clock on every call.
+    if (
+      !resumedConnectRef.current &&
+      resolved.provider === "cloudflare_tunnel" &&
+      !resolved.fields.PDPP_REFERENCE_ORIGIN &&
+      !resolved.tunnel_error
+    ) {
+      startCloudflareConnect()
+    }
+    resumedConnectRef.current = true
+  }, [remoteAccess.data, startCloudflareConnect])
+
+  const loadErrorRef = useRef<string | null>(null)
+  useEffect(() => {
+    // The route exists but this request could not answer it. Report the
+    // failure instead of falling back to a default that looks real, and
+    // clear that report (only that one) once a read succeeds again.
+    const loadError = remoteAccess.error ? String(remoteAccess.error) : null
+    if (loadError) {
+      setError(loadError)
+    } else if (loadErrorRef.current) {
+      const stale = loadErrorRef.current
+      setError(current => (current === stale ? null : current))
+    }
+    loadErrorRef.current = loadError
+  }, [remoteAccess.error])
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
@@ -661,6 +678,7 @@ export function RemoteAccessSetting({
             shown. The setting below is unavailable rather than assumed off.
           </p>
         ) : null}
+        <LiveReadAt updatedAt={remoteAccess.dataUpdatedAt} />
         {loadState === "loaded" && inspection?.availability === "unavailable" ? (
           <p className="pdpp-caption rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-muted-foreground">
             {inspection?.reason ??

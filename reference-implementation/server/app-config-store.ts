@@ -46,12 +46,13 @@ function defaultAppConfig(): AppConfig {
   }
 }
 
-function resolveConfigPath(): string {
+export function appConfigPath(): string {
   return join(homedir(), ".dataconnect", "config.json")
 }
 
-export function createAppConfigStore(): AppConfigStore {
-  const path = resolveConfigPath()
+// `onWrite` runs after every save; the server passes the live channel's `bump`.
+export function createAppConfigStore(onWrite: () => void = () => undefined): AppConfigStore {
+  const path = appConfigPath()
 
   async function load(): Promise<AppConfig> {
     let content: string
@@ -73,6 +74,7 @@ export function createAppConfigStore(): AppConfigStore {
   async function save(config: AppConfig): Promise<AppConfig> {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, "utf8")
+    onWrite()
     return config
   }
 

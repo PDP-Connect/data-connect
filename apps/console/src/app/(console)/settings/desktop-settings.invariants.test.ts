@@ -19,12 +19,12 @@ test("the settings page mounts the Desktop section with the desktop settings com
 test("launch-at-login and start-minimized default to unchecked until a real load succeeds", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  // Both booleans must start false, and the checked= props must gate on
-  // stateIsKnown, not render the unverified default as a real answer — the
-  // same discipline remote-access-setting.tsx documents for its posture
-  // radios ("must not paint the default config as real state").
-  assert.match(setting, /const \[autostartEnabled, setAutostartEnabledState\] = useState\(false\)/)
-  assert.match(setting, /const \[startMinimized, setStartMinimizedState\] = useState\(false\)/)
+  // Both booleans read false until data arrives, and the checked= props must
+  // gate on stateIsKnown, not render the unverified default as a real answer
+  // — the same discipline remote-access-setting.tsx documents for its
+  // posture radios ("must not paint the default config as real state").
+  assert.match(setting, /const autostartEnabled = asAutostartEnabled\(autostart\.data\)/)
+  assert.match(setting, /const startMinimized = asStartMinimized\(appConfig\.data\)/)
   assert.match(setting, /checked=\{stateIsKnown && autostartEnabled\}/)
   assert.match(setting, /checked=\{stateIsKnown && startMinimized\}/)
 })
@@ -68,8 +68,8 @@ test("no Tauri invoke() call remains anywhere in this file", async () => {
 test("autostart reads and writes go through the dedicated autostart server actions, not the generic app-config actions", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  assert.match(setting, /loadAutostart\(\)/)
-  assert.match(setting, /changeAutostart\(next\)/)
+  assert.match(setting, /useLiveQuery\("desktop\.autostart", loadAutostart\)/)
+  assert.match(setting, /useLiveMutation\("desktop\.autostart", changeAutostart\)/)
   assert.match(setting, /import \{[^}]*loadAutostartAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
   assert.match(setting, /import \{[^}]*setAutostartAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
 })
@@ -77,8 +77,9 @@ test("autostart reads and writes go through the dedicated autostart server actio
 test("start-minimized reads and writes go through the generic app-config actions, not a dedicated autostart action", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
 
-  assert.match(setting, /loadAppConfig\(\)/)
-  assert.match(setting, /saveAppConfig\(\{ \.\.\.current, startMinimized: next \}\)/)
+  assert.match(setting, /useLiveQuery\("desktop\.app-config", loadAppConfig\)/)
+  assert.match(setting, /saveAppConfig\(\{ \.\.\.\(await loadAppConfig\(\)\), \.\.\.patch \}\)/)
+  assert.match(setting, /saveAppConfigField\(\{ startMinimized: next \}\)/)
   assert.match(setting, /import \{[^}]*loadAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
   assert.match(setting, /import \{[^}]*saveAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
 })
@@ -99,12 +100,12 @@ test("close-to-tray defaults to true and reads/writes through the generic app-co
 
   // Unlike startMinimized/autostart (real default false), closeToTray's
   // real default is true (AppConfig::default() in file_ops.rs), so its
-  // loaded-state hook must default true, not false -- an unset config must
+  // loaded value must default true, not false -- an unset config must
   // read as "close-to-tray is on", matching what the Rust side actually
   // does when config.json has no closeToTray key at all.
-  assert.match(setting, /const \[closeToTray, setCloseToTrayState\] = useState\(true\)/)
+  assert.match(setting, /const closeToTray = asCloseToTray\(appConfig\.data\)/)
   assert.match(setting, /checked=\{stateIsKnown && closeToTray\}/)
-  assert.match(setting, /saveAppConfig\(\{ \.\.\.current, closeToTray: next \}\)/)
+  assert.match(setting, /saveAppConfigField\(\{ closeToTray: next \}\)/)
   assert.match(
     setting,
     /candidate\.closeToTray !== false/,

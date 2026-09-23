@@ -3,8 +3,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { cn } from "@/lib/utils.ts"
+import { LiveReadAt, useLiveMutation, useLiveQuery } from "../components/live-provider.tsx"
 import type { AppConfig } from "../lib/app-config-client.ts"
 import type { AutostartState } from "../lib/autostart-client.ts"
 import {
@@ -25,6 +26,11 @@ import {
  * supervision from the console's perspective (autostart's OS side effect is
  * applied asynchronously by `unified.rs::spawn_autostart_watcher`, not by
  * this window).
+ *
+ * Both values are live topics (`components/live-provider.tsx`): a change in
+ * another tab or on another device shows here within about a second. A
+ * launch-at-login request shows "Applying…" until the desktop app records
+ * the OS result, in this tab and in every other one.
  */
 interface DesktopSettingsProps {
   loadAppConfig?: typeof loadAppConfigAction
@@ -57,7 +63,19 @@ function asAutostartEnabled(value: unknown): boolean {
   return candidate.enabled === true
 }
 
+function asAutostartPending(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false
+  return (value as Partial<AutostartState>).pending === true
+}
+
 type LoadState = "loading" | "loaded" | "failed"
+
+// A failed refetch keeps the last read on screen; only a read that never
+// succeeded counts as failed.
+function loadStateOf(...queries: Array<{ data: unknown; isError: boolean }>): LoadState {
+  if (queries.every(query => query.data !== undefined)) return "loaded"
+  return queries.some(query => query.isError) ? "failed" : "loading"
+}
 
 export function DesktopSettingsSetting({
   loadAppConfig: suppliedLoadAppConfig,
@@ -70,90 +88,63 @@ export function DesktopSettingsSetting({
   const loadAutostart = suppliedLoadAutostart ?? loadAutostartAction
   const changeAutostart = suppliedSetAutostart ?? setAutostartAction
 
-  // Neither default below is real state we have read yet. Until a load
-  // succeeds we must not paint a guessed value as the current setting — the
-  // same discipline remote-access-setting.tsx applies, because rendering an
+  // Nothing below is real state until both reads succeed. Until then we
+  // must not paint a guessed value as the current setting — the same
+  // discipline remote-access-setting.tsx applies, because rendering an
   // unverified "off" reads as a real answer to a user deciding whether to
   // trust their machine to a launch-at-login toggle.
-  const [autostartEnabled, setAutostartEnabledState] = useState(false)
-  const [startMinimized, setStartMinimizedState] = useState(false)
-  const [closeToTray, setCloseToTrayState] = useState(true)
-  const [loadState, setLoadState] = useState<LoadState>("loading")
+  const autostart = useLiveQuery("desktop.autostart", loadAutostart)
+  const appConfig = useLiveQuery("desktop.app-config", loadAppConfig)
+  const loadState = loadStateOf(autostart, appConfig)
   const [error, setError] = useState<string | null>(null)
-  const [busyAutostart, setBusyAutostart] = useState(false)
-  const [busyStartMinimized, setBusyStartMinimized] = useState(false)
-  const [busyCloseToTray, setBusyCloseToTray] = useState(false)
+  const loadError = autostart.error ?? appConfig.error
 
-  useEffect(() => {
-    let cancelled = false
-    setLoadState("loading")
-    void Promise.all([loadAutostart(), loadAppConfig()])
-      .then(([autostart, config]) => {
-        if (cancelled) return
-        setAutostartEnabledState(asAutostartEnabled(autostart))
-        setStartMinimizedState(asStartMinimized(config))
-        setCloseToTrayState(asCloseToTray(config))
-        setLoadState("loaded")
-      })
-      .catch(reason => {
-        if (cancelled) return
-        setError(String(reason))
-        setLoadState("failed")
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [loadAutostart, loadAppConfig])
+  const autostartMutation = useLiveMutation("desktop.autostart", changeAutostart)
+  // Read-modify-write of the whole config document, as before; each toggle
+  // has its own mutation so each has its own busy state.
+  const saveAppConfigField = async (patch: Partial<AppConfig>) =>
+    saveAppConfig({ ...(await loadAppConfig()), ...patch })
+  const startMinimizedMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
+    saveAppConfigField({ startMinimized: next })
+  )
+  const closeToTrayMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
+    saveAppConfigField({ closeToTray: next })
+  )
 
   const stateIsKnown = loadState === "loaded"
   const desktopUnavailable = !stateIsKnown
+  const autostartEnabled = asAutostartEnabled(autostart.data)
+  const startMinimized = asStartMinimized(appConfig.data)
+  const closeToTray = asCloseToTray(appConfig.data)
+  // Applying: this tab's request is in flight, or the server reports a
+  // request (from any tab or device) the desktop app has not applied yet.
+  // Only this tab's own request disables the toggle: if the desktop app is
+  // not running, a request can stay pending, and the owner must be able to
+  // retry.
+  const autostartApplying = autostartMutation.isPending || asAutostartPending(autostart.data)
+  const busyStartMinimized = startMinimizedMutation.isPending
+  const busyCloseToTray = closeToTrayMutation.isPending
+
+  const reportResult = {
+    onError: (reason: unknown) => setError(String(reason)),
+    onSuccess: (result: { ok: true } | { ok: false; message: string }) => {
+      if (!result.ok) setError(result.message)
+    },
+  }
 
   const toggleAutostart = (next: boolean) => {
     setError(null)
-    setBusyAutostart(true)
-    void changeAutostart(next)
-      .then(result => {
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        setAutostartEnabledState(result.enabled)
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusyAutostart(false))
+    autostartMutation.mutate(next, reportResult)
   }
 
   const toggleStartMinimized = (next: boolean) => {
     setError(null)
-    setBusyStartMinimized(true)
-    void loadAppConfig()
-      .then(current => saveAppConfig({ ...current, startMinimized: next }))
-      .then(result => {
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        setStartMinimizedState(next)
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusyStartMinimized(false))
+    startMinimizedMutation.mutate(next, reportResult)
   }
 
   const toggleCloseToTray = (next: boolean) => {
     setError(null)
-    setBusyCloseToTray(true)
-    void loadAppConfig()
-      .then(current => saveAppConfig({ ...current, closeToTray: next }))
-      .then(result => {
-        if (!result.ok) {
-          setError(result.message)
-          return
-        }
-        setCloseToTrayState(next)
-      })
-      .catch(reason => setError(String(reason)))
-      .finally(() => setBusyCloseToTray(false))
+    closeToTrayMutation.mutate(next, reportResult)
   }
 
   return (
@@ -169,6 +160,15 @@ export function DesktopSettingsSetting({
           shown. The controls below are unavailable rather than assumed off.
         </p>
       ) : null}
+      {loadError && !error ? (
+        <p
+          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          role="alert"
+        >
+          {String(loadError)}
+        </p>
+      ) : null}
+      <LiveReadAt updatedAt={Math.min(autostart.dataUpdatedAt, appConfig.dataUpdatedAt)} />
 
       <div
         className={cn(
@@ -179,7 +179,7 @@ export function DesktopSettingsSetting({
         <label className="flex items-start gap-2" htmlFor="autostart-enabled">
           <input
             checked={stateIsKnown && autostartEnabled}
-            disabled={busyAutostart || desktopUnavailable}
+            disabled={autostartMutation.isPending || desktopUnavailable}
             id="autostart-enabled"
             onChange={event => toggleAutostart(event.currentTarget.checked)}
             type="checkbox"
@@ -187,6 +187,14 @@ export function DesktopSettingsSetting({
           <span className="grid gap-1">
             <span className="pdpp-caption font-medium text-foreground">
               Launch at login
+              {stateIsKnown && autostartApplying ? (
+                <span
+                  className="ml-2 font-normal text-muted-foreground"
+                  data-testid="autostart-applying"
+                >
+                  Applying…
+                </span>
+              ) : null}
             </span>
             <span className="pdpp-caption text-muted-foreground">
               Start DataConnect automatically when you sign in to this
