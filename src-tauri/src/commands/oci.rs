@@ -29,6 +29,7 @@ use super::oci_verify::{
 
 pub(crate) const OCI_REGISTRY: &str = "ghcr.io";
 pub(crate) const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+const OCI_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 pub(crate) const OCI_CONFIG_MEDIA_TYPE: &str = "application/vnd.pdpp.connector.config.v1+json";
 pub(crate) const OCI_PROFILE_MEDIA_TYPE: &str = "application/vnd.pdpp.connector.profile.v1+json";
 pub(crate) const OCI_CODE_MEDIA_TYPE: &str = "application/vnd.pdpp.connector.code.v1.tar+gzip";
@@ -195,12 +196,22 @@ impl RegistryClient {
         repository: &str,
         reference: &str,
     ) -> Result<(String, Vec<u8>), String> {
+        self.fetch_manifest_as(repository, reference, OCI_MANIFEST_MEDIA_TYPE)
+            .await
+    }
+
+    /// `accept` must name the media type the reference resolves to: ghcr.io
+    /// answers a manifest request that does not accept it with 404
+    /// MANIFEST_UNKNOWN, which reads as absent.
+    async fn fetch_manifest_as(
+        &self,
+        repository: &str,
+        reference: &str,
+        accept: &str,
+    ) -> Result<(String, Vec<u8>), String> {
         validate_repository(repository)?;
         let response = self
-            .authorized_get(
-                &format!("v2/{repository}/manifests/{reference}"),
-                OCI_MANIFEST_MEDIA_TYPE,
-            )
+            .authorized_get(&format!("v2/{repository}/manifests/{reference}"), accept)
             .await?;
         let status = response.status();
         let header_digest = response
@@ -262,7 +273,7 @@ impl RegistryClient {
         let response = self
             .authorized_get(
                 &format!("v2/{repository}/referrers/{digest}?artifactType={artifact_type}"),
-                "application/vnd.oci.image.index.v1+json",
+                OCI_INDEX_MEDIA_TYPE,
             )
             .await?;
         let status = response.status();
@@ -282,7 +293,7 @@ impl RegistryClient {
         let bytes = read_limited(response, MAX_MANIFEST_BYTES).await?;
         let index: ImageIndex = serde_json::from_slice(&bytes)
             .map_err(|e| format!("OCI_UNKNOWN: referrers endpoint returned invalid JSON: {e}"))?;
-        if index.media_type.as_deref() != Some("application/vnd.oci.image.index.v1+json") {
+        if index.media_type.as_deref() != Some(OCI_INDEX_MEDIA_TYPE) {
             return Err(
                 "OCI_UNKNOWN: referrers endpoint returned a body that is not an OCI image index"
                     .to_string(),
@@ -320,11 +331,26 @@ impl RegistryClient {
                 // "no v3 bundle published" rather than an error — the caller
                 // falls through to the legacy `.sig` path either way, but the
                 // distinction matters for anything reading the error text.
+                // The tag resolves to an image index, so ask for one.
                 let tag = cosign_bundle_tag(digest)?;
-                match self.fetch_manifest(repository, &tag).await {
-                    Ok((_, bytes)) => serde_json::from_slice(&bytes).map_err(|e| {
-                        format!("OCI_TAMPERED: cosign bundle tag is not an OCI image index: {e}")
-                    })?,
+                match self
+                    .fetch_manifest_as(repository, &tag, OCI_INDEX_MEDIA_TYPE)
+                    .await
+                {
+                    Ok((_, bytes)) => {
+                        let index: ImageIndex = serde_json::from_slice(&bytes).map_err(|e| {
+                            format!(
+                                "OCI_TAMPERED: cosign bundle tag is not an OCI image index: {e}"
+                            )
+                        })?;
+                        if index.media_type.as_deref() != Some(OCI_INDEX_MEDIA_TYPE) {
+                            return Err(
+                                "OCI_TAMPERED: cosign bundle tag is not an OCI image index"
+                                    .to_string(),
+                            );
+                        }
+                        index
+                    }
                     Err(error) if error.starts_with("OCI_ABSENT:") => return Ok(Vec::new()),
                     Err(error) => return Err(error),
                 }
@@ -1351,7 +1377,26 @@ mod tests {
                 let Some(path) = request.split_whitespace().nth(1) else {
                     continue;
                 };
-                let (status, headers, body) = match routes.get(path) {
+                // Content negotiation as ghcr.io does it: a manifest whose
+                // mediaType the request does not accept is answered 404
+                // MANIFEST_UNKNOWN, not served.
+                let accept = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("accept")
+                            .then(|| value.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                let refused_media_type = path.contains("/manifests/")
+                    && routes.get(path).is_some_and(|route| {
+                        serde_json::from_slice::<serde_json::Value>(&route.body)
+                            .ok()
+                            .and_then(|body| body["mediaType"].as_str().map(str::to_owned))
+                            .is_some_and(|media_type| !accept.contains(&media_type))
+                    });
+                let (status, headers, body) = match routes.get(path).filter(|_| !refused_media_type)
+                {
                     Some(route) => (route.status, route.headers.clone(), route.body.clone()),
                     None => (
                         404u16,
