@@ -1060,7 +1060,7 @@ test("provider metadata routes expose current honest capability set", async () =
     const protectedResource = await fetchJson(`${rsUrl}/.well-known/oauth-protected-resource`);
     assert.equal(protectedResource.status, 200);
     assert.equal(protectedResource.body.resource, rsUrl);
-    assert.equal(protectedResource.body.resource_name, "PDPP Reference Provider Resource Server");
+    assert.equal(protectedResource.body.resource_name, "DataConnect Resource Server");
     assert.deepEqual(protectedResource.body.authorization_servers, [asUrl]);
     assert.deepEqual(protectedResource.body.bearer_methods_supported, ["header"]);
     assert.equal(protectedResource.body.pdpp_provider_connect_version, "draft-2026-04-16");

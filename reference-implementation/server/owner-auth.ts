@@ -19,6 +19,7 @@
  * for scope and rationale.
  */
 import crypto from "node:crypto";
+import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import {
   escapeHtml as hostedEscape,
   readHostedThemeChoiceFromCookieHeader,
@@ -231,13 +232,12 @@ function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice
   <div class="hosted-ui-actions">
     <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
   </div>
-  <p class="hosted-ui-footnote">Configured via <code>PDPP_OWNER_PASSWORD</code>. Clear this placeholder with <code>POST /owner/logout</code>.</p>
 </form>`;
 
   const body = [
     renderPageIntro({
       eyebrow: "Owner sign-in",
-      lede: "This is the local placeholder owner auth for the reference implementation. It is not a full auth product.",
+      lede: "This password keeps other people from seeing your data or changing which apps can use it.",
       title: `Sign in to ${providerName}`,
     }),
     form,
@@ -255,14 +255,14 @@ function renderOwnerAuthDisabledPage({ providerName, themeChoice }: DisabledPage
   const body = [
     renderPageIntro({
       eyebrow: "Owner approval UI",
-      lede: "Placeholder owner sign-in is disabled on this local reference instance, so approval pages remain open in local-dev mode.",
+      lede: "No owner password is set, so approval pages open without sign-in.",
       title: `${providerName} owner access`,
     }),
     renderSurface({
       ariaLabel: "Owner auth status",
       children: renderResultState({
         body: "Device approvals are open locally. Consent approvals still arrive through pending request links.",
-        footnote: "Set PDPP_OWNER_PASSWORD to turn on the reference-only session gate.",
+        footnote: "Set PDPP_OWNER_PASSWORD to require sign-in.",
         title: "Sign-in is not required right now",
         tone: "neutral",
       }),
@@ -296,7 +296,7 @@ function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoi
   const body = [
     renderPageIntro({
       eyebrow: "Owner approval UI",
-      lede: "You are signed in to the local placeholder owner-auth gate for the reference implementation.",
+      lede: `You are signed in to ${providerName}.`,
       title: `${providerName} owner access`,
     }),
     renderSurface({
@@ -304,7 +304,7 @@ function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoi
       children: [
         renderResultState({
           body: "You can approve device flows directly here, or open a pending consent URL from a staged provider-connect request.",
-          footnote: "This session is reference-only placeholder auth, not a full owner account system.",
+          footnote: "Sign out when you finish on a shared computer.",
           title: "Signed in",
           tone: "success",
         }),
@@ -313,7 +313,7 @@ function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoi
       surface: "human",
     }),
     renderActionRow([
-      { href: "/", label: "Open PDPP", variant: "primary" },
+      { href: "/", label: `Open ${DATACONNECT_PRODUCT_IDENTITY.name}`, variant: "primary" },
       { href: "/device", label: "Open device approval UI" },
       {
         action: "/owner/logout",
@@ -601,7 +601,7 @@ function replyDisabledLogin(req: AuthRequest, res: AuthResponse, providerName: s
     .json({
       error: {
         code: "owner_auth_disabled",
-        message: "Owner placeholder auth is disabled on this reference instance.",
+        message: "Owner sign-in is disabled because no owner password is set.",
         type: "invalid_request",
       },
     });
@@ -800,7 +800,7 @@ function denyOwnerAccess(req: AuthRequest, res: AuthResponse): void {
       error: {
         code: "owner_session_required",
         message:
-          "Owner session required. This is the reference implementation placeholder owner auth; sign in at /owner/login.",
+          "Owner session required. Sign in at /owner/login.",
         type: "authentication_error",
       },
     });
@@ -832,7 +832,7 @@ function handleDisabledOwnerSession(
 export function createOwnerAuthPlaceholder({
   password,
   subjectId,
-  providerName = "PDPP Reference Provider",
+  providerName = DATACONNECT_PRODUCT_IDENTITY.name,
   sessionTtlSeconds = OWNER_SESSION_DEFAULT_TTL_SECONDS,
   sameSite = "lax",
   forceSecureCookies = false,

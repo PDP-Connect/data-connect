@@ -140,6 +140,13 @@ It behaves as a small reference-only owner access hub:
 - when already signed in, it becomes a signed-in landing page with device
   approval and sign-out actions
 
+The sign-in page itself names only the product and what the password
+protects. It does not print operator configuration. On a server, the
+password comes from `PDPP_OWNER_PASSWORD` (see "Environment variables"
+below). The desktop app keeps its owner password in the OS keychain and shows
+it under Settings > Owner password. `POST /owner/logout` is listed under
+"Stable owner-entry routes" below.
+
 ### Owner self-export
 
 - `POST /oauth/device_authorization`
@@ -351,7 +358,7 @@ start option, not a config-store or bootstrap candidate.
 
 ### Reference-only hosted-UI layer
 
-Server-rendered HTML pages (`GET /consent`, `GET /device` and its result pages, `POST /consent/approve`/`deny` result pages, and the stable owner-entry page at `GET /owner/login`) all go through a small shared hosted-UI module, [`server/hosted-ui.js`](server/hosted-ui.js). That module renders the PDPP brand mark and typography, reuses the `data-surface="human"` / `data-surface="protocol"` language from `packages/pdpp-brand/styles/base.css`, and serves a single shared stylesheet at `GET /__pdpp/hosted-ui.css`.
+Server-rendered HTML pages (`GET /consent`, `GET /device` and its result pages, `POST /consent/approve`/`deny` result pages, and the stable owner-entry page at `GET /owner/login`) all go through a small shared hosted-UI module, [`server/hosted-ui.js`](server/hosted-ui.js). That module renders the DataConnect product mark and wordmark (plus the `PDPP_INSTANCE_NAME` label when one is set) with the PDPP typography, reuses the `data-surface="human"` / `data-surface="protocol"` language from `packages/pdpp-brand/styles/base.css`, and serves a single shared stylesheet at `GET /__pdpp/hosted-ui.css`.
 
 This hosted-UI layer is **reference-only** implementation support. It is **not** a PDPP protocol surface; clients and providers never need to fetch `/__pdpp/hosted-ui.css` or consume any of the `hosted-ui-*` class names. The React/Next public site in `apps/site/` and operator console in `apps/console/` remain the canonical app-layer design-system surfaces.
 

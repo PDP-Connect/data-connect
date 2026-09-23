@@ -35,7 +35,8 @@ ss -tlnp | grep 'next-server'
 
 curl the candidate port; the console redirects unauthenticated requests to
 `/owner/login` with a 307, and the login page's `<title>` is
-`PDPP Reference Provider — Owner sign-in`. Once logged in, `/settings`
+`DataConnect — Owner sign-in` (or `<instance name> — Owner sign-in` when
+`PDPP_INSTANCE_NAME` is set). Once logged in, `/settings`
 renders with `<title>Settings</title>`.
 
 ## What this does not catch

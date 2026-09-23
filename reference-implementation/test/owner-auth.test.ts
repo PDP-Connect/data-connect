@@ -348,7 +348,7 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     assert.equal(loginPage.status, 200, "/owner/login should stay discoverable even when auth is disabled");
     const loginHtml = await loginPage.text();
     assert.ok(loginHtml.includes("owner access"), "renders owner-access landing copy");
-    assert.ok(loginHtml.includes("disabled"), "explains that placeholder auth is disabled");
+    assert.ok(loginHtml.includes("No owner password is set"), "explains that owner sign-in is off");
     assert.ok(loginHtml.includes("/device"), "offers a stable device-approval entry point");
     assert.ok(!loginHtml.includes("Owner password"), "does not render a password form when disabled");
 
@@ -496,6 +496,57 @@ test("owner-auth placeholder: wrong password with valid CSRF returns 401 and iss
     assert.ok(!findSetCookiePair(setCookies, "pdpp_owner_session"), "no session cookie on wrong password");
     const text = await resp.text();
     assert.ok(text.includes("Incorrect password"), "login page shows error");
+  });
+});
+
+// ── 3a. sign-in page copy: product identity, no operator detail ──────────────
+// The sign-in page is the auth gate for local and server-exposed instances
+// alike. It names the product, says what the password protects, and keeps
+// operator configuration (env vars, logout route) in the README instead.
+const SIGN_IN_FORBIDDEN_COPY = [
+  "placeholder",
+  "reference implementation",
+  "Reference Provider",
+  "not a full auth product",
+  "PDPP_OWNER_PASSWORD",
+  "/owner/logout",
+];
+
+function assertOwnerSignInCopy(html: string): void {
+  assert.match(html, /<title>DataConnect — Owner sign-in<\/title>/);
+  assert.match(html, /<span class="hosted-ui-wordmark">DataConnect<\/span>/);
+  assert.match(html, /<h1 id="hosted-ui-page-title" class="pdpp-display">Sign in to DataConnect<\/h1>/);
+  assert.ok(
+    html.includes("This password keeps other people from seeing your data or changing which apps can use it."),
+    "says what the password protects"
+  );
+  assert.ok(!html.includes("hosted-ui-instance-monogram"), "an unnamed instance shows no instance monogram");
+  for (const phrase of SIGN_IN_FORBIDDEN_COPY) {
+    assert.ok(!html.includes(phrase), `sign-in page must not say ${JSON.stringify(phrase)}`);
+  }
+}
+
+test("owner-auth: sign-in page names DataConnect and prints no operator detail", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const page = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" } });
+    assert.equal(page.status, 200);
+    assertOwnerSignInCopy(await page.text());
+
+    const csrf = await fetchCsrf(asUrl, "/owner/login");
+    const wrong = await fetch(`${asUrl}/owner/login`, {
+      body: new URLSearchParams({ _csrf: csrf.csrfField ?? "", password: "wrong", return_to: "/" }).toString(),
+      headers: {
+        Accept: "text/html",
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: csrf.csrfCookie || "",
+      },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.equal(wrong.status, 401);
+    const html = await wrong.text();
+    assert.match(html, /<div class="hosted-ui-error" role="alert">Incorrect password\.<\/div>/);
+    assertOwnerSignInCopy(html);
   });
 });
 

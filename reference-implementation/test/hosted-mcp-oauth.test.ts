@@ -5461,10 +5461,10 @@ test("hosted MCP picker renders the configured instance name and monogram, never
       /<span class="hosted-ui-instance-monogram" aria-hidden="true">TD<\/span>/,
       'instance monogram must be derived from the configured name ("Tim\'s Data Server" -> "TD")'
     );
-    // The protocol wordmark is a separate invariant from the operator label —
-    // it must stay "PDPP" regardless of instance branding (mirrors the
-    // console's own "wordmark is PDPP, never Recordroom" test).
-    assert.match(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "protocol wordmark must stay PDPP");
+    // The product wordmark is a separate invariant from the operator label —
+    // it must stay "DataConnect" regardless of instance branding (mirrors the
+    // console's own "the console product identity is always DataConnect" test).
+    assert.match(html, /<span class="hosted-ui-wordmark">DataConnect<\/span>/, "product wordmark must stay DataConnect");
   } finally {
     await closeServer(server);
   }
