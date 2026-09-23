@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { BlockList, isIP } from "node:net";
+
 /**
  * Login-attempt throttling for `POST /owner/login`.
  *
@@ -36,6 +38,9 @@
 export interface OwnerLoginRateLimitRequest {
   readonly connection?: { readonly remoteAddress?: string };
   readonly headers: {
+    readonly "cf-connecting-ip"?: string;
+    readonly "x-forwarded-for"?: string;
+    readonly "x-pdpp-owner-login-tunnel-client-ip"?: string;
     readonly "x-forwarded-proto"?: string;
     readonly host?: string;
   };
@@ -54,6 +59,11 @@ export interface OwnerLoginRateLimitConfig {
   readonly maxLocal?: number;
   /** Sliding window size, in milliseconds, attempts are counted over. */
   readonly windowMs?: number;
+  /**
+   * Comma-separated IP/CIDR peers whose forwarded client-IP headers may be
+   * used for limiter keying. Mirrors `PDPP_TRUSTED_PROXIES`.
+   */
+  readonly trustedProxies?: string | null;
 }
 
 export interface OwnerLoginRateLimiter {
@@ -77,6 +87,64 @@ export const OWNER_LOGIN_RATE_LIMIT_DEFAULT_MAX = 8;
 export const OWNER_LOGIN_RATE_LIMIT_DEFAULT_MAX_LOCAL = 100;
 
 const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/;
+const TUNNEL_LOGIN_CLIENT_IP_HEADER = "x-pdpp-owner-login-tunnel-client-ip";
+
+function peerAddress(req: OwnerLoginRateLimitRequest): string {
+  return req.socket?.remoteAddress || req.connection?.remoteAddress || req.ip || "unknown";
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "::1" || address === "127.0.0.1" || address === "localhost" || address.startsWith("127.");
+}
+
+type TrustedProxy = {
+  readonly address: string;
+  readonly prefixLength: number;
+  readonly type: "ipv4" | "ipv6";
+};
+
+function parseTrustedProxy(raw: string): TrustedProxy | null {
+  const [address, prefix] = raw.trim().split("/", 2);
+  if (!address) {
+    return null;
+  }
+  const version = isIP(address);
+  if (version === 0) {
+    return null;
+  }
+  const prefixLength = prefix === undefined ? 32 : Number(prefix);
+  const maxPrefix = version === 4 ? 32 : 128;
+  if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > maxPrefix) {
+    return null;
+  }
+  return { address, prefixLength, type: version === 4 ? "ipv4" : "ipv6" };
+}
+
+function parseTrustedProxies(raw: string | null | undefined): readonly TrustedProxy[] {
+  return (raw ?? "")
+    .split(",")
+    .map(parseTrustedProxy)
+    .filter((entry): entry is TrustedProxy => entry !== null);
+}
+
+function trustedProxyMatches(peer: string, { address, prefixLength, type }: TrustedProxy): boolean {
+  if (isIP(peer) !== (type === "ipv4" ? 4 : 6)) {
+    return false;
+  }
+  const blockList = new BlockList();
+  blockList.addSubnet(address, prefixLength, type);
+  return blockList.check(peer, type);
+}
+
+function firstForwardedFor(req: OwnerLoginRateLimitRequest): string | null {
+  const value = req.headers["x-forwarded-for"];
+  const first = value?.split(",", 1)[0]?.trim();
+  return first || null;
+}
+
+function forwardedClientIp(req: OwnerLoginRateLimitRequest): string | null {
+  return req.headers["cf-connecting-ip"]?.trim() || firstForwardedFor(req);
+}
 
 function isPrivateNetworkHostname(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase();
@@ -105,7 +173,17 @@ function isPrivateNetworkHostname(hostname: string): boolean {
   return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
 }
 
-function requestKey(req: OwnerLoginRateLimitRequest): string {
+function requestKey(req: OwnerLoginRateLimitRequest, trustedProxies: readonly TrustedProxy[]): string {
+  const tunnelClientIp = req.headers[TUNNEL_LOGIN_CLIENT_IP_HEADER]?.trim();
+  if (tunnelClientIp && isIP(tunnelClientIp) !== 0 && isLoopbackAddress(peerAddress(req))) {
+    return `tunnel:${tunnelClientIp}`;
+  }
+  if (trustedProxies.some((proxy) => trustedProxyMatches(peerAddress(req), proxy))) {
+    const clientIp = forwardedClientIp(req);
+    if (clientIp) {
+      return `proxy:${clientIp}`;
+    }
+  }
   return req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown";
 }
 
@@ -123,12 +201,19 @@ function requestKey(req: OwnerLoginRateLimitRequest): string {
 // `metadata.ts` is Host-based by design for its own purpose -- resolving a
 // *displayable* public URL, not gating a security control -- so it is not
 // reused here even by IP.)
-function isLocalOrPrivateOwnerLoginRequest(req: OwnerLoginRateLimitRequest): boolean {
-  const key = requestKey(req);
+function isLocalOrPrivateOwnerLoginRequest(
+  req: OwnerLoginRateLimitRequest,
+  trustedProxies: readonly TrustedProxy[]
+): boolean {
+  const key = requestKey(req, trustedProxies);
+  if (key.startsWith("tunnel:")) {
+    return false;
+  }
   if (key === "unknown") {
     return false;
   }
-  return isPrivateNetworkHostname(key);
+  const normalizedKey = key.startsWith("proxy:") ? key.slice("proxy:".length) : key;
+  return isPrivateNetworkHostname(normalizedKey);
 }
 
 interface AttemptWindow {
@@ -152,6 +237,7 @@ export function createOwnerLoginRateLimiter(config: OwnerLoginRateLimitConfig = 
   const maxLocal = Number.isFinite(config.maxLocal)
     ? Math.max(1, config.maxLocal as number)
     : OWNER_LOGIN_RATE_LIMIT_DEFAULT_MAX_LOCAL;
+  const trustedProxies = parseTrustedProxies(config.trustedProxies);
   const attempts = new Map<string, AttemptWindow>();
 
   function pruneIfLarge(now: number): void {
@@ -168,8 +254,8 @@ export function createOwnerLoginRateLimiter(config: OwnerLoginRateLimitConfig = 
   function check(req: OwnerLoginRateLimitRequest): number | null {
     const now = Date.now();
     pruneIfLarge(now);
-    const key = requestKey(req);
-    const limit = isLocalOrPrivateOwnerLoginRequest(req) ? maxLocal : max;
+    const key = requestKey(req, trustedProxies);
+    const limit = isLocalOrPrivateOwnerLoginRequest(req, trustedProxies) ? maxLocal : max;
     const current = attempts.get(key);
     if (!current || current.resetAt <= now) {
       attempts.set(key, { count: 1, resetAt: now + windowMs });
@@ -190,7 +276,7 @@ export function createOwnerLoginRateLimiter(config: OwnerLoginRateLimitConfig = 
   }
 
   function recordSuccess(req: OwnerLoginRateLimitRequest): void {
-    attempts.delete(requestKey(req));
+    attempts.delete(requestKey(req, trustedProxies));
   }
 
   return { check, recordSuccess };

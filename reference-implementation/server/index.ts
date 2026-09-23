@@ -824,7 +824,9 @@ interface ServerOpts {
   onScheduleMutation?: (() => void) | null;
   ownerAuthForceSecureCookies?: boolean;
   /** Login-attempt throttling for `POST /owner/login`. `false` disables it (tests only). */
-  ownerAuthLoginRateLimit?: { windowMs?: number; max?: number; maxLocal?: number } | false;
+  ownerAuthLoginRateLimit?:
+    | { windowMs?: number; max?: number; maxLocal?: number; trustedProxies?: string | null }
+    | false;
   ownerAuthPassword?: string;
   ownerAuthSameSite?: string;
   ownerAuthSessionTtlSeconds?: number;
@@ -2996,7 +2998,9 @@ function envPositiveInt(readEnv: boolean, name: string): number | undefined {
 function resolveOwnerAuthLoginRateLimit(
   opts: ServerOpts,
   readOwnerAuthEnv: boolean
-): { windowMs?: number; max?: number; maxLocal?: number } | false {
+):
+  | { windowMs?: number; max?: number; maxLocal?: number; trustedProxies?: string | null }
+  | false {
   // Explicit `false` (test fixtures only) disables throttling outright.
   if (opts.ownerAuthLoginRateLimit === false) {
     return false;
@@ -3009,6 +3013,8 @@ function resolveOwnerAuthLoginRateLimit(
     ...(max === undefined ? {} : { max }),
     ...(maxLocal === undefined ? {} : { maxLocal }),
     ...(windowMs === undefined ? {} : { windowMs }),
+    trustedProxies:
+      fromOpts.trustedProxies ?? opts.trustedProxies ?? (readOwnerAuthEnv ? process.env.PDPP_TRUSTED_PROXIES : null),
   };
 }
 
