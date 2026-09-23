@@ -27,6 +27,8 @@ export interface PdppMarkOptions {
 
 export function renderPdppMark(options?: PdppMarkOptions): string;
 
+export function renderDataConnectMark(options?: PdppMarkOptions): string;
+
 export interface HostedDocumentOptions {
   body: string;
   providerName: string;

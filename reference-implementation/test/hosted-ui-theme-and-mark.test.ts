@@ -17,13 +17,23 @@
  *     decorative (`role="presentation"` + `aria-hidden="true"`, no aria-label).
  *     The title is HTML-escaped so it cannot break out of the attribute.
  *
- * Pure — the module has zero imports. No DB, no server, no fixtures.
+ *   - renderDataConnectMark / renderBrandHeader: the hosted pages carry the
+ *     console's DataConnect mark, byte-for-byte the same geometry as
+ *     apps/console/public/brand/dataconnect-mark.svg.
+ *
+ * Pure — no DB, no server, no fixtures.
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { normalizeHostedThemeChoice, renderPdppMark } from "../server/hosted-ui.ts";
+import {
+  normalizeHostedThemeChoice,
+  renderBrandHeader,
+  renderDataConnectMark,
+  renderPdppMark,
+} from "../server/hosted-ui.ts";
 
 // --- normalizeHostedThemeChoice ---------------------------------------------
 
@@ -75,4 +85,47 @@ test("renderPdppMark: an empty title makes the mark decorative (presentation + a
   assert.ok(svg.includes('aria-hidden="true"'), "empty title => aria-hidden");
   assert.equal(svg.includes("aria-label"), false, "no aria-label for a decorative mark");
   assert.equal(svg.includes('role="img"'), false, 'not role="img" when decorative');
+});
+
+// --- renderDataConnectMark / renderBrandHeader --------------------------------
+
+function svgGeometry(svg: string): string[] {
+  return [...svg.matchAll(/<(stop|rect|path)\b[^>]*>/g)].map((match) =>
+    match[0]
+      .replace(/\s*\/?>$/, "")
+      .replace(/url\(#[^)]+\)/, "url(#)")
+      .replace(/\s+/g, " ")
+  );
+}
+
+test("renderDataConnectMark: geometry matches the console's DataConnect mark asset", () => {
+  const asset = readFileSync(
+    new URL("../../apps/console/public/brand/dataconnect-mark.svg", import.meta.url),
+    "utf8"
+  );
+  const expected = svgGeometry(asset);
+  assert.equal(expected.length, 6, "asset has 3 gradient stops, 1 rect, 2 paths");
+  assert.deepEqual(svgGeometry(renderDataConnectMark()), expected);
+});
+
+test('renderDataConnectMark: defaults to an accessible "DataConnect" label; empty title is decorative', () => {
+  assert.ok(renderDataConnectMark().includes('role="img" aria-label="DataConnect"'));
+  const decorative = renderDataConnectMark({ title: "" });
+  assert.ok(decorative.includes('role="presentation" aria-hidden="true"'));
+  assert.equal(decorative.includes("aria-label"), false);
+});
+
+test("renderBrandHeader: the default instance name shows the product brand only", () => {
+  const header = renderBrandHeader({ providerName: "DataConnect" });
+  assert.ok(header.includes('<span class="hosted-ui-wordmark">DataConnect</span>'));
+  assert.equal(header.includes("PDPP"), false, "no PDPP wordmark or mark label");
+  assert.equal(header.includes("hosted-ui-instance-monogram"), false);
+  assert.equal(header.includes("hosted-ui-provider"), false);
+});
+
+test("renderBrandHeader: a configured instance name keeps its monogram and label", () => {
+  const header = renderBrandHeader({ providerName: "Tim's Data Server" });
+  assert.ok(header.includes('<span class="hosted-ui-wordmark">DataConnect</span>'));
+  assert.ok(header.includes('<span class="hosted-ui-instance-monogram" aria-hidden="true">TD</span>'));
+  assert.ok(header.includes('<span class="hosted-ui-provider" aria-label="Provider">Tim&#39;s Data Server</span>'));
 });

@@ -19,8 +19,8 @@ test("hosted owner UI supports CSS-only dark mode for login and approval pages",
 test("hosted owner documents stay framework-free while loading the shared stylesheet", () => {
   const html = renderHostedDocument({
     body: '<section class="hosted-ui-surface" data-surface="human">Sign in</section>',
-    providerName: "PDPP Reference Provider",
-    title: "PDPP Reference Provider - Owner sign-in",
+    providerName: "DataConnect",
+    title: "DataConnect - Owner sign-in",
   });
 
   assert.match(html, /<link rel="stylesheet" href="\/__pdpp\/hosted-ui\.css" \/>/);
@@ -35,9 +35,9 @@ test("hosted owner documents honor the dashboard theme cookie when present", () 
 
   const html = renderHostedDocument({
     body: '<section class="hosted-ui-surface" data-surface="human">Sign in</section>',
-    providerName: "PDPP Reference Provider",
+    providerName: "DataConnect",
     themeChoice: "dark",
-    title: "PDPP Reference Provider - Owner sign-in",
+    title: "DataConnect - Owner sign-in",
   });
 
   assert.match(html, /<html lang="en" data-theme="dark">/);

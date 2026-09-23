@@ -1689,7 +1689,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_server, asUrl);
       assert.deepEqual(result.json.authorization_servers_advertised, [asUrl]);
       assert.equal(result.json.authorization_server_advertised, true);
-      assert.equal(result.json.resource_name, "PDPP Reference Provider Resource Server");
+      assert.equal(result.json.resource_name, "DataConnect Resource Server");
       assert.equal(result.json.pdpp_self_export_supported, true);
       assert.equal(result.json.device_authorization_supported, true);
       assert.equal(result.json.pushed_authorization_request_supported, true);

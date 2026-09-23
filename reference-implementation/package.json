@@ -64,6 +64,7 @@
     "@fastify/formbody": "^9.0.0",
     "@huggingface/transformers": "^4.2.0",
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#8803c30c31f6d514bdc237df2f224b5ff77fa232",
+    "@pdpp/brand-react": "*",
     "@pdpp/collector-runtime": "*",
     "@pdpp/connector-protocol": "*",
     "@pdpp/display": "*",

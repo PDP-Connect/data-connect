@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
+import { DATACONNECT_PRODUCT_IDENTITY } from "@pdpp/brand-react/product-identity";
 import { handleStreamableHttpRequest } from "@pdpp/mcp-server/server";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { FastifyBaseLogger } from "fastify";
@@ -962,9 +963,10 @@ const RS_PORT = Number.parseInt(process.env.RS_PORT || "7663", 10);
 const DB_PATH = process.env.PDPP_DB_PATH || process.env.DB_PATH || ":memory:";
 // PDPP_INSTANCE_NAME is the operator-facing name for this instance:
 // PDPP_PROVIDER_NAME is preserved as a fallback for deployments that only
-// set the older var, so nothing already running breaks.
+// set the older var, so nothing already running breaks. An unnamed instance
+// carries the product name.
 const PDPP_PROVIDER_NAME =
-  process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || "PDPP Reference Provider";
+  process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || DATACONNECT_PRODUCT_IDENTITY.name;
 const PDPP_PROVIDER_CONNECT_VERSION = process.env.PDPP_PROVIDER_CONNECT_VERSION || "draft-2026-04-16";
 const PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION = process.env.PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION !== "0";
 const PDPP_DCR_INITIAL_ACCESS_TOKENS = (process.env.PDPP_DCR_INITIAL_ACCESS_TOKENS || "")

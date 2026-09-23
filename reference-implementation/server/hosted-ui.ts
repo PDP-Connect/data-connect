@@ -19,6 +19,8 @@
  * (see `HOSTED_UI_CSS_PATH` and `HOSTED_UI_CSS`).
  */
 
+import { DATACONNECT_PRODUCT_IDENTITY } from "@pdpp/brand-react/product-identity";
+
 export const HOSTED_UI_CSS_PATH = "/__pdpp/hosted-ui.css";
 export const HOSTED_UI_BRAND_MARKER = "data-pdpp-hosted-ui";
 export const HOSTED_UI_THEME_COOKIE_NAME = "pdpp-theme";
@@ -115,6 +117,28 @@ export function renderPdppMark({ size = 28, title = "PDPP" } = {}) {
     `<path d="M 40 30 L 40 170 L 60 170 L 60 116 L 100 116 Q 105 116 105 110 L 105 30 Z" fill="${HUMAN}"/>` +
     `<path d="M 105 30 L 105 110 Q 105 116 100 116 L 60 116 L 60 170 L 80 170 L 80 136 L 125 136 Q 155 136 155 103 Q 155 30 105 30 Z" fill="${PROTOCOL}"/>` +
     `<circle cx="105" cy="73" r="18" fill="${COUNTER}"/>` +
+    "</svg>"
+  );
+}
+
+// ─── DataConnect mark (server-side SVG) ──────────────────────────────────────
+// Geometry mirrors apps/console/public/brand/dataconnect-mark.svg so the hosted
+// pages carry the same product mark as the console. Keep in sync
+// (test/hosted-ui-theme-and-mark.test.ts compares the two).
+
+export function renderDataConnectMark({ size = 28, title = DATACONNECT_PRODUCT_IDENTITY.name } = {}) {
+  const safeTitle = escapeHtml(title);
+  const labelAttr = title ? `role="img" aria-label="${safeTitle}"` : 'role="presentation" aria-hidden="true"';
+  return (
+    `<svg class="hosted-ui-mark" viewBox="0 0 832 832" width="${size}" height="${size}" ${labelAttr}>` +
+    '<defs><linearGradient id="hosted-ui-dataconnect-mark-bg" x1="416" x2="416" y1="0" y2="832" gradientUnits="userSpaceOnUse">' +
+    '<stop offset="0.100024" stop-color="#304DC0"/>' +
+    '<stop offset="0.578171" stop-color="#121265"/>' +
+    '<stop offset="0.956731" stop-color="#090939"/>' +
+    "</linearGradient></defs>" +
+    '<rect fill="url(#hosted-ui-dataconnect-mark-bg)" height="832" rx="183" width="832"/>' +
+    '<path d="M188.955 197.596C309.404 197.596 407.047 295.552 407.047 416C407.047 536.449 309.404 634.405 188.955 634.405C187.051 634.405 185.153 634.38 183.262 634.332C161.511 633.772 150.635 633.492 140.716 623.315C130.797 613.137 130.797 599.88 130.797 573.367V258.633C130.797 232.12 130.797 218.864 140.716 208.686C150.636 198.508 161.511 198.229 183.262 197.669C185.154 197.621 187.051 197.596 188.955 197.596Z" fill="white"/>' +
+    '<path d="M657.638 634.404C537.19 634.404 439.547 536.449 439.547 416.001C439.547 295.552 537.19 197.596 657.638 197.596C659.542 197.596 661.44 197.621 663.332 197.669C685.082 198.229 695.958 198.509 705.877 208.686C715.797 218.864 715.797 232.121 715.797 258.634L715.797 573.368C715.797 599.88 715.797 613.136 705.877 623.314C695.957 633.492 685.082 633.772 663.331 634.331C661.44 634.379 659.542 634.404 657.638 634.404Z" fill="white"/>' +
     "</svg>"
   );
 }
@@ -900,20 +924,26 @@ function buildInstanceMonogram(name: string): string {
 }
 
 /**
- * Brand header: PDPP protocol mark + wordmark (always "PDPP" — the protocol
- * identity, never configurable) + the operator-facing instance name and its
+ * Brand header: DataConnect product mark + wordmark (always the product name
+ * from `DATACONNECT_PRODUCT_IDENTITY`, never configurable; PDPP is the
+ * protocol, not the product) + the operator-facing instance name and its
  * derived monogram (PDPP_INSTANCE_NAME, or PDPP_PROVIDER_NAME as a fallback
  * for existing deployments — see `resolveProviderName` in server/index.ts).
+ * An instance that keeps the default name shows the product brand only, so
+ * the header never repeats "DataConnect".
  */
 export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
-  const providerNameString = String(providerName ?? "");
-  const safeProvider = escapeHtml(providerNameString);
-  const safeMonogram = escapeHtml(buildInstanceMonogram(providerNameString));
+  const productName = DATACONNECT_PRODUCT_IDENTITY.name;
+  const providerNameString = String(providerName ?? "").trim();
+  const instanceLabel =
+    providerNameString && providerNameString !== productName
+      ? `
+  <span class="hosted-ui-instance-monogram" aria-hidden="true">${escapeHtml(buildInstanceMonogram(providerNameString))}</span>
+  <span class="hosted-ui-provider" aria-label="Provider">${escapeHtml(providerNameString)}</span>`
+      : "";
   return `<header class="hosted-ui-header">
-  ${renderPdppMark({ size: 28 })}
-  <span class="hosted-ui-wordmark">PDPP</span>
-  <span class="hosted-ui-instance-monogram" aria-hidden="true">${safeMonogram}</span>
-  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
+  ${renderDataConnectMark({ size: 28, title: "" })}
+  <span class="hosted-ui-wordmark">${escapeHtml(productName)}</span>${instanceLabel}
 </header>`;
 }
 

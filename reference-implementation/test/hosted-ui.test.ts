@@ -146,7 +146,7 @@ function assertHostedShell(html: string): void {
     "links shared hosted-ui stylesheet"
   );
   assert.match(html, /hosted-ui-header/, "renders brand header");
-  assert.match(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "shows PDPP wordmark");
+  assert.match(html, /<span class="hosted-ui-wordmark">DataConnect<\/span>/, "shows DataConnect wordmark");
   assert.doesNotMatch(html, /<style>[\s\S]*body\s*{\s*font-family:\s*system-ui/, "no route-local inline style block");
 }
 
@@ -302,7 +302,7 @@ test("hosted-ui: /owner/login disabled state still uses the shared hosted-UI lay
     const html = await resp.text();
     assertHostedShell(html);
     assert.match(html, /owner access/i, "shows owner-access heading");
-    assert.match(html, /disabled/i, "explains disabled placeholder auth");
+    assert.match(html, /No owner password is set/, "explains that owner sign-in is off");
     assert.doesNotMatch(html, /hosted-ui-password/, "does not render password field");
   });
 });
