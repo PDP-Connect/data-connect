@@ -12,6 +12,7 @@
     "./owner-session": "./server/owner-session.ts",
     "./owner-session-constants": "./server/owner-session-constants.ts",
     "./remote-access-config": "./server/remote-access-config.ts",
+    "./live-topics": "./server/live-topics.ts",
     "./deployment-diagnostics": "./server/deployment-diagnostics.ts",
     "./manual-upload-limits": "./server/manual-upload-limits.ts",
     "./operations/as-authorization-server-metadata": "./operations/as-authorization-server-metadata/index.ts",

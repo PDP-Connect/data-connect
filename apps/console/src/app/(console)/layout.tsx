@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { DashboardPaletteProvider } from "./components/dashboard-palette-provider.tsx";
+import { LiveProvider } from "./components/live-provider.tsx";
 import { isDashboardEnabled } from "./lib/dashboard-flag.ts";
 
 // Live operator state for a single reference instance — never index.
@@ -28,5 +29,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   if (!isDashboardEnabled()) {
     notFound();
   }
-  return <DashboardPaletteProvider>{children}</DashboardPaletteProvider>;
+  return (
+    <DashboardPaletteProvider>
+      <LiveProvider>{children}</LiveProvider>
+    </DashboardPaletteProvider>
+  );
 }

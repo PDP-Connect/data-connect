@@ -34,12 +34,16 @@ export interface RemoteAccessConfigStore {
   save: (config: RemoteAccessConfig) => Promise<RemoteAccessConfig>
 }
 
-function resolveConfigPath(dataDir: string): string {
+export function remoteAccessConfigPath(dataDir: string): string {
   return join(dataDir, REMOTE_ACCESS_CONFIG_FILE)
 }
 
-export function createRemoteAccessConfigStore(dataDir: string): RemoteAccessConfigStore {
-  const path = resolveConfigPath(dataDir)
+// `onWrite` runs after every save; the server passes the live channel's `bump`.
+export function createRemoteAccessConfigStore(
+  dataDir: string,
+  onWrite: () => void = () => undefined
+): RemoteAccessConfigStore {
+  const path = remoteAccessConfigPath(dataDir)
 
   async function load(): Promise<RemoteAccessConfig> {
     let content: string
@@ -81,6 +85,7 @@ export function createRemoteAccessConfigStore(dataDir: string): RemoteAccessConf
     }
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, `${JSON.stringify(validated.config, null, 2)}\n`, "utf8")
+    onWrite()
     return validated.config
   }
 

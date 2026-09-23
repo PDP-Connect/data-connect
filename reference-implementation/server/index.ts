@@ -85,9 +85,10 @@ import {
 } from "../runtime/controller.ts";
 import { createConnectorInstallService } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
-import { createRemoteAccessConfigStore } from "./remote-access-store.ts";
-import { createAppConfigStore } from "./app-config-store.ts";
-import { createAutostartStore } from "./autostart-store.ts";
+import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
+import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
+import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
+import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
@@ -361,6 +362,7 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
+import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
 import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
 import { mountOwnerCredentialReveal } from "./routes/owner-credential-reveal.ts";
 import {
@@ -826,6 +828,8 @@ interface ServerOpts {
   ownerAuthPassword?: string;
   ownerAuthSameSite?: string;
   ownerAuthSessionTtlSeconds?: number;
+  /** Revision registry for the owner live channel; defaults to one per process. */
+  ownerLive?: LiveRevisions;
   ownerAuthSubjectId?: string;
   ownerExposurePosture?: {
     allowUnauthenticatedOwnerWhenDisabled: boolean;
@@ -960,6 +964,26 @@ interface OwnerDeviceAuthStore {
 
 const AS_PORT = Number.parseInt(process.env.AS_PORT || "7662", 10);
 const RS_PORT = Number.parseInt(process.env.RS_PORT || "7663", 10);
+
+// One live-revision registry per process, shared by the AS app (which serves
+// the `/_ref/owner-live` SSE route) and the RS app (whose owner stores bump it
+// on write). See live-revisions.ts.
+let processOwnerLive: LiveRevisions | null = null;
+function resolveOwnerLive(opts: ServerOpts): LiveRevisions {
+  if (opts.ownerLive) {
+    return opts.ownerLive;
+  }
+  if (!processOwnerLive) {
+    const dataDir = process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data");
+    processOwnerLive = createLiveRevisions();
+    registerDefaultLiveTopics(processOwnerLive, {
+      appConfigPath: appConfigPath(),
+      autostartPath: autostartStatePath(dataDir),
+      remoteAccessPath: remoteAccessConfigPath(dataDir),
+    });
+  }
+  return processOwnerLive;
+}
 const DB_PATH = process.env.PDPP_DB_PATH || process.env.DB_PATH || ":memory:";
 // PDPP_INSTANCE_NAME is the operator-facing name for this instance:
 // PDPP_PROVIDER_NAME is preserved as a fallback for deployments that only
@@ -5653,6 +5677,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   (registerInboxRoutes as (...args: unknown[]) => void)(app, { controller, handleError, ownerAuth, pdppError });
 
+  mountOwnerLiveAs(app, {
+    live: resolveOwnerLive(opts),
+    pdppError,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountOwnerLiveAs>[1]);
+
   // Operator-only stream-playground route. Lazy-launches a long-lived patchright
   // headless browser whose first page is pinned to a self-contained data:
   // URL, registers its CDP page-target wsUrl with the run-target registry
@@ -7850,7 +7880,9 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
-    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
+      resolveOwnerLive(opts).bump("remote-access")
+    ),
   } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
 
   // Owner-authenticated HTTP routes for the generic desktop app-config blob
@@ -7863,7 +7895,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
-    store: createAppConfigStore(),
+    store: createAppConfigStore(() => resolveOwnerLive(opts).bump("desktop.app-config")),
   } as unknown as Parameters<typeof mountOwnerAppConfig>[1]);
 
   // Owner-authenticated HTTP routes for launch-at-login. Unlike app-config,
@@ -7875,8 +7907,16 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
-    store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+    store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
+      resolveOwnerLive(opts).bump("desktop.autostart")
+    ),
   } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
+
+  mountOwnerLiveRs(app, {
+    live: resolveOwnerLive(opts),
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerLiveRs>[1]);
 
   // Owner-authenticated HTTP route for exporting the desktop database
   // encryption key as a printable recovery code. See
@@ -8623,6 +8663,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl: configuredAsPublicUrl,
     cimdFetchDependencies: opts.cimdFetchDependencies,
     controller,
+    ownerLive: resolveOwnerLive(opts),
     dbPath: opts.dbPath || DB_PATH,
     dynamicClientRegistrationInitialAccessTokens: resolveDynamicClientRegistrationInitialAccessTokens(opts),
     enableDynamicClientRegistration: resolveDynamicClientRegistrationEnabled(opts),
@@ -8721,6 +8762,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl,
     configuredProviderAuthConnectorKeys,
     controller,
+    ownerLive: resolveOwnerLive(opts),
     ownerAuthPassword: opts.ownerAuthPassword,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,

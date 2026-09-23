@@ -44,7 +44,7 @@ export interface AutostartStore {
   requestChange: (desiredEnabled: boolean) => Promise<AutostartState>
 }
 
-function resolveStatePath(dataDir: string): string {
+export function autostartStatePath(dataDir: string): string {
   return join(dataDir, AUTOSTART_STATE_FILE)
 }
 
@@ -52,8 +52,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export function createAutostartStore(dataDir: string): AutostartStore {
-  const path = resolveStatePath(dataDir)
+// `onWrite` runs after every write this store makes; the server passes the
+// live channel's `bump` so other tabs hear about the request at once.
+export function createAutostartStore(dataDir: string, onWrite: () => void = () => undefined): AutostartStore {
+  const path = autostartStatePath(dataDir)
 
   async function readState(): Promise<AutostartState | null> {
     let content: string
@@ -75,6 +77,7 @@ export function createAutostartStore(dataDir: string): AutostartStore {
   async function writeState(state: AutostartState): Promise<void> {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, "utf8")
+    onWrite()
   }
 
   // Rust seeds this file on first watcher tick after startup. If it hasn't

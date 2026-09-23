@@ -48,11 +48,13 @@ export interface MountOwnerAutostartContext {
   store: AutostartStore
 }
 
-// Project only `enabled`/`error` out of the full internal state --
+// Project only `enabled`/`error`/`pending` out of the full internal state --
 // `requestId`/`appliedRequestId` are request bookkeeping this server
-// shouldn't leak.
-function toResponseShape(state: AutostartState): { enabled: boolean; error: string | null } {
-  return { enabled: state.enabled, error: state.error }
+// shouldn't leak. `pending` is true while a requested change has not been
+// applied yet, so another tab can say "Applying…" instead of painting the
+// desired value as fact.
+function toResponseShape(state: AutostartState): { enabled: boolean; error: string | null; pending: boolean } {
+  return { enabled: state.enabled, error: state.error, pending: state.appliedRequestId < state.requestId }
 }
 
 export function mountOwnerAutostart(app: AppLike, ctx: MountOwnerAutostartContext): void {

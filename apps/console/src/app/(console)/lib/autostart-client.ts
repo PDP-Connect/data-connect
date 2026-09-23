@@ -20,6 +20,8 @@ import { verifyDashboardSession } from "./verify-session.ts"
 export interface AutostartState {
   enabled: boolean
   error: string | null
+  /** A requested change the desktop app has not applied yet. Absent from older servers. */
+  pending?: boolean
 }
 
 async function autostartFetch(path: string, init: RequestInit = {}): Promise<unknown> {

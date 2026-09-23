@@ -99,7 +99,7 @@ function mountWithStore(store: AutostartStore): FakeApp["routes"] {
   return app.routes;
 }
 
-test("GET autostart projects only enabled/error, not request bookkeeping", async () => {
+test("GET autostart projects only enabled/error/pending, not request bookkeeping", async () => {
   const routes = mountWithStore(
     fakeStore({ appliedRequestId: 2, desiredEnabled: true, enabled: true, error: null, requestId: 2 })
   );
@@ -107,7 +107,16 @@ test("GET autostart projects only enabled/error, not request bookkeeping", async
   assert.ok(handler);
   const { captured, res } = makeRes();
   await handler?.({}, res);
-  assert.deepEqual(captured.body, { data: { enabled: true, error: null }, object: "autostart_state" });
+  assert.deepEqual(captured.body, { data: { enabled: true, error: null, pending: false }, object: "autostart_state" });
+});
+
+test("GET autostart reports a requested change the desktop app has not applied yet as pending", async () => {
+  const routes = mountWithStore(
+    fakeStore({ appliedRequestId: 2, desiredEnabled: true, enabled: false, error: null, requestId: 3 })
+  );
+  const { captured, res } = makeRes();
+  await routes.get("GET /v1/owner/autostart")?.({}, res);
+  assert.deepEqual(captured.body, { data: { enabled: false, error: null, pending: true }, object: "autostart_state" });
 });
 
 test("GET autostart surfaces a load failure (desktop app not seeded yet) via handleError", async () => {
@@ -133,7 +142,7 @@ test("POST autostart requests a change and returns the applied result", async ()
   const handler = routes.get("POST /v1/owner/autostart");
   const { captured, res } = makeRes();
   await handler?.({ body: { enabled: true } }, res);
-  assert.deepEqual(captured.body, { data: { enabled: true, error: null }, object: "autostart_state" });
+  assert.deepEqual(captured.body, { data: { enabled: true, error: null, pending: false }, object: "autostart_state" });
 });
 
 test("POST autostart rejects a malformed body before it reaches the store", async () => {
