@@ -92,6 +92,7 @@ const OWNER_AUTH_PROBABLY_ENABLED =
 // top-level nouns off root; the overview is `/`. Removed legacy console-prefix
 // paths are intentionally not routed or redirected.
 const OWNER_ROUTE_PREFIXES = [
+  "/settings",
   "/sources",
   "/syncs",
   "/audit",
@@ -207,6 +208,8 @@ export const config = {
     // Owner overview at root.
     "/",
     // Clean owner-console sections (redesign-owner-console-product-experience §10.B).
+    "/settings",
+    "/settings/:path*",
     "/sources",
     "/sources/:path*",
     "/syncs",
