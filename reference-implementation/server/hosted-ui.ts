@@ -19,7 +19,7 @@
  * (see `HOSTED_UI_CSS_PATH` and `HOSTED_UI_CSS`).
  */
 
-import { DATACONNECT_PRODUCT_IDENTITY } from "@pdpp/brand-react/product-identity";
+import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 
 export const HOSTED_UI_CSS_PATH = "/__pdpp/hosted-ui.css";
 export const HOSTED_UI_BRAND_MARKER = "data-pdpp-hosted-ui";

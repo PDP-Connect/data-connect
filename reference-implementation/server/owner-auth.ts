@@ -19,7 +19,7 @@
  * for scope and rationale.
  */
 import crypto from "node:crypto";
-import { DATACONNECT_PRODUCT_IDENTITY } from "@pdpp/brand-react/product-identity";
+import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import {
   escapeHtml as hostedEscape,
   readHostedThemeChoiceFromCookieHeader,
