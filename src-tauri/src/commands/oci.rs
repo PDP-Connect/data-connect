@@ -16,9 +16,15 @@ use std::path::{Component, Path, PathBuf};
 
 use super::oci_verify::CosignSignature;
 pub(crate) use super::oci_verify::{
-    COSIGN_BUNDLE_ANNOTATION, COSIGN_CERTIFICATE_ANNOTATION, COSIGN_SIGNATURE_ANNOTATION,
-    COSIGN_SIGNATURE_MEDIA_TYPE, DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
-    DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
+    COSIGN_BUNDLE_ANNOTATION, COSIGN_BUNDLE_V03_ARTIFACT_TYPE, COSIGN_CERTIFICATE_ANNOTATION,
+    COSIGN_SIGNATURE_ANNOTATION, COSIGN_SIGNATURE_MEDIA_TYPE,
+};
+// Only this module's tests reference the pinned identity/issuer directly (to
+// assert they are what gets pinned); production code calls into
+// `oci_verify`, which already has them in scope.
+#[cfg(test)]
+use super::oci_verify::{
+    DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY, DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
 };
 
 pub(crate) const OCI_REGISTRY: &str = "ghcr.io";
@@ -95,6 +101,38 @@ struct SignatureLayer {
     digest: String,
     size: Option<u64>,
     annotations: Option<HashMap<String, String>>,
+}
+
+/// An OCI image index, as returned by both the `/referrers/` API and the
+/// `sha256-<hex>` fallback tag cosign v3 writes for registries that do not
+/// implement it — both shapes are the same "list of referrer descriptors"
+/// document, so one type and one parser covers both discovery paths.
+#[derive(Debug, Deserialize)]
+struct ImageIndex {
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+    manifests: Vec<ReferrerDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferrerDescriptor {
+    digest: String,
+    #[serde(rename = "artifactType")]
+    artifact_type: Option<String>,
+}
+
+/// A referrer manifest naming a `subject`, fetched by digest. Used for the
+/// cosign v3 bundle referrer: an image manifest whose one layer is the
+/// Sigstore bundle and whose `subject.digest` names the signed artifact.
+#[derive(Debug, Deserialize)]
+struct SubjectManifest {
+    subject: Option<SubjectDescriptor>,
+    layers: Vec<Descriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubjectDescriptor {
+    digest: String,
 }
 
 pub(crate) struct RegistryClient {
@@ -202,6 +240,146 @@ impl RegistryClient {
             Some(_) => Err("OCI_UNKNOWN: malformed Docker-Content-Digest".to_string()),
             None => Ok((computed, bytes)),
         }
+    }
+
+    /// `GET /v2/<repository>/referrers/<digest>?artifactType=...`.
+    ///
+    /// Per the OCI distribution spec, a registry that implements this
+    /// endpoint MUST answer 200 with an (possibly empty) image index and MUST
+    /// NOT answer 404; so 404 here means only one thing, "this registry does
+    /// not implement the endpoint", never "no referrers" — there is no
+    /// per-referrer absence outcome the way a missing tag has one. Returns
+    /// `Ok(Some(index))` when supported, `Ok(None)` when the endpoint itself
+    /// is unsupported (caller falls back to the `sha256-<hex>` tag), and
+    /// `Err` when the response can be read as neither.
+    async fn lookup_referrers(
+        &self,
+        repository: &str,
+        digest: &str,
+        artifact_type: &str,
+    ) -> Result<Option<ImageIndex>, String> {
+        validate_repository(repository)?;
+        let response = self
+            .authorized_get(
+                &format!("v2/{repository}/referrers/{digest}?artifactType={artifact_type}"),
+                "application/vnd.oci.image.index.v1+json",
+            )
+            .await?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(format!(
+                "OCI_DENIED: referrers endpoint returned HTTP {status}"
+            ));
+        }
+        if status != StatusCode::OK {
+            return Err(format!(
+                "OCI_UNKNOWN: referrers endpoint returned HTTP {status}"
+            ));
+        }
+        let bytes = read_limited(response, MAX_MANIFEST_BYTES).await?;
+        let index: ImageIndex = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("OCI_UNKNOWN: referrers endpoint returned invalid JSON: {e}"))?;
+        if index.media_type.as_deref() != Some("application/vnd.oci.image.index.v1+json") {
+            return Err(
+                "OCI_UNKNOWN: referrers endpoint returned a body that is not an OCI image index"
+                    .to_string(),
+            );
+        }
+        Ok(Some(index))
+    }
+
+    /// Discover every cosign v3-default Sigstore bundle referrer published
+    /// for `digest`, trying the `/referrers/` API first and falling back to
+    /// the `sha256-<hex>` tag cosign v3 also writes, for a registry that does
+    /// not implement the endpoint (observed against both ghcr.io and a local
+    /// `registry:3.1.1`, per data-connectors PR #148). Both mechanisms return
+    /// the same image-index shape, so one parser (`ImageIndex`) covers both.
+    ///
+    /// Filters to `COSIGN_BUNDLE_V03_ARTIFACT_TYPE` even on the API path,
+    /// which already asked the server to filter: the tag fallback has no
+    /// query string to filter with server-side, and a future registry that
+    /// starts answering the referrers API could return entries this client
+    /// does not otherwise expect. Never assume a server-side filter was
+    /// honoured.
+    async fn discover_cosign_bundle_referrers(
+        &self,
+        repository: &str,
+        digest: &str,
+    ) -> Result<Vec<String>, String> {
+        let index = match self
+            .lookup_referrers(repository, digest, COSIGN_BUNDLE_V03_ARTIFACT_TYPE)
+            .await?
+        {
+            Some(index) => index,
+            None => {
+                // Unsupported endpoint: fall back to the tag. `OCI_ABSENT`
+                // here means "the tag itself is absent", which is a genuine
+                // "no v3 bundle published" rather than an error — the caller
+                // falls through to the legacy `.sig` path either way, but the
+                // distinction matters for anything reading the error text.
+                let tag = cosign_bundle_tag(digest)?;
+                match self.fetch_manifest(repository, &tag).await {
+                    Ok((_, bytes)) => serde_json::from_slice(&bytes).map_err(|e| {
+                        format!("OCI_TAMPERED: cosign bundle tag is not an OCI image index: {e}")
+                    })?,
+                    Err(error) if error.starts_with("OCI_ABSENT:") => return Ok(Vec::new()),
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        if index.manifests.len() > 32 {
+            return Err("OCI_UNVERIFIABLE: too many cosign v3 bundle candidates".to_string());
+        }
+        Ok(index
+            .manifests
+            .into_iter()
+            .filter(|entry| entry.artifact_type.as_deref() == Some(COSIGN_BUNDLE_V03_ARTIFACT_TYPE))
+            .filter(|entry| valid_digest(&entry.digest))
+            .map(|entry| entry.digest)
+            .collect())
+    }
+
+    /// Fetch one candidate bundle referrer's manifest by digest, and confirm
+    /// its `subject` names the artifact digest being verified. Returns the
+    /// candidate's bundle layer bytes (fetched and digest-checked), or an
+    /// error if the manifest is malformed or names a different subject.
+    ///
+    /// The `artifactType` filter in `discover_cosign_bundle_referrers` says
+    /// WHAT KIND of thing a referrer is, not what it is ABOUT; a referrer
+    /// whose `subject.digest` differs from the artifact digest is a bundle
+    /// for a different artifact that happens to share this repository, and
+    /// is refused as misidentified here rather than treated as this
+    /// artifact's signature.
+    async fn fetch_candidate_bundle_manifest(
+        &self,
+        repository: &str,
+        manifest_digest: &str,
+        expected_subject_digest: &str,
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self
+            .fetch_manifest_by_digest(repository, manifest_digest)
+            .await?;
+        let manifest: SubjectManifest = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("OCI_TAMPERED: cosign bundle referrer manifest invalid: {e}"))?;
+        let subject = manifest
+            .subject
+            .ok_or("OCI_MISIDENTIFIED: cosign bundle referrer manifest has no subject")?;
+        if subject.digest != expected_subject_digest {
+            return Err(format!(
+                "OCI_MISIDENTIFIED: cosign bundle referrer {manifest_digest} names subject {}, not {expected_subject_digest}",
+                subject.digest
+            ));
+        }
+        let [layer] = manifest.layers.as_slice() else {
+            return Err(format!(
+                "OCI_TAMPERED: cosign bundle referrer {manifest_digest} must have exactly one layer, got {}",
+                manifest.layers.len()
+            ));
+        };
+        self.fetch_blob(repository, layer).await
     }
 
     async fn fetch_blob(
@@ -467,7 +645,13 @@ async fn download_with_client(
             return Err("OCI_TAMPERED: config descriptor does not match lock".to_string());
         }
     }
-    verify_signature(client, &reference.repository, &reference.digest).await?;
+    verify_signature(
+        client,
+        &reference.repository,
+        &reference.digest,
+        &manifest_bytes,
+    )
+    .await?;
     let layers = index_layers(&manifest.layers)?;
     let config_bytes = client
         .fetch_blob(&reference.repository, &manifest.config)
@@ -579,11 +763,78 @@ pub(crate) async fn download_verified_catalog() -> Result<Vec<u8>, String> {
     if manifest.layers.len() != 1 || manifest.layers[0].media_type != OCI_CATALOG_MEDIA_TYPE {
         return Err("OCI_TAMPERED: catalog must contain exactly one catalog layer".to_string());
     }
-    verify_signature(&client, repository, &digest).await?;
+    verify_signature(&client, repository, &digest, &bytes).await?;
     client.fetch_blob(repository, &manifest.layers[0]).await
 }
 
+/// Verify a manifest's cosign signature, trying the cosign v3-default
+/// Sigstore bundle first and falling back to the legacy `.sig` simple-signing
+/// image if no v3 candidate verifies. Accepts as soon as any v3 candidate
+/// verifies (matching the legacy path's own "any one candidate suffices"
+/// posture); a v3 discovery or verification failure is not itself a refusal
+/// of the artifact, since the legacy signature may still be published and
+/// valid during the dual-signing transition (data-connectors PR #148).
 async fn verify_signature(
+    client: &RegistryClient,
+    repository: &str,
+    manifest_digest: &str,
+    manifest_bytes: &[u8],
+) -> Result<(), String> {
+    match verify_cosign_bundle_signature(client, repository, manifest_digest, manifest_bytes).await
+    {
+        Ok(()) => return Ok(()),
+        Err(error) => log::debug!("cosign v3 bundle verification did not succeed: {error}"),
+    }
+    verify_legacy_cosign_signature(client, repository, manifest_digest).await
+}
+
+/// Discover and verify a cosign v3-default Sigstore bundle for
+/// `manifest_digest`. Tries the `/referrers/` API, then the `sha256-<hex>`
+/// fallback tag; accepts if any discovered candidate's manifest names this
+/// digest as its `subject` and its bundle verifies under the pinned identity.
+async fn verify_cosign_bundle_signature(
+    client: &RegistryClient,
+    repository: &str,
+    manifest_digest: &str,
+    manifest_bytes: &[u8],
+) -> Result<(), String> {
+    let manifest_digests = client
+        .discover_cosign_bundle_referrers(repository, manifest_digest)
+        .await?;
+    if manifest_digests.is_empty() {
+        return Err("OCI_UNVERIFIABLE: no cosign v3 bundle referrer is published".to_string());
+    }
+
+    let mut candidates = Vec::new();
+    let mut denied_error = None;
+    for candidate_manifest_digest in manifest_digests {
+        let bundle = client
+            .fetch_candidate_bundle_manifest(
+                repository,
+                &candidate_manifest_digest,
+                manifest_digest,
+            )
+            .await;
+        match bundle {
+            Ok(bundle) => candidates.push(bundle),
+            Err(error) => {
+                log::debug!("Refused cosign v3 bundle candidate: {error}");
+                if error.starts_with("OCI_DENIED:") {
+                    denied_error = Some(error);
+                }
+            }
+        }
+    }
+    if candidates.is_empty() {
+        if let Some(error) = denied_error {
+            return Err(error);
+        }
+        return Err("OCI_UNVERIFIABLE: cosign v3 bundle has no complete candidates".to_string());
+    }
+    super::oci_verify::verify_cosign_bundle_signature(&candidates, manifest_bytes, repository).await
+}
+
+async fn verify_legacy_cosign_signature(
     client: &RegistryClient,
     repository: &str,
     manifest_digest: &str,
@@ -975,6 +1226,20 @@ fn sha256_digest(bytes: &[u8]) -> String {
 fn signature_tag(digest: &str) -> String {
     format!("{}.sig", digest.replace(':', "-"))
 }
+
+/// The fallback tag cosign v3 writes for its default Sigstore bundle when a
+/// registry does not implement the `/referrers/` API: `sha256-<hex>`, WITHOUT
+/// the legacy path's `.sig` suffix (observed against cosign v3.1.3, per
+/// data-connectors PR #148). This tag resolves to an OCI image index in the
+/// same shape the referrers API returns, not to the bundle manifest directly.
+fn cosign_bundle_tag(digest: &str) -> Result<String, String> {
+    if !valid_digest(digest) {
+        return Err(format!(
+            "OCI_INVALID_REFERENCE: invalid OCI manifest digest: {digest}"
+        ));
+    }
+    Ok(digest.replace(':', "-"))
+}
 fn distribution_absence(bytes: &[u8]) -> bool {
     serde_json::from_slice::<Value>(bytes)
         .ok()
@@ -1051,6 +1316,278 @@ mod tests {
             socket.write_all(&body).await.unwrap();
         });
         RegistryClient::fixture(&format!("http://{address}/")).unwrap()
+    }
+
+    /// One (status, headers, body) response, keyed by the exact request-line
+    /// path the client must send to receive it (e.g.
+    /// `/v2/pdp-connect/connector/ynab/referrers/sha256:aaaa...`).
+    struct RoutedResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    /// A registry fixture that answers multiple, DIFFERENT endpoints across
+    /// separate connections — needed once verification does more than one
+    /// registry round trip (discovery, then a candidate manifest, then its
+    /// blob). Each incoming connection is matched by request path against
+    /// `routes`; an unmatched path gets a 404 distribution-spec absence body,
+    /// which is the correct behaviour for "this endpoint was not stubbed"
+    /// rather than a fixture bug that looks like a network failure.
+    async fn router_fixture(routes: Vec<(&'static str, RoutedResponse)>) -> RegistryClient {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let routes: HashMap<&'static str, RoutedResponse> = routes.into_iter().collect();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = [0u8; 8192];
+                let Ok(n) = socket.read(&mut buffer).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                let Some(path) = request.split_whitespace().nth(1) else {
+                    continue;
+                };
+                let (status, headers, body) = match routes.get(path) {
+                    Some(route) => (route.status, route.headers.clone(), route.body.clone()),
+                    None => (
+                        404u16,
+                        Vec::new(),
+                        br#"{"errors":[{"code":"MANIFEST_UNKNOWN"}]}"#.to_vec(),
+                    ),
+                };
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
+                let mut response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                for (key, value) in headers {
+                    response.push_str(&format!("{key}: {value}\r\n"));
+                }
+                response.push_str("\r\n");
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            }
+        });
+        RegistryClient::fixture(&format!("http://{address}/")).unwrap()
+    }
+
+    // ── cosign v3 Sigstore bundle discovery/selection plumbing ─────────────
+    //
+    // These tests exercise `discover_cosign_bundle_referrers` and
+    // `fetch_candidate_bundle_manifest` against the REAL captured wire bytes
+    // from data-connectors#148 (tag-index.json / inner-manifest.json /
+    // bundle-blob.json — a key-based bundle, so it never reaches an actual
+    // Sigstore accept; see oci_verify.rs's v3_t7 and the fixture README for
+    // why). They prove the OCI-side plumbing — index parsing, the
+    // `/referrers/` → tag fallback, candidate-manifest fetch, and the
+    // subject-digest cross-check — independent of the cryptographic
+    // verification the sibling `oci_verify` test module covers with a real
+    // Fulcio-signed bundle.
+
+    const V3_REPO: &str = "pdp-connect/connector/ynab";
+
+    fn v3_tag_index_bytes() -> &'static [u8] {
+        include_bytes!("../../test-fixtures/cosign-v3-bundle/tag-index.json")
+    }
+    fn v3_inner_manifest_bytes() -> &'static [u8] {
+        include_bytes!("../../test-fixtures/cosign-v3-bundle/inner-manifest.json")
+    }
+    fn v3_bundle_blob_bytes() -> &'static [u8] {
+        include_bytes!("../../test-fixtures/cosign-v3-bundle/bundle-blob.json")
+    }
+
+    /// The artifact digest `tag-index.json`'s subject actually claims (see
+    /// the fixture README): the digest a caller must ask about for the
+    /// fixture's referrer chain to resolve without a subject mismatch.
+    const V3_FIXTURE_SUBJECT_DIGEST: &str =
+        "sha256:eb0668a2f70bcaf199212c1a65769a4824007f10acfb5ec06b612bb47c2454c4";
+
+    fn manifest_route(bytes: &[u8]) -> RoutedResponse {
+        RoutedResponse {
+            status: 200,
+            headers: vec![("Docker-Content-Digest".to_string(), sha256_digest(bytes))],
+            body: bytes.to_vec(),
+        }
+    }
+
+    fn blob_route(bytes: &[u8]) -> RoutedResponse {
+        RoutedResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: bytes.to_vec(),
+        }
+    }
+
+    fn not_found_route() -> RoutedResponse {
+        RoutedResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: br#"{"errors":[{"code":"MANIFEST_UNKNOWN"}]}"#.to_vec(),
+        }
+    }
+
+    fn v3_referrers_path(digest: &str) -> String {
+        format!("/v2/{V3_REPO}/referrers/{digest}?artifactType={COSIGN_BUNDLE_V03_ARTIFACT_TYPE}")
+    }
+    fn v3_tag_path(digest: &str) -> String {
+        format!("/v2/{V3_REPO}/manifests/{}", digest.replace(':', "-"))
+    }
+    fn manifest_by_digest_path(digest: &str) -> String {
+        format!("/v2/{V3_REPO}/manifests/{digest}")
+    }
+    fn blob_path(digest: &str) -> String {
+        format!("/v2/{V3_REPO}/blobs/{digest}")
+    }
+    fn legacy_sig_path(digest: &str) -> String {
+        format!("/v2/{V3_REPO}/manifests/{}.sig", digest.replace(':', "-"))
+    }
+
+    /// Every route needed for the fixture's v3 bundle to be discovered and
+    /// fetched (but not necessarily verified — see the module doc comment
+    /// above): the referrers API answering unsupported (matching what
+    /// data-connectors#148 observed against both ghcr.io and
+    /// `registry:3.1.1`), the tag fallback, the candidate manifest, and its
+    /// blob.
+    fn v3_discovery_routes(digest: &str) -> Vec<(&'static str, RoutedResponse)> {
+        // Leak the owned Strings to `'static` for the router's key type; test-only.
+        let referrers_path: &'static str = Box::leak(v3_referrers_path(digest).into_boxed_str());
+        let tag_path: &'static str = Box::leak(v3_tag_path(digest).into_boxed_str());
+        let manifest_path: &'static str = Box::leak(
+            manifest_by_digest_path(&sha256_digest(v3_inner_manifest_bytes())).into_boxed_str(),
+        );
+        let blob_path: &'static str =
+            Box::leak(blob_path(&sha256_digest(v3_bundle_blob_bytes())).into_boxed_str());
+        vec![
+            (referrers_path, not_found_route()),
+            (tag_path, manifest_route(v3_tag_index_bytes())),
+            (manifest_path, manifest_route(v3_inner_manifest_bytes())),
+            (blob_path, blob_route(v3_bundle_blob_bytes())),
+        ]
+    }
+
+    #[tokio::test]
+    async fn v3_discovery_finds_the_fallback_tag_when_referrers_is_unsupported() {
+        let client = router_fixture(v3_discovery_routes(V3_FIXTURE_SUBJECT_DIGEST)).await;
+        let candidates = client
+            .discover_cosign_bundle_referrers(V3_REPO, V3_FIXTURE_SUBJECT_DIGEST)
+            .await
+            .expect("discovery must succeed");
+        assert_eq!(candidates, vec![sha256_digest(v3_inner_manifest_bytes())]);
+    }
+
+    #[tokio::test]
+    async fn v3_candidate_manifest_is_fetched_when_subject_matches() {
+        let client = router_fixture(v3_discovery_routes(V3_FIXTURE_SUBJECT_DIGEST)).await;
+        let bundle = client
+            .fetch_candidate_bundle_manifest(
+                V3_REPO,
+                &sha256_digest(v3_inner_manifest_bytes()),
+                V3_FIXTURE_SUBJECT_DIGEST,
+            )
+            .await
+            .expect("candidate with matching subject must be fetched");
+        assert_eq!(bundle, v3_bundle_blob_bytes());
+    }
+
+    #[tokio::test]
+    async fn v3_candidate_with_mismatched_subject_is_misidentified() {
+        let client = router_fixture(v3_discovery_routes(V3_FIXTURE_SUBJECT_DIGEST)).await;
+        let wrong_digest = format!("sha256:{}", "b".repeat(64));
+        let error = client
+            .fetch_candidate_bundle_manifest(
+                V3_REPO,
+                &sha256_digest(v3_inner_manifest_bytes()),
+                &wrong_digest,
+            )
+            .await
+            .expect_err("a referrer naming a different subject must be refused");
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_discovery_returns_empty_when_neither_referrers_nor_tag_exist() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let referrers_path: &'static str = Box::leak(v3_referrers_path(&digest).into_boxed_str());
+        let tag_path: &'static str = Box::leak(v3_tag_path(&digest).into_boxed_str());
+        let client = router_fixture(vec![
+            (referrers_path, not_found_route()),
+            (tag_path, not_found_route()),
+        ])
+        .await;
+        let candidates = client
+            .discover_cosign_bundle_referrers(V3_REPO, &digest)
+            .await
+            .expect("no candidates is a valid, non-error outcome");
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v3_discovery_uses_the_referrers_api_when_supported() {
+        let digest = V3_FIXTURE_SUBJECT_DIGEST;
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "size": v3_inner_manifest_bytes().len(),
+                "digest": sha256_digest(v3_inner_manifest_bytes()),
+                "artifactType": COSIGN_BUNDLE_V03_ARTIFACT_TYPE,
+            }]
+        });
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let referrers_path: &'static str = Box::leak(v3_referrers_path(digest).into_boxed_str());
+        let manifest_path: &'static str = Box::leak(
+            manifest_by_digest_path(&sha256_digest(v3_inner_manifest_bytes())).into_boxed_str(),
+        );
+        let client = router_fixture(vec![
+            (
+                referrers_path,
+                RoutedResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: index_bytes,
+                },
+            ),
+            (manifest_path, manifest_route(v3_inner_manifest_bytes())),
+        ])
+        .await;
+        let candidates = client
+            .discover_cosign_bundle_referrers(V3_REPO, digest)
+            .await
+            .expect("discovery via the referrers API must succeed");
+        assert_eq!(candidates, vec![sha256_digest(v3_inner_manifest_bytes())]);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_falls_back_to_legacy_when_no_v3_candidate_verifies() {
+        // The v3 fixture bundle is key-based and cannot verify with this
+        // crate (see oci_verify.rs's v3_t7); `verify_signature` must not
+        // treat that as a refusal of the artifact — it must fall through to
+        // the legacy `.sig` path exactly as it did before this feature.
+        // Stub the legacy signature tag as genuinely absent too, so the
+        // overall call refuses for a reason that proves both paths ran
+        // (not just the first).
+        let digest = V3_FIXTURE_SUBJECT_DIGEST;
+        let mut routes = v3_discovery_routes(digest);
+        let sig_path: &'static str = Box::leak(legacy_sig_path(digest).into_boxed_str());
+        routes.push((sig_path, not_found_route()));
+        let client = router_fixture(routes).await;
+        let manifest_bytes = b"pretend this is the fetched OCI manifest";
+        let error = verify_signature(&client, V3_REPO, digest, manifest_bytes)
+            .await
+            .expect_err("neither v3 nor legacy signature is verifiable here");
+        // OCI_UNVERIFIABLE (legacy path's own "signature tag absent" framing),
+        // never a v3-specific error swallowing the legacy attempt.
+        assert!(error.starts_with("OCI_UNVERIFIABLE:"), "{error}");
+        assert!(error.contains("cosign signature"), "{error}");
     }
 
     #[tokio::test]
