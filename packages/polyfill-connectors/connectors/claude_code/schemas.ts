@@ -65,6 +65,7 @@ export const sessionsSchema = z.object({
 	started_at: isoDateTimeSchema,
 	last_event_at: isoDateTimeSchema,
 	message_count: z.number().int().min(0).nullable(),
+	title: stringMaxSchema(2048),
 	user_type: stringMaxSchema(40),
 	entrypoint: stringMaxSchema(256),
 });
@@ -80,6 +81,7 @@ export const messagesSchema = z.object({
 	is_sidechain: z.boolean(),
 	user_type: stringMaxSchema(40),
 	agent_id: stringMaxSchema(256).nullable(),
+	has_pasted_content: z.boolean(),
 });
 
 // attachments.id is one of two shapes:
@@ -165,6 +167,64 @@ export const slashCommandsSchema = z.object({
 	mtime_epoch: z.number().nullable(),
 });
 
+/**
+ * `stats-cache.json` per-model usage counters. No independent identity beyond
+ * the model name (D3: a nested array without its own identity stays an array
+ * field, not a child stream).
+ */
+const modelUsageSchema = z.object({
+	model: pdppSafeText.max(256),
+	input_tokens: z.number().int().min(0),
+	output_tokens: z.number().int().min(0),
+	cache_read_input_tokens: z.number().int().min(0),
+	cache_creation_input_tokens: z.number().int().min(0),
+	web_search_requests: z.number().int().min(0),
+	cost_usd_cents: z.number().int().min(0),
+	context_window: z.number().int().min(0).nullable(),
+	max_output_tokens: z.number().int().min(0).nullable(),
+});
+
+const dailyActivitySchema = z.object({
+	date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD"),
+	message_count: z.number().int().min(0),
+	session_count: z.number().int().min(0),
+	tool_call_count: z.number().int().min(0),
+});
+
+const dailyModelTokensSchema = z.object({
+	date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD"),
+	tokens_by_model: z.record(z.string(), z.number().int().min(0)),
+});
+
+const longestSessionSchema = z
+	.object({
+		session_id: uuidSchema.nullable(),
+		duration_seconds: z.number().int().min(0).nullable(),
+		message_count: z.number().int().min(0).nullable(),
+		timestamp: isoDateTimeSchema,
+	})
+	.nullable();
+
+export const usageSchema = z.object({
+	id: pdppSafeText,
+	total_sessions: z.number().int().min(0).nullable(),
+	total_messages: z.number().int().min(0).nullable(),
+	first_session_date: isoDateTimeSchema,
+	last_computed_date: z
+		.string()
+		.regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD")
+		.nullable(),
+	total_speculation_time_saved_ms: z.number().int().min(0).nullable(),
+	total_cost_usd_cents: z.number().int().min(0),
+	currency: z.literal("USD"),
+	models: z.array(modelUsageSchema),
+	daily_activity: z.array(dailyActivitySchema),
+	daily_model_tokens: z.array(dailyModelTokensSchema),
+	hour_counts: z.record(z.string(), z.number().int().min(0)),
+	longest_session: longestSessionSchema,
+	source: z.enum(["stats-cache", "stats-cache-missing"]),
+});
+
 const inventoryClassificationSchema = z.enum(["inventory_only", "defer"]);
 const inventoryTypeSchema = z.enum(["directory", "file", "missing", "other"]);
 const coverageStatusSchema = z.enum([
@@ -205,6 +265,7 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	skills: skillsSchema,
 	memory_notes: memoryNotesSchema,
 	slash_commands: slashCommandsSchema,
+	usage: usageSchema,
 	file_history: inventorySchema,
 	cache_inventory: inventorySchema,
 	backup_inventory: inventorySchema,
