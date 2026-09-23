@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone repro/verification harness for the tao 0.35.3 Wayland CSD
-//! titlebar-overlay bug (waspflow/tao-0.37-titlebar-fix-0921).
+//! Standalone repro/verification harness for the tao 0.35 Wayland CSD
+//! titlebar bug that `dataconnect_lib::wayland_titlebar` works around.
 //!
 //! Not part of the shipped app. Built only behind the `stall-repro` feature
 //! (shared with the other throwaway measurement binaries in this crate) via
@@ -10,26 +10,45 @@
 //!
 //! Creates one real, decorated window (matching DataConnect's own defaults
 //! -- no `decorations: false`, no `GDK_BACKEND` override), then performs the
-//! exact hide-then-show cycle the original investigation identified as the
-//! bug's trigger shape (`unified.rs::setup()` hides the main window at
-//! startup, then later re-shows it). The window is left open afterward so
-//! an external harness (xwininfo/xev/xdotool/a human) can probe titlebar
-//! hit-testing.
+//! hide-then-show cycle that triggers the bug (`unified.rs::setup()` hides
+//! the main window at startup, then later re-shows it). It logs which
+//! titlebar widget GTK holds afterwards, and logs `CloseRequested` if the
+//! close button works. The window stays open so an external harness can
+//! click it.
 //!
-//! Honest scope note: this binary cannot exercise tao's Wayland-only CSD
-//! code path (`window.display().backend().is_wayland()`) when run under
-//! X11/Xvfb -- that check is false under X11 by construction, so a clean
-//! run here proves the patched build creates/hides/shows a window without
-//! regressing, NOT that the Wayland-specific bug is fixed. Confirming the
-//! bug's mechanism is fixed requires either a genuine Wayland session (none
-//! available in this sandbox -- no weston/sway/cage found) or a source-level
-//! read of tao's own code (done separately: tao 0.37.0 removed
-//! `wayland/header.rs` entirely and gated the replacement EventBox behind
-//! `!attributes.decorations`, so DataConnect's own decorated windows never
-//! hit that path on Wayland either).
+//! Environment:
+//! - `TITLEBAR_REPRO_WORKAROUND=0` skips the fix, to reproduce the bug.
+//! - `TITLEBAR_REPRO_SKIP_HIDE=1` skips the hide/show cycle (control run).
+//! - `TITLEBAR_REPRO_LIFETIME_SECS` sets how long the window stays open.
+//!
+//! The Wayland path only runs under a Wayland compositor. A headless one is
+//! enough: `kwin_wayland --virtual` inside `dbus-run-session`, with clicks
+//! sent through KWin's `org_kde_kwin_fake_input` protocol
+//! (`KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`). Under X11/Xvfb, tao installs no
+//! header bar, so a clean run there proves nothing about this bug.
 
 use std::time::Duration;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+/// Logs which titlebar widget GTK holds after the re-show: tao's EventBox
+/// (the bug's mechanism) or none (compositor/GTK default decorations).
+fn report_titlebar(window: &tauri::WebviewWindow) {
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        use gtk::glib::object::ObjectExt;
+        use gtk::prelude::{DisplayExtManual, GtkWindowExt, WidgetExt};
+        let gtk_window = target.gtk_window().expect("gtk window");
+        let titlebar = gtk_window
+            .titlebar()
+            .map(|widget| ObjectExt::type_(&widget).name().to_string());
+        eprintln!(
+            "[titlebar-repro] after re-show: backend_wayland={} decorated={} titlebar={:?}",
+            gtk_window.display().backend().is_wayland(),
+            gtk_window.is_decorated(),
+            titlebar,
+        );
+    });
+}
 
 fn main() {
     eprintln!("[titlebar-repro] pid={}", std::process::id());
@@ -41,7 +60,14 @@ fn main() {
         std::env::var("WAYLAND_DISPLAY"),
     );
 
-    let app = tauri::Builder::default()
+    // TITLEBAR_REPRO_WORKAROUND=0 runs without the app's fix, to reproduce the bug.
+    let workaround = std::env::var("TITLEBAR_REPRO_WORKAROUND").as_deref() != Ok("0");
+    eprintln!("[titlebar-repro] wayland_titlebar workaround={workaround}");
+    let mut builder = tauri::Builder::default();
+    if workaround {
+        builder = builder.plugin(dataconnect_lib::wayland_titlebar::init());
+    }
+    let app = builder
         .build(tauri::generate_context!())
         .expect("failed to build titlebar-repro tauri app");
 
@@ -69,14 +95,21 @@ fn main() {
             .get_webview_window("titlebar-repro")
             .expect("window must exist");
 
-        std::thread::sleep(Duration::from_millis(800));
-        eprintln!("[titlebar-repro] hiding window (t=800ms)");
-        let _ = window.hide();
+        // TITLEBAR_REPRO_SKIP_HIDE=1 is the control run: same window, no hide/show.
+        if std::env::var("TITLEBAR_REPRO_SKIP_HIDE").as_deref() == Ok("1") {
+            std::thread::sleep(Duration::from_millis(1600));
+            eprintln!("[titlebar-repro] control run: window never hidden");
+        } else {
+            std::thread::sleep(Duration::from_millis(800));
+            eprintln!("[titlebar-repro] hiding window (t=800ms)");
+            let _ = window.hide();
 
-        std::thread::sleep(Duration::from_millis(800));
-        eprintln!("[titlebar-repro] re-showing window (t=1600ms) -- this is the trigger shape");
-        let _ = window.show();
-        let _ = window.set_focus();
+            std::thread::sleep(Duration::from_millis(800));
+            eprintln!("[titlebar-repro] re-showing window (t=1600ms) -- this is the trigger shape");
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        report_titlebar(&window);
 
         eprintln!(
             "[titlebar-repro] window re-shown, staying open for external probing (xwininfo/xev/xdotool/manual click)"

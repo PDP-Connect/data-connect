@@ -95,87 +95,10 @@ scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 libc = "0.2"
 signal-hook = "0.4.4"
 
-# Windows CI (build (windows-latest, ...)) failed after the tao 0.37.0 bump
-# below with `error[E0432]: unresolved import windows::Win32::UI::Controls`
-# in tauri-runtime-wry's dialog/windows.rs. Root cause, confirmed against
-# the actual resolved dependency graph (`cargo tree --target
-# x86_64-pc-windows-msvc -i windows@0.61.3`): tauri-runtime-wry's own
-# Cargo.toml requests `windows = "0.61"` with features =
-# ["Win32_Foundation", "Win32_Graphics_Dwm"] -- it compiles against a
-# SEPARATE windows 0.61.3 instance from the windows 0.62.2 that tao
-# 0.37.0 requires (`^0.61` and `^0.62` cannot unify to one crate instance
-# under semver), and tauri-runtime-wry never directly requests
-# Win32_UI_Controls on its own 0.61.3 instance -- it was relying on some
-# other crate in the graph pulling that feature in for the SAME windows
-# instance via Cargo's additive-but-per-instance feature unification.
-# Under tao 0.35.3 (both tao and tauri-runtime-wry sharing one windows
-# 0.61.x instance) that incidentally worked; splitting into two instances
-# broke it. windows 0.61.3 still has the Controls module (confirmed:
-# crates.io source, Win32/UI/mod.rs), it is just feature-gated
-# (`Win32_UI_Controls`) and nothing else in the graph turns it on for
-# THIS specific 0.61.3 instance. Force it on directly, pinned to the same
-# 0.61 range tauri-runtime-wry itself uses (NOT 0.62 -- a first attempt
-# at this fix added the feature to the wrong, 0.62.2 instance and did not
-# actually resolve the compile error, since tauri-runtime-wry never
-# touches that instance at all).
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_UI_Controls"] }
-
-# RETIRE THIS PATCH WHEN (checked 2026-09-21 against the crates.io sparse index,
-# https://index.crates.io/ta/ur/tauri-runtime-wry and https://index.crates.io/ta/ur/tauri
-# -- re-run the same query to check again):
-#   EITHER a published, STABLE (non-alpha) tauri 2.x release depends on a
-#   tauri-runtime-wry release whose own `tao` requirement is `>= 0.37`
-#   (as of this check, the newest stable tauri-runtime-wry is 2.11.4, published
-#   2026-06-30, requiring tao "^0.35.0"; the newest stable tauri is 2.11.6,
-#   published 2026-09-19, still pinned to tauri-runtime-wry "^2.11.4"; the only
-#   published tauri-runtime-wry releases requiring tao ">=0.37" are
-#   3.0.0-alpha.0/1/2, which are not stable),
-#   OR this app migrates to Tauri 3.0 stable (not alpha).
-# Until then, no real upgrade path exists -- this fork patch is the only way to
-# get the Wayland titlebar hit-testing fix (tao#1046/#1122,
-# tauri-apps/tauri#13440) onto the current stable Tauri 2.x line.
-#
-# Fork-patch to relax tauri-runtime-wry's `tao = "^0.35.0"` requirement so we can
-# pull tao >=0.36, which fixes an unconditional Wayland CSD EventBox overlay
-# (tao#1046/#1122, tauri-apps/tauri#13440) that breaks titlebar button
-# hit-testing after a window is hidden and re-shown. No published tauri 2.x
-# release pulls tao >=0.36 (that lands only on the 3.0.0-alpha line, which
-# would require migrating ~15 tauri-plugin-* deps to their own 3.0-alpha
-# releases -- several don't have one). This patches only tauri-runtime-wry's
-# Cargo.toml manifest (one line, the `tao` version requirement), starting
-# from the tauri-apps/tauri monorepo pinned at tag tauri-runtime-wry-v2.11.4
-# (commit ca90b46b2e2cbbc981dae1b809f4af4343fe0558). No Rust source was
-# modified. tauri-runtime and tauri-utils must be patched from the same
-# source in lockstep because they are path-sibling dependencies of
-# tauri-runtime-wry inside that monorepo checkout -- patching
-# tauri-runtime-wry alone causes cargo to pull a second, differently-sourced
-# copy of tauri-runtime, which Rust then treats as a distinct type from the
-# one tauri itself uses (`the trait tauri_runtime::Runtime<EventLoopMessage>
-# is not implemented for tauri_runtime_wry::Wry<EventLoopMessage>`).
-#
-# A local `path = "..."` patch was tried first and built locally, but fails
-# in CI (and on any other machine) with "failed to load source for
-# dependency `tauri-runtime`... No such file or directory" -- a path patch
-# resolves to an absolute filesystem path that only exists on the machine
-# that created it. Fixed by publishing the one-line manifest change to a
-# real, network-reachable git remote and patching from there instead, with
-# an explicit commit pin (never a mutable branch ref) so the resolved
-# dependency is reproducible.
-#
-# Fork: https://github.com/tnunamak/tauri, branch
-# `tao-0.37-compat-for-dataconnect`, pinned at commit
-# 1598c1df37f87fe76a08ed18e0b8fa7b270c3d16 (one commit ahead of
-# tauri-runtime-wry-v2.11.4 / ca90b46b2e2cbbc981dae1b809f4af4343fe0558,
-# containing only the `tao` version-range relaxation below). Reproduce:
-#   git clone --branch tauri-runtime-wry-v2.11.4 \
-#     https://github.com/tauri-apps/tauri.git tauri-fork
-#   # edit crates/tauri-runtime-wry/Cargo.toml:
-#   #   tao = { version = "0.35.0", ... } -> tao = { version = ">=0.35.0, <0.38.0", ... }
-[patch.crates-io]
-tauri-runtime = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
-tauri-utils = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
-tauri-runtime-wry = { git = "https://github.com/tnunamak/tauri", rev = "1598c1df37f87fe76a08ed18e0b8fa7b270c3d16" }
+# gtk is already in the tree via tauri; it is named here so the
+# wayland_titlebar module can call GtkWindowExt on the window tauri returns.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # run_lease.rs's process-identity check has no /proc filesystem to read on
