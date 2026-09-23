@@ -7941,7 +7941,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // routes/owner-credential-reveal.ts for the full rationale.
   mountOwnerCredentialReveal(app, {
     handleError,
-    isEligibleForReveal: (req) =>
+    isEligibleForReveal: (req: { headers?: Record<string, string | string[] | undefined> }) =>
       ownerCredentialRevealEnabled && hasLocalOwnerCredentialRevealProof(req, ownerCredentialRevealProof),
     readOwnerPassword,
     requireOwner,

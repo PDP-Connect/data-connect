@@ -34,14 +34,14 @@ function response(): TestResponse {
 }
 
 function mountedRoute(isEligibleForReveal: (req: { headers?: Record<string, string> }) => boolean) {
-  const handlers: Handler[] = [];
+  const handlers: unknown[] = [];
   const app = {
-    get(_path: string, ...args: Handler[]) {
-      handlers.push(...args);
+    get(_path: string, ...args: unknown[]) {
+      handlers.push(...args.filter((arg) => typeof arg === "function"));
       return this;
     },
   };
-  mountOwnerCredentialReveal(app, {
+  mountOwnerCredentialReveal(app as unknown as Parameters<typeof mountOwnerCredentialReveal>[0], {
     handleError: (_res, err) => {
       throw err;
     },
@@ -50,7 +50,7 @@ function mountedRoute(isEligibleForReveal: (req: { headers?: Record<string, stri
     requireOwner: (_req, _res, next) => next?.(),
     requireToken: (_req, _res, next) => next?.(),
   });
-  return handlers;
+  return handlers as Handler[];
 }
 
 async function run(handlers: Handler[], req: { headers?: Record<string, string> }) {
