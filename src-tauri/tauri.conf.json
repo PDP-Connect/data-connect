@@ -15,6 +15,7 @@
       {
         "title": "DataConnect",
         "label": "main",
+        "create": false,
         "width": 1280,
         "height": 840,
         "minWidth": 720,
