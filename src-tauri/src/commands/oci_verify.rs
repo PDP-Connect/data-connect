@@ -1,13 +1,22 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Verification for cosign's legacy OCI simple-signing objects.
+//! Verification for cosign's OCI signature formats: the legacy simple-signing
+//! `.sig` image, and the cosign v3-default Sigstore bundle.
 //!
-//! Cosign stores the signed JSON payload in a layer at `<digest with ':' replaced
-//! by '-'>.sig`.  The OCI client owns transport and descriptor validation; this
-//! module turns those already-verified bytes and annotations into a Sigstore
-//! bundle, then proves the signature, Fulcio chain, pinned signer identity, and
-//! Rekor signed-entry timestamp.
+//! Cosign stores the legacy signed JSON payload in a layer at `<digest with
+//! ':' replaced by '-'>.sig`.  The OCI client owns transport and descriptor
+//! validation; this module turns those already-verified bytes and
+//! annotations into a Sigstore bundle, then proves the signature, Fulcio
+//! chain, pinned signer identity, and Rekor signed-entry timestamp.
+//!
+//! Cosign v3 makes the Sigstore protobuf bundle (media type
+//! `application/vnd.dev.sigstore.bundle.v0.3+json`) the default signature
+//! format instead.  That bundle is a DSSE envelope wrapping an in-toto
+//! Statement whose `subject[].digest.sha256` names the signed artifact; the
+//! `sigstore` crate verifies it natively (PAE signature, Fulcio chain, SCT,
+//! Rekor tlog consistency) given the already-fetched, digest-checked bundle
+//! bytes.
 
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -36,6 +45,12 @@ pub(crate) const DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER: &str =
     "https://token.actions.githubusercontent.com";
 pub(crate) const DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: &str =
     "https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main";
+
+/// The `artifactType`/media type cosign v3 gives its default Sigstore bundle,
+/// both as a referrer descriptor's `artifactType` and as the bundle layer's
+/// own `mediaType`.
+pub(crate) const COSIGN_BUNDLE_V03_ARTIFACT_TYPE: &str =
+    "application/vnd.dev.sigstore.bundle.v0.3+json";
 
 /// One descriptor-validated simple-signing layer from the cosign `.sig` image.
 ///
@@ -145,6 +160,137 @@ async fn verify_cosign_signature_with_trust_root<R: TrustRoot>(
         "{error_class}: no cosign signature for {repository}@{expected_manifest_digest} verified: {}",
         failures.join("; ")
     ))
+}
+
+/// Verifies one of the supplied cosign v3 Sigstore bundles against the
+/// production trust root.  A candidate must be a DSSE envelope whose in-toto
+/// statement names `expected_manifest_bytes`' digest, use the PDP-Connect
+/// workflow identity and GitHub Actions issuer, and carry Fulcio + Rekor
+/// evidence the crate can check offline.
+///
+/// `candidates` are already-fetched, digest-verified bundle layer bytes, one
+/// per referrer whose manifest named the artifact digest as its `subject`;
+/// that check happens at the referrer-selection layer
+/// (`fetch_candidate_bundle_manifest` in `oci.rs`), because for this format
+/// the claim lives in the outer manifest, not the bundle payload. This
+/// function additionally requires the DSSE in-toto statement's own subject
+/// digest to match, so a bundle cannot be accepted on a manifest `subject`
+/// claim it does not itself repeat.
+///
+/// `expected_manifest_bytes` are the exact, already digest-checked manifest
+/// bytes the caller fetched by digest (`RegistryClient::fetch_manifest_by_digest`),
+/// hashed here to produce the `input_digest` the DSSE path compares against
+/// the statement's subject — the same relationship the legacy path has
+/// between its `payload` bytes and `messageDigest`.
+pub(crate) async fn verify_cosign_bundle_signature(
+    candidates: &[Vec<u8>],
+    expected_manifest_bytes: &[u8],
+    repository: &str,
+) -> Result<(), String> {
+    let expected_manifest_digest = sha256_digest_string(expected_manifest_bytes);
+    validate_reference(repository, &expected_manifest_digest)?;
+    if candidates.is_empty() {
+        return Err("OCI_UNVERIFIABLE: artifact has no usable cosign v3 bundle candidate".into());
+    }
+
+    let trust_root = SigstoreTrustRoot::new(None).await.map_err(|error| {
+        format!("OCI_UNVERIFIABLE: could not load the Sigstore trust root: {error}")
+    })?;
+    verify_cosign_bundle_signature_with_trust_root(
+        candidates,
+        expected_manifest_bytes,
+        repository,
+        trust_root,
+    )
+    .await
+}
+
+fn sha256_digest_string(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+async fn verify_cosign_bundle_signature_with_trust_root<R: TrustRoot>(
+    candidates: &[Vec<u8>],
+    expected_manifest_bytes: &[u8],
+    repository: &str,
+    trust_root: R,
+) -> Result<(), String> {
+    let expected_manifest_digest = sha256_digest_string(expected_manifest_bytes);
+    validate_reference(repository, &expected_manifest_digest)?;
+    let verifier = Verifier::new(Default::default(), trust_root).map_err(|error| {
+        format!("OCI_UNVERIFIABLE: could not initialize Sigstore verification: {error}")
+    })?;
+    let policy = Identity::new(
+        DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
+        DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
+    );
+
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        match verify_bundle_candidate(&verifier, &policy, candidate, expected_manifest_bytes).await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => failures.push(error),
+        }
+    }
+
+    let error_class = if failures
+        .iter()
+        .any(|error| error.starts_with("OCI_MISIDENTIFIED:"))
+    {
+        "OCI_MISIDENTIFIED"
+    } else {
+        "OCI_UNVERIFIABLE"
+    };
+    Err(format!(
+        "{error_class}: no cosign v3 bundle for {repository}@{expected_manifest_digest} verified: {}",
+        failures.join("; ")
+    ))
+}
+
+/// Verify one candidate bundle's bytes as a Sigstore bundle.
+///
+/// `Verifier::verify_digest` takes a live `Sha256` hasher rather than raw
+/// digest bytes; the crate finalizes it internally and, on the DSSE path,
+/// compares the result against the in-toto statement's subject digest rather
+/// than using it as a signed preimage (`verify_bundle_content`'s `Dsse` arm,
+/// sigstore 0.14.0 `src/bundle/verify/verifier.rs`). Hashing the real
+/// manifest bytes here — rather than trying to seed a hasher with a
+/// precomputed digest, which the hash API does not allow — produces exactly
+/// that comparison value.
+async fn verify_bundle_candidate(
+    verifier: &Verifier,
+    policy: &Identity,
+    bundle_bytes: &[u8],
+    manifest_bytes: &[u8],
+) -> Result<(), String> {
+    let bundle: Bundle = serde_json::from_slice(bundle_bytes).map_err(|error| {
+        format!("OCI_UNVERIFIABLE: cosign v3 bundle is not valid JSON: {error}")
+    })?;
+
+    // `sigstore` 0.14.0 pins `sha2 = "0.10"`, one major behind this crate's own
+    // `sha2 = "0.11"`, so `Verifier::verify_digest` needs the 0.10 `Sha256`
+    // type specifically (see the `sha2-for-sigstore` note in `Cargo.toml`).
+    use sha2_for_sigstore::Digest as _;
+    let mut hasher = sha2_for_sigstore::Sha256::new();
+    hasher.update(manifest_bytes);
+
+    // `offline = true`: verify the Rekor evidence embedded in the bundle
+    // (inclusion proof + checkpoint, required for a v0.3 bundle) rather than
+    // asking the network to fill in missing evidence, matching the legacy
+    // path's offline posture.
+    verifier
+        .verify_digest(hasher, bundle, policy, true)
+        .await
+        .map_err(|error| {
+            let error = error.to_string();
+            let error_class = if error.contains("OIDCIssuer") || error.contains("SubjectAltName") {
+                "OCI_MISIDENTIFIED"
+            } else {
+                "OCI_UNVERIFIABLE"
+            };
+            format!("{error_class}: Sigstore v3 bundle verification failed: {error}")
+        })
 }
 
 async fn verify_candidate(
@@ -384,6 +530,148 @@ mod tests {
             "../../test-fixtures/sigstore-trusted-root.json"
         ))
         .expect("valid captured Sigstore trust root")
+    }
+
+    // ── cosign v3 Sigstore bundle: real Fulcio-signed fixture ──────────────
+    //
+    // `fulcio-real-bundle-v03.json` is a real, Fulcio-issued, Rekor-logged
+    // cosign v0.3 DSSE bundle (borrowed from the `sigstore` crate's own test
+    // suite; see test-fixtures/cosign-v3-bundle/README.md for full
+    // provenance). `fulcio-real-manifest-v134.json` is the actual preimage it
+    // signed, fetched live from ghcr.io. Together they let these tests drive
+    // the real `Verifier::verify_digest` path end to end, not just structural
+    // parsing.
+
+    const KUBEWARDEN_IDENTITY: &str = "https://github.com/kubewarden/kubewarden-controller/.github/workflows/release.yml@refs/tags/v1.34.0";
+    const KUBEWARDEN_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+    fn kubewarden_bundle_bytes() -> &'static [u8] {
+        include_bytes!("../../test-fixtures/cosign-v3-bundle/fulcio-real-bundle-v03.json")
+    }
+
+    fn kubewarden_manifest_bytes() -> &'static [u8] {
+        include_bytes!("../../test-fixtures/cosign-v3-bundle/fulcio-real-manifest-v134.json")
+    }
+
+    fn kubewarden_policy() -> Identity {
+        Identity::new(KUBEWARDEN_IDENTITY, KUBEWARDEN_ISSUER)
+    }
+
+    async fn verify_kubewarden_bundle(
+        manifest_bytes: &[u8],
+        policy: Identity,
+    ) -> Result<(), String> {
+        let verifier =
+            Verifier::new(Default::default(), captured_trust_root()).expect("offline verifier");
+        verify_bundle_candidate(
+            &verifier,
+            &policy,
+            kubewarden_bundle_bytes(),
+            manifest_bytes,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn v3_t1_accepts_a_real_fulcio_signed_v03_bundle_offline() {
+        let result =
+            verify_kubewarden_bundle(kubewarden_manifest_bytes(), kubewarden_policy()).await;
+        assert!(
+            result.is_ok(),
+            "real Fulcio-signed v0.3 DSSE bundle must verify: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_t2_refuses_a_payload_digest_mismatch() {
+        // Real bundle, but the manifest bytes hashed here are not what the
+        // DSSE statement's subject names — this must refuse, not downgrade.
+        let error = verify_kubewarden_bundle(b"not the signed artifact", kubewarden_policy())
+            .await
+            .expect_err("mismatched artifact bytes must be refused");
+        assert!(error.starts_with("OCI_UNVERIFIABLE:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_t3_refuses_a_wrong_identity() {
+        let wrong_identity = Identity::new(
+            "https://github.com/attacker/kubewarden-controller/.github/workflows/release.yml@refs/tags/v1.34.0",
+            KUBEWARDEN_ISSUER,
+        );
+        let error = verify_kubewarden_bundle(kubewarden_manifest_bytes(), wrong_identity)
+            .await
+            .expect_err("wrong identity must be refused");
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_t4_refuses_a_wrong_issuer() {
+        let wrong_issuer = Identity::new(KUBEWARDEN_IDENTITY, "https://issuer.example.invalid");
+        let error = verify_kubewarden_bundle(kubewarden_manifest_bytes(), wrong_issuer)
+            .await
+            .expect_err("wrong issuer must be refused");
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_t5_pinned_policy_refuses_a_real_bundle_for_a_different_signer() {
+        // The bundle's real identity is kubewarden's, not
+        // DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY, so the PDP-Connect-pinned
+        // policy this entry point uses must still refuse it — proving the
+        // production policy is actually applied, not bypassed just because
+        // the bundle is real and cryptographically valid.
+        let error = verify_cosign_bundle_signature_with_trust_root(
+            &[kubewarden_bundle_bytes().to_vec()],
+            kubewarden_manifest_bytes(),
+            "pdp-connect/connector/ynab",
+            captured_trust_root(),
+        )
+        .await
+        .expect_err("a real bundle for a different signer must be refused");
+        assert!(error.starts_with("OCI_MISIDENTIFIED:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_t6_no_candidates_is_unverifiable() {
+        let error = verify_cosign_bundle_signature_with_trust_root(
+            &[],
+            kubewarden_manifest_bytes(),
+            "pdp-connect/connector/ynab",
+            captured_trust_root(),
+        )
+        .await
+        .expect_err("no candidates must refuse");
+        assert!(error.starts_with("OCI_UNVERIFIABLE:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn v3_t7_key_based_bundle_is_unverifiable_not_a_downgrade() {
+        // The captured cosign-v3-bundle fixture (real wire bytes from
+        // data-connectors#148) is key-based (publicKey.hint), not a Fulcio
+        // certificate. `sigstore` 0.14.0 cannot build a `CheckedBundle` from
+        // `VerificationMaterial::PublicKey` at all
+        // (`BundleErrorKind::VerificationMaterialContentUnsupported`), so this
+        // must refuse as unverifiable — never silently accepted, and never a
+        // panic. We do not have preimage bytes for this fixture's own subject
+        // digest (see the fixture README), so this test only proves the
+        // refusal path is reached, not a digest match on top of it.
+        let key_based_bundle =
+            include_bytes!("../../test-fixtures/cosign-v3-bundle/bundle-blob.json");
+        let verifier =
+            Verifier::new(Default::default(), captured_trust_root()).expect("offline verifier");
+        let error = verify_bundle_candidate(
+            &verifier,
+            &kubewarden_policy(),
+            key_based_bundle,
+            b"placeholder artifact bytes",
+        )
+        .await
+        .expect_err("key-based bundle must not verify");
+        assert!(error.starts_with("OCI_UNVERIFIABLE:"), "{error}");
+        assert!(
+            error.contains("unsupported VerificationMaterial::Content"),
+            "expected the crate's own unsupported-content-material refusal, got: {error}"
+        );
     }
 
     async fn verify_fixture_with_policy(
