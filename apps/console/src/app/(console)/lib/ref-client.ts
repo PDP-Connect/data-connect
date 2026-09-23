@@ -90,6 +90,7 @@ export interface RunStatusEnvelope {
     connector_error_message: string | null;
     message: string | null;
     origin: string | null;
+    recovery_hint?: { action: "refresh_credentials"; retryable: false } | null;
     reason: string | null;
   } | null;
   /**
@@ -182,11 +183,19 @@ function normalizeRunFailure(value: unknown): RunStatusEnvelope["failure"] {
     return null;
   }
   const failure = value as Record<string, unknown>;
+  const recoveryHint =
+    failure.recovery_hint && typeof failure.recovery_hint === "object" && !Array.isArray(failure.recovery_hint)
+      ? (failure.recovery_hint as Record<string, unknown>)
+      : null;
   return {
     connector_error_message:
       typeof failure.connector_error_message === "string" ? failure.connector_error_message : null,
     message: typeof failure.message === "string" ? failure.message : null,
     origin: typeof failure.origin === "string" ? failure.origin : null,
+    recovery_hint:
+      recoveryHint?.action === "refresh_credentials" && recoveryHint.retryable === false
+        ? { action: "refresh_credentials", retryable: false }
+        : null,
     reason: typeof failure.reason === "string" ? failure.reason : null,
   };
 }

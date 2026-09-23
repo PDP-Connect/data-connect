@@ -166,6 +166,14 @@ export default async function RunDetailPage({
         interactions={interactions}
         progress={progress}
       />
+      {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
+        <p className="pdpp-caption mb-8 text-muted-foreground">
+          Reconnect this source to sync again: {" "}
+          <Link className="text-foreground underline" href={`/sources/${encodeURIComponent(connectorId)}`}>
+            {connectorName}
+          </Link>
+        </p>
+      ) : null}
       <KnownGapsSection
         coverageGaps={gapClassification.coverageGaps}
         informationalGaps={gapClassification.informationalGaps}
@@ -995,6 +1003,9 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
       ];
     }
     if (runStatus?.failure) {
+      if (runStatus.failure.recovery_hint?.action === "refresh_credentials") {
+        return runStatus.failure.message ? [["message", runStatus.failure.message]] : [];
+      }
       return [
         ["reason", runStatus.failure.reason ?? runStatus.terminal_reason ?? "—"],
         ["origin", runStatus.failure.origin ?? "—"],
