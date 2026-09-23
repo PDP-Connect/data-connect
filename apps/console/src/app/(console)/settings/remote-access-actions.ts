@@ -9,6 +9,7 @@ import {
   inspectMyDevicesOnlyRemoteAccess,
   inspectNgrokRemoteAccess,
   inspectRemoteAccess,
+  setConsolePort,
   setRemoteAccessConfig,
 } from "../lib/remote-access-client.ts"
 import { requireDashboardAccess } from "../lib/dashboard-access.ts"
@@ -38,9 +39,23 @@ function effectiveConsolePort(): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 3000
 }
 
+/**
+ * The port the owner relies on, as the desktop supervisor told this process
+ * at spawn (`DATACONNECT_CONSOLE_STABLE_PORT`, see
+ * `src-tauri/src/console_port.rs`). It differs from `effectiveConsolePort`
+ * only when that port was taken at launch. `null` on a host with no desktop
+ * supervisor, where `PORT` comes from the environment alone.
+ */
+function stableConsolePort(): number | null {
+  const raw = process.env.DATACONNECT_CONSOLE_STABLE_PORT?.trim()
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : null
+}
+
 export async function loadRemoteAccessStateAction(): Promise<{
   config: RemoteAccessConfig
   effectiveConsolePort: number
+  stableConsolePort: number | null
   inspection: Awaited<ReturnType<typeof inspectRemoteAccess>>
   ngrokInspection: Awaited<ReturnType<typeof inspectNgrokRemoteAccess>>
   cloudflareTunnelInspection: Awaited<ReturnType<typeof inspectCloudflareTunnelRemoteAccess>>
@@ -58,6 +73,7 @@ export async function loadRemoteAccessStateAction(): Promise<{
   return {
     config,
     effectiveConsolePort: effectiveConsolePort(),
+    stableConsolePort: stableConsolePort(),
     inspection,
     ngrokInspection,
     cloudflareTunnelInspection,
@@ -74,6 +90,15 @@ export async function setRemoteAccessConfigAction(
   try {
     const saved = await setRemoteAccessConfig(config, providerCredential, acknowledgeRemoteDisconnectRisk)
     return { config: saved, ok: true }
+  } catch (err) {
+    return { message: actionMessage(err), ok: false }
+  }
+}
+
+export async function setConsolePortAction(port: number | null): Promise<RemoteAccessActionResult> {
+  await requireDashboardAccess("/settings")
+  try {
+    return { config: await setConsolePort(port), ok: true }
   } catch (err) {
     return { message: actionMessage(err), ok: false }
   }

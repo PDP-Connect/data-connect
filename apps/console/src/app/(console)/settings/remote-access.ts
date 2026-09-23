@@ -426,3 +426,44 @@ export function originVerificationDisplay(
       return { ...base, reading: { kind: "unreachable", checkedAt, reason: outcome.reason } }
   }
 }
+
+/**
+ * Whether the console's port will still be the same after a restart, as a
+ * pure function of what the console process knows about itself. Every
+ * provider gets the same answer: a provider whose route the app sets itself
+ * (ngrok) is unaffected by a moved port, but a pin is harmless there, so no
+ * provider is excluded from the port control.
+ *
+ * - `environment`: no desktop supervisor reported a stable port, so `PORT`
+ *   comes from this host's own environment (Docker, a platform).
+ * - `moved`: the stable port was taken when DataConnect started, and the
+ *   console is on another port for now. Anything routed to `stablePort`
+ *   does not reach it.
+ * - `pinned`: the owner's pin; a taken pin stops the start instead.
+ * - `kept`: the persisted port, reused on every launch.
+ */
+export type ConsolePortStatus =
+  | { kind: "environment"; port: number }
+  | { kind: "moved"; port: number; stablePort: number }
+  | { kind: "pinned"; port: number }
+  | { kind: "kept"; port: number }
+
+export function consolePortStatus({
+  pinnedPort,
+  runningPort,
+  stablePort,
+}: {
+  pinnedPort: number | null
+  runningPort: number
+  stablePort: number | null
+}): ConsolePortStatus {
+  if (stablePort == null) {
+    return { kind: "environment", port: runningPort }
+  }
+  if (runningPort !== stablePort) {
+    return { kind: "moved", port: runningPort, stablePort }
+  }
+  return pinnedPort === runningPort
+    ? { kind: "pinned", port: runningPort }
+    : { kind: "kept", port: runningPort }
+}

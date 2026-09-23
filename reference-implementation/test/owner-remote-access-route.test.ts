@@ -871,3 +871,99 @@ test("POST config with posture my_devices_only ignores any client-submitted lan_
     assert.equal(body.data.fields.PDPP_BIND_HOST, body.data.my_devices_only?.lan_host);
   });
 });
+
+// A Cloudflare owner is the case the pin was missing for: the dashboard
+// route targets a fixed port, and POST /config demands the tunnel token on
+// every submission.
+async function saveCloudflareTunnel(routes: FakeApp["routes"], extra: Partial<RemoteAccessConfig> = {}): Promise<void> {
+  const post = makeRes();
+  await routes.get("POST /v1/owner/remote-access/config")?.(
+    {
+      body: {
+        cloudflare_tunnel: { hostname: "vault.example.com" },
+        fields: offRemoteAccessConfig().fields,
+        posture: "public_url",
+        provider: "cloudflare_tunnel",
+        providerCredential: "shhh-cloudflare-token",
+        ...extra,
+      },
+    },
+    post.res
+  );
+  assert.equal(post.captured.status, 200, JSON.stringify(post.captured.body));
+}
+
+test("POST config keeps a pinned port for every provider, not only user_supplied_origin", async () => {
+  await withMountedRoutes(async (routes) => {
+    await saveCloudflareTunnel(routes, { console_port: 38739 });
+    const get = makeRes();
+    await routes.get("GET /v1/owner/remote-access/config")?.({}, get.res);
+    assert.equal((get.captured.body as { data: RemoteAccessConfig }).data.console_port, 38739);
+
+    const post = makeRes();
+    await routes.get("POST /v1/owner/remote-access/config")?.(
+      {
+        body: {
+          console_port: 38740,
+          fields: offRemoteAccessConfig().fields,
+          ngrok: { endpoint_mode: "https_edge_termination", reserved_domain: null },
+          posture: "public_url",
+          provider: "ngrok",
+          providerCredential: "shhh-ngrok-authtoken",
+        },
+      },
+      post.res
+    );
+    assert.equal((post.captured.body as { data: RemoteAccessConfig }).data.console_port, 38740);
+  });
+});
+
+test("POST console-port pins and unpins without a provider credential and keeps the provider as stored", async () => {
+  await withMountedRoutes(async (routes) => {
+    await saveCloudflareTunnel(routes);
+    const getHandler = routes.get("GET /v1/owner/remote-access/config");
+    const before = makeRes();
+    await getHandler?.({}, before.res);
+    const stored = (before.captured.body as { data: RemoteAccessConfig }).data;
+
+    const pinHandler = routes.get("POST /v1/owner/remote-access/console-port");
+    assert.ok(pinHandler);
+    const pin = makeRes();
+    await pinHandler?.({ body: { console_port: 38739 } }, pin.res);
+    assert.equal(pin.captured.status, 200);
+    assert.doesNotMatch(JSON.stringify(pin.captured.body), /cloudflare_tunnel_token_sealed/);
+
+    const after = makeRes();
+    await getHandler?.({}, after.res);
+    assert.deepEqual((after.captured.body as { data: RemoteAccessConfig }).data, { ...stored, console_port: 38739 });
+
+    const unpin = makeRes();
+    await pinHandler?.({ body: { console_port: null } }, unpin.res);
+    const unpinned = makeRes();
+    await getHandler?.({}, unpinned.res);
+    assert.deepEqual((unpinned.captured.body as { data: RemoteAccessConfig }).data, { ...stored, console_port: null });
+  });
+});
+
+test("POST console-port rejects a port that is not a TCP port and changes nothing", async () => {
+  await withMountedRoutes(async (routes) => {
+    await saveCloudflareTunnel(routes);
+    const pinHandler = routes.get("POST /v1/owner/remote-access/console-port");
+    for (const console_port of [0, 65536, 1.5, "7664", undefined]) {
+      const res = makeRes();
+      await pinHandler?.({ body: { console_port } }, res.res);
+      assert.equal(res.captured.status, 400, `console_port=${String(console_port)}`);
+    }
+    const get = makeRes();
+    await routes.get("GET /v1/owner/remote-access/config")?.({}, get.res);
+    assert.equal((get.captured.body as { data: RemoteAccessConfig }).data.console_port, null);
+  });
+});
+
+test("POST console-port refuses while remote access is off instead of reporting a pin it cannot store", async () => {
+  await withMountedRoutes(async (routes) => {
+    const res = makeRes();
+    await routes.get("POST /v1/owner/remote-access/console-port")?.({ body: { console_port: 7664 } }, res.res);
+    assert.equal(res.captured.status, 409);
+  });
+});

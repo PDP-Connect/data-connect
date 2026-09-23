@@ -72,11 +72,12 @@ export interface RemoteAccessConfig {
   provider: RemoteAccessProvider | null
   fields: ReachabilityFields
   /**
-   * The port an owner-run reverse proxy must target, pinned so it survives
-   * restarts instead of chasing the desktop supervisor's per-launch
-   * ephemeral allocation (`src-tauri/src/commands/process_supervisor.rs`'s
-   * `allocate_loopback_port`). Only meaningful for `user_supplied_origin`.
-   * `null`/absent keeps today's dynamic-port behavior.
+   * The owner's pin for the console's loopback port: the target of an
+   * owner-maintained route (a reverse proxy, a Cloudflare dashboard route).
+   * Applies to every provider. A taken pin fails the desktop console's start
+   * instead of moving it. `null`/absent uses the desktop supervisor's
+   * persisted stable port (`src-tauri/src/console_port.rs`), which falls
+   * back loudly when it is taken.
    *
    * This is a supervisor launch parameter, not a PLATFORM-OWNED env var like
    * PORT/AS_PORT/RS_PORT (see README.md, "Config precedence") -- it never
@@ -714,6 +715,7 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
         provider: "ngrok",
         fields: offRemoteAccessConfig().fields,
         ngrok: ngrokOptions,
+        console_port: config.console_port ?? null,
         ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
         // Passed through, not synthesized: a reload of a file the Tauri
         // supervisor wrote a failure to (`apply_ngrok_tunnel_outcome` in
@@ -750,6 +752,7 @@ function validateNgrokConfig(config: RemoteAccessConfig): { ok: true; config: Re
       provider: "ngrok",
       fields: validated.fields,
       ngrok: ngrokOptions,
+      console_port: config.console_port ?? null,
       ngrok_authtoken_sealed: config.ngrok_authtoken_sealed ?? null,
       tunnel_error: config.tunnel_error ?? null,
     },
@@ -797,6 +800,7 @@ function validateCloudflareTunnelConfig(config: RemoteAccessConfig): { ok: true;
       provider: "cloudflare_tunnel",
       fields: validated.fields,
       cloudflare_tunnel: { hostname },
+      console_port: config.console_port ?? null,
       cloudflare_tunnel_token_sealed: config.cloudflare_tunnel_token_sealed ?? null,
       tunnel_error: config.tunnel_error ?? null,
     },

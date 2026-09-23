@@ -380,7 +380,9 @@ impl Supervisor {
     /// stack-level restart (a new `Supervisor` each time) rather than only
     /// across this supervisor's own internal crash-restarts, which already
     /// reuse the one port allocated in `start`. `None` behaves exactly like
-    /// `start`.
+    /// `start`. The fallback is silent here: a caller whose port matters
+    /// outside the app must compare `SupervisorHandle::port` with the port it
+    /// asked for and report a difference (see `crate::console_port`).
     pub fn start_on_port(
         self,
         preferred_port: Option<u16>,
@@ -1237,7 +1239,7 @@ fn process_group_exists(process_group: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-fn loopback_port_range_is_free(port: u16, adjacent: bool) -> bool {
+pub(crate) fn loopback_port_range_is_free(port: u16, adjacent: bool) -> bool {
     let required_ports = if adjacent { 2 } else { 1 };
     (0..required_ports).all(|offset| {
         port.checked_add(offset)
@@ -1252,7 +1254,10 @@ fn loopback_port_range_is_free(port: u16, adjacent: bool) -> bool {
 /// pinned port exists specifically so an external reverse proxy has a
 /// stable, known target. Absent a request, an OS-assigned ephemeral port is
 /// chosen as before.
-fn allocate_loopback_port(adjacent: bool, requested_port: Option<u16>) -> io::Result<u16> {
+pub(crate) fn allocate_loopback_port(
+    adjacent: bool,
+    requested_port: Option<u16>,
+) -> io::Result<u16> {
     if let Some(port) = requested_port {
         return loopback_port_range_is_free(port, adjacent)
             .then_some(port)
@@ -1818,6 +1823,75 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_ne!(handle.port(), occupied_port);
         drop(occupied);
         handle.stop().unwrap();
+    }
+
+    /// The console-port contract against real sockets and a real child:
+    /// the port survives relaunches with no in-memory hint, a collision
+    /// moves the console but does not overwrite the persisted port, and the
+    /// next launch after the collision clears returns to it.
+    #[test]
+    fn a_persisted_console_port_survives_relaunches_and_a_collision_is_not_persisted() {
+        use crate::console_port::{
+            plan_console_port, port_to_persist, read_persisted_console_port,
+            write_persisted_console_port, DEFAULT_CONSOLE_PORT,
+        };
+        let script = node_script(
+            r#"const http = require('node:http');
+const server = http.createServer((request, response) => {
+  response.writeHead(request.url === '/ready' ? 302 : 404, { location: '/login' });
+  response.end('ok');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // One app launch: plan, start, persist, stop. `previous` is always
+        // None, as after a relaunch or rebuild. The default port is treated
+        // as taken so the test does not depend on 7664 being free here.
+        let launch = || {
+            let persisted = read_persisted_console_port(dir.path());
+            let plan = plan_console_port(
+                None,
+                persisted,
+                None,
+                |port| port != DEFAULT_CONSOLE_PORT && loopback_port_range_is_free(port, false),
+                || allocate_loopback_port(false, None).ok(),
+            );
+            let readiness = Readiness::HttpGet {
+                url_from_port: "http://127.0.0.1:{port}/ready".to_string(),
+                deadline: Duration::from_secs(3),
+                host_header: None,
+            };
+            let handle = Supervisor::new(
+                base_spec(script.path(), readiness),
+                ArcSink(Arc::new(RecordingSink::default())),
+            )
+            .start_on_port(plan.preferred)
+            .unwrap();
+            let actual = handle.port();
+            if let Some(port) = port_to_persist(None, persisted, actual) {
+                write_persisted_console_port(dir.path(), port).unwrap();
+            }
+            handle.stop().unwrap();
+            (plan.stable, actual)
+        };
+
+        let (stable, first) = launch();
+        assert_eq!(stable, first, "a first launch keeps the port it chose");
+        assert_eq!(launch().1, first, "a relaunch reuses the persisted port");
+
+        let occupied = TcpListener::bind(("127.0.0.1", first)).unwrap();
+        let (stable, moved) = launch();
+        assert_eq!(stable, first, "the console is still told its stable port");
+        assert_ne!(moved, first);
+        assert_eq!(read_persisted_console_port(dir.path()), Some(first));
+        drop(occupied);
+
+        assert_eq!(
+            launch().1,
+            first,
+            "the next launch returns to the stable port"
+        );
     }
 
     #[test]

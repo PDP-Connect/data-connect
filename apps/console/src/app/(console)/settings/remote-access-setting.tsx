@@ -16,12 +16,15 @@ import {
   CLOUDFLARE_TUNNEL_SETUP_URL,
   useCloudflareTunnelConnectionStatus,
 } from "./cloudflare-tunnel-prerequisite.tsx"
+import { ConsolePortSetting } from "./console-port-setting.tsx"
 import { OriginVerificationStatus } from "./origin-verification-status.tsx"
 import {
   loadRemoteAccessStateAction,
+  setConsolePortAction,
   setRemoteAccessConfigAction,
 } from "./remote-access-actions.ts"
 import {
+  consolePortStatus,
   DEFAULT_PUBLIC_URL_OPTION_ID,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
@@ -62,6 +65,7 @@ import {
 interface RemoteAccessSettingProps {
   loadState?: typeof loadRemoteAccessStateAction
   saveConfig?: typeof setRemoteAccessConfigAction
+  saveConsolePort?: typeof setConsolePortAction
 }
 
 function asConfig(value: unknown): RemoteAccessConfig {
@@ -161,9 +165,11 @@ const postureRows: Array<{
 export function RemoteAccessSetting({
   loadState: suppliedLoadState,
   saveConfig: suppliedSaveConfig,
+  saveConsolePort: suppliedSaveConsolePort,
 }: RemoteAccessSettingProps) {
   const loadRemoteAccessState = suppliedLoadState ?? loadRemoteAccessStateAction
   const saveRemoteAccessConfig = suppliedSaveConfig ?? setRemoteAccessConfigAction
+  const saveConsolePort = suppliedSaveConsolePort ?? setConsolePortAction
   const [config, setConfig] = useState<RemoteAccessConfig>(
     offRemoteAccessConfig
   )
@@ -198,6 +204,10 @@ export function RemoteAccessSetting({
   const [effectiveConsolePort, setEffectiveConsolePort] = useState<
     number | null
   >(null)
+  // The port the desktop supervisor told this console to keep. Differs from
+  // `effectiveConsolePort` only when that port was taken at launch; `null`
+  // on a host without the desktop supervisor.
+  const [stableConsolePort, setStableConsolePort] = useState<number | null>(null)
   const [cloudflareToken, setCloudflareToken] = useState("")
   const [cloudflareHostname, setCloudflareHostname] = useState("")
   const cloudflareTunnelConnection = useCloudflareTunnelConnectionStatus(loadRemoteAccessState)
@@ -222,6 +232,7 @@ export function RemoteAccessSetting({
         ({
           config: nextConfig,
           effectiveConsolePort: nextPort,
+          stableConsolePort: nextStablePort,
           inspection: nextInspection,
           ngrokInspection: nextNgrokInspection,
           cloudflareTunnelInspection: nextCloudflareTunnelInspection,
@@ -250,6 +261,7 @@ export function RemoteAccessSetting({
             resolved.console_port != null ? String(resolved.console_port) : ""
           )
           setEffectiveConsolePort(nextPort ?? null)
+          setStableConsolePort(nextStablePort ?? null)
           setLoadState("loaded")
           // Resume showing progress after a page reload mid-connect --
           // otherwise a Cloudflare config with no origin yet and no
@@ -492,21 +504,44 @@ export function RemoteAccessSetting({
       .finally(() => setBusy(false))
   }
 
+  /**
+   * Pin or unpin the console port alone. Credential-free on purpose: the
+   * provider does not change, so the owner is not asked for a token again.
+   * Resolves to an error message for `ConsolePortSetting` to show, or `null`.
+   */
+  const pinConsolePort = async (port: number | null): Promise<string | null> => {
+    setBusy(true)
+    try {
+      const result = await saveConsolePort(port)
+      if (!result.ok) return result.message
+      const saved = asConfig(result.config)
+      setConfig(saved)
+      setPinnedPort(saved.console_port != null ? String(saved.console_port) : "")
+      return null
+    } catch (reason) {
+      return String(reason)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const enablePublicUrl = () => {
     const option = publicUrlOptionById(optionId)
     if (!option) {
       setError("Choose how this Personal Server should be reachable.")
       return
     }
+    // Every provider carries the pin: a Cloudflare dashboard route targets
+    // a fixed port exactly like an owner's proxy does.
+    const portValidation = validatePinnedConsolePort(pinnedPort)
+    if (!portValidation.ok) {
+      setError(portValidation.message)
+      return
+    }
 
     if (option.provider === "user_supplied_origin") {
       if (!configuredOriginValidation.ok) {
         setError(configuredOriginValidation.message)
-        return
-      }
-      const portValidation = validatePinnedConsolePort(pinnedPort)
-      if (!portValidation.ok) {
-        setError(portValidation.message)
         return
       }
       const nextConfig: RemoteAccessConfig = {
@@ -550,6 +585,7 @@ export function RemoteAccessSetting({
         provider: "cloudflare_tunnel",
         fields: offRemoteAccessConfig().fields,
         cloudflare_tunnel: { hostname: hostname.hostname },
+        console_port: portValidation.port,
       }
       performSave(nextConfig, cloudflareToken.trim(), () => {
         setPendingPosture(null)
@@ -595,6 +631,7 @@ export function RemoteAccessSetting({
         endpoint_mode: option.ngrokMode ?? "https_edge_termination",
         reserved_domain: domain.domain,
       },
+      console_port: portValidation.port,
     }
 
     performSave(nextConfig, authtoken.trim(), () => {
@@ -781,26 +818,25 @@ export function RemoteAccessSetting({
             // DataConnect passes.
             <OriginVerificationStatus
               consolePort={effectiveConsolePort}
-              consolePortPinned={config.console_port != null}
               display={originVerification}
               origin={originDisplay.origin}
             />
           ) : null}
-          {config.provider === "user_supplied_origin" &&
-          effectiveConsolePort != null &&
-          // Fallback for a host with no desktop supervisor, which never
-          // records a binding; otherwise `OriginVerificationStatus` above
-          // already says where to point the proxy.
-          originVerification.binding === null ? (
-            <p className="pdpp-caption text-muted-foreground">
-              Point your proxy at{" "}
-              <span className="font-mono text-foreground/80">
-                http://127.0.0.1:{effectiveConsolePort}
-              </span>
-              {config.console_port != null
-                ? ". This port is pinned and will not change on restart."
-                : ". This port is not pinned, so it can change the next time DataConnect restarts -- set a fixed port below to stop that."}
-            </p>
+          {effectiveConsolePort != null ? (
+            // One control for every provider: where the console listens,
+            // whether that survives a restart, and the pin. Rendered from
+            // `consolePortStatus`, not the provider id -- see
+            // `ConsolePortSetting`'s doc comment.
+            <ConsolePortSetting
+              busy={busy}
+              onPin={pinConsolePort}
+              pinnedPort={config.console_port ?? null}
+              status={consolePortStatus({
+                pinnedPort: config.console_port ?? null,
+                runningPort: effectiveConsolePort,
+                stablePort: stableConsolePort,
+              })}
+            />
           ) : null}
           <button
             className="justify-self-start rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
@@ -1133,37 +1169,37 @@ export function RemoteAccessSetting({
                   value={origin}
                 />
               </label>
-              <label
-                className="grid gap-1 pdpp-caption text-foreground"
-                htmlFor="remote-access-pinned-port"
-              >
-                Port your proxy targets (optional)
-                <input
-                  autoComplete="off"
-                  className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
-                  id="remote-access-pinned-port"
-                  inputMode="numeric"
-                  onChange={event => setPinnedPort(event.currentTarget.value)}
-                  placeholder={
-                    effectiveConsolePort != null
-                      ? String(effectiveConsolePort)
-                      : "4310"
-                  }
-                  type="text"
-                  value={pinnedPort}
-                />
-                <span className="pdpp-caption text-muted-foreground">
-                  {effectiveConsolePort != null
-                    ? `Currently running on port ${effectiveConsolePort}. `
-                    : ""}
-                  Leave this blank to let DataConnect pick a port each
-                  restart -- your proxy config would need updating every
-                  time. Set a fixed port so your proxy config never goes
-                  stale.
-                </span>
-              </label>
             </>
           ) : null}
+          <label
+            className="grid gap-1 pdpp-caption text-foreground"
+            htmlFor="remote-access-pinned-port"
+          >
+            Pin the console port (optional)
+            <input
+              autoComplete="off"
+              className="rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+              id="remote-access-pinned-port"
+              inputMode="numeric"
+              onChange={event => setPinnedPort(event.currentTarget.value)}
+              placeholder={
+                effectiveConsolePort != null
+                  ? String(effectiveConsolePort)
+                  : "7664"
+              }
+              type="text"
+              value={pinnedPort}
+            />
+            <span className="pdpp-caption text-muted-foreground">
+              {effectiveConsolePort != null
+                ? `Currently running on port ${effectiveConsolePort}. `
+                : ""}
+              DataConnect already keeps this port across restarts, and tells
+              you if another program took it. Pin a port if a proxy or tunnel
+              route must never find the console anywhere else: a pinned port
+              that is taken stops DataConnect from starting instead.
+            </span>
+          </label>
           <div className="flex flex-wrap justify-end gap-2">
             <button
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
