@@ -161,3 +161,36 @@ test("enabled auth + no session → 401 even when allowUnauthenticatedWhenDisabl
   const jsonBody = typeof res.body === "object" ? res.body : null;
   assert.equal(jsonBody?.error?.code, "owner_session_required");
 });
+
+// ── GET /owner/session follows the same decision ─────────────────────────────
+function ownerSessionRoute(auth: OwnerAuthPlaceholder): (req: TestAuthRequest, res: TestAuthResponse) => unknown {
+  const routes = new Map<string, (req: TestAuthRequest, res: TestAuthResponse) => unknown>();
+  auth.attachRoutes({
+    get: (path, handler) => routes.set(`GET ${path}`, handler as never),
+    post: (path, handler) => routes.set(`POST ${path}`, handler as never),
+  });
+  const route = routes.get("GET /owner/session");
+  assert.ok(route, "GET /owner/session is attached");
+  return route;
+}
+
+test("GET /owner/session: disabled auth that fails closed answers 401, not 204", () => {
+  const route = ownerSessionRoute(
+    createOwnerAuthPlaceholder({ allowUnauthenticatedWhenDisabled: false, password: null })
+  );
+  const { req, res } = makeReqRes({ accept: "application/json" });
+  route(req, res);
+  assert.equal(res.statusCode, 401);
+  const jsonBody = typeof res.body === "object" ? res.body : null;
+  assert.equal(jsonBody?.error?.code, "owner_session_required");
+});
+
+test("GET /owner/session: disabled auth in the open local-dev posture answers 204", () => {
+  const route = ownerSessionRoute(
+    createOwnerAuthPlaceholder({ allowUnauthenticatedWhenDisabled: true, password: null })
+  );
+  const { req, res } = makeReqRes({ accept: "application/json" });
+  route(req, res);
+  assert.equal(res.statusCode, 204);
+  assert.equal(res._sent, true);
+});

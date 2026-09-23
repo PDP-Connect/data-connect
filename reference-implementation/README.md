@@ -291,6 +291,7 @@ Stable owner-entry routes:
 - `GET /owner/login` - owner access page (supports a safe same-origin `return_to` query parameter). When placeholder auth is disabled it renders an honest disabled-state landing page; when enabled it renders either the sign-in form or a signed-in landing page.
 - `POST /owner/login` - when placeholder auth is enabled, submits the owner password; on success sets a signed HTTP-only session cookie (`pdpp_owner_session`, 7 day lifetime by default, configurable with `PDPP_OWNER_SESSION_TTL_SECONDS`, `SameSite=Lax`, `Secure` when served over HTTPS) and redirects to `return_to`
 - `POST /owner/logout` - clears the session cookie when present
+- `GET /owner/session` - body-less admission check: `204` when the request would pass the owner-session gate (a valid session, or the open local-dev posture), otherwise the same `401` / login redirect as a protected route. A server that forwards the browser's cookie but cannot validate it itself (the console in a split deployment) asks this before it uses owner authority.
 
 Unauthenticated HTML requests to the protected routes redirect to `/owner/login?return_to=...`; non-HTML callers receive an honest `401` with error code `owner_session_required`.
 

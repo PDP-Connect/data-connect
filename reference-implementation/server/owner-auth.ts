@@ -823,7 +823,8 @@ function handleDisabledOwnerSession(
  * Build the owner-auth placeholder. Returns an object with:
  *   - `enabled`: whether placeholder auth is active (password configured)
  *   - `subjectId`: the single owner subject id to use when enabled
- *   - `attachRoutes(app)`: wire `/owner/login*` and `/owner/logout` routes
+ *   - `attachRoutes(app)`: wire `/owner/login*`, `/owner/logout` and the
+ *     `/owner/session` admission check
  *   - `requireOwnerSession(req, res, next)`: Express middleware that gates
  *     a protected route. Redirects browsers to `/owner/login`, returns 401
  *     JSON to non-HTML callers.
@@ -970,6 +971,16 @@ export function createOwnerAuthPlaceholder({
     app.get("/owner/login", (req, res) => handleOwnerLoginGet(req, res, context));
     app.post("/owner/login", (req, res) => handleOwnerLoginPost(req, res, context));
     app.post("/owner/logout", (req, res) => handleOwnerLogout(req, res, context));
+    // Body-less admission check for a server that forwards a browser's cookie
+    // but cannot validate it itself (the console in a split deployment, before
+    // it hands out the owner bearer). Same decision as every other gated
+    // route: 204 when `requireOwnerSession` admits the request (a valid
+    // session, or the open local-dev posture), otherwise its 401/redirect.
+    app.get("/owner/session", (req, res) =>
+      requireOwnerSession(req, res, () => {
+        res.status(204).end();
+      })
+    );
   }
 
   function requireOwnerSession(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
