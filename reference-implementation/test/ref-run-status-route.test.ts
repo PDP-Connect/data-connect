@@ -196,15 +196,16 @@ async function emitStarted(
 async function emitFailed(
   runId: string,
   {
+    connectorErrorMessage = "could not open browser profile",
     occurredAt = "2026-06-10T19:05:40.730Z",
     traceId = "trace_status_1",
-  }: { occurredAt?: string; traceId?: string } = {}
+  }: { connectorErrorMessage?: string; occurredAt?: string; traceId?: string } = {}
 ): Promise<void> {
   await emitSpineEvent({
     actor_id: CONNECTOR_ID,
     actor_type: "runtime",
     data: {
-      connector_error_message: "could not open browser profile",
+      connector_error_message: connectorErrorMessage,
       failure_origin: "connector",
       reason: "connector_reported_failed",
       records_emitted: 0,
@@ -330,6 +331,21 @@ test("run-status route: completed run has no failure summary", async (t) => {
   assert.equal(res._body.status, "completed");
   assert.equal(res._body.terminal_reason, null);
   assert.equal(res._body.failure, null);
+});
+
+test("run-status route: connector auth error code gets generic reconnect guidance", async (t) => {
+  freshDb(t);
+  await emitStarted("run_auth_failed");
+  await emitFailed("run_auth_failed", { connectorErrorMessage: "ynab_auth_failed" });
+
+  const app = makeApp();
+  mountRefRunStatus(app, makeSpineCtx());
+  const res = makeRes();
+  await getRoute(app, ROUTE)({ params: { runId: "run_auth_failed" } }, res);
+
+  assert.equal(res._body.failure?.connector_error_message, "ynab_auth_failed");
+  assert.match(res._body.failure?.message ?? "", /Reconnect this source/);
+  assert.deepEqual(res._body.failure?.recovery_hint, { action: "refresh_credentials", retryable: false });
 });
 
 test("run-status route: known_gaps passes through from the terminal event, window-independent of the timeline page", async (t) => {
