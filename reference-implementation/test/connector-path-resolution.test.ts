@@ -132,6 +132,27 @@ test("resolves reference seed when active manifest is the reference GitHub fixtu
   assert.match(resolved, SEED_CONNECTOR_PATH_REGEX, `expected reference seed, got ${resolved}`);
 });
 
+test("a catalog GitHub manifest with no active install fails closed instead of running the seed", async () => {
+  // The seed GitHub fixture shares this connector_id. Running it for the
+  // catalog manifest would persist its synthetic records as owner data.
+  __resetControllerPathResolverCachesForTests();
+  const catalogGithub = readCollectionProfileFixture("github") as unknown as FixtureManifest;
+  assert.equal(resolveDefaultConnectorPath(catalogGithub.connector_id, catalogGithub), null);
+  assert.equal(resolveDefaultConnectorPath("github", { ...catalogGithub, connector_id: "github" }), null);
+  await withInstalls([], async ({ installStore, localStore }) => {
+    assert.equal(
+      await resolveActiveInstallFirstConnectorPath("github", catalogGithub, undefined, localStore, installStore),
+      null
+    );
+  });
+});
+
+test("the seed is not selected without a manifest to match against the reference fixture", () => {
+  __resetControllerPathResolverCachesForTests();
+  const referenceGithub = readManifest(REFERENCE_MANIFESTS_DIR, "github.json");
+  assert.equal(resolveDefaultConnectorPath(referenceGithub.connector_id), null);
+});
+
 test("a catalog connector that is not installed resolves no connector code", async () => {
   __resetControllerPathResolverCachesForTests();
   const ynab = readCollectionProfileFixture("ynab") as unknown as FixtureManifest;

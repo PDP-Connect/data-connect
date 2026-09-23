@@ -1184,7 +1184,7 @@ test("a probed identity capture persists onto a paused historical-archive row (s
         "the binding kind must survive the setup-fields/identity write untouched"
       );
       assert.equal(instance?.status, "active", "capture on a recovered row must also resume it (requirement #2)");
-    });
+    }, FIRST_SYNC_SERVER_OPTIONS);
   });
 });
 

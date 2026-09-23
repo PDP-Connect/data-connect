@@ -891,6 +891,27 @@ test("runtime controller resolves an installed catalog connector to its verified
   }
 });
 
+test("run-now refuses an uninstalled catalog manifest that shares an id with the seed fixture, and writes no records", async () => {
+  await withHarness(async ({ asUrl }) => {
+    const catalogGithub = readCollectionProfileFixture("github");
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(catalogGithub),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201, "register catalog GitHub manifest");
+
+    const { status, body } = await fetchJson<ErrorBody>(`${asUrl}/_ref/connectors/github/run`, { method: "POST" });
+    assert.equal(status, 404, "an uninstalled catalog connector must not start a run");
+    assert.equal(body?.error.code, "not_found");
+    assert.equal(
+      (getDb().prepare("SELECT COUNT(*) AS count FROM records WHERE connector_id = 'github'").get() as CountRow).count,
+      0,
+      "the seed fixture's synthetic GitHub records must never reach owner data"
+    );
+  });
+});
+
 test("POST /_ref/connectors/:connectorId/run returns 409 when the connector already has an active run", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-ref-run-now-"));
   const slowConnectorPath = join(tmpDir, "slow-connector.mjs");

@@ -1342,23 +1342,30 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
 // Resolve the fallback connector-implementation path for a controller-managed
 // run that has no active install.
 //
-// Catalog connectors execute only from a verified install record (see
+// Catalog connectors execute only from an install record (see
 // resolveActiveInstallFirstConnectorPath below); this resolver never looks
 // for connector code outside that record. What remains is the seed connector
 // at reference-implementation/connectors/seed/index.ts, which serves the
 // reference fixture manifests in reference-implementation/fixtures/seed-manifests/.
 // Those fixtures can share a `connector_id` with a catalog manifest (for
-// example, GitHub), and the seed GitHub fixture emits a `commits` PROGRESS
-// stream the catalog manifest does not declare. An installed catalog connector
-// therefore always wins over the seed, because the install record is checked
-// first.
-//
-// The seed is returned only when the reference fixture has a manifest for
-// this connector_id. Unknown ids resolve to null.
+// example, GitHub). Running the seed for a catalog manifest writes the
+// fixture's synthetic records into the owner's data, so the seed is returned
+// only when the active manifest's fingerprint (version + sorted stream names)
+// matches the reference fixture's. A catalog manifest with no active install,
+// a missing manifest, and an unknown id all resolve to null, and the
+// controller refuses the run.
 export function resolveDefaultConnectorPath(connectorId: string, manifest?: ConnectorManifest): string | null {
-  const referenceFingerprints = loadReferenceFixtureFingerprints();
-  const lookupKeys = connectorLookupKeys(connectorId, manifest ?? null);
-  return getFirstByConnectorLookupKey(referenceFingerprints, lookupKeys) === null ? null : SEED_CONNECTOR_PATH;
+  const referenceFingerprint = getFirstByConnectorLookupKey(
+    loadReferenceFixtureFingerprints(),
+    connectorLookupKeys(connectorId, manifest ?? null)
+  );
+  const activeFingerprint = fingerprintManifest(manifest ?? null);
+  return referenceFingerprint &&
+    activeFingerprint &&
+    referenceFingerprint.version === activeFingerprint.version &&
+    referenceFingerprint.streams === activeFingerprint.streams
+    ? SEED_CONNECTOR_PATH
+    : null;
 }
 
 // OCI installs are the only source of catalog connector code, and they fail
@@ -3801,7 +3808,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
         ? activeInstall.path
         : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
-      throw new ControllerError(`No runnable connector implementation is available for ${connectorId}`, "not_found");
+      throw new ControllerError(
+        `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
+        "not_found"
+      );
     }
     return {
       connectorPath,

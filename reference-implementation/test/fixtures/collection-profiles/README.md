@@ -16,3 +16,9 @@ Tests install them with `test/helpers/installed-collection-profiles.ts`, which
 writes an install root with a placeholder entrypoint. They prove how the
 reference implementation discovers installed profiles by manifest. They do not
 exercise connector code.
+
+`artifacts/ical-0.1.0.tgz` is the full installed layout of the ical 0.1.0
+artifact above (profile, bundled `dist/collection-profile.mjs`, provenance,
+licences, assets), archived after the verified installer installed it.
+`test/installed-artifact-run.test.ts` installs it, checks its bytes against the
+recorded signed digests, and runs the bundled connector end to end.
