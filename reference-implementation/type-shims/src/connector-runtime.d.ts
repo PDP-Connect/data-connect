@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import { type AuthConfig } from "@pdpp/connector-protocol/auth";
 import type { AssistanceCompletionStatus, AssistanceRequest, DetailCoverageMessage, DetailGapMessage, DetailGapNetworkPressure, DetailGapStartEntry, EmittedMessage, InteractionRequest, InteractionResponse, ProgressExtra, RecordData, StartMessage, StreamScope, ValidateRecord } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { BrowserContext, Page } from "playwright";

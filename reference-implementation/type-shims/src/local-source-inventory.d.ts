@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import type { RecordData } from "./connector-runtime.ts";
 import { type FingerprintCursor } from "./fingerprint-cursor.ts";
 export type SourceClassification = "collect" | "collect_redacted" | "inventory_only" | "exclude" | "defer";

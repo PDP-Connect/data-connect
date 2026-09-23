@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 
 image="${PDPP_CORE_ORACLE_IMAGE:-pdpp-core-headed-oracle}"

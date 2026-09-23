@@ -84,15 +84,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Fetch Railway schema
-        run: curl --fail --silent --show-error https://railway.com/railway.schema.json -o /tmp/railway.schema.json
+      # Pin the official Railway schema snapshot so CI does not depend on a
+      # website/CDN response being JSON. Snapshot fetched 2026-09-23 from
+      # https://railway.com/railway.schema.json; refresh deliberately and
+      # review the diff when Railway changes its schema.
+      - name: Verify pinned Railway schema
+        run: |
+          echo "0302fd53109298d9c277dbaedae772630506d8da43636e69875268a8782dd68f  .github/schemas/railway.schema.json" | sha256sum --check
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const schema = JSON.parse(readFileSync(".github/schemas/railway.schema.json", "utf8"));
+            if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema" || schema.type !== "object") {
+              throw new Error("pinned Railway schema has an unexpected JSON Schema dialect or root type");
+            }
+          '
 
       - name: Run railway check-script unit tests
         run: |
           npm run railway:template:test
           node --test --import tsx scripts/check-railway-template-artifacts.test.ts scripts/check-flyio-deploy-env.test.ts
           npx --yes ajv-cli@5.0.0 validate --spec=draft2020 --all-errors \
-            -s /tmp/railway.schema.json \
+            -s .github/schemas/railway.schema.json \
             -d deploy/railway/railway.console.json \
             -d deploy/railway/railway.reference.json
 

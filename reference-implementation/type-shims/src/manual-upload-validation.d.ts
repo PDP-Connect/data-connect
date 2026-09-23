@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import { validateAppleHealthExportArtifactFromFile } from "../connectors/apple_health/validation.ts";
 import { validateGoogleMapsTimelineArtifact } from "../connectors/google_maps/validation.ts";
 import { validateNetflixExportArtifact } from "../connectors/netflix_export/validation.ts";

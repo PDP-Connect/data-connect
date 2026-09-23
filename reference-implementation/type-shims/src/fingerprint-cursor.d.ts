@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import type { RecordData } from "@pdpp/connector-protocol";
 export interface CarryForwardCursor<T> {
     /** Drop ids from the next map that were not `note`d this run. Idempotent.

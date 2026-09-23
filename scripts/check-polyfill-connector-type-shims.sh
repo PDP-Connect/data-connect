@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,6 +10,11 @@ shim_root="${repo_root}/reference-implementation/type-shims"
 
 if [[ ! -f "${archive}" ]]; then
   echo "missing declaration source archive: ${archive}" >&2
+  exit 1
+fi
+
+if ! tar -tzf "${archive}" >/dev/null; then
+  echo "invalid declaration source archive: ${archive}" >&2
   exit 1
 fi
 
@@ -25,12 +33,20 @@ files=(
 )
 
 for file in "${files[@]}"; do
-  # The package has one declaration line with trailing whitespace. Strip only
-  # line-end spaces before comparison so the checked-in shim stays clean while
-  # CI still proves every declaration token matches the package source.
+  if ! tar -tzf "${archive}" "package/${file}" | grep -Fxq "package/${file}"; then
+    echo "missing package declaration: ${file}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${shim_root}/${file}" ]]; then
+    echo "missing checked-in type shim: ${file}" >&2
+    exit 1
+  fi
+
+  # The shim has the required repository SPDX header. Skip only that header and
+  # line-end spaces so CI compares every declaration token with package source.
   if ! diff -u \
     <(tar -xzOf "${archive}" "package/${file}" | sed 's/[[:blank:]]*$//') \
-    <(sed 's/[[:blank:]]*$//' "${shim_root}/${file}"); then
+    <(sed -e '1,3d' -e 's/[[:blank:]]*$//' "${shim_root}/${file}"); then
     echo "type shim drifted from polyfill-connectors package: ${file}" >&2
     exit 1
   fi
