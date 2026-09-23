@@ -8,8 +8,8 @@ name: docker-images
 # that file's header comment for the pnpm->npm / packages/*->real-path
 # conversion notes). Converted here for this repo's npm workspaces (not
 # pnpm), package-lock.json (not pnpm-lock.yaml/pnpm-workspace.yaml), Node
-# engine floor (>=22.14.0 <24, this repo's package.json engines field, vs.
-# pdpp's node-version 24), and GHCR org (ghcr.io/pdp-connect/data-connect,
+# Node version (24.19.0, matching this repo's package.json engines field),
+# and GHCR org (ghcr.io/pdp-connect/data-connect,
 # not ghcr.io/pdp-connect/pdpp).
 #
 # There is no `tags: ["v*"]` trigger. This repo's own release workflow
@@ -21,12 +21,13 @@ name: docker-images
 on:
   push:
     branches: [main]
-    # reference-implementation/** is intentionally excluded to avoid rebuilding
-    # the image matrix on every ref-impl-only commit. Coverage is preserved
-    # elsewhere: reference-implementation.yml already builds/tests the
-    # reference-implementation package itself on every such change, and any
-    # commit that also touches this workflow's paths below still triggers here.
+    # Broad reference-implementation changes do not rebuild the image matrix.
+    # The package manifest and declaration shims are included because the
+    # production build installs that manifest and typechecks the console.
     paths:
+      - "reference-implementation/type-shims/**"
+      - "reference-implementation/package.json"
+      - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
       - ".env.docker.example"
       - ".github/workflows/docker-images.yml"
@@ -39,10 +40,14 @@ on:
       - "package-lock.json"
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
+      - "scripts/core-headed-patchright-runtime-oracle.*"
   pull_request:
-    # See the push trigger above: reference-implementation/** is excluded on
-    # purpose so ref-impl-only changes don't rebuild the Docker image matrix.
+    # See the push trigger above for the narrow reference-implementation paths
+    # that affect the production image build.
     paths:
+      - "reference-implementation/type-shims/**"
+      - "reference-implementation/package.json"
+      - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
       - ".env.docker.example"
       - ".github/workflows/docker-images.yml"
@@ -55,6 +60,7 @@ on:
       - "package-lock.json"
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
+      - "scripts/core-headed-patchright-runtime-oracle.*"
   workflow_dispatch:
     inputs:
       image:
@@ -114,6 +120,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify excluded connector type declarations
+        if: matrix.image == 'console' || matrix.image == 'core'
+        run: bash scripts/check-polyfill-connector-type-shims.sh
+
       - name: Compute image name
         env:
           IMAGE_NAME: ${{ matrix.image }}
@@ -172,6 +182,36 @@ jobs:
       - name: Prove the built core image carries one non-unknown revision in both the OCI label and the runtime env
         if: matrix.image == 'core'
         run: bash deploy/docker/check-image-identity.sh --require-known pdpp:ci-core-test
+
+      - name: Prove the built Core image runs headed Patchright with durable profiles and interaction-scoped CDP
+        if: matrix.image == 'core'
+        env:
+          PDPP_CORE_ORACLE_IMAGE: pdpp:ci-core-test
+          PDPP_CORE_ORACLE_SKIP_BUILD: "1"
+        run: bash scripts/core-headed-patchright-runtime-oracle.sh
+
+  validate-neko:
+    name: validate docker/neko image
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build n.eko browser image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./docker/neko/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: pdpp-neko:ci
 
   # Manual diagnostic publish ONLY - never a release publisher.
   #

@@ -514,7 +514,8 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
   // deliberately curated subset (see its own package.json) vendored for
   // @pdpp/local-collector's build only, not a general-purpose mirror of the
   // full @pdpp/polyfill-connectors package, and does not carry this file.
-  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import("@pdpp/polyfill-connectors/static-secret-injection");
+  const staticSecretInjectionModule = "@pdpp/polyfill-connectors/static-secret-injection";
+  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(staticSecretInjectionModule);
   for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);

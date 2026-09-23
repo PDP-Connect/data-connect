@@ -41,14 +41,6 @@ services:
       NEKO_USERNAME: ${NEKO_USERNAME:-user}
       NEKO_PASSWORD: ${NEKO_PASSWORD:-neko}
 
-  # NOTE (port from pdpp, unresolved gap): this build context expects
-  # docker/neko/Dockerfile, which does not exist anywhere in data-connect
-  # today. n.eko support (docker/neko/*, the Patchright-in-neko installer
-  # script referenced by the now-dropped scripts/check-railway-template-
-  # artifacts.test.ts) was never ported as part of Move B and is out of
-  # scope for this deploy-tooling restoration — it is not in the file list
-  # this change restores. This service will fail to build until
-  # docker/neko/Dockerfile is authored or ported separately.
   neko:
     image: ${NEKO_IMAGE:-pdpp-neko:local}
     build:

@@ -78,19 +78,19 @@ COPY reference-implementation/vendor/list-envelope/package.json reference-implem
 COPY reference-implementation/vendor/mcp-server/package.json reference-implementation/vendor/mcp-server/package.json
 COPY reference-implementation/vendor/operator-ui/package.json reference-implementation/vendor/operator-ui/package.json
 COPY reference-implementation/vendor/read-core/package.json reference-implementation/vendor/read-core/package.json
-# reference-implementation depends on @pdpp/reference-contract and
-# @pdpp/polyfill-connectors via `file:./vendor/*.tgz` (Move B's interim,
-# pre-registry-publish pin — see reference-implementation/vendor/README.md).
-# npm resolves and unpacks these tarballs during install, so they must be
-# present before the manifest-only install below runs.
-COPY reference-implementation/vendor/*.tgz reference-implementation/vendor/
+# The reference implementation keeps the reference-contract tarball as a
+# local compatibility dependency. Connector implementations are not copied
+# into this image; production installs resolve them from the signed catalog.
+# (@pdpp/polyfill-connectors is a devDependency pinned to a second, excluded
+# tarball -- see .dockerignore -- and is dropped below via --omit=dev.)
+COPY reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz reference-implementation/vendor/
 
 # --allow-git=all: this repo declares a git-sourced devDependency
 # (@opendatalabs/data-connectors-tools); the manifest-only tree above is
 # enough for npm to resolve it. --ignore-scripts here for the same reason
 # as the Patchright env vars: native rebuilds happen explicitly below, after
 # the full source tree exists, not against a manifest-only skeleton.
-RUN npm install --allow-git=all --ignore-scripts \
+RUN npm install --allow-git=all --omit=dev --ignore-scripts \
   && npm rebuild better-sqlite3 esbuild onnxruntime-node protobufjs
 
 FROM deps AS source
@@ -184,17 +184,15 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && test -x /usr/bin/Xvfb
 
-COPY packages/polyfill-connectors/package.json /tmp/polyfill-connectors-package.json
+COPY reference-implementation/package.json /tmp/reference-implementation-package.json
 
 WORKDIR /tmp/patchright-install
 
-# The vendored reference-implementation/vendor/pdpp-polyfill-connectors-*.tgz
-# is the package version actually loaded at runtime (see vendor/README.md);
-# its Patchright dependency is what must match here, not this repo's own
-# top-level packages/polyfill-connectors (a different, native package with
-# no direct runtime relationship to reference-implementation's server).
-COPY reference-implementation/vendor/*.tgz /tmp/patchright-install/vendor/
-RUN PATCHRIGHT_VERSION="$(tar -xzO -f /tmp/patchright-install/vendor/pdpp-polyfill-connectors-0.0.1.tgz package/package.json | node --input-type=module -e "import { readFileSync } from 'node:fs'; const version = JSON.parse(readFileSync(0, 'utf8')).dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
+# Keep the browser layer tied to the direct runtime dependency, not to a
+# connector package that is absent from the production image (see
+# deploy/docker/Dockerfile's identical stage and .dockerignore, which
+# excludes the devendored polyfill-connectors tarball from the build context).
+RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const packageJson = JSON.parse(readFileSync('/tmp/reference-implementation-package.json', 'utf8')); const version = packageJson.dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
   && npx patchright install --with-deps chromium \
@@ -282,6 +280,7 @@ ENV NODE_ENV=production \
     PDPP_RS_URL=http://127.0.0.1:7663 \
     PDPP_DB_PATH=/var/lib/pdpp/pdpp.sqlite \
     PDPP_BROWSER_PROFILE_ROOT=/var/lib/pdpp/browser-profiles \
+    PDPP_RUNTIME_BROWSER=1 \
     PDPP_CONNECTOR_ARTIFACT_ROOT=/var/lib/pdpp/connector-artifacts \
     PDPP_EMBEDDING_DOWNLOAD_ALLOWED=1 \
     PDPP_EMBEDDING_CACHE_DIR=/var/lib/pdpp/transformers \

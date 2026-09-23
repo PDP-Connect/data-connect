@@ -4,18 +4,11 @@ name: deploy-tooling
 # PDP-Connect/pdpp (see deploy/railway/README.md, deploy/flyio/README.md,
 # deploy/docker/README.md). Mirrors the classify -> suite -> gate shape of
 # .github/workflows/reference-implementation.yml, scoped to this repo's npm
-# workspaces and Node engine floor (>=22.14.0 <24) rather than pdpp's pnpm.
+# workspaces and Node engine floor (>=24.15.0) rather than pdpp's pnpm.
 #
-# Scope, deliberately narrow: this workflow proves the *check scripts* the
-# deploy runbooks depend on (railway env/GHCR-visibility contract checks,
-# Docker image-identity contract checks, and `docker compose config` parsing
-# for the compose files) stay green. It does NOT build or publish Docker
-# images -- pdpp's own image-build-and-publish pipeline
-# (.github/workflows/docker-images.yml there) was intentionally not ported;
-# see deploy/docker/README.md's own architecture notes for what still differs
-# between this repo's Dockerfile and the one these checks were originally
-# written against. Add an image-build job here only as a deliberate,
-# separately-reviewed follow-up.
+# This workflow proves deploy check scripts and Compose configs. The separate
+# docker-images workflow builds image targets; it has no automatic publish
+# trigger.
 #
 # check-image-identity.sh / check-prod-revision-drift.sh are plain bash and
 # their *.test.sh counterparts stub `docker` entirely, so they run with no
@@ -25,6 +18,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/deploy-tooling.yml"
+      - ".railwayignore"
       - "deploy/**"
       - "docker-compose.yml"
       - "docker-compose.dev.yml"
@@ -33,6 +27,9 @@ on:
       - "package-lock.json"
       - "scripts/check-railway-deploy-env.ts"
       - "scripts/check-railway-deploy-env.test.ts"
+      - "scripts/check-railway-template-artifacts.test.ts"
+      - "scripts/check-flyio-deploy-env.ts"
+      - "scripts/check-flyio-deploy-env.test.ts"
       - "scripts/check-railway-ghcr-public.ts"
       - "scripts/check-railway-ghcr-public.test.ts"
       - "scripts/railway-mcp-query-smoke.ts"
@@ -81,14 +78,23 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "24.19.0"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Fetch Railway schema
+        run: curl --fail --silent --show-error https://railway.com/railway.schema.json -o /tmp/railway.schema.json
+
       - name: Run railway check-script unit tests
-        run: npm run railway:template:test
+        run: |
+          npm run railway:template:test
+          node --test --import tsx scripts/check-railway-template-artifacts.test.ts scripts/check-flyio-deploy-env.test.ts
+          npx --yes ajv-cli@5.0.0 validate --spec=draft2020 --all-errors \
+            -s /tmp/railway.schema.json \
+            -d deploy/railway/railway.console.json \
+            -d deploy/railway/railway.reference.json
 
   compose-config:
     name: docker compose config parses cleanly

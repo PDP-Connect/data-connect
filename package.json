@@ -62,7 +62,9 @@
     "railway:env-check:test": "node --test --import tsx scripts/check-railway-deploy-env.test.ts",
     "railway:mcp-query-smoke": "node --import tsx scripts/railway-mcp-query-smoke.ts",
     "railway:mcp-query-smoke:test": "node --test --import tsx scripts/railway-mcp-query-smoke.test.ts",
-    "railway:sqlite-restart-smoke": "bash scripts/railway-sqlite-restart-smoke.sh"
+    "railway:sqlite-restart-smoke": "bash scripts/railway-sqlite-restart-smoke.sh",
+    "flyio:env-check": "node --import tsx scripts/check-flyio-deploy-env.ts",
+    "flyio:env-check:test": "node --test --import tsx scripts/check-flyio-deploy-env.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
