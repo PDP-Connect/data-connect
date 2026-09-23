@@ -8,7 +8,16 @@
  * Manifest declarations are logical needs only; they never name a source
  * environment variable. Reserved names cannot enter through an installation
  * binding or the connection fragment.
+ *
+ * One exception, bounded by identity: a first-party connector may declare
+ * `runtime_requirements.tuning_environment`, the operator tuning knobs it
+ * reads. Each declared key inside the connector's own `PDPP_<KEY>_` namespace
+ * becomes a `process_env` binding for that connector only. Any other
+ * connector's declared keys are logical keys that need an operator binding.
  */
+import { canonicalConnectorKey, firstPartyConnectorKeys, nativeConnectorKeys } from "../server/connector-key.ts";
+import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
+
 const PLATFORM_KEYS = [
   "PATH",
   "PATHEXT",
@@ -72,36 +81,8 @@ const PLATFORM_KEYS = [
   "SLACK_CHANNEL_TYPES",
   "SLACK_SKIP_FILES",
   "SLACK_RECLAIM_UPLOADS",
-  "PDPP_AMAZON_YEARS",
-  "PDPP_AMAZON_SKIP_DETAIL",
   "WHATSAPP_MAX_ARCHIVE_BYTES",
   "WHATSAPP_MAX_MESSAGE_COUNT",
-  "PDPP_GMAIL_ATTACHMENT_BACKFILL_PAGE_BYTES",
-  "PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS",
-  "PDPP_GMAIL_ATTACHMENT_PROGRESS_MIN_BYTES",
-  "PDPP_GMAIL_ATTACHMENT_PROGRESS_MIN_INTERVAL_MS",
-  "PDPP_GMAIL_ATTACHMENT_RECOVERY_PAGE_BYTES",
-  "PDPP_GMAIL_ATTACHMENT_STALL_TIMEOUT_MS",
-  "PDPP_GMAIL_MAX_ATTACHMENT_BYTES",
-  "PDPP_CHATGPT_BACKEND_FETCH_TIMEOUT_MS",
-  "PDPP_CHATGPT_DETAIL_RATE_LIMIT_STOP_AFTER",
-  "PDPP_CHATGPT_MAX_DETAIL_FETCHES_PER_RUN",
-  "PDPP_CHATGPT_MAX_RUN_WALL_CLOCK_MS",
-  "PDPP_CHATGPT_MAX_TAIL_DEFERRAL_GAPS_PER_RUN",
-  "PDPP_CHATGPT_PACING_BURST_TOLERANCE_MS",
-  "PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS",
-  "PDPP_CHATGPT_PACING_MAX_INTERVAL_MS",
-  "PDPP_CHATGPT_PACING_MIN_INTERVAL_MS",
-  "PDPP_CHATGPT_PACING_RECOVERY_GAIN",
-  "PDPP_CHATGPT_RETRY_BUDGET_CAPACITY",
-  "PDPP_CHATGPT_RETRY_BUDGET_INITIAL_TOKENS",
-  "PDPP_CHATGPT_CIRCUIT_BREAKER",
-  "PDPP_CHATGPT_PUSH_APPROVAL_TIMEOUT_MS",
-  "PDPP_CHATGPT_BROWSER_LOGIN_TIMEOUT_MS",
-  "PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS",
-  "PDPP_IMESSAGE_MAX_ATTACHMENT_BYTES",
-  "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES",
-  "PDPP_GOOGLE_TAKEOUT_MAX_PHOTO_BYTES",
 ] as const;
 
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"] as const;
@@ -386,6 +367,56 @@ function declaredLogicalKeys(manifest: unknown): string[] {
   return [...out];
 }
 
+/**
+ * Tuning keys the connector declares. A manifest that has the field is
+ * authoritative, even when the list is empty. The transitional table only
+ * covers first-party manifests that predate the field.
+ */
+function declaredTuningKeys(manifest: unknown, connectorId: string | undefined): string[] {
+  const declared = record(record(manifest).runtime_requirements).tuning_environment;
+  if (declared !== undefined) {
+    return list(declared)
+      .map(name)
+      .filter((key): key is string => key !== null);
+  }
+  return connectorId !== undefined && Object.hasOwn(UNDECLARED_TUNING_ENVIRONMENT, connectorId)
+    ? [...(UNDECLARED_TUNING_ENVIRONMENT[connectorId] ?? [])]
+    : [];
+}
+
+const TUNING_NAMESPACES = [...firstPartyConnectorKeys(), ...nativeConnectorKeys()]
+  .map((connectorKey) => ({
+    connectorKey,
+    prefix: `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`,
+  }))
+  // Longest prefix first: PDPP_GOOGLE_MAPS_DATA_PORTABILITY_X belongs to
+  // google-maps-data-portability, not google-maps.
+  .sort((a, b) => b.prefix.length - a.prefix.length);
+
+/**
+ * The canonical connector key that owns a tuning key, or null. A connector
+ * owns the keys in its `PDPP_<KEY>_` namespace. Only canonical keys from the
+ * shipped first-party registry have a namespace, so a third-party or
+ * unrecognized identity owns no ambient key. Reserved and proxy keys have no
+ * owner.
+ */
+export function tuningEnvironmentKeyOwner(key: string): string | null {
+  if (reserved(key) || proxyKey(key)) {
+    return null;
+  }
+  const match = TUNING_NAMESPACES.find(({ prefix }) => key.startsWith(prefix) && key.length > prefix.length);
+  return match?.connectorKey ?? null;
+}
+
+function tuningBindings(connectorId: string | undefined, keys: readonly string[]): ConnectorEnvironmentBinding[] {
+  if (connectorId === undefined || canonicalConnectorKey(connectorId) !== connectorId) {
+    return [];
+  }
+  return keys
+    .filter((key) => tuningEnvironmentKeyOwner(key) === connectorId)
+    .map((key) => ({ connectorId, logicalKey: key, source: { key, kind: "process_env" }, targetKey: key }));
+}
+
 function connectionValues(
   fragment: ConnectorConnectionEnvironment | null | undefined,
   connectorId: string | undefined,
@@ -624,11 +655,13 @@ export function composeConnectorChildEnvironment(input: ConnectorChildEnvironmen
   const connectionEnv = connectionValues(input.connectionEnv, input.connectorId, proxyAuthorized);
   apply(env, platformValues(source, platform, proxyAuthorized), platform, false);
   apply(env, declaredLocalPathValues(input.manifest, source, platform), platform, false);
+  const tuningKeys = declaredTuningKeys(input.manifest, input.connectorId);
   apply(
     env,
     approvedBindingValues(
-      policy.approvedBindings,
-      declaredLogicalKeys(input.manifest),
+      // Operator bindings come last, so they override a declared tuning key.
+      [...tuningBindings(input.connectorId, tuningKeys), ...policy.approvedBindings],
+      [...declaredLogicalKeys(input.manifest), ...tuningKeys],
       input.connectorId,
       proxyAuthorized,
       source,
