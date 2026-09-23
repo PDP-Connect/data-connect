@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { npmPackMetadata } from "./pack-metadata.ts";
 
 const execFileAsync = promisify(execFile);
@@ -26,10 +27,6 @@ interface RunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   maxBuffer?: number;
-}
-
-interface RunWithInputOptions extends RunOptions {
-  stdio?: string[];
 }
 
 interface PostJsonResponse {
@@ -102,43 +99,6 @@ async function run(
   }
 }
 
-function runWithInput(
-  command: string,
-  args: string[],
-  input: string,
-  options: RunWithInputOptions = {}
-): Promise<{ stderr: string; stdout: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      if (code === 0) {
-        resolve({ stderr, stdout });
-        return;
-      }
-      const error = new Error(
-        `Command failed: ${command} ${args.join(" ")} (code ${code ?? "null"}${signal ? `, ${signal}` : ""})`
-      );
-      // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-      (error as any).stderr = stderr;
-      // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-      (error as any).stdout = stdout;
-      reject(error);
-    });
-    child.stdin.end(input);
-  });
-}
-
 async function packPackage(cwd: string): Promise<string> {
   const packInfo = await npmPackMetadata({ cwd });
   return path.join(cwd, packInfo.filename);
@@ -182,9 +142,14 @@ async function main(): Promise<void> {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "pdpp-local-collector-pack-"));
   const projectDir = path.join(tempRoot, "project");
   const npmCacheDir = path.join(tempRoot, "npm-cache");
+  // The collector installs connectors under the platform state root. Pointing
+  // XDG_STATE_HOME (and HOME, for macOS) into the temp tree exercises that
+  // default path with no override, and keeps installs off the real host.
+  const stateRoot = path.join(tempRoot, "state");
   const env = {
     ...process.env,
     HOME: path.join(tempRoot, "home"),
+    XDG_STATE_HOME: stateRoot,
     npm_config_cache: npmCacheDir,
     PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "",
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "",
@@ -212,8 +177,8 @@ async function main(): Promise<void> {
 
     log("Resolving installed package exports and bin...");
     await assertInstalledEntrypoints(projectDir, env);
-    log("Exercising the installed browser-shaped runtime branch...");
-    await assertInstalledBrowserBranchFailsClosed(projectDir, env);
+    log("Checking the installed package ships the installer core and no connector code...");
+    await assertInstalledPackageShipsNoConnectorCode(projectDir);
 
     log("Running pdpp-local-collector advertise from the installed package...");
     const advertise = await run("npx", ["--no-install", "pdpp-local-collector", "advertise"], { cwd: projectDir, env });
@@ -224,7 +189,6 @@ async function main(): Promise<void> {
       "apple_photos",
       "claude_code",
       "codex",
-      "google_messages",
       "google_takeout",
       "imessage",
     ]);
@@ -261,15 +225,17 @@ async function main(): Promise<void> {
       await runImessageSampleSmoke({ projectDir, env });
       await runFixtureBackedGoogleTakeoutEnrollRunSmoke({ projectDir, env });
       await runApplePhotosSampleSmoke({ projectDir, env });
-      await runGoogleMessagesSampleSmoke({ projectDir, env });
+      await assertRunsUsedInstalledProfiles(stateRoot, ["codex", "imessage", "google_takeout", "apple_photos"]);
+      await runTamperedProfileSmoke({ projectDir, env, stateRoot });
     } else {
       log("SKIP fixture-backed enroll/run smoke: reference-implementation/server/index.ts not present.");
       log("SKIP collector_protocol_mismatch smoke: reference-implementation/server/index.ts not present.");
       log("SKIP iMessage bounded-sample smoke: reference-implementation/server/index.ts not present.");
       log("SKIP Google Takeout enroll/run smoke: reference-implementation/server/index.ts not present.");
       log("SKIP Apple Photos bounded-sample smoke: reference-implementation/server/index.ts not present.");
-      log("SKIP Google Messages bounded-sample smoke: reference-implementation/server/index.ts not present.");
+      log("SKIP installed-profile checks: reference-implementation/server/index.ts not present.");
     }
+    await runUnpinnedConnectorRefusalSmoke({ projectDir, env });
 
     log("PASS pack-install-run local smoke");
   } finally {
@@ -302,72 +268,192 @@ assert.ok((await stat(bin)).mode & 0o111, "installed pdpp-local-collector bin mu
   }
 }
 
-async function assertInstalledBrowserBranchFailsClosed(projectDir: string, env: NodeJS.ProcessEnv): Promise<void> {
-  const probePath = path.join(projectDir, "assert-browser-branch.mjs");
-  const runtimePath = path.join(
-    projectDir,
-    "node_modules",
-    "@pdpp",
-    "local-collector",
-    "dist",
-    "polyfill-connectors",
-    "src",
-    "connector-runtime.js"
+/**
+ * Connector code is no longer compiled into this package: each connector is a
+ * pinned, signed Collection Profile installed at run time. The package must
+ * therefore carry the installer core that verifies those profiles, and must
+ * not carry a vendored connector tree.
+ */
+async function assertInstalledPackageShipsNoConnectorCode(projectDir: string): Promise<void> {
+  const installed = path.join(projectDir, "node_modules", "@pdpp", "local-collector", "dist");
+  assert.equal(
+    await pathExists(path.join(installed, "polyfill-connectors")),
+    false,
+    "installed package must not ship vendored connector code"
   );
-  const probe = `import { runConnector } from ${JSON.stringify(pathToFileURL(runtimePath).href)};
+  assert.equal(
+    await pathExists(path.join(installed, "connector-installer-core", "index.mjs")),
+    true,
+    "installed package must ship the installer core that verifies Collection Profiles"
+  );
+}
 
-runConnector({
-  browser: { profileName: "artifact-closure-probe" },
-  collect: async () => {},
-  ensureSession: async () => {},
-  name: "artifact-closure-probe",
-  probeSession: async () => ({ authenticated: true }),
-  validateRecord: () => {},
-});
-`;
-  await writeFile(probePath, probe);
-  let failure: Error | null = null;
+/** sha256 of a file, in the pins' `sha256:<hex>` form. */
+async function fileSha256(filePath: string): Promise<string> {
+  const { createHash } = await import("node:crypto");
+  return `sha256:${createHash("sha256").update(await readFile(filePath)).digest("hex")}`;
+}
+
+/**
+ * Each smoke above ran a connector through the installed CLI. Prove the code
+ * it ran was the pinned Collection Profile, installed under the default state
+ * root: the release directory for the pinned digest exists and its entrypoint
+ * hashes to the pin.
+ */
+async function assertRunsUsedInstalledProfiles(stateRoot: string, connectorIds: readonly string[]): Promise<void> {
+  for (const connectorId of connectorIds) {
+    const pin = COLLECTION_PROFILE_PINS.find((candidate) => candidate.connectorId === connectorId);
+    assert.ok(pin, `no Collection Profile pin for ${connectorId}`);
+    const entrypoint = installedEntrypoint(stateRoot, pin);
+    assert.equal(await fileSha256(entrypoint), pin.entrypointSha256, `${connectorId} installed entrypoint`);
+  }
+  log(`Installed-profile check PASS: ${connectorIds.join(", ")} ran from their pinned Collection Profiles.`);
+}
+
+function installedEntrypoint(stateRoot: string, pin: { connectorKey: string; digest: string }): string {
+  return path.join(
+    stateRoot,
+    "pdpp",
+    "collection-profiles",
+    "connectors",
+    pin.connectorKey,
+    pin.digest.replace(":", "-"),
+    "dist",
+    "collection-profile.mjs"
+  );
+}
+
+/**
+ * A modified install is not run. Overwrite the installed codex entrypoint,
+ * run codex again, and check that the run succeeded from a reinstalled copy
+ * that matches the pin, with the modified copy set aside.
+ */
+async function runTamperedProfileSmoke({
+  projectDir,
+  env,
+  stateRoot,
+}: {
+  projectDir: string;
+  env: NodeJS.ProcessEnv;
+  stateRoot: string;
+}): Promise<void> {
+  const pin = COLLECTION_PROFILE_PINS.find((candidate) => candidate.connectorId === "codex");
+  assert.ok(pin, "no Collection Profile pin for codex");
+  const entrypoint = installedEntrypoint(stateRoot, pin);
+  await writeFile(entrypoint, "process.stdout.write('tampered');\n");
+
+  log("Booting in-process reference server for the tampered-profile smoke...");
+  const { startServer } = await import(`file://${referenceServerEntry}`);
+  // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
+  const server = (await (startServer as any)({
+    asPort: 0,
+    dbPath: ":memory:",
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+  })) as ServerInstance;
+  const baseUrl = `http://127.0.0.1:${server.asPort}`;
+  const codexHome = await prepareCodexFixture();
   try {
-    await runWithInput(
-      process.execPath,
-      [probePath],
-      `${JSON.stringify({ type: "START", scope: { streams: [{ name: "probe" }] } })}\n`,
+    const codeResp = await postJson(`${baseUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "codex",
+      local_binding_name: "pack-install-run-tampered",
+    });
+    assert.equal(codeResp.status, 201, `enrollment-codes returned ${codeResp.status}: ${JSON.stringify(codeResp.body)}`);
+    // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
+    const enrollmentCode = (codeResp.body as any).enrollment_code;
+    const enroll = await run(
+      "npx",
+      ["--no-install", "pdpp-local-collector", "enroll", "--base-url", baseUrl, "--code", enrollmentCode],
+      { cwd: projectDir, env }
+    );
+    const enrollment = JSON.parse(enroll.stdout) as EnrollmentData;
+    log("Running installed pdpp-local-collector run --connector codex over a modified install...");
+    const runResult = await run(
+      "npx",
+      [
+        "--no-install",
+        "pdpp-local-collector",
+        "run",
+        "--base-url",
+        baseUrl,
+        "--connector",
+        "codex",
+        "--device-id",
+        enrollment.device_id,
+        "--device-token",
+        enrollment.device_token,
+        "--connection-id",
+        enrollment.source_instance_id,
+        "--queue",
+        path.join(projectDir, "pack-install-run-tampered-outbox.json"),
+        "--streams",
+        "prompts,rules",
+      ],
+      { cwd: projectDir, env: { ...env, CODEX_HOME: codexHome } }
+    );
+    const runOutput = JSON.parse(runResult.stdout) as RunOutput;
+    assert.equal(runOutput.done?.status, "succeeded", `codex over a modified install did not succeed: ${runResult.stdout}`);
+    assert.match(runResult.stderr, /did not match its pin/, `expected a cache warning: ${runResult.stderr}`);
+    assert.equal(await fileSha256(entrypoint), pin.entrypointSha256, "codex was not reinstalled to its pin");
+    const siblings = await readdir(path.dirname(path.dirname(path.dirname(entrypoint))));
+    assert.equal(
+      siblings.filter((name) => name.includes(".invalid-")).length,
+      1,
+      `expected the modified install set aside: ${siblings.join(", ")}`
+    );
+    log("Tampered-profile smoke PASS: the modified install was set aside and codex ran from a verified reinstall.");
+  } finally {
+    await closeServer(server);
+    await rm(codexHome, { recursive: true, force: true });
+  }
+}
+
+/**
+ * google_messages has a local-collector definition but no published, signed
+ * Collection Profile (it needs gmcli, and the artifact builder has no tool
+ * layer yet), so the collector has nothing to install. The installed CLI must
+ * refuse it by name before contacting any server.
+ */
+async function runUnpinnedConnectorRefusalSmoke({
+  projectDir,
+  env,
+}: {
+  projectDir: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<void> {
+  log("Running installed pdpp-local-collector run --connector google_messages (unpinned)...");
+  let failure: (Error & { stderr?: string; code?: number }) | null = null;
+  try {
+    await run(
+      "npx",
+      [
+        "--no-install",
+        "pdpp-local-collector",
+        "run",
+        "--base-url",
+        "http://127.0.0.1:9",
+        "--connector",
+        "google_messages",
+        "--device-id",
+        "dexp_unused",
+        "--device-token",
+        "unused",
+        "--connection-id",
+        "unused",
+      ],
       { cwd: projectDir, env }
     );
   } catch (error) {
-    failure = error as Error;
-  } finally {
-    await rm(probePath, { force: true });
+    failure = error as Error & { stderr?: string; code?: number };
   }
-  assert.ok(failure, "installed browser-shaped runtime probe must fail closed");
-  const output = `${
-    // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    (failure as any).stdout ?? ""
-  }\n${
-    // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    (failure as any).stderr ?? ""
-  }\n${
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established behavior; this diagnostic requires a semantic refactor outside the closure scope.
-    failure.message ?? ""
-  }`;
+  assert.ok(failure, "run --connector google_messages must fail");
   assert.match(
-    output,
-    // biome-ignore lint/performance/useTopLevelRegex: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    /browser_runtime_unavailable/,
-    `browser branch must report its typed capability code: ${output}`
+    `${failure.stderr ?? ""}\n${failure.message}`,
+    /no published, signed Collection Profile yet/,
+    `google_messages must be refused by name: ${failure.stderr ?? failure.message}`
   );
-  assert.match(
-    output,
-    // biome-ignore lint/performance/useTopLevelRegex: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    /filesystem-class connectors only/,
-    `browser branch must explain the published boundary: ${output}`
-  );
-  assert.doesNotMatch(
-    output,
-    // biome-ignore lint/performance/useTopLevelRegex: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    /ERR_MODULE_NOT_FOUND/,
-    `browser branch must not fail through a missing emitted module: ${output}`
-  );
+  log("Unpinned-connector refusal smoke PASS: google_messages was refused by name.");
 }
 
 /**
@@ -1125,197 +1211,6 @@ async function runApplePhotosSampleSmoke({
   } finally {
     await closeServer(server);
     await rm(exportDir, { recursive: true, force: true });
-  }
-}
-
-const GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT = 500;
-const GOOGLE_MESSAGES_SAMPLE_LIMIT = 20;
-
-/**
- * Fake `gmcli` binary for the pack-install-run smoke: a single chat, 500
- * messages, dispatching on the real documented CLI shape (`--json --full
- * chats list` / `messages list --conv <id> --json --full --limit <N>
- * --order asc`) so this smoke proves the packed google_messages tarball
- * spawns exactly this shape against whatever GMCLI_BIN points at — no real
- * gmcli binary or paired Android device is available in CI, so this script
- * fixture stands in for it.
- */
-async function prepareFakeGmcliBinary(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), "pdpp-local-collector-gmcli-fixture-"));
-  const binPath = path.join(dir, "fake-gmcli.mjs");
-  const messages = Array.from({ length: GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT }, (_, i) => ({
-    message_id: `msg_${String(i).padStart(4, "0")}`,
-    conversation_id: "chat_fixture",
-    source_platform: "rcs",
-    sender_id: i % 2 === 0 ? "+15551230001" : "me",
-    body: `fixture message ${i}`,
-    timestamp_ms: 1_754_071_452_000 + i * 1000,
-    status: 1,
-    is_from_me: i % 2 === 1,
-  }));
-  const script = `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args.includes("chats") && args.includes("list")) {
-  process.stdout.write(JSON.stringify([{ conversation_id: "chat_fixture", source_platform: "rcs", name: "Fixture Chat" }]));
-  process.exit(0);
-}
-if (args[0] === "messages" && args[1] === "list") {
-  const limitIdx = args.indexOf("--limit");
-  const limit = limitIdx >= 0 ? Number(args[limitIdx + 1]) : ${GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT};
-  const all = ${JSON.stringify(messages)};
-  process.stdout.write(JSON.stringify(all.slice(0, limit)));
-  process.exit(0);
-}
-process.exit(1);
-`;
-  await writeFile(binPath, script, { mode: 0o755 });
-  return binPath;
-}
-
-/**
- * Fixture-backed bounded-sample smoke for google_messages, using a fake
- * `gmcli` binary (no real gmcli install or paired Android device is
- * available in this environment) that speaks the same documented CLI
- * contract (`--json --full chats list`, `messages list --conv <id> --json
- * --full --limit <N> --order asc`) the real gmcli would. Proves the
- * `--sample` path against the actual packed, installed tarball.
- */
-async function runGoogleMessagesSampleSmoke({
-  projectDir,
-  env,
-}: {
-  projectDir: string;
-  env: NodeJS.ProcessEnv;
-}): Promise<void> {
-  log("Booting in-process reference server for the Google Messages bounded-sample smoke...");
-  const { startServer } = await import(`file://${referenceServerEntry}`);
-  const { getDb } = await import(`file://${referenceDbModule}`);
-  // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-  const server = (await (startServer as any)({
-    asPort: 0,
-    dbPath: ":memory:",
-    ownerAuthPassword: "",
-    quiet: true,
-    rsPort: 0,
-  })) as ServerInstance;
-  const baseUrl = `http://127.0.0.1:${server.asPort}`;
-  const gmcliBin = await prepareFakeGmcliBinary();
-  try {
-    log("Creating enrollment code for google_messages...");
-    const codeResp = await postJson(`${baseUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "google_messages",
-      local_binding_name: "pack-install-run-google-messages",
-    });
-    assert.equal(
-      codeResp.status,
-      201,
-      `enrollment-codes returned ${codeResp.status}: ${JSON.stringify(codeResp.body)}`
-    );
-    // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    const enrollmentCode = (codeResp.body as any).enrollment_code;
-
-    log("Running installed pdpp-local-collector enroll for google_messages...");
-    const enroll = await run(
-      "npx",
-      ["--no-install", "pdpp-local-collector", "enroll", "--base-url", baseUrl, "--code", enrollmentCode],
-      { cwd: projectDir, env }
-    );
-    const enrollment = JSON.parse(enroll.stdout) as EnrollmentData;
-
-    log(
-      `Running installed pdpp-local-collector run --connector google_messages --sample ${GOOGLE_MESSAGES_SAMPLE_LIMIT}...`
-    );
-    const queuePath = path.join(projectDir, "pack-install-run-google-messages-outbox.json");
-    const runResult = await run(
-      "npx",
-      [
-        "--no-install",
-        "pdpp-local-collector",
-        "run",
-        "--base-url",
-        baseUrl,
-        "--connector",
-        "google_messages",
-        "--device-id",
-        enrollment.device_id,
-        "--device-token",
-        enrollment.device_token,
-        "--connection-id",
-        enrollment.source_instance_id,
-        "--queue",
-        queuePath,
-        "--streams",
-        "messages",
-        "--sample",
-        String(GOOGLE_MESSAGES_SAMPLE_LIMIT),
-      ],
-      { cwd: projectDir, env: { ...env, GMCLI_BIN: gmcliBin } }
-    );
-    const runOutput = JSON.parse(runResult.stdout) as {
-      object?: string;
-      records_seen?: number;
-      status?: { outbox?: { counts?: { pending?: number; sent?: number; total?: number } } };
-    };
-    assert.equal(runOutput.object, "local_collector_sample", `unexpected --sample response shape: ${runResult.stdout}`);
-    assert.ok(
-      typeof runOutput.records_seen === "number" && runOutput.records_seen >= GOOGLE_MESSAGES_SAMPLE_LIMIT,
-      `--sample ${GOOGLE_MESSAGES_SAMPLE_LIMIT} must see at least the limit before stopping: ${runResult.stdout}`
-    );
-    assert.ok(
-      runOutput.records_seen < GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT,
-      `--sample ${GOOGLE_MESSAGES_SAMPLE_LIMIT} must stop well short of the full ${GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT}-message fixture; got ${runOutput.records_seen}: ${runResult.stdout}`
-    );
-    const outboxTotal = runOutput.status?.outbox?.counts?.total ?? 0;
-    assert.ok(outboxTotal > 0, `sample run must leave sampled work in the local outbox: ${runResult.stdout}`);
-
-    log(
-      "Running installed pdpp-local-collector run --connector google_messages (no --sample) to drain the full fixture..."
-    );
-    const fullRun = await run(
-      "npx",
-      [
-        "--no-install",
-        "pdpp-local-collector",
-        "run",
-        "--base-url",
-        baseUrl,
-        "--connector",
-        "google_messages",
-        "--device-id",
-        enrollment.device_id,
-        "--device-token",
-        enrollment.device_token,
-        "--connection-id",
-        enrollment.source_instance_id,
-        "--queue",
-        queuePath,
-        "--streams",
-        "messages",
-      ],
-      { cwd: projectDir, env: { ...env, GMCLI_BIN: gmcliBin } }
-    );
-    const fullRunOutput = JSON.parse(fullRun.stdout) as RunOutput;
-    assert.equal(
-      fullRunOutput.done?.status,
-      "succeeded",
-      `follow-up full google_messages run did not report DONE.status=succeeded: ${fullRun.stdout}`
-    );
-
-    // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
-    const persisted = (getDb() as any)
-      .prepare("SELECT COUNT(*) as n FROM records WHERE connector_id = ? AND connector_instance_id = ?")
-      .get("google-messages", enrollment.connector_instance_id);
-    assert.equal(
-      persisted.n,
-      GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT,
-      `expected the full ${GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT}-message fixture persisted after the non-sampled follow-up run; got ${persisted.n}`
-    );
-    log(
-      `Google Messages bounded-sample + full-drain smoke PASS: sample stopped at ${runOutput.records_seen} of ${GOOGLE_MESSAGES_FIXTURE_MESSAGE_COUNT}, follow-up run persisted all ${persisted.n}.`
-    );
-  } finally {
-    await closeServer(server);
-    await rm(path.dirname(gmcliBin), { recursive: true, force: true });
   }
 }
 

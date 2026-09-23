@@ -138,6 +138,10 @@ export function managedConnectorCommand(entrypoint: string): string {
  * Both paths must coexist until the manager publishes real artifacts and the
  * new path is proven against them, so this does not replace the snapshot —
  * it stands beside it.
+ *
+ * (The published collector now takes the other route: it keeps the snapshot
+ * for definitions and resolves only the entrypoint from an installed profile.
+ * See `createBundledConnectorRegistry` and `collection-profiles.ts`.)
  */
 export function managedDefinitionsFrom(
   managed: readonly ManagedDefinition[]

@@ -42,6 +42,16 @@ const req = require("left-pad");
   )
 })
 
+test("bareImportSpecifiers catches a createRequire()-bound require alias", () => {
+  // The vendored installer core's tar-stream.mjs loads node-tar this way; a
+  // plain \brequire( pattern missed it, and the packed collector failed with
+  // "Cannot find module 'tar'" on its first install.
+  const source = `const requireFromTarReader = createRequire(import.meta.url);
+const { Parser } = requireFromTarReader("tar");
+`
+  assert.deepEqual([...bareImportSpecifiers(source)], ["tar"])
+})
+
 test("bareImportSpecifiers does not false-positive on 'import'/'export' appearing inside string literals or property access", () => {
   // This is the exact shape pdpp-local-collector.ts's own env-file parser
   // uses (`line.startsWith("export ")`) — a naive "contains the word import

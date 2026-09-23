@@ -46,9 +46,15 @@ import {
   normalizeSourceRoots,
   validateSinceLocally,
 } from "../src/connect-scope.ts";
-import { resolveCollectorQueuePath } from "../src/durable-state.ts";
+import { collectorStateDirectory, defaultCollectorStateRoot, resolveCollectorQueuePath } from "../src/durable-state.ts";
 import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, CollectorUsageError } from "../src/errors.ts";
+import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
+import {
+  type CollectionProfilePin,
+  ensureCollectionProfileInstalled,
+  installedCollectionProfile,
+} from "../src/managed/collection-profiles.ts";
 import {
   type BundledConnectorEntry,
   type BundledConnectorRegistry,
@@ -88,22 +94,46 @@ import {
  * the connector-owned {@link LOCAL_COLLECTOR_DEFINITIONS} to obtain the
  * runnable, id-keyed registry the CLI resolves `--connector <id>` against.
  *
- * `LOCAL_COLLECTOR_DEFINITIONS` is imported from this package's own
- * generated snapshot (`src/generated/collector-definitions.generated.ts`),
- * not from `@pdpp/polyfill-connectors` directly — this package must not
- * carry a source dependency on the content package. The snapshot is
- * regenerated from `@pdpp/polyfill-connectors`'s
- * `LOCAL_COLLECTOR_DEFINITIONS` (see that script's header for the update
- * path). In this repository the snapshot is a pinned duplicate with no
- * active cross-repository drift test (the in-monorepo drift test is
- * `test.skip`'d — see `test/collector-definitions-snapshot-drift.test.ts`);
- * drift is bounded only by the pinned commit map until the second tranche
- * lands a cross-repository check. Adding a filesystem-class connector to
- * the bundle is a change in
- * `@pdpp/polyfill-connectors/src/collector-registry.ts` followed by
- * regenerating the snapshot — this file and the runtime do not change.
+ * `LOCAL_COLLECTOR_DEFINITIONS` is this package's generated snapshot of each
+ * connector's local-collector participation (ordering, default streams,
+ * scoping). The code that runs is not in this package: each connector is a
+ * signed Collection Profile pinned in {@link COLLECTION_PROFILE_PINS} and
+ * installed on first use under {@link COLLECTION_PROFILE_ROOT} (see
+ * {@link prepareConnectorSpec}). A definition without a pin is not offered;
+ * {@link UNPINNED_CONNECTOR_IDS} names it so the refusal can say why.
  */
-export const BUNDLED_CONNECTORS: BundledConnectorRegistry = createBundledConnectorRegistry(LOCAL_COLLECTOR_DEFINITIONS);
+const PINS_BY_CONNECTOR: ReadonlyMap<string, CollectionProfilePin> = new Map(
+  COLLECTION_PROFILE_PINS.map((pin) => [pin.connectorId, pin])
+);
+
+/**
+ * Install store for Collection Profiles. A sibling of the durable outbox
+ * directory, never inside it. `PDPP_COLLECTION_PROFILE_ROOT` overrides it.
+ */
+export const COLLECTION_PROFILE_ROOT: string =
+  process.env.PDPP_COLLECTION_PROFILE_ROOT?.trim() || join(defaultCollectorStateRoot(), "pdpp", "collection-profiles");
+
+/** Definitions this package can run, in definition order. */
+const PINNED_DEFINITIONS = LOCAL_COLLECTOR_DEFINITIONS.filter((definition) =>
+  PINS_BY_CONNECTOR.has(definition.connector_id)
+);
+
+/** Connectors with a local-collector definition but no published, signed Collection Profile. */
+export const UNPINNED_CONNECTOR_IDS: readonly string[] = Object.freeze(
+  LOCAL_COLLECTOR_DEFINITIONS.filter((definition) => !PINS_BY_CONNECTOR.has(definition.connector_id)).map(
+    (definition) => definition.connector_id
+  )
+);
+
+export const BUNDLED_CONNECTORS: BundledConnectorRegistry = createBundledConnectorRegistry(
+  PINNED_DEFINITIONS,
+  new Map(
+    PINNED_DEFINITIONS.map((definition) => {
+      const pin = PINS_BY_CONNECTOR.get(definition.connector_id) as CollectionProfilePin;
+      return [definition.connector_id, installedCollectionProfile(COLLECTION_PROFILE_ROOT, pin).entrypoint];
+    })
+  )
+);
 
 /** Stable list of connector ids the published `pdpp-local-collector` accepts. */
 export const BUNDLED_CONNECTOR_IDS: readonly string[] = bundledConnectorIds(BUNDLED_CONNECTORS);
@@ -121,6 +151,18 @@ export const BUNDLED_CONNECTOR_VERSIONS: Readonly<Record<string, string>> =
  */
 export function normalizeConnectorId(connectorId: string): string {
   return connectorId.trim().toLowerCase().replaceAll("-", "_");
+}
+
+/**
+ * Why `--connector <id>` is refused. A connector with a definition but no
+ * pinned Collection Profile is named as such, so the refusal does not read
+ * like a typo.
+ */
+function unsupportedConnectorMessage(connector: string): string {
+  const reason = UNPINNED_CONNECTOR_IDS.includes(normalizeConnectorId(connector))
+    ? `connector '${connector}' has no published, signed Collection Profile yet, so pdpp-local-collector cannot install it.`
+    : `connector '${connector}' is not bundled with pdpp-local-collector.`;
+  return `${reason} Supported: ${BUNDLED_CONNECTOR_IDS.join(", ")}.`;
 }
 
 /** Lookup helper. Returns null when the id is not bundled (after normalization). */
@@ -777,7 +819,7 @@ export async function runCollectorOnce(options: CliOptions): Promise<CollectorRu
     throw new CollectorUsageError("run requires --connector <connector-id>");
   }
 
-  const spec = buildConnectorSpec(options);
+  const spec = await prepareConnectorSpec(options);
   const reporter = options.quiet ? null : createRunProgressReporter();
   const controller = new AbortController();
   const removeInterruptHandlers = installInterruptAbort(controller);
@@ -841,7 +883,7 @@ export async function runCollectorSample(options: CliOptions): Promise<SampleRun
     throw new CollectorUsageError("--sample requires a positive integer");
   }
 
-  const spec = buildConnectorSpec(options);
+  const spec = await prepareConnectorSpec(options);
   const reporter = options.quiet ? null : createRunProgressReporter();
   const controller = new AbortController();
   let recordsSeen = 0;
@@ -941,10 +983,7 @@ export async function runSetup(options: CliOptions, deps: RunSetupDeps = {}): Pr
   }
   const normalizedConnector = normalizeConnectorId(options.connector);
   if (!getBundledConnector(normalizedConnector)) {
-    throw new CollectorUsageError(
-      `connector '${options.connector}' is not bundled with pdpp-local-collector. ` +
-        `Supported: ${BUNDLED_CONNECTOR_IDS.join(", ")}.`
-    );
+    throw new CollectorUsageError(unsupportedConnectorMessage(options.connector));
   }
 
   const enrollment = await enroll({
@@ -1188,10 +1227,7 @@ export async function runConnect(options: CliOptions, deps: RunConnectDeps = {})
   }
   const normalizedConnector = normalizeConnectorId(options.connector);
   if (!getBundledConnector(normalizedConnector)) {
-    throw new CollectorUsageError(
-      `connector '${options.connector}' is not bundled with pdpp-local-collector. ` +
-        `Supported: ${BUNDLED_CONNECTOR_IDS.join(", ")}.`
-    );
+    throw new CollectorUsageError(unsupportedConnectorMessage(options.connector));
   }
 
   const profileName = options.profile ?? normalizedConnector;
@@ -3100,6 +3136,24 @@ export function resolveConnectorProtocolCapabilities(
   return entrypointCommand ? [] : (bundled?.protocol_capabilities ?? []);
 }
 
+/**
+ * {@link buildConnectorSpec}, then make sure the entrypoint it names exists:
+ * a pinned connector's Collection Profile is verified in the install store,
+ * or fetched, Sigstore-verified and installed there first. A custom
+ * `--command` launches its own executable and installs nothing.
+ */
+export async function prepareConnectorSpec(
+  options: CliOptions,
+  install: typeof ensureCollectionProfileInstalled = ensureCollectionProfileInstalled
+): Promise<CollectorConnectorSpec> {
+  const spec = buildConnectorSpec(options);
+  const pin = options.entrypointCommand ? undefined : PINS_BY_CONNECTOR.get(spec.connector_id);
+  if (pin) {
+    await install({ pin, installRoot: COLLECTION_PROFILE_ROOT, durableRoot: collectorStateDirectory() });
+  }
+  return spec;
+}
+
 export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec {
   if (!options.connector) {
     throw new CollectorUsageError("connector required");
@@ -3114,8 +3168,7 @@ export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec 
 
   if (!(bundled || customAllowed)) {
     throw new CollectorUsageError(
-      `connector '${options.connector}' is not bundled with pdpp-local-collector. ` +
-        `Supported: ${BUNDLED_CONNECTOR_IDS.join(", ")}. ` +
+      `${unsupportedConnectorMessage(options.connector)} ` +
         `Set ${ALLOW_CUSTOM_COMMAND_ENV}=1 to use --command <bin> for monorepo development.`
     );
   }
@@ -3179,14 +3232,14 @@ export class CollectorExecutionRootError extends CollectorUsageError {}
  * Candidates are tried in order and the first one that (after realpath)
  * actually contains the resolved connector entrypoint wins:
  *
- *   1. the resolved `@pdpp/local-collector` package root — true for every
- *      published install, where the collector build vendors the bundled
- *      connectors into its own `dist/` tree;
+ *   1. the resolved `@pdpp/local-collector` package root — for a custom
+ *      entrypoint inside the installed package;
  *   2. that package root's grandparent — true for a monorepo dev checkout,
- *      where the entrypoint falls back to a sibling workspace package
- *      (`packages/polyfill-connectors/...`) or a custom relative dev path
- *      (`connectors/<id>/index.ts`) that only resolves under the repo root;
- *   3. the entrypoint's own containing directory — the
+ *      where a custom relative dev path (`connectors/<id>/index.ts`) only
+ *      resolves under the repo root;
+ *   3. the entrypoint's own containing directory — true for every pinned
+ *      connector, whose entrypoint is an installed Collection Profile under
+ *      {@link COLLECTION_PROFILE_ROOT}. It also covers the
  *      `PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1` escape hatch
  *      (`buildConnectorSpec`'s `options.entrypointCommand` path) lets an
  *      operator point `--command`/`--args` at an absolute path anywhere on
