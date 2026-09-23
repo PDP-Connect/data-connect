@@ -50,7 +50,19 @@
     "skills:sync": "node scripts/sync-skills.js",
     "skills:watch": "node scripts/watch-skills.js",
     "postinstall": "node scripts/sync-skills.js && node scripts/fetch-connectors.js",
-    "fresh-start": "bash scripts/fresh-start.sh"
+    "fresh-start": "bash scripts/fresh-start.sh",
+    "docker:check-image-identity": "bash deploy/docker/check-image-identity.sh",
+    "docker:check-image-identity:test": "bash deploy/docker/check-image-identity.test.sh",
+    "docker:check-prod-revision-drift": "bash deploy/docker/check-prod-revision-drift.sh",
+    "docker:check-prod-revision-drift:test": "bash deploy/docker/check-prod-revision-drift.test.sh",
+    "railway:template:test": "node --test --import tsx scripts/check-railway-deploy-env.test.ts scripts/check-railway-ghcr-public.test.ts scripts/railway-mcp-query-smoke.test.ts",
+    "railway:ghcr-public": "node --import tsx scripts/check-railway-ghcr-public.ts",
+    "railway:ghcr-public:test": "node --test --import tsx scripts/check-railway-ghcr-public.test.ts",
+    "railway:env-check": "node --import tsx scripts/check-railway-deploy-env.ts",
+    "railway:env-check:test": "node --test --import tsx scripts/check-railway-deploy-env.test.ts",
+    "railway:mcp-query-smoke": "node --import tsx scripts/railway-mcp-query-smoke.ts",
+    "railway:mcp-query-smoke:test": "node --test --import tsx scripts/railway-mcp-query-smoke.test.ts",
+    "railway:sqlite-restart-smoke": "bash scripts/railway-sqlite-restart-smoke.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

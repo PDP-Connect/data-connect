@@ -1,0 +1,147 @@
+name: deploy-tooling
+
+# Offline checks for the Railway/Fly.io/Docker deploy tooling restored from
+# PDP-Connect/pdpp (see deploy/railway/README.md, deploy/flyio/README.md,
+# deploy/docker/README.md). Mirrors the classify -> suite -> gate shape of
+# .github/workflows/reference-implementation.yml, scoped to this repo's npm
+# workspaces and Node engine floor (>=22.14.0 <24) rather than pdpp's pnpm.
+#
+# Scope, deliberately narrow: this workflow proves the *check scripts* the
+# deploy runbooks depend on (railway env/GHCR-visibility contract checks,
+# Docker image-identity contract checks, and `docker compose config` parsing
+# for the compose files) stay green. It does NOT build or publish Docker
+# images -- pdpp's own image-build-and-publish pipeline
+# (.github/workflows/docker-images.yml there) was intentionally not ported;
+# see deploy/docker/README.md's own architecture notes for what still differs
+# between this repo's Dockerfile and the one these checks were originally
+# written against. Add an image-build job here only as a deliberate,
+# separately-reviewed follow-up.
+#
+# check-image-identity.sh / check-prod-revision-drift.sh are plain bash and
+# their *.test.sh counterparts stub `docker` entirely, so they run with no
+# Docker daemon and no network -- see those test files' own headers.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/deploy-tooling.yml"
+      - "deploy/**"
+      - "docker-compose.yml"
+      - "docker-compose.dev.yml"
+      - "docker-compose.neko.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/check-railway-deploy-env.ts"
+      - "scripts/check-railway-deploy-env.test.ts"
+      - "scripts/check-railway-ghcr-public.ts"
+      - "scripts/check-railway-ghcr-public.test.ts"
+      - "scripts/railway-mcp-query-smoke.ts"
+      - "scripts/railway-mcp-query-smoke.test.ts"
+      - "scripts/railway-sqlite-restart-smoke.sh"
+      - "scripts/lib/owner-session.ts"
+  merge_group: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-tooling-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shell-checks:
+    name: docker check-script unit tests (bash, no Docker daemon needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: check-image-identity.sh
+        run: bash deploy/docker/check-image-identity.test.sh
+
+      - name: check-prod-revision-drift.sh
+        run: bash deploy/docker/check-prod-revision-drift.test.sh
+
+  railway-checks:
+    name: railway deploy-contract unit tests (node:test, no network needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run railway check-script unit tests
+        run: npm run railway:template:test
+
+  compose-config:
+    name: docker compose config parses cleanly
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate root compose stack (base + dev + neko overlays)
+        env:
+          PDPP_OWNER_PASSWORD: ci-placeholder
+          PDPP_CREDENTIAL_ENCRYPTION_KEY: ci-placeholder
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.neko.yml config >/dev/null
+
+      - name: Validate the minimal self-host stack
+        env:
+          PDPP_OWNER_PASSWORD: ci-placeholder
+          PDPP_CREDENTIAL_ENCRYPTION_KEY: ci-placeholder
+        run: docker compose -f deploy/docker/docker-compose.yml config >/dev/null
+
+  gate:
+    name: deploy-tooling gate
+    needs:
+      - shell-checks
+      - railway-checks
+      - compose-config
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate required sub-job results
+        run: |
+          set -euo pipefail
+
+          fail=0
+          for job_result in \
+            "shell-checks:${{ needs.shell-checks.result }}" \
+            "railway-checks:${{ needs.railway-checks.result }}" \
+            "compose-config:${{ needs.compose-config.result }}"
+          do
+            name="${job_result%%:*}"
+            result="${job_result##*:}"
+            if [[ "${result}" != "success" && "${result}" != "skipped" ]]; then
+              echo "::error::${name} reported ${result}"
+              fail=1
+            fi
+          done
+
+          exit "${fail}"
