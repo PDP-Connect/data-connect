@@ -10,8 +10,9 @@
 //! escape hatch.
 
 use crate::commands::process_supervisor::{
-    EnvironmentSpec, EventSink, LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness,
-    RestartPolicy, StopPolicy, Supervisor, SupervisorError, SupervisorHandle,
+    allocate_loopback_port, loopback_port_range_is_free, EnvironmentSpec, EventSink,
+    LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness, RestartPolicy, StopPolicy,
+    Supervisor, SupervisorError, SupervisorHandle,
 };
 use crate::commands::{
     attach_reference_server, login_reference_server_with_password,
@@ -332,7 +333,10 @@ fn browser_console_url(app: &AppHandle) -> Result<String, String> {
 /// ask `Supervisor::start_on_port` to reuse it for either sidecar --
 /// `read_preferred_console_port` and `read_preferred_ri_port` are thin
 /// wrappers over this for `UnifiedRuntimeState.console_origin`/`ri_origin`
-/// respectively.
+/// respectively. For the console this in-memory hint is now only the
+/// fallback when its persisted port (`crate::console_port`) is taken: it
+/// lives only as long as the app process, so on its own it could not keep
+/// the port across a relaunch or rebuild.
 ///
 /// Confirmed live, 2026-09-19, for the console specifically: without this,
 /// the console supervisor always called plain `Supervisor::start()` (no
@@ -371,6 +375,41 @@ fn read_preferred_ri_port(app: &AppHandle) -> Option<u16> {
     let state = app.try_state::<UnifiedRuntimeState>()?;
     let ri_origin = state.ri_origin.lock().ok()?.clone();
     preferred_port_from_origin(ri_origin.as_deref())
+}
+
+/// Persist the console's port when `crate::console_port::port_to_persist`
+/// says so, and never let a lost stable port pass silently: a tunnel route
+/// or proxy that points at `stable` stops working the moment the console
+/// lands elsewhere. The console's Settings page names both ports as well
+/// (it receives `stable` in `STABLE_PORT_ENV`); the notification covers an
+/// owner who does not open Settings.
+fn report_console_port_outcome(
+    app: &AppHandle,
+    data_dir: &Path,
+    pinned: Option<u16>,
+    persisted: Option<u16>,
+    stable: u16,
+    actual: u16,
+) {
+    if let Some(port) = crate::console_port::port_to_persist(pinned, persisted, actual) {
+        if let Err(error) = crate::console_port::write_persisted_console_port(data_dir, port) {
+            log::error!("{error}; the console may use a different port on the next launch");
+        }
+    }
+    if actual == stable {
+        return;
+    }
+    let message = crate::console_port::moved_port_message(stable, actual);
+    log::warn!("{message}");
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .title("DataConnect is on a different port")
+        .body(&message)
+        .show()
+    {
+        log::warn!("Failed to show the console port notification: {error}");
+    }
 }
 
 fn configured_console_url() -> Result<String, String> {
@@ -793,6 +832,7 @@ fn console_process_spec(
     rs_origin: &str,
     owner_password: &str,
     remote_access: &RemoteAccessConfig,
+    stable_port: u16,
 ) -> ProcessSpec {
     // The console is the only process a LAN device ever connects to
     // directly (AS/RS stay internal loopback-only, see `ri_process_spec`'s
@@ -820,6 +860,10 @@ fn console_process_spec(
             OsString::from(ORIGIN_PROOF_KEY_ENV),
             OsString::from(origin_proof_key()),
         ),
+        (
+            OsString::from(crate::console_port::STABLE_PORT_ENV),
+            OsString::from(stable_port.to_string()),
+        ),
     ]);
     env.extend(remote_access.fields.environment());
     ProcessSpec {
@@ -843,8 +887,8 @@ fn console_process_spec(
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
-        // The console is the one surface a "proxy you run" points at (it
-        // fronts AS/RS internally) -- see RemoteAccessConfig::console_port's
+        // The console is the one surface a proxy or tunnel route points at
+        // (it fronts AS/RS internally) -- see RemoteAccessConfig::console_port's
         // doc comment. RI keeps its dynamic AS/RS allocation; only this spec
         // ever receives a pin.
         requested_port: remote_access.console_port,
@@ -954,9 +998,9 @@ fn start_managed_stack(
     // a missing lease costs cleanup on a later boot, while a failed start
     // costs the owner their session.
     let lease_observer = || RunLeaseObserver::new(app);
-    // Reuse the RI's previous loopback port across a stack-level restart,
-    // the same way `preferred_console_port` below keeps the console's port
-    // stable -- see `preferred_port_from_origin`'s doc comment for why the
+    // Reuse the RI's previous loopback port across a stack-level restart
+    // (the console's own port is persisted on disk instead, see
+    // `crate::console_port`) -- see `preferred_port_from_origin`'s doc comment for why the
     // RI now needs this same independent mechanism rather than piggybacking
     // on the held ngrok tunnel's state. The console's env bakes in
     // `PDPP_AS_URL`/`PDPP_RS_URL` pointing at wherever the RI lands, so a
@@ -996,7 +1040,18 @@ fn start_managed_stack(
     // exactly the same one-restart-to-settle shape the RI has always used,
     // now shared by the console instead of the console being privileged
     // with same-boot knowledge the RI never had.
-    let preferred_console_port = read_preferred_console_port(app);
+    //
+    // The console's port is persisted on disk, not only remembered for this
+    // session: see `crate::console_port` for why, and for the order of
+    // choices (pin, persisted port, this session's port, fresh).
+    let persisted_console_port = crate::console_port::read_persisted_console_port(&data_dir);
+    let console_port_plan = crate::console_port::plan_console_port(
+        remote_access.console_port,
+        persisted_console_port,
+        read_preferred_console_port(app),
+        |port| loopback_port_range_is_free(port, false),
+        || allocate_loopback_port(false, None).ok(),
+    );
     let console = Supervisor::new(
         console_process_spec(
             &node_binary,
@@ -1005,12 +1060,21 @@ fn start_managed_stack(
             &rs_origin,
             owner_password,
             remote_access,
+            console_port_plan.stable,
         ),
         sink.clone(),
     )
     .with_observer(lease_observer())
-    .start_on_port(preferred_console_port)
+    .start_on_port(console_port_plan.preferred)
     .map_err(|error| format!("Failed to start staged console: {error}"))?;
+    report_console_port_outcome(
+        app,
+        &data_dir,
+        remote_access.console_port,
+        persisted_console_port,
+        console_port_plan.stable,
+        console.port(),
+    );
     let console_url = format!("http://127.0.0.1:{}", console.port());
 
     // A tunnel failure (for example `ERR_NGROK_312`, TLS endpoints on ngrok's
@@ -5395,6 +5459,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:2",
             "owner-password",
             &crate::remote_access::off_remote_access_config(),
+            crate::console_port::DEFAULT_CONSOLE_PORT,
         );
         let debug = format!("{:?}", spec.env);
         assert!(
@@ -5451,6 +5516,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7663",
             "owner-password-test",
             &remote_access,
+            4310,
         );
         assert_eq!(console_spec.requested_port, Some(4310));
 
@@ -5461,8 +5527,31 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7663",
             "owner-password-test",
             &off_remote_access_config(),
+            crate::console_port::DEFAULT_CONSOLE_PORT,
         );
         assert_eq!(unpinned_console_spec.requested_port, None);
+    }
+
+    #[test]
+    fn the_console_is_told_the_port_the_owner_relies_on() {
+        // Settings compares this with PORT to report a console that could
+        // not keep its stable port; without it that case would be silent.
+        let spec = console_process_spec(
+            &node_program(),
+            Path::new("/tmp/console-root"),
+            "http://127.0.0.1:7662",
+            "http://127.0.0.1:7663",
+            "owner-password-test",
+            &off_remote_access_config(),
+            38739,
+        );
+        assert_eq!(
+            spec.env
+                .vars
+                .get(std::ffi::OsStr::new(crate::console_port::STABLE_PORT_ENV)),
+            Some(&OsString::from("38739")),
+            "the console must receive its stable port"
+        );
     }
 
     #[test]

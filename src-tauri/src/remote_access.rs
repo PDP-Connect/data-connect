@@ -78,11 +78,12 @@ pub(crate) struct RemoteAccessConfig {
     pub(crate) posture: RemoteAccessPosture,
     pub(crate) provider: Option<String>,
     pub(crate) fields: ReachabilityFields,
-    /// The port an owner-run reverse proxy must target, pinned so it survives
-    /// restarts instead of chasing the supervisor's per-launch ephemeral
-    /// allocation. Only meaningful for `user_supplied_origin` (the only
-    /// provider a self-hoster's own proxy points at); other providers ignore
-    /// it. `None` keeps today's dynamic-port behavior. This is a supervisor
+    /// The owner's pin for the console's loopback port: the target of an
+    /// owner-maintained route (a reverse proxy, a Cloudflare dashboard
+    /// route). Applies to every provider; a taken pin fails the start
+    /// instead of moving. `None` uses the persisted stable port
+    /// (`crate::console_port`), which is kept across launches but falls
+    /// back, loudly, when it is taken. This is a supervisor
     /// launch parameter, not a PLATFORM-OWNED env var like PORT/AS_PORT/
     /// RS_PORT (see `reference-implementation/README.md`, "Config
     /// precedence") -- it never goes through the config-store precedence

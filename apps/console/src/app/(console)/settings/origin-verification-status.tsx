@@ -19,12 +19,10 @@ function checkedTime(checkedAt: number): string {
  */
 export function OriginVerificationStatus({
   consolePort,
-  consolePortPinned,
   display,
   origin,
 }: {
   consolePort: number | null
-  consolePortPinned: boolean
   display: OriginVerificationDisplay
   origin: string
 }) {
@@ -70,10 +68,7 @@ export function OriginVerificationStatus({
               , pointing at <span className="select-all font-mono text-foreground/80">{target}</span>
             </>
           ) : null}
-          .{" "}
-          {consolePortPinned
-            ? "This port is pinned and will not change on restart."
-            : "This port can change when DataConnect restarts. If it does, the address stops working until you update it there, and the check above will say so."}
+          . The console address below says whether this port stays the same across restarts.
         </p>
       ) : binding?.kind === "app_supplied" && misrouted ? (
         <p className="pdpp-caption text-muted-foreground">

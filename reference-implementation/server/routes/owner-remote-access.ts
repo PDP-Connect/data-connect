@@ -5,6 +5,7 @@
 //
 //   GET  /v1/owner/remote-access/config                      -> current RemoteAccessConfig
 //   POST /v1/owner/remote-access/config                      -> validate + persist a new config
+//   POST /v1/owner/remote-access/console-port                -> pin or unpin the console port only
 //   GET  /v1/owner/remote-access/inspect                     -> user_supplied_origin availability probe
 //   GET  /v1/owner/remote-access/inspect/ngrok               -> ngrok availability probe
 //   GET  /v1/owner/remote-access/inspect/cloudflare_tunnel   -> Cloudflare named-tunnel availability probe
@@ -273,6 +274,49 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
         }
         const saved = await ctx.store.save(toSave);
         // Never echo the sealed (or plaintext) credential back to the console.
+        const { ngrok_authtoken_sealed: _sealed, cloudflare_tunnel_token_sealed: _cfSealed, ...safeSaved } = saved
+        res.json({ data: safeSaved, object: "remote_access_config" })
+      } catch (err) {
+        if (err instanceof Error) {
+          ctx.pdppError(res, 400, "remote_access_config_invalid", err.message, null)
+          return
+        }
+        ctx.handleError(res, err)
+      }
+    }
+  )
+
+  // Pinning is not a provider change, so it must not need one. POST /config
+  // requires ngrok's authtoken or Cloudflare's tunnel token on every
+  // submission, so before this route a Cloudflare owner could pin the port
+  // only by pasting their token again -- and the Settings page did not
+  // offer the pin to them at all. This route changes `console_port` alone,
+  // for every provider, and leaves every provider field as stored.
+  app.post(
+    "/v1/owner/remote-access/console-port",
+    ...guarded,
+    async (req: RouteRequest, res: RouteResponse) => {
+      try {
+        const body = req.body as { console_port?: unknown } | null | undefined
+        const port = body?.console_port
+        if (port !== null && !(typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535)) {
+          ctx.pdppError(res, 400, "invalid_request", "console_port must be null or an integer between 1 and 65535.", null)
+          return
+        }
+        const current = await ctx.store.load()
+        if (current.posture === "off") {
+          // Off stores no pin (`offRemoteAccessConfig`), so saving one here
+          // would report success and persist nothing.
+          ctx.pdppError(
+            res,
+            409,
+            "remote_access_off",
+            "Remote access is off, so there is no port to pin. DataConnect already keeps the console on the same port across restarts.",
+            null
+          )
+          return
+        }
+        const saved = await ctx.store.save({ ...current, console_port: port })
         const { ngrok_authtoken_sealed: _sealed, cloudflare_tunnel_token_sealed: _cfSealed, ...safeSaved } = saved
         res.json({ data: safeSaved, object: "remote_access_config" })
       } catch (err) {

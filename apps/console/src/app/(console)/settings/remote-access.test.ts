@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   cloudflareTunnelDurableAddressState,
+  consolePortStatus,
   describeTunnelError,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
@@ -466,4 +467,35 @@ test("a reading taken against another origin says nothing about this one", () =>
     1_010
   )
   assert.deepEqual(display, { reading: { kind: "unverified" }, binding: null, agentExited: false })
+})
+
+test("the console port status says when the port the owner relies on was lost", () => {
+  assert.deepEqual(consolePortStatus({ pinnedPort: null, runningPort: 41000, stablePort: 7664 }), {
+    kind: "moved",
+    port: 41000,
+    stablePort: 7664,
+  })
+})
+
+test("the console port status separates a pin from the persisted port", () => {
+  assert.deepEqual(consolePortStatus({ pinnedPort: 38739, runningPort: 38739, stablePort: 38739 }), {
+    kind: "pinned",
+    port: 38739,
+  })
+  assert.deepEqual(consolePortStatus({ pinnedPort: null, runningPort: 7664, stablePort: 7664 }), {
+    kind: "kept",
+    port: 7664,
+  })
+  // A pin saved a moment ago is not in effect until the restart it triggers.
+  assert.deepEqual(consolePortStatus({ pinnedPort: 4310, runningPort: 7664, stablePort: 7664 }), {
+    kind: "kept",
+    port: 7664,
+  })
+})
+
+test("the console port status does not claim stability on a host without the desktop supervisor", () => {
+  assert.deepEqual(consolePortStatus({ pinnedPort: null, runningPort: 3000, stablePort: null }), {
+    kind: "environment",
+    port: 3000,
+  })
 })

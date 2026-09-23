@@ -89,6 +89,16 @@ export async function setRemoteAccessConfig(
   return unwrapData(payload) as RemoteAccessConfig
 }
 
+/** Pin (`port`) or unpin (`null`) the console port alone, for any provider,
+ * without resubmitting a provider credential. */
+export async function setConsolePort(port: number | null): Promise<RemoteAccessConfig> {
+  const payload = await remoteAccessFetch("/v1/owner/remote-access/console-port", {
+    body: JSON.stringify({ console_port: port }),
+    method: "POST",
+  })
+  return unwrapData(payload) as RemoteAccessConfig
+}
+
 export async function inspectRemoteAccess(): Promise<RemoteAccessInspection> {
   const payload = await remoteAccessFetch("/v1/owner/remote-access/inspect")
   return unwrapData(payload) as RemoteAccessInspection
