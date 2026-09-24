@@ -25,6 +25,7 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
+import { assertConnectorManifestRevisionWithClient, storedConnectorManifestRevision } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import {
   isPostgresStorageBackend,
@@ -769,6 +770,9 @@ export async function postgresBackfillRecordSortPositionsForManifest(
   manifest: ConnectorManifest
 ): Promise<{ updated: number }> {
   const connectorId = manifestConnectorId(manifest);
+  const auth = await import(new URL("./auth.ts", import.meta.url).href);
+  const { storedManifest } = auth.normalizeConnectorManifestForStorage(manifest as unknown as Record<string, unknown>);
+  const expectedRevision = storedConnectorManifestRevision(storedManifest);
   if (!(connectorId && Array.isArray(manifest.streams))) {
     return { updated: 0 };
   }
@@ -818,6 +822,9 @@ export async function postgresBackfillRecordSortPositionsForManifest(
       }
       const updatedInPage = await page.rows.reduce(async (previous, row) => {
         const total = await previous;
+        await withPostgresTransaction((client) =>
+          assertConnectorManifestRevisionWithClient(client, connectorId, expectedRevision)
+        );
         const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
         const cursor = cursorValue(data, manifestStream);
         const primary = primaryKeyText(data, row.record_key, manifestStream);

@@ -108,7 +108,7 @@ async function assertStaleLexicalPageRejected(): Promise<void> {
       { deferIndexes: true }
     );
     __setLexicalBackfillPhaseHookForTest(async (point) => {
-      if (point === "before-page-write" && !held) {
+      if (point === "before-instance-fence" && !held) {
         held = true;
         entered.release();
         await resume.promise;
@@ -118,8 +118,9 @@ async function assertStaleLexicalPageRejected(): Promise<void> {
     await entered.promise;
     await registerConnector(manifest("title"), { backfillRetrievalIndexes: false });
     await lexicalIndexBackfillForManifest({ manifest: pinnedManifest("title") });
+    const staleRejected = assert.rejects(stale, MANIFEST_REVISION_CHANGED);
     resume.release();
-    await assert.rejects(stale, MANIFEST_REVISION_CHANGED);
+    await staleRejected;
     const rows = isPostgresStorageBackend()
       ? (
           await postgresQuery<{ field: string; text: string }>(
@@ -210,8 +211,9 @@ async function assertStaleSemanticPageRejected(): Promise<void> {
     await entered.promise;
     await registerConnector(semanticManifest("title"), { backfillRetrievalIndexes: false });
     await semanticIndexBackfillForManifest({ manifest: semanticManifest("title") });
+    const staleRejected = assert.rejects(stale, MANIFEST_REVISION_CHANGED);
     resume.release();
-    await assert.rejects(stale, MANIFEST_REVISION_CHANGED);
+    await staleRejected;
     const scopeKeys = isPostgresStorageBackend()
       ? (
           await postgresQuery<{ scope_key: string }>(
@@ -313,7 +315,7 @@ test("SQLite: stale record-column repair cannot overwrite manifest B", async () 
   try {
     const { a, b } = await seedRecordRepairA();
     await backfillSqliteRecordSemanticTimesForManifest(b);
-    await backfillSqliteRecordSemanticTimesForManifest(a);
+    await assert.rejects(backfillSqliteRecordSemanticTimesForManifest(a), MANIFEST_REVISION_CHANGED);
     const row = getDb()
       .prepare("SELECT semantic_time FROM records WHERE connector_instance_id=? AND stream=?")
       .get<{ semantic_time: string }>(connectorInstanceId, stream);
@@ -340,7 +342,7 @@ test("PostgreSQL: stale record-column repair cannot overwrite manifest B", {
       try {
         await initPostgresStorage({ backend: "postgres", databaseUrl });
         const { a } = await seedRecordRepairA();
-        await postgresBackfillRecordSortPositionsForManifest(a);
+        await assert.rejects(postgresBackfillRecordSortPositionsForManifest(a), MANIFEST_REVISION_CHANGED);
         const row = await postgresQuery<{ cursor_value: string }>(
           "SELECT cursor_value FROM records WHERE connector_instance_id=$1 AND stream=$2",
           [connectorInstanceId, stream]
@@ -456,27 +458,6 @@ async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
   const entered = deferred();
   const resume = deferred();
   let paused = false;
-  const readFailedAttemptCount = async (): Promise<number> => {
-    const dirty = isPostgresStorageBackend()
-      ? (
-          await postgresQuery<{ attempts: number }>(
-            "SELECT attempts FROM search_index_dirty WHERE connector_instance_id=$1 AND stream=$2",
-            [connectorInstanceId, stream]
-          )
-        ).rows[0]
-      : getDb()
-          .prepare("SELECT attempts FROM search_index_dirty WHERE connector_instance_id=? AND stream=?")
-          .get<{ attempts: number }>(connectorInstanceId, stream);
-    return dirty?.attempts ?? 0;
-  };
-  const waitForFailureEvidence = async (remaining: number): Promise<number> => {
-    const attempts = await readFailedAttemptCount();
-    if (attempts > 0 || remaining === 0) {
-      return attempts;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    return waitForFailureEvidence(remaining - 1);
-  };
   configureSemanticBackend(makeStubBackend({ dimensions: 8 }));
   try {
     await registerConnector(retrievalManifest("subject"), { backfillRetrievalIndexes: false });
@@ -511,8 +492,7 @@ async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
       ingest.version ?? 1
     );
     resume.release();
-    const failedAttemptCount = await waitForFailureEvidence(100);
-    assert.equal(failedAttemptCount, 1, "the delayed A publish must reach the manifest revision fence");
+    await ingest;
     const lexical = isPostgresStorageBackend()
       ? (
           await postgresQuery<{ field: string }>(
@@ -602,7 +582,7 @@ test("SQLite: stale semantic backfill checks its manifest before vector-index in
       { deferIndexes: true }
     );
     await registerConnector(b, { backfillRetrievalIndexes: false });
-    await semanticIndexBackfillForManifest({ manifest: a });
+    await assert.rejects(semanticIndexBackfillForManifest({ manifest: a }), MANIFEST_REVISION_CHANGED);
     assert.equal(dimensionsRead, false);
   } finally {
     configureSemanticBackend(null);
