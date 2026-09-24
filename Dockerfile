@@ -207,7 +207,7 @@ RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } f
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
   && npx patchright install --with-deps chromium \
-  && test -n "$(find /root/.cache/ms-playwright -type f \( -path '*/chrome-linux64/chrome' -o -path '*/chrome-linux/chrome' \) -print -quit)" \
+  && test -n "$(find /root/.cache/ms-playwright -type f \( -path '*/chrome-linux64/chrome' -o -path '*/chrome-linux-arm64/chrome' -o -path '*/chrome-linux/chrome' \) -print -quit)" \
   && rm -rf /tmp/patchright-install
 
 WORKDIR /app
