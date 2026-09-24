@@ -120,6 +120,84 @@ test("a corrupted active entrypoint fails closed", async () => {
   }
 });
 
+test("status skips a stale active record with missing bytes and reinstall repairs it", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    rmSync(active.root, { force: true, recursive: true });
+
+    assert.deepEqual(await service.status(), []);
+    assert.equal(await resolveActiveConnectorPath(createFileConnectorInstallStore(dataDir), "github"), null);
+
+    const repaired = await service.install("github", digest);
+    assert.equal(repaired.digest, digest);
+    assert.equal((await service.status())[0]?.digest, digest);
+    assert.equal(existsSync(join(repaired.root, "dist", "collection-profile.mjs")), true);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("status skips a corrupt expected root and reinstall replaces it safely", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    writeFileSync(join(active.root, "dist", "collection-profile.mjs"), "tampered\n");
+
+    assert.deepEqual(await service.status(), []);
+
+    const repaired = await service.install("github", digest);
+    assert.equal((await service.status())[0]?.digest, digest);
+    assert.equal(readFileSync(join(repaired.root, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("reinstall refuses to replace a symlinked active digest root", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const outsideDir = mkdtempSync(join(tmpdir(), "pdpp-connector-outside-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    rmSync(active.root, { force: true, recursive: true });
+    symlinkSync(outsideDir, active.root, "dir");
+
+    assert.deepEqual(await service.status(), []);
+    await assert.rejects(() => service.install("github", digest), /already exists without a matching active record/);
+    assert.deepEqual(readdirSync(outsideDir), []);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+    rmSync(outsideDir, { force: true, recursive: true });
+  }
+});
+
 test("an active root outside the configured data directory is invalid", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   const outsideDir = mkdtempSync(join(tmpdir(), "pdpp-connector-outside-"));

@@ -771,14 +771,22 @@ export function createConnectorInstallService(options: {
       const existing = await store.getActive(connectorId);
       if (existsSync(root)) {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
-          return reuseExistingInstall(root, root, entry, existing, dataDir, options.registerManifest);
-        }
-        // A crash can leave the published directory between rename and the
-        // active-record commit. It is not trusted merely because its name is
-        // digest-shaped, so discard it safely and retry from the signed source.
-        removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
-        if (existsSync(root)) {
-          throw new Error("Connector digest root already exists without a matching active record.");
+          const inspected = await inspectActiveConnector(store, connectorId);
+          if (inspected.status === "active") {
+            return await reuseExistingInstall(root, root, entry, existing, dataDir, options.registerManifest);
+          }
+          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
+          if (existsSync(root)) {
+            throw new Error("Connector digest root already exists without a matching active record.");
+          }
+        } else {
+          // A crash can leave the published directory between rename and the
+          // active-record commit. It is not trusted merely because its name is
+          // digest-shaped, so discard it safely and retry from the signed source.
+          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
+          if (existsSync(root)) {
+            throw new Error("Connector digest root already exists without a matching active record.");
+          }
         }
       }
       assertNoSymlinkComponents(dataDir);
@@ -821,10 +829,7 @@ export function createConnectorInstallService(options: {
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
-    status: async () => {
-      const records = await store.listActive();
-      return records.map((record) => verifyStoredRecord(record.root, record, dataDir));
-    },
+    status: async () => (await listVerifiedActiveConnectors(store)).verified,
     async update(connectorId) {
       const entries = await catalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);
