@@ -27,7 +27,18 @@ function readWorkflowStep(workflow: string, name: string) {
   const start = workflow.indexOf(marker)
   if (start === -1) throw new Error(`Missing workflow step: ${name}`)
   const next = workflow.indexOf("\n      - name: ", start + marker.length)
-  return workflow.slice(start, next === -1 ? workflow.length : next)
+  const nextJob = workflow
+    .slice(start + marker.length)
+    .search(/\n  [a-z][\w-]+:\n/)
+  const end =
+    next === -1
+      ? nextJob === -1
+        ? workflow.length
+        : start + marker.length + nextJob
+      : nextJob === -1
+        ? next
+        : Math.min(next, start + marker.length + nextJob)
+  return workflow.slice(start, end)
 }
 
 function readWorkflowRunScript(workflow: string, name: string) {
@@ -104,12 +115,12 @@ describe("release workflow", () => {
     expect(workflow).toContain("node scripts/ensure-pdpp-runtime.js")
     expect(workflow).toContain("Stage reference-stack roots")
     expect(workflow).toContain(
-      'node scripts/ensure-console-stack.js --profile release'
+      "node scripts/ensure-console-stack.js --profile release"
     )
     expect(workflow).toContain("node scripts/ensure-reference-stack.js \\")
     expect(workflow).toContain('--node-binary "$node_binary"')
     expect(workflow).toContain(
-      'node scripts/verify-reference-stack.mjs --profile release'
+      "node scripts/verify-reference-stack.mjs --profile release"
     )
     expect(workflow).toContain("if: github.event_name == 'release'")
     expect(workflow).not.toMatch(
@@ -227,6 +238,38 @@ describe("release workflow", () => {
     expect(publishArtifacts).toContain('${#artifacts[@]}" -ne 5')
     expect(publishArtifacts).toContain(
       'gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber'
+    )
+  })
+
+  it("publishes the Core image only from the release workflow", () => {
+    const workflow = readReleaseWorkflow()
+    const publishCoreImage = workflow.slice(
+      workflow.indexOf("  publish-core-image:")
+    )
+    const coreMetadata = readWorkflowStep(workflow, "Extract Docker metadata")
+    const buildAndPushCore = readWorkflowStep(
+      workflow,
+      "Build and push Core image"
+    )
+
+    expect(workflow).toContain(
+      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: build"
+    )
+    expect(publishCoreImage).toContain("packages: write")
+    expect(publishCoreImage).toContain("id-token: write")
+    expect(publishCoreImage).toContain("attestations: write")
+    expect(publishCoreImage).toContain("ghcr.io/${GITHUB_REPOSITORY,,}/core")
+    expect(publishCoreImage).toContain(
+      "node scripts/verify-release-ref.mjs --release-tag"
+    )
+    expect(coreMetadata).toContain("type=semver,pattern={{version}}")
+    expect(coreMetadata).toContain("type=raw,value=latest")
+    expect(coreMetadata).not.toContain("dispatch-sha-")
+    expect(buildAndPushCore).toContain("push: true")
+    expect(buildAndPushCore).toContain("target: core")
+    expect(buildAndPushCore).toContain("platforms: linux/amd64,linux/arm64")
+    expect(buildAndPushCore).toContain(
+      "PDPP_REFERENCE_REVISION=${{ github.sha }}"
     )
   })
 

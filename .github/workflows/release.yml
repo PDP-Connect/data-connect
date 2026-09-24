@@ -386,3 +386,80 @@ jobs:
             exit 1
           fi
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
+
+  publish-core-image:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Verify checked-out release identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
+
+      - name: Verify excluded connector type declarations
+        run: bash scripts/check-polyfill-connector-type-shims.sh
+
+      - name: Compute image name
+        run: |
+          echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/core" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.PDPP_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=PDPP Core node
+            org.opencontainers.image.description=PDPP platform-neutral single-container Core node with console and loopback AS/RS
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Build and push Core image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          cache-from: |
+            type=gha,scope=core
+            type=gha,scope=reference
+          cache-to: type=gha,mode=max,scope=core
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PDPP_REFERENCE_REVISION=${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          push: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          target: core

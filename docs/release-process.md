@@ -25,7 +25,12 @@ That is the full release flow for normal releases.
 8. `git push origin <target>` (unless `--no-push`)
 9. `gh release create vX.Y.Z --target <target> ...`
 
-Creating the GitHub release triggers `.github/workflows/release.yml` (`on: release: created`) to build/upload artifacts.
+Creating the GitHub release triggers `.github/workflows/release.yml` (`on: release: created`) to:
+
+1. Build and upload the desktop manual-install artifacts.
+2. Build and publish the public Core image to GHCR as `ghcr.io/pdp-connect/data-connect/core:<version>` and `ghcr.io/pdp-connect/data-connect/core:latest`.
+
+For example, `v1.5.1` publishes `core:1.5.1` and moves `core:latest` only after the release workflow succeeds.
 
 ## Direct answers (branch + tag confusion)
 
