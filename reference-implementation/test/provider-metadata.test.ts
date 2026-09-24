@@ -1088,7 +1088,8 @@ test("provider metadata routes expose current honest capability set", async () =
       "https://pdpp.dev/data-access",
     ]);
     assert.equal(authorizationServer.body.token_endpoint, `${asUrl}/oauth/token`);
-    assert.deepEqual(authorizationServer.body.token_endpoint_auth_methods_supported, ["none"]);
+    assert.deepEqual(authorizationServer.body.token_endpoint_auth_methods_supported, ["none", "private_key_jwt"]);
+    assert.deepEqual(authorizationServer.body.token_endpoint_auth_signing_alg_values_supported, ["RS256"]);
     assert.equal(authorizationServer.body.device_authorization_endpoint, `${asUrl}/oauth/device_authorization`);
     assertDeviceAuthorizationProfiles(authorizationServer.body);
     assert.equal(authorizationServer.body.agent_connect_endpoint, `${asUrl}/agent-connect`);

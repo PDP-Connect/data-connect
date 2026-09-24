@@ -4,7 +4,7 @@
 // biome-ignore-all lint/suspicious/useAwait: async helper wrappers preserve the existing test API and call-site behavior.
 
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -443,9 +443,14 @@ async function prepareOauthCodeFlow({
   manifest: ConnectorManifest;
 }): Promise<{ code: string; verifier: string }> {
   const verifier = randomBytes(32).toString("base64url");
+  const clientMetadata = client.metadata as { redirect_uris?: unknown } | undefined;
+  const redirectUri =
+    Array.isArray(clientMetadata?.redirect_uris) && typeof clientMetadata.redirect_uris[0] === "string"
+      ? clientMetadata.redirect_uris[0]
+      : "https://client.example/callback";
   const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
   authorizeUrl.searchParams.set("client_id", client.client_id);
-  authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
+  authorizeUrl.searchParams.set("redirect_uri", redirectUri);
   authorizeUrl.searchParams.set("response_type", "code");
   authorizeUrl.searchParams.set("state", "state-123");
   authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
@@ -473,7 +478,7 @@ async function prepareOauthCodeFlow({
   const callback = new URL(
     mustExist(approveResp.headers.get("location"), "approve redirect must carry a Location header")
   );
-  assert.equal(callback.origin, "https://client.example");
+  assert.equal(callback.origin, new URL(redirectUri).origin);
   assert.equal(callback.searchParams.get("state"), "state-123");
   assert.equal(callback.searchParams.has("access_token"), false);
   assert.equal(callback.searchParams.has("grant"), false);
@@ -494,6 +499,11 @@ async function completeOauthCodeFlow({
   client: RegisteredClient;
   manifest: ConnectorManifest;
 }): Promise<OauthCodeFlowResult> {
+  const clientMetadata = client.metadata as { redirect_uris?: unknown } | undefined;
+  const redirectUri =
+    Array.isArray(clientMetadata?.redirect_uris) && typeof clientMetadata.redirect_uris[0] === "string"
+      ? clientMetadata.redirect_uris[0]
+      : "https://client.example/callback";
   const { code, verifier } = await prepareOauthCodeFlow({ accessMode, asUrl, client, manifest });
 
   const { status, body } = await fetchJson(`${asUrl}/oauth/token`, {
@@ -502,7 +512,7 @@ async function completeOauthCodeFlow({
       code,
       code_verifier: verifier,
       grant_type: "authorization_code",
-      redirect_uri: "https://client.example/callback",
+      redirect_uri: redirectUri,
     }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     method: "POST",
@@ -4797,13 +4807,19 @@ test("hosted MCP picker pins the wildcard stream entry when the whole source is 
 // `cimdFetchDependencies` lets the test exercise the exact resolution path a
 // real hosted MCP connector (ChatGPT, Claude, ...) takes without touching the
 // network.
-function startServerWithCimdDocFetch(doc: Record<string, unknown>) {
+function startServerWithCimdDocFetch(doc: Record<string, unknown>, jwks?: Record<string, unknown>) {
+  const jwksUri = typeof doc.jwks_uri === "string" ? doc.jwks_uri : null;
   return startServer({
     asPort: 0,
     cimdFetchDependencies: {
       dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
-      fetchImpl: async () =>
-        new Response(JSON.stringify(doc), { headers: { "Content-Type": "application/json" }, status: 200 }),
+      fetchImpl: async (input) => {
+        const body = jwksUri && String(input) === jwksUri ? jwks : doc;
+        return new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      },
       isGlobalUnicastAddressImpl: () => true,
     },
     dbPath: ":memory:",
@@ -4836,6 +4852,104 @@ function chatgptShapedCimdDoc(clientId: string, overrides: Record<string, unknow
     ...overrides,
   };
 }
+
+function signClientAssertion({
+  audience,
+  clientId,
+  keyId,
+  privateKey,
+}: {
+  audience: string;
+  clientId: string;
+  keyId: string;
+  privateKey: import("node:crypto").KeyObject;
+}): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: keyId, typ: "JWT" })).toString("base64url");
+  const claims = Buffer.from(
+    JSON.stringify({ aud: audience, exp: now + 60, iat: now, iss: clientId, sub: clientId })
+  ).toString("base64url");
+  const signingInput = `${header}.${claims}`;
+  const signature = sign("RSA-SHA256", Buffer.from(signingInput), privateKey).toString("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+test("CIMD private_key_jwt authenticates authorization-code and refresh exchanges against its JWKS", async () => {
+  const clientId = chatgptShapedClientId();
+  const redirectUri = chatgptShapedRedirectUri(clientId);
+  const jwksUri = `${new URL(clientId).origin}/oauth/jwks.json`;
+  const keyId = "test-signing-key";
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwks = {
+    keys: [{ ...publicKey.export({ format: "jwk" }), alg: "RS256", kid: keyId, use: "sig" }],
+  };
+  const doc = chatgptShapedCimdDoc(clientId, {
+    grant_types: ["authorization_code", "refresh_token"],
+    jwks_uri: jwksUri,
+    response_types: ["code"],
+    token_endpoint_auth_method: "private_key_jwt",
+    token_endpoint_auth_signing_alg: "RS256",
+  });
+  const server = await startServerWithCimdDocFetch(doc, jwks);
+  const asUrl = `http://localhost:${server.asPort}`;
+  const client = { client_id: clientId, metadata: { redirect_uris: [redirectUri] } };
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const { code, verifier } = await prepareOauthCodeFlow({ asUrl, client, manifest });
+    const tokenEndpoint = `${asUrl}/oauth/token`;
+
+    const rejected = await fetchJson(tokenEndpoint, {
+      body: new URLSearchParams({
+        client_assertion: signClientAssertion({
+          audience: `${asUrl}/not-the-token-endpoint`,
+          clientId,
+          keyId,
+          privateKey,
+        }),
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.body.error, "invalid_client");
+
+    const authenticated = await fetchJson(tokenEndpoint, {
+      body: new URLSearchParams({
+        client_assertion: signClientAssertion({ audience: tokenEndpoint, clientId, keyId, privateKey }),
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        code,
+        code_verifier: verifier,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(authenticated.status, 200, JSON.stringify(authenticated.body));
+    assert.equal(typeof authenticated.body.refresh_token, "string");
+
+    const refreshed = await fetchJson(tokenEndpoint, {
+      body: new URLSearchParams({
+        client_assertion: signClientAssertion({ audience: tokenEndpoint, clientId, keyId, privateKey }),
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        grant_type: "refresh_token",
+        refresh_token: stringField(authenticated.body, "refresh_token"),
+      }).toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+    assert.equal(typeof refreshed.body.access_token, "string");
+  } finally {
+    await closeServer(server);
+  }
+});
 
 async function fetchHostedMcpPickerHtml(
   asUrl: string,

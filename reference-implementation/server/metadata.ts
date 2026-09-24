@@ -1305,6 +1305,7 @@ export interface AuthorizationServerMetadataInput {
   responseTypesSupported?: readonly string[] | null;
   tokenEndpoint?: string | null;
   tokenEndpointAuthMethodsSupported?: readonly string[] | null;
+  tokenEndpointAuthSigningAlgValuesSupported?: readonly string[] | null;
 }
 
 export interface AuthorizationServerPublicClient {
@@ -1332,6 +1333,7 @@ export interface AuthorizationServerMetadata {
   response_types_supported?: readonly string[];
   token_endpoint?: string;
   token_endpoint_auth_methods_supported?: readonly string[];
+  token_endpoint_auth_signing_alg_values_supported?: readonly string[];
 }
 
 export function buildAuthorizationServerMetadata({
@@ -1348,6 +1350,7 @@ export function buildAuthorizationServerMetadata({
   cimdEnabled,
   tokenEndpoint,
   tokenEndpointAuthMethodsSupported,
+  tokenEndpointAuthSigningAlgValuesSupported,
   deviceAuthorizationEndpoint,
   deviceAuthorizationProfilesSupported,
   agentConnectEndpoint,
@@ -1397,6 +1400,9 @@ export function buildAuthorizationServerMetadata({
   }
   if (tokenEndpointAuthMethodsSupported?.length) {
     metadata.token_endpoint_auth_methods_supported = tokenEndpointAuthMethodsSupported;
+  }
+  if (tokenEndpointAuthSigningAlgValuesSupported?.length) {
+    metadata.token_endpoint_auth_signing_alg_values_supported = tokenEndpointAuthSigningAlgValuesSupported;
   }
   if (deviceAuthorizationEndpoint) {
     metadata.device_authorization_endpoint = deviceAuthorizationEndpoint;

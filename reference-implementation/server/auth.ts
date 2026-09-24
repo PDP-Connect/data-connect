@@ -33,6 +33,11 @@ import {
 import { postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
 import { createTraceContext, emitSpineEvent as emitRawSpineEvent, type SpineEventInput } from "../lib/spine.ts";
 import type { CimdFetchDependencies, CimdTransportFailureEvent } from "./cimd.ts";
+import {
+  OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE,
+  clientAssertionIssuer,
+  verifyPrivateKeyJwtClientAssertion,
+} from "./oauth-client-auth.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
 import {
@@ -214,12 +219,15 @@ interface ClientMetadata {
   client_name?: string | null;
   client_uri?: string | null | undefined;
   grant_types?: string[] | undefined;
+  jwks?: unknown;
+  jwks_uri?: string | undefined;
   issuer_subject_id?: string;
   logo_uri?: string | null | undefined;
   policy_uri?: string | null | undefined;
   redirect_uris?: string[] | undefined;
   response_types?: string[] | undefined;
   token_endpoint_auth_method: string;
+  token_endpoint_auth_signing_alg?: string | undefined;
   tos_uri?: string | null | undefined;
 }
 
@@ -5535,6 +5543,17 @@ function normalizeCimdRegisteredClient(value: unknown): RegisteredClient {
     metadata: {
       client_name: isNonEmptyString(value.metadata.client_name) ? value.metadata.client_name : null,
       client_uri: isNonEmptyString(value.metadata.client_uri) ? value.metadata.client_uri : null,
+      ...(Array.isArray(value.metadata.grant_types)
+        ? { grant_types: value.metadata.grant_types.filter(isNonEmptyString) }
+        : {}),
+      ...(Array.isArray(value.metadata.response_types)
+        ? { response_types: value.metadata.response_types.filter(isNonEmptyString) }
+        : {}),
+      ...(value.metadata.jwks !== undefined ? { jwks: value.metadata.jwks } : {}),
+      ...(isNonEmptyString(value.metadata.jwks_uri) ? { jwks_uri: value.metadata.jwks_uri } : {}),
+      ...(isNonEmptyString(value.metadata.token_endpoint_auth_signing_alg)
+        ? { token_endpoint_auth_signing_alg: value.metadata.token_endpoint_auth_signing_alg }
+        : {}),
       logo_uri: isNonEmptyString(value.metadata.logo_uri) ? value.metadata.logo_uri : null,
       policy_uri: isNonEmptyString(value.metadata.policy_uri) ? value.metadata.policy_uri : null,
       redirect_uris: Array.isArray(value.metadata.redirect_uris)
@@ -5639,6 +5658,82 @@ export async function resolveOAuthClient(
     registeredClient = await resolveCimdClientForGrant(clientId, opts);
   }
   return registeredClient;
+}
+
+/**
+ * Enforce CIMD token-endpoint client authentication before consuming a grant.
+ * An assertion issuer may supply the client_id when the token request omits it.
+ */
+export async function authenticateOAuthTokenClient({
+  baseUrl,
+  clientAssertion,
+  clientAssertionType,
+  clientId,
+  cimdFetchDependencies,
+  tokenEndpoint,
+}: {
+  baseUrl: string;
+  clientAssertion: unknown;
+  clientAssertionType: unknown;
+  clientId: unknown;
+  cimdFetchDependencies?: CimdFetchDependencies;
+  tokenEndpoint: string;
+}): Promise<string | null> {
+  const hasAssertion = clientAssertion !== undefined || clientAssertionType !== undefined;
+  let resolvedClientId = isNonEmptyString(clientId) ? clientId : null;
+  if (!resolvedClientId && clientAssertion !== undefined) {
+    resolvedClientId = clientAssertionIssuer(clientAssertion);
+  }
+  if (!resolvedClientId) {
+    if (hasAssertion) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return null;
+  }
+
+  const { isCimdClientId } = await import("./cimd.ts");
+  if (!isCimdClientId(resolvedClientId)) {
+    if (hasAssertion) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return resolvedClientId;
+  }
+
+  let registeredClient: RegisteredClient | null;
+  try {
+    registeredClient = await resolveOAuthClient(resolvedClientId, {
+      baseUrl,
+      ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
+    });
+  } catch {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+  if (!registeredClient) {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+
+  if (registeredClient.token_endpoint_auth_method === "private_key_jwt") {
+    if (clientAssertionType !== OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    try {
+      await verifyPrivateKeyJwtClientAssertion({
+        assertion: clientAssertion,
+        clientId: resolvedClientId,
+        ...(cimdFetchDependencies ? { dependencies: cimdFetchDependencies } : {}),
+        metadata: registeredClient.metadata,
+        tokenEndpoint,
+      });
+    } catch {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return resolvedClientId;
+  }
+
+  if (hasAssertion) {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+  return resolvedClientId;
 }
 
 function requiresStagedGrantBatch(input: Record<string, unknown>): boolean {
@@ -9780,6 +9875,7 @@ export async function exchangeOAuthAuthorizationCode({
   codeVerifier,
   baseUrl = null,
   issuerBase = null,
+  cimdFetchDependencies,
 }: {
   code: unknown;
   clientId: unknown;
@@ -9787,6 +9883,7 @@ export async function exchangeOAuthAuthorizationCode({
   codeVerifier: unknown;
   baseUrl?: string | null;
   issuerBase?: string | null;
+  cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
   const normalized = requireOAuthAuthorizationCodeExchangeInput({ clientId, code, codeVerifier, redirectUri });
   const oauthCodeStore = getOAuthCodeStore();
@@ -9799,6 +9896,7 @@ export async function exchangeOAuthAuthorizationCode({
   const registeredClient = await resolveOAuthClient(normalized.clientId, {
     ...(baseUrl ? { baseUrl } : {}),
     ...(issuerBase ? { issuerBase } : {}),
+    ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
   });
   if (!registeredClient) {
     throw buildOAuthAuthorizationCodeError("invalid_client", "Unknown client_id");
@@ -10358,9 +10456,13 @@ function reusedOAuthRefreshTokenError(): AuthError {
 export async function exchangeOAuthRefreshToken({
   refreshToken,
   clientId,
+  baseUrl,
+  cimdFetchDependencies,
 }: {
   refreshToken: unknown;
   clientId: unknown;
+  baseUrl?: string | null;
+  cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(refreshToken)) {
     throw buildOAuthRefreshTokenError("invalid_request", "refresh_token is required");
@@ -10369,7 +10471,10 @@ export async function exchangeOAuthRefreshToken({
     throw buildOAuthRefreshTokenError("invalid_request", "client_id is required");
   }
 
-  const registeredClient = await getRegisteredClient(clientId);
+  const registeredClient = await resolveOAuthClient(clientId, {
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
+  });
   if (!(registeredClient && clientSupportsOAuthRefreshToken(registeredClient))) {
     throw buildOAuthRefreshTokenError("invalid_grant", "Client is not registered for refresh_token");
   }

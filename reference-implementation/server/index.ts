@@ -105,6 +105,7 @@ import {
   configureNativeManifest,
   consumeConsentExchangeCode,
   countGrantPackagesForOwner,
+  authenticateOAuthTokenClient,
   createCimdDocument,
   createConsentExchangeCode,
   createHostedMcpGrantPackage,
@@ -5389,12 +5390,33 @@ export function buildAsApp(opts: ServerOpts = {}) {
       typeof args.deviceCode === "string" && args.deviceCode.startsWith("dc_owner_")
         ? ownerDeviceAuthStore.exchangeDeviceCode(args)
         : exchangeGrantScopedDeviceCode(args),
-    exchangeOAuthAuthorizationCode,
-    exchangeOAuthRefreshToken,
+    authenticateOAuthTokenClient: (args: Parameters<typeof authenticateOAuthTokenClient>[0]) =>
+      authenticateOAuthTokenClient({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    exchangeOAuthAuthorizationCode: (args: Parameters<typeof exchangeOAuthAuthorizationCode>[0]) =>
+      exchangeOAuthAuthorizationCode({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    exchangeOAuthRefreshToken: (args: Parameters<typeof exchangeOAuthRefreshToken>[0]) =>
+      exchangeOAuthRefreshToken({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
     oauthError,
     resolveBaseUrl: (req: unknown) => {
       const explicitBaseUrl = opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL);
       return resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitBaseUrl);
+    },
+    resolveTokenEndpoint: (req: unknown) => {
+      const explicitIssuer =
+        opts.asIssuer ||
+        opts.asPublicUrl ||
+        (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL);
+      const issuer = explicitIssuer || resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], null);
+      return `${issuer.replace(/\/+$/, "")}/oauth/token`;
     },
     setReferenceTraceId,
   };
