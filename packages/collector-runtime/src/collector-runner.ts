@@ -29,7 +29,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
-import { validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
+import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
 import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
@@ -1422,6 +1422,18 @@ function assertValidStreamEvidence(
   }
 }
 
+/** Local collector has no durable blob transport, even for a declared emitter. */
+function rejectUnsupportedHostBlob(
+  message: Extract<EmittedMessage, { type: "BLOB" }>,
+  connector: CollectorConnectorSpec
+): never {
+  if (!connector.protocol_capabilities.includes("BLOB")) {
+    throw new Error(`${connector.connector_id} emitted BLOB without declaring the BLOB protocol capability`);
+  }
+  validateHostBlobMessage(message);
+  throw new Error(`${connector.connector_id} emitted BLOB to a collector without blob transport support`);
+}
+
 /**
  * Fold the per-store coverage map collected during a run into the safe
  * {@link CollectorCompletenessSummary} surfaced on the run result. Returns
@@ -1700,7 +1712,11 @@ async function streamConnectorIntoOutbox(
       if (!line.trim()) {
         continue;
       }
-      handleMessage(parseConnectorProtocolLine(line, lineNumber, input.config.connector.connector_id));
+      const message = parseConnectorProtocolLine(line, lineNumber, input.config.connector.connector_id);
+      if (message.type === "BLOB") {
+        rejectUnsupportedHostBlob(message, input.config.connector);
+      }
+      handleMessage(message);
       if (scanBudgetExceeded) {
         try {
           child.kill("SIGTERM");

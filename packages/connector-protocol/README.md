@@ -20,13 +20,19 @@ Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-co
 
 ## Protocol rollout
 
-Protocol version `0.0.3` adds the `BLOB` event. A connector declaring the
-host blob write capability writes and closes a regular JSON file in the
+Protocol version `0.0.3` adds the `BLOB` event and the `BLOB` protocol
+capability. A connector declaring that capability writes and closes a regular JSON file in the
 host-provided spool, then emits a `BLOB` descriptor immediately before the
 matching `RECORD`. The host validates the descriptor, bytes, and record
 binding before accepting that record. `validateHostBlobMessage` checks the
-wire descriptor at the untyped boundary. A runtime must admit this event
-explicitly before a connector that emits it is distributed.
+wire descriptor at the untyped boundary. `recordKeysEqual` defines binding:
+scalar and compound keys are distinct, and compound member order matters.
+A runtime must advertise `BLOB` only after it can durably ingest the bytes.
+The signed profile's `host_blob_write` declaration separately limits streams,
+spool size, and host permission; protocol capability negotiation does not grant it.
+The local collector currently does not advertise it and rejects any BLOB it
+sees. Merging this PR would trigger a semantic-release minor publication;
+the consumer runtime must be ready before merge.
 
 Protocol version `0.0.2` (the `CONNECTOR_PROTOCOL_VERSION` constant exported
 from `connector-runtime-protocol.ts`, tracked independently of this package's

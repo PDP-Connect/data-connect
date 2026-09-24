@@ -1034,6 +1034,85 @@ test("runCollectorConnector fails closed when a connector emits STREAM_EVIDENCE 
   }
 });
 
+test("runCollectorConnector rejects an undeclared BLOB before accepting its RECORD", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => { let b = ""; process.stdin.on("data", (c) => { b += c; if (b.includes("\\n")) r(); }); });
+        process.stdout.write(JSON.stringify({ type: "BLOB", stream: "messages", key: ["account", "m1"], file: "blob.json", mime_type: "application/json", size_bytes: 2, sha256: "a".repeat(64) }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: ["account", "m1"], data: { id: "m1" }, emitted_at: new Date().toISOString() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
+      `,
+    });
+    const queuePath = await tempQueuePath();
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-undeclared-blob",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-undeclared-blob",
+        }),
+      /emitted BLOB without declaring the BLOB protocol capability/
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector rejects a declared BLOB before spawning because this runtime has no blob transport", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const markerDir = await createTempDir("pdpp-withdrawn-blob-");
+    const markerPath = join(markerDir, "spawned.marker");
+    const fixture = await writeFixtureConnector({
+      script: `await (await import("node:fs/promises")).writeFile(${JSON.stringify(markerPath)}, "spawned");`,
+    });
+    const queuePath = await tempQueuePath();
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-declared-blob",
+            protocol_capabilities: ["BLOB"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          sourceInstanceId: "src-declared-blob",
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeCapabilityMismatchError);
+        if (error instanceof RuntimeCapabilityMismatchError) {
+          assert.deepEqual(error.missing, ["BLOB"]);
+        }
+        return true;
+      }
+    );
+    assert.equal(harness.heartbeats.length, 0);
+    await assert.rejects(() => readFile(markerPath));
+  } finally {
+    await harness.close();
+  }
+});
+
 test("runCollectorConnector rejects a connector declaring STREAM_EVIDENCE at placement: the collector runtime does not advertise it", async () => {
   // The protocol package still parses this message, but the current device
   // runtime deliberately withdraws the capability until durable terminal

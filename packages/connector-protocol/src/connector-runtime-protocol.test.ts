@@ -6,8 +6,10 @@ import test from "node:test";
 import {
   CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
+  HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   type RuntimeContinuationFact,
+  recordKeysEqual,
   STREAM_EVIDENCE_CAPABILITY,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
@@ -31,15 +33,25 @@ test("BLOB validates a bounded closed-file descriptor with no record data", () =
     { file: "../escape" },
     { file: "a..b" },
     { file: "/absolute" },
+    { file: `a${"b".repeat(128)}` },
     { size_bytes: 0 },
     { size_bytes: 33_554_433 },
     { sha256: "A".repeat(64) },
     { key: "" },
+    { key: [] },
+    { key: ["part", ""] },
+    { key: ["part", 4] },
     { stream: "" },
     { data: { secret: "inline" } },
   ]) {
     assert.throws(() => validateHostBlobMessage({ ...blob, ...change }), /invalid BLOB/);
   }
+  assert.doesNotThrow(() => validateHostBlobMessage({ ...blob, key: ["account", "conversation-1"] }));
+  assert.equal(recordKeysEqual("a", ["a"]), false);
+  assert.equal(recordKeysEqual(["a", "b"], ["b", "a"]), false);
+  assert.equal(recordKeysEqual(["a", "b"], ["a", "b"]), true);
+  assert.equal(HOST_BLOB_CAPABILITY, "BLOB");
+  assert.equal(isConnectorProtocolCapabilityArray(["BLOB"]), true);
 });
 
 const CONTINUATION: RuntimeContinuationFact = {
