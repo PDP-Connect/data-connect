@@ -14,25 +14,17 @@
 //   - the password is never emitted through the log/warn channels — the
 //     one-time banner is the only print surface.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, test } from "vitest";
 
 import {
-  buildFirstBootBanner,
   CREDENTIAL_KEY_FILENAME,
-  OWNER_PASSWORD_FILENAME,
   prepareFirstBoot,
   resolveDataDir,
 } from "../deploy/railway/core-first-boot.ts";
 
-const FIRST_BOOT_BANNER_PATTERN = /First boot/;
-const DEFAULT_ORIGIN_PATTERN = /http:\/\/localhost:3000\//;
-const OWNER_PASSWORD_ENV_PATTERN = /PDPP_OWNER_PASSWORD/;
-const PERSIST_FAILURE_BANNER_PATTERN = /could not be persisted|WARNING/;
-const COULD_NOT_PERSIST_LOG_PATTERN = /could not persist/;
-const CONFIGURED_ORIGIN_PATTERN = /https:\/\/pdpp\.example\.com\//;
 const OWNER_ONLY_MODE = 0o600;
 const cleanupDirs: string[] = [];
 // biome-ignore lint/suspicious/noBitwiseOperators: st.mode carries permission bits; masking with 0o777 is the standard idiom for reading a file's permission bits, not a confusable arithmetic operator.
@@ -59,57 +51,21 @@ function noop() {
   // test doubles for log/warn that intentionally discard output
 }
 
-test("first boot generates, persists, and banners an owner password", () => {
+test("first boot leaves owner password setup to the server setup flow", () => {
   const dataDir = makeDataDir();
   const logs = capture();
   const result = prepareFirstBoot({ env: {}, dataDir, log: logs.log, warn: logs.log });
 
-  const password = result.env.PDPP_OWNER_PASSWORD;
-  assert.ok(password && password.length >= 20, "generates a high-entropy password");
-
-  const passwordFile = path.join(dataDir, OWNER_PASSWORD_FILENAME);
-  assert.equal(readFileSync(passwordFile, "utf8").trim(), password);
-  assert.equal(permissionBits(statSync(passwordFile).mode), OWNER_ONLY_MODE, "password file is owner-only");
-
-  const banner = result.bannerLines.join("\n");
-  assert.match(banner, FIRST_BOOT_BANNER_PATTERN);
-  assert.ok(banner.includes(password), "banner carries the generated password");
-  assert.match(banner, DEFAULT_ORIGIN_PATTERN);
-  assert.match(banner, OWNER_PASSWORD_ENV_PATTERN);
-
-  // The banner is the ONLY surface that carries the password.
+  assert.equal(result.env.PDPP_OWNER_PASSWORD, undefined);
+  assert.ok(!existsSync(path.join(dataDir, "owner-password")), "does not persist an owner password");
   assert.ok(
-    logs.lines.every((line) => !line.includes(password)),
-    "log/warn channels never carry the password"
+    logs.lines.every((line) => !line.includes("PDPP_OWNER_PASSWORD")),
+    "does not print owner password setup instructions"
   );
 });
 
-test("restart reuses the persisted password and never reprints the banner", () => {
+test("the PDPP_OWNER_PASSWORD environment variable remains an operator-owned override", () => {
   const dataDir = makeDataDir();
-  const first = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
-
-  const logs = capture();
-  const second = prepareFirstBoot({ env: {}, dataDir, log: logs.log, warn: logs.log });
-
-  assert.equal(second.env.PDPP_OWNER_PASSWORD, first.env.PDPP_OWNER_PASSWORD);
-  assert.deepEqual(second.bannerLines, [], "no banner after the first boot");
-  assert.ok(
-    logs.lines.some((line) => line.includes(OWNER_PASSWORD_FILENAME)),
-    "logs a non-secret pointer to the persisted password file"
-  );
-  const firstPassword = first.env.PDPP_OWNER_PASSWORD;
-  assert.ok(firstPassword, "first boot generated a password");
-  assert.ok(
-    logs.lines.every((line) => !line.includes(firstPassword)),
-    "the password itself is never re-logged"
-  );
-});
-
-test("the PDPP_OWNER_PASSWORD environment variable always wins", () => {
-  const dataDir = makeDataDir();
-  // Pre-existing persisted password from an earlier unconfigured boot.
-  writeFileSync(path.join(dataDir, OWNER_PASSWORD_FILENAME), "persisted-password\n");
-
   const result = prepareFirstBoot({
     env: { PDPP_OWNER_PASSWORD: "operator-supplied" },
     dataDir,
@@ -117,26 +73,11 @@ test("the PDPP_OWNER_PASSWORD environment variable always wins", () => {
     warn: noop,
   });
 
-  assert.equal(result.env.PDPP_OWNER_PASSWORD, undefined, "no override of the operator env");
-  assert.deepEqual(result.bannerLines, []);
-  assert.equal(
-    readFileSync(path.join(dataDir, OWNER_PASSWORD_FILENAME), "utf8").trim(),
-    "persisted-password",
-    "the persisted file is left untouched"
-  );
+  assert.equal(result.env.PDPP_OWNER_PASSWORD, undefined, "does not shadow the operator env");
+  assert.ok(!existsSync(path.join(dataDir, "owner-password")));
 });
 
-test("a blank persisted file is treated as first boot", () => {
-  const dataDir = makeDataDir();
-  writeFileSync(path.join(dataDir, OWNER_PASSWORD_FILENAME), "  \n");
-
-  const result = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
-
-  assert.ok(result.env.PDPP_OWNER_PASSWORD);
-  assert.ok(result.bannerLines.length > 0, "banner prints for the regenerated password");
-});
-
-test("an unpersistable data dir still gates the boot and warns honestly", () => {
+test("an unpersistable data dir does not generate or print an owner password", () => {
   const dataDir = makeDataDir();
   // A path under a regular FILE cannot be created -> deterministic ENOTDIR.
   const blockedDir = path.join(dataDir, "blocker", "sub");
@@ -145,10 +86,8 @@ test("an unpersistable data dir still gates the boot and warns honestly", () => 
   const warned = capture();
   const result = prepareFirstBoot({ env: {}, dataDir: blockedDir, log: noop, warn: warned.log });
 
-  assert.ok(result.env.PDPP_OWNER_PASSWORD, "owner data stays gated even without persistence");
-  const banner = result.bannerLines.join("\n");
-  assert.match(banner, PERSIST_FAILURE_BANNER_PATTERN);
-  assert.ok(warned.lines.some((line) => COULD_NOT_PERSIST_LOG_PATTERN.test(line)));
+  assert.equal(result.env.PDPP_OWNER_PASSWORD, undefined);
+  assert.ok(warned.lines.every((line) => !line.includes("PDPP_OWNER_PASSWORD")));
 });
 
 test("sqlite boots provision a stable credential encryption key file", () => {
@@ -164,9 +103,6 @@ test("sqlite boots provision a stable credential encryption key file", () => {
   const second = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
   assert.equal(readFileSync(keyFile, "utf8").trim(), key, "key is stable across boots");
   assert.equal(second.env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE, keyFile);
-
-  const banner = first.bannerLines.join("\n");
-  assert.ok(!banner.includes(key), "the key is never printed");
 });
 
 test("postgres boots keep the explicit fail-closed credential key contract", () => {
@@ -192,29 +128,8 @@ test("a configured credential key provider is never shadowed", () => {
   }
 });
 
-test("banner respects a configured reference origin", () => {
-  const dataDir = makeDataDir();
-  const result = prepareFirstBoot({
-    env: { PDPP_REFERENCE_ORIGIN: "https://pdpp.example.com/" },
-    dataDir,
-    log: noop,
-    warn: noop,
-  });
-  assert.match(result.bannerLines.join("\n"), CONFIGURED_ORIGIN_PATTERN);
-});
-
 test("data dir defaults beside the configured SQLite database", () => {
   assert.equal(resolveDataDir({ PDPP_DB_PATH: "/var/lib/pdpp/pdpp.sqlite" }), "/var/lib/pdpp");
   assert.equal(resolveDataDir({ PDPP_DB_PATH: ":memory:" }), "/var/lib/pdpp");
   assert.equal(resolveDataDir({}), "/var/lib/pdpp");
-});
-
-test("buildFirstBootBanner prefixes every line for the supervisor log stream", () => {
-  const lines = buildFirstBootBanner({
-    origin: "http://localhost:3000",
-    password: "pw",
-    passwordFile: "/var/lib/pdpp/owner-password",
-    persisted: true,
-  });
-  assert.ok(lines.every((line) => line.startsWith("[core]")));
 });
