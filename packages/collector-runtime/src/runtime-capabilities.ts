@@ -72,6 +72,8 @@ export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * connector on the server/reference runtime (a separate runtime profile in a
  * separate repository). Durable device-side propagation is real future work,
  * deliberately deferred rather than half-built here.
+ * Also does NOT advertise `BLOB`: this collector has no durable host blob
+ * transport. The runner rejects any BLOB line before it can accept a RECORD.
  */
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   bindings: new Set<RuntimeBindingName>(["network", "browser", "filesystem", "local_device"]),

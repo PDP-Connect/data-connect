@@ -73,6 +73,10 @@ test("collector runtime does not advertise STREAM_EVIDENCE: no local-collector c
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
 });
 
+test("collector runtime does not advertise BLOB without a durable spool transport", () => {
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("BLOB"), false);
+});
+
 test("directional compatibility: old fail-closed runtime rejects a STREAM_EVIDENCE emitter", () => {
   assert.deepEqual(diffRequiredProtocolCapabilities(streamEvidenceConnector, oldFailClosedRuntime), [
     "STREAM_EVIDENCE",
