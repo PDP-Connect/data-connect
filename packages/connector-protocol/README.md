@@ -20,6 +20,14 @@ Published from [PDP-Connect/data-connect](https://github.com/PDP-Connect/data-co
 
 ## Protocol rollout
 
+Protocol version `0.0.3` adds the `BLOB` event. A connector declaring the
+host blob write capability writes and closes a regular JSON file in the
+host-provided spool, then emits a `BLOB` descriptor immediately before the
+matching `RECORD`. The host validates the descriptor, bytes, and record
+binding before accepting that record. `validateHostBlobMessage` checks the
+wire descriptor at the untyped boundary. A runtime must admit this event
+explicitly before a connector that emits it is distributed.
+
 Protocol version `0.0.2` (the `CONNECTOR_PROTOCOL_VERSION` constant exported
 from `connector-runtime-protocol.ts`, tracked independently of this package's
 own release version) adds the `STREAM_EVIDENCE` wire message. It is a breaking

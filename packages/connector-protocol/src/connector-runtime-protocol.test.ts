@@ -11,9 +11,36 @@ import {
   STREAM_EVIDENCE_CAPABILITY,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
+  validateHostBlobMessage,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
 import { type EmittedMessage, parseJsonlLine, type SkipResultBoundaryClaim, stringifyForJsonl } from "./index.ts";
+
+test("BLOB validates a bounded closed-file descriptor with no record data", () => {
+  const blob: EmittedMessage = {
+    file: "blob-1.json",
+    key: "conversation-1",
+    mime_type: "application/json",
+    sha256: "a".repeat(64),
+    size_bytes: 32,
+    stream: "conversations",
+    type: "BLOB",
+  };
+  assert.doesNotThrow(() => validateHostBlobMessage(blob));
+  for (const change of [
+    { file: "../escape" },
+    { file: "a..b" },
+    { file: "/absolute" },
+    { size_bytes: 0 },
+    { size_bytes: 33_554_433 },
+    { sha256: "A".repeat(64) },
+    { key: "" },
+    { stream: "" },
+    { data: { secret: "inline" } },
+  ]) {
+    assert.throws(() => validateHostBlobMessage({ ...blob, ...change }), /invalid BLOB/);
+  }
+});
 
 const CONTINUATION: RuntimeContinuationFact = {
   boundary: "uidvalidity-123",
@@ -237,7 +264,7 @@ test("the protocol wire-version constant is independent of the package release v
   // message shapes change); package.json's version tracks release cadence
   // and is owned by semantic-release. They are unrelated numbers that happen
   // to look similar today — this package must never assert they're equal.
-  assert.equal(CONNECTOR_PROTOCOL_VERSION, "0.0.2");
+  assert.equal(CONNECTOR_PROTOCOL_VERSION, "0.0.3");
   assert.equal(STREAM_EVIDENCE_CAPABILITY, "STREAM_EVIDENCE");
 });
 

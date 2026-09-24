@@ -46,6 +46,7 @@ export type {
   DetailGapRecoveredMessage,
   DetailGapStartEntry,
   EmittedMessage,
+  HostBlobMessage,
   InteractionKind,
   InteractionRequest,
   InteractionResponse,
@@ -59,8 +60,10 @@ export type {
 export {
   CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
+  HOST_BLOB_MAX_BYTES,
   isConnectorProtocolCapabilityArray,
   STREAM_EVIDENCE_CAPABILITY,
+  validateHostBlobMessage,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
 export { isMainModule } from "./is-main-module.ts";
