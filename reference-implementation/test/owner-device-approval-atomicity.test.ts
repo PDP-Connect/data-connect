@@ -225,6 +225,36 @@ test("trusted runtime approval with a captured null verifier cannot cross a pass
   assert.equal((await introspect(runtimeToken)).active, false);
 });
 
+test("trusted runtime approval with a captured verifier cannot cross a password reset", async () => {
+  await setupSqliteAuth();
+  const subjectId = "runtime-owner-token-reset-ordering";
+  const passwordStore = createOwnerPasswordVerifierStore();
+  const initialVerifier = await createOwnerPasswordVerifier("initial runtime owner password");
+  await passwordStore.write(initialVerifier);
+  const capturedVerifier = await passwordStore.readVersioned();
+  assert.ok(capturedVerifier);
+
+  const started = await startOwnerDeviceAuth();
+  const replacementVerifier = await createOwnerPasswordVerifier("replacement runtime owner password");
+  assert.equal(
+    await passwordStore.writeAndRevokeAccess(replacementVerifier, subjectId, null, capturedVerifier.revision),
+    true
+  );
+
+  await assert.rejects(
+    approveOwnerDeviceAuthorization(started.user_code, subjectId, {
+      authorizationFence: { credentialRevision: capturedVerifier.revision },
+    }),
+    (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
+  );
+  assert.deepEqual(ownerDeviceRow(started.device_code), {
+    status: "pending",
+    subject_id: null,
+    token_id: null,
+  });
+  assert.equal(countRows("tokens", `subject_id = '${subjectId}' AND token_kind = 'owner'`), 0);
+});
+
 test("owner-device dynamic client binding rolls back with failed approval", async () => {
   initDb();
   const registered = await registerDynamicClient({

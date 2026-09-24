@@ -789,6 +789,17 @@ export function createConnectorInstallService(options: {
           // A crash can leave the published directory between rename and the
           // active-record commit. It is not trusted merely because its name is
           // digest-shaped, so discard it safely and retry from the signed source.
+          try {
+            readVerifiedRecord(root, entry);
+            throw new Error("Connector digest root already exists without a matching active record.");
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === "Connector digest root already exists without a matching active record."
+            ) {
+              throw error;
+            }
+          }
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");

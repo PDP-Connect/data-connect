@@ -57,7 +57,11 @@ import type { ControllerOptions } from "../runtime/controller.ts";
 import { __resetControllerInteractionStateForTests, createController } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorOptions } from "../runtime/index.ts";
 import { registerConnector } from "../server/auth.ts";
-import { type ConnectorInstallStore, createConnectorInstallService, createConnectorInstallStore } from "../server/connector-install/index.ts";
+import {
+  type ConnectorInstallStore,
+  createConnectorInstallService,
+  createFileConnectorInstallStore,
+} from "../server/connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -182,13 +186,21 @@ function fakeAdmitRunConnection() {
     connectorId,
     connectorInstanceId,
     ownerSubjectId: requestedOwnerSubjectId,
+    runAdmission,
   }: {
     connectorId: string;
     connectorInstanceId: string | null;
     ownerSubjectId: string | null;
+    runAdmission: "collection" | "setup" | "browser_enrollment";
   }) => {
     const ownerSubjectId = requestedOwnerSubjectId || "owner_local";
     const exactId = connectorInstanceId ?? `cin_${ownerSubjectId}_${connectorId}`;
+    const row = getDb()
+      .prepare("SELECT status FROM connector_instances WHERE connector_instance_id = ?")
+      .get<{ status: string }>(exactId);
+    if (row?.status !== "active" && !(row?.status === "draft" && runAdmission !== "collection")) {
+      throw new Error("Owner connection is no longer active");
+    }
     return Promise.resolve({ connectorId, connectorInstanceId: exactId, ownerSubjectId });
   };
 }
@@ -279,11 +291,7 @@ async function runWithMidRunManifestChange(input: {
   await seedConnectionEvidence(registeredConnectorId, input.ownerConnectionStatus);
   let installedStore: ConnectorInstallStore | undefined;
   if (input.installedDataDir) {
-    const previousDataDir = process.env.PDPP_DATA_DIR;
-    process.env.PDPP_DATA_DIR = input.installedDataDir;
-    installedStore = createConnectorInstallStore();
-    if (previousDataDir === undefined) { delete process.env.PDPP_DATA_DIR; }
-    else { process.env.PDPP_DATA_DIR = previousDataDir; }
+    installedStore = createFileConnectorInstallStore(input.installedDataDir);
     const artifactDigest = `sha256:${"d".repeat(64)}`;
     await createConnectorInstallService({
       catalogLoader: async () => [{
@@ -490,7 +498,7 @@ test("the continuation executes the manifest its admission was decided against",
   );
 });
 
-test("current policy B admits the installed A tuple", async (t) => {
+test("current policy B admits the installed connector path with the current manifest", async (t) => {
   const dir = freshDb(t);
   const result = await runWithMidRunManifestChange({
     committedMidRun: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v2"),
@@ -500,7 +508,7 @@ test("current policy B admits the installed A tuple", async (t) => {
   assert.equal(result.calls.length, 2);
   const [parent, continuation] = result.calls;
   assert.ok(parent && continuation);
-  assert.equal((continuation.manifest as { version?: string }).version, "1.0.0-v1");
+  assert.equal((continuation.manifest as { version?: string }).version, "1.0.0-v2");
   assert.equal(continuation.connectorPath, parent.connectorPath);
 });
 
