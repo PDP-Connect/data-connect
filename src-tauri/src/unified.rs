@@ -1915,7 +1915,7 @@ pub(crate) fn spawn_origin_verification_watcher(app: AppHandle) {
 /// Has a shutdown been requested? Used to make `Quitting` absorbing for the
 /// background watchers, which otherwise keep running (and can keep acting on
 /// the stack) for the whole shutdown budget.
-fn shutdown_has_been_requested(app: &AppHandle) -> bool {
+pub(crate) fn shutdown_has_been_requested(app: &AppHandle) -> bool {
     app.try_state::<UnifiedRuntimeState>()
         .and_then(|state| {
             state
