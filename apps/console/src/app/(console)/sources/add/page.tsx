@@ -71,7 +71,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
           ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
         ])
       );
-      catalog = buildOwnerConnectorCatalog(manifests, templates);
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;
