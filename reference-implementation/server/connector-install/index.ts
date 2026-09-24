@@ -730,6 +730,7 @@ export function createConnectorInstallService(options: {
     options.store ||
     (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(dataDir);
+  let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
@@ -769,7 +770,17 @@ export function createConnectorInstallService(options: {
       release();
     }
   };
-  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => loadCatalog();
+  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+    const refresh = catalogRefresh ?? loadCatalog();
+    catalogRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (catalogRefresh === refresh) {
+        catalogRefresh = undefined;
+      }
+    }
+  };
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
     const release = acquireInstallLock(dataDir);
     try {

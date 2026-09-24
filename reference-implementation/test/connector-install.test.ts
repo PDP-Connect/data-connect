@@ -476,6 +476,45 @@ test("catalog remains readable while an install holds the install lock", async (
   }
 });
 
+test("concurrent catalog reads share one in-flight refresh", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let enteredResolve: (() => void) | undefined;
+  let releaseRefresh: (() => void) | undefined;
+  let loadCount = 0;
+  const entered = new Promise<void>((resolve) => {
+    enteredResolve = resolve;
+  });
+  const refreshReleased = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        loadCount += 1;
+        enteredResolve?.();
+        await refreshReleased;
+        return [entry];
+      },
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const first = service.catalog();
+    await entered;
+    const second = service.catalog();
+
+    releaseRefresh?.();
+    const [firstEntries, secondEntries] = await Promise.all([first, second]);
+
+    assert.equal(loadCount, 1);
+    assert.deepEqual(secondEntries, firstEntries);
+    assert.equal(firstEntries[0]?.digest, digest);
+  } finally {
+    releaseRefresh?.();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("the RI transport bounds signed config and profile blobs", async () => {
   const profileDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
   let oversized = false;
