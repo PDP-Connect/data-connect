@@ -79,7 +79,11 @@ import {
   getScheduleIneligibilityReason,
   resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
-import { createConnectorInstallService } from "./connector-install/index.ts";
+import {
+  createConnectorInstallService,
+  createConnectorInstallStore,
+  inspectActiveConnector,
+} from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
 import { ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
@@ -6628,6 +6632,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
       onManualUploadValidationTask: opts.onManualUploadValidationTask,
       pdppError,
       requireOwnerSession: ownerAuth.requireOwnerSession,
+      resolveActiveConnectorManifest: async (connectorId: string) => {
+        const inspected = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+        return inspected.status === "active" ? inspected.record.manifest : null;
+      },
       resolveRegisteredConnectorManifest,
       setReferenceTraceId,
     } as unknown as Parameters<typeof mountRefManualUploadDraftConnection>[1]);

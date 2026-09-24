@@ -249,6 +249,7 @@ export interface MountRefManualUploadDraftConnectionContext {
   onManualUploadValidationTask?: (task: Promise<void>) => void;
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
+  resolveActiveConnectorManifest?: (connectorId: string) => Promise<ConnectorManifestLike | null>;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
 }
@@ -296,6 +297,25 @@ async function emitManualUploadAudit(
     subject_type: "subject",
     trace_id: trace.trace_id,
   });
+}
+
+async function resolveManualUploadConnectorManifest(
+  ctx: MountRefManualUploadDraftConnectionContext,
+  connectorId: string
+): Promise<ConnectorManifestLike> {
+  try {
+    return await ctx.resolveRegisteredConnectorManifest(connectorId);
+  } catch (error) {
+    const maybeCode = error && typeof error === "object" ? (error as { code?: unknown }).code : null;
+    if (maybeCode !== "not_found" || !ctx.resolveActiveConnectorManifest) {
+      throw error;
+    }
+    const activeManifest = await ctx.resolveActiveConnectorManifest(connectorId);
+    if (activeManifest) {
+      return activeManifest;
+    }
+    throw error;
+  }
 }
 
 function errorWithCode(code: string): { code: string } {
@@ -1278,7 +1298,7 @@ function mountGetSetup(app: AppLike, ctx: MountRefManualUploadDraftConnectionCon
       const rawConnectorId = decodeURIComponent(req.params.connectorId as string);
       const connectorId = ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId;
       try {
-        const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
+        const manifest = await resolveManualUploadConnectorManifest(ctx, connectorId);
         const setup = manualUploadSetupFromManifest(manifest);
         if (!setup?.importDirEnvVar) {
           ctx.pdppError(
@@ -1329,7 +1349,7 @@ function mountPostValidationPreview(app: AppLike, ctx: MountRefManualUploadDraft
       let stagingPath: string | null = null;
       try {
         ownerSubjectId = ctx.getOwnerSubjectId(req);
-        const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
+        const manifest = await resolveManualUploadConnectorManifest(ctx, connectorId);
         const setup = await requireManualUploadSetup(ctx, req, res, {
           connectorId,
           manifest,
@@ -1441,7 +1461,7 @@ function mountPostStagedArtifact(app: AppLike, ctx: MountRefManualUploadDraftCon
       let maxFileBytesForError: number | null = null;
       try {
         ownerSubjectId = ctx.getOwnerSubjectId(req);
-        const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
+        const manifest = await resolveManualUploadConnectorManifest(ctx, connectorId);
         const setup = await requireManualUploadSetup(ctx, req, res, {
           connectorId,
           manifest,
@@ -1603,7 +1623,7 @@ function mountPostDraftConnection(app: AppLike, ctx: MountRefManualUploadDraftCo
       let stagingPath: string | null = null;
       try {
         ownerSubjectId = ctx.getOwnerSubjectId(req);
-        const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
+        const manifest = await resolveManualUploadConnectorManifest(ctx, connectorId);
         const setup = await requireManualUploadSetup(ctx, req, res, {
           connectorId,
           manifest,
