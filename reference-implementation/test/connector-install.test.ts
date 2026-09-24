@@ -441,6 +441,41 @@ test("concurrent installs are serialized by the process-safe lock", async () => 
   }
 });
 
+test("catalog remains readable while an install holds the install lock", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let enteredResolve: (() => void) | undefined;
+  let releaseStage: (() => void) | undefined;
+  const entered = new Promise<void>((resolve) => {
+    enteredResolve = resolve;
+  });
+  const stageReleased = new Promise<void>((resolve) => {
+    releaseStage = resolve;
+  });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => ({ entries: [entry], generatedAt: "2026-09-24T00:00:00.000Z" }),
+      dataDir,
+      installArtifact: async (root) => {
+        enteredResolve?.();
+        await stageReleased;
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const installing = service.install("github", digest);
+    await entered;
+
+    assert.equal((await service.catalog())[0]?.digest, digest);
+
+    releaseStage?.();
+    await installing;
+  } finally {
+    releaseStage?.();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("the RI transport bounds signed config and profile blobs", async () => {
   const profileDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
   let oversized = false;

@@ -396,10 +396,10 @@ function reclaimStaleLock(lockDir: string, ownerPid: number): boolean {
   }
 }
 
-function acquireInstallLock(dataDir: string): () => void {
+function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): () => void {
   assertNoSymlinkComponents(dataDir);
   mkdirSync(dataDir, { recursive: true });
-  const lockDir = join(dataDir, ".connector-install.lock");
+  const lockDir = join(dataDir, lockName);
   for (;;) {
     try {
       mkdirSync(lockDir);
@@ -410,12 +410,12 @@ function acquireInstallLock(dataDir: string): () => void {
       }
       const ownerPid = readLockOwner(lockDir);
       if (ownerPid === null) {
-        throw new Error("Another connector installation is in progress.", { cause: error });
+        throw new Error(busyMessage, { cause: error });
       }
       if (reclaimStaleLock(lockDir, ownerPid)) {
         continue;
       }
-      throw new Error("Another connector installation is in progress.", { cause: error });
+      throw new Error(busyMessage, { cause: error });
     }
   }
   writeFileSync(join(lockDir, "pid"), `${String(process.pid)}\n`, { mode: 0o600 });
@@ -427,6 +427,14 @@ function acquireInstallLock(dataDir: string): () => void {
     released = true;
     rmSync(lockDir, { force: true, recursive: true });
   };
+}
+
+function acquireInstallLock(dataDir: string): () => void {
+  return acquireDirectoryLock(dataDir, ".connector-install.lock", "Another connector installation is in progress.");
+}
+
+function acquireCatalogStateLock(dataDir: string): () => void {
+  return acquireDirectoryLock(dataDir, ".connector-catalog.lock", "Another connector catalog refresh is in progress.");
 }
 
 function sha256(path: string): string {
@@ -723,47 +731,45 @@ export function createConnectorInstallService(options: {
     (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(dataDir);
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
-    const previousHighWater = await store.getCatalogHighWater();
-    const loaded = options.catalogLoader
-      ? await options.catalogLoader()
-      : await loadCatalogFromPinnedCore(previousHighWater);
-    const snapshot: ConnectorCatalogSnapshot = Array.isArray(loaded)
-      ? { entries: loaded as readonly ConnectorCatalogEntry[] }
-      : (loaded as ConnectorCatalogSnapshot);
-    if (!Array.isArray(snapshot.entries)) {
-      throw new Error("Verified connector catalog has an invalid entry list.");
-    }
-    for (const entry of snapshot.entries) {
-      assertCatalogEntry(entry, entry.connector_id, entry.digest);
-    }
-    const highWater =
-      snapshot.generatedAt ??
-      snapshot.entries
-        .map((entry) => entry.digest)
-        .sort()
-        .join(",");
-    if (snapshot.generatedAt && !Number.isFinite(Date.parse(snapshot.generatedAt))) {
-      throw new Error("Verified connector catalog has an invalid generated_at timestamp.");
-    }
-    if (
-      snapshot.generatedAt &&
-      previousHighWater &&
-      Number.isFinite(Date.parse(previousHighWater)) &&
-      Date.parse(snapshot.generatedAt) < Date.parse(previousHighWater)
-    ) {
-      throw new Error("Catalog rollback refused by high-water mark.");
-    }
-    await store.setCatalogHighWater(highWater);
-    return snapshot.entries;
-  };
-  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
-    const release = acquireInstallLock(dataDir);
+    const release = acquireCatalogStateLock(dataDir);
     try {
-      return await loadCatalog();
+      const previousHighWater = await store.getCatalogHighWater();
+      const loaded = options.catalogLoader
+        ? await options.catalogLoader()
+        : await loadCatalogFromPinnedCore(previousHighWater);
+      const snapshot: ConnectorCatalogSnapshot = Array.isArray(loaded)
+        ? { entries: loaded as readonly ConnectorCatalogEntry[] }
+        : (loaded as ConnectorCatalogSnapshot);
+      if (!Array.isArray(snapshot.entries)) {
+        throw new Error("Verified connector catalog has an invalid entry list.");
+      }
+      for (const entry of snapshot.entries) {
+        assertCatalogEntry(entry, entry.connector_id, entry.digest);
+      }
+      const highWater =
+        snapshot.generatedAt ??
+        snapshot.entries
+          .map((entry) => entry.digest)
+          .sort()
+          .join(",");
+      if (snapshot.generatedAt && !Number.isFinite(Date.parse(snapshot.generatedAt))) {
+        throw new Error("Verified connector catalog has an invalid generated_at timestamp.");
+      }
+      if (
+        snapshot.generatedAt &&
+        previousHighWater &&
+        Number.isFinite(Date.parse(previousHighWater)) &&
+        Date.parse(snapshot.generatedAt) < Date.parse(previousHighWater)
+      ) {
+        throw new Error("Catalog rollback refused by high-water mark.");
+      }
+      await store.setCatalogHighWater(highWater);
+      return snapshot.entries;
     } finally {
       release();
     }
   };
+  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => loadCatalog();
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
     const release = acquireInstallLock(dataDir);
     try {
