@@ -235,6 +235,21 @@ export function parseConnectorInstallStatusResponse(payload: unknown): Connector
   return { data, object: "connector_install_status" };
 }
 
+export function parseConnectorInstallResponse(payload: unknown): ConnectorInstallStatus {
+  const record = asRecord(payload, "connector_install");
+  if (record.object !== "connector_install") {
+    throw new ConnectorInstallContractError("connector_install.object must be 'connector_install'.");
+  }
+  const status = parseConnectorInstallStatusResponse({
+    data: [record.data],
+    object: "connector_install_status",
+  }).data[0];
+  if (!status) {
+    throw new ConnectorInstallContractError("connector_install.data must be a status record.");
+  }
+  return status;
+}
+
 export function parseConnectorLocalSourcesResponse(payload: unknown): readonly ConnectorLocalSource[] {
   return readData(payload, "connector_install_local_sources").map(readLocalSource);
 }

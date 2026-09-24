@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   ConnectorInstallContractError,
   parseConnectorInstallCatalogResponse,
+  parseConnectorInstallResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
 import { connectorInstallCatalogFixture, connectorInstallStatusFixture } from "./connector-install-fixtures.ts";
@@ -29,6 +30,18 @@ test("connector-install client contract parses installed status fixtures", () =>
   assert.equal(response.data[0]?.registry, "ghcr.io");
   assert.equal(response.data[0]?.repository, "pdp-connect/connector/github");
   assert.equal(response.data[1]?.version, "0.1.0");
+});
+
+test("connector-install mutation response unwraps its single status record", () => {
+  const status = connectorInstallStatusFixture.data[0];
+  assert.ok(status);
+  const parsed = parseConnectorInstallResponse({
+    data: status,
+    object: "connector_install",
+  });
+  assert.equal(parsed.connector_id, status.connector_id);
+  assert.equal(parsed.config_digest, status.config_digest);
+  assert.equal(parsed.version, status.version);
 });
 
 test("connector-install status accepts an installed package without an activation timestamp", () => {
