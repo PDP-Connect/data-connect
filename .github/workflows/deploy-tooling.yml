@@ -102,7 +102,7 @@ jobs:
       - name: Run railway check-script unit tests
         run: |
           npm run railway:template:test
-          node --test --import tsx scripts/check-railway-template-artifacts.test.ts scripts/check-flyio-deploy-env.test.ts
+          npx vitest run scripts/check-railway-template-artifacts.test.ts scripts/check-flyio-deploy-env.test.ts
           npx --yes ajv-cli@5.0.0 validate --spec=draft2020 --all-errors \
             -s .github/schemas/railway.schema.json \
             -d deploy/railway/railway.console.json \
