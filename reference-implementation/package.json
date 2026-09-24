@@ -12,6 +12,7 @@
     "./owner-session": "./server/owner-session.ts",
     "./owner-session-constants": "./server/owner-session-constants.ts",
     "./remote-access-config": "./server/remote-access-config.ts",
+    "./owner-password-owner-set": "./server/owner-password-owner-set.ts",
     "./live-topics": "./server/live-topics.ts",
     "./deployment-diagnostics": "./server/deployment-diagnostics.ts",
     "./manual-upload-limits": "./server/manual-upload-limits.ts",
@@ -64,7 +65,7 @@
   "dependencies": {
     "@fastify/formbody": "^9.0.0",
     "@huggingface/transformers": "^4.2.0",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#8803c30c31f6d514bdc237df2f224b5ff77fa232",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
     "@pdpp/collector-runtime": "*",
     "@pdpp/connector-protocol": "*",
     "@pdpp/display": "*",

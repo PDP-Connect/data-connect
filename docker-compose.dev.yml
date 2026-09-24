@@ -2,6 +2,7 @@ services:
   reference:
     environment:
       NODE_ENV: development
+      PDPP_OWNER_AUTH_REQUIRED: ""
       PDPP_EMBEDDING_CACHE_DIR: /var/cache/pdpp/transformers
     command: >
       sh -lc 'node --env-file-if-exists=.env.local --import tsx --watch reference-implementation/server/index.ts'

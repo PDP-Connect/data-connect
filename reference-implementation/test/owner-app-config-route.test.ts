@@ -5,9 +5,8 @@
  * Acceptance coverage for the owner app-config routes
  * (server/routes/owner-app-config.ts).
  *
- * These routes are the HTTP replacement for the two Tauri commands the
- * console used to call directly (get_app_config / set_app_config, in
- * src-tauri/src/commands/file_ops.rs) -- unreachable from the console's
+ * These routes are the HTTP owner path for desktop preferences. The native
+ * get_app_config command is unreachable from the console's
  * http://127.0.0.1:{port} window because Tauri never injects invoke() into
  * that origin. The property this file protects: the routes read/write
  * through the SAME store the file-based AppConfig owns, reject a
@@ -117,11 +116,12 @@ test("GET app-config returns the default before anything is saved", async () => 
     assert.ok(handler);
     const { captured, res } = makeRes();
     await handler?.({}, res);
-    assert.deepEqual(captured.body, { data: DEFAULT_CONFIG, object: "app_config" });
+    assert.deepEqual((captured.body as { data: unknown }).data, DEFAULT_CONFIG);
+    assert.match((captured.body as { revision: string }).revision, /^[a-f0-9]{64}$/);
   });
 });
 
-test("POST app-config persists a full config and GET reflects it", async () => {
+test("POST app-config patches fields by revision and GET reflects both", async () => {
   await withMountedRoutes(async routes => {
     const postHandler = routes.get("POST /v1/owner/app-config");
     const getHandler = routes.get("GET /v1/owner/app-config");
@@ -133,13 +133,20 @@ test("POST app-config persists a full config and GET reflects it", async () => {
       storageProvider: "local",
     };
 
+    const before = makeRes();
+    await getHandler?.({}, before.res);
+    const revision = (before.captured.body as { revision: string }).revision;
     const post = makeRes();
-    await postHandler?.({ body: config }, post.res);
-    assert.deepEqual(post.captured.body, { data: config, object: "app_config" });
+    await postHandler?.({ body: { field: "startMinimized", value: true }, headers: { "if-match": revision } }, post.res);
+    assert.equal((post.captured.body as { data: typeof config }).data.startMinimized, true);
+    const nextRevision = (post.captured.body as { revision: string }).revision;
+    const postClose = makeRes();
+    await postHandler?.({ body: { field: "closeToTray", value: false }, headers: { "if-match": nextRevision } }, postClose.res);
+    assert.deepEqual((postClose.captured.body as { data: unknown }).data, config);
 
     const get = makeRes();
     await getHandler?.({}, get.res);
-    assert.deepEqual(get.captured.body, { data: config, object: "app_config" });
+    assert.deepEqual((get.captured.body as { data: unknown }).data, config);
   });
 });
 
@@ -148,12 +155,36 @@ test("POST app-config rejects a malformed body before it reaches the store", asy
     const postHandler = routes.get("POST /v1/owner/app-config");
     const getHandler = routes.get("GET /v1/owner/app-config");
 
+    const before = makeRes();
+    await getHandler?.({}, before.res);
+    const revision = (before.captured.body as { revision: string }).revision;
     const post = makeRes();
-    await postHandler?.({ body: { not: "a config" } }, post.res);
+    await postHandler?.({ body: { not: "a patch" }, headers: { "if-match": revision } }, post.res);
     assert.equal(post.captured.status, 400);
 
     const get = makeRes();
     await getHandler?.({}, get.res);
-    assert.deepEqual(get.captured.body, { data: DEFAULT_CONFIG, object: "app_config" });
+    assert.deepEqual((get.captured.body as { data: unknown }).data, DEFAULT_CONFIG);
+  });
+});
+
+test("POST app-config requires a revision and returns current state on stale revision", async () => {
+  await withMountedRoutes(async routes => {
+    const get = routes.get("GET /v1/owner/app-config")!;
+    const post = routes.get("POST /v1/owner/app-config")!;
+    const initial = makeRes();
+    await get({}, initial.res);
+    const revision = (initial.captured.body as { revision: string }).revision;
+    const missing = makeRes();
+    await post({ body: { field: "startMinimized", value: true } }, missing.res);
+    assert.equal(missing.captured.status, 428);
+    const first = makeRes();
+    await post({ body: { field: "startMinimized", value: true }, headers: { "if-match": revision } }, first.res);
+    const stale = makeRes();
+    await post({ body: { field: "closeToTray", value: false }, headers: { "if-match": revision } }, stale.res);
+    assert.equal(stale.captured.status, 409);
+    assert.equal((stale.captured.body as { data: { startMinimized: boolean } }).data.startMinimized, true);
+    assert.equal((stale.captured.body as { revision: string }).revision,
+      (first.captured.body as { revision: string }).revision);
   });
 });

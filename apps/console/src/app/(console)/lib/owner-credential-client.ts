@@ -27,7 +27,7 @@ export function ownerCredentialRevealHeadersForCookie(cookieValue: string | null
   return proof ? { [LOCAL_REVEAL_PROOF_HEADER]: proof } : {}
 }
 
-async function ownerCredentialRevealProofCookie(): Promise<string | null> {
+export async function ownerCredentialRevealProofCookie(): Promise<string | null> {
   const cookieStore = await cookies()
   return cookieStore.get(LOCAL_REVEAL_COOKIE)?.value ?? null
 }
@@ -36,8 +36,12 @@ async function localRevealHeaders(): Promise<HeadersInit> {
   return ownerCredentialRevealHeadersForCookie(await ownerCredentialRevealProofCookie())
 }
 
+export async function hasLocalOwnerCredentialRevealProofCookie(): Promise<boolean> {
+  return (await ownerCredentialRevealProofCookie()) !== null
+}
+
 export async function canShowOwnerCredentialRevealSetting(): Promise<boolean> {
-  return process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" && (await ownerCredentialRevealProofCookie()) !== null
+  return process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" && (await hasLocalOwnerCredentialRevealProofCookie())
 }
 
 export async function revealOwnerCredential(): Promise<string> {

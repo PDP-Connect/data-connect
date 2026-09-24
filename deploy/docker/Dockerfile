@@ -82,6 +82,7 @@ FROM base AS reference
 ARG PDPP_REFERENCE_REVISION=unknown
 
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     AS_PORT=7662 \
     RS_PORT=7663 \
     PDPP_RS_URL=http://127.0.0.1:7663 \
@@ -132,6 +133,7 @@ FROM browsers AS reference-browser
 ARG PDPP_REFERENCE_REVISION=unknown
 
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     AS_PORT=7662 \
     RS_PORT=7663 \
     PDPP_REFERENCE_OPERATIONAL_DEFAULTS=1 \

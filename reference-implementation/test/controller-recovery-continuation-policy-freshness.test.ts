@@ -22,12 +22,11 @@
  * The repair separates two questions that the single pinned object was
  * answering at once:
  *
- *   - "how do I run?"     -> execution identity, still pinned, so a chain does
- *                            not silently switch implementations mid-envelope.
+ *   - "how do I run?"     -> installed activation tuple or seed manifest,
+ *                            pinned for each envelope.
  *   - "may I run at all?" -> CURRENT registered policy, resolved fresh at
- *                            continuation admission, and the continuation is
- *                            then bound to that same admitted manifest so the
- *                            decision and the run cannot disagree.
+ *                            continuation admission, recorded separately from
+ *                            the execution tuple when an install is active.
  *
  * Fail CLOSED: if the registry read yields nothing or throws, the continuation
  * is withheld. Nothing is lost — gaps stay durable and an owner-initiated run
@@ -50,7 +49,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -58,8 +57,15 @@ import type { ControllerOptions } from "../runtime/controller.ts";
 import { __resetControllerInteractionStateForTests, createController } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorOptions } from "../runtime/index.ts";
 import { registerConnector } from "../server/auth.ts";
+import { type ConnectorInstallStore, createConnectorInstallService, createConnectorInstallStore } from "../server/connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import {
+  isArtifactRootReferencedByActiveRun,
+  releaseActiveRunArtifactRoot,
+  retainActiveRunArtifactRoot,
+} from "../server/connector-install/active-run-artifact-roots.ts";
 
 const CONNECTOR = "amazon";
 const CONNECTION = "cin_policy_freshness";
@@ -82,6 +88,23 @@ const MANUAL_ONLY_REFRESH_POLICY = {
   rationale: "Requires OTP and short-lived browser sessions; never refresh in the background.",
   recommended_mode: "manual",
 };
+const RUN_ADMISSION_ACTIVATION_CHANGED = /activation changed during run admission/;
+const RE_A_DOWNLOAD_FAILED = /simulated A artifact download failure/;
+const RE_DRAFT_COLLECTION_REFUSED = /Owner connection is no longer active/;
+
+test("artifact-root leases remain distinct when caller run IDs collide", () => {
+  const rootA = join(tmpdir(), "pdpp-active-artifact-a");
+  const rootB = join(tmpdir(), "pdpp-active-artifact-b");
+  const leaseA = retainActiveRunArtifactRoot("caller-run-id-collision", rootA);
+  const leaseB = retainActiveRunArtifactRoot("caller-run-id-collision", rootB);
+
+  releaseActiveRunArtifactRoot(leaseA);
+  assert.equal(isArtifactRootReferencedByActiveRun(rootA), false);
+  assert.equal(isArtifactRootReferencedByActiveRun(rootB), true);
+
+  releaseActiveRunArtifactRoot(leaseB);
+  assert.equal(isArtifactRootReferencedByActiveRun(rootB), false);
+});
 
 /**
  * A manifest `validateConnectorManifest` accepts: a non-empty `streams` array
@@ -113,7 +136,7 @@ function manifestWithRefreshPolicy(refreshPolicy: Record<string, unknown> | null
   };
 }
 
-function freshDb(t: TestContext) {
+function freshDb(t: TestContext): string {
   closeDb();
   const dir = mkdtempSync(join(tmpdir(), "pdpp-recovery-policy-freshness-"));
   t.after(() => {
@@ -126,6 +149,7 @@ function freshDb(t: TestContext) {
   });
   initDb(join(dir, "pdpp.sqlite"));
   __resetControllerInteractionStateForTests();
+  return dir;
 }
 
 interface PendingDetailGapRowFixture {
@@ -208,16 +232,16 @@ async function drainUntilIdle(controller: ReturnType<typeof createController>, l
  * The `connectors` row itself is NOT seeded here — each test registers it
  * through `registerConnector`, the real path.
  */
-async function seedConnectionEvidence(registeredConnectorId: string) {
+async function seedConnectionEvidence(registeredConnectorId: string, status: "active" | "draft" = "active") {
   const now = new Date().toISOString();
   getDb()
     .prepare(
       `INSERT OR IGNORE INTO connector_instances(
          connector_instance_id, owner_subject_id, connector_id, display_name, status,
          source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at
-       ) VALUES (?, 'owner_1', ?, 'x', 'active', 'account', ?, '{}', ?, ?, NULL)`
+       ) VALUES (?, 'owner_1', ?, 'x', ?, 'account', ?, '{}', ?, ?, NULL)`
     )
-    .run(CONNECTION, registeredConnectorId, CONNECTION, now, now);
+    .run(CONNECTION, registeredConnectorId, status, CONNECTION, now, now);
   getDb()
     .prepare(
       `INSERT INTO spine_events(
@@ -260,16 +284,51 @@ function readManifestGeneration(): number {
  * assuming it did.
  */
 async function runWithMidRunManifestChange(input: {
+  readonly admissionRaceManifest?: Record<string, unknown>;
   readonly registered: Record<string, unknown>;
   readonly committedMidRun: Record<string, unknown> | null;
-  readonly onBarrier?: () => void;
+  readonly onBarrier?: (installStore?: ConnectorInstallStore) => void | Promise<void>;
+  readonly installedDataDir?: string;
+  readonly ownerConnectionStatus?: "active" | "draft";
+  readonly runAdmission?: "collection" | "setup" | "browser_enrollment";
 }): Promise<{
   readonly calls: RuntimeRunConnectorOptions[];
   readonly generationBefore: number;
   readonly generationAfter: number;
 }> {
   const registeredConnectorId = await registerConnector(input.registered, { backfillRetrievalIndexes: false });
-  await seedConnectionEvidence(registeredConnectorId);
+  await seedConnectionEvidence(registeredConnectorId, input.ownerConnectionStatus);
+  let installedStore: ConnectorInstallStore | undefined;
+  if (input.installedDataDir) {
+    const previousDataDir = process.env.PDPP_DATA_DIR;
+    process.env.PDPP_DATA_DIR = input.installedDataDir;
+    installedStore = createConnectorInstallStore();
+    if (previousDataDir === undefined) { delete process.env.PDPP_DATA_DIR; }
+    else { process.env.PDPP_DATA_DIR = previousDataDir; }
+    const artifactDigest = `sha256:${"d".repeat(64)}`;
+    await createConnectorInstallService({
+      catalogLoader: async () => [{
+        config_digest: `sha256:${"e".repeat(64)}`,
+        connector_id: CONNECTOR,
+        connector_key: CONNECTOR,
+        digest: artifactDigest,
+        version: "1.0.0-v1",
+      }],
+      dataDir: input.installedDataDir,
+      installArtifact: (root) => {
+        mkdirSync(join(root, "profile"), { recursive: true });
+        mkdirSync(join(root, "dist"), { recursive: true });
+        writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify(input.registered));
+        writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+        writeFileSync(join(root, "provenance.json"), "{}\n");
+      },
+      registerManifest: (manifest) => registerConnector(manifest, {
+        backfillRetrievalIndexes: false,
+        skipManifestPersistence: true,
+      }),
+      store: installedStore,
+    }).install(CONNECTOR, artifactDigest);
+  }
   const generationBefore = readManifestGeneration();
 
   const calls: RuntimeRunConnectorOptions[] = [];
@@ -281,7 +340,7 @@ async function runWithMidRunManifestChange(input: {
       if (input.committedMidRun) {
         await registerConnector(input.committedMidRun, { backfillRetrievalIndexes: false });
       }
-      input.onBarrier?.();
+      await input.onBarrier?.(installedStore);
       return {
         detail_gaps: [{ gap_id: "gap_recovered", status: "recovered", stream: "order_items" }],
         records_emitted: 1,
@@ -291,8 +350,40 @@ async function runWithMidRunManifestChange(input: {
     return { detail_gaps: [], records_emitted: 0, status: "succeeded" };
   };
 
+  let controllerInstallStore = installedStore;
+  const { admissionRaceManifest } = input;
+  if (installedStore && admissionRaceManifest) {
+    const readActivation = installedStore.getActivation;
+    assert.ok(readActivation);
+    let activationReads = 0;
+    controllerInstallStore = {
+      ...installedStore,
+      getActivation: async (connectorId) => {
+        const snapshot = await readActivation(connectorId);
+        activationReads += 1;
+        if (activationReads === 1) {
+          // Publish a refresh-policy-only registry update after the controller
+          // has taken activation A but before it reads the current policy.
+          await registerConnector(admissionRaceManifest, { backfillRetrievalIndexes: false });
+          return snapshot;
+        }
+        if (activationReads === 2 && snapshot) {
+          // Model the atomic publisher state observed by the admission recheck.
+          return { ...snapshot, repairReason: "test publication in progress", state: "repair_required" };
+        }
+        return snapshot;
+      },
+    };
+  }
+
   const controller = createController({
     admitRunConnection: fakeAdmitRunConnection(),
+    ...(controllerInstallStore
+      ? {
+          connectorInstallStore: controllerInstallStore,
+          localConnectorSourceStore: createFileLocalConnectorSourceStore(input.installedDataDir),
+        }
+      : {}),
     connectorPathResolver: () => "/tmp/connector.ts",
     // Stop offering work once the continuation has started, so a chain that
     // is permitted drains exactly one extra envelope rather than twelve.
@@ -302,18 +393,39 @@ async function runWithMidRunManifestChange(input: {
     runConnectorImpl,
   });
 
-  await controller.runNow(registeredConnectorId, {
+  const run = controller.runNow(registeredConnectorId, {
     connectorInstanceId: CONNECTION,
     // The parent run pins THIS object, exactly as a real caller does. Every
     // continuation used to inherit it.
     manifest: input.registered,
     ownerToken: "owner-token",
     runId: "run_policy_freshness_root",
+    ...(input.runAdmission ? { runAdmission: input.runAdmission } : {}),
   });
-  await drainUntilIdle(controller);
+  if (admissionRaceManifest) {
+    await assert.rejects(run, RUN_ADMISSION_ACTIVATION_CHANGED);
+  } else {
+    await run;
+    await drainUntilIdle(controller);
+  }
 
   return { calls, generationAfter: readManifestGeneration(), generationBefore };
 }
+
+test("run admission rejects an A executable snapshot when B publishes before current policy is accepted", async (t) => {
+  freshDb(t);
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-run-admission-activation-race-"));
+  t.after(() => rmSync(dataDir, { force: true, recursive: true }));
+  const a = manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "admission-a");
+  const b = manifestWithRefreshPolicy(PAUSED_REFRESH_POLICY, "admission-b");
+  const result = await runWithMidRunManifestChange({
+    admissionRaceManifest: b,
+    committedMidRun: null,
+    installedDataDir: dataDir,
+    registered: a,
+  });
+  assert.equal(result.calls.length, 0, "A must not launch with policy read from B after B invalidated activation A");
+});
 
 test("a pause committed mid-run withholds the continuation", async (t) => {
   freshDb(t);
@@ -432,12 +544,143 @@ test("the continuation executes the manifest its admission was decided against",
     "premise: the mid-run registration must advance the manifest generation",
   );
   assert.equal(result.calls.length, 2, "premise: an automatic policy must still self-chain");
-  const continuation = result.calls[1];
+  const [, continuation] = result.calls;
   assert.ok(continuation);
   const ranManifest = continuation.manifest as { version?: string } | undefined;
   assert.equal(
     ranManifest?.version,
     "1.0.0-v2",
     "the continuation must run the CURRENT manifest, not the one the parent run pinned",
+  );
+});
+
+test("current policy B admits the installed A tuple and records both revisions", async (t) => {
+  const dir = freshDb(t);
+  const result = await runWithMidRunManifestChange({
+    committedMidRun: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v2"),
+    installedDataDir: join(dir, "installs"),
+    registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+  });
+  assert.equal(result.calls.length, 2);
+  const [parent, continuation] = result.calls;
+  assert.ok(parent && continuation);
+  assert.equal((continuation.manifest as { version?: string }).version, "1.0.0-v1");
+  assert.equal(continuation.connectorPath, parent.connectorPath);
+  assert.equal(continuation.executionAdmission?.activation_id, parent.executionAdmission?.activation_id);
+  assert.notEqual(continuation.executionAdmission?.policy_revision, parent.executionAdmission?.policy_revision);
+  assert.equal(continuation.executionAdmission?.owner_connection_status, "active");
+  assert.ok(continuation.executionAdmission?.manifest_revision);
+});
+
+test("current policy pause withholds a continuation of installed A", async (t) => {
+  const dir = freshDb(t);
+  const result = await runWithMidRunManifestChange({
+    committedMidRun: manifestWithRefreshPolicy(PAUSED_REFRESH_POLICY, "v2"),
+    installedDataDir: join(dir, "installs"),
+    registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+  });
+  assert.equal(result.calls.length, 1);
+});
+
+test("owner revocation withholds a continuation of installed A", async (t) => {
+  const dir = freshDb(t);
+  const result = await runWithMidRunManifestChange({
+    committedMidRun: null,
+    installedDataDir: join(dir, "installs"),
+    onBarrier: () => {
+      getDb().prepare("UPDATE connector_instances SET status='revoked',revoked_at=datetime('now'),updated_at=datetime('now') WHERE connector_instance_id=?")
+        .run(CONNECTION);
+    },
+    registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+  });
+  assert.equal(result.calls.length, 1);
+});
+
+test("an active A run keeps A's immutable artifact root through B publication and failed A reinstall", async (t) => {
+  const dir = freshDb(t);
+  const dataDir = join(dir, "installs");
+  const digestA = `sha256:${"d".repeat(64)}`;
+  const digestB = `sha256:${"f".repeat(64)}`;
+  const manifestB = manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "published-b");
+  let oldRoot = "";
+  const result = await runWithMidRunManifestChange({
+    committedMidRun: null,
+    installedDataDir: dataDir,
+    registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+    onBarrier: async (installStore) => {
+      assert.ok(installStore, "the active install store is available");
+      oldRoot = join(dataDir, "connectors", CONNECTOR, digestA);
+      const next = {
+        config_digest: `sha256:${"e".repeat(64)}`,
+        connector_id: CONNECTOR,
+        connector_key: CONNECTOR,
+        digest: digestB,
+        latest: true,
+        version: "1.0.0-b",
+      };
+      const service = createConnectorInstallService({
+        catalogLoader: async () => [next],
+        dataDir,
+        installArtifact: (root) => {
+          mkdirSync(join(root, "profile"), { recursive: true });
+          mkdirSync(join(root, "dist"), { recursive: true });
+          writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify(manifestB));
+          writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+          writeFileSync(join(root, "provenance.json"), "{}\n");
+        },
+        registerManifest: (manifest) => registerConnector(manifest, { backfillRetrievalIndexes: false }),
+        store: installStore,
+      });
+      await service.install(CONNECTOR, digestB);
+      assert.equal((await service.status())[0]?.digest, digestB, "B is the active install after publication");
+      const retryA = createConnectorInstallService({
+        catalogLoader: async () => [{
+          config_digest: `sha256:${"e".repeat(64)}`,
+          connector_id: CONNECTOR,
+          connector_key: CONNECTOR,
+          digest: digestA,
+          version: "1.0.0-v1",
+        }],
+        dataDir,
+        installArtifact: () => {
+          throw new Error("simulated A artifact download failure");
+        },
+        registerManifest: (manifest) => registerConnector(manifest, { backfillRetrievalIndexes: false }),
+        store: installStore,
+      });
+      await assert.rejects(() => retryA.install(CONNECTOR, digestA), RE_A_DOWNLOAD_FAILED);
+      assert.equal(existsSync(oldRoot), true, "the active A run's executable root remains present");
+      assert.equal((await service.status())[0]?.digest, digestB, "the failed reinstall does not displace B");
+    },
+  });
+  assert.equal(result.calls.length, 1, "the blocked A run remains a single admitted run");
+  assert.equal(existsSync(oldRoot), true, "A's root remains after the active run drains");
+});
+
+for (const runAdmission of ["setup", "browser_enrollment"] as const) {
+  test(`installed connector admits an exact draft for ${runAdmission}`, async (t) => {
+    const dir = freshDb(t);
+    const result = await runWithMidRunManifestChange({
+      committedMidRun: null,
+      installedDataDir: join(dir, "installs"),
+      ownerConnectionStatus: "draft",
+      registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+      runAdmission,
+    });
+    assert.equal(result.calls.length, 1, "the explicitly admitted draft run reaches the connector");
+    assert.equal(result.calls[0]?.executionAdmission?.owner_connection_status, "draft");
+  });
+}
+
+test("installed connector still rejects a draft through ordinary collection admission", async (t) => {
+  const dir = freshDb(t);
+  await assert.rejects(
+    () => runWithMidRunManifestChange({
+      committedMidRun: null,
+      installedDataDir: join(dir, "installs"),
+      ownerConnectionStatus: "draft",
+      registered: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v1"),
+    }),
+    RE_DRAFT_COLLECTION_REFUSED
   );
 });

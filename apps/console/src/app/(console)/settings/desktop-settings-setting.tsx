@@ -11,7 +11,7 @@ import type { AutostartState } from "../lib/autostart-client.ts"
 import {
   loadAppConfigAction,
   loadAutostartAction,
-  saveAppConfigAction,
+  saveAppConfigFieldAction,
   setAutostartAction,
 } from "./desktop-settings-actions.ts"
 
@@ -34,7 +34,7 @@ import {
  */
 interface DesktopSettingsProps {
   loadAppConfig?: typeof loadAppConfigAction
-  saveAppConfig?: typeof saveAppConfigAction
+  saveAppConfigField?: typeof saveAppConfigFieldAction
   loadAutostart?: typeof loadAutostartAction
   setAutostart?: typeof setAutostartAction
 }
@@ -79,12 +79,12 @@ function loadStateOf(...queries: Array<{ data: unknown; isError: boolean }>): Lo
 
 export function DesktopSettingsSetting({
   loadAppConfig: suppliedLoadAppConfig,
-  saveAppConfig: suppliedSaveAppConfig,
+  saveAppConfigField: suppliedSaveAppConfigField,
   loadAutostart: suppliedLoadAutostart,
   setAutostart: suppliedSetAutostart,
 }: DesktopSettingsProps) {
   const loadAppConfig = suppliedLoadAppConfig ?? loadAppConfigAction
-  const saveAppConfig = suppliedSaveAppConfig ?? saveAppConfigAction
+  const saveAppConfigField = suppliedSaveAppConfigField ?? saveAppConfigFieldAction
   const loadAutostart = suppliedLoadAutostart ?? loadAutostartAction
   const changeAutostart = suppliedSetAutostart ?? setAutostartAction
 
@@ -100,15 +100,11 @@ export function DesktopSettingsSetting({
   const loadError = autostart.error ?? appConfig.error
 
   const autostartMutation = useLiveMutation("desktop.autostart", changeAutostart)
-  // Read-modify-write of the whole config document, as before; each toggle
-  // has its own mutation so each has its own busy state.
-  const saveAppConfigField = async (patch: Partial<AppConfig>) =>
-    saveAppConfig({ ...(await loadAppConfig()), ...patch })
   const startMinimizedMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
-    saveAppConfigField({ startMinimized: next })
+    saveAppConfigField({ field: "startMinimized", value: next })
   )
   const closeToTrayMutation = useLiveMutation("desktop.app-config", (next: boolean) =>
-    saveAppConfigField({ closeToTray: next })
+    saveAppConfigField({ field: "closeToTray", value: next })
   )
 
   const stateIsKnown = loadState === "loaded"

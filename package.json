@@ -39,7 +39,7 @@
     "tauri:icon": "tauri icon ./public/data_connect_1024_1x.png",
     "tauri:icon:refresh-cache": "sh -c 'tauri icon ./public/data_connect_1024_1x.png && rm -rf \"$HOME/Library/Caches/com.apple.iconservices\" \"$HOME/Library/Caches/com.apple.iconservices.store\" && (qlmanage -r cache || true) && (killall iconservicesagent || true) && (killall Dock || true) && (killall Finder || true)'",
     "tauri:icon:rebuild": "sh -c 'tauri icon ./public/data_connect_1024_1x.png && npm run tauri:build && rm -rf \"$HOME/Library/Caches/com.apple.iconservices\" \"$HOME/Library/Caches/com.apple.iconservices.store\" && (qlmanage -r cache || true) && (killall iconservicesagent || true) && (killall Dock || true) && (killall Finder || true)'",
-    "tauri:dev": "node scripts/sync-connectors-dev.js && tauri dev",
+    "tauri:dev": "node scripts/sync-connectors-dev.js && tauri dev --config src-tauri/tauri.debug.conf.json",
     "demo:chatgpt-endpoint": "sh -c 'PORT=${DATACONNECT_DEMO_PORT:-8787}; lsof -ti tcp:$PORT -sTCP:LISTEN | xargs kill -9 2>/dev/null || true; DATACONNECT_DEMO_PORT=$PORT node --watch scripts/demo-chatgpt-endpoint.mjs'",
     "demo:chatgpt-endpoint:once": "sh -c 'PORT=${DATACONNECT_DEMO_PORT:-8787}; lsof -ti tcp:$PORT -sTCP:LISTEN | xargs kill -9 2>/dev/null || true; DATACONNECT_DEMO_PORT=$PORT node scripts/demo-chatgpt-endpoint.mjs'",
     "tauri:build": "node scripts/build-prod.js",
@@ -93,7 +93,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#ee11b09dc4e4c3acb1a1e0606ced0429f761be27",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
     "@semantic-release/exec": "^7.1.0",
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/vitest-runner": "10.0.0",

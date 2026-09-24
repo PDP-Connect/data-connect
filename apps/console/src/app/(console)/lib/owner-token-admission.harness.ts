@@ -147,15 +147,53 @@ export async function startReference(opts: Record<string, unknown>): Promise<Sta
   };
 }
 
-/** Issue a session cookie value exactly as the AS would after a password login. */
-export async function issueSessionCookie(password: string, { expired = false } = {}): Promise<string> {
-  const { deriveOwnerSessionSecret, encodeOwnerSession, OWNER_SESSION_DEFAULT_SUBJECT_ID } = await import(
-    "pdpp-reference-implementation/owner-session"
-  );
-  const now = Math.floor(Date.now() / 1000);
-  const sub = OWNER_SESSION_DEFAULT_SUBJECT_ID;
-  const payload = expired ? { exp: now - 60, iat: now - 3600, sub } : { exp: now + 3600, iat: now, sub };
-  return encodeOwnerSession(payload, deriveOwnerSessionSecret(password));
+function getSetCookies(resp: Response): string[] {
+  if (typeof resp.headers.getSetCookie === "function") {
+    return resp.headers.getSetCookie();
+  }
+  const single = resp.headers.get("set-cookie");
+  return single ? [single] : [];
+}
+
+function findCookiePair(setCookies: readonly string[], name: string): string | null {
+  for (const header of setCookies) {
+    const pair = header.split(";", 1)[0] ?? "";
+    if (pair.startsWith(`${name}=`)) {
+      return pair;
+    }
+  }
+  return null;
+}
+
+function csrfField(html: string): string {
+  const match = html.match(/<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/);
+  assert.ok(match?.[1], "login page must include a CSRF field");
+  return match[1];
+}
+
+/** Issue a session cookie value through the real AS login route. */
+export async function issueSessionCookie(asUrl: string, password: string): Promise<string> {
+  const loginPage = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" }, redirect: "manual" });
+  const csrfCookie = findCookiePair(getSetCookies(loginPage), "pdpp_owner_csrf");
+  const body = new URLSearchParams({
+    _csrf: csrfField(await loginPage.text()),
+    password,
+    return_to: "/",
+  });
+  const login = await fetch(`${asUrl}/owner/login`, {
+    body: body.toString(),
+    headers: {
+      Accept: "text/html",
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: csrfCookie ?? "",
+    },
+    method: "POST",
+    redirect: "manual",
+  });
+  assert.equal(login.status, 302);
+  const sessionCookie = findCookiePair(getSetCookies(login), OWNER_SESSION_COOKIE);
+  assert.ok(sessionCookie, "login must issue an owner session cookie");
+  return sessionCookie.slice(`${OWNER_SESSION_COOKIE}=`.length);
 }
 
 export function isLoginRedirect(err: unknown): boolean {

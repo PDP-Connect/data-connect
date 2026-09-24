@@ -21,6 +21,8 @@ import { ConsolePortSetting } from "./console-port-setting.tsx"
 import { OriginVerificationStatus } from "./origin-verification-status.tsx"
 import {
   loadRemoteAccessStateAction,
+  restartAfterOwnerPasswordSetAction,
+  requestOwnerPasswordWindowAction,
   setConsolePortAction,
   setRemoteAccessConfigAction,
 } from "./remote-access-actions.ts"
@@ -65,6 +67,8 @@ import {
  */
 interface RemoteAccessSettingProps {
   loadState?: typeof loadRemoteAccessStateAction
+  requestOwnerPasswordWindow?: typeof requestOwnerPasswordWindowAction
+  restartAfterOwnerPasswordSet?: typeof restartAfterOwnerPasswordSetAction
   saveConfig?: typeof setRemoteAccessConfigAction
   saveConsolePort?: typeof setConsolePortAction
 }
@@ -165,10 +169,14 @@ const postureRows: Array<{
 
 export function RemoteAccessSetting({
   loadState: suppliedLoadState,
+  requestOwnerPasswordWindow: suppliedRequestOwnerPasswordWindow,
+  restartAfterOwnerPasswordSet: suppliedRestartAfterOwnerPasswordSet,
   saveConfig: suppliedSaveConfig,
   saveConsolePort: suppliedSaveConsolePort,
 }: RemoteAccessSettingProps) {
   const loadRemoteAccessState = suppliedLoadState ?? loadRemoteAccessStateAction
+  const requestOwnerPasswordWindow = suppliedRequestOwnerPasswordWindow ?? requestOwnerPasswordWindowAction
+  const restartAfterOwnerPasswordSet = suppliedRestartAfterOwnerPasswordSet ?? restartAfterOwnerPasswordSetAction
   const saveRemoteAccessConfig = suppliedSaveConfig ?? setRemoteAccessConfigAction
   const saveConsolePort = suppliedSaveConsolePort ?? setConsolePortAction
   const [config, setConfig] = useState<RemoteAccessConfig>(
@@ -200,6 +208,7 @@ export function RemoteAccessSetting({
   const [origin, setOrigin] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [waitingForOwnerPassword, setWaitingForOwnerPassword] = useState(false)
   const [optionId, setOptionId] = useState<string>(DEFAULT_PUBLIC_URL_OPTION_ID)
   const [authtoken, setAuthtoken] = useState("")
   const [ngrokDomain, setNgrokDomain] = useState("")
@@ -211,6 +220,7 @@ export function RemoteAccessSetting({
   const [effectiveConsolePort, setEffectiveConsolePort] = useState<
     number | null
   >(null)
+  const [ownerPasswordOwnerSet, setOwnerPasswordOwnerSet] = useState(true)
   // The port the desktop supervisor told this console to keep. Differs from
   // `effectiveConsolePort` only when that port was taken at launch; `null`
   // on a host without the desktop supervisor.
@@ -249,6 +259,7 @@ export function RemoteAccessSetting({
       ngrokInspection: nextNgrokInspection,
       cloudflareTunnelInspection: nextCloudflareTunnelInspection,
       myDevicesOnlyInspection: nextMyDevicesOnlyInspection,
+      ownerPasswordOwnerSet: nextOwnerPasswordOwnerSet,
     } = next
     const resolved = asConfig(nextConfig)
     setConfig(resolved)
@@ -263,6 +274,7 @@ export function RemoteAccessSetting({
     setMyDevicesOnlyInspection(asInspection(nextMyDevicesOnlyInspection))
     setEffectiveConsolePort(nextPort ?? null)
     setStableConsolePort(nextStablePort ?? null)
+    setOwnerPasswordOwnerSet(nextOwnerPasswordOwnerSet)
     if (!draftOpenRef.current) {
       setOrigin(resolved.fields.PDPP_REFERENCE_ORIGIN ?? "")
       // Without this, an owner who already saved their ngrok domain sees
@@ -310,6 +322,8 @@ export function RemoteAccessSetting({
   }, [remoteAccess.error])
 
   const stateIsKnown = loadState === "loaded"
+  const showOwnerPasswordMigrationBanner =
+    config.posture !== "off" && !ownerPasswordOwnerSet
   const desktopUnavailable = !stateIsKnown || inspection?.availability === "unavailable"
   // Specific to the ngrok row: user_supplied_origin can still work (via
   // `inspection` above) even when ngrok cannot (no Tauri host to supervise
@@ -389,6 +403,20 @@ export function RemoteAccessSetting({
       })
         .then(result => {
           if (!result.ok) {
+            if (result.code === "owner_password_required") {
+              void continueAfterOwnerPassword(
+                {
+                  posture: "my_devices_only",
+                  provider: null,
+                  fields: offRemoteAccessConfig().fields,
+                },
+                undefined,
+                retryResult => {
+                  setConfig(asConfig(retryResult.config))
+                }
+              )
+              return
+            }
             setError(result.message)
             return
           }
@@ -475,6 +503,10 @@ export function RemoteAccessSetting({
     void saveRemoteAccessConfig(nextConfig, providerCredential)
       .then(result => {
         if (!result.ok) {
+          if (result.code === "owner_password_required") {
+            void continueAfterOwnerPassword(nextConfig, providerCredential, onSuccess)
+            return
+          }
           setError(result.message)
           return
         }
@@ -483,6 +515,88 @@ export function RemoteAccessSetting({
       })
       .catch(reason => setError(String(reason)))
       .finally(() => setBusy(false))
+  }
+
+  const continueAfterOwnerPassword = async (
+    nextConfig: RemoteAccessConfig,
+    providerCredential: string | undefined,
+    onSuccess: (result: { config: RemoteAccessConfig }) => void
+  ) => {
+    let ownerPasswordSet = false
+    let remoteConfigSaved = false
+    setWaitingForOwnerPassword(true)
+    setBusy(true)
+    setError("Set an owner password in the DataConnect window that just opened. This change will continue after it is saved.")
+    try {
+      const opened = await requestOwnerPasswordWindow()
+      if (!opened.ok) {
+        setError(opened.message)
+        return
+      }
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        const state = await loadRemoteAccessState()
+        setOwnerPasswordOwnerSet(state.ownerPasswordOwnerSet)
+        if (!state.ownerPasswordOwnerSet) continue
+        ownerPasswordSet = true
+        const result = await saveRemoteAccessConfig(nextConfig, providerCredential)
+        if (!result.ok) {
+          setError(result.message)
+          return
+        }
+        remoteConfigSaved = true
+        setConfig(asConfig(result.config))
+        setError(null)
+        onSuccess(result)
+        return
+      }
+      setError("The owner password window is still waiting. Save the password there, then try this remote access change again.")
+    } catch (reason) {
+      setError(String(reason))
+    } finally {
+      // A successful config write triggers the desktop's existing config
+      // watcher, which restarts the stack with the new password. If the
+      // config was rejected after the password was saved, request a restart
+      // explicitly so the new credential still takes effect.
+      if (ownerPasswordSet && !remoteConfigSaved) {
+        const restart = await restartAfterOwnerPasswordSet()
+        if (!restart.ok) setError(restart.message)
+      }
+      setWaitingForOwnerPassword(false)
+      setBusy(false)
+    }
+  }
+
+  const setOwnerPasswordForMigration = async () => {
+    setWaitingForOwnerPassword(true)
+    setBusy(true)
+    setError("Set an owner password in the DataConnect window that just opened.")
+    try {
+      const opened = await requestOwnerPasswordWindow()
+      if (!opened.ok) {
+        setError(opened.message)
+        return
+      }
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        const state = await loadRemoteAccessState()
+        setOwnerPasswordOwnerSet(state.ownerPasswordOwnerSet)
+        if (!state.ownerPasswordOwnerSet) continue
+        const restart = await restartAfterOwnerPasswordSet()
+        if (!restart.ok) {
+          setError(restart.message)
+          return
+        }
+        setError("Owner password saved. DataConnect is restarting.")
+        return
+      }
+      setError("The owner password window is still waiting. Save the password there, then try again.")
+    } catch (reason) {
+      setError(String(reason))
+    } finally {
+      setWaitingForOwnerPassword(false)
+      setBusy(false)
+    }
   }
 
   /**
@@ -876,6 +990,24 @@ export function RemoteAccessSetting({
         </p>
       ) : null}
 
+      {showOwnerPasswordMigrationBanner ? (
+        <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <p>
+            Remote access is on with the original generated password. It still
+            works, but set your own owner password from this computer when you
+            are ready.
+          </p>
+          <button
+            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100 disabled:opacity-50"
+            disabled={busy || desktopUnavailable}
+            onClick={() => void setOwnerPasswordForMigration()}
+            type="button"
+          >
+            Set owner password
+          </button>
+        </div>
+      ) : null}
+
       {pendingRiskyConfig ? (
         <div
           aria-label="Confirm a change that could disconnect you"
@@ -953,7 +1085,7 @@ export function RemoteAccessSetting({
                     chosen
                       ? "border-foreground/50 bg-muted/30"
                       : "border-border/70",
-                    rowUnavailable ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                    rowUnavailable || waitingForOwnerPassword ? "cursor-not-allowed opacity-60" : "cursor-pointer"
                   )}
                   key={option.id}
                 >
@@ -961,7 +1093,7 @@ export function RemoteAccessSetting({
                     <input
                       aria-label={option.label}
                       checked={chosen}
-                      disabled={busy || rowUnavailable}
+                      disabled={busy || rowUnavailable || waitingForOwnerPassword}
                       name="public-url-option"
                       onChange={() => {
                         setOptionId(option.id)
@@ -1218,7 +1350,7 @@ export function RemoteAccessSetting({
           <div className="flex flex-wrap justify-end gap-2">
             <button
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
-              disabled={busy}
+              disabled={busy || waitingForOwnerPassword}
               onClick={cancelPublicUrlDialog}
               type="button"
             >

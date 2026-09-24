@@ -93,69 +93,69 @@ function makeReqRes({ accept }: { accept?: string } = {}): { req: TestAuthReques
   return { req, res };
 }
 
-function runRequireOwnerSession(
+async function runRequireOwnerSession(
   auth: OwnerAuthPlaceholder,
   opts?: { accept?: string }
-): { req: TestAuthRequest; res: TestAuthResponse; nextCalled: boolean } {
+): Promise<{ req: TestAuthRequest; res: TestAuthResponse; nextCalled: boolean }> {
   const { req, res } = makeReqRes(opts);
   let nextCalled = false;
-  auth.requireOwnerSession(req, res, () => {
+  await auth.requireOwnerSession(req, res, () => {
     nextCalled = true;
   });
   return { nextCalled, req, res };
 }
 
 // ── disabled + NOT allowed (hosted defense-in-depth) → fail closed ───────────
-test("disabled auth + allowUnauthenticatedWhenDisabled=false → JSON caller gets 401, no next()", () => {
+test("disabled auth + allowUnauthenticatedWhenDisabled=false → JSON caller gets 401, no next()", async () => {
   const auth = createOwnerAuthPlaceholder({
     allowUnauthenticatedWhenDisabled: false,
     password: null,
   });
-  assert.equal(auth.enabled, false, "no password → auth disabled");
-  const { res, nextCalled } = runRequireOwnerSession(auth, { accept: "application/json" });
+  assert.equal(auth.enabled, true, "fail-closed posture keeps the auth gate active before setup claim");
+  const { res, nextCalled } = await runRequireOwnerSession(auth, { accept: "application/json" });
   assert.equal(nextCalled, false, "must NOT fall through to the protected handler");
   assert.equal(res.statusCode, 401, "unauthenticated owner route returns 401");
   const jsonBody = typeof res.body === "object" ? res.body : null;
   assert.equal(jsonBody?.error?.code, "owner_session_required");
 });
 
-test("disabled auth + allowUnauthenticatedWhenDisabled=false → HTML caller redirects to /owner/login", () => {
+test("disabled auth + allowUnauthenticatedWhenDisabled=false → HTML caller redirects to /owner/login", async () => {
   const auth = createOwnerAuthPlaceholder({
     allowUnauthenticatedWhenDisabled: false,
     password: null,
   });
-  const { res, nextCalled } = runRequireOwnerSession(auth, { accept: "text/html" });
+  const { res, nextCalled } = await runRequireOwnerSession(auth, { accept: "text/html" });
   assert.equal(nextCalled, false);
   assert.ok(res.redirectedTo?.startsWith("/owner/login?return_to="), "browser redirected to login");
 });
 
 // ── disabled + allowed (local-dev / override) → open fall-through preserved ──
-test("disabled auth + allowUnauthenticatedWhenDisabled=true → falls through (local-dev convenience)", () => {
+test("disabled auth + allowUnauthenticatedWhenDisabled=true → falls through (local-dev convenience)", async () => {
   const auth = createOwnerAuthPlaceholder({
     allowUnauthenticatedWhenDisabled: true,
     password: null,
   });
-  const { res, nextCalled } = runRequireOwnerSession(auth, { accept: "application/json" });
+  const { res, nextCalled } = await runRequireOwnerSession(auth, { accept: "application/json" });
   assert.equal(nextCalled, true, "local-dev open behavior preserved");
   assert.equal(res._sent, false, "no response written when falling through");
 });
 
-test("default (no posture supplied) preserves the historical open fall-through", () => {
+test("default (no posture supplied) preserves the historical open fall-through", async () => {
   // buildAsApp defaults the flag to true when no posture is supplied, so
   // low-level fixtures that construct the placeholder directly stay open.
   const auth = createOwnerAuthPlaceholder({ password: null });
-  const { nextCalled } = runRequireOwnerSession(auth, { accept: "application/json" });
+  const { nextCalled } = await runRequireOwnerSession(auth, { accept: "application/json" });
   assert.equal(nextCalled, true);
 });
 
 // ── enabled (password set) → always requires a session regardless of flag ────
-test("enabled auth + no session → 401 even when allowUnauthenticatedWhenDisabled=true", () => {
+test("enabled auth + no session → 401 even when allowUnauthenticatedWhenDisabled=true", async () => {
   const auth = createOwnerAuthPlaceholder({
     allowUnauthenticatedWhenDisabled: true,
     password: "secret",
   });
   assert.equal(auth.enabled, true);
-  const { res, nextCalled } = runRequireOwnerSession(auth, { accept: "application/json" });
+  const { res, nextCalled } = await runRequireOwnerSession(auth, { accept: "application/json" });
   assert.equal(nextCalled, false);
   assert.equal(res.statusCode, 401);
   const jsonBody = typeof res.body === "object" ? res.body : null;
@@ -174,23 +174,23 @@ function ownerSessionRoute(auth: OwnerAuthPlaceholder): (req: TestAuthRequest, r
   return route;
 }
 
-test("GET /owner/session: disabled auth that fails closed answers 401, not 204", () => {
+test("GET /owner/session: disabled auth that fails closed answers 401, not 204", async () => {
   const route = ownerSessionRoute(
     createOwnerAuthPlaceholder({ allowUnauthenticatedWhenDisabled: false, password: null })
   );
   const { req, res } = makeReqRes({ accept: "application/json" });
-  route(req, res);
+  await route(req, res);
   assert.equal(res.statusCode, 401);
   const jsonBody = typeof res.body === "object" ? res.body : null;
   assert.equal(jsonBody?.error?.code, "owner_session_required");
 });
 
-test("GET /owner/session: disabled auth in the open local-dev posture answers 204", () => {
+test("GET /owner/session: disabled auth in the open local-dev posture answers 204", async () => {
   const route = ownerSessionRoute(
     createOwnerAuthPlaceholder({ allowUnauthenticatedWhenDisabled: true, password: null })
   );
   const { req, res } = makeReqRes({ accept: "application/json" });
-  route(req, res);
+  await route(req, res);
   assert.equal(res.statusCode, 204);
   assert.equal(res._sent, true);
 });

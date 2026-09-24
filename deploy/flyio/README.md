@@ -23,15 +23,9 @@ streaming and persistent profiles. Set `PDPP_BROWSER_HEADLESS=1` only for the
 advanced deployment-wide headless/minimal path. n.eko remains optional and
 headed when remote CDP is configured.
 
-**Architecture note (differs from the pdpp original this was ported from):**
-this runbook describes pdpp's combined Core image, where one supervisor
-process ran both the operator console (on the public port) and the reference
-AS/RS (on loopback) in a single container. data-connect's
-`deploy/docker/Dockerfile` `core` stage does not bundle the console today — it
-runs only the reference AS/RS, directly on the published port (7662). Where
-this document says "console listens on port 3000", read that as "the
-reference AS listens on port 7662" for this repo. See
-`deploy/docker/README.md`'s own architecture note for the same gap.
+The root `Dockerfile` builds the combined Core image. Its supervisor runs the
+console on Fly's public port 3000 and the reference AS/RS on loopback. The
+console proxies owner and protocol requests to the reference server.
 
 ## Shareable Path
 
@@ -50,7 +44,7 @@ Two launch paths, and the difference matters:
 - **Image-backed** (below) — Fly pulls the prebuilt public Core image from
   GHCR. Nothing is compiled; the deploy is fast and runs the same artifact the
   Docker and Railway paths run.
-- **Source-build** (further down) — Fly builds `deploy/docker/Dockerfile`
+- **Source-build** (further down) — Fly builds the repository-root `Dockerfile`
   target `core` from the repository via [`fly.toml`](./fly.toml). Use it to deploy
   local modifications or an unreleased commit. It is slower and its result is
   whatever the source tree produces, not the published release.
@@ -59,15 +53,13 @@ Fast image-backed path, using the released public Core image:
 
 ```sh
 APP="pdpp-core-$(openssl rand -hex 3)"
-OWNER_PASSWORD="$(openssl rand -base64 24)"
 
 fly launch \
   --image ghcr.io/pdp-connect/data-connect/core:latest \
   --name "$APP" \
   --region iad \
-  --internal-port 7662 \
+  --internal-port 3000 \
   --db \
-  --secret "PDPP_OWNER_PASSWORD=$OWNER_PASSWORD" \
   --env "PDPP_REFERENCE_ORIGIN=https://$APP.fly.dev" \
   --no-github-workflow \
   --no-object-storage \
@@ -75,20 +67,26 @@ fly launch \
   --now \
   --yes
 
-printf 'Origin: https://%s.fly.dev\nOwner password: %s\n' "$APP" "$OWNER_PASSWORD"
+printf 'Origin: https://%s.fly.dev\n' "$APP"
+fly logs --app "$APP"
 ```
+
+Use the one-time setup token in the Core logs at `https://$APP.fly.dev/setup`
+and choose an owner password. For scripted deployments, set
+`PDPP_OWNER_PASSWORD` as a Fly secret before launch; that explicit value skips
+the wizard.
 
 `:latest` moves only when a release succeeds and always resolves to the same
 image as that release's version tag. To pin a deployment, substitute an
-immutable tag (`core:1.5.1` or `core:sha-<rev>`); the rollback command below
-takes the same form.
+immutable release tag such as `core:1.5.1`; the rollback command below takes
+the same form. Manual diagnostic images use `core:dispatch-sha-<rev>` and are
+not release-channel pins.
 
 Source-build path from the public repository. This builds the `core` target
 from source rather than pulling the published image:
 
 ```sh
 APP="pdpp-core-$(openssl rand -hex 3)"
-OWNER_PASSWORD="$(openssl rand -base64 24)"
 
 fly launch \
   --from https://github.com/PDP-Connect/data-connect \
@@ -98,7 +96,6 @@ fly launch \
   --copy-config \
   --build-target core \
   --db \
-  --secret "PDPP_OWNER_PASSWORD=$OWNER_PASSWORD" \
   --env "PDPP_REFERENCE_ORIGIN=https://$APP.fly.dev" \
   --no-github-workflow \
   --no-object-storage \
@@ -106,12 +103,13 @@ fly launch \
   --now \
   --yes
 
-printf 'Origin: https://%s.fly.dev\nOwner password: %s\n' "$APP" "$OWNER_PASSWORD"
+printf 'Origin: https://%s.fly.dev\n' "$APP"
+fly logs --app "$APP"
 ```
 
 This is the honest Fly equivalent to the Railway button today: one command that
-creates the app, provisions Postgres, deploys the Core runtime, and prints the
-owner password the operator needs for login and smoke checks.
+creates the app, provisions Postgres, and deploys the Core runtime. Use the
+one-time setup token from `fly logs` to choose the owner password at `/setup`.
 
 If `fly launch --from` cannot read the config path in your local flyctl version,
 clone the repository and run the same command from the checkout without the
@@ -123,7 +121,7 @@ One public app, one loopback AS/RS pair, one storage backend.
 
 ```
 internet --HTTPS--> core (public Fly app)
-                       |- reference AS listens on Fly internal_port 7662
+                       |- console listens on Fly internal_port 3000
                        |- AS listens on 127.0.0.1:7662
                        `- RS listens on 127.0.0.1:7663
                             |
@@ -139,16 +137,19 @@ provisioning provide the standard `DATABASE_URL` that the runtime accepts.
 
 ## Configuration
 
-[`fly.toml`](./fly.toml) builds `deploy/docker/Dockerfile` target `core` and
-exposes the reference AS on port 7662.
+[`fly.toml`](./fly.toml) builds the repository-root `Dockerfile` target
+`core` and exposes the console on port 3000. The reference AS/RS use internal
+loopback ports 7662 and 7663.
 
 Set or let `fly launch` set:
 
 ```sh
 PDPP_REFERENCE_ORIGIN=https://<app-name>.fly.dev
-PDPP_OWNER_PASSWORD=<required user-provided secret>
 DATABASE_URL=<created by fly launch --db>
 ```
+
+`PDPP_OWNER_PASSWORD` is optional. Leave it unset to use the setup wizard, or
+set it as a Fly secret for scripted deployment.
 
 `PDPP_DATABASE_URL` is also accepted and takes precedence over `DATABASE_URL` if
 you choose to attach Postgres manually:
@@ -166,12 +167,13 @@ Preflight a local env file before a live deploy:
 node --import tsx scripts/check-flyio-deploy-env.ts --core deploy/flyio/core.env.example
 ```
 
-The committed example intentionally fails until the app origin, owner password,
-and database URL are filled.
+The committed example intentionally fails until the app origin and database
+URL are filled. An owner password is optional.
 
 ## Verification
 
-After launch, run:
+After completing `/setup`, set `OWNER_PASSWORD` in your shell to the password
+chosen in the wizard, then run:
 
 ```sh
 ORIGIN="https://$APP.fly.dev"

@@ -76,7 +76,8 @@ async function withMountedRoutes(
   // Host header, so isRemoteOriginRequest is false regardless of what this
   // contract declares unless a test opts into a real referenceOrigin --
   // an empty contract is the simplest honest default for everyone else.
-  contract = parseReachabilityContract({ env: {} })
+  contract = parseReachabilityContract({ env: {} }),
+  ownerPasswordOwnerSet: () => Promise<boolean> = async () => true
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "owner-remote-access-route-"));
   const previousKey = process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY;
@@ -95,6 +96,7 @@ async function withMountedRoutes(
       },
       requireOwner: (...args: unknown[]) => (args[2] as () => void)(),
       requireToken: (...args: unknown[]) => (args[2] as () => void)(),
+      ownerPasswordOwnerSet,
       store: createRemoteAccessConfigStore(dir),
     });
     await fn(app.routes);
@@ -107,6 +109,99 @@ async function withMountedRoutes(
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+test("managed desktop refuses a new remote-access turn-on before the owner sets a password", async () => {
+  const previousManagedDesktop = process.env.PDPP_MANAGED_DESKTOP_HOST;
+  process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
+  try {
+    await withMountedRoutes(
+      async (routes) => {
+        const postHandler = routes.get("POST /v1/owner/remote-access/config");
+        const config: RemoteAccessConfig = {
+          posture: "public_url",
+          provider: "user_supplied_origin",
+          fields: {
+            PDPP_BIND_HOST: "127.0.0.1",
+            PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+            PDPP_TRUSTED_HOSTS: "vault.example.com",
+            PDPP_TRUSTED_PROXIES: "",
+          },
+        };
+
+        const post = makeRes();
+        await postHandler?.({ body: config }, post.res);
+
+        assert.equal(post.captured.status, 409);
+        assert.deepEqual(post.captured.body, {
+          error: {
+            code: "owner_password_required",
+            message: "Set an owner password in DataConnect before turning on remote access.",
+          },
+        });
+      },
+      parseReachabilityContract({ env: {} }),
+      async () => false
+    );
+  } finally {
+    if (previousManagedDesktop === undefined) {
+      delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    } else {
+      process.env.PDPP_MANAGED_DESKTOP_HOST = previousManagedDesktop;
+    }
+  }
+});
+
+test("managed desktop keeps upgraded remote-on installs writable before the owner-set marker exists", async () => {
+  const previousManagedDesktop = process.env.PDPP_MANAGED_DESKTOP_HOST;
+  process.env.PDPP_MANAGED_DESKTOP_HOST = "1";
+  try {
+    let markerPresent = true;
+    await withMountedRoutes(
+      async (routes) => {
+        const postHandler = routes.get("POST /v1/owner/remote-access/config");
+        const initial: RemoteAccessConfig = {
+          posture: "public_url",
+          provider: "user_supplied_origin",
+          fields: {
+            PDPP_BIND_HOST: "127.0.0.1",
+            PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+            PDPP_TRUSTED_HOSTS: "vault.example.com",
+            PDPP_TRUSTED_PROXIES: "",
+          },
+        };
+        const changed: RemoteAccessConfig = {
+          ...initial,
+          fields: {
+            ...initial.fields,
+            PDPP_REFERENCE_ORIGIN: "https://vault2.example.com",
+            PDPP_TRUSTED_HOSTS: "vault2.example.com",
+          },
+        };
+
+        const first = makeRes();
+        await postHandler?.({ body: initial }, first.res);
+        assert.equal(first.captured.status, 200);
+
+        markerPresent = false;
+        const second = makeRes();
+        await postHandler?.({ body: changed }, second.res);
+        assert.equal(second.captured.status, 200);
+        assert.deepEqual((second.captured.body as { data: RemoteAccessConfig }).data, {
+          ...changed,
+          console_port: null,
+        });
+      },
+      parseReachabilityContract({ env: {} }),
+      async () => markerPresent
+    );
+  } finally {
+    if (previousManagedDesktop === undefined) {
+      delete process.env.PDPP_MANAGED_DESKTOP_HOST;
+    } else {
+      process.env.PDPP_MANAGED_DESKTOP_HOST = previousManagedDesktop;
+    }
+  }
+});
 
 test("GET config returns the off default before anything is saved", async () => {
   await withMountedRoutes(async (routes) => {

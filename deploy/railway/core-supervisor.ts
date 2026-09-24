@@ -163,9 +163,9 @@ process.on("SIGTERM", () => stop("SIGTERM"));
 process.on("SIGINT", () => stop("SIGINT"));
 
 async function main(): Promise<void> {
-  // Standalone-image credential bootstrap: generate (first boot) or load
-  // (subsequent boots) an owner password when the platform did not supply one,
-  // so owner data is gated by default. See ./core-first-boot.ts.
+  // Owner setup is handled by the reference server. With no
+  // PDPP_OWNER_PASSWORD it creates a single-use setup token and serves /setup;
+  // do not create or log a fallback password here.
   const firstBoot = prepareFirstBoot();
   const readyFile = referenceReadyFile();
   clearReferenceReadyFile(readyFile);
@@ -196,10 +196,6 @@ async function main(): Promise<void> {
     PDPP_RS_URL: "http://127.0.0.1:7663",
     PDPP_REFERENCE_READY_FILE: readyFile,
   };
-
-  for (const line of firstBoot.bannerLines) {
-    console.log(line);
-  }
 
   if (process.env.PDPP_CORE_RUNTIME_ORACLE === "1") {
     start(

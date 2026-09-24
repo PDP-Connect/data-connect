@@ -54,17 +54,13 @@
 // owner precisely why ngrok cannot be enabled here instead of accepting a
 // config that will never activate.
 //
-// Setting the owner password for the FIRST time is out of scope here: it is a
-// one-time write to the OS keychain (`owner_credential.rs::
-// save_owner_credential`), which is exactly as native as ngrok's authtoken
-// storage and for the same reason (there is no HTTP-reachable equivalent that
-// isn't a strictly weaker, unencrypted secret store). These routes require an
-// owner bearer token, which cannot be minted without `PDPP_OWNER_PASSWORD`
-// already being configured -- the same owner-password gate the desktop
-// onboarding flow establishes, and the same gate `owner-exposure-posture.ts`
-// already enforces at boot for any non-loopback deployment. A self-hoster sets
-// `PDPP_OWNER_PASSWORD` as an operator env var, same as every other owner
-// control already requires.
+// Setting the owner password for the FIRST remote-access turn-on is native:
+// the console writes `owner-password-window-request.json`, the Tauri watcher
+// opens an app-origin password window, and that window calls
+// `set_desktop_owner_password` to write the OS keychain credential and the
+// owner-set marker. This route enforces the marker before an off -> remote
+// managed-desktop transition. Existing remote-on installs keep working so an
+// upgrade does not strand a saved phone password.
 //
 // Persistence: `RemoteAccessConfigStore` (`../remote-access-store.ts`) writes
 // `remote-access.json` under `PDPP_DATA_DIR`. In the managed desktop stack
@@ -145,6 +141,7 @@ export interface MountOwnerRemoteAccessContext {
   pdppError: (res: RouteResponse, status: number, code: string, message: string, param?: string | null) => void
   requireOwner: MiddlewareHandler
   requireToken: MiddlewareHandler
+  ownerPasswordOwnerSet?: () => Promise<boolean>
   store: RemoteAccessConfigStore
 }
 
@@ -271,6 +268,23 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
             )
             return
           }
+        }
+        const current = await ctx.store.load()
+        if (
+          process.env.PDPP_MANAGED_DESKTOP_HOST === "1" &&
+          current.posture === "off" &&
+          toSave.posture !== "off" &&
+          ctx.ownerPasswordOwnerSet !== undefined &&
+          !(await ctx.ownerPasswordOwnerSet())
+        ) {
+          ctx.pdppError(
+            res,
+            409,
+            "owner_password_required",
+            "Set an owner password in DataConnect before turning on remote access.",
+            null
+          )
+          return
         }
         const saved = await ctx.store.save(toSave);
         // Never echo the sealed (or plaintext) credential back to the console.

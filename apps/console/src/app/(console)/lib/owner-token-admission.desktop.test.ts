@@ -5,12 +5,8 @@
  * Default unified desktop: the console process holds the same
  * `PDPP_OWNER_PASSWORD` as the reference server.
  *
- * Here the console validates the session cookie itself (local HMAC), and
- * `verifyDashboardSession()` already refuses anonymous requests before any
- * dashboard client asks for the bearer. This topology was NOT open to the
- * split-deployment bypass. These tests pin that `getOwnerToken()` keeps using
- * the local check (no extra AS round trip) and that it now refuses an
- * anonymous request on its own, without relying on the caller's gate.
+ * The cookie is opaque, so the console forwards it to the AS for admission
+ * even when this process also has `PDPP_OWNER_PASSWORD`.
  */
 
 import assert from "node:assert/strict";
@@ -43,7 +39,7 @@ test.before(async () => {
   reference = await startReference({ ownerAuthPassword: OWNER_PASSWORD });
   ({ clearOwnerToken, getOwnerToken, isOwnerSessionGateEnabled } = await import("./owner-token.ts"));
   ({ loadAppConfigAction, saveAppConfigAction } = await import("../settings/desktop-settings-actions.ts"));
-  ownerCookie = await issueSessionCookie(OWNER_PASSWORD);
+  ownerCookie = await issueSessionCookie(reference.asUrl, OWNER_PASSWORD);
   fetches = recordFetches();
 });
 
@@ -61,19 +57,17 @@ test("desktop topology: the console holds the password, so its local gate is on"
   assert.equal(isOwnerSessionGateEnabled(), true);
 });
 
-test("desktop: admission is local — a warm-cache owner request makes no AS call", async () => {
+test("desktop: admission asks the AS before returning a warm cached bearer", async () => {
   clearOwnerToken();
   const token = await asRequest(ownerCookie, () => getOwnerToken());
   const before = asCalls().length;
   assert.equal(await asRequest(ownerCookie, () => getOwnerToken()), token);
-  assert.equal(asCalls().length, before);
+  assert.ok(asCalls().length > before, "warm-cache admission still checks /owner/session");
 });
 
-test("desktop: an anonymous request is refused locally, without an AS call, even with a warm cache", async () => {
+test("desktop: an anonymous request is refused even with a warm cache", async () => {
   await asRequest(ownerCookie, () => getOwnerToken());
-  const before = asCalls().length;
   await assert.rejects(asRequest(null, () => getOwnerToken()), isLoginRedirect);
-  assert.equal(asCalls().length, before);
 });
 
 test("desktop: an anonymous request cannot join an in-flight owner mint", async () => {
@@ -86,12 +80,20 @@ test("desktop: an anonymous request cannot join an in-flight owner mint", async 
   assert.ok(isLoginRedirect((anonymousResult as PromiseRejectedResult).reason));
 });
 
-test("desktop: expired and wrong-password cookies are refused locally", async () => {
+test("desktop: unknown and revoked cookies are refused", async () => {
   await asRequest(ownerCookie, () => getOwnerToken());
-  const expired = await issueSessionCookie(OWNER_PASSWORD, { expired: true });
-  await assert.rejects(asRequest(expired, () => getOwnerToken()), isLoginRedirect);
-  const otherPassword = await issueSessionCookie("the-password-before-rotation");
-  await assert.rejects(asRequest(otherPassword, () => getOwnerToken()), isLoginRedirect);
+  await assert.rejects(asRequest("unknown-session-id", () => getOwnerToken()), isLoginRedirect);
+  const revocableCookie = await issueSessionCookie(reference.asUrl, OWNER_PASSWORD);
+  const logout = await fetch(`${reference.asUrl}/owner/logout`, {
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: `pdpp_owner_session=${revocableCookie}`,
+    },
+    method: "POST",
+  });
+  assert.equal(logout.status, 204);
+  await assert.rejects(asRequest(revocableCookie, () => getOwnerToken()), isLoginRedirect);
 });
 
 test("desktop: owner read and mutation through the Server Actions; anonymous calls are refused", async () => {

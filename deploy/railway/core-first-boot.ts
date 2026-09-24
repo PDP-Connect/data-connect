@@ -1,23 +1,12 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// First-boot credential bootstrap for the standalone Core image
-// (Dockerfile targets the public `core` image; compatibility aliases remain available.)
+// First-boot support for the standalone Core image.
 //
-// Managed platforms make owner credentials a deploy-time prompt (Railway) or a
-// launch flag (Fly). A bare `docker run` has neither, and the runtime's
-// fallback for a missing PDPP_OWNER_PASSWORD is owner auth DISABLED — which
-// must never be the out-of-the-box posture of a self-hosted node. So the
-// supervisor calls this module before starting the reference and console:
-//
-//   - PDPP_OWNER_PASSWORD set        -> no-op; the environment always wins.
-//   - persisted password on the data  -> reused silently (one non-secret log
-//     volume                            line; the password itself is never
-//                                       reprinted after first boot).
-//   - neither                        -> generate one, persist it to the data
-//                                       volume so restarts keep it, and print
-//                                       a one-time first-boot banner with the
-//                                       dashboard URL and the password.
+// Owner-password setup belongs to the reference server: when a server install
+// has no configured password, it creates a one-time setup token and serves the
+// /setup wizard. This module must not generate or log a password. An explicit
+// PDPP_OWNER_PASSWORD remains an override and is passed through unchanged.
 //
 // When storage resolves to SQLite (the quickstart's zero-config default), a
 // credential encryption key is provisioned the same way so owner-captured
@@ -27,20 +16,14 @@
 // keep the explicit fail-closed key contract (see
 // reference-implementation/server/stores/credential-encryption.ts).
 //
-// The password appears exactly once, in the first-boot banner on stdout
-// (`docker logs`), and in the mode-0600 file on the data volume. It is never
-// logged anywhere else and never passed via argv.
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const DEFAULT_DATA_DIR = "/var/lib/pdpp";
-export const OWNER_PASSWORD_FILENAME = "owner-password";
 export const CREDENTIAL_KEY_FILENAME = "credential-encryption-key";
 
 const LOG_PREFIX = "[core]";
-const BANNER_RULE = "─".repeat(64);
-const TRAILING_SLASHES_PATTERN = /\/+$/;
 
 function trimmedValue(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -91,56 +74,18 @@ function persistSecret(dataDir: string, file: string, secret: string): void {
   writeFileSync(file, `${secret}\n`, { mode: 0o600 });
 }
 
-export function buildFirstBootBanner({
-  origin,
-  password,
-  passwordFile,
-  persisted,
-}: {
-  origin: string;
-  password: string;
-  passwordFile: string;
-  persisted: boolean;
-}): string[] {
-  const lines = [
-    BANNER_RULE,
-    "First boot — generated an owner password for this instance.",
-    "",
-    `  Dashboard:      ${origin}/`,
-    `  Owner password: ${password}`,
-    "",
-  ];
-  if (persisted) {
-    lines.push(
-      `Saved to ${passwordFile} (on the data volume), so restarts keep`,
-      "this password. To change it, set the PDPP_OWNER_PASSWORD environment",
-      "variable and restart; the environment variable always wins.",
-      "This password is printed only on first boot."
-    );
-  } else {
-    lines.push(
-      "WARNING: the password could not be persisted and will change on the",
-      "next boot. Set PDPP_OWNER_PASSWORD to keep a stable password."
-    );
-  }
-  lines.push(BANNER_RULE);
-  return lines.map((line) => (line ? `${LOG_PREFIX} ${line}` : LOG_PREFIX));
-}
-
 export interface FirstBootEnvAdditions {
   PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE?: string;
-  PDPP_OWNER_PASSWORD?: string;
 }
 export interface FirstBootResult {
-  bannerLines: string[];
   env: FirstBootEnvAdditions;
 }
 type LogFn = (message: string) => void;
 
 /**
- * Resolve first-boot credentials. Returns env additions for the supervised
- * children plus the one-time banner lines (empty on every boot after the
- * first, and always empty when PDPP_OWNER_PASSWORD is supplied).
+ * Provision the local SQLite credential-wrapping key when needed. Owner
+ * passwords are configured by the operator or claimed through /setup in the
+ * reference server; they are never generated or logged here.
  */
 export function prepareFirstBoot({
   env = process.env,
@@ -154,34 +99,6 @@ export function prepareFirstBoot({
   warn?: LogFn;
 } = {}): FirstBootResult {
   const envAdditions: FirstBootEnvAdditions = {};
-  let bannerLines: string[] = [];
-
-  if (!trimmedValue(env.PDPP_OWNER_PASSWORD)) {
-    const passwordFile = path.join(dataDir, OWNER_PASSWORD_FILENAME);
-    let password = readPersistedSecret(passwordFile);
-    if (password) {
-      log(`${LOG_PREFIX} owner password loaded from ${passwordFile}`);
-    } else {
-      password = randomBytes(18).toString("base64url");
-      let persisted = true;
-      try {
-        persistSecret(dataDir, passwordFile, password);
-      } catch (err) {
-        persisted = false;
-        const detail = (err as NodeJS.ErrnoException)?.code || (err as NodeJS.ErrnoException)?.message;
-        warn(
-          `${LOG_PREFIX} warning: could not persist the generated owner password to ${passwordFile} (${detail}); it will be regenerated on the next boot`
-        );
-      }
-      const origin = (trimmedValue(env.PDPP_REFERENCE_ORIGIN) || "http://localhost:3000").replace(
-        TRAILING_SLASHES_PATTERN,
-        ""
-      );
-      bannerLines = buildFirstBootBanner({ origin, password, passwordFile, persisted });
-    }
-    envAdditions.PDPP_OWNER_PASSWORD = password;
-  }
-
   if (
     !(
       usesPostgresStorage(env) ||
@@ -206,5 +123,5 @@ export function prepareFirstBoot({
     }
   }
 
-  return { env: envAdditions, bannerLines };
+  return { env: envAdditions };
 }

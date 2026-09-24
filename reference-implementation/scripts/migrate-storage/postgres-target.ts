@@ -29,6 +29,8 @@ const ALL_TABLE_NAMES = [
   "tokens",
   "pending_consents",
   "owner_device_auth",
+  "owner_sessions",
+  "owner_password_verifier",
   "device_exporters",
   "device_ingest_credentials",
   "device_enrollment_codes",

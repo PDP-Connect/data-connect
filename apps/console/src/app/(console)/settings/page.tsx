@@ -12,6 +12,10 @@ import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { OwnerCredentialSetting } from "./owner-credential-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
+import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
+import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
+import { loadOwnerPasswordSource } from "./owner-password-data.ts"
+import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -19,7 +23,18 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
-  const showOwnerCredentialReveal = await canShowOwnerCredentialRevealSetting()
+  const linuxLocalOnlyNoPromptNotice =
+    process.env.PDPP_MANAGED_DESKTOP_HOST === "1" &&
+    process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" &&
+    process.platform === "linux"
+      ? "This Linux build allows local-only reveal without an OS prompt until polkit is verified. Password changes stay unavailable on Linux until OS re-auth is verified."
+      : null
+  const [showOwnerCredentialReveal, ownerSessions, ownerPasswordSource] =
+    await Promise.all([
+      canShowOwnerCredentialRevealSetting(),
+      loadOwnerSessionInventory(),
+      loadOwnerPasswordSource(),
+    ])
 
   return (
     <RecordroomShellWithPalette>
@@ -45,7 +60,31 @@ export default async function SettingsPage() {
             description="See the password another device needs to sign in to this Personal Server."
             title="Owner password"
           >
-            <OwnerCredentialSetting />
+            <OwnerCredentialSetting
+              linuxLocalOnlyNoPromptNotice={linuxLocalOnlyNoPromptNotice}
+            />
+          </Section>
+        ) : null}
+        {ownerSessions.enabled ? (
+          <Section
+            description="Review signed-in devices and command-line tokens. Signing one out blocks its next request."
+            title="Owner sessions"
+          >
+            <OwnerSessionsSetting
+              bearers={ownerSessions.bearers}
+              sessions={ownerSessions.sessions}
+            />
+          </Section>
+        ) : null}
+        {ownerPasswordSource ? (
+          <Section
+            description="Change the password used to sign in to this Personal Server."
+            title="Owner password"
+          >
+            <OwnerPasswordSetting
+              linuxLocalOnlyNoPromptNotice={linuxLocalOnlyNoPromptNotice}
+              source={ownerPasswordSource}
+            />
           </Section>
         ) : null}
         <Section

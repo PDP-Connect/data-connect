@@ -32,6 +32,7 @@ export const LIVE_PING_INTERVAL_MS = 25_000
 export const LIVE_TOKEN_TTL_MS = 60_000
 
 interface RawResponse {
+  end: () => void
   flushHeaders?: () => void
   setHeader: (name: string, value: string) => void
   statusCode: number
@@ -39,6 +40,7 @@ interface RawResponse {
 }
 
 interface RouteRequest {
+  headers: { cookie?: string }
   params?: Record<string, string>
   raw?: { on: (event: "close", listener: () => void) => void }
 }
@@ -60,8 +62,10 @@ interface AppLike {
 type PdppError = (res: RouteResponse, status: number, code: string, message: string) => unknown
 
 export interface MountOwnerLiveAsContext {
+  isOwnerSessionActive: (req: RouteRequest) => Promise<boolean>
   live: LiveRevisions
   now?: () => number
+  onSessionLogout: (req: RouteRequest, listener: () => void) => () => void
   pdppError: PdppError
   pingIntervalMs?: number
   requireOwnerSession: MiddlewareHandler
@@ -116,24 +120,54 @@ export function mountOwnerLiveAs(app: AppLike, ctx: MountOwnerLiveAsContext): vo
       raw.flushHeaders?.()
 
       let closed = false
+      let pendingSend = Promise.resolve()
       const send = (name: string, data: unknown) => {
+        // Preserve event order while the shared session store is consulted.
+        // Local logout callbacks cannot observe revocation by another instance.
+        pendingSend = pendingSend.then(async () => {
         if (closed) return
         try {
-          raw.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
+            const eventData = await data
+            if (closed) return
+            if (!(await ctx.isOwnerSessionActive(req))) {
+              close()
+              return
+            }
+            if (!closed) raw.write(`event: ${name}\ndata: ${JSON.stringify(eventData)}\n\n`)
         } catch {
-          /* socket already gone; the close handler cleans up */
+            // Store failures must not leave an authenticated stream running.
+            close()
         }
+        })
+        return pendingSend
       }
 
       // Subscribe before the snapshot so a change between the two is not lost.
       const unsubscribe = ctx.live.subscribe((topic, revision) => send("invalidate", { revision, topic }))
-      const ping = setInterval(() => send("ping", {}), pingIntervalMs)
-      req.raw.on("close", () => {
+      const hello = send("hello", ctx.live.snapshot().then(revisions => ({ revisions })))
+      let pingPending = false
+      const ping = setInterval(() => {
+        if (closed || pingPending) return
+        pingPending = true
+        void send("ping", {}).finally(() => { pingPending = false })
+      }, pingIntervalMs)
+      let stopWatchingLogout: () => void = () => undefined
+      const close = () => {
+        if (closed) return
         closed = true
         clearInterval(ping)
         unsubscribe()
-      })
-      send("hello", { revisions: await ctx.live.snapshot() })
+        stopWatchingLogout()
+        try {
+          raw.end()
+        } catch {
+          /* response already gone; subscriptions and timer are still removed */
+        }
+      }
+      stopWatchingLogout = ctx.onSessionLogout(req, close)
+      if (closed) stopWatchingLogout()
+      req.raw.on("close", close)
+      await hello
     }
   )
 }

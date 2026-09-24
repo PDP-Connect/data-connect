@@ -1,16 +1,15 @@
 # Minimal production Docker Compose for a self-hosted PDPP Core node.
 #
-#   core       - reference AS/RS (data-connect's `core` build stage; see
-#                deploy/docker/Dockerfile for what this stage actually runs —
-#                console is NOT bundled into this image today, unlike pdpp's
-#                original combined core image. See deploy/docker/README.md.)
+#   core       - combined console and reference AS/RS Core image; the console
+#                is public and proxies to AS/RS listeners inside the container.
 #   postgres   - durable storage with pgvector (semantic search index)
 #
 # Setup (see ./README.md for the full runbook):
 #
 #   curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
-#   printf 'PDPP_OWNER_PASSWORD=%s\nPDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' \
-#     "$(openssl rand -base64 24)" "$(openssl rand -hex 32)" > .env
+#   printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+#   # Optional scripted owner-password override:
+#   # printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
 #   docker compose up -d
 #
 # This file is intentionally small. The repository-root docker-compose.yml is
@@ -20,20 +19,17 @@ services:
   core:
     # The released channel: moves only on a successful release, and always
     # resolves to the same image as that release's version tag. Override with
-    # PDPP_CORE_IMAGE to pin an immutable tag (core:1.5.1, core:sha-<rev>).
+    # PDPP_CORE_IMAGE to pin an immutable release tag (for example core:1.5.1).
     image: ${PDPP_CORE_IMAGE:-ghcr.io/pdp-connect/data-connect/core:latest}
     restart: unless-stopped
     environment:
-      # The single public origin this node advertises in its OAuth metadata.
-      # Unset by default: the RS/AS derive it from the live request's Host
-      # header, which always matches whatever host:port a client actually
-      # dialed — including a remapped PDPP_WEB_PORT below. Set this explicitly
-      # only when fronting the node with a reverse proxy or TLS terminator
-      # (anything beyond a local trial) — e.g. your HTTPS domain, or when
-      # PDPP_WEB_PORT is remapped and the container is reached through
-      # something that doesn't forward the real Host (no x-forwarded-host).
+      # The single public origin this node advertises. Override this when
+      # remapping the port or fronting the node with a reverse proxy/TLS.
       PDPP_REFERENCE_MODE: composed
-      PDPP_REFERENCE_ORIGIN: ${PDPP_REFERENCE_ORIGIN:-}
+      PDPP_REFERENCE_ORIGIN: ${PDPP_REFERENCE_ORIGIN:-http://localhost:7662}
+      # Mark this as hosted so an unclaimed instance requires the setup wizard.
+      # Only the console port is published below; AS/RS ports stay private.
+      PDPP_BIND_HOST: 0.0.0.0
       PDPP_CONNECTOR_ENVIRONMENT_POLICY: ${PDPP_CONNECTOR_ENVIRONMENT_POLICY:-}
       # Postgres is the storage backend; the runtime selects it because this
       # database URL is present. Credentials live on the compose-private
@@ -44,10 +40,10 @@ services:
       # today (the URL is a literal), and this keeps it that way.
       PDPP_DEPLOYMENT_STORAGE_CONTRACT: postgres
       PDPP_DATABASE_URL: postgresql://pdpp:${PDPP_POSTGRES_PASSWORD:-pdpp}@postgres:5432/pdpp
-      # Required secrets — generate once into .env (see header). The owner
-      # password gates the dashboard; the encryption key seals any connector
-      # credentials you store, so back it up with the database.
-      PDPP_OWNER_PASSWORD: ${PDPP_OWNER_PASSWORD:?generate into .env — see deploy/docker/README.md}
+      # Optional scripted owner-password override. When omitted, the hosted
+      # reference server prints a one-time setup token; claim the install at
+      # /setup and choose the password there. The encryption key is required.
+      PDPP_OWNER_PASSWORD: ${PDPP_OWNER_PASSWORD:-}
       PDPP_CREDENTIAL_ENCRYPTION_KEY: ${PDPP_CREDENTIAL_ENCRYPTION_KEY:?generate into .env — see deploy/docker/README.md}
       # Pending rejected source lines remain recoverable until their connection
       # is deleted. Bound their aggregate bytes per owner; leave blank for the
@@ -75,7 +71,7 @@ services:
     volumes:
       - pdpp-data:/var/lib/pdpp
     ports:
-      - "${PDPP_WEB_PORT:-7662}:7662"
+      - "${PDPP_WEB_PORT:-7662}:3000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -58,7 +58,7 @@ interface DatabaseBackup {
   files: BackupFile[]
 }
 
-function resolveEncryptionKey(
+export function resolveDatabaseEncryptionKey(
   value = process.env[DATABASE_ENCRYPTION_KEY_ENV]
 ): string | null {
   if (typeof value !== "string") {
@@ -245,7 +245,7 @@ export function openSqliteDatabase(
     path !== ":memory:" &&
     existsSync(path) &&
     !hasPlaintextSqliteHeader(path) &&
-    !resolveEncryptionKey(options.encryptionKey)
+    !resolveDatabaseEncryptionKey(options.encryptionKey)
   ) {
     throw new Error(
       "The SQLite vault at " +
@@ -256,7 +256,7 @@ export function openSqliteDatabase(
     )
   }
 
-  const encryptionKey = resolveEncryptionKey(options.encryptionKey)
+  const encryptionKey = resolveDatabaseEncryptionKey(options.encryptionKey)
   const key = encryptionKey === null ? null : Buffer.from(encryptionKey, "utf8")
   if (
     path !== ":memory:" &&

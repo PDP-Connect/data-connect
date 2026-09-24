@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createController } from "../runtime/controller.ts";
 import {
   type AuthorizationDecisionFaultHook,
   approveOwnerDeviceAuthorization,
@@ -19,8 +21,15 @@ import {
   seedPreRegisteredClients,
 } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import { createOwnerPasswordVerifier } from "../server/owner-password-verifier.ts";
+import { createOwnerPasswordVerifierStore } from "../server/stores/owner-password-verifier-store.ts";
+import { getOwnerSessionStore } from "../server/stores/owner-session-store.ts";
+import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const CLIENT_ID = "owner_device_atomicity_client";
+const TEST_POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const FORCED_AFTER_TOKEN_INSERT_RE = /forced after_token_insert/;
 const FORCED_BEFORE_TOKEN_INSERT_RE = /forced before_token_insert/;
 const FORCED_DENIAL_EVENT_RE = /forced denial event rollback/;
@@ -178,6 +187,74 @@ test("owner-device approval retry after rollback mints exactly one introspectabl
   const tokenState = await introspect(approved.access_token);
   assert.equal(tokenState.active, true, "bound owner token introspects active");
   assert.equal(tokenState.pdpp_token_kind, "owner");
+});
+
+test("trusted runtime approval with a captured null verifier cannot cross a password reset", async () => {
+  await setupSqliteAuth();
+  const subjectId = "runtime-owner-token-reset-race";
+  const passwordStore = createOwnerPasswordVerifierStore();
+
+  // Runtime approval has no browser session, but still fences issuance to the
+  // verifier state observed immediately before the approval transaction.
+  assert.equal(await passwordStore.readVersioned(), null);
+  const stalePending = await startOwnerDeviceAuth();
+  const replacementVerifier = await createOwnerPasswordVerifier("replacement runtime owner password");
+  await passwordStore.write(replacementVerifier);
+  await assert.rejects(
+    approveOwnerDeviceAuthorization(stalePending.user_code, subjectId, {
+      authorizationFence: { credentialRevision: null },
+    }),
+    (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
+  );
+  assert.deepEqual(ownerDeviceRow(stalePending.device_code), {
+    status: "pending",
+    subject_id: null,
+    token_id: null,
+  });
+  assert.equal(countRows("tokens", "subject_id = 'runtime-owner-token-reset-race' AND token_kind = 'owner'"), 0);
+
+  // If trusted issuance completes first, the reset's same-subject token
+  // revocation includes that bearer before the reset operation returns.
+  const current = await passwordStore.readVersioned();
+  assert.ok(current);
+  const runtimeController = createController({ ownerClientId: CLIENT_ID, ownerSubjectId: subjectId });
+  const runtimeToken = await runtimeController.issueRuntimeOwnerToken(subjectId);
+  assert.equal((await introspect(runtimeToken)).active, true);
+  const finalVerifier = await createOwnerPasswordVerifier("final runtime owner password");
+  assert.equal(await passwordStore.writeAndRevokeAccess(finalVerifier, subjectId, null, current.revision), true);
+  assert.equal((await introspect(runtimeToken)).active, false);
+});
+
+test("trusted runtime token issuance cannot cross a password reset after capturing its verifier", async () => {
+  await setupSqliteAuth();
+  const subjectId = "runtime-owner-token-reset-ordering";
+  const passwordStore = createOwnerPasswordVerifierStore();
+  const initialVerifier = await createOwnerPasswordVerifier("initial runtime owner password");
+  await passwordStore.write(initialVerifier);
+  const capturedVerifier = await passwordStore.readVersioned();
+  assert.ok(capturedVerifier);
+
+  const pause = createPause();
+  const runtimeController = createController({
+    ownerClientId: CLIENT_ID,
+    ownerSubjectId: subjectId,
+    beforeRuntimeOwnerTokenApproval: pause.hook,
+  });
+  const issuance = runtimeController.issueRuntimeOwnerToken(subjectId);
+  await pause.paused;
+
+  const replacementVerifier = await createOwnerPasswordVerifier("replacement runtime owner password");
+  assert.equal(
+    await passwordStore.writeAndRevokeAccess(replacementVerifier, subjectId, null, capturedVerifier.revision),
+    true
+  );
+  pause.release();
+
+  await assert.rejects(
+    issuance,
+    (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
+  );
+  assert.equal(countRows("tokens", `subject_id = '${subjectId}' AND token_kind = 'owner'`), 0);
 });
 
 test("owner-device dynamic client binding rolls back with failed approval", async () => {
@@ -384,3 +461,96 @@ test("owner-device mixed approval and denial contention has one durable terminal
     rmSync(directory, { force: true, recursive: true });
   }
 });
+
+test(
+  "Postgres owner-device approval fence rejects stale sessions and rotation revokes completed approvals",
+  { skip: !TEST_POSTGRES_URL },
+  async () => {
+    assert.ok(TEST_POSTGRES_URL);
+    const databaseName = `pdpp_test_owner_device_rotation_${randomBytes(4).toString("hex")}_1`;
+    await withTemporaryPostgresDatabase({ connectionString: TEST_POSTGRES_URL, databaseName }, async (databaseUrl) => {
+      await initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await seedPreRegisteredClients([
+          {
+            client_id: CLIENT_ID,
+            metadata: { client_name: "Owner Device Rotation Client", token_endpoint_auth_method: "none" },
+          },
+        ]);
+
+        const subjectId = "owner_device_rotation_test";
+        const passwordStore = createOwnerPasswordVerifierStore();
+        await passwordStore.write(await createOwnerPasswordVerifier("initial PostgreSQL owner password"));
+        const initialVerifier = await passwordStore.readVersioned();
+        assert.ok(initialVerifier);
+        const now = Math.floor(Date.now() / 1000);
+        const sessionRecord = (idHash: string) => ({
+          exp: now + 3600,
+          idHash,
+          iat: now,
+          publicId: `session-${idHash}`,
+          label: "Test browser",
+          ipAddress: null,
+          userAgent: null,
+          deviceKey: idHash,
+          lastSeenAt: now,
+          revokedAt: null,
+          sub: subjectId,
+        });
+        const sessionStore = getOwnerSessionStore();
+        const staleSession = sessionRecord("postgres-stale-session");
+        assert.equal(await sessionStore.createSession(staleSession, initialVerifier.revision), true);
+        const pending = await startOwnerDeviceAuth();
+        const runtimePending = await startOwnerDeviceAuth();
+        const resetVerifier = await createOwnerPasswordVerifier("replacement PostgreSQL owner password");
+        assert.equal(await passwordStore.writeAndRevokeAccess(resetVerifier, subjectId), true);
+        await assert.rejects(
+          approveOwnerDeviceAuthorization(pending.user_code, subjectId, {
+            authorizationFence: {
+              credentialRevision: initialVerifier.revision,
+              sessionIdHash: staleSession.idHash,
+            },
+          }),
+          (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
+        );
+        await assert.rejects(
+          approveOwnerDeviceAuthorization(runtimePending.user_code, subjectId, {
+            authorizationFence: { credentialRevision: initialVerifier.revision },
+          }),
+          (err: unknown) => err instanceof Error && "code" in err && err.code === "approval_conflict"
+        );
+        assert.equal(
+          (await postgresQuery<{ count: string }>(
+            "SELECT COUNT(*)::text AS count FROM tokens WHERE subject_id = $1 AND token_kind = 'owner'",
+            [subjectId]
+          )).rows[0]?.count,
+          "0"
+        );
+
+        const currentVerifier = await passwordStore.readVersioned();
+        assert.ok(currentVerifier);
+        const currentSession = sessionRecord("postgres-current-session");
+        assert.equal(await sessionStore.createSession(currentSession, currentVerifier.revision), true);
+        const approved = await approveOwnerDeviceAuthorization(pending.user_code, subjectId, {
+          authorizationFence: {
+            credentialRevision: currentVerifier.revision,
+            sessionIdHash: currentSession.idHash,
+          },
+        });
+        const ownerToken = String(approved.access_token);
+        assert.equal((await introspect(ownerToken)).active, true);
+
+        const finalVerifier = await createOwnerPasswordVerifier("final PostgreSQL owner password");
+        assert.equal(
+          await passwordStore.writeAndRevokeAccess(finalVerifier, subjectId, null, currentVerifier.revision),
+          true
+        );
+        assert.equal((await introspect(ownerToken)).active, false);
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    });
+  }
+);

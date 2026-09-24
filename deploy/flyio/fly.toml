@@ -7,9 +7,10 @@
 #   fly launch --config deploy/flyio/fly.toml ...
 #   fly deploy --config deploy/flyio/fly.toml
 #
-# Before deploying, set the required secrets:
-#   fly secrets set PDPP_OWNER_PASSWORD="$(openssl rand -base64 24)"
+# Before deploying, set the public origin:
 #   fly secrets set PDPP_REFERENCE_ORIGIN="https://<app-name>.fly.dev"
+# Optional scripted owner-password override:
+#   fly secrets set PDPP_OWNER_PASSWORD="<chosen-password>"
 #   fly launch --db injects DATABASE_URL automatically.
 #
 # See deploy/flyio/README.md for the full first-deploy walkthrough.
@@ -18,16 +19,16 @@ app = "pdpp-core"       # Replace with your chosen app name
 primary_region = "iad"  # Replace with your preferred region
 
 [build]
-  dockerfile = "deploy/docker/Dockerfile"
+  dockerfile = "Dockerfile"
   target = "core"
 
 [env]
   NODE_ENV = "production"
-  # Public origin, owner password, and durable database URL are set as secrets
-  # or attached variables, not baked into fly.toml.
+  # Public origin and durable database URL are set as variables. The optional
+  # owner-password override remains a secret, not a value baked into fly.toml.
 
 [http_service]
-  internal_port = 7662
+  internal_port = 3000
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true

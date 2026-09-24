@@ -1,6 +1,4 @@
 const TOP_LEVEL_REGEX_1 = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
-const TOP_LEVEL_REGEX_2 = /PDPP_OWNER_PASSWORD/;
-const TOP_LEVEL_REGEX_3 = /internet-facing|hosted|exposed/i;
 
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -9,8 +7,7 @@ const TOP_LEVEL_REGEX_3 = /internet-facing|hosted|exposed/i;
  * Hosted-exposure hardening — end-to-end (security audit S-1 + S-2, lane A1).
  *
  * Proves at the live HTTP boundary that:
- *   S-1  hosted posture WITHOUT a password refuses to boot — `startServer`
- *        rejects, no listener binds.
+ *   S-1  hosted posture WITHOUT a password boots with owner access locked.
  *   S-2  with a password, an unauthenticated `POST /connectors` (manifest
  *        upsert — a one-request grant-wipe DoS) returns 401; the authenticated
  *        owner can still register.
@@ -228,30 +225,58 @@ async function withHostedEnv(fn: () => Promise<void>): Promise<void> {
   }
 }
 
-// ── S-1: hosted + no password → refuse to boot ───────────────────────────────
-test("S-1: declared hosted origin without a password refuses to boot", async () => {
+// ── S-1: hosted + no password → boot locked ─────────────────────────────────
+test("S-1: declared hosted origin without a password boots locked", async () => {
   await withHostedEnv(async () => {
-    let server: TestServerHandle | null = null;
-    await assert.rejects(
-      async () => {
-        server = await startServer({
-          asPort: 0,
-          dbPath: ":memory:",
-          ignoreAmbientPublicUrls: false,
-          quiet: true,
-          rsPort: 0,
+    await withServer({}, async ({ asUrl }) => {
+      assert.equal((await fetch(`${asUrl}/setup`)).status, 200, "first-run claim page is available");
+      assert.equal((await fetch(`${asUrl}/owner/session`)).status, 401, "owner routes stay locked before claim");
         });
-      },
-      (err) => {
-        assert.match((err as Error).message, TOP_LEVEL_REGEX_2, "error names the missing password");
-        assert.match((err as Error).message, TOP_LEVEL_REGEX_3, "error explains the hosted exposure");
-        return true;
-      },
-      "startServer must reject in a hosted posture without a password"
-    );
-    // Defensive: if a partial server object leaked, tear it down.
-    await closeServer(server);
   });
+});
+
+test("S-1: an empty configured password still reaches setup", async () => {
+  await withHostedEnv(async () => {
+    await withServer({ ownerAuthPassword: "" }, async ({ asUrl }) => {
+      assert.equal((await fetch(`${asUrl}/setup`)).status, 200, "empty env value is treated as unset");
+      assert.equal((await fetch(`${asUrl}/owner/session`)).status, 401, "owner routes stay locked before claim");
+    });
+  });
+});
+
+test("S-1: an explicit configured password skips setup", async () => {
+  await withHostedEnv(async () => {
+    await withServer({ ownerAuthPassword: "explicit-operator-password" }, async ({ asUrl }) => {
+      assert.equal((await fetch(`${asUrl}/setup`)).status, 404, "configured env value skips the wizard");
+      assert.equal((await fetch(`${asUrl}/owner/login`)).status, 200, "owner login remains available");
+    });
+  });
+});
+
+test("S-1: owner-auth-required loopback posture reaches setup and locks owner routes", async () => {
+  const previous = {
+    ownerAuthRequired: process.env.PDPP_OWNER_AUTH_REQUIRED,
+    origin: process.env.PDPP_REFERENCE_ORIGIN,
+    trustedHosts: process.env.PDPP_TRUSTED_HOSTS,
+  };
+  process.env.PDPP_OWNER_AUTH_REQUIRED = "1";
+  process.env.PDPP_REFERENCE_ORIGIN = "http://localhost:3200";
+  process.env.PDPP_TRUSTED_HOSTS = "localhost,127.0.0.1,::1";
+  try {
+    await withServer({}, async ({ asUrl }) => {
+      assert.equal((await fetch(`${asUrl}/setup`)).status, 200, "first-run claim page is available");
+      assert.equal((await fetch(`${asUrl}/owner/session`)).status, 401, "owner routes stay locked before claim");
+    });
+  } finally {
+    for (const [name, value] of [
+      ["PDPP_OWNER_AUTH_REQUIRED", previous.ownerAuthRequired],
+      ["PDPP_REFERENCE_ORIGIN", previous.origin],
+      ["PDPP_TRUSTED_HOSTS", previous.trustedHosts],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 // ── S-1: hosted + password → boots normally ──────────────────────────────────

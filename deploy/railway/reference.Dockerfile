@@ -80,6 +80,7 @@ ARG PDPP_REFERENCE_REVISION=unknown
 # through a path with no restart policy, that deployment is the truthful gap
 # to fix, not this flag.
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     AS_PORT=7662 \
     RS_PORT=7663 \
     PDPP_RS_URL=http://127.0.0.1:7663 \

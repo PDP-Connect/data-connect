@@ -127,6 +127,7 @@ FROM base AS reference
 ARG PDPP_REFERENCE_REVISION=unknown
 
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     AS_PORT=7662 \
     RS_PORT=7663 \
     PDPP_RS_URL=http://127.0.0.1:7663 \
@@ -206,6 +207,7 @@ FROM browsers AS reference-browser
 ARG PDPP_REFERENCE_REVISION=unknown
 
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     AS_PORT=7662 \
     RS_PORT=7663 \
     PDPP_REFERENCE_OPERATIONAL_DEFAULTS=1 \
@@ -232,10 +234,8 @@ CMD ["node", "--import", "tsx", "reference-implementation/server/index.ts"]
 # Mirrors PDP-Connect/pdpp's own `core-browser`/`core` stage split and image
 # identity/provenance contract (org.opencontainers.image.revision label,
 # PDPP_BUILD_REVISION/PDPP_REFERENCE_REVISION match gate) -- see
-# deploy/docker/check-image-identity.sh, deploy/docker/README.md's "Known gap"
-# note (this stage is what closes that gap), and deploy/railway/README.md's
-# own architecture note pointing at this exact file as the wiring this repo
-# was missing.
+# deploy/docker/check-image-identity.sh and deploy/docker/README.md document
+# the image identity contract implemented in this stage.
 FROM browsers AS core
 
 ARG PDPP_REFERENCE_REVISION=unknown
@@ -272,6 +272,7 @@ LABEL org.opencontainers.image.revision="${PDPP_BUILD_REVISION}" \
       pdpp.build.composition="${PDPP_BUILD_COMPOSITION}"
 
 ENV NODE_ENV=production \
+    PDPP_OWNER_AUTH_REQUIRED=1 \
     HOSTNAME=0.0.0.0 \
     PORT=3000 \
     AS_PORT=7662 \

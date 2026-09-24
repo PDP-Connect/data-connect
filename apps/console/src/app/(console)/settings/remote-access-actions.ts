@@ -13,14 +13,30 @@ import {
   setRemoteAccessConfig,
 } from "../lib/remote-access-client.ts"
 import { requireDashboardAccess } from "../lib/dashboard-access.ts"
+import {
+  ownerPasswordOwnerSet,
+  requestOwnerPasswordStackRestart,
+  requestOwnerPasswordWindow,
+} from "pdpp-reference-implementation/owner-password-owner-set"
 import type { RemoteAccessConfig } from "./remote-access.ts"
 
 export type RemoteAccessActionResult =
   | { ok: true; config: RemoteAccessConfig }
-  | { ok: false; message: string }
+  | { ok: false; code?: string; message: string }
 
 function actionMessage(err: unknown): string {
-  return err instanceof Error ? err.message : "Unexpected remote access request failure."
+  return err instanceof Error
+    ? err.message
+    : "Unexpected remote access request failure."
+}
+
+function actionCode(err: unknown): string | undefined {
+  return err &&
+    typeof err === "object" &&
+    "code" in err &&
+    typeof err.code === "string"
+    ? err.code
+    : undefined
 }
 
 /**
@@ -49,7 +65,9 @@ function effectiveConsolePort(): number {
 function stableConsolePort(): number | null {
   const raw = process.env.DATACONNECT_CONSOLE_STABLE_PORT?.trim()
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : null
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535
+    ? parsed
+    : null
 }
 
 export async function loadRemoteAccessStateAction(): Promise<{
@@ -58,22 +76,35 @@ export async function loadRemoteAccessStateAction(): Promise<{
   stableConsolePort: number | null
   inspection: Awaited<ReturnType<typeof inspectRemoteAccess>>
   ngrokInspection: Awaited<ReturnType<typeof inspectNgrokRemoteAccess>>
-  cloudflareTunnelInspection: Awaited<ReturnType<typeof inspectCloudflareTunnelRemoteAccess>>
-  myDevicesOnlyInspection: Awaited<ReturnType<typeof inspectMyDevicesOnlyRemoteAccess>>
+  cloudflareTunnelInspection: Awaited<
+    ReturnType<typeof inspectCloudflareTunnelRemoteAccess>
+  >
+  myDevicesOnlyInspection: Awaited<
+    ReturnType<typeof inspectMyDevicesOnlyRemoteAccess>
+  >
+  ownerPasswordOwnerSet: boolean
 }> {
   await requireDashboardAccess("/settings")
-  const [config, inspection, ngrokInspection, cloudflareTunnelInspection, myDevicesOnlyInspection] =
-    await Promise.all([
-      getRemoteAccessConfig(),
-      inspectRemoteAccess(),
-      inspectNgrokRemoteAccess(),
-      inspectCloudflareTunnelRemoteAccess(),
-      inspectMyDevicesOnlyRemoteAccess(),
-    ])
+  const [
+    config,
+    inspection,
+    ngrokInspection,
+    cloudflareTunnelInspection,
+    myDevicesOnlyInspection,
+  ] = await Promise.all([
+    getRemoteAccessConfig(),
+    inspectRemoteAccess(),
+    inspectNgrokRemoteAccess(),
+    inspectCloudflareTunnelRemoteAccess(),
+    inspectMyDevicesOnlyRemoteAccess(),
+  ])
   return {
     config,
     effectiveConsolePort: effectiveConsolePort(),
     stableConsolePort: stableConsolePort(),
+    ownerPasswordOwnerSet: await ownerPasswordOwnerSet(
+      process.env.PDPP_DATA_DIR || "data"
+    ),
     inspection,
     ngrokInspection,
     cloudflareTunnelInspection,
@@ -88,18 +119,68 @@ export async function setRemoteAccessConfigAction(
 ): Promise<RemoteAccessActionResult> {
   await requireDashboardAccess("/settings")
   try {
-    const saved = await setRemoteAccessConfig(config, providerCredential, acknowledgeRemoteDisconnectRisk)
+    const saved = await setRemoteAccessConfig(
+      config,
+      providerCredential,
+      acknowledgeRemoteDisconnectRisk
+    )
     return { config: saved, ok: true }
   } catch (err) {
-    return { message: actionMessage(err), ok: false }
+    return { code: actionCode(err), message: actionMessage(err), ok: false }
   }
 }
 
-export async function setConsolePortAction(port: number | null): Promise<RemoteAccessActionResult> {
+export async function setConsolePortAction(
+  port: number | null
+): Promise<RemoteAccessActionResult> {
   await requireDashboardAccess("/settings")
   try {
     return { config: await setConsolePort(port), ok: true }
   } catch (err) {
-    return { message: actionMessage(err), ok: false }
+    return { code: actionCode(err), message: actionMessage(err), ok: false }
+  }
+}
+
+export async function requestOwnerPasswordWindowAction(): Promise<
+  { ok: true } | { ok: false; message: string }
+> {
+  await requireDashboardAccess("/settings")
+  if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {
+    return {
+      ok: false,
+      message: "Open the DataConnect desktop app to set the owner password.",
+    }
+  }
+  try {
+    if (await ownerPasswordOwnerSet(process.env.PDPP_DATA_DIR || "data")) {
+      return {
+        ok: false,
+        message: "Use Settings to change the existing owner password.",
+      }
+    }
+    await requestOwnerPasswordWindow(process.env.PDPP_DATA_DIR || "data", {
+      purpose: "initial_setup",
+    })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, message: actionMessage(err) }
+  }
+}
+
+export async function restartAfterOwnerPasswordSetAction(): Promise<
+  { ok: true } | { ok: false; message: string }
+> {
+  await requireDashboardAccess("/settings")
+  if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {
+    return {
+      ok: false,
+      message: "Open the DataConnect desktop app to apply the owner password.",
+    }
+  }
+  try {
+    await requestOwnerPasswordStackRestart(process.env.PDPP_DATA_DIR || "data")
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, message: actionMessage(err) }
   }
 }

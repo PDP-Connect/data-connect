@@ -40,6 +40,7 @@ import {
   resolveManifestSensitivity,
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
+import { lockConnectorManifestPublication, storedConnectorManifestRevision } from "./connector-manifest-write-fence.ts";
 import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
@@ -64,6 +65,10 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import {
+  lockOwnerPasswordVerifierRevision,
+  ownerPasswordVerifierRevision,
+} from "./stores/owner-password-verifier-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
@@ -455,6 +460,7 @@ export type AuthorizationDecisionFaultStage = "after_cas_before_event" | "after_
 export type AuthorizationDecisionFaultHook = (stage: AuthorizationDecisionFaultStage) => void;
 
 interface OwnerDeviceApprovalInput {
+  authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
   clientId: string;
   consentApprovedEvent: AuthSpineEventInput;
   deviceCode: string;
@@ -2739,6 +2745,12 @@ function buildOwnerDeviceApprovalConflictError(row: OwnerDeviceAuthRow): AuthErr
   );
 }
 
+function buildOwnerDeviceApprovalSessionConflictError(): AuthError {
+  return Object.assign(new Error("The owner session changed during device approval. Sign in again and retry."), {
+    code: "approval_conflict",
+  });
+}
+
 function requireOwnerDeviceApprovedSubject(row: OwnerDeviceAuthRow, subjectId: string): void {
   if (row.subject_id === subjectId) {
     return;
@@ -2784,6 +2796,31 @@ function requireDynamicClientSubject(registeredClient: RegisteredClient, subject
 const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
   approveAtomically: (input) =>
     withPostgresTransaction(async (client) => {
+      if (input.authorizationFence) {
+        await lockOwnerPasswordVerifierRevision(client);
+        const verifier = (
+          await client.query<{ verifier_json: string }>(
+            "SELECT verifier_json FROM owner_password_verifier WHERE singleton = 1 FOR UPDATE"
+          )
+        ).rows[0];
+        const hasRevisionFence = Object.hasOwn(input.authorizationFence, "credentialRevision");
+        const currentRevision = verifier ? ownerPasswordVerifierRevision(verifier.verifier_json) : null;
+        if (hasRevisionFence && currentRevision !== input.authorizationFence.credentialRevision) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+        if (input.authorizationFence.sessionIdHash !== undefined) {
+          const session = (
+            await client.query<{ id_hash: string }>(
+              `SELECT id_hash FROM owner_sessions
+               WHERE id_hash = $1 AND subject_id = $2 AND revoked_at IS NULL AND expires_at > $3`,
+              [input.authorizationFence.sessionIdHash, input.subjectId, Math.floor(Date.now() / 1000)]
+            )
+          ).rows[0];
+          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+        } else if (!hasRevisionFence) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+      }
       const existing = await client.query<OwnerDeviceAuthRow>(
         `SELECT *
          FROM owner_device_auth
@@ -2950,7 +2987,32 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
 
 const sqliteOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
   approveAtomically: (input) =>
-    transaction(() => {
+    writeTransaction(() => {
+      if (input.authorizationFence) {
+        const verifier = getDb()
+          .prepare("SELECT verifier_json FROM owner_password_verifier WHERE singleton = 1")
+          .get<{ verifier_json: string }>();
+        const hasRevisionFence = Object.hasOwn(input.authorizationFence, "credentialRevision");
+        const currentRevision = verifier ? ownerPasswordVerifierRevision(verifier.verifier_json) : null;
+        if (hasRevisionFence && currentRevision !== input.authorizationFence.credentialRevision) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+        if (input.authorizationFence.sessionIdHash !== undefined) {
+          const session = getDb()
+            .prepare(
+              `SELECT id_hash FROM owner_sessions
+               WHERE id_hash = ? AND subject_id = ? AND revoked_at IS NULL AND expires_at > ?`
+            )
+            .get<{ id_hash: string }>(
+              input.authorizationFence.sessionIdHash,
+              input.subjectId,
+              Math.floor(Date.now() / 1000)
+            );
+          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+        } else if (!hasRevisionFence) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+      }
       const row = getOne<OwnerDeviceAuthRow>(referenceQueries.authOwnerDeviceAuthGetByDeviceCode, [input.deviceCode]);
       if (!row) {
         const err: AuthError = new Error("Unknown user code");
@@ -3268,6 +3330,14 @@ function canonicalManifestJson(rawManifest: string): string {
 async function persistManifestAndAdvanceGenerations(connectorId: string, manifestJson: string): Promise<boolean> {
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
+      await lockConnectorManifestPublication(client, connectorId);
+      const activation = await client.query<{ state: string; canonical_manifest_json: string }>(
+        "SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=$1 FOR SHARE",
+        [connectorId]
+      );
+      if (activation.rows[0]?.state === "active") {
+        assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3296,6 +3366,12 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
   }
   return transaction(() => {
     const db = getDb();
+    const activation = db
+      .prepare("SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=?")
+      .get<{ state: string; canonical_manifest_json: string }>(connectorId);
+    if (activation?.state === "active") {
+      assertActiveConnectorStreamShape(activation.canonical_manifest_json, manifestJson);
+    }
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
@@ -3317,6 +3393,17 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
     );
     return true;
   });
+}
+
+function assertActiveConnectorStreamShape(activeManifestJson: string, proposedManifestJson: string): void {
+  const active = JSON.parse(activeManifestJson) as { streams?: unknown };
+  const proposed = JSON.parse(proposedManifestJson) as { streams?: unknown };
+  if (
+    canonicalManifestJson(JSON.stringify(active.streams ?? null)) !==
+    canonicalManifestJson(JSON.stringify(proposed.streams ?? null))
+  ) {
+    throw new Error("Cannot change connector stream shape while its installed activation is active");
+  }
 }
 
 function getConnectorCatalogStore() {
@@ -5151,20 +5238,17 @@ async function maybeRegisterConnectorPhaseForTest(point: string, context: Record
  */
 export async function registerConnector(
   manifest: Record<string, unknown>,
-  options: { backfillRetrievalIndexes?: boolean } = {}
+  options: { backfillRetrievalIndexes?: boolean; skipManifestPersistence?: boolean } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
-  await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
+  const registryManifestRevision = storedConnectorManifestRevision(storedManifest);
+  if (!options.skipManifestPersistence) {
+    await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
+  }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
 
   const postgresBackend = isPostgresStorageBackend();
-  if (postgresBackend) {
-    // Not fenced — keep the manifest-shape cache coherent regardless of
-    // whether the fenced repair below runs.
-    const { invalidatePostgresRecordManifestCache } = await import("./postgres-records.ts");
-    invalidatePostgresRecordManifestCache(connectorId);
-  }
 
   if (options.backfillRetrievalIndexes === false) {
     const postgresRecords = await import("./postgres-records.ts");
@@ -5175,7 +5259,7 @@ export async function registerConnector(
     if (typeof cursorBackfill !== "function") {
       throw new Error("Missing postgres record cursor-value backfill contract");
     }
-    await cursorBackfill(storedManifest);
+    await cursorBackfill(storedManifest, registryManifestRevision);
     return connectorId;
   }
 
@@ -5194,12 +5278,14 @@ export async function registerConnector(
   if (postgresBackend) {
     const { postgresBackfillRecordSortPositionsForManifest } = await import("./postgres-records.ts");
     await postgresBackfillRecordSortPositionsForManifest(
-      storedManifest as Parameters<typeof postgresBackfillRecordSortPositionsForManifest>[0]
+      storedManifest as Parameters<typeof postgresBackfillRecordSortPositionsForManifest>[0],
+      registryManifestRevision
     );
   } else {
     const { backfillSqliteRecordSemanticTimesForManifest } = await import("./records.ts");
     await backfillSqliteRecordSemanticTimesForManifest(
-      storedManifest as Parameters<typeof backfillSqliteRecordSemanticTimesForManifest>[0]
+      storedManifest as Parameters<typeof backfillSqliteRecordSemanticTimesForManifest>[0],
+      { registryManifestRevision }
     );
   }
 
@@ -5219,6 +5305,7 @@ export async function registerConnector(
     manifest: storedManifest as NonNullable<
       NonNullable<Parameters<typeof lexicalIndexBackfillForManifest>[0]>["manifest"]
     >,
+    registryManifestRevision,
   });
 
   // Semantic retrieval index drift-detect + backfill. Parallel to lexical;
@@ -5232,6 +5319,7 @@ export async function registerConnector(
       manifest: storedManifest as NonNullable<
         NonNullable<Parameters<typeof semanticIndexBackfillForManifest>[0]>["manifest"]
       >,
+      registryManifestRevision,
     });
   }
   return connectorId;
@@ -10817,7 +10905,10 @@ export async function getOwnerDeviceAuthorizationByUserCode(
 export async function approveOwnerDeviceAuthorization(
   userCode: unknown,
   subjectId = "owner_local",
-  opts: { faultHook?: OwnerDeviceApprovalFaultHook } = {}
+  opts: {
+    authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
+    faultHook?: OwnerDeviceApprovalFaultHook;
+  } = {}
 ): Promise<Record<string, unknown>> {
   const pending = await getOwnerDeviceAuthRowByUserCode(userCode);
   if (!pending) {
@@ -10852,6 +10943,7 @@ export async function approveOwnerDeviceAuthorization(
         token,
         traceContext,
       }),
+      ...(opts.authorizationFence === undefined ? {} : { authorizationFence: opts.authorizationFence }),
     });
   } catch (err: unknown) {
     if (isOwnerDeviceExpiredError(err)) {
