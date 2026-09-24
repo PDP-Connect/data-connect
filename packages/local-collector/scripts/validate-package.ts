@@ -93,10 +93,9 @@ const forbidden = [
   /(?:from\s+|import\s*\(|require\s*\()\s*["']pdf-parse["']/,
   /(?:from\s+|import\s*\(|require\s*\()\s*["']better-sqlite3["']/,
   /(?:from\s+|import\s*\(|require\s*\()\s*["']linkedom["']/,
-  // iMessage reads chat.db via node:sqlite (built into Node.js), not a
-  // spawned `sqlite3` binary — a regression to shelling out would silently
-  // break the zero-install npx promise on hosts without that binary on
-  // PATH. See connectors/imessage/index.ts's module doc.
+  // The signed iMessage profile reads chat.db via node:sqlite (built into
+  // Node.js), not a spawned `sqlite3` binary. A regression to shelling out
+  // would break the profile on hosts without that binary on PATH.
   /execFileSync?\s*\(\s*["']sqlite3["']/,
   /["']workspace:/,
 ];

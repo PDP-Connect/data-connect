@@ -19,16 +19,12 @@ name: Consumer drift signal
 #       packages/local-collector/src/generated/collector-definitions.generated.ts from this
 #       repo's checkout and compares it byte-for-byte against the committed file, so both the
 #       generator and the generated file are guarded paths.
-#   (b) vendored connector sources — check-connector-source-drift.mjs byte-compares each
-#       vendored connector directory under packages/polyfill-connectors/connectors/<id>/
-#       against data-connectors' canonical copy, for whichever IDs
-#       collector-definitions.generated.ts currently declares. The trigger-path list below is
-#       necessarily static (GitHub Actions can't compute `on.paths` at runtime), so the job
-#       itself re-derives that ID set from the generated file and asserts it against the
-#       hard-coded list below — see the "Assert hard-coded connector list matches the
-#       registry-derived set" step. A registry change that adds/removes a bundled connector
-#       without updating this workflow's trigger list fails loudly instead of silently
-#       narrowing coverage.
+#   (b) connector inputs — Google Messages remains a locally vendored source and is
+#       byte-compared with data-connectors. Claude Code, Codex, Google Takeout, iMessage,
+#       and Apple Photos run from signed OCI Collection Profiles, whose digests are recorded
+#       in collection-profile-pins.generated.ts. The trigger-path list below is necessarily
+#       static (GitHub Actions cannot compute `on.paths` at runtime), so the job checks both
+#       the remaining source ID and the five artifact pin IDs against their generated sets.
 #   (c) runtime/protocol package artifacts — check-tarball-digest-drift.sh rebuilds
 #       @pdpp/collector-runtime and @pdpp/connector-protocol from a data-connect checkout
 #       pinned to .github/cross-repo-pins.json's data-connect SHA and compares the packed
@@ -47,11 +43,7 @@ on:
       - "packages/connector-protocol/**"
       - "packages/local-collector/scripts/generate-collector-definitions-snapshot.ts"
       - "packages/local-collector/src/generated/collector-definitions.generated.ts"
-      - "packages/polyfill-connectors/connectors/claude_code/**"
-      - "packages/polyfill-connectors/connectors/codex/**"
-      - "packages/polyfill-connectors/connectors/google_takeout/**"
-      - "packages/polyfill-connectors/connectors/imessage/**"
-      - "packages/polyfill-connectors/connectors/apple_photos/**"
+      - "packages/local-collector/src/generated/collection-profile-pins.generated.ts"
       - "packages/polyfill-connectors/connectors/google_messages/**"
       - ".github/workflows/consumer-drift-signal.yml"
       - ".github/consumer-drift-signal-config.json"
@@ -63,11 +55,7 @@ on:
       - "packages/connector-protocol/**"
       - "packages/local-collector/scripts/generate-collector-definitions-snapshot.ts"
       - "packages/local-collector/src/generated/collector-definitions.generated.ts"
-      - "packages/polyfill-connectors/connectors/claude_code/**"
-      - "packages/polyfill-connectors/connectors/codex/**"
-      - "packages/polyfill-connectors/connectors/google_takeout/**"
-      - "packages/polyfill-connectors/connectors/imessage/**"
-      - "packages/polyfill-connectors/connectors/apple_photos/**"
+      - "packages/local-collector/src/generated/collection-profile-pins.generated.ts"
       - "packages/polyfill-connectors/connectors/google_messages/**"
       - ".github/workflows/consumer-drift-signal.yml"
       - ".github/consumer-drift-signal-config.json"
@@ -88,29 +76,40 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Assert hard-coded connector list matches the registry-derived set
+      - name: Assert source and artifact trigger sets match generated ownership
         run: |
           set -euo pipefail
 
-          derived="$(node -e '
+          declared="$(node -e '
             const fs = require("fs");
             const src = fs.readFileSync("packages/local-collector/src/generated/collector-definitions.generated.ts", "utf8");
             const ids = [...src.matchAll(/connector_id:\s*"([^"]+)"/g)].map((m) => m[1]).sort();
             console.log(ids.join(" "));
           ')"
 
-          hardcoded="apple_photos claude_code codex google_messages google_takeout imessage"
+          pinned="$(node -e '
+            const fs = require("fs");
+            const src = fs.readFileSync("packages/local-collector/src/generated/collection-profile-pins.generated.ts", "utf8");
+            const ids = [...src.matchAll(/\"connectorId\":\s*\"([^\"]+)\"/g)].map((m) => m[1]).sort();
+            console.log(ids.join(" "));
+          ')"
 
-          if [[ "$derived" != "$hardcoded" ]]; then
-            echo "::error::this workflow's hard-coded trigger paths cover connectors [$hardcoded]," >&2
-            echo "::error::but packages/local-collector/src/generated/collector-definitions.generated.ts" >&2
-            echo "::error::currently declares [$derived]. Update this workflow's on.push/on.pull_request" >&2
-            echo "::error::paths (and this check's \$hardcoded list) to match before merging." >&2
+          expected_declared="apple_photos claude_code codex google_messages google_takeout imessage"
+          expected_pinned="apple_photos claude_code codex google_takeout imessage"
+          source_ids="google_messages"
+
+          if [[ "$declared" != "$expected_declared" || "$pinned" != "$expected_pinned" ]]; then
+            echo "::error::generated definitions [$declared] or signed profile pins [$pinned] changed." >&2
+            echo "::error::Review this workflow's source trigger paths and artifact pin coverage before merging." >&2
             exit 1
           fi
 
-          echo "OK: this workflow's hard-coded connector trigger paths ($hardcoded) match the set derived"
-          echo "from collector-definitions.generated.ts."
+          if ! grep -Fq "packages/polyfill-connectors/connectors/google_messages/**" .github/workflows/consumer-drift-signal.yml; then
+            echo "::error::the remaining source trigger path for [$source_ids] is missing." >&2
+            exit 1
+          fi
+
+          echo "OK: one source trigger ($source_ids) and five pinned artifact inputs ($pinned)."
 
       - name: Fetch data-connectors' pin file and compare
         run: |
@@ -168,12 +167,8 @@ jobs:
             ':(exclude)packages/connector-protocol/scripts/package-artifact.test.mjs'
             packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
             packages/local-collector/src/generated/collector-definitions.generated.ts
+            packages/local-collector/src/generated/collection-profile-pins.generated.ts
             packages/local-collector/tsconfig.build.json
-            packages/polyfill-connectors/connectors/claude_code
-            packages/polyfill-connectors/connectors/codex
-            packages/polyfill-connectors/connectors/google_takeout
-            packages/polyfill-connectors/connectors/imessage
-            packages/polyfill-connectors/connectors/apple_photos
             packages/polyfill-connectors/connectors/google_messages
           )
 

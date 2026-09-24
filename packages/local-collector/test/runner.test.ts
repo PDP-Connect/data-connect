@@ -2179,9 +2179,9 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
   assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
 
-test("resolveExecutionRoot resolves a published-shape bundled entrypoint under the local-collector package root", () => {
+test("resolveExecutionRoot resolves an entrypoint under the local-collector package root", () => {
   const executionRoot = resolveExecutionRoot({
-    args: [join(import.meta.dirname, "..", "dist", "polyfill-connectors", "connectors", "claude_code", "index.js")],
+    args: [join(import.meta.dirname, "..", "dist", "bin", "pdpp-local-collector.js")],
   });
   assert.equal(executionRoot, join(import.meta.dirname, ".."));
 });
@@ -2191,8 +2191,8 @@ test("resolveExecutionRoot falls back to the entrypoint's own directory for an o
   assert.equal(executionRoot, "/tmp/some-unrelated-dir");
 });
 
-test("resolveExecutionRoot resolves a relative dev entrypoint to the enclosing repository root", () => {
-  const executionRoot = resolveExecutionRoot({ args: ["connectors/claude_code/index.ts"] });
+test("resolveExecutionRoot resolves a relative development entrypoint to the enclosing repository root", () => {
+  const executionRoot = resolveExecutionRoot({ args: ["connectors/fixture/index.ts"] });
   assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
 });
 
