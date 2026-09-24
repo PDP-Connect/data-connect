@@ -70,6 +70,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Owner-visible connector attention state must survive restore.",
   },
+  connector_activations: {
+    classification: "backup_required",
+    reason: "Installed connector activation state is durable runtime authority for which verified manifest revision may run.",
+  },
   connector_coverage_horizons: {
     classification: "backup_required",
     reason:
@@ -236,6 +240,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   owner_device_auth: {
     classification: "backup_required",
     reason: "Owner-device authorization state must survive restore.",
+  },
+  owner_password_verifier: {
+    classification: "backup_required",
+    reason: "Owner password verifier state is the durable local owner credential authority.",
+  },
+  owner_sessions: {
+    classification: "backup_required",
+    reason: "Owner session records are durable bearer inventory and revocation state until expiry.",
   },
   pending_consents: {
     classification: "backup_required",
