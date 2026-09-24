@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import test from "node:test";
-import type { RecoveredStaticSecret } from "@pdpp/polyfill-connectors/static-secret-injection";
 import {
   __resetControllerInteractionStateForTests,
   createController,
@@ -27,12 +26,7 @@ type ResolveStaticSecretRunEnv = (args: {
   ownerSubjectId?: string | undefined;
   sourceBinding: unknown;
   credentialStore: unknown;
-  isStaticSecretConnector: (connectorId: string) => boolean;
-  buildConnectionScopedSecretEnv: (
-    connectorId: string,
-    recovered: RecoveredStaticSecret,
-    sourceBinding?: unknown
-  ) => Record<string, string>;
+  manifest: unknown;
 }) => Promise<Record<string, string> | null>;
 
 const resolveStaticSecretRunEnv = resolveStaticSecretRunEnvUntyped as ResolveStaticSecretRunEnv;
@@ -69,6 +63,16 @@ const GMAIL_MANIFEST = {
   connector_id: GMAIL_CONNECTOR,
   name: "Gmail",
   runtime_requirements: { bindings: { network: { required: true } } },
+  setup: {
+    modality: "static_secret",
+    credential_capture: {
+      kind: "app_password",
+      fields: [
+        { name: "account_email", type: "email", secret: false, env: ["GMAIL_ADDRESS"] },
+        { name: "secret", type: "password", secret: true, env: ["GOOGLE_APP_PASSWORD_PDPP", "GMAIL_APP_PASSWORD"] },
+      ],
+    },
+  },
   streams: [],
   version: "1.0.0",
 };
@@ -77,6 +81,17 @@ const CHATGPT_MANIFEST = {
   connector_id: CHATGPT_CONNECTOR,
   name: "ChatGPT",
   runtime_requirements: { bindings: { browser: { required: true } } },
+  setup: {
+    modality: "static_secret",
+    credential_capture: {
+      kind: "username_password",
+      required: false,
+      fields: [
+        { name: "username", type: "text", secret: false, env: ["CHATGPT_USERNAME"] },
+        { name: "password", type: "password", secret: true, required: false, env: ["CHATGPT_PASSWORD"] },
+      ],
+    },
+  },
   streams: [],
   version: "1.0.0",
 };
@@ -85,6 +100,16 @@ const AMAZON_MANIFEST = {
   connector_id: AMAZON_CONNECTOR,
   name: "Amazon",
   runtime_requirements: { bindings: { browser: { required: true } } },
+  setup: {
+    modality: "static_secret",
+    credential_capture: {
+      kind: "username_password",
+      fields: [
+        { name: "username", type: "text", secret: false, env: ["AMAZON_USERNAME"] },
+        { name: "password", type: "password", secret: true, env: ["AMAZON_PASSWORD"] },
+      ],
+    },
+  },
   streams: [],
   version: "1.0.0",
 };
@@ -95,6 +120,12 @@ const NON_SECRET_MANIFEST = {
   runtime_requirements: { bindings: { filesystem: { required: true } } },
   streams: [],
   version: "1.0.0",
+};
+const MANIFEST_BY_CONNECTOR: Readonly<Record<string, unknown>> = {
+  [AMAZON_CONNECTOR]: AMAZON_MANIFEST,
+  [CHATGPT_CONNECTOR]: CHATGPT_MANIFEST,
+  [GMAIL_CONNECTOR]: GMAIL_MANIFEST,
+  [NON_SECRET_CONNECTOR]: NON_SECRET_MANIFEST,
 };
 
 function seedConnectorInstance({
@@ -138,21 +169,14 @@ function seedConnectorInstance({
 // wiring proof.
 function buildRealResolver(): StaticSecretRunEnvResolver {
   return async ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
-    const { isStaticSecretConnector, buildConnectionScopedSecretEnv } = await import(
-      "@pdpp/polyfill-connectors/static-secret-injection"
-    );
-    if (!isStaticSecretConnector(connectorId)) {
-      return null;
-    }
     const credentialStore = createSqliteConnectorInstanceCredentialStore({
       env: { PDPP_CREDENTIAL_ENCRYPTION_KEY: TEST_KEY },
     });
     return await resolveStaticSecretRunEnv({
-      buildConnectionScopedSecretEnv,
       connectorId,
       connectorInstanceId,
       credentialStore,
-      isStaticSecretConnector,
+      manifest: MANIFEST_BY_CONNECTOR[connectorId] ?? null,
       ownerSubjectId,
       sourceBinding: createSqliteConnectorInstanceStore().get(connectorInstanceId)?.sourceBinding,
     });
@@ -277,7 +301,6 @@ test("a captured ChatGPT username/password credential is injected into the conne
   assert.equal(calls.length, 1);
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
     CHATGPT_PASSWORD: "chatgpt password here",
-    CHATGPT_USERNAME: "owner@example.com",
   });
 });
 
@@ -329,7 +352,6 @@ test("a connector credential_rejected terminal marks the injected stored credent
   assert.equal(calls.length, 1);
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
     CHATGPT_PASSWORD: "stale chatgpt password",
-    CHATGPT_USERNAME: "owner@example.com",
   });
   const meta = await store.getMetadata("cin_chatgpt");
   assert.ok(meta, "expected credential metadata for cin_chatgpt");
@@ -368,7 +390,6 @@ test("a captured Amazon username/password credential is injected into the connec
   assert.equal(calls.length, 1);
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
     AMAZON_PASSWORD: "amazon password here",
-    AMAZON_USERNAME: "owner@example.com",
   });
 });
 
@@ -407,7 +428,6 @@ test("non-secret static setup fields are injected with the captured credential",
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
     GMAIL_ADDRESS: "owner@example.com",
     GMAIL_APP_PASSWORD: "personal one here",
-    GMAIL_USER: "owner@example.com",
     GOOGLE_APP_PASSWORD_PDPP: "personal one here",
   });
 });

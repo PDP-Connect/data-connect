@@ -4,16 +4,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeConnectorManifestForStorage, registerConnector } from "../server/auth.ts";
-import { canonicalActivationManifestRevision } from "../server/connector-install/activation-authority.ts";
-import {
-  storedConnectorManifestRevision,
-  storedConnectorManifestStreamRevision,
-} from "../server/connector-manifest-write-fence.ts";
+import { storedConnectorManifestRevision } from "../server/connector-manifest-write-fence.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import {
-  __setManifestDerivedIngestPhaseHookForTest as __setPostgresManifestDerivedIngestPhaseHookForTest,
-  postgresBackfillRecordSortPositionsForManifest,
-} from "../server/postgres-records.ts";
+import { postgresBackfillRecordSortPositionsForManifest } from "../server/postgres-records.ts";
 import {
   closePostgresStorage,
   initPostgresStorage,
@@ -22,7 +15,6 @@ import {
 } from "../server/postgres-storage.ts";
 import {
   __setIndexPublishPhaseHookForTest,
-  __setManifestDerivedIngestPhaseHookForTest as __setSqliteManifestDerivedIngestPhaseHookForTest,
   backfillSqliteRecordSemanticTimesForManifest,
   ingestRecord,
   maintainRecordIndexes,
@@ -80,21 +72,6 @@ function deferred() {
     throw new Error("Deferred release was not initialized");
   }
   return { promise, release };
-}
-
-function ingestAttemptContext(field: "subject" | "title", currentManifest = manifest(field)) {
-  return {
-    manifestStreamRevision: storedConnectorManifestStreamRevision(currentManifest),
-    streams: {
-      [stream]: {
-        consentTimeField: field,
-        cursorField: field,
-        lexicalFields: [field],
-        primaryKey: ["id"],
-        semanticFields: [field],
-      },
-    },
-  };
 }
 
 function retrievalManifest(field: "subject" | "title") {
@@ -329,15 +306,8 @@ test("SQLite: stale record-column repair cannot overwrite manifest B", async () 
   initDb(":memory:");
   try {
     const { a, b } = await seedRecordRepairA();
-    await backfillSqliteRecordSemanticTimesForManifest(b, {
-      registryManifestRevision: canonicalActivationManifestRevision(b),
-    });
-    await assert.rejects(
-      backfillSqliteRecordSemanticTimesForManifest(a, {
-        registryManifestRevision: canonicalActivationManifestRevision(a),
-      }),
-      MANIFEST_REVISION_CHANGED
-    );
+    await backfillSqliteRecordSemanticTimesForManifest(b);
+    await backfillSqliteRecordSemanticTimesForManifest(a);
     const row = getDb()
       .prepare("SELECT semantic_time FROM records WHERE connector_instance_id=? AND stream=?")
       .get<{ semantic_time: string }>(connectorInstanceId, stream);
@@ -364,10 +334,7 @@ test("PostgreSQL: stale record-column repair cannot overwrite manifest B", {
       try {
         await initPostgresStorage({ backend: "postgres", databaseUrl });
         const { a } = await seedRecordRepairA();
-        await assert.rejects(
-          postgresBackfillRecordSortPositionsForManifest(a, canonicalActivationManifestRevision(a)),
-          MANIFEST_REVISION_CHANGED
-        );
+        await postgresBackfillRecordSortPositionsForManifest(a);
         const row = await postgresQuery<{ cursor_value: string }>(
           "SELECT cursor_value FROM records WHERE connector_instance_id=$1 AND stream=$2",
           [connectorInstanceId, stream]
@@ -379,133 +346,6 @@ test("PostgreSQL: stale record-column repair cannot overwrite manifest B", {
       }
     }
   );
-});
-
-async function assertInFlightIngestRejectedAfterManifestBPublishes(): Promise<void> {
-  const entered = deferred();
-  const resume = deferred();
-  let paused = false;
-  const a = manifest("subject");
-  const b = manifest("title");
-  const setPhaseHook = isPostgresStorageBackend()
-    ? __setPostgresManifestDerivedIngestPhaseHookForTest
-    : __setSqliteManifestDerivedIngestPhaseHookForTest;
-  try {
-    await registerConnector(a, { backfillRetrievalIndexes: false });
-    setPhaseHook(async (point: string) => {
-      if (point === "before-durable-transaction" && !paused) {
-        paused = true;
-        entered.release();
-        await resume.promise;
-      }
-    });
-    const inFlight = ingestRecord(
-      { connector_id: connectorId, connector_instance_id: connectorInstanceId },
-      {
-        data: { id: "one", subject: "2026-01-01T00:00:00.000Z", title: "2026-02-01T00:00:00.000Z" },
-        emitted_at: "2026-03-01T00:00:00.000Z",
-        key: "one",
-        stream,
-      }
-    );
-    await entered.promise;
-    await registerConnector(b, { backfillRetrievalIndexes: false });
-    resume.release();
-    await assert.rejects(inFlight, MANIFEST_REVISION_CHANGED);
-    const count = isPostgresStorageBackend()
-      ? (
-          await postgresQuery("SELECT 1 FROM records WHERE connector_instance_id=$1 AND stream=$2", [
-            connectorInstanceId,
-            stream,
-          ])
-        ).rowCount
-      : getDb()
-          .prepare("SELECT 1 FROM records WHERE connector_instance_id=? AND stream=?")
-          .all(connectorInstanceId, stream).length;
-    assert.equal(count, 0);
-  } finally {
-    resume.release();
-    setPhaseHook(null);
-  }
-}
-
-test("SQLite: an in-flight ordinary ingest cannot commit A-derived columns after B publishes", async () => {
-  initDb(":memory:");
-  try {
-    await assertInFlightIngestRejectedAfterManifestBPublishes();
-  } finally {
-    closeDb();
-  }
-});
-
-test("PostgreSQL: an in-flight ordinary ingest cannot commit A-derived columns after B publishes", {
-  skip: !process.env.PDPP_TEST_POSTGRES_URL,
-}, async () => {
-  const url = process.env.PDPP_TEST_POSTGRES_URL;
-  assert.ok(url);
-  await withTemporaryPostgresDatabase(
-    {
-      closeConnections: closePostgresStorage,
-      connectionString: url,
-      databaseName: `pdpp_test_f1_ingest_revision_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
-      templateName: null,
-    },
-    async (databaseUrl) => {
-      initDb(":memory:");
-      try {
-        await initPostgresStorage({ backend: "postgres", databaseUrl });
-        await assertInFlightIngestRejectedAfterManifestBPublishes();
-      } finally {
-        await closePostgresStorage();
-        closeDb();
-      }
-    }
-  );
-});
-
-test("SQLite: a refresh-policy-only manifest update does not reject an in-flight device ingest", async () => {
-  initDb(":memory:");
-  const entered = deferred();
-  const resume = deferred();
-  let paused = false;
-  __setSqliteManifestDerivedIngestPhaseHookForTest(async (point: string) => {
-    if (point === "before-durable-transaction" && !paused) {
-      paused = true;
-      entered.release();
-      await resume.promise;
-    }
-  });
-  const a = manifest("subject");
-  try {
-    await registerConnector(a, { backfillRetrievalIndexes: false });
-    const inFlight = ingestRecord(
-      { connector_id: connectorId, connector_instance_id: connectorInstanceId },
-      {
-        data: { id: "one", subject: "2026-01-01T00:00:00.000Z", title: "2026-02-01T00:00:00.000Z" },
-        emitted_at: "2026-03-01T00:00:00.000Z",
-        key: "one",
-        stream,
-      },
-      { attemptContext: ingestAttemptContext("subject") }
-    );
-    await entered.promise;
-    await registerConnector(
-      {
-        ...a,
-        capabilities: {
-          ...a.capabilities,
-          refresh_policy: { rationale: "daily sync", recommended_mode: "manual" },
-        },
-      },
-      { backfillRetrievalIndexes: false }
-    );
-    resume.release();
-    assert.equal((await inFlight).changed, true);
-  } finally {
-    resume.release();
-    __setSqliteManifestDerivedIngestPhaseHookForTest(null);
-    closeDb();
-  }
 });
 
 async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
@@ -556,9 +396,6 @@ async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
     await entered.promise;
     const current = retrievalManifest("title");
     await registerConnector(current, { backfillRetrievalIndexes: false });
-    const currentRevision = storedConnectorManifestStreamRevision(
-      normalizeConnectorManifestForStorage(current).storedManifest
-    );
     await maintainRecordIndexes(
       { connector_id: connectorId, connector_instance_id: connectorInstanceId },
       {
@@ -567,8 +404,7 @@ async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
         key: "one",
         stream,
       },
-      ingest.version ?? 1,
-      { manifestStreamRevision: currentRevision }
+      ingest.version ?? 1
     );
     resume.release();
     const failedAttemptCount = await waitForFailureEvidence(100);
@@ -662,13 +498,7 @@ test("SQLite: stale semantic backfill checks its manifest before vector-index in
       { deferIndexes: true }
     );
     await registerConnector(b, { backfillRetrievalIndexes: false });
-    await assert.rejects(
-      semanticIndexBackfillForManifest({
-        manifest: a,
-        registryManifestRevision: canonicalActivationManifestRevision(a),
-      }),
-      MANIFEST_REVISION_CHANGED
-    );
+    await semanticIndexBackfillForManifest({ manifest: a });
     assert.equal(dimensionsRead, false);
   } finally {
     configureSemanticBackend(null);

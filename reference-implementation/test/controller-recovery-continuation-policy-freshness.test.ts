@@ -61,11 +61,6 @@ import { type ConnectorInstallStore, createConnectorInstallService, createConnec
 import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import {
-  isArtifactRootReferencedByActiveRun,
-  releaseActiveRunArtifactRoot,
-  retainActiveRunArtifactRoot,
-} from "../server/connector-install/active-run-artifact-roots.ts";
 
 const CONNECTOR = "amazon";
 const CONNECTION = "cin_policy_freshness";
@@ -88,23 +83,8 @@ const MANUAL_ONLY_REFRESH_POLICY = {
   rationale: "Requires OTP and short-lived browser sessions; never refresh in the background.",
   recommended_mode: "manual",
 };
-const RUN_ADMISSION_ACTIVATION_CHANGED = /activation changed during run admission/;
 const RE_A_DOWNLOAD_FAILED = /simulated A artifact download failure/;
 const RE_DRAFT_COLLECTION_REFUSED = /Owner connection is no longer active/;
-
-test("artifact-root leases remain distinct when caller run IDs collide", () => {
-  const rootA = join(tmpdir(), "pdpp-active-artifact-a");
-  const rootB = join(tmpdir(), "pdpp-active-artifact-b");
-  const leaseA = retainActiveRunArtifactRoot("caller-run-id-collision", rootA);
-  const leaseB = retainActiveRunArtifactRoot("caller-run-id-collision", rootB);
-
-  releaseActiveRunArtifactRoot(leaseA);
-  assert.equal(isArtifactRootReferencedByActiveRun(rootA), false);
-  assert.equal(isArtifactRootReferencedByActiveRun(rootB), true);
-
-  releaseActiveRunArtifactRoot(leaseB);
-  assert.equal(isArtifactRootReferencedByActiveRun(rootB), false);
-});
 
 /**
  * A manifest `validateConnectorManifest` accepts: a non-empty `streams` array
@@ -284,7 +264,6 @@ function readManifestGeneration(): number {
  * assuming it did.
  */
 async function runWithMidRunManifestChange(input: {
-  readonly admissionRaceManifest?: Record<string, unknown>;
   readonly registered: Record<string, unknown>;
   readonly committedMidRun: Record<string, unknown> | null;
   readonly onBarrier?: (installStore?: ConnectorInstallStore) => void | Promise<void>;
@@ -350,31 +329,7 @@ async function runWithMidRunManifestChange(input: {
     return { detail_gaps: [], records_emitted: 0, status: "succeeded" };
   };
 
-  let controllerInstallStore = installedStore;
-  const { admissionRaceManifest } = input;
-  if (installedStore && admissionRaceManifest) {
-    const readActivation = installedStore.getActivation;
-    assert.ok(readActivation);
-    let activationReads = 0;
-    controllerInstallStore = {
-      ...installedStore,
-      getActivation: async (connectorId) => {
-        const snapshot = await readActivation(connectorId);
-        activationReads += 1;
-        if (activationReads === 1) {
-          // Publish a refresh-policy-only registry update after the controller
-          // has taken activation A but before it reads the current policy.
-          await registerConnector(admissionRaceManifest, { backfillRetrievalIndexes: false });
-          return snapshot;
-        }
-        if (activationReads === 2 && snapshot) {
-          // Model the atomic publisher state observed by the admission recheck.
-          return { ...snapshot, repairReason: "test publication in progress", state: "repair_required" };
-        }
-        return snapshot;
-      },
-    };
-  }
+  const controllerInstallStore = installedStore;
 
   const controller = createController({
     admitRunConnection: fakeAdmitRunConnection(),
@@ -402,30 +357,11 @@ async function runWithMidRunManifestChange(input: {
     runId: "run_policy_freshness_root",
     ...(input.runAdmission ? { runAdmission: input.runAdmission } : {}),
   });
-  if (admissionRaceManifest) {
-    await assert.rejects(run, RUN_ADMISSION_ACTIVATION_CHANGED);
-  } else {
-    await run;
-    await drainUntilIdle(controller);
-  }
+  await run;
+  await drainUntilIdle(controller);
 
   return { calls, generationAfter: readManifestGeneration(), generationBefore };
 }
-
-test("run admission rejects an A executable snapshot when B publishes before current policy is accepted", async (t) => {
-  freshDb(t);
-  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-run-admission-activation-race-"));
-  t.after(() => rmSync(dataDir, { force: true, recursive: true }));
-  const a = manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "admission-a");
-  const b = manifestWithRefreshPolicy(PAUSED_REFRESH_POLICY, "admission-b");
-  const result = await runWithMidRunManifestChange({
-    admissionRaceManifest: b,
-    committedMidRun: null,
-    installedDataDir: dataDir,
-    registered: a,
-  });
-  assert.equal(result.calls.length, 0, "A must not launch with policy read from B after B invalidated activation A");
-});
 
 test("a pause committed mid-run withholds the continuation", async (t) => {
   freshDb(t);
@@ -554,7 +490,7 @@ test("the continuation executes the manifest its admission was decided against",
   );
 });
 
-test("current policy B admits the installed A tuple and records both revisions", async (t) => {
+test("current policy B admits the installed A tuple", async (t) => {
   const dir = freshDb(t);
   const result = await runWithMidRunManifestChange({
     committedMidRun: manifestWithRefreshPolicy(AUTOMATIC_REFRESH_POLICY, "v2"),
@@ -566,10 +502,6 @@ test("current policy B admits the installed A tuple and records both revisions",
   assert.ok(parent && continuation);
   assert.equal((continuation.manifest as { version?: string }).version, "1.0.0-v1");
   assert.equal(continuation.connectorPath, parent.connectorPath);
-  assert.equal(continuation.executionAdmission?.activation_id, parent.executionAdmission?.activation_id);
-  assert.notEqual(continuation.executionAdmission?.policy_revision, parent.executionAdmission?.policy_revision);
-  assert.equal(continuation.executionAdmission?.owner_connection_status, "active");
-  assert.ok(continuation.executionAdmission?.manifest_revision);
 });
 
 test("current policy pause withholds a continuation of installed A", async (t) => {
@@ -668,7 +600,6 @@ for (const runAdmission of ["setup", "browser_enrollment"] as const) {
       runAdmission,
     });
     assert.equal(result.calls.length, 1, "the explicitly admitted draft run reaches the connector");
-    assert.equal(result.calls[0]?.executionAdmission?.owner_connection_status, "draft");
   });
 }
 

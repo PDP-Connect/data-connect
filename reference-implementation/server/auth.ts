@@ -40,7 +40,7 @@ import {
   resolveManifestSensitivity,
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
-import { lockConnectorManifestPublication, storedConnectorManifestRevision } from "./connector-manifest-write-fence.ts";
+import { lockConnectorManifestPublication } from "./connector-manifest-write-fence.ts";
 import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
@@ -5242,7 +5242,6 @@ export async function registerConnector(
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
-  const registryManifestRevision = storedConnectorManifestRevision(storedManifest);
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
   }
@@ -5259,7 +5258,7 @@ export async function registerConnector(
     if (typeof cursorBackfill !== "function") {
       throw new Error("Missing postgres record cursor-value backfill contract");
     }
-    await cursorBackfill(storedManifest, registryManifestRevision);
+    await cursorBackfill(storedManifest);
     return connectorId;
   }
 
@@ -5278,14 +5277,12 @@ export async function registerConnector(
   if (postgresBackend) {
     const { postgresBackfillRecordSortPositionsForManifest } = await import("./postgres-records.ts");
     await postgresBackfillRecordSortPositionsForManifest(
-      storedManifest as Parameters<typeof postgresBackfillRecordSortPositionsForManifest>[0],
-      registryManifestRevision
+      storedManifest as Parameters<typeof postgresBackfillRecordSortPositionsForManifest>[0]
     );
   } else {
     const { backfillSqliteRecordSemanticTimesForManifest } = await import("./records.ts");
     await backfillSqliteRecordSemanticTimesForManifest(
-      storedManifest as Parameters<typeof backfillSqliteRecordSemanticTimesForManifest>[0],
-      { registryManifestRevision }
+      storedManifest as Parameters<typeof backfillSqliteRecordSemanticTimesForManifest>[0]
     );
   }
 
@@ -5305,7 +5302,6 @@ export async function registerConnector(
     manifest: storedManifest as NonNullable<
       NonNullable<Parameters<typeof lexicalIndexBackfillForManifest>[0]>["manifest"]
     >,
-    registryManifestRevision,
   });
 
   // Semantic retrieval index drift-detect + backfill. Parallel to lexical;
@@ -5319,7 +5315,6 @@ export async function registerConnector(
       manifest: storedManifest as NonNullable<
         NonNullable<Parameters<typeof semanticIndexBackfillForManifest>[0]>["manifest"]
       >,
-      registryManifestRevision,
     });
   }
   return connectorId;

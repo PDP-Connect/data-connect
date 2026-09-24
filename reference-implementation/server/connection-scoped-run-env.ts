@@ -25,10 +25,6 @@ import { resolveStaticSecretRunEnv, type StaticSecretCredentialStore } from "./s
 type RunEnv = Record<string, string>;
 type CredentialProbeContext = Record<string, unknown>;
 type CredentialProbeTransport = Record<string, unknown>;
-interface RecoveredStaticSecret {
-  readonly credentialKind: string;
-  readonly secret: string;
-}
 
 interface ConnectorInstance {
   readonly sourceBinding?: unknown;
@@ -51,6 +47,7 @@ type RunEnvResolver = (args: RunEnvResolverArgs) => Promise<RunEnv | null>;
 interface ResolverDependencies {
   readonly createConnectorInstanceCredentialStore: () => ConnectorInstanceCredentialStore;
   readonly createConnectorInstanceStore: () => ConnectorInstanceStore;
+  readonly resolveRegisteredConnectorManifest?: (connectorId: string) => Promise<unknown>;
 }
 
 interface ManualUploadBinding {
@@ -121,23 +118,18 @@ export async function buildStaticSecretCredentialProber() {
 function buildControllerStaticSecretRunEnvResolver({
   createConnectorInstanceStore,
   createConnectorInstanceCredentialStore,
+  resolveRegisteredConnectorManifest,
 }: ResolverDependencies): RunEnvResolver {
   return async ({ connectorId, connectorInstanceId, ownerSubjectId }: RunEnvResolverArgs) => {
-    const { isStaticSecretCaptureOptional, isStaticSecretConnector, buildConnectionScopedSecretEnv } =
-      await loadStaticSecretInjectionHelpers();
-    if (!isStaticSecretConnector(connectorId)) {
-      return null;
-    }
-    const credentialStore = createConnectorInstanceCredentialStore();
-    const connectorInstance = await createConnectorInstanceStore().get(connectorInstanceId);
+    const [manifest, connectorInstance] = await Promise.all([
+      resolveRegisteredConnectorManifest?.(connectorId).catch(() => null) ?? Promise.resolve(null),
+      createConnectorInstanceStore().get(connectorInstanceId),
+    ]);
     return await resolveStaticSecretRunEnv({
-      buildConnectionScopedSecretEnv: (id: string, recovered: object) =>
-        buildConnectionScopedSecretEnv(id, recovered as RecoveredStaticSecret, connectorInstance?.sourceBinding),
       connectorId,
       connectorInstanceId,
-      credentialStore,
-      isStaticSecretCaptureOptional,
-      isStaticSecretConnector,
+      credentialStore: createConnectorInstanceCredentialStore(),
+      manifest,
       ownerSubjectId,
       sourceBinding: connectorInstance?.sourceBinding ?? null,
     });
@@ -226,10 +218,12 @@ function buildControllerProviderAuthRunEnvResolver({
 export function buildConnectionScopedRunEnvResolver({
   createConnectorInstanceStore,
   createConnectorInstanceCredentialStore,
+  resolveRegisteredConnectorManifest,
 }: ResolverDependencies): RunEnvResolver {
   const staticSecretResolver = buildControllerStaticSecretRunEnvResolver({
     createConnectorInstanceCredentialStore,
     createConnectorInstanceStore,
+    ...(resolveRegisteredConnectorManifest ? { resolveRegisteredConnectorManifest } : {}),
   });
   const providerAuthResolver = buildControllerProviderAuthRunEnvResolver({
     createConnectorInstanceCredentialStore,
