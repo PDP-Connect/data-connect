@@ -183,6 +183,13 @@ jobs:
         if: matrix.image == 'core'
         run: bash deploy/docker/check-image-identity.sh --require-known pdpp:ci-core-test
 
+      - name: Prove Core includes owner-facing connector manifests
+        if: matrix.image == 'core'
+        run: >-
+          docker run --rm --entrypoint sh pdpp:ci-core-test -ec
+          'test -d /console/packages/polyfill-connectors/manifests &&
+          test -n "$(find /console/packages/polyfill-connectors/manifests -maxdepth 1 -type f -name "*.json" -print -quit)"'
+
       - name: Prove the built Core image runs headed Patchright with durable profiles and interaction-scoped CDP
         if: matrix.image == 'core'
         env:

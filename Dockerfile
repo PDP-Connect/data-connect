@@ -97,6 +97,16 @@ FROM deps AS source
 
 COPY . .
 
+# The production install omits the dev-only polyfill package, but the owner
+# console still needs its signed manifest metadata to populate /sources/add.
+# Keep only those manifests in the runtime tree; connector code and fixtures
+# remain outside the Core image and are installed from the signed catalog.
+RUN mkdir -p packages/polyfill-connectors/manifests \
+  && tar -xzf reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz \
+    --strip-components=2 \
+    -C packages/polyfill-connectors/manifests \
+    package/manifests
+
 # mcp-server ships as dist/-built output (not source-resolved), and depends
 # on both vendor/cli and vendor/read-core (also dist/-built) -- mcp-server's
 # own build script builds cli first, but not read-core, so that one needs
@@ -300,6 +310,7 @@ COPY --from=source /app /app
 COPY --from=console-builder /app/apps/console/.next/standalone /console
 COPY --from=console-builder /app/apps/console/.next/static /console/apps/console/.next/static
 COPY --from=console-builder /app/apps/console/public /console/apps/console/public
+COPY --from=source /app/packages/polyfill-connectors/manifests /console/packages/polyfill-connectors/manifests
 
 EXPOSE 3000
 

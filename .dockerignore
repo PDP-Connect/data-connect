@@ -9,4 +9,3 @@ coverage
 tmp
 **/tmp
 *.log
-reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz
