@@ -4,15 +4,13 @@
 // Deterministic offline tests for the standalone Core image's first-boot
 // credential bootstrap (deploy/railway/core-first-boot.ts).
 //
-// These pin the Docker quickstart's owner-gating contract:
-//   - no PDPP_OWNER_PASSWORD -> generate, persist to the data dir, banner once;
-//   - subsequent boots reuse the persisted password and never reprint it;
-//   - the PDPP_OWNER_PASSWORD environment variable always wins;
+// These pin the Docker quickstart's first-boot contract:
+//   - owner password setup belongs to the server /setup flow;
+//   - runtime data defaults to the durable data dir, so installed connector
+//     bytes live beside the persisted database instead of under /app/data;
 //   - SQLite (quickstart) boots provision a credential encryption key file,
 //     Postgres (managed-platform) boots keep the explicit fail-closed key
-//     contract;
-//   - the password is never emitted through the log/warn channels — the
-//     one-time banner is the only print surface.
+//     contract.
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -90,6 +88,35 @@ test("an unpersistable data dir does not generate or print an owner password", (
   assert.ok(warned.lines.every((line) => !line.includes("PDPP_OWNER_PASSWORD")));
 });
 
+test("first boot points runtime data at the durable data dir", () => {
+  const dataDir = makeDataDir();
+  const result = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
+
+  assert.equal(result.env.PDPP_DATA_DIR, dataDir);
+});
+
+test("docker SQLite first boot keeps connector data beside the persisted database", () => {
+  const result = prepareFirstBoot({
+    env: { PDPP_DB_PATH: "/var/lib/pdpp/pdpp.sqlite" },
+    log: noop,
+    warn: noop,
+  });
+
+  assert.equal(result.env.PDPP_DATA_DIR, "/var/lib/pdpp");
+});
+
+test("an explicit runtime data dir is never shadowed", () => {
+  const dataDir = makeDataDir();
+  const result = prepareFirstBoot({
+    env: { PDPP_DATA_DIR: "/operator/data" },
+    dataDir,
+    log: noop,
+    warn: noop,
+  });
+
+  assert.equal(result.env.PDPP_DATA_DIR, undefined);
+});
+
 test("sqlite boots provision a stable credential encryption key file", () => {
   const dataDir = makeDataDir();
   const first = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
@@ -114,6 +141,7 @@ test("postgres boots keep the explicit fail-closed credential key contract", () 
   ]) {
     const result = prepareFirstBoot({ env, dataDir, log: noop, warn: noop });
     assert.equal(result.env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE, undefined);
+    assert.equal(result.env.PDPP_DATA_DIR, dataDir);
   }
 });
 

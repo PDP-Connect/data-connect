@@ -76,6 +76,7 @@ function persistSecret(dataDir: string, file: string, secret: string): void {
 
 export interface FirstBootEnvAdditions {
   PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE?: string;
+  PDPP_DATA_DIR?: string;
 }
 export interface FirstBootResult {
   env: FirstBootEnvAdditions;
@@ -99,6 +100,9 @@ export function prepareFirstBoot({
   warn?: LogFn;
 } = {}): FirstBootResult {
   const envAdditions: FirstBootEnvAdditions = {};
+  if (!trimmedValue(env.PDPP_DATA_DIR)) {
+    envAdditions.PDPP_DATA_DIR = dataDir;
+  }
   if (
     !(
       usesPostgresStorage(env) ||
