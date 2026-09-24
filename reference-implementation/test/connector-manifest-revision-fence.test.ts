@@ -4,7 +4,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeConnectorManifestForStorage, registerConnector } from "../server/auth.ts";
-import { storedConnectorManifestRevision } from "../server/connector-manifest-write-fence.ts";
+import {
+  assertConnectorManifestStreamRevisionSync,
+  assertConnectorManifestStreamRevisionWithClient,
+  storedConnectorManifestRevision,
+  storedConnectorManifestStreamRevision,
+  withConnectorManifestDerivedWrite,
+} from "../server/connector-manifest-write-fence.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { postgresBackfillRecordSortPositionsForManifest } from "../server/postgres-records.ts";
 import {
@@ -346,6 +352,104 @@ test("PostgreSQL: stale record-column repair cannot overwrite manifest B", {
       }
     }
   );
+});
+
+async function assertManifestDerivedWriteRejectedAfterManifestBPublishes(): Promise<void> {
+  const a = manifest("subject");
+  const b = manifest("title");
+  await registerConnector(a, { backfillRetrievalIndexes: false });
+  const expectedRevision = storedConnectorManifestRevision(normalizeConnectorManifestForStorage(a).storedManifest);
+  await registerConnector(b, { backfillRetrievalIndexes: false });
+  await assert.rejects(
+    withConnectorManifestDerivedWrite(connectorId, expectedRevision, {
+      postgres: async (client) => {
+        await client.query("SELECT 1");
+      },
+      sqlite: () => {
+        getDb().prepare("SELECT 1").get();
+      },
+    }),
+    MANIFEST_REVISION_CHANGED
+  );
+}
+
+test("SQLite: a stale derived write cannot commit after manifest B publishes", async () => {
+  initDb(":memory:");
+  try {
+    await assertManifestDerivedWriteRejectedAfterManifestBPublishes();
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a stale derived write cannot commit after manifest B publishes", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_f1_derived_revision_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertManifestDerivedWriteRejectedAfterManifestBPublishes();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+async function assertRefreshPolicyOnlyUpdateKeepsStreamRevision(): Promise<void> {
+  const a = manifest("subject");
+  await registerConnector(a, { backfillRetrievalIndexes: false });
+  const expectedRevision = storedConnectorManifestStreamRevision(normalizeConnectorManifestForStorage(a).storedManifest);
+  await registerConnector(
+    {
+      ...a,
+      capabilities: {
+        ...a.capabilities,
+        refresh_policy: { rationale: "daily sync", recommended_mode: "manual" },
+      },
+    },
+    { backfillRetrievalIndexes: false }
+  );
+  if (isPostgresStorageBackend()) {
+    await withPostgresTransactionForManifestStreamRevision(expectedRevision);
+  } else {
+    assertConnectorManifestStreamRevisionSync(connectorId, expectedRevision);
+  }
+}
+
+async function withPostgresTransactionForManifestStreamRevision(expectedRevision: string): Promise<void> {
+  await postgresQuery("BEGIN");
+  try {
+    await assertConnectorManifestStreamRevisionWithClient(
+      {
+        query: (text: string, values?: readonly unknown[]) => postgresQuery(text, values ? [...values] : undefined),
+      } as Parameters<typeof assertConnectorManifestStreamRevisionWithClient>[0],
+      connectorId,
+      expectedRevision
+    );
+  } finally {
+    await postgresQuery("ROLLBACK");
+  }
+}
+
+test("SQLite: a refresh-policy-only manifest update preserves the stream-shape revision", async () => {
+  initDb(":memory:");
+  try {
+    await assertRefreshPolicyOnlyUpdateKeepsStreamRevision();
+  } finally {
+    closeDb();
+  }
 });
 
 async function assertLiveIndexWriterFencedByManifestRevision(): Promise<void> {
