@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { startServer } from "../server/index.ts";
+import { localOwnerCredentialRevealProofHeader } from "../server/routes/owner-credential-reveal.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const OWNER_CLIENT_ID = "cli_longview";
@@ -68,6 +69,28 @@ async function withServer(
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+  }
+}
+
+async function withEnvironment<T>(values: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   }
 }
 
@@ -130,14 +153,26 @@ async function issueOwnerToken(
 }
 
 test("GET /v1/owner/credential/reveal returns the process's configured owner password to an owner bearer", async () => {
-  await withServer({ ownerAuthPassword: TEST_OWNER_PASSWORD }, async ({ asUrl, rsUrl }) => {
-    const ownerToken = await issueOwnerToken(asUrl, OWNER_SUBJECT_ID, TEST_OWNER_PASSWORD);
-    const { body, status } = await fetchJson(`${rsUrl}/v1/owner/credential/reveal`, {
-      headers: { Authorization: `Bearer ${ownerToken}` },
-    });
-    assert.equal(status, 200);
-    assert.deepEqual(body, { data: { password: TEST_OWNER_PASSWORD }, object: "owner_credential_reveal" });
-  });
+  await withEnvironment(
+    {
+      PDPP_MANAGED_DESKTOP_HOST: "1",
+      PDPP_OWNER_CREDENTIAL_REVEAL_PROOF: "test-local-proof",
+      PDPP_OWNER_PASSWORD_SOURCE: "desktop_generated",
+    },
+    async () => {
+      await withServer({ ownerAuthPassword: TEST_OWNER_PASSWORD }, async ({ asUrl, rsUrl }) => {
+        const ownerToken = await issueOwnerToken(asUrl, OWNER_SUBJECT_ID, TEST_OWNER_PASSWORD);
+        const { body, status } = await fetchJson(`${rsUrl}/v1/owner/credential/reveal`, {
+          headers: {
+            Authorization: `Bearer ${ownerToken}`,
+            ...localOwnerCredentialRevealProofHeader("test-local-proof"),
+          },
+        });
+        assert.equal(status, 200);
+        assert.deepEqual(body, { data: { password: TEST_OWNER_PASSWORD }, object: "owner_credential_reveal" });
+      });
+    }
+  );
 });
 
 test("GET /v1/owner/credential/reveal rejects a request with no bearer token", async () => {
@@ -156,13 +191,13 @@ test("GET /v1/owner/credential/reveal rejects a client-kind bearer (not owner-ki
   });
 });
 
-test("GET /v1/owner/credential/reveal returns 404 when owner auth is disabled on this deployment", async () => {
+test("GET /v1/owner/credential/reveal returns unavailable on a server deployment without owner auth", async () => {
   await withServer({ ownerAuthPassword: "" }, async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
     const { body, status } = await fetchJson(`${rsUrl}/v1/owner/credential/reveal`, {
       headers: { Authorization: `Bearer ${ownerToken}` },
     });
     assert.equal(status, 404);
-    assert.equal((body as { error: { code: string } }).error.code, "owner_auth_disabled");
+    assert.equal((body as { error: { code: string } }).error.code, "owner_credential_reveal_unavailable");
   });
 });

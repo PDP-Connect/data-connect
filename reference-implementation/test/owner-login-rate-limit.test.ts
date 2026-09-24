@@ -105,6 +105,110 @@ test("owner login rate limit: different source IPs are tracked independently", (
   assert.equal(limiter.check(owner), null, "a different remote IP is unaffected by another IP's throttle");
 });
 
+test("owner login rate limit: Cloudflare tunnel marker from loopback gets the remote limit", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, windowMs: 60_000 });
+  const req: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-pdpp-owner-login-tunnel-client-ip": "198.51.100.10",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  assert.equal(limiter.check(req), null);
+  assert.ok(limiter.check(req), "tunnel marker is classified at the strict remote ceiling");
+});
+
+test("owner login rate limit: Cloudflare tunnel client IPs get distinct buckets", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, windowMs: 60_000 });
+  const visitorA: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-pdpp-owner-login-tunnel-client-ip": "198.51.100.10",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  const visitorB: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-pdpp-owner-login-tunnel-client-ip": "198.51.100.11",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  assert.equal(limiter.check(visitorA), null);
+  assert.ok(limiter.check(visitorA), "first tunnel visitor is throttled");
+  assert.equal(limiter.check(visitorB), null, "second tunnel visitor has its own bucket");
+});
+
+test("owner login rate limit: spoofed forwarded IP from an untrusted peer is ignored", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, trustedProxies: "10.0.0.1", windowMs: 60_000 });
+  const req: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "owner.example-tunnel.dev",
+      "x-forwarded-for": "198.51.100.99",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(limiter.check(req), null, `untrusted loopback caller keeps local attempt ${i + 1}`);
+  }
+  assert.ok(limiter.check(req), "untrusted forwarded IP did not move the request into a spoofed remote bucket");
+});
+
+test("owner login rate limit: private tunnel marker from an untrusted direct peer is ignored", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, windowMs: 60_000 });
+  const req: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-forwarded-for": "198.51.100.99",
+      "x-pdpp-owner-login-tunnel-client-ip": "198.51.100.10",
+    },
+    socket: { remoteAddress: "192.168.1.50" },
+  };
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(limiter.check(req), null, `untrusted direct caller keeps local attempt ${i + 1}`);
+  }
+  assert.ok(limiter.check(req), "forged private marker did not grant a remote per-client bucket");
+});
+
+test("owner login rate limit: forged public Host and forwarded headers from a direct peer do not rotate buckets", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, trustedProxies: "10.0.0.1", windowMs: 60_000 });
+  const first: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-forwarded-for": "198.51.100.10",
+      "x-forwarded-proto": "https",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  const second: OwnerLoginRateLimitRequest = {
+    headers: {
+      host: "vault.example.com",
+      "x-forwarded-for": "198.51.100.11",
+      "x-forwarded-proto": "https",
+    },
+    socket: { remoteAddress: "127.0.0.1" },
+  };
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(limiter.check(i % 2 === 0 ? first : second), null, `direct spoof attempt ${i + 1} stays local`);
+  }
+  assert.ok(limiter.check(first), "forged forwarded IPs from an untrusted direct peer share the real peer bucket");
+});
+
+test("owner login rate limit: trusted proxy forwarded IPs get separate remote buckets", () => {
+  const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 5, trustedProxies: "10.0.0.1", windowMs: 60_000 });
+  const visitorA: OwnerLoginRateLimitRequest = {
+    headers: { host: "owner.example.com", "x-forwarded-for": "198.51.100.10" },
+    socket: { remoteAddress: "10.0.0.1" },
+  };
+  const visitorB: OwnerLoginRateLimitRequest = {
+    headers: { host: "owner.example.com", "x-forwarded-for": "198.51.100.11" },
+    socket: { remoteAddress: "10.0.0.1" },
+  };
+  assert.equal(limiter.check(visitorA), null);
+  assert.ok(limiter.check(visitorA), "first trusted-proxy visitor is throttled");
+  assert.equal(limiter.check(visitorB), null, "second trusted-proxy visitor has its own bucket");
+});
+
 test("owner login rate limit: falls back to socket/connection remoteAddress when req.ip is absent", () => {
   const limiter = createOwnerLoginRateLimiter({ max: 1, maxLocal: 100, windowMs: 60_000 });
   const req: OwnerLoginRateLimitRequest = {

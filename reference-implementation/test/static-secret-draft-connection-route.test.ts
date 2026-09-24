@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
@@ -10,6 +10,14 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
+import { createFirstSyncConnectorFixture } from "./helpers/first-sync-connector-fixture.ts";
+
+// Tests whose flow starts a first sync need a runnable connector. Catalog
+// connectors run only from a verified install, so these route tests supply a
+// fixture connector instead of reaching a provider.
+const firstSyncConnector = createFirstSyncConnectorFixture();
+after(() => firstSyncConnector.cleanup());
+const FIRST_SYNC_SERVER_OPTIONS = { connectorPathResolver: () => firstSyncConnector.connectorPath };
 
 const REGEXP_1 = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
@@ -73,7 +81,10 @@ function permissiveProber() {
   });
 }
 
-async function withServer(fn: (harness: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (harness: { asUrl: string; rsUrl: string }) => Promise<void>,
+  extraOptions: { connectorPathResolver?: () => string } = {}
+): Promise<void> {
   const server = await startServer({
     asPort: 0,
     autoEnrollEligibleSchedules: false,
@@ -83,6 +94,7 @@ async function withServer(fn: (harness: { asUrl: string; rsUrl: string }) => Pro
     quiet: true,
     rsPort: 0,
     staticSecretCredentialProber: permissiveProber(),
+    ...extraOptions,
   });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -827,7 +839,7 @@ test("credential captured with first sync active reads collecting on /_ref/conne
       assert.equal(ownerStateOf(row)?.resolver, "collecting");
       assert.notEqual(ownerStateOf(row)?.resolver, "healthy");
       assert.notEqual(ownerStateOf(row)?.resolver, "system_degraded");
-    });
+    }, FIRST_SYNC_SERVER_OPTIONS);
   });
 });
 

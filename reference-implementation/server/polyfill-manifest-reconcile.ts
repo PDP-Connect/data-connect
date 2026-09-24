@@ -11,12 +11,16 @@
  * declarations (and keep breaking records pagination).
  *
  * Scope:
- *   - When the development polyfill package is present, only its first-party
- *     manifests are reconciled. Connectors that are NOT in this shipped set
- *     are left alone so user-custom manifests are never overwritten.
- *   - The production Docker image has no polyfill package. Its verified
- *     catalog installer registers each installed manifest directly, so this
- *     optional reconciliation path is a no-op there.
+ *   - The shipped set is the manifest of every active connector install whose
+ *     recorded bytes still verify (`listVerifiedActiveConnectors`). Connectors
+ *     that are NOT installed are left alone so user-custom manifests are never
+ *     overwritten, and an install that fails verification is reported and
+ *     skipped, never read.
+ *   - The verified catalog installer also registers each manifest when it
+ *     installs it; this pass repairs persisted rows that drifted from the
+ *     installed bytes afterwards.
+ *   - `manifestsDir` replaces the installed set with a directory of manifest
+ *     JSON files, for tests and one-off operator repairs.
  *   - Comparison is a deep structural equality against the persisted
  *     manifest; any difference triggers a fresh `registerConnector()`
  *     call, which is idempotent and runs the full validation + lexical
@@ -30,6 +34,11 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  type ConnectorInstallStore,
+  createConnectorInstallStore,
+  listVerifiedActiveConnectors,
+} from "./connector-install/index.ts";
 
 const JSON_EXTENSION_RE = /\.json$/;
 
@@ -65,23 +74,6 @@ const deleteAllRecordsForConnectorTyped: DeleteAllRecordsForConnector =
   deleteAllRecordsForConnector as DeleteAllRecordsForConnector;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Resolve the optional polyfill package's manifests directory through its
- * `./manifests` export. The production image has no such package, so the
- * returned sentinel path makes this reconciliation path a no-op there.
- */
-export function defaultPolyfillManifestsDir(): string {
-  try {
-    const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
-    return join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
-  } catch {
-    // The production Docker image has no polyfill package. An unavailable
-    // directory makes reconciliation a documented no-op; catalog-installed
-    // manifests are registered by the verified install service instead.
-    return resolve(__dirname, "..", "polyfill-connectors-not-installed", "manifests");
-  }
-}
 
 /**
  * Resolve the shipped reference-fixture manifests directory. These are
@@ -153,7 +145,10 @@ export interface ReconcileOptions {
   enabled?: boolean;
   /** Register shipped unlisted manifests for an explicit UAT deployment. */
   includeUnlisted?: boolean;
+  /** Install store whose verified active records are the shipped set. */
+  installStore?: ConnectorInstallStore;
   log?: (line: string) => void;
+  /** Reconcile this directory of manifest JSON files instead of the installed set. */
   manifestsDir?: string;
   /**
    * Directory containing the reference-fixture manifests served by the
@@ -358,8 +353,13 @@ async function applyShippedManifest(
 interface EntryContext {
   includeUnlisted: boolean;
   log: ReconcileLog;
-  manifestsDir: string;
   referenceFixtureFingerprints: Map<string, ManifestFingerprint>;
+}
+
+/** One shipped manifest to reconcile: a name for logs and a loader. */
+interface ShippedManifestSource {
+  readonly entryName: string;
+  readonly load: () => Promise<PolyfillManifest | null>;
 }
 
 /**
@@ -650,8 +650,9 @@ async function reconcileChangedManifestEntry(
   };
 }
 
-async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<EntryDelta> {
-  const shipped = await loadShippedManifest(ctx.manifestsDir, entryName, ctx.log);
+async function reconcileEntry(source: ShippedManifestSource, ctx: EntryContext): Promise<EntryDelta> {
+  const { entryName } = source;
+  const shipped = await source.load();
   const loadedEntry = validateOrReconcileInvalidManifestEntry(shipped);
   if (loadedEntry.kind === "invalid") {
     return loadedEntry.delta;
@@ -682,9 +683,8 @@ async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<Ent
     // are exercised (or explicitly promoted to listed=true via a future
     // manifest edit).
     //
-    // Safety: this branch only runs for files inside the first-party
-    // shipped manifests dir, so user-custom connectors are never
-    // auto-seeded by reconciliation. Registration is NOT schedule
+    // Safety: this branch only runs for manifests in the shipped set, so
+    // user-custom connectors are never auto-seeded by reconciliation. Registration is NOT schedule
     // enablement — schedules still require an explicit operator action,
     // and the scheduler eligibility filter (refresh_policy.background_safe)
     // continues to gate background runs independently.
@@ -709,6 +709,55 @@ async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<Ent
   return reconcileChangedManifestEntry(loadedEntry.shipped, persisted, connectorId, entryName, ctx);
 }
 
+async function directoryManifestSources(
+  manifestsDir: string,
+  log: ReconcileLog
+): Promise<{ entries: ShippedManifestSource[] } | { disabled_reason: string }> {
+  // readdir's TS overload defaults the dirent buffer parameter to
+  // NonSharedBuffer. We pass the encoding explicitly so the result
+  // is typed as `Dirent<string>[]` (entry.name is a string).
+  let entries: Dirent<string>[];
+  try {
+    entries = await readdir(manifestsDir, { encoding: "utf8", withFileTypes: true });
+  } catch (err) {
+    log(`[manifest-reconcile] manifests dir unavailable: ${errorMessage(err)}`);
+    return { disabled_reason: "manifests_dir_unavailable" };
+  }
+  return {
+    entries: entries
+      .filter((entry) => entry.isFile() && JSON_EXTENSION_RE.test(entry.name))
+      .map((entry) => ({
+        entryName: entry.name,
+        load: () => loadShippedManifest(manifestsDir, entry.name, log),
+      })),
+  };
+}
+
+async function installedManifestSources(
+  store: ConnectorInstallStore,
+  log: ReconcileLog
+): Promise<{ entries: ShippedManifestSource[] } | { disabled_reason: string }> {
+  let listed: Awaited<ReturnType<typeof listVerifiedActiveConnectors>>;
+  try {
+    listed = await listVerifiedActiveConnectors(store);
+  } catch (err) {
+    log(`[manifest-reconcile] connector install store unavailable: ${errorMessage(err)}`);
+    return { disabled_reason: "install_store_unavailable" };
+  }
+  const invalid = listed.invalid.map(({ connectorId, reason }) => ({
+    entryName: connectorId,
+    load: () => {
+      log(`[manifest-reconcile] skipping unverified install ${connectorId}: ${reason}`);
+      return Promise.resolve(null);
+    },
+  }));
+  const verified = listed.verified.map((record) => ({
+    entryName: `${record.connectorId}@${record.digest}`,
+    load: () => Promise.resolve(record.manifest as PolyfillManifest),
+  }));
+  return { entries: [...verified, ...invalid] };
+}
+
 /**
  * Reconcile persisted connector manifests against the shipped
  * first-party set. Returns a summary counter for the caller's log.
@@ -717,7 +766,8 @@ export async function reconcilePolyfillManifests(opts: ReconcileOptions = {}): P
   const {
     enabled = true,
     includeUnlisted = false,
-    manifestsDir = defaultPolyfillManifestsDir(),
+    installStore,
+    manifestsDir,
     referenceFixturesDir = defaultReferenceFixturesDir(),
     log = () => {
       /* default no-op logger */
@@ -732,29 +782,21 @@ export async function reconcilePolyfillManifests(opts: ReconcileOptions = {}): P
     return { ...EMPTY_SUMMARY, disabled_reason: "env_skip" };
   }
 
-  // readdir's TS overload defaults the dirent buffer parameter to
-  // NonSharedBuffer. We pass the encoding explicitly so the result
-  // is typed as `Dirent<string>[]`, which is what the rest of this
-  // function operates on (entry.name is a string).
-  let entries: Dirent<string>[];
-  try {
-    entries = await readdir(manifestsDir, { encoding: "utf8", withFileTypes: true });
-  } catch (err) {
-    log(`[manifest-reconcile] manifests dir unavailable: ${errorMessage(err)}`);
-    return { ...EMPTY_SUMMARY, disabled_reason: "manifests_dir_unavailable" };
+  const sources = manifestsDir
+    ? await directoryManifestSources(manifestsDir, log)
+    : await installedManifestSources(installStore ?? createConnectorInstallStore(), log);
+  if ("disabled_reason" in sources) {
+    return { ...EMPTY_SUMMARY, disabled_reason: sources.disabled_reason };
   }
 
   const referenceFixtureFingerprints = await loadReferenceFixtureFingerprints(referenceFixturesDir);
-  const ctx: EntryContext = { includeUnlisted, log, manifestsDir, referenceFixtureFingerprints };
+  const ctx: EntryContext = { includeUnlisted, log, referenceFixtureFingerprints };
   const summary: ReconcileSummary = { ...EMPTY_SUMMARY };
 
-  for (const entry of entries) {
-    if (!(entry.isFile() && JSON_EXTENSION_RE.test(entry.name))) {
-      continue;
-    }
+  for (const source of sources.entries) {
     summary.scanned += 1;
     // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-    applyDelta(summary, await reconcileEntry(entry.name, ctx));
+    applyDelta(summary, await reconcileEntry(source, ctx));
   }
   return summary;
 }

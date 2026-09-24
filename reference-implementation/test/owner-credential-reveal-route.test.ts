@@ -55,6 +55,7 @@ function mount(readOwnerPassword: () => string | null): FakeApp["routes"] {
         .status(500)
         .json({ error: { message: err instanceof Error ? err.message : String(err) } });
     },
+    isEligibleForReveal: () => true,
     readOwnerPassword,
     requireOwner: (...args: unknown[]) => (args[2] as () => void)(),
     requireToken: (...args: unknown[]) => (args[2] as () => void)(),
@@ -117,6 +118,7 @@ test("GET reveal registers requireToken and requireOwner ahead of the handler", 
   };
   mountOwnerCredentialReveal(app as unknown as Parameters<typeof mountOwnerCredentialReveal>[0], {
     handleError: () => {},
+    isEligibleForReveal: () => true,
     readOwnerPassword: () => "irrelevant",
     requireOwner: () => {},
     requireToken: () => {},

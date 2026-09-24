@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from "node:child_process";
-import { chmod, cp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +22,17 @@ const workspaceRoot = path.resolve(packageRoot, "..");
  * relative imports with no further path surgery here.
  */
 const BUILT_WORKSPACE_DEPENDENCIES = ["collector-runtime", "connector-protocol"];
+
+/**
+ * data-connectors' installer core, which fetches and Sigstore-verifies
+ * Collection Profiles (see src/managed/collection-profiles.ts). Its package,
+ * `@opendatalabs/data-connectors-tools`, is a git dependency that is not on
+ * the npm registry, so its JavaScript is copied into `dist/<this dir>/` and
+ * the specifier is rewritten to it, like the workspace packages above. Its
+ * own npm dependencies are declared in this package's `dependencies`.
+ */
+const INSTALLER_CORE_SPECIFIER = "@opendatalabs/data-connectors-tools/installer-core";
+const INSTALLER_CORE_DIST_DIR = "connector-installer-core";
 
 const shortShaPattern = /^[0-9a-f]{7,40}$/;
 const testFilePattern = /(^|\/).+\.test\.js$/;
@@ -66,29 +77,35 @@ const declarationKeep = new Set(
  * `@pdpp/collector-runtime` and `@pdpp/connector-protocol` (each optionally
  * with a `/<subpath>`, e.g. `@pdpp/connector-protocol/http-retry`), and
  * `@pdpp/reference-contract/common` (the one subpath `local-device-client.ts`
- * imports for `canonicalTerminalRunCommitEnvelope`).
+ * imports for `canonicalTerminalRunCommitEnvelope`), and the installer core
+ * (see `INSTALLER_CORE_SPECIFIER`).
  *
  * These specifiers are CORRECT for every other in-repo consumer, which
  * resolves them through the workspace's own `node_modules` — this is a real
  * dependency relationship between packages, not vendoring. But this
  * published tarball ships none of the three as an installable `node_modules`
  * entry (see `validate-package.ts`'s `@pdpp/*`-dependency ban), and the
- * bare-specifier files themselves are vendored throughout the tree (copied
- * `collector-runtime`/`connector-protocol` dist output, plus every vendored
- * `polyfill-connectors` connector and runtime file that imports either
- * package directly), not confined to one directory. `resolveVendoredTarget`
+ * bare-specifier files themselves are spread through the tree (copied
+ * `collector-runtime`/`connector-protocol` dist output and this package's
+ * own compiled files), not confined to one directory. `resolveVendoredTarget`
  * below computes the right relative path from EACH file's own location.
  */
 const CROSS_PACKAGE_BARE_SPECIFIER_PATTERNS: readonly { packageDir: string; pattern: RegExp }[] = [
   { packageDir: "collector-runtime", pattern: /(["'])@pdpp\/collector-runtime(\/[^"']+)?\1/g },
   { packageDir: "connector-protocol", pattern: /(["'])@pdpp\/connector-protocol(\/[^"']+)?\1/g },
   { packageDir: "reference-contract", pattern: /(["'])@pdpp\/reference-contract\/common\1/g },
+  {
+    packageDir: INSTALLER_CORE_DIST_DIR,
+    pattern: /(["'])@opendatalabs\/data-connectors-tools\/installer-core\1/g,
+  },
 ];
 
 /** Relative path (no extension) from a vendored file's own directory to a rewritten bare specifier's target module. */
 function resolveVendoredTarget(fileDir: string, packageDir: string, subpath: string | undefined): string {
   let targetFile: string;
-  if (packageDir === "reference-contract") {
+  if (packageDir === INSTALLER_CORE_DIST_DIR) {
+    targetFile = path.join(distRoot, packageDir, "index");
+  } else if (packageDir === "reference-contract") {
     targetFile = path.join(distRoot, packageDir, "src", "common", "index");
   } else if (subpath) {
     targetFile = path.join(distRoot, packageDir, "src", subpath);
@@ -101,7 +118,6 @@ function resolveVendoredTarget(fileDir: string, packageDir: string, subpath: str
 
 await copyBuiltWorkspaceDependencies();
 await rewriteDeclarations(distRoot);
-await replaceBrowserLauncherWithPublishedGuard();
 await rm(path.join(distRoot, ".tsbuildinfo"), { force: true });
 await chmod(path.join(distRoot, "local-collector", "bin", "pdpp-local-collector.js"), 0o755);
 await stampBuildInfo();
@@ -114,9 +130,8 @@ await stampBuildInfo();
  * tsconfig.build.json); it consumes their independently built output, which
  * `package.json`'s `build` script builds first.
  *
- * After copying, every vendored file in the whole `dist/` tree — the copied
- * packages themselves, plus every vendored `polyfill-connectors` connector
- * and runtime file that imports either package directly — gets its
+ * After copying, every file in the whole `dist/` tree — the copied
+ * packages themselves and this package's own compiled files — gets its
  * unresolvable cross-package bare specifiers rewritten to the relative path
  * the vendored copy actually lands at (see
  * `CROSS_PACKAGE_BARE_SPECIFIER_PATTERNS`'s doc comment).
@@ -128,7 +143,19 @@ async function copyBuiltWorkspaceDependencies(): Promise<void> {
     // biome-ignore lint/performance/noAwaitInLoops: Two short-lived directory copies; sequencing keeps failures attributable to the dependency that produced them.
     await cp(sourceDist, targetDir, { recursive: true });
   }
+  await copyInstallerCore();
   await rewriteCrossPackageBareSpecifiers(distRoot);
+}
+
+/** Copy the installer core's modules and the Apache-2.0 licence they ship under. */
+async function copyInstallerCore(): Promise<void> {
+  const sourceDir = path.dirname(fileURLToPath(import.meta.resolve(INSTALLER_CORE_SPECIFIER)));
+  const packageDir = path.resolve(sourceDir, "..", "..");
+  const targetDir = path.join(distRoot, INSTALLER_CORE_DIST_DIR);
+  await mkdir(targetDir, { recursive: true });
+  const modules = (await readdir(sourceDir)).filter((name) => name.endsWith(".mjs") && !name.includes(".test."));
+  await Promise.all(modules.map((name) => cp(path.join(sourceDir, name), path.join(targetDir, name))));
+  await cp(path.join(packageDir, "LICENSE"), path.join(targetDir, "LICENSE"));
 }
 
 async function rewriteCrossPackageBareSpecifiers(dir: string): Promise<void> {
@@ -156,10 +183,14 @@ async function rewriteCrossPackageBareSpecifiers(dir: string): Promise<void> {
         const isDeclaration = entry.name.endsWith(".d.ts");
         let rewritten = text;
         for (const { packageDir, pattern } of CROSS_PACKAGE_BARE_SPECIFIER_PATTERNS) {
+          let extension = isDeclaration ? "ts" : "js";
+          if (packageDir === INSTALLER_CORE_DIST_DIR) {
+            extension = "mjs";
+          }
           rewritten = rewritten.replace(
             pattern,
             (_match, quote: string, subpath: string | undefined) =>
-              `${quote}${resolveVendoredTarget(dir, packageDir, subpath)}.${isDeclaration ? "ts" : "js"}${quote}`
+              `${quote}${resolveVendoredTarget(dir, packageDir, subpath)}.${extension}${quote}`
           );
         }
         if (rewritten !== text) {
@@ -266,15 +297,7 @@ async function rewriteDeclarations(dir: string): Promise<void> {
       continue;
     }
     const rel = path.relative(distRoot, full);
-    if (
-      testFilePattern.test(rel) ||
-      [
-        "polyfill-connectors/src/pilot-fixture-test-helper.js",
-        "polyfill-connectors/src/profile-lock.js",
-        "polyfill-connectors/src/runtime-environment.js",
-        "polyfill-connectors/src/test-harness.js",
-      ].includes(path.normalize(rel))
-    ) {
+    if (testFilePattern.test(rel)) {
       deletes.push(rm(full, { force: true }));
       continue;
     }
@@ -289,39 +312,4 @@ async function rewriteDeclarations(dir: string): Promise<void> {
   }
 
   await Promise.all([...deletes, ...updates, ...dirs.map((d) => rewriteDeclarations(d))]);
-}
-
-/**
- * Replace the private browser launcher with a closure-complete, fail-closed
- * facade. `connector-runtime.js` keeps a literal lazy import so the generic
- * runtime can be shared with the workspace, but this package deliberately
- * ships only filesystem-class connectors. Leaving the target absent turns an
- * unsupported browser request into ERR_MODULE_NOT_FOUND instead of the typed,
- * actionable capability failure promised by the package boundary.
- */
-async function replaceBrowserLauncherWithPublishedGuard(): Promise<void> {
-  const target = path.join(distRoot, "polyfill-connectors", "src", "browser-launch.js");
-  const body = `const BROWSER_RUNTIME_UNAVAILABLE_CODE = "browser_runtime_unavailable";
-class HeadedBrowserUnavailableError extends Error {
-    constructor({ message }) {
-        super(message);
-        this.name = "HeadedBrowserUnavailableError";
-        this.code = BROWSER_RUNTIME_UNAVAILABLE_CODE;
-    }
-}
-class CdpAttachSessionRaceExhaustedError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = "CdpAttachSessionRaceExhaustedError";
-        this.code = "browser_surface_attach_exhausted";
-    }
-}
-async function acquireBrowserForConnector() {
-    throw new HeadedBrowserUnavailableError({
-        message: "browser runtime unavailable: @pdpp/local-collector bundles filesystem-class connectors only; run browser-bound connectors from the PDPP monorepo until a browser-collector publishability decision lands.",
-    });
-}
-export { CdpAttachSessionRaceExhaustedError, HeadedBrowserUnavailableError, acquireBrowserForConnector };
-`;
-  await writeFile(target, body);
 }

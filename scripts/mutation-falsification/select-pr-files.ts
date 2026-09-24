@@ -638,6 +638,37 @@ export function escapesCohortRoot(testPath: SelectedFile, testSource: string): b
   // larger than this climbs past the root, which is what leaves the sandbox.
   const depth = testPath.split("/").length - 1
 
+  // Follow simple `join(alias, "relative/path")` bindings as well as direct
+  // literals. Tests often derive the repository root through an intermediate
+  // cohort-root constant; counting each `..` independently misses that the
+  // second join starts at the root rather than at the test directory.
+  const aliasDepths = new Map([["__dirname", depth]])
+  let foundAlias = true
+  while (foundAlias) {
+    foundAlias = false
+    for (const [, alias, base, relativePath] of testSource.matchAll(
+      /(?:const|let)\s+([\w$]+)\s*=\s*join\(\s*([\w$]+)\s*,\s*["'`]([^"'`]*)["'`]\s*\)/g
+    )) {
+      const baseDepth = aliasDepths.get(base)
+      if (baseDepth === undefined || aliasDepths.has(alias)) {
+        continue
+      }
+      let aliasDepth = baseDepth
+      for (const segment of relativePath.split("/")) {
+        if (segment === "..") {
+          aliasDepth -= 1
+        } else if (segment !== "" && segment !== ".") {
+          aliasDepth += 1
+        }
+      }
+      if (aliasDepth < 0) {
+        return true
+      }
+      aliasDepths.set(alias, aliasDepth)
+      foundAlias = true
+    }
+  }
+
   // The traversals these tests build with `join(__dirname, "../../...")`. Each
   // literal is measured against the budget rather than matched at a fixed
   // depth, because the same `../../` escapes from `scripts/` but not from

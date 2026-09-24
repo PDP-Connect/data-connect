@@ -675,6 +675,14 @@ const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-impleme
     expect(escapesCohortRoot("scripts/ci-console-prebuild.test.ts", source)).toBe(true)
   })
 
+  it("detects an above-root path reached through a directory alias", () => {
+    const source = `const __dirname = dirname(fileURLToPath(import.meta.url));
+const REFERENCE_IMPL_DIR = join(__dirname, "..");
+const REPO_ROOT = join(REFERENCE_IMPL_DIR, "..");
+await runCommand("npm", ["--prefix", "apps/console", "run", "build"], { cwd: REPO_ROOT });`
+    expect(escapesCohortRoot("test/composed-origin.test.ts", source)).toBe(true)
+  })
+
   it("measures the climb against the test's own depth, not a fixed one", () => {
     // The same literal escapes from `scripts/` but stays inside the root from
     // one directory deeper, so depth is what decides.

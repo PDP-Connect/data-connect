@@ -121,6 +121,9 @@ export interface DataLoadViolation {
 const MANIFEST_ROOTS = [
   "reference-implementation/fixtures/seed-manifests",
   "node_modules/@pdpp/polyfill-connectors/manifests",
+  // The pinned Collection Profiles @pdpp/local-collector installs, and a pin
+  // record per profile; see server/local-collector-profiles.ts.
+  "reference-implementation/server/local-collector-profiles",
 ];
 
 /**
@@ -154,7 +157,7 @@ const MANIFEST_ROOTS = [
  */
 const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
 
-const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:107";
+const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:99";
 
 /**
  * Closed, human-reviewed allowlist of call sites (file + 1-indexed line of
@@ -240,13 +243,11 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // (see this file's own module doc comment), not connector catalog data.
   "reference-implementation/server/connector-install/local-source.ts:150",
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
-  // pass join(<manifest-root-derived-dir>, entryName) (defaultPolyfillManifestsDir()
-  // / defaultReferenceFixturesDir(), both resolve()'d off the two sanctioned
-  // manifest roots — defaultPolyfillManifestsDir()'s own
-  // import.meta.resolve("@pdpp/polyfill-connectors/manifests") anchor is now
-  // separately recognized by this scanner's resolver, see
-  // `isPolyfillConnectorsPackageSrcDirExpr`; that fix closes THAT anchor
-  // shape, not this one), but through 2 hops of parameter indirection
+  // pass join(<manifest-dir>, entryName), where the dir is
+  // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
+  // fixture root) or a caller-supplied `manifestsDir` option (tests and
+  // one-off operator repairs; the default shipped set is the verified
+  // install store, read without this function), but through 2 hops of parameter indirection
   // (readManifestJson's own `path` param, fed by loadReferenceFixtureFingerprints's/
   // reconcilePolyfillManifests's `referenceFixturesDir`/`manifestsDir` params) —
   // one hop deeper than this scanner's bounded parameter resolver follows.
@@ -257,6 +258,10 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // Re-derived 2026-09-17: the call site moved from line 99 to 107 after the
   // docker-connectors-from-catalog / developer-connector-sources merges
   // (2026-09-16) added lines above it -- the function itself is unchanged.
+  // Re-derived 2026-09-23: the call site moved from line 107 to 99 when the
+  // default shipped set moved to the verified install store and
+  // defaultPolyfillManifestsDir() was removed -- the function itself is
+  // unchanged.
   // This entry is line-pinned by design (see this array's own doc comment
   // above); it must be re-derived whenever an edit anywhere above the call
   // site shifts it.

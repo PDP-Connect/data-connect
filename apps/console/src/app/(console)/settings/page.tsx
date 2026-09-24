@@ -5,6 +5,7 @@ import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
+import { canShowOwnerCredentialRevealSetting } from "../lib/owner-credential-client.ts"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
@@ -16,8 +17,9 @@ export const metadata: Metadata = {
   title: "Settings",
 }
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
   const identity = getProductIdentity()
+  const showOwnerCredentialReveal = await canShowOwnerCredentialRevealSetting()
 
   return (
     <RecordroomShellWithPalette>
@@ -38,12 +40,14 @@ export default function SettingsPage() {
         >
           <RemoteAccessSetting />
         </Section>
-        <Section
-          description="See the password another device needs to sign in to this Personal Server."
-          title="Owner password"
-        >
-          <OwnerCredentialSetting />
-        </Section>
+        {showOwnerCredentialReveal ? (
+          <Section
+            description="See the password another device needs to sign in to this Personal Server."
+            title="Owner password"
+          >
+            <OwnerCredentialSetting />
+          </Section>
+        ) : null}
         <Section
           description="Control how DataConnect starts on this computer."
           title="Desktop"
