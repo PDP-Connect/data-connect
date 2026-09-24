@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { after, test } from "node:test";
+import { after as afterTest, test } from "node:test";
 
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
@@ -1262,8 +1262,8 @@ test("runCollectorConnector rejects promptly when the connector command is missi
 
 const tempDirs = new Set<string>();
 
-after(async () => {
-  await Promise.all([...tempDirs].map((dir) => rm(dir, { recursive: true, force: true })));
+afterTest(async () => {
+  await Promise.all([...tempDirs].map((dir) => rm(dir, { force: true, recursive: true })));
 });
 
 async function createTempDir(prefix: string): Promise<string> {
