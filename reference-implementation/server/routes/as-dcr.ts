@@ -87,7 +87,7 @@ export interface MountAsDcrContext {
   /** IP-keyed rate limiter for public (unauthenticated) registrations. */
   publicDcrRateLimiter: PublicDcrRateLimiter;
   /** Reads the owner session from the request, returns null if absent. */
-  readOwnerSession: (req: RouteRequest) => { sub?: string } | null;
+  readOwnerSession: (req: RouteRequest) => Promise<{ sub?: string } | null> | { sub?: string } | null;
   /** Auth-layer capability: register a new dynamic client. */
   registerDynamicClient: Parameters<typeof executeAsDcrRegister>[1]["registerDynamicClient"];
   /** Owner-session enforcement middleware; rejects the request if not authenticated. */
@@ -117,7 +117,7 @@ export function mountAsDcr(app: AppLike, ctx: MountAsDcrContext): void {
     res.setHeader("Request-Id", traceContext.request_id);
     ctx.setReferenceTraceId(res, traceContext.trace_id);
 
-    const ownerSession = ctx.readOwnerSession(req);
+    const ownerSession = await ctx.readOwnerSession(req);
     const authorizationHeader = typeof req.headers.authorization === "string" ? req.headers.authorization : null;
 
     if (!(authorizationHeader || ownerSession)) {
