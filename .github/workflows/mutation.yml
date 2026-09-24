@@ -231,8 +231,11 @@ jobs:
         run: |
           set -uo pipefail
           mapfile -t mutate < <(node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).mutate.forEach((f)=>console.log(f))' "reports/mutation/${COHORT}/intent.json")
+          mapfile -t test_files < "reports/mutation/${COHORT}/selected-tests.txt"
           printf 'Mutating %d file(s):\n' "${#mutate[@]}"
           printf '  %s\n' "${mutate[@]}"
+          printf 'Selected %d test file(s):\n' "${#test_files[@]}"
+          printf '  %s\n' "${test_files[@]}"
 
           # Run from the cohort root. Every relative path in play -- the mutate
           # globs, the configuration's reporter paths, its selection lookup and
@@ -261,7 +264,11 @@ jobs:
           # the root.
           cd "${COHORT_ROOT}" || exit 1
           stryker_exit=0
-          npx stryker run "${COHORT_CONFIG_RELATIVE}" --mutate "$(IFS=,; echo "${mutate[*]}")" || stryker_exit=$?
+          test_files_option=()
+          if [[ "${COHORT}" == "scripts" ]] && (( ${#test_files[@]} > 0 )); then
+            test_files_option=(--testFiles "$(IFS=,; echo "${test_files[*]}")")
+          fi
+          npx stryker run "${COHORT_CONFIG_RELATIVE}" --mutate "$(IFS=,; echo "${mutate[*]}")" "${test_files_option[@]}" || stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
           exit "${stryker_exit}"
 

@@ -3,7 +3,7 @@
 
 // Offline unit tests for the pure core of railway-mcp-query-smoke.ts.
 //
-// These run with zero dependencies and no network/Docker (node --test), exactly
+// These run with zero dependencies and no network/Docker under Vitest, exactly
 // like check-railway-deploy-env.test.ts. They prove the seed-corpus shape, the
 // MCP JSON-RPC framing, the dual-transport response parser, the seeded-record
 // assertion, the anonymous-refusal classifier, and the owner-session form
@@ -12,7 +12,7 @@
 // real composed origin (see deploy/railway/README.md), not in CI.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 
 import { extractCsrfFieldValue, findSetCookiePair } from "./lib/owner-session.ts";
 import {

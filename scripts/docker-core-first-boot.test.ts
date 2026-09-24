@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { type TestContext, test } from "node:test";
+import { afterEach, test } from "vitest";
 
 import {
   buildFirstBootBanner,
@@ -34,12 +34,19 @@ const PERSIST_FAILURE_BANNER_PATTERN = /could not be persisted|WARNING/;
 const COULD_NOT_PERSIST_LOG_PATTERN = /could not persist/;
 const CONFIGURED_ORIGIN_PATTERN = /https:\/\/pdpp\.example\.com\//;
 const OWNER_ONLY_MODE = 0o600;
+const cleanupDirs: string[] = [];
 // biome-ignore lint/suspicious/noBitwiseOperators: st.mode carries permission bits; masking with 0o777 is the standard idiom for reading a file's permission bits, not a confusable arithmetic operator.
 const permissionBits = (mode: number) => mode & 0o777;
 
-function makeDataDir(t: TestContext) {
+afterEach(() => {
+  for (const dir of cleanupDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function makeDataDir() {
   const dir = mkdtempSync(path.join(tmpdir(), "pdpp-first-boot-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  cleanupDirs.push(dir);
   return dir;
 }
 
@@ -52,8 +59,8 @@ function noop() {
   // test doubles for log/warn that intentionally discard output
 }
 
-test("first boot generates, persists, and banners an owner password", (t) => {
-  const dataDir = makeDataDir(t);
+test("first boot generates, persists, and banners an owner password", () => {
+  const dataDir = makeDataDir();
   const logs = capture();
   const result = prepareFirstBoot({ env: {}, dataDir, log: logs.log, warn: logs.log });
 
@@ -77,8 +84,8 @@ test("first boot generates, persists, and banners an owner password", (t) => {
   );
 });
 
-test("restart reuses the persisted password and never reprints the banner", (t) => {
-  const dataDir = makeDataDir(t);
+test("restart reuses the persisted password and never reprints the banner", () => {
+  const dataDir = makeDataDir();
   const first = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
 
   const logs = capture();
@@ -98,8 +105,8 @@ test("restart reuses the persisted password and never reprints the banner", (t) 
   );
 });
 
-test("the PDPP_OWNER_PASSWORD environment variable always wins", (t) => {
-  const dataDir = makeDataDir(t);
+test("the PDPP_OWNER_PASSWORD environment variable always wins", () => {
+  const dataDir = makeDataDir();
   // Pre-existing persisted password from an earlier unconfigured boot.
   writeFileSync(path.join(dataDir, OWNER_PASSWORD_FILENAME), "persisted-password\n");
 
@@ -119,8 +126,8 @@ test("the PDPP_OWNER_PASSWORD environment variable always wins", (t) => {
   );
 });
 
-test("a blank persisted file is treated as first boot", (t) => {
-  const dataDir = makeDataDir(t);
+test("a blank persisted file is treated as first boot", () => {
+  const dataDir = makeDataDir();
   writeFileSync(path.join(dataDir, OWNER_PASSWORD_FILENAME), "  \n");
 
   const result = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
@@ -129,8 +136,8 @@ test("a blank persisted file is treated as first boot", (t) => {
   assert.ok(result.bannerLines.length > 0, "banner prints for the regenerated password");
 });
 
-test("an unpersistable data dir still gates the boot and warns honestly", (t) => {
-  const dataDir = makeDataDir(t);
+test("an unpersistable data dir still gates the boot and warns honestly", () => {
+  const dataDir = makeDataDir();
   // A path under a regular FILE cannot be created -> deterministic ENOTDIR.
   const blockedDir = path.join(dataDir, "blocker", "sub");
   writeFileSync(path.join(dataDir, "blocker"), "not a directory\n");
@@ -144,8 +151,8 @@ test("an unpersistable data dir still gates the boot and warns honestly", (t) =>
   assert.ok(warned.lines.some((line) => COULD_NOT_PERSIST_LOG_PATTERN.test(line)));
 });
 
-test("sqlite boots provision a stable credential encryption key file", (t) => {
-  const dataDir = makeDataDir(t);
+test("sqlite boots provision a stable credential encryption key file", () => {
+  const dataDir = makeDataDir();
   const first = prepareFirstBoot({ env: {}, dataDir, log: noop, warn: noop });
 
   const keyFile = path.join(dataDir, CREDENTIAL_KEY_FILENAME);
@@ -162,8 +169,8 @@ test("sqlite boots provision a stable credential encryption key file", (t) => {
   assert.ok(!banner.includes(key), "the key is never printed");
 });
 
-test("postgres boots keep the explicit fail-closed credential key contract", (t) => {
-  const dataDir = makeDataDir(t);
+test("postgres boots keep the explicit fail-closed credential key contract", () => {
+  const dataDir = makeDataDir();
   for (const env of [
     { DATABASE_URL: "postgresql://pdpp@db:5432/pdpp" },
     { PDPP_DATABASE_URL: "postgresql://pdpp@db:5432/pdpp" },
@@ -174,8 +181,8 @@ test("postgres boots keep the explicit fail-closed credential key contract", (t)
   }
 });
 
-test("a configured credential key provider is never shadowed", (t) => {
-  const dataDir = makeDataDir(t);
+test("a configured credential key provider is never shadowed", () => {
+  const dataDir = makeDataDir();
   for (const env of [
     { PDPP_CREDENTIAL_ENCRYPTION_KEY: "operator-key" },
     { PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE: "/run/secrets/pdpp-key" },
@@ -185,8 +192,8 @@ test("a configured credential key provider is never shadowed", (t) => {
   }
 });
 
-test("banner respects a configured reference origin", (t) => {
-  const dataDir = makeDataDir(t);
+test("banner respects a configured reference origin", () => {
+  const dataDir = makeDataDir();
   const result = prepareFirstBoot({
     env: { PDPP_REFERENCE_ORIGIN: "https://pdpp.example.com/" },
     dataDir,

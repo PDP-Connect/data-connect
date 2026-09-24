@@ -38,6 +38,12 @@ const referenceCohort: CohortDefinition = {
   ],
 }
 
+const scriptsCohort: CohortDefinition = {
+  name: "scripts",
+  root: ".",
+  productionPrefixes: ["scripts/"],
+}
+
 const inputs: ExecutionInputs = {
   cohortRoot: ".",
   configDigest: "sha256:config",
@@ -363,6 +369,15 @@ describe("selectCohortTests", () => {
   it("selects no test from another cohort's tree", () => {
     const diff = parseNameStatusZ("M\0src/apps/external-url.test.ts\0")
     expect(selectCohortTests(diff, referenceCohort)).toEqual([])
+  })
+
+  it("narrows root cohort tests by production prefix", () => {
+    const diff = parseNameStatusZ(
+      "M\0apps/console/src/core.test.ts\0" +
+        "M\0reference-implementation/test/acknowledged-loss.test.ts\0" +
+        "M\0scripts/check-dockerfile-copy-paths.test.ts\0"
+    )
+    expect(selectCohortTests(diff, scriptsCohort)).toEqual(["scripts/check-dockerfile-copy-paths.test.ts"])
   })
 
   it("takes a renamed test's destination, since that is the file at head", () => {

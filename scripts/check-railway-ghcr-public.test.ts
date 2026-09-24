@@ -3,14 +3,14 @@
 
 // Offline unit tests for the pure core of check-railway-ghcr-public.ts.
 //
-// These run with zero network (node --test), exactly like the other railway:*
+// These run with zero network under Vitest, exactly like the other railway:*
 // unit tests. They pin the GHCR status -> visibility classifier, the per-image
 // pass/fail logic (including the --tag pin), and the readiness summary that
 // gates the pushbutton publish path. The live HTTP probe itself runs against
 // real GHCR by the operator (see deploy/railway/template.md), not in CI.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 
 import {
   classifyProbeResult,

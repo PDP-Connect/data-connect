@@ -20,6 +20,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule } from "./is-main-module.js";
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const DOCKERFILES = ["Dockerfile", "deploy/railway/reference.Dockerfile"];
@@ -31,14 +33,14 @@ const DOCKERFILES = ["Dockerfile", "deploy/railway/reference.Dockerfile"];
 const COPY_INSTRUCTION_PATTERN = /^COPY\s+(?!--from=)(.+)$/;
 const WHITESPACE_PATTERN = /\s+/;
 
-interface Violation {
+export interface Violation {
   dockerfile: string;
   line: number;
   path: string;
 }
 
-function checkDockerfile(relativePath: string): Violation[] {
-  const fullPath = join(REPO_ROOT, relativePath);
+export function checkDockerfile(relativePath: string, repoRoot = REPO_ROOT): Violation[] {
+  const fullPath = join(repoRoot, relativePath);
   if (!existsSync(fullPath)) {
     return [];
   }
@@ -61,7 +63,7 @@ function checkDockerfile(relativePath: string): Violation[] {
       if (source.includes("*") || source === "." || source.startsWith("$")) {
         continue;
       }
-      const sourcePath = join(REPO_ROOT, source);
+      const sourcePath = join(repoRoot, source);
       if (!existsSync(sourcePath)) {
         violations.push({ dockerfile: relativePath, line: index + 1, path: source });
       }
@@ -71,7 +73,7 @@ function checkDockerfile(relativePath: string): Violation[] {
 }
 
 function main(): void {
-  const violations = DOCKERFILES.flatMap(checkDockerfile);
+  const violations = DOCKERFILES.flatMap((dockerfile) => checkDockerfile(dockerfile));
   if (violations.length > 0) {
     console.error(`check-dockerfile-copy-paths: ${violations.length} stale COPY source path(s)`);
     for (const violation of violations) {
@@ -84,4 +86,6 @@ function main(): void {
   );
 }
 
-main();
+if (isMainModule(import.meta.url, process.argv[1])) {
+  main();
+}
