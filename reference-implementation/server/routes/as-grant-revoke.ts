@@ -8,6 +8,7 @@
 //
 // Covers:
 //   POST /grants/:grantId/revoke  — RFC 9396 / PDPP grant revocation
+//   POST /_ref/grants/:grantId/revoke — owner-session twin for the console
 //
 // The `requireRevokeAuth` middleware is also extracted here because it is
 // solely a gate for this one route and has no callers in index.js after the
@@ -67,6 +68,8 @@ export interface MountAsGrantRevokeContext {
   introspect: (token: string) => Promise<IntrospectInfo>;
   logger?: { warn?: (obj: Record<string, unknown>, msg: string) => void };
   pdppError: PdppErrorFn;
+  /** Owner-session gate for the `_ref` console twin of the revoke route. */
+  requireOwnerSession: MiddlewareFn;
   /** Revokes the grant row, returns trace_id for header propagation. */
   revokeGrant: (
     grantId: string,
@@ -168,6 +171,10 @@ export function mountAsGrantRevoke(app: AppLike, ctx: MountAsGrantRevokeContext)
     requireRevokeAuth as RouteArg<RouteHandler | MiddlewareFn>,
     handler
   );
+
+  // Owner console revoke: same handler, gated by the owner session cookie
+  // (the console forwards it server-side) instead of a bearer.
+  app.post("/_ref/grants/:grantId/revoke", ctx.requireOwnerSession, handler);
 }
 
 /** Builds the `applyGrantRevokeSideEffects` capability for injection into ctx. */

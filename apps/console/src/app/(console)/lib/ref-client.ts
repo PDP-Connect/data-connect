@@ -3521,6 +3521,13 @@ export async function revokeGrantPackage(packageId: string): Promise<GrantPackag
   }
 }
 
+/** Revokes one grant via the owner-session twin of `POST /grants/:id/revoke`. */
+export async function revokeGrant(grantId: string): Promise<{ revoked: true }> {
+  return (await refFetch(`/_ref/grants/${encodeURIComponent(grantId)}/revoke`, undefined, {
+    method: "POST",
+  })) as { revoked: true };
+}
+
 // ---------------------------------------------------------------------------
 // Browser-enrollment shell: in-dashboard browser-bound connector setup
 // ---------------------------------------------------------------------------

@@ -30,6 +30,10 @@ const PACKAGE_PIVOT_LOOKUP_RE = /lookupGrantPackageIdForGrant\(/;
 const PACKAGE_PIVOT_HREF_RE = /\/grants\/packages\/\$\{encodeURIComponent\(packageId\)\}/;
 const PACKAGE_PIVOT_COPY_RE = /Parent grant package/i;
 
+const REVOKE_ACTION_RE = /action=\{revokeGrantAction\}/;
+const REVOKE_CONFIRM_RE = /name="confirm_revoke"/;
+const REVOKE_ACTIVE_ONLY_RE = /\{revoked \? null : \(/;
+
 test("grant detail page links to filtered event-subscriptions list", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, SUBSCRIPTIONS_HREF_RE);
@@ -47,4 +51,11 @@ test("grant detail page surfaces a parent-package pivot link when the grant is p
   assert.match(src, PACKAGE_PIVOT_LOOKUP_RE);
   assert.match(src, PACKAGE_PIVOT_HREF_RE);
   assert.match(src, PACKAGE_PIVOT_COPY_RE);
+});
+
+test("grant detail page offers a confirmed revoke for active grants", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, REVOKE_ACTION_RE);
+  assert.match(src, REVOKE_CONFIRM_RE);
+  assert.match(src, REVOKE_ACTIVE_ONLY_RE);
 });

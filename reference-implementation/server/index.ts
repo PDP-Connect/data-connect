@@ -7072,6 +7072,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     introspect,
     logger: opts.logger,
     pdppError,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
     revokeGrant,
     setReferenceTraceId,
   };

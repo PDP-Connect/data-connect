@@ -629,6 +629,43 @@ test("POST /_ref/grant-packages/:id/revoke surfaces partial child failure withou
   }
 });
 
+test("POST /_ref/grants/:id/revoke revokes a single grant under the owner session", async () => {
+  const server = await startTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerConnector(asUrl, "spotify");
+    const github = await registerConnector(asUrl, "github");
+    const client = await registerAuthCodeClient(asUrl);
+    const { packageId } = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+
+    const before = await fetchJson(`${asUrl}/_ref/grant-packages/${encodeURIComponent(packageId)}`);
+    const [target, sibling] = (before.body as GrantPackageDetail).children;
+    assert.ok(target?.grant_id);
+    assert.ok(sibling?.grant_id);
+
+    // Owner-session twin of POST /grants/:id/revoke: no bearer required.
+    const revoke = await fetchJson(`${asUrl}/_ref/grants/${encodeURIComponent(target.grant_id)}/revoke`, {
+      method: "POST",
+    });
+    assert.equal(revoke.status, 200);
+    assert.deepEqual(revoke.body, { revoked: true });
+
+    const after = await fetchJson(`${asUrl}/_ref/grant-packages/${encodeURIComponent(packageId)}`);
+    const statusByGrant = new Map(
+      (after.body as GrantPackageDetail).children.map((child) => [child.grant_id, child.grant_status])
+    );
+    assert.equal(statusByGrant.get(target.grant_id), "revoked");
+    assert.equal(statusByGrant.get(sibling.grant_id), "active");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("GET /_ref/grants surfaces grant_package_id on package-member child rows and omits it otherwise", async () => {
   const server = await startTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
