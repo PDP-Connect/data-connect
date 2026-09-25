@@ -628,22 +628,35 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
 
 async function reuseExistingInstall(
   root: string,
-  expectedRoot: string,
   entry: ConnectorCatalogEntry,
   existing: ConnectorInstallRecord | null,
+  previousActive: ConnectorInstallRecord | null,
   dataDir: string,
-  registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>
+  registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
+  store: ConnectorInstallStore
 ): Promise<ConnectorInstallRecord> {
-  if (
-    !existing ||
-    existing.digest !== entry.digest ||
-    (entry.config_digest !== undefined && existing.configDigest !== entry.config_digest) ||
-    resolve(existing.root) !== resolve(expectedRoot)
-  ) {
-    throw new Error("Connector digest root already exists without a matching active record.");
+  if (existing) {
+    if (
+      existing.digest !== entry.digest ||
+      (entry.config_digest !== undefined && existing.configDigest !== entry.config_digest) ||
+      resolve(existing.root) !== resolve(root)
+    ) {
+      throw new Error("Connector digest root already exists without a matching active record.");
+    }
   }
-  const verified = verifyStoredRecord(root, existing, dataDir);
-  await registerManifest(verified.manifest);
+  const reusable = existing ?? { ...readVerifiedRecord(root, entry), root };
+  const verified = verifyStoredRecord(root, reusable, dataDir);
+  await store.activate(verified);
+  try {
+    await registerManifest(verified.manifest);
+  } catch (error) {
+    if (previousActive) {
+      await store.activate(previousActive);
+    } else {
+      await store.deactivate(entry.connector_id);
+    }
+    throw error;
+  }
   return verified;
 }
 
@@ -771,7 +784,10 @@ export function createConnectorInstallService(options: {
       const existing = await store.getActive(connectorId);
       if (existsSync(root)) {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
-          return reuseExistingInstall(root, root, entry, existing, dataDir, options.registerManifest);
+          return reuseExistingInstall(root, entry, existing, existing, dataDir, options.registerManifest, store);
+        }
+        if (existing) {
+          return reuseExistingInstall(root, entry, null, existing, dataDir, options.registerManifest, store);
         }
         // A crash can leave the published directory between rename and the
         // active-record commit. It is not trusted merely because its name is
