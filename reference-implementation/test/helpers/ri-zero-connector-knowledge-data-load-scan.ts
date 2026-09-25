@@ -215,6 +215,12 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   "reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts:94",
   // reference-revision.ts reads the repo's own package.json for its version string.
   "reference-implementation/server/reference-revision.ts:17",
+  // Recovery startup markers live under the operator's PDPP_DATA_DIR. Their
+  // JSON controls one-time recovery transitions and contains no connector or
+  // provider identity/policy; keep these exact read sites pinned so edits
+  // still require re-review.
+  "reference-implementation/server/index.ts:2222",
+  "reference-implementation/server/index.ts:2292",
   // createFileConnectorInstallStore() reads the operator-managed
   // PDPP_DATA_DIR connector activation state. Connector ids in this file are
   // runtime data supplied by the owner, not RI-committed provider knowledge.
