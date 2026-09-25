@@ -516,6 +516,99 @@ const REDDIT_SAVED = [
   },
 ];
 
+// ─── Dominican Republic demo fixtures (fictitious citizen) ────────────────────
+//
+// One invented citizen for the DR citizen-assistant demo. The cédula uses the
+// unissued 000 prefix so it cannot collide with a real person; names, scores
+// and dates are illustrative, not SIUBEN or INTRANT data.
+
+const DEMO_CEDULA = "000-1234567-8";
+const DEMO_HOGAR_ID = "siuben:hogar:000-1234567-8";
+const DEMO_SOURCE_UPDATED_AT = "2026-09-01T12:00:00.000Z";
+
+const SIUBEN_CLASIFICACION_HOGAR = [
+  {
+    cedula_jefe_hogar: DEMO_CEDULA,
+    estado: "Vigente",
+    fecha_ultima_visita: "2025-11-18",
+    icv_descripcion: "Pobreza moderada",
+    icv_grupo: "ICV-2",
+    icv_puntaje: 38.6,
+    id: DEMO_HOGAR_ID,
+    miembros_hogar: 4,
+    municipio: "Santo Domingo Este",
+    nombre_jefe_hogar: "Rosa Elena Martínez Guzmán",
+    programas_activos: ["Aliméntate (Supérate)", "Bono Gas Hogar"],
+    provincia: "Santo Domingo",
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+  },
+];
+
+const SIUBEN_MIEMBROS_HOGAR = [
+  {
+    edad: 41,
+    hogar_id: DEMO_HOGAR_ID,
+    id: "siuben:miembro:1",
+    nivel_educativo: "Bachiller",
+    nombre: "Rosa Elena Martínez Guzmán",
+    ocupacion: "Trabajadora doméstica",
+    parentesco: "Jefa del hogar",
+    sexo: "F",
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+  },
+  {
+    edad: 44,
+    hogar_id: DEMO_HOGAR_ID,
+    id: "siuben:miembro:2",
+    nivel_educativo: "Básica",
+    nombre: "Julio César Peña Almonte",
+    ocupacion: "Mototaxista",
+    parentesco: "Cónyuge",
+    sexo: "M",
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+  },
+  {
+    edad: 15,
+    hogar_id: DEMO_HOGAR_ID,
+    id: "siuben:miembro:3",
+    nivel_educativo: "Secundaria (en curso)",
+    nombre: "Ana Lucía Peña Martínez",
+    ocupacion: "Estudiante",
+    parentesco: "Hija",
+    sexo: "F",
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+  },
+  {
+    edad: 8,
+    hogar_id: DEMO_HOGAR_ID,
+    id: "siuben:miembro:4",
+    nivel_educativo: "Primaria (en curso)",
+    nombre: "Luis Miguel Peña Martínez",
+    ocupacion: "Estudiante",
+    parentesco: "Hijo",
+    sexo: "M",
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+  },
+];
+
+const INTRANT_LICENCIAS_CONDUCIR = [
+  {
+    categoria: "Categoría 2",
+    categoria_descripcion: "Vehículos livianos (automóviles y jeepetas)",
+    cedula: DEMO_CEDULA,
+    estado: "Vigente",
+    fecha_expedicion: "2022-11-14",
+    fecha_vencimiento: "2026-11-14",
+    id: "intrant:licencia:000-1234567-8",
+    nombre: "Rosa Elena Martínez Guzmán",
+    numero_licencia: DEMO_CEDULA,
+    oficina_expedicion: "Santo Domingo Este (demo)",
+    restricciones: ["Uso de lentes correctivos"],
+    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+    tipo_sangre: "O+",
+  },
+];
+
 // ─── Connector-owned fixture registry ──────────────────────────────────────
 //
 // One declarative entry per fixture family: its connector_key, the stream
@@ -610,6 +703,27 @@ const SEED_FIXTURE_HANDLERS: readonly SeedFixtureHandler[] = [
       }
     },
     streamNames: ["posts", "comments", "saved"],
+  },
+  {
+    connectorKey: "siuben",
+    run(emitRecord) {
+      for (const hogar of SIUBEN_CLASIFICACION_HOGAR) {
+        emitRecord("clasificacion_hogar", hogar);
+      }
+      for (const miembro of SIUBEN_MIEMBROS_HOGAR) {
+        emitRecord("miembros_hogar", miembro);
+      }
+    },
+    streamNames: ["clasificacion_hogar", "miembros_hogar"],
+  },
+  {
+    connectorKey: "intrant",
+    run(emitRecord) {
+      for (const licencia of INTRANT_LICENCIAS_CONDUCIR) {
+        emitRecord("licencias_conducir", licencia);
+      }
+    },
+    streamNames: ["licencias_conducir"],
   },
 ];
 

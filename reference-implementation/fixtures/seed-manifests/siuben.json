@@ -1,0 +1,81 @@
+{
+  "protocol_version": "0.1.0",
+  "connector_id": "siuben",
+  "connector_key": "siuben",
+  "manifest_uri": "https://demo.pdpp.dev/rd/connectors/siuben",
+  "version": "0.1.0-demo",
+  "display_name": "SIUBEN · Sistema Único de Beneficiarios (demo)",
+  "runtime_requirements": {
+    "bindings": {}
+  },
+  "capabilities": {
+    "public_listing": { "tier": "development" }
+  },
+  "streams": [
+    {
+      "name": "clasificacion_hogar",
+      "description": "Clasificación socioeconómica del hogar: ICV, grupo, programas sociales y fecha de la última visita (datos ficticios)",
+      "semantics": "mutable_state",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "cedula_jefe_hogar": { "type": "string" },
+          "nombre_jefe_hogar": { "type": "string" },
+          "provincia": { "type": "string" },
+          "municipio": { "type": "string" },
+          "icv_puntaje": { "type": "number" },
+          "icv_grupo": { "type": "string" },
+          "icv_descripcion": { "type": "string" },
+          "miembros_hogar": { "type": "integer" },
+          "programas_activos": { "type": "array", "items": { "type": "string" } },
+          "fecha_ultima_visita": { "type": "string", "format": "date" },
+          "estado": { "type": "string" },
+          "source_updated_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "icv_grupo"]
+      },
+      "primary_key": ["id"],
+      "cursor_field": "source_updated_at",
+      "consent_time_field": "source_updated_at",
+      "selection": { "fields": true, "resources": true },
+      "views": [
+        {
+          "id": "basica",
+          "label": "Grupo ICV y programas",
+          "fields": ["id", "icv_grupo", "icv_descripcion", "programas_activos"]
+        }
+      ],
+      "coverage_strategy": "full_inventory",
+      "freshness_strategy": "manual_as_of",
+      "incremental": false
+    },
+    {
+      "name": "miembros_hogar",
+      "description": "Miembros del hogar registrados: parentesco, edad y ocupación (datos ficticios)",
+      "semantics": "mutable_state",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "hogar_id": { "type": "string" },
+          "nombre": { "type": "string" },
+          "parentesco": { "type": "string" },
+          "edad": { "type": "integer" },
+          "sexo": { "type": "string" },
+          "nivel_educativo": { "type": "string" },
+          "ocupacion": { "type": "string" },
+          "source_updated_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "hogar_id", "parentesco"]
+      },
+      "primary_key": ["id"],
+      "cursor_field": "source_updated_at",
+      "consent_time_field": "source_updated_at",
+      "selection": { "fields": true, "resources": true },
+      "coverage_strategy": "full_inventory",
+      "freshness_strategy": "manual_as_of",
+      "incremental": false
+    }
+  ]
+}
