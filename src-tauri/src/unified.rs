@@ -6068,6 +6068,29 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn staged_roots_resolve_the_bare_release_bundle_layout() {
+        // This is the layout every shipped build actually uses: Tauri's
+        // resources declaration (tauri.conf.json) stages
+        // target/release/reference-stack/{ri,console} directly under the
+        // resource root with no profile prefix on Windows/Linux (NSIS and
+        // AppImage do not flatten resource directories), and macOS's post-
+        // build copy step (scripts/build-prod.js::copyReferenceStacksIntoApp,
+        // and the equivalent release workflow step) restores it to the same
+        // bare `reference-stack/<sidecar>` shape inside Contents/Resources
+        // after Tauri's .app bundler flattens it. Only the profile-scoped
+        // dev layout above had coverage before this test.
+        let directory = tempdir().expect("staged root temp directory");
+        let root = directory.path().join("reference-stack").join("console");
+        fs::create_dir_all(&root).expect("staged root directory");
+        fs::write(root.join("launch.mjs"), "// fake launcher").expect("staged launcher");
+
+        assert_eq!(
+            resolve_staged_root(directory.path(), "release", "console"),
+            Some(root)
+        );
+    }
+
+    #[test]
     fn quitting_status_disables_quit_and_open_console_tray_items() {
         let app = tauri::test::mock_app();
 
