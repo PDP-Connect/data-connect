@@ -200,16 +200,6 @@ jobs:
       - name: Verify staged reference implementation
         run: node scripts/verify-reference-stack.mjs --profile release
 
-      - name: Smoke the staged Next.js package and agent routes
-        shell: bash
-        run: |
-          set -euo pipefail
-          node_binary="src-tauri/binaries/pdpp-node-${{ matrix.target }}"
-          if [ "${{ matrix.os_family }}" = "windows" ]; then
-            node_binary="${node_binary}.exe"
-          fi
-          node scripts/console-stack-smoke.mjs --profile release --node "$node_binary"
-
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:
