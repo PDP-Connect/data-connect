@@ -127,18 +127,27 @@ function assertNoSymlinks(root, current = root) {
   }
 }
 
-function walkFiles(root, { current = root, skipNodeModules = false, output = [] } = {}) {
+function walkFiles(
+  root,
+  { current = root, skipNodeModules = false, skipDist = false, output = [] } = {}
+) {
   for (const entry of readdirSync(current, { withFileTypes: true }).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   )) {
     // Prune before recursing, not after: skipNodeModules avoids walking a
     // dependency tree only to discard it. stagedFileHashes needs the real
-    // staged node_modules, so it omits skipNodeModules.
+    // staged node_modules, so it omits skipNodeModules. skipDist likewise
+    // excludes build output (e.g. tsc's dist/, including dist/.tsbuildinfo,
+    // which is not byte-stable across two consecutive builds of unchanged
+    // source): sourceInputFiles must hash only source, not the build's own
+    // prior output, or the recipe rebuilds its own cache key out from under
+    // itself every time buildWorkspacePackages runs.
     if (skipNodeModules && entry.name === "node_modules") continue
+    if (skipDist && entry.name === "dist") continue
     const filePath = join(current, entry.name)
     const fileStats = statSync(filePath)
     if (fileStats.isDirectory())
-      walkFiles(root, { current: filePath, skipNodeModules, output })
+      walkFiles(root, { current: filePath, skipNodeModules, skipDist, output })
     else if (fileStats.isFile()) output.push(filePath)
   }
   return output
@@ -162,7 +171,9 @@ function sourceInputFiles(projectRoot) {
     join(projectRoot, "scripts", "ensure-reference-stack.js"),
     join(projectRoot, "scripts", "stage-generations.js"),
     ...roots.flatMap(root =>
-      existsSync(root) ? walkFiles(root, { skipNodeModules: true }) : []
+      existsSync(root)
+        ? walkFiles(root, { skipNodeModules: true, skipDist: true })
+        : []
     ),
   ]
     .filter(
@@ -173,7 +184,7 @@ function sourceInputFiles(projectRoot) {
     .sort()
 }
 
-function sourceInputHash(projectRoot) {
+export function sourceInputHash(projectRoot) {
   const hash = createHash("sha256")
   for (const filePath of sourceInputFiles(projectRoot)) {
     hash.update(relative(projectRoot, filePath).split("\\").join("/"))

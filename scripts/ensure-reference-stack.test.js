@@ -11,6 +11,7 @@ import {
   launchScript,
   pruneForeignPlatformPrebuilds,
   referenceStackRoot,
+  sourceInputHash,
   stageReferenceStack,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
@@ -304,6 +305,40 @@ describe("reference stack staging contract", () => {
       expect(after.inputs.sha256).not.toBe(before.inputs.sha256)
     })
   }
+
+  it("excludes workspace build output (dist/) from the source-input hash", () => {
+    // Regression for #249: beforeBuildCommand reruns ensure-reference-stack.js
+    // after the release workflow's own explicit staging step already ran it.
+    // Both runs call buildWorkspacePackages, which rebuilds dist/ (including
+    // dist/.tsbuildinfo) for packages/collector-runtime, packages/connector-protocol,
+    // reference-implementation/vendor/read-core, and reference-implementation/vendor/mcp-server.
+    // Those dist/ files used to be walked as "source" inputs, so the second
+    // run's rebuild changed inputs.sha256 even though nothing under src/
+    // changed, which sent staging down the "not reused" path and made it
+    // recompute a new ri-<hash> generation directory that collided with the
+    // one the first run had just installed -- tripping "Existing immutable
+    // stage ... does not match this build; refusing to replace a tree a
+    // process may be using" in installStageGeneration.
+    const projectRoot = process.cwd()
+    const distDir = join(projectRoot, "packages", "collector-runtime", "dist")
+    const tsbuildinfoPath = join(distDir, ".tsbuildinfo")
+    const preexisting = existsSync(distDir)
+    if (!preexisting) mkdirSync(distDir, { recursive: true })
+    const originalContent = existsSync(tsbuildinfoPath)
+      ? readFileSync(tsbuildinfoPath, "utf8")
+      : undefined
+    try {
+      writeFileSync(tsbuildinfoPath, "buildinfo-run-A\n")
+      const hashA = sourceInputHash(projectRoot)
+      writeFileSync(tsbuildinfoPath, "buildinfo-run-B\n")
+      const hashB = sourceInputHash(projectRoot)
+      expect(hashB).toBe(hashA)
+    } finally {
+      if (!preexisting) rmSync(distDir, { force: true, recursive: true })
+      else if (originalContent === undefined) rmSync(tsbuildinfoPath, { force: true })
+      else writeFileSync(tsbuildinfoPath, originalContent)
+    }
+  })
 
   it("prunes a symlinked node_modules before traversing into it (cycle-safe)", () => {
     // Only the source tree carries the cycle: staged dependencies must
