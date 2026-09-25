@@ -6,10 +6,11 @@
  * All calls go through the standard PDPP `/v1/streams` surface as an owner-
  * self-export client.
  *
- * Because `/v1/streams` is per-connector for owner tokens, the dashboard
- * derives the connector list from the shipped polyfill manifests directory
- * and then probes the RS per connector. Only the records path is exercised
- * through the spec API.
+ * Because `/v1/streams` is per-connector for owner tokens, source views use
+ * the live, signature-verified connector install catalog and owner templates
+ * to derive available connectors. Optional package manifests add display and
+ * stream detail in development builds; they are not required in production.
+ * Only the records path is exercised through the spec API.
  *
  * Server-only: do not import from client components.
  */
@@ -803,14 +804,10 @@ export async function searchRecordsHybrid(
 export async function listConnectorManifests(): Promise<ConnectorManifest[]> {
   const dir = await manifestsDir();
   if (!dir) {
-    // No manifest directory resolved under any known layout. Degrade to an empty
-    // set (the feed renders the honest GENERIC card for every stream) rather than
-    // throwing the whole dashboard page — but this is a deploy/path misconfig, not
-    // a normal state, so make it loud in the server logs.
-    console.error(
-      "[rs-client] connector manifests directory not found under any candidate layout; declared presentation roles will be UNAVAILABLE (feed titles fall back to identity keys). Candidates:",
-      manifestsDirCandidates()
-    );
+    // Production images intentionally resolve availability from the signed
+    // runtime catalog and owner templates. Local manifests are optional
+    // presentation enrichment, so their absence must not make catalog reads
+    // look like a deploy error.
     return [];
   }
   const files = await readdir(dir);
