@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import {
   mkdtempSync,
   mkdirSync,
@@ -253,7 +253,7 @@ describe("release workflow", () => {
     )
 
     expect(workflow).toContain(
-      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: build"
+      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
     )
     expect(publishCoreImage).toContain("packages: write")
     expect(publishCoreImage).toContain("id-token: write")
@@ -263,7 +263,8 @@ describe("release workflow", () => {
       "node scripts/verify-release-ref.mjs --release-tag"
     )
     expect(coreMetadata).toContain("type=semver,pattern={{version}}")
-    expect(coreMetadata).toContain("type=raw,value=latest")
+    expect(coreMetadata).toContain("latest=false")
+    expect(coreMetadata).not.toContain("value=latest")
     expect(coreMetadata).not.toContain("dispatch-sha-")
     expect(buildAndPushCore).toContain("push: true")
     expect(buildAndPushCore).toContain("target: core")
@@ -271,6 +272,130 @@ describe("release workflow", () => {
     expect(buildAndPushCore).toContain(
       "PDPP_REFERENCE_REVISION=${{ github.sha }}"
     )
+  })
+
+  it("pushes only versioned Core tags and serializes only latest promotion", () => {
+    const workflow = readReleaseWorkflow()
+    const publishCoreImage = workflow.slice(
+      workflow.indexOf("  publish-core-image:"),
+      workflow.indexOf("  promote-core-latest:")
+    )
+    const promoter = workflow.slice(workflow.indexOf("  promote-core-latest:"))
+
+    expect(publishCoreImage).not.toContain("concurrency")
+    expect(publishCoreImage).not.toMatch(/:latest|value=latest/)
+    expect(publishCoreImage).toContain(
+      "outputs:\n      digest: ${{ steps.build-core.outputs.digest }}\n      version: ${{ steps.meta.outputs.version }}"
+    )
+    expect(readWorkflowStep(workflow, "Build and push Core image")).toContain(
+      "id: build-core"
+    )
+    expect(workflow.match(/concurrency:/g)).toHaveLength(1)
+    expect(promoter).toContain(
+      "promote-core-latest:\n    if: github.event_name == 'release' && !github.event.release.prerelease\n    needs: publish-core-image"
+    )
+    expect(promoter).toContain(
+      "concurrency:\n      group: core-image-latest-promotion\n      cancel-in-progress: false"
+    )
+    expect(promoter).toContain(
+      "permissions:\n      contents: read\n      packages: write\n    steps:"
+    )
+    expect(promoter).toContain(
+      "CANDIDATE_DIGEST: ${{ needs.publish-core-image.outputs.digest }}"
+    )
+  })
+
+  describe("latest promotion script", () => {
+    const repository = ACTIONS_EXPRESSION_VALUES["github.repository"]
+    const image = `ghcr.io/${repository.toLowerCase()}/core`
+    const digest = `sha256:${"b".repeat(64)}`
+    const create = `CREATE=buildx imagetools create --tag ${image}:latest ${image}@${digest}`
+    const stubs = `
+docker() {
+  if [ "$3" = create ]; then printf 'CREATE=%s\\n' "$*"; return; fi
+  [ "$4" = "${image}:latest" ] || { echo "unexpected docker $*" >&2; return 1; }
+  case "$FX_LATEST" in
+    MISSING) echo "ERROR: ${image}:latest: not found" >&2; return 1 ;;
+    DENIED) echo "ERROR: unexpected status 403 Forbidden" >&2; return 1 ;;
+    *) printf '{"linux/amd64":{"config":{"Labels":{"org.opencontainers.image.version":"%s"}}},"linux/arm64":{"config":{"Labels":{"org.opencontainers.image.version":"%s"}}}}\\n' "$FX_LATEST" "\${FX_LATEST_ARM64:-$FX_LATEST}" ;;
+  esac
+}
+`
+
+    function runPromote(candidate: string, latest: string, extra = {}) {
+      const script = readWorkflowRunScript(
+        readReleaseWorkflow(),
+        "Promote Core image to latest if newer"
+      )
+      const root = mkdtempSync(join(tmpdir(), "data-connect-promote-"))
+      try {
+        const result = spawnSync("bash", ["-c", `${stubs}\n${script}`], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            REPOSITORY: repository,
+            RUNNER_TEMP: root,
+            CANDIDATE_DIGEST: digest,
+            CANDIDATE_VERSION: candidate,
+            FX_LATEST: latest,
+            ...extra,
+          },
+        })
+        return {
+          status: result.status,
+          creates: result.stdout
+            .split("\n")
+            .filter(line => line.startsWith("CREATE=")),
+        }
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    }
+
+    it.each([
+      ["1.5.1", "1.5.0"],
+      ["1.6.0", "1.5.9"],
+      ["2.0.0", "1.99.99"],
+      ["1.10.0", "1.9.0"],
+      ["1.5.1", "MISSING"],
+    ])("promotes %s over latest %s", (candidate, latest) => {
+      expect(runPromote(candidate, latest)).toEqual({
+        status: 0,
+        creates: [create],
+      })
+    })
+
+    it.each([
+      ["1.5.1", "1.5.1"],
+      ["1.5.0", "1.5.1"],
+      ["1.9.0", "1.10.0"],
+      ["1.99.99", "2.0.0"],
+      ["1.6.0-rc.1", "1.5.0"],
+    ])("leaves latest alone for %s when latest is %s", (candidate, latest) => {
+      expect(runPromote(candidate, latest)).toEqual({ status: 0, creates: [] })
+    })
+
+    it.each([
+      ["an unreadable latest", "1.5.1", "DENIED", {}],
+      ["an unlabelled latest", "1.5.1", "", {}],
+      ["a prerelease latest", "1.5.1", "1.5.0-rc.1", {}],
+      [
+        "mixed platform versions",
+        "1.5.1",
+        "1.5.0",
+        { FX_LATEST_ARM64: "1.4.0" },
+      ],
+      [
+        "a malformed digest",
+        "1.5.1",
+        "1.5.0",
+        { CANDIDATE_DIGEST: "sha256:x" },
+      ],
+    ])("fails closed on %s", (_name, candidate, latest, extra) => {
+      const run = runPromote(candidate, latest, extra)
+      expect(run.status).not.toBe(0)
+      expect(run.creates).toEqual([])
+    })
   })
 
   it("publishes five files from upload-artifact's preserved subdirectories", () => {

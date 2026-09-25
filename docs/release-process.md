@@ -28,9 +28,10 @@ That is the full release flow for normal releases.
 Creating the GitHub release triggers `.github/workflows/release.yml` (`on: release: created`) to:
 
 1. Build and upload the desktop manual-install artifacts.
-2. Build and publish the public Core image to GHCR as `ghcr.io/pdp-connect/data-connect/core:<version>` and `ghcr.io/pdp-connect/data-connect/core:latest`.
+2. After the desktop artifacts upload, build and publish the public Core image to GHCR as `ghcr.io/pdp-connect/data-connect/core:<version>`. Every release publishes its version tag, prereleases included.
+3. For stable releases only, a serialized job (`core-image-latest-promotion` concurrency group) moves `core:latest` to this release's exact image digest if its version is strictly newer (SemVer) than the `org.opencontainers.image.version` label on the current `core:latest`. If `core:latest` does not exist yet, the job creates it. If the current version cannot be read, the job fails and leaves `latest` unchanged.
 
-For example, `v1.5.1` publishes `core:1.5.1` and moves `core:latest` only after the release workflow succeeds.
+For example, `v1.5.1` publishes `core:1.5.1` and moves `core:latest` only if `latest` is older than 1.5.1. Re-running an older release publishes its version tag again but does not move `latest` back. GitHub keeps at most one pending job in the concurrency group, so a newer pending promoter can replace an older one and the replaced job shows as cancelled. Re-run a cancelled promoter if needed; re-running is safe.
 
 ## Direct answers (branch + tag confusion)
 

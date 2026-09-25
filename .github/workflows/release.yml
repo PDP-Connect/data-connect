@@ -389,8 +389,11 @@ jobs:
 
   publish-core-image:
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, publish]
     runs-on: ubuntu-22.04
+    outputs:
+      digest: ${{ steps.build-core.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     permissions:
       contents: read
       id-token: write
@@ -441,11 +444,13 @@ jobs:
             org.opencontainers.image.title=PDPP Core node
             org.opencontainers.image.description=PDPP platform-neutral single-container Core node with console and loopback AS/RS
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
 
       - name: Build and push Core image
+        id: build-core
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           cache-from: |
@@ -463,3 +468,72 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           target: core
+
+  # Only the mutable latest alias is serialized; version tags publish per release
+  # above. GitHub keeps one pending run per group and cancels a replaced pending
+  # run. Re-running a cancelled promoter is safe: it moves latest only forward.
+  promote-core-latest:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: publish-core-image
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: core-image-latest-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote Core image to latest if newer
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ needs.publish-core-image.outputs.digest }}
+          CANDIDATE_VERSION: ${{ needs.publish-core-image.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}/core"
+          stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected Core image digest: '$CANDIDATE_DIGEST'."
+            exit 1
+          fi
+          # A prerelease never moves latest, so it cannot displace a stable release.
+          if [[ ! "$CANDIDATE_VERSION" =~ $stable ]]; then
+            echo "Not promoting '$CANDIDATE_VERSION': latest tracks stable X.Y.Z releases only."
+            exit 0
+          fi
+          candidate=("${BASH_REMATCH[@]:1}")
+
+          if inspect_error="$(docker buildx imagetools inspect "$image:latest" --format '{{json .Image}}' 2>&1 >"$RUNNER_TEMP/core-latest-image.json")"; then
+            current="$(jq -r '[.[] | .config.Labels["org.opencontainers.image.version"] // ""] | unique | join(",")' "$RUNNER_TEMP/core-latest-image.json")"
+            if [[ ! "$current" =~ $stable ]]; then
+              echo "::error::Cannot identify the stable version behind $image:latest (got '$current')."
+              exit 1
+            fi
+            for part in 0 1 2; do
+              if (( candidate[part] > BASH_REMATCH[part + 1] )); then break; fi
+              if (( candidate[part] < BASH_REMATCH[part + 1] )) || (( part == 2 )); then
+                echo "Not promoting $CANDIDATE_VERSION: $image:latest is already $current."
+                exit 0
+              fi
+            done
+          elif [[ "$inspect_error" == *"$image:latest: not found"* ]]; then
+            echo "No $image:latest yet; publishing it for the first time."
+          else
+            echo "::error::Cannot inspect $image:latest: $inspect_error"
+            exit 1
+          fi
+
+          docker buildx imagetools create --tag "$image:latest" "$image@$CANDIDATE_DIGEST"
+          echo "Promoted $image:latest to $CANDIDATE_VERSION ($CANDIDATE_DIGEST)."
