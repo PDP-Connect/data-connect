@@ -187,7 +187,7 @@ function sourceInputHash(projectRoot) {
 function manifestTarget(target) {
   return (
     target ||
-    process.env.TAURI_ENV_TARGET ||
+    process.env.TAURI_ENV_TARGET_TRIPLE ||
     process.env.TARGET ||
     `${process.platform}-${process.arch}`
   )
@@ -261,7 +261,7 @@ function defaultNodeBinary(projectRoot) {
   const candidates = nodeSidecarCandidates(projectRoot)
   if (candidates.length === 1) return candidates[0]
   if (candidates.length > 1) {
-    const target = process.env.TAURI_ENV_TARGET || process.env.TARGET
+    const target = process.env.TAURI_ENV_TARGET_TRIPLE || process.env.TARGET
     const matching = candidates.find(
       candidate => target && candidate.includes(target)
     )

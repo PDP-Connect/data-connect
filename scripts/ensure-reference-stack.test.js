@@ -134,6 +134,28 @@ describe("reference stack staging contract", () => {
     expect(verifyReferenceStackRoot(first)).toEqual(firstManifest)
   })
 
+  it("records the Tauri target triple when beforeBuildCommand omits --target", () => {
+    const root = fixtureRoot()
+    writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    const previous = process.env.TAURI_ENV_TARGET_TRIPLE
+    process.env.TAURI_ENV_TARGET_TRIPLE = "x86_64-unknown-linux-gnu"
+    try {
+      const manifest = buildManifest({
+        nodeBinary: process.execPath,
+        projectRoot: root,
+        stageRoot: root,
+        profile: "release",
+      })
+      // CI stages with --target first; Tauri's beforeBuildCommand must reuse
+      // that stage rather than rebuild under a different target label.
+      expect(manifest.target).toBe("x86_64-unknown-linux-gnu")
+    } finally {
+      if (previous === undefined) delete process.env.TAURI_ENV_TARGET_TRIPLE
+      else process.env.TAURI_ENV_TARGET_TRIPLE = previous
+    }
+  })
+
   it("rejects a changed staged file", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
