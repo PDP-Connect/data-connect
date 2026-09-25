@@ -273,6 +273,16 @@ pub(crate) fn decide(lease: &RunLease, self_pid: i32) -> ReapDecision {
 
     // 2. The owner is gone. Is the child itself still there?
     let Some(actual_ticks) = process_start_ticks(lease.pid) else {
+        // A process group can outlive its leader. On Unix the group id remains
+        // reserved while any member exists, so probing the recorded group is
+        // sufficient to reap descendants without targeting a recycled group.
+        #[cfg(unix)]
+        if lease.pgid.is_some_and(process_group_exists) {
+            return ReapDecision::Reaped {
+                pid: lease.pid,
+                pgid: lease.pgid,
+            };
+        }
         return ReapDecision::RemovedStaleFile;
     };
 
@@ -286,6 +296,11 @@ pub(crate) fn decide(lease: &RunLease, self_pid: i32) -> ReapDecision {
         pid: lease.pid,
         pgid: lease.pgid,
     }
+}
+
+#[cfg(unix)]
+fn process_group_exists(pgid: i32) -> bool {
+    pgid > 0 && unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
 /// Reap orphans left by dead app sessions.
@@ -684,6 +699,51 @@ mod tests {
         assert!(!RunLease::directory(directory.path())
             .join("console.json")
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_surviving_process_group_is_reaped_after_its_leader_exits() {
+        use std::os::unix::process::CommandExt;
+
+        let directory = tempdir().expect("temp app data");
+        let mut child = TestChild(
+            Command::new("sh")
+                .args(["-c", "sleep 300 & wait"])
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a process-group leader"),
+        );
+        let pid = child.id() as i32;
+        let pgid = pid;
+        let mut lease = lease_for(&child, "console", 1);
+        lease.owner_started_at_ticks = u64::MAX;
+        lease.pgid = Some(pgid);
+        lease.publish(directory.path()).expect("publish lease");
+
+        child.kill().expect("stop group leader");
+        child.wait().expect("wait for group leader");
+        assert!(process_group_exists(pgid));
+
+        let decisions = reap_orphans(directory.path(), std::process::id() as i32);
+        assert_eq!(
+            decisions[0].1,
+            ReapDecision::Reaped {
+                pid,
+                pgid: Some(pgid)
+            }
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && process_group_exists(pgid) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !process_group_exists(pgid),
+            "the surviving group must be gone"
+        );
     }
 
     #[test]
