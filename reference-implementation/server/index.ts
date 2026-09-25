@@ -3309,6 +3309,13 @@ async function resolveGrantManifest(tokenInfo: TokenInfo | null | undefined, opt
 }
 
 async function resolveRegisteredConnectorManifest(connectorId: string) {
+  // The installed signed artifact is the production source of truth. Core may
+  // skip manifest-table persistence, so OAuth and other routes must resolve
+  // its active, integrity-checked manifest before falling back to the table.
+  const activeInstall = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+  if (activeInstall.status === "active") {
+    return activeInstall.record.manifest;
+  }
   const manifest = await getConnectorManifest(connectorId);
   if (!manifest) {
     throw Object.assign(new Error(`Unknown connector: ${connectorId}`), {
