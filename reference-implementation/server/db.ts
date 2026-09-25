@@ -883,6 +883,7 @@ CREATE TABLE IF NOT EXISTS grants (
   client_id      TEXT NOT NULL,
   storage_binding_json TEXT,
   grant_json     TEXT NOT NULL,
+  trust_signal_json TEXT,
   access_mode    TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'active',
   consumed       INTEGER NOT NULL DEFAULT 0,
@@ -6401,6 +6402,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // write-path derivation, only promoting an existing value to a column.
   // Spec: openspec/changes/reconcile-active-summary-evidence/specs/
   //       reference-connector-instances/spec.md
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT"));
   // Terminal provenance is source-bound, not projection-bound. This trigger
   // shares SQLite's single-writer ordering with registry mutation. It accepts

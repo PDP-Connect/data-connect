@@ -78,6 +78,13 @@ import {
   makeDefaultAccountConnectorInstanceId,
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
+import {
+  buildDomainControlTrustSignal,
+  parseTrustSignal,
+  serializeTrustSignal,
+  type TrustSignal,
+  type TrustSignalMethod,
+} from "./trust-signal.ts";
 
 // ─── Domain types ─────────────────────────────────────────────────────────────
 
@@ -225,6 +232,12 @@ interface RegisteredClient {
   metadata: ClientMetadata;
   registration_mode: string;
   token_endpoint_auth_method: string;
+  /**
+   * The trust signal the AS relied on to accept this identity, when it relied on
+   * one (spec-core.md#trust-registry-queries). A pre-registered client carries no
+   * signal: the AS relied on its own registration table, not on an assertion.
+   */
+  trust_signal?: TrustSignal | null;
   updated_at: string | null;
 }
 
@@ -554,6 +567,8 @@ interface TokenIntrospectionRow extends DbRow {
   subject_id: string;
   token_kind: string;
   trace_id: string | null;
+  // SQLite hands this back as TEXT, PostgreSQL as already-decoded JSONB.
+  trust_signal_json: string | Record<string, unknown> | null;
 }
 
 interface TokenIntrospectionResult extends Record<string, unknown> {
@@ -562,6 +577,7 @@ interface TokenIntrospectionResult extends Record<string, unknown> {
   exp?: number;
   grant_id?: string | null;
   grant_package_id?: string | null;
+  grant_trust_signal?: TrustSignal;
   pdpp_token_kind?: string;
   scenario_id?: string | null;
   subject_id?: string;
@@ -700,6 +716,7 @@ interface GrantPackageStore {
     clientId: string;
     storageBindingJson: string | null;
     grantJson: string;
+    trustSignalJson: string | null;
     accessMode: string;
     issuedAt: string;
     expiresAt: string | null;
@@ -4047,6 +4064,7 @@ async function persistApprovedSingleGrantAtomically({
   subjectId,
   tokenIssuedEvent,
   traceContext,
+  trustSignal,
   reviewedRevision,
   reviewedInstanceChecks,
 }: {
@@ -4064,10 +4082,12 @@ async function persistApprovedSingleGrantAtomically({
   subjectId: string;
   tokenIssuedEvent: (tokenId: string) => AuthSpineEventInput;
   traceContext: TraceContext;
+  trustSignal: TrustSignal | null;
   reviewedRevision: string;
   reviewedInstanceChecks: ReviewedInstanceCheck[];
 }): Promise<string> {
   const storageBindingJson = serializeStorageBinding(persistedStorageBinding);
+  const trustSignalJson = serializeTrustSignal(trustSignal);
 
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
@@ -4090,14 +4110,15 @@ async function persistApprovedSingleGrantAtomically({
       await client.query(
         `INSERT INTO grants(
            grant_id, subject_id, client_id, storage_binding_json, grant_json,
-           access_mode, issued_at, expires_at, trace_id, scenario_id
-         ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+           trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+         ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
         [
           grantId,
           subjectId,
           clientId,
           storageBindingJson,
           grantJson,
+          trustSignalJson,
           accessMode,
           issuedAt,
           expiresAt,
@@ -4153,6 +4174,7 @@ async function persistApprovedSingleGrantAtomically({
       clientId,
       storageBindingJson,
       grantJson,
+      trustSignalJson,
       accessMode,
       issuedAt,
       expiresAt,
@@ -5468,6 +5490,33 @@ function normalizeCimdRegisteredClient(value: unknown): RegisteredClient {
   };
 }
 
+/**
+ * Attach the reliance record for verified domain control to a CIMD-resolved client.
+ *
+ * Both resolution branches establish the same signal — the document was retrieved
+ * from the https URL the client claims as its identity and names that client_id back
+ * (spec-core.md#client-display obligation 5) — and differ only in `method`, which is
+ * the provenance a relying party needs to reproduce the decision. The lookup time is
+ * stamped here, at the moment of reliance, not at issuance: a status may be withdrawn
+ * between the two, and the record has to show what was true when the server relied.
+ */
+function withDomainControlTrustSignal(
+  client: RegisteredClient,
+  clientId: string,
+  method: TrustSignalMethod,
+  issuer: string
+): RegisteredClient {
+  return {
+    ...client,
+    trust_signal: buildDomainControlTrustSignal({
+      clientId,
+      issuer,
+      lookedUpAt: new Date().toISOString(),
+      method,
+    }),
+  };
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol boundary retains its existing ordered local/self-hosted/external resolution branches; observability only forwards an optional sink.
 async function resolveCimdClientForGrant(
   clientId: string,
@@ -5513,7 +5562,12 @@ async function resolveCimdClientForGrant(
           redirect_uris: localDoc.redirect_uris,
           token_endpoint_auth_method: "none",
         };
-        return normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc));
+        return withDomainControlTrustSignal(
+          normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc)),
+          clientId,
+          "same_origin_document",
+          issuerUrl.origin
+        );
       }
     } catch (err: unknown) {
       if (isAuthError(err) && (err.code === "invalid_client" || err.code === "invalid_request")) {
@@ -5531,7 +5585,12 @@ async function resolveCimdClientForGrant(
     ...((opts.requestId ?? opts.request_id) === undefined ? {} : { requestId: opts.requestId ?? opts.request_id }),
     ...((opts.traceId ?? opts.trace_id) === undefined ? {} : { traceId: opts.traceId ?? opts.trace_id }),
   });
-  return normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc));
+  return withDomainControlTrustSignal(
+    normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc)),
+    clientId,
+    "https_document_fetch",
+    issuerBase ?? clientId
+  );
 }
 
 export async function resolveOAuthClient(
@@ -6257,6 +6316,7 @@ function resolveApprovedEntryIndexes(
 interface ApproveStagedGrantBatchOptions {
   approval_review_revision?: unknown;
   approvedSourceIndexes?: number[] | null;
+  baseUrl?: string;
   confirmedApproveAll?: boolean;
   narrowings?: Record<string, unknown>[] | null;
   nativeManifest?: DbRow | null;
@@ -6399,7 +6459,14 @@ async function approveStagedGrantBatch(
   const reviewed = requireMatchingApprovalReview(pending as PendingConsentRow, opts.approval_review_revision);
   const { subjectId } = reviewed;
   const persistedOptions = persistedBatchReviewOptions(pending as PendingConsentRow);
-  const batchState = await buildReviewedBatchApprovalState(request, pending, subjectId, persistedOptions);
+  // The re-resolution inside the batch state needs the issuer origin: a CIMD
+  // client_id under the AS's own origin resolves from local storage, and
+  // without the base URL it falls through to a network self-fetch that cannot
+  // succeed. The single-grant path already forwards it.
+  const batchState = await buildReviewedBatchApprovalState(request, pending, subjectId, {
+    ...persistedOptions,
+    ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
+  });
   if (
     batchState.review.revision !== pending.approval_review_revision ||
     batchState.review.digest !== pending.approval_review_digest
@@ -6648,6 +6715,7 @@ async function persistApprovedBatchGrantAtomically({
     reviewRevision: review.revision,
     subjectId,
     traceContext,
+    trustSignal: registeredClient.trust_signal ?? null,
   });
 
   return {
@@ -6686,8 +6754,12 @@ async function persistApprovedBatchRowsAtomically(input: {
   reviewRevision: string;
   subjectId: string;
   traceContext: TraceContext;
+  trustSignal: TrustSignal | null;
 }): Promise<string> {
   const packageJson = JSON.stringify(input.packageEnvelope);
+  // One reliance decision accepted the identity for the whole batch, so every child
+  // grant in it records the same signal.
+  const trustSignalJson = serializeTrustSignal(input.trustSignal);
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
       const claim = await client.query(
@@ -6749,14 +6821,15 @@ async function persistApprovedBatchRowsAtomically(input: {
         await client.query(
           `INSERT INTO grants(
              grant_id, subject_id, client_id, storage_binding_json, grant_json,
-             access_mode, issued_at, expires_at, trace_id, scenario_id
-           ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+             trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+           ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
           [
             child.grant.grant_id,
             input.subjectId,
             input.clientId,
             serializeStorageBinding(normalizeStorageBinding(resolved.storageBinding)),
             JSON.stringify(child.grant),
+            trustSignalJson,
             resolved.entry.selection.access_mode,
             child.grant.issued_at,
             child.grant.expires_at ?? null,
@@ -6895,6 +6968,7 @@ async function persistApprovedBatchRowsAtomically(input: {
         input.clientId,
         serializeStorageBinding(normalizeStorageBinding(resolved.storageBinding)),
         JSON.stringify(child.grant),
+        trustSignalJson,
         resolved.entry.selection.access_mode,
         child.grant.issued_at,
         child.grant.expires_at ?? null,
@@ -7285,6 +7359,12 @@ export async function approveGrant(
     }),
     reviewedRevision: approvalArtifact.revision,
     subjectId,
+    // The signal from the resolution that immediately precedes issuance, which is
+    // the one the AS actually relied on to issue this grant. `requirePendingRequest
+    // ClientRegistration` re-resolved the identity a moment ago, so its lookup time
+    // is the truthful one; the PAR-time signal describes a reliance that only got
+    // the request as far as a reviewable consent.
+    trustSignal: registeredClient.trust_signal ?? null,
     tokenIssuedEvent: (tokenId) =>
       buildTokenIssuedEventInput({
         clientId: registeredClient.client_id,
@@ -7593,6 +7673,7 @@ const postgresGrantPackageStore: GrantPackageStore = {
     clientId,
     storageBindingJson,
     grantJson,
+    trustSignalJson,
     accessMode,
     issuedAt,
     expiresAt,
@@ -7602,14 +7683,15 @@ const postgresGrantPackageStore: GrantPackageStore = {
     pgExec(
       `INSERT INTO grants(
          grant_id, subject_id, client_id, storage_binding_json, grant_json,
-         access_mode, issued_at, expires_at, trace_id, scenario_id
-       ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+         trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+       ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
       [
         grantId,
         subjectId,
         clientId,
         storageBindingJson,
         grantJson,
+        trustSignalJson,
         accessMode,
         issuedAt,
         expiresAt,
@@ -7780,6 +7862,7 @@ const sqliteGrantPackageStore: GrantPackageStore = {
     clientId,
     storageBindingJson,
     grantJson,
+    trustSignalJson,
     accessMode,
     issuedAt,
     expiresAt,
@@ -7792,6 +7875,7 @@ const sqliteGrantPackageStore: GrantPackageStore = {
       clientId,
       storageBindingJson,
       grantJson,
+      trustSignalJson,
       accessMode,
       issuedAt,
       expiresAt,
@@ -8065,7 +8149,8 @@ const postgresTokenStore: TokenStore = {
                 gp.package_id AS persisted_package_id,
                 gp.subject_id AS package_subject_id,
                 gp.client_id AS package_client_id,
-                g.storage_binding_json::text AS storage_binding_json
+                g.storage_binding_json::text AS storage_binding_json,
+                g.trust_signal_json
          FROM tokens t
          LEFT JOIN grants g ON t.grant_id = g.grant_id
          LEFT JOIN grant_packages gp ON t.package_id = gp.package_id
@@ -8421,6 +8506,7 @@ async function persistChildGrantForPackage({
     storageBindingJson: serializeStorageBinding(persistedStorageBinding),
     subjectId,
     traceId: traceContext.trace_id,
+    trustSignalJson: serializeTrustSignal(registeredClient.trust_signal),
   });
 
   await emitSpineEvent({
@@ -11444,6 +11530,12 @@ function enrichClientTokenIntrospection(
     result.client_id = row.client_id;
     result.grant = parsedGrant;
     result.grant_storage_binding = grantStorageBinding;
+    // Only present when the AS relied on a signal to accept this identity. A grant
+    // issued to a pre-registered client carries none, and reports none.
+    const trustSignal = parseTrustSignal(row.trust_signal_json);
+    if (trustSignal) {
+      result.grant_trust_signal = trustSignal;
+    }
     result.trace_id = row.trace_id;
     result.scenario_id = row.scenario_id;
     return result;

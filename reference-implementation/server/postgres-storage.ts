@@ -2047,6 +2047,7 @@ async function bootstrapPostgresSchemaOnce({
         client_id TEXT NOT NULL,
         storage_binding_json JSONB,
         grant_json JSONB NOT NULL,
+        trust_signal_json JSONB,
         access_mode TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
         consumed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -2055,6 +2056,7 @@ async function bootstrapPostgresSchemaOnce({
         trace_id TEXT,
         scenario_id TEXT
       );
+      ALTER TABLE grants ADD COLUMN IF NOT EXISTS trust_signal_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_pg_grants_client_status
         ON grants(client_id, status, issued_at);
       -- Absent-only grant expiry: grants issued before that normalization
