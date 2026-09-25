@@ -31,9 +31,9 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@opendatalabs/personal-server-ts-core": "^1.16.1",
+    "@opendatalabs/personal-server-ts-core": "^1.24.6",
     "@opendatalabs/personal-server-ts-mcp": "^0.2.0",
-    "@opendatalabs/personal-server-ts-server": "^1.16.1",
+    "@opendatalabs/personal-server-ts-server": "^1.24.6",
     "better-sqlite3": "^13.0.3",
     "hono": "^4.13.7",
     "viem": "^2.56.3"

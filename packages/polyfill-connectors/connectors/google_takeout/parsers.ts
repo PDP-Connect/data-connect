@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { buildWatchHistoryRecord as sharedBuildWatchHistoryRecord } from "../../src/youtube-watch-history.ts";
 import type {
 	LocationPoint,
 	LocationRecord,
@@ -91,24 +92,17 @@ export function buildLocationRecord(
 /**
  * Build a youtube_watch_history record from a raw WatchHistoryEntry. Returns
  * null if the entry is missing a timestamp.
+ *
+ * Delegates to the shared library module (src/youtube-watch-history.ts),
+ * which the `youtube` connector's manual-import reads the same file format
+ * through — see D9 in docs/migration/connector-cutover/CONTRACTS.md. Kept
+ * as a re-export here so existing imports of `./parsers.ts` (this
+ * connector's tests, index.ts) do not need to change.
  */
 export function buildWatchHistoryRecord(
 	e: WatchHistoryEntry,
 ): WatchHistoryRecord | null {
-	const ts = e.time || null;
-	if (!ts) {
-		return null;
-	}
-	const videoUrl = e.titleUrl || null;
-	const channelUrl = e.subtitles?.[0]?.url || null;
-	return {
-		id: hashId(`yt|${ts}|${videoUrl || e.title}`),
-		watched_at: ts,
-		video_url: videoUrl,
-		video_title: e.title || null,
-		channel_name: e.subtitles?.[0]?.name || null,
-		channel_url: channelUrl,
-	};
+	return sharedBuildWatchHistoryRecord(e);
 }
 
 /**

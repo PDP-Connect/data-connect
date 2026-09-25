@@ -57,7 +57,7 @@
     "ajv": "^8.20.0",
     "sigstore": "^5.0.0",
     "tar": "^7.5.22",
-    "zod": "^4.6.2"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#ee11b09dc4e4c3acb1a1e0606ced0429f761be27",
