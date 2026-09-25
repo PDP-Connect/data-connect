@@ -1,0 +1,49 @@
+{
+  "protocol_version": "0.1.0",
+  "connector_id": "sns",
+  "connector_key": "sns",
+  "manifest_uri": "https://demo.pdpp.dev/rd/connectors/sns",
+  "version": "0.1.0-demo",
+  "display_name": "SNS · Servicio Nacional de Salud (demo)",
+  "runtime_requirements": {
+    "bindings": {}
+  },
+  "capabilities": {
+    "public_listing": { "tier": "development" }
+  },
+  "streams": [
+    {
+      "name": "control_prenatal",
+      "description": "Control prenatal: centro de salud, semanas de gestación, fecha probable de parto, controles y vacunas del embarazo (datos ficticios)",
+      "semantics": "mutable_state",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "cedula": { "type": "string" },
+          "nombre": { "type": "string" },
+          "centro_salud": { "type": "string" },
+          "fecha_ultima_consulta": { "type": "string", "format": "date" },
+          "semanas_gestacion": { "type": "integer" },
+          "fecha_probable_parto": { "type": "string", "format": "date" },
+          "controles_prenatales": { "type": "integer" },
+          "grupo_sanguineo": { "type": "string" },
+          "vacunas_embarazo": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "riesgo_obstetrico": { "type": "string" },
+          "source_updated_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "fecha_probable_parto"]
+      },
+      "primary_key": ["id"],
+      "cursor_field": "source_updated_at",
+      "consent_time_field": "source_updated_at",
+      "selection": { "fields": true, "resources": true },
+      "coverage_strategy": "full_inventory",
+      "freshness_strategy": "manual_as_of",
+      "incremental": false
+    }
+  ]
+}

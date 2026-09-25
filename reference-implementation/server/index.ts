@@ -44,6 +44,7 @@ import {
   searchSpine,
 } from "../lib/spine.ts";
 import { buildEventPayload } from "../operations/as-client-event-subscriptions/index.ts";
+import { executeAsGrantRevoke } from "../operations/as-grant-revoke/index.ts";
 import type {
   ConnectorIdentityPageBoundary,
   ConnectorSummaryPageProfile,
@@ -122,8 +123,10 @@ import {
   getCumulativeClientAccessForPackage,
   getGrantPackageAccess,
   getGrantPackageForOwner,
+  getGrantPackageIdForGrant,
   getManifestForStorageBinding,
   introspect,
+  introspectPackageStreamRead,
   issueOAuthAuthorizationCodeForDeviceCode,
   issueOAuthAuthorizationCodeForPackageDeviceCode,
   listActiveTokensForOwnerClient,
@@ -631,6 +634,8 @@ import { registerStreamingRoutes } from "./streaming/routes.ts";
 import { createRunTargetRegistry } from "./streaming/run-target-registry.ts";
 import { createStreamingSessionStore } from "./streaming/sessions.ts";
 import { buildLogger, createApp } from "./transport.ts";
+import { demoLangCookie, requestedDemoLang } from "./demo-i18n.ts";
+import { type MountOwnerAutorizacionesContext, mountOwnerAutorizaciones } from "./routes/owner-autorizaciones.ts";
 import {
   createWebPushSubscriptionStore,
   fanoutEscalationWebPush,
@@ -3424,6 +3429,27 @@ function buildGrantInvalidError(): ApiError {
   }) as ApiError;
 }
 
+// DR demo: every event of a grant's timeline, for the citizen "what was read" list.
+const CITIZEN_TIMELINE_LIMIT = 2000;
+
+/** DR demo: a grant's stored JSON and end date, for the citizen authorizations page. */
+async function readCitizenGrantRow(grantId: string): Promise<{ expiresAt: string | null; grantJson: string } | null> {
+  const row = (
+    isPostgresStorageBackend()
+      ? (
+          await postgresQuery(
+            "SELECT grant_json::text AS grant_json, expires_at AS grant_expires_at FROM grants WHERE grant_id = $1",
+            [grantId]
+          )
+        ).rows[0]
+      : getOne(referenceQueries.grantsGetScopedStateById, [grantId])
+  ) as { grant_expires_at?: string | null; grant_json?: string } | null | undefined;
+  if (!row?.grant_json) {
+    return null;
+  }
+  return { expiresAt: row.grant_expires_at ?? null, grantJson: row.grant_json };
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export async function resolveGrantScopedStateGrant(connectorId: string, grantId: string) {
   // Grants live in the active storage backend. In postgres mode the SQLite
@@ -4910,6 +4936,17 @@ export function buildAsApp(opts: ServerOpts = {}) {
     //   reference-implementation-architecture/spec.md
     (res as ResLike).setHeader("X-Frame-Options", "DENY");
     (res as ResLike).setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    next();
+  });
+
+  // DR demo: ?lang= (ES | EN toggle) or ?ui_locales= (requesting app) sticks
+  // for the rest of the flow, e.g. /oauth/authorize?ui_locales=en -> /owner/login.
+  app.use((..._args: never[]) => {
+    const [req, res, next] = _args as unknown as [ReqLike, ResLike, () => void];
+    const lang = requestedDemoLang({ headers: req.headers ?? {}, query: req.query });
+    if (lang) {
+      res.setHeader("Set-Cookie", demoLangCookie(lang));
+    }
     next();
   });
 
@@ -7086,6 +7123,33 @@ export function buildAsApp(opts: ServerOpts = {}) {
   };
   mountAsGrantRevoke(app, asGrantRevokeContext as unknown as Parameters<typeof mountAsGrantRevoke>[1]);
 
+  // DR demo: citizen "Mis autorizaciones" page; revokes through the same
+  // operation + side effects as the grant revoke route above.
+  mountOwnerAutorizaciones(app as unknown as Parameters<typeof mountOwnerAutorizaciones>[0], {
+    ensureCsrfToken: ownerAuth.ensureCsrfToken as unknown as MountOwnerAutorizacionesContext["ensureCsrfToken"],
+    handleError: handleError as unknown as MountOwnerAutorizacionesContext["handleError"],
+    listGrantEvents: async (grantId) =>
+      (await listSpineEventsPage("grant", grantId, { cursor: null, limit: CITIZEN_TIMELINE_LIMIT }))
+        .events as unknown as Awaited<ReturnType<MountOwnerAutorizacionesContext["listGrantEvents"]>>,
+    listSpineCorrelations: (kind, filters) =>
+      listSpineCorrelations(kind, filters as Record<string, unknown>) as unknown as ReturnType<
+        MountOwnerAutorizacionesContext["listSpineCorrelations"]
+      >,
+    ...(opts.logger ? { logger: opts.logger as NonNullable<MountOwnerAutorizacionesContext["logger"]> } : {}),
+    packageIdForGrant: (grantId) => getGrantPackageIdForGrant(grantId),
+    readGrant: readCitizenGrantRow,
+    renderCsrfField: (token) => ownerAuth.renderCsrfField(token),
+    requireCsrf: ownerAuth.requireCsrf as unknown as MountOwnerAutorizacionesContext["requireCsrf"],
+    requireOwnerSession: ownerAuth.requireOwnerSession as unknown as MountOwnerAutorizacionesContext["requireOwnerSession"],
+    revokeGrant: async (grantId) => {
+      await executeAsGrantRevoke({ grantId, requestId: generateSpineId("req") }, { revokeGrant });
+      await asGrantRevokeContext.applyGrantRevokeSideEffects(grantId).catch(() => undefined);
+    },
+    revokePackage: async (packageId) => {
+      await revokeGrantPackage(packageId, { request_id: generateSpineId("req") });
+    },
+  });
+
   // Client event subscriptions are mounted on the RESOURCE SERVER under
   // `/v1/event-subscriptions` (see buildRsApp). They are the same kind of
   // RI-extension surface as `/v1/streams/:s/records`: ordinary clients use
@@ -7279,7 +7343,9 @@ function buildRsApp(opts: ServerOpts = {}) {
     ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
-    requireTokenWithIntrospection(req, res, next, introspectToken);
+    requireTokenWithIntrospection(req, res, next, (token) =>
+      introspectPackageStreamRead(token, req.params?.stream, introspectToken)
+    );
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },

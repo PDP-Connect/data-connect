@@ -9,8 +9,8 @@
  * not load the shared hosted-ui stylesheet; every selector is `cu-` prefixed
  * so nothing leaks into other hosted pages.
  *
- *   ┌ amber sim bar: "Simulación · no es el portal oficial" ┐
- *   ├ nav: text wordmark ─────────────────────────── ES ───┤
+ *   ┌ amber sim bar: "Simulación · no es el portal oficial"  ES | EN ┐
+ *   ├ nav: text wordmark ──────────────────────────────────┤
  *   │           ┌ card: glyph + title ┐                    │
  *   │           │ body                │                    │
  *   │           └─────────────────────┘                    │
@@ -18,7 +18,9 @@
  *   └ "no afiliada a la OGTIC ni al Gobierno…" ────────────┘
  */
 
-export type CitizenShell = "cuenta-unica" | "dr-consent";
+import { type DemoLang, pickLang } from "./demo-i18n.ts";
+
+export type CitizenShell = "cuenta-unica" | "dr-consent" | "citizen-grants";
 
 interface ShellBrand {
   footerNote: string;
@@ -27,20 +29,38 @@ interface ShellBrand {
   wordmark: string;
 }
 
-const SHELL_BRANDS: Record<CitizenShell, ShellBrand> = {
-  "cuenta-unica": {
-    footerNote: "Simulación para demostración. No es un servicio del Estado dominicano.",
-    navAction: `<a class="cu-btn cu-outline" href="#">Crear cuenta</a>`,
-    subtitle: "Entorno de demostración",
-    wordmark: "Cuenta Única",
-  },
-  "dr-consent": {
-    footerNote: "Servicio de demostración que funciona junto a Cuenta Única. No es un servicio del Estado dominicano.",
+function shellBrand(shell: CitizenShell, lang: DemoLang): ShellBrand {
+  const t = (es: string, en: string) => pickLang(lang, es, en);
+  const notState = t("No es un servicio del Estado dominicano.", "Not a service of the Dominican State.");
+  if (shell === "cuenta-unica") {
+    return {
+      footerNote: `${t("Simulación para demostración.", "Simulation for demonstration.")} ${notState}`,
+      navAction: `<a class="cu-btn cu-outline" href="#">${t("Crear cuenta", "Create account")}</a>`,
+      subtitle: t("Entorno de demostración", "Demo environment"),
+      wordmark: "Cuenta Única",
+    };
+  }
+  if (shell === "citizen-grants") {
+    return {
+      footerNote: `${t("Vista simulada para demostración.", "Simulated view for demonstration.")} ${notState}`,
+      navAction: "",
+      subtitle: t(
+        "Vista simulada de cómo podría verse en Soy Yo RD",
+        "Simulated view of how this could look in Soy Yo RD"
+      ),
+      wordmark: t("Mis autorizaciones", "My authorizations"),
+    };
+  }
+  return {
+    footerNote: `${t(
+      "Servicio de demostración que funciona junto a Cuenta Única.",
+      "Demo service that works alongside Cuenta Única."
+    )} ${notState}`,
     navAction: "",
-    subtitle: "Servidor de autorización · demostración",
-    wordmark: "Autorización de acceso a datos",
-  },
-};
+    subtitle: t("Servidor de autorización · demostración", "Authorization server · demo"),
+    wordmark: t("Autorización de acceso a datos", "Data access authorization"),
+  };
+}
 
 const FONT_HREF = "https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap";
 
@@ -84,12 +104,14 @@ body.cu-page {
   font-size: 13px; font-weight: 600; text-align: center; padding: 6px 16px; letter-spacing: .2px;
 }
 .cu-sim-bar span { font-weight: 400; }
+.cu-sim-lang { margin-left: 12px; white-space: nowrap; }
+.cu-sim-lang a { color: var(--sim-text); font-weight: 400; }
+.cu-sim-lang a[aria-current="true"] { font-weight: 700; text-decoration: none; }
 .cu-nav { background: #fff; box-shadow: 0 1.5px 4px 0 #00000040; }
 .cu-nav-inner { max-width: 1400px; margin: 0 auto; height: 72px; padding: 0 24px; display: flex; align-items: center; gap: 16px; }
 .cu-wordmark { flex: 1; display: flex; flex-direction: column; line-height: 1.1; color: var(--cu-primary); text-decoration: none; }
 .cu-wordmark b { font-size: 20px; font-weight: 700; letter-spacing: -.2px; }
 .cu-wordmark small { font-size: 11px; font-weight: 500; color: var(--cu-text-muted); }
-.cu-lang { font-size: 14px; color: var(--cu-primary); font-weight: 500; }
 .cu-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 40px; padding: 0 22px; border-radius: 60px; border: 0;
@@ -208,22 +230,59 @@ export function renderCitizenCard({ glyph, title, body }: { glyph: string; title
 </div>`;
 }
 
-/** Full standalone document; `body` goes inside the centered 560px column. */
+/**
+ * The current URL with `lang` set, for the ES | EN toggle.
+ * "/consent?request_uri=x&lang=es" + "en" -> "/consent?request_uri=x&lang=en"
+ */
+export function citizenLangHref(currentUrl: string, lang: DemoLang): string {
+  if (!currentUrl) {
+    return `?lang=${lang}`;
+  }
+  const url = new URL(currentUrl, "http://localhost");
+  url.searchParams.set("lang", lang);
+  return `${url.pathname}${url.search}`;
+}
+
+function renderLangToggle(lang: DemoLang, currentUrl: string): string {
+  const link = (target: DemoLang) => {
+    const current = target === lang ? ` aria-current="true"` : "";
+    const href = escapeText(citizenLangHref(currentUrl, target));
+    return `<a data-lang-toggle="${target}" href="${href}" hreflang="${target}"${current}>${target.toUpperCase()}</a>`;
+  };
+  return `<span class="cu-sim-lang">${link("es")} | ${link("en")}</span>`;
+}
+
+// Without a server-known URL, keep the page's own query (e.g. request_uri) on toggle.
+const LANG_TOGGLE_SCRIPT = `document.querySelectorAll("[data-lang-toggle]").forEach(function (a) {
+  var u = new URL(location.href); u.searchParams.set("lang", a.getAttribute("data-lang-toggle")); a.href = u.pathname + u.search;
+});`;
+
+/**
+ * Full standalone document; `body` goes inside the centered 560px column.
+ * `currentUrl` (path + query, e.g. `req.originalUrl`) is where the ES | EN
+ * toggle links point; without it they point to "?lang=…" on the same path.
+ */
 export function renderCitizenDocument({
   body,
+  currentUrl = "",
+  lang = "es",
   script = "",
   shell,
   title,
 }: {
   body: string;
+  currentUrl?: string;
+  lang?: DemoLang;
   script?: string;
   shell: CitizenShell;
   title: unknown;
 }): string {
-  const brand = SHELL_BRANDS[shell];
+  const brand = shellBrand(shell, lang);
+  const t = (es: string, en: string) => pickLang(lang, es, en);
   const scriptTag = script ? `<script>${script}</script>` : "";
+  const toggleScript = currentUrl ? "" : `<script>${LANG_TOGGLE_SCRIPT}</script>`;
   return `<!DOCTYPE html>
-<html lang="es">
+<html lang="${lang}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -234,11 +293,10 @@ export function renderCitizenDocument({
 <link rel="stylesheet" href="${FONT_HREF}" />
 <style>${CITIZEN_CSS}</style>
 </head>
-<body class="cu-page" data-shell="${shell}">
-<div class="cu-sim-bar" role="note">Simulación · no es el portal oficial <span>— demostración con datos ficticios</span></div>
+<body class="cu-page" data-shell="${shell}" data-lang="${lang}">
+<div class="cu-sim-bar" role="note">${t("Simulación · no es el portal oficial", "Simulation · not the official portal")} <span>— ${t("demostración con datos ficticios", "demo with fictitious data")}</span>${renderLangToggle(lang, currentUrl)}</div>
 <nav class="cu-nav"><div class="cu-nav-inner">
   <a class="cu-wordmark" href="#"><b>${escapeText(brand.wordmark)}</b><small>${escapeText(brand.subtitle)}</small></a>
-  <span class="cu-lang">ES</span>
   ${brand.navAction}
 </div></nav>
 <main class="cu-main" aria-labelledby="hosted-ui-page-title"><div class="cu-card-wrap">
@@ -247,13 +305,16 @@ ${body}
 <footer>
   <div class="cu-footer-top"><div class="cu-foot-inner cu-foot-grid">
     <div class="cu-foot-brand">${escapeText(brand.wordmark)}<small>${escapeText(brand.footerNote)}</small></div>
-    <div><h4>INFÓRMATE</h4><p>Términos de uso</p><p>Política de privacidad</p><p>Preguntas frecuentes</p></div>
-    <div><h4>CONTÁCTANOS</h4><p>Tel: (000) 000-0000</p><p>demo@example.org</p></div>
-    <div><h4>SOBRE ESTA DEMO</h4><p>Pantalla simulada. Los datos mostrados son ficticios.</p></div>
+    <div><h4>${t("INFÓRMATE", "LEARN MORE")}</h4><p>${t("Términos de uso", "Terms of use")}</p><p>${t("Política de privacidad", "Privacy policy")}</p><p>${t("Preguntas frecuentes", "Frequently asked questions")}</p></div>
+    <div><h4>${t("CONTÁCTANOS", "CONTACT US")}</h4><p>Tel: (000) 000-0000</p><p>demo@example.org</p></div>
+    <div><h4>${t("SOBRE ESTA DEMO", "ABOUT THIS DEMO")}</h4><p>${t("Pantalla simulada. Los datos mostrados son ficticios.", "Simulated screen. The data shown is fictitious.")}</p></div>
   </div></div>
-  <div class="cu-footer-bottom"><div class="cu-foot-inner"><p>© 2026 Demostración · no afiliada a la OGTIC ni al Gobierno de la República Dominicana.</p></div></div>
+  <div class="cu-footer-bottom"><div class="cu-foot-inner"><p>${t(
+    "© 2026 Demostración · no afiliada a la OGTIC ni al Gobierno de la República Dominicana.",
+    "© 2026 Demo · not affiliated with OGTIC or the Government of the Dominican Republic."
+  )}</p></div></div>
 </footer>
-${scriptTag}
+${toggleScript}${scriptTag}
 </body>
 </html>`;
 }

@@ -21,6 +21,7 @@
 
 import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import { type CitizenShell, renderCitizenDocument } from "./citizen-ui.ts";
+import type { DemoLang } from "./demo-i18n.ts";
 
 export const HOSTED_UI_CSS_PATH = "/__pdpp/hosted-ui.css";
 export const HOSTED_UI_BRAND_MARKER = "data-pdpp-hosted-ui";
@@ -33,6 +34,9 @@ interface HostedDocumentArgs {
   providerName: unknown;
   // DR demo: render inside the citizen shell instead of the PDPP chrome.
   shell?: CitizenShell;
+  // DR demo: citizen-shell language and the URL its ES | EN toggle keeps.
+  currentUrl?: string;
+  lang?: DemoLang;
   themeChoice?: unknown;
   title: unknown;
 }
@@ -1055,9 +1059,17 @@ export function renderHostedDocument({
   body,
   shell,
   themeChoice = "system",
+  currentUrl,
+  lang,
 }: HostedDocumentArgs): string {
   if (shell) {
-    return renderCitizenDocument({ body, shell, title });
+    return renderCitizenDocument({
+      body,
+      shell,
+      title,
+      ...(currentUrl ? { currentUrl } : {}),
+      ...(lang ? { lang } : {}),
+    });
   }
   const safeTitle = escapeHtml(title);
   const safeThemeChoice = normalizeHostedThemeChoice(themeChoice);

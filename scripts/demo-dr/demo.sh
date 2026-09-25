@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # DR citizen-assistant demo runner.
 #
-#   scripts/demo-dr/demo.sh seed                 # load the fictitious SIUBEN + INTRANT records (once)
+#   scripts/demo-dr/demo.sh seed                 # load the fictitious SNS + SIUBEN + INTRANT records (once)
 #   scripts/demo-dr/demo.sh start [PUBLIC_ORIGIN] # run reference server + console on one origin
 #   scripts/demo-dr/demo.sh reset                # delete the demo database
 #
@@ -51,7 +51,7 @@ cmd_seed() {
   (cd "$ROOT/reference-implementation" && env -u PDPP_OWNER_PASSWORD npm run -s server) >"$DATA_DIR/seed-server.log" 2>&1 &
   PIDS+=("$!")
   wait_for "http://localhost:7662/.well-known/oauth-authorization-server"
-  (cd "$ROOT/reference-implementation" && npm run -s cli -- seed --connector siuben,intrant)
+  (cd "$ROOT/reference-implementation" && npm run -s cli -- seed --connector sns,siuben,intrant)
   echo "Seeded. Now run: $0 start [PUBLIC_ORIGIN]"
 }
 

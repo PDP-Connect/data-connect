@@ -518,13 +518,15 @@ const REDDIT_SAVED = [
 
 // ─── Dominican Republic demo fixtures (fictitious citizen) ────────────────────
 //
-// One invented citizen for the DR citizen-assistant demo. The cédula uses the
-// unissued 000 prefix so it cannot collide with a real person; names, scores
-// and dates are illustrative, not SIUBEN or INTRANT data.
+// Invented citizens for the DR demo (María and her partner Luis). The cédula
+// uses the unissued 000 prefix so it cannot collide with a real person; names,
+// scores and dates are illustrative, not SNS, SIUBEN or INTRANT data.
 
 const DEMO_CEDULA = "000-1234567-8";
 const DEMO_HOGAR_ID = "siuben:hogar:000-1234567-8";
 const DEMO_SOURCE_UPDATED_AT = "2026-09-01T12:00:00.000Z";
+
+const DEMO_NOMBRE_MARIA = "María Altagracia Rosario Peña";
 
 const SIUBEN_CLASIFICACION_HOGAR = [
   {
@@ -533,12 +535,12 @@ const SIUBEN_CLASIFICACION_HOGAR = [
     fecha_ultima_visita: "2025-11-18",
     icv_descripcion: "Pobreza moderada",
     icv_grupo: "ICV-2",
-    icv_puntaje: 38.6,
+    icv_puntaje: 41.2,
     id: DEMO_HOGAR_ID,
-    miembros_hogar: 4,
+    miembros_hogar: 2,
     municipio: "Santo Domingo Este",
-    nombre_jefe_hogar: "Rosa Elena Martínez Guzmán",
-    programas_activos: ["Aliméntate (Supérate)", "Bono Gas Hogar"],
+    nombre_jefe_hogar: DEMO_NOMBRE_MARIA,
+    programas_activos: ["Aliméntate (Supérate)"],
     provincia: "Santo Domingo",
     source_updated_at: DEMO_SOURCE_UPDATED_AT,
   },
@@ -546,48 +548,44 @@ const SIUBEN_CLASIFICACION_HOGAR = [
 
 const SIUBEN_MIEMBROS_HOGAR = [
   {
-    edad: 41,
+    edad: 29,
     hogar_id: DEMO_HOGAR_ID,
     id: "siuben:miembro:1",
-    nivel_educativo: "Bachiller",
-    nombre: "Rosa Elena Martínez Guzmán",
-    ocupacion: "Trabajadora doméstica",
+    nivel_educativo: "Universitario",
+    nombre: DEMO_NOMBRE_MARIA,
+    ocupacion: "Enfermera",
     parentesco: "Jefa del hogar",
     sexo: "F",
     source_updated_at: DEMO_SOURCE_UPDATED_AT,
   },
   {
-    edad: 44,
+    edad: 31,
     hogar_id: DEMO_HOGAR_ID,
     id: "siuben:miembro:2",
-    nivel_educativo: "Básica",
-    nombre: "Julio César Peña Almonte",
-    ocupacion: "Mototaxista",
+    nivel_educativo: "Bachiller",
+    nombre: "Luis Manuel Pérez Santos",
+    ocupacion: "Repartidor",
     parentesco: "Cónyuge",
     sexo: "M",
     source_updated_at: DEMO_SOURCE_UPDATED_AT,
   },
+];
+
+// Prenatal check-ups (SNS). One record: María, 32 weeks.
+const SNS_CONTROL_PRENATAL = [
   {
-    edad: 15,
-    hogar_id: DEMO_HOGAR_ID,
-    id: "siuben:miembro:3",
-    nivel_educativo: "Secundaria (en curso)",
-    nombre: "Ana Lucía Peña Martínez",
-    ocupacion: "Estudiante",
-    parentesco: "Hija",
-    sexo: "F",
+    cedula: DEMO_CEDULA,
+    centro_salud: "Hospital Materno Infantil (demo)",
+    controles_prenatales: 6,
+    fecha_probable_parto: "2026-11-20",
+    fecha_ultima_consulta: "2026-09-15",
+    grupo_sanguineo: "O+",
+    id: "sns:control_prenatal:000-1234567-8",
+    nombre: DEMO_NOMBRE_MARIA,
+    riesgo_obstetrico: "Bajo",
+    semanas_gestacion: 32,
     source_updated_at: DEMO_SOURCE_UPDATED_AT,
-  },
-  {
-    edad: 8,
-    hogar_id: DEMO_HOGAR_ID,
-    id: "siuben:miembro:4",
-    nivel_educativo: "Primaria (en curso)",
-    nombre: "Luis Miguel Peña Martínez",
-    ocupacion: "Estudiante",
-    parentesco: "Hijo",
-    sexo: "M",
-    source_updated_at: DEMO_SOURCE_UPDATED_AT,
+    vacunas_embarazo: ["Td", "Influenza"],
   },
 ];
 
@@ -600,7 +598,7 @@ const INTRANT_LICENCIAS_CONDUCIR = [
     fecha_expedicion: "2022-11-14",
     fecha_vencimiento: "2026-11-14",
     id: "intrant:licencia:000-1234567-8",
-    nombre: "Rosa Elena Martínez Guzmán",
+    nombre: DEMO_NOMBRE_MARIA,
     numero_licencia: DEMO_CEDULA,
     oficina_expedicion: "Santo Domingo Este (demo)",
     restricciones: ["Uso de lentes correctivos"],
@@ -613,6 +611,7 @@ const INTRANT_LICENCIAS_CONDUCIR = [
 // (scripts/demo-dr/seed-remote.ts) with the same data `pdpp seed` loads locally.
 export const DR_DEMO_RECORDS_BY_STREAM: Readonly<Record<string, readonly SeedRecord[]>> = {
   clasificacion_hogar: SIUBEN_CLASIFICACION_HOGAR,
+  control_prenatal: SNS_CONTROL_PRENATAL,
   licencias_conducir: INTRANT_LICENCIAS_CONDUCIR,
   miembros_hogar: SIUBEN_MIEMBROS_HOGAR,
 };
@@ -723,6 +722,15 @@ const SEED_FIXTURE_HANDLERS: readonly SeedFixtureHandler[] = [
       }
     },
     streamNames: ["clasificacion_hogar", "miembros_hogar"],
+  },
+  {
+    connectorKey: "sns",
+    run(emitRecord) {
+      for (const control of SNS_CONTROL_PRENATAL) {
+        emitRecord("control_prenatal", control);
+      }
+    },
+    streamNames: ["control_prenatal"],
   },
   {
     connectorKey: "intrant",

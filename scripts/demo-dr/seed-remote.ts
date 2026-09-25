@@ -15,7 +15,7 @@ import { establishOwnerSessionCookie } from "../lib/owner-session.ts";
 import { mintOwnerToken } from "../railway-mcp-query-smoke.ts";
 
 const MANIFESTS_DIR = join(import.meta.dirname, "../../reference-implementation/fixtures/seed-manifests");
-const DEMO_SOURCES = ["siuben", "intrant"] as const;
+const DEMO_SOURCES = ["sns", "siuben", "intrant"] as const;
 const OWNER_SUBJECT_ID = "owner_local";
 const HTTP_OK = 200;
 const REGISTER_OK_STATUSES = new Set([200, 201, 409]);

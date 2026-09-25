@@ -21,6 +21,7 @@
 import crypto from "node:crypto";
 import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import { CITIZEN_GLYPHS, renderCitizenCard, renderCitizenDocument } from "./citizen-ui.ts";
+import { type DemoLang, pickLang, resolveDemoLang } from "./demo-i18n.ts";
 import {
   escapeHtml as hostedEscape,
   readHostedThemeChoiceFromCookieHeader,
@@ -124,6 +125,7 @@ interface LoginPageOptions {
   clientName?: string | null;
   csrfToken: string;
   error: string | null;
+  lang: DemoLang;
   providerName: string;
   returnTo: string;
   themeChoice?: string;
@@ -266,7 +268,7 @@ const LOGIN_PAGE_SCRIPT = `(function () {
     toggle.addEventListener("click", function () {
       var show = pw.type === "password";
       pw.type = show ? "text" : "password";
-      toggle.setAttribute("aria-label", show ? "Ocultar contraseña" : "Mostrar contraseña");
+      toggle.setAttribute("aria-label", toggle.getAttribute(show ? "data-label-hide" : "data-label-show"));
       toggle.setAttribute("aria-pressed", String(show));
     });
   }
@@ -297,42 +299,66 @@ async function resolveLoginClientName(returnTo: string, lookup: ClientNameLookup
   }
 }
 
-function renderLoginPage({ clientName, error, returnTo, csrfToken }: LoginPageOptions): string {
+// DR demo: sign-in copy; the error strings are shown in the red alert.
+const LOGIN_ERRORS = {
+  csrf: [
+    "La sesión expiró o el formulario ya se envió. Inténtalo de nuevo.",
+    "The session expired or the form was already sent. Please try again.",
+  ],
+  passwordChanged: [
+    "La contraseña cambió durante el inicio de sesión. Inténtalo de nuevo con la contraseña actual.",
+    "The password changed while signing in. Try again with the current password.",
+  ],
+  wrongPassword: ["La cédula o la contraseña no son correctas.", "The cédula or the password is not correct."],
+} as const;
+
+function loginError(lang: DemoLang, key: keyof typeof LOGIN_ERRORS): string {
+  const [es, en] = LOGIN_ERRORS[key];
+  return pickLang(lang, es, en);
+}
+
+function renderLoginPage({ clientName, error, lang, returnTo, csrfToken }: LoginPageOptions): string {
+  const t = (es: string, en: string) => pickLang(lang, es, en);
   const safeReturnTo = typeof returnTo === "string" ? returnTo : "";
   const errorBlock = error ? `<div class="hosted-ui-error cu-error" role="alert">${hostedEscape(error)}</div>` : "";
   const continueTo = clientName
-    ? `Continuarás a <b>${hostedEscape(clientName)}</b>`
-    : "Continuarás a la aplicación que solicitó tus datos";
+    ? `${t("Continuarás a", "You will continue to")} <b>${hostedEscape(clientName)}</b>`
+    : t("Continuarás a la aplicación que solicitó tus datos", "You will continue to the app that requested your data");
 
   // DR demo: simulated Cuenta Única sign-in. The cédula field is
   // presentational only; the owner password is still the real check.
   const body = `<div class="cu-client">${CITIZEN_GLYPHS.home}<span>${continueTo}</span></div>
-<p class="cu-lead">Inicia sesión con tu número de cédula y contraseña.</p>
-<form method="POST" action="/owner/login" data-surface="human" aria-label="Inicio de sesión">
+<p class="cu-lead">${t("Inicia sesión con tu número de cédula y contraseña.", "Sign in with your cédula number and password.")}</p>
+<form method="POST" action="/owner/login" data-surface="human" aria-label="${t("Inicio de sesión", "Sign in")}">
   ${renderCsrfHiddenField(csrfToken)}
   <input type="hidden" name="return_to" value="${hostedEscape(safeReturnTo)}" />
   ${errorBlock}
   <div class="cu-field">
-    <label for="hosted-ui-cedula">Número de cédula <span>*</span></label>
+    <label for="hosted-ui-cedula">${t("Número de cédula", "Cédula number")} <span>*</span></label>
     <input id="hosted-ui-cedula" type="text" name="cedula_demo" inputmode="numeric" autocomplete="username" value="000-1234567-8" placeholder="000-0000000-0" maxlength="13" />
   </div>
   <div class="cu-field cu-has-adorn">
-    <label for="hosted-ui-password">Contraseña <span>*</span></label>
+    <label for="hosted-ui-password">${t("Contraseña", "Password")} <span>*</span></label>
     <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
-    <button type="button" class="cu-adorn" id="cu-toggle-password" aria-label="Mostrar contraseña" aria-pressed="false">${EYE_ICON}</button>
+    <button type="button" class="cu-adorn" id="cu-toggle-password" aria-label="${t("Mostrar contraseña", "Show password")}" data-label-show="${t("Mostrar contraseña", "Show password")}" data-label-hide="${t("Ocultar contraseña", "Hide password")}" aria-pressed="false">${EYE_ICON}</button>
   </div>
-  <div class="cu-row-links"><a class="cu-link" href="#">¿Olvidaste tu contraseña?</a></div>
-  <button type="submit" class="cu-btn cu-block">Iniciar sesión ${ARROW_ICON}</button>
+  <div class="cu-row-links"><a class="cu-link" href="#">${t("¿Olvidaste tu contraseña?", "Forgot your password?")}</a></div>
+  <button type="submit" class="cu-btn cu-block">${t("Iniciar sesión", "Sign in")} ${ARROW_ICON}</button>
 </form>
-<div class="cu-divider">o</div>
-<a class="cu-btn cu-outline cu-block" href="#">Recuperar cuenta</a>
-<div class="cu-alt"><span class="cu-q">¿No tienes una cuenta?</span> <a class="cu-link" href="#">Regístrate aquí.</a></div>`;
+<div class="cu-divider">${t("o", "or")}</div>
+<a class="cu-btn cu-outline cu-block" href="#">${t("Recuperar cuenta", "Recover account")}</a>
+<div class="cu-alt"><span class="cu-q">${t("¿No tienes una cuenta?", "Don't have an account?")}</span> <a class="cu-link" href="#">${t("Regístrate aquí.", "Register here.")}</a></div>`;
 
+  // The toggle keeps return_to so the sign-in still continues to the app.
+  const currentUrl = safeReturnTo ? `/owner/login?return_to=${encodeURIComponent(safeReturnTo)}` : "/owner/login";
+  const cardTitle = t("Cuenta Única Ciudadana", "Cuenta Única citizen account");
   return renderCitizenDocument({
-    body: renderCitizenCard({ body, glyph: CITIZEN_GLYPHS.lock, title: "Cuenta Única Ciudadana" }),
+    body: renderCitizenCard({ body, glyph: CITIZEN_GLYPHS.lock, title: cardTitle }),
+    currentUrl,
+    lang,
     script: LOGIN_PAGE_SCRIPT,
     shell: "cuenta-unica",
-    title: "Cuenta Única Ciudadana (simulación) · Iniciar sesión",
+    title: t("Cuenta Única Ciudadana (simulación) · Iniciar sesión", "Cuenta Única (simulation) · Sign in"),
   });
 }
 
@@ -747,17 +773,23 @@ function replyLoginRateLimited(
 ): void {
   res.setHeader("Retry-After", String(retryAfterSeconds));
   if (wantsHtml(req)) {
+    const lang = resolveDemoLang(req);
+    const t = (es: string, en: string) => pickLang(lang, es, en);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(429).send(
       renderHostedDocument({
         body: renderCitizenCard({
-          body: `<p class="cu-lead">Demasiados intentos de inicio de sesión desde esta dirección. Intenta de nuevo en unos ${retryAfterSeconds} segundos.</p>`,
+          body: `<p class="cu-lead">${t(
+            `Demasiados intentos de inicio de sesión desde esta dirección. Intenta de nuevo en unos ${retryAfterSeconds} segundos.`,
+            `Too many sign-in attempts from this address. Try again in about ${retryAfterSeconds} seconds.`
+          )}</p>`,
           glyph: CITIZEN_GLYPHS.lock,
-          title: "Espera un momento",
+          title: t("Espera un momento", "Please wait a moment"),
         }),
+        lang,
         providerName,
         shell: "cuenta-unica",
-        title: "Cuenta Única Ciudadana (simulación) · Espera un momento",
+        title: t("Cuenta Única Ciudadana (simulación) · Espera un momento", "Cuenta Única (simulation) · Please wait"),
       })
     );
     return;
@@ -833,6 +865,7 @@ async function sendOwnerLoginPage(
   returnTo: string,
   status: number,
   error: string | null,
+  lang: DemoLang,
   themeChoice?: string
 ): Promise<void> {
   const clientName = await resolveLoginClientName(returnTo, clientNameLookup);
@@ -842,6 +875,7 @@ async function sendOwnerLoginPage(
       clientName,
       csrfToken,
       error,
+      lang,
       providerName,
       returnTo,
       ...(themeChoice === undefined ? {} : { themeChoice }),
@@ -873,6 +907,7 @@ async function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context:
         clientName,
         csrfToken,
         error: null,
+        lang: resolveDemoLang(req),
         providerName: context.providerName,
         returnTo,
         themeChoice: readHostedThemeChoiceFromCookieHeader(req.headers.cookie),
@@ -926,7 +961,8 @@ async function handleOwnerLoginPost(
       csrfToken,
       returnTo,
       403,
-      "La sesión expiró o el formulario ya se envió. Inténtalo de nuevo.",
+      loginError(resolveDemoLang(req), "csrf"),
+      resolveDemoLang(req),
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;
@@ -954,7 +990,8 @@ async function handleOwnerLoginPost(
       csrfToken,
       returnTo,
       401,
-      "La cédula o la contraseña no son correctas.",
+      loginError(resolveDemoLang(req), "wrongPassword"),
+      resolveDemoLang(req),
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;
@@ -969,7 +1006,8 @@ async function handleOwnerLoginPost(
       csrfToken,
       returnTo,
       401,
-      "La contraseña cambió durante el inicio de sesión. Inténtalo de nuevo con la contraseña actual.",
+      loginError(resolveDemoLang(req), "passwordChanged"),
+      resolveDemoLang(req),
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;

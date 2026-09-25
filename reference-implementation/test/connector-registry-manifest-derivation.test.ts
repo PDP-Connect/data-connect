@@ -331,6 +331,7 @@ test("cli/commands/seed.ts: seedableConnectorsFromManifests against the real fix
     "intrant",
     "reddit",
     "siuben",
+    "sns",
     "spotify",
   ]);
 });
