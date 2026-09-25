@@ -245,24 +245,30 @@ function wantsHtml(req: AuthRequest): boolean {
 function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice }: LoginPageOptions): string {
   const safeReturnTo = typeof returnTo === "string" ? returnTo : "";
   const errorBlock = error ? `<div class="hosted-ui-error" role="alert">${hostedEscape(error)}</div>` : "";
-  const form = `<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Owner sign-in">
+  // DR demo: styled as a simulated Cuenta Única sign-in. The cédula field is
+  // presentational only; the owner password is still the real check.
+  const form = `<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Inicio de sesión">
   ${renderCsrfHiddenField(csrfToken)}
   <input type="hidden" name="return_to" value="${hostedEscape(safeReturnTo)}" />
   ${errorBlock}
   <div class="hosted-ui-field">
-    <label for="hosted-ui-password">Owner password</label>
+    <label for="hosted-ui-cedula">Cédula</label>
+    <input id="hosted-ui-cedula" type="text" name="cedula_demo" inputmode="numeric" autocomplete="username" value="000-1234567-8" placeholder="000-0000000-0" />
+  </div>
+  <div class="hosted-ui-field">
+    <label for="hosted-ui-password">Contraseña</label>
     <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
   </div>
   <div class="hosted-ui-actions">
-    <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
+    <button type="submit" class="hosted-ui-button" data-variant="primary">Iniciar sesión</button>
   </div>
 </form>`;
 
   const body = [
     renderPageIntro({
-      eyebrow: "Owner sign-in",
-      lede: "This password keeps other people from seeing your data or changing which apps can use it.",
-      title: `Sign in to ${providerName}`,
+      eyebrow: "Cuenta Única Ciudadana · simulación",
+      lede: "Inicie sesión con su cédula para revisar qué datos se solicitan. Esta pantalla simula el inicio de sesión de Cuenta Única para la demostración; no es el portal oficial.",
+      title: "Iniciar sesión",
     }),
     form,
   ].join("\n");
@@ -271,7 +277,7 @@ function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice
     body,
     providerName,
     themeChoice,
-    title: `${providerName} — Owner sign-in`,
+    title: `${providerName} — Iniciar sesión`,
   });
 }
 
@@ -884,7 +890,7 @@ async function handleOwnerLoginPost(
       csrfToken,
       returnTo,
       401,
-      "Incorrect password.",
+      "Cédula o contraseña incorrecta.",
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;

@@ -46,9 +46,9 @@ export interface GrantExpiryOption {
  * that a forgotten grant closes by itself within a quarter.
  */
 export const HOSTED_MCP_GRANT_EXPIRY_OPTIONS: readonly GrantExpiryOption[] = Object.freeze([
-  Object.freeze({ days: 90, id: "90d", label: "90 days" }),
-  Object.freeze({ days: 365, id: "1y", label: "1 year" }),
-  Object.freeze({ days: null, id: "never", label: "No end date" }),
+  Object.freeze({ days: 90, id: "90d", label: "90 días" }),
+  Object.freeze({ days: 365, id: "1y", label: "1 año" }),
+  Object.freeze({ days: null, id: "never", label: "Sin fecha de fin" }),
 ]);
 
 export const HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID = "90d";

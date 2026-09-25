@@ -170,7 +170,7 @@ export interface HostedMcpPickerRow {
 // `personal_ai_assistant`, was not a registry code.
 export const HOSTED_MCP_PICKER_PURPOSE_CODE = "https://pdpp.dev/purpose/agent_context";
 export const HOSTED_MCP_PICKER_PURPOSE_DESCRIPTION =
-  "Provide selected personal data as context to this MCP client acting as your personal AI agent.";
+  "Responder sus preguntas como asistente ciudadano, usando solo los registros que usted autorice aquí.";
 export const HOSTED_MCP_PICKER_DEFAULT_ACCESS_MODE = "continuous";
 export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new Set(["single_use", "continuous"]);
 
@@ -215,7 +215,7 @@ export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "an
 // you revoke it" is false, because a single_use grant is consumed at first
 // token issuance (spec-core.md:920). This states the expiry fact alone and
 // never mentions the mode.
-export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY = "This authorization has no scheduled end date.";
+export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY = "Esta autorización no tiene fecha de fin programada.";
 
 // Input normalization helpers.
 
@@ -833,7 +833,7 @@ export async function buildHostedMcpConsentChallengeModel(
   // `displayName`, not `titleName`: spec-core.md:673 requires the resolved
   // display name when the metadata carries one, with `client_id` only as the
   // fallback — and `displayName` already encodes exactly that precedence.
-  const clientName = clientDisplay?.displayName ?? "This app";
+  const clientName = clientDisplay?.displayName ?? "Esta aplicación";
   const logo = await resolveConsentClientLogo(client, clientLogoFetchOptions);
   // Icons come from each row's own manifest, the same value /sources passes to
   // ConnectorIcon. Resolved here rather than in the console because the
@@ -1137,7 +1137,7 @@ function buildPickerRowMeta({
   // now", not "will exist".
   // "Data types", not "streams": `stream` is a protocol noun the owner never
   // agreed to learn, and it means nothing on a screen about sharing data.
-  const availabilityPhrase = streamCount === 1 ? "1 data type" : `${streamCount} data types`;
+  const availabilityPhrase = streamCount === 1 ? "1 tipo de dato" : `${streamCount} tipos de datos`;
   parts.push(availabilityPhrase);
   // The connector key used to be appended here whenever it differed from the
   // display label — so a row read "5 data types · chase-bank". That is a
@@ -1500,9 +1500,9 @@ interface PendingConsentCumulativeRisk {
 type ConsentAuthorship = "protocol" | "manifest" | "client";
 
 const AUTHORSHIP_EYEBROW: Record<ConsentAuthorship, string> = {
-  client: "They claim — not verified by your server",
-  manifest: "Your server describes",
-  protocol: "Your server enforces",
+  client: "Declarado por la aplicación — no verificado",
+  manifest: "Descrito por el servidor",
+  protocol: "Aplicado por el servidor",
 };
 
 /**
@@ -2586,8 +2586,8 @@ function renderGrantExpiryControl(ui: ConsentUiRenderer): string {
       </label>`;
   }).join("");
   return `<fieldset class="hosted-ui-expiry" data-hosted-mcp-grant-expiry>
-      <legend class="hosted-ui-expiry-legend">When this access ends</legend>
-      <p class="hosted-ui-expiry-hint">You can revoke it sooner at any time.</p>
+      <legend class="hosted-ui-expiry-legend">Cuándo termina este acceso</legend>
+      <p class="hosted-ui-expiry-hint">Puede revocarlo antes en cualquier momento.</p>
       ${options}
     </fieldset>`;
 }
@@ -2628,13 +2628,13 @@ function renderStreamScopeControls(
 
   const fieldControls = canNarrowFields
     ? `<fieldset class="hosted-ui-scope-fields">
-        <legend class="hosted-ui-scope-legend">Fields</legend>
+        <legend class="hosted-ui-scope-legend">Campos</legend>
         ${scope.requiredFields
           .map(
             (field) =>
               `<label class="hosted-ui-scope-field hosted-ui-scope-field--required"><input type="checkbox" checked disabled /> ${ui.escapeHtml(
                 humanizeStreamLabel(field)
-              )} <span class="hosted-ui-scope-required-note">always included</span></label>`
+              )} <span class="hosted-ui-scope-required-note">siempre incluido</span></label>`
           )
           .join("")}
         ${scope.optionalFields
@@ -2652,7 +2652,7 @@ function renderStreamScopeControls(
   // ("messages created on or after ..."), never as `time_range`.
   const dateControls = scope.timeField
     ? `<fieldset class="hosted-ui-scope-dates">
-        <legend class="hosted-ui-scope-legend">Dates</legend>
+        <legend class="hosted-ui-scope-legend">Fechas</legend>
         <p class="hosted-ui-scope-hint">Leave blank for all ${ui.escapeHtml(label)}, whenever they were ${ui.escapeHtml(
           describeTimeField(scope.timeField)
         )}.</p>
@@ -2665,7 +2665,7 @@ function renderStreamScopeControls(
       </fieldset>`
     : "";
 
-  const summary = canNarrowFields ? `All ${totalFields} fields · all dates` : "All dates";
+  const summary = canNarrowFields ? `Los ${totalFields} campos · todas las fechas` : "Todas las fechas";
 
   return `<details class="hosted-ui-scope" data-hosted-mcp-stream-scope data-stream="${ui.escapeHtml(streamName)}" data-required-fields="${ui.escapeHtml(
     JSON.stringify(scope.requiredFields)
@@ -2707,12 +2707,12 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
   // honest or safe. "Verified app" would be the more flattering phrasing and
   // the more dangerous one, because an owner would act on it.
   const trustLine = clientDisplay.isUnverified
-    ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">This app isn't registered with your server. Its name and logo are self-reported.</p>`
+    ? `<p class="hosted-ui-client-trust" data-trust="unverified" role="status">Esta aplicación no está registrada en el servidor. Su nombre y logo son declarados por ella misma.</p>`
     : clientDisplay.verifiedDomain
-      ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status">Verified domain: ${ui.escapeHtml(
+      ? `<p class="hosted-ui-client-trust" data-trust="domain-verified" role="status">Dominio verificado: ${ui.escapeHtml(
           clientDisplay.verifiedDomain
-        )} — this app controls that domain. Your server hasn't checked anything else about it.</p>`
-      : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registered with your server by you.</p>`;
+        )} — esta aplicación controla ese dominio. El servidor no ha verificado nada más sobre ella.</p>`
+      : `<p class="hosted-ui-client-trust" data-trust="registered" role="status">Registrada por usted en el servidor.</p>`;
   const domainLine = clientDisplay.domainLabel
     ? `<span class="hosted-ui-client-identity-domain">${ui.escapeHtml(clientDisplay.domainLabel)}</span>`
     : "";
@@ -2743,7 +2743,7 @@ function renderHostedMcpClientIdentityBlock(clientDisplay: ConsentClientDisplay,
   // client-authored register survives where it still carries information:
   // policy/terms links the client published, attributed once.
   const clientBlock = policyLinksHtml
-    ? renderAuthorshipBlock("client", "Links this app published", policyLinksHtml, ui)
+    ? renderAuthorshipBlock("client", "Enlaces publicados por la aplicación", policyLinksHtml, ui)
     : "";
   return ui.renderSurface({
     ariaLabel: "Requesting app identity",
@@ -2775,17 +2775,17 @@ function renderHostedMcpTermsBlock(clientName: string, ui: ConsentUiRenderer): s
   // visual noise that made this page read as a debug dump.
   return renderAuthorshipBlock(
     "manifest",
-    "What this server sets and what the app said",
+    "Lo que fija el servidor y lo que declaró la aplicación",
     ui.renderKeyValueList([
       {
-        label: "Purpose",
+        label: "Finalidad",
         // One sentence, said once, with its origin named inside it.
         // This was three rows — a `Purpose` row saying the server assigned
         // it, a `Purpose description` row saying what it was, and a
         // `Purpose code` row printing `https://pdpp.dev/purpose/agent_context`
         // — for one idea. The registry code is a protocol identifier, not
         // owner-facing copy; it stays in the grant and the audit record.
-        value: `Set by this server because ${clientName} didn't give one: use the data you select as context for your AI assistant.`,
+        value: `Fijada por el servidor porque ${clientName} no indicó una: usar los datos que seleccione como contexto para su asistente.`,
       },
     ]),
     ui
@@ -2819,7 +2819,7 @@ const RETENTION_ON_EXPIRY_COPY: Record<string, string> = {
  * panel so the two can never drift into saying different things.
  */
 function buildHostedMcpRetentionSentence(clientName: string): string {
-  const silence = `${clientName} did not say how long it keeps the data it receives.`;
+  const silence = `${clientName} no indicó cuánto tiempo conserva los datos que recibe.`;
   if (!HOSTED_MCP_PICKER_RETENTION) {
     return silence;
   }
@@ -2868,7 +2868,7 @@ export async function renderHostedMcpSourceSelection(
   const clientIdentityBlock = clientDisplay ? renderHostedMcpClientIdentityBlock(clientDisplay, ui) : "";
   // The name the owner reads, used in every sentence that talks about the
   // requester, so the page never says "this app" where it knows the name.
-  const clientName = clientDisplay?.displayName ?? "This app";
+  const clientName = clientDisplay?.displayName ?? "Esta aplicación";
   // Purpose and retention are one register and now one block — see
   // `renderHostedMcpTermsBlock`. Rendered only when there is something to
   // grant: on an empty picker the terms of a grant that cannot be made are
@@ -2901,7 +2901,7 @@ export async function renderHostedMcpSourceSelection(
 
   const renderRowStreams = (row: HostedMcpPickerRow): string => {
     if (!Array.isArray(row.streams) || row.streams.length === 0) {
-      return '<p class="hosted-ui-option-streams-empty">No data is available to share from this source.</p>';
+      return '<p class="hosted-ui-option-streams-empty">Esta fuente no tiene datos disponibles para compartir.</p>';
     }
     const items = row.streams
       .map((stream) => {
@@ -2969,7 +2969,7 @@ export async function renderHostedMcpSourceSelection(
           const sourceKindBlock =
             row.sourceKind && !uniformSourceKind
               ? `<span class="hosted-ui-option-source-kind" data-authorship="protocol">${ui.escapeHtml(
-                  row.sourceKind === "connector" ? "Read directly from this source" : "Read from data you imported"
+                  row.sourceKind === "connector" ? "Leído directamente de esta fuente" : "Leído de datos que usted importó"
                 )}</span>`
               : "";
           // The disclosure is its own control, beside the checkbox rather
@@ -2978,7 +2978,7 @@ export async function renderHostedMcpSourceSelection(
           // and when the affordance was `::after` generated text on the
           // summary, one tap on a phone had two plausible outcomes and the
           // control could be neither labelled nor sized.
-          const disclosureLabel = `Show what ${row.connectorTypeLabel} can share`;
+          const disclosureLabel = `Ver qué puede compartir ${row.connectorTypeLabel}`;
           // What the filter matches against: the source name, the connected
           // account, and the data types it holds — the three things an owner
           // would actually type. Precomputed here so the filter never has to
@@ -3002,7 +3002,7 @@ export async function renderHostedMcpSourceSelection(
                 </span>
               </label>
               <span class="hosted-ui-disclosure" role="button" tabindex="0" aria-expanded="false" aria-label="${ui.escapeHtml(disclosureLabel)}" data-hosted-mcp-disclosure>
-                <span class="hosted-ui-disclosure-label" aria-hidden="true">Choose data</span>
+                <span class="hosted-ui-disclosure-label" aria-hidden="true">Elegir datos</span>
                 <svg class="hosted-ui-disclosure-chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M3 1 L7 5 L3 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </span>
             </summary>
@@ -3018,12 +3018,12 @@ export async function renderHostedMcpSourceSelection(
       // A link only when the route resolved one — this renderer never
       // constructs a URL it cannot stand behind, and Cancel is present either
       // way, so the link can only ever add an exit.
-      `<p class="pdpp-body">You haven&#39;t connected any data sources yet. Connect one, then start this request again.</p>
+      `<p class="pdpp-body">Todavía no hay fuentes de datos conectadas. Conecte una y vuelva a iniciar esta solicitud.</p>
         <div class="hosted-ui-actions hosted-ui-decision-actions">
-          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancelar</button>
           ${
             typeof opts.connectionsUrl === "string" && opts.connectionsUrl
-              ? `<a class="hosted-ui-button" data-variant="primary" href="${ui.escapeHtml(opts.connectionsUrl)}">Connect a source</a>`
+              ? `<a class="hosted-ui-button" data-variant="primary" href="${ui.escapeHtml(opts.connectionsUrl)}">Conectar una fuente</a>`
               : ""
           }
         </div>`;
@@ -3040,16 +3040,16 @@ export async function renderHostedMcpSourceSelection(
   // decision's own terms — the summary is the one place they appear together
   // as a single reviewable artifact.
   const reviewPanel = rows.length
-    ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
-          <h2 class="pdpp-title">What you're allowing</h2>
-          <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
+    ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="Lo que está autorizando">
+          <h2 class="pdpp-title">Lo que está autorizando</h2>
+          <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nada seleccionado todavía.</p>
           <dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
-            <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
-            <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
-            <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
-            <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
-            <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
-            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
+            <dt>Aplicación</dt><dd>${ui.escapeHtml(clientName)}</dd>
+            <dt>Datos</dt><dd data-hosted-mcp-review-scope></dd>
+            <dt>Alcance</dt><dd>Todo lo que contiene cada tipo de dato marcado, salvo que lo haya limitado arriba.</dd>
+            <dt>Duración</dt><dd data-hosted-mcp-review-duration></dd>
+            <dt>Fin</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
+            <dt>Conservación de sus datos</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
           </dl>
         </section>`
     : "";
@@ -3067,8 +3067,8 @@ export async function renderHostedMcpSourceSelection(
   // `decision=cancel`, using formaction so no nested form is needed.
   const submit = rows.length
     ? `<div class="hosted-ui-actions hosted-ui-decision-actions">
-          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancel</button>
-          <button type="submit" class="hosted-ui-button" data-variant="primary" name="decision" value="allow">Allow access</button>
+          <button type="submit" class="hosted-ui-button" data-variant="ghost" name="decision" value="cancel" formaction="/oauth/authorize/mcp-package/cancel" formnovalidate>Cancelar</button>
+          <button type="submit" class="hosted-ui-button" data-variant="primary" name="decision" value="allow">Autorizar acceso</button>
         </div>`
     : "";
 
@@ -3088,7 +3088,7 @@ export async function renderHostedMcpSourceSelection(
       // people know from every file manager; the behavior was already
       // implemented correctly (the parent goes `indeterminate` on partial
       // selection) and the copy was apologizing for a control that works.
-      `<p class="pdpp-body">You can revoke this access later from your grants page.</p>`
+      `<p class="pdpp-body">Puede revocar este acceso más tarde desde su página de autorizaciones.</p>`
     : "";
 
   const validationError = typeof opts.validationError === "string" ? opts.validationError.trim() : "";
@@ -3100,7 +3100,7 @@ export async function renderHostedMcpSourceSelection(
   // one message that explains why the page just changed.
   const validationBanner =
     rows.length || validationError
-      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Choose at least one data type to continue."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
+      ? `<div class="hosted-ui-error hosted-ui-picker-error" role="alert" data-hosted-mcp-picker-error data-default-message="Elija al menos un tipo de dato para continuar."${validationError ? "" : " hidden"}>${ui.escapeHtml(validationError)}</div>`
       : "";
 
   // A filter earns its place only once the list stops being scannable. On
@@ -3126,18 +3126,18 @@ export async function renderHostedMcpSourceSelection(
   // answer is nothing — and it is the one place the page states the size of
   // the decision without the owner having to count checkboxes.
   const selectionCounter = rows.length
-    ? `<p class="hosted-ui-picker-counter" role="status" aria-live="polite" data-hosted-mcp-counter>Nothing selected yet.</p>`
+    ? `<p class="hosted-ui-picker-counter" role="status" aria-live="polite" data-hosted-mcp-counter>Nada seleccionado todavía.</p>`
     : "";
 
   const bulkControls = rows.length
     ? `
         ${sourceFilter}
-        <div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Source bulk controls">
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Select every source</button>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Clear selection</button>
+        <div class="hosted-ui-actions hosted-ui-picker-toolbar" aria-label="Controles de fuentes">
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-select-sources>Marcar todas las fuentes</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-clear-sources>Quitar selección</button>
           <span class="hosted-ui-toolbar-divider" aria-hidden="true"></span>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Show all data types</button>
-          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Hide all data types</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-expand-all>Mostrar todos los datos</button>
+          <button type="button" class="hosted-ui-button" data-hosted-mcp-collapse-all>Ocultar todos los datos</button>
         </div>
         ${selectionCounter}
       `
@@ -3146,19 +3146,19 @@ export async function renderHostedMcpSourceSelection(
   const accessModeControl = rows.length
     ? `
         <fieldset class="hosted-ui-access-mode">
-          <legend class="hosted-ui-access-mode-legend">Access duration</legend>
+          <legend class="hosted-ui-access-mode-legend">Tipo de acceso</legend>
           <label class="hosted-ui-access-mode-option">
             <input type="radio" name="access_mode" value="continuous" checked />
             <span class="hosted-ui-access-mode-body">
-              <span class="hosted-ui-access-mode-label">Ongoing access</span>
-              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can read the data you select, including new matching records, until you revoke access.</span>
+              <span class="hosted-ui-access-mode-label">Acceso continuo</span>
+              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} puede leer los datos que seleccione, incluidos registros nuevos, hasta que usted revoque el acceso.</span>
             </span>
           </label>
           <label class="hosted-ui-access-mode-option">
             <input type="radio" name="access_mode" value="single_use" />
             <span class="hosted-ui-access-mode-body">
-              <span class="hosted-ui-access-mode-label">One-time access</span>
-              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can start one retrieval. It can't start another without your approval.</span>
+              <span class="hosted-ui-access-mode-label">Acceso único</span>
+              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} puede hacer una sola consulta. No puede hacer otra sin su aprobación.</span>
             </span>
           </label>
         </fieldset>
@@ -3274,12 +3274,12 @@ export async function renderHostedMcpSourceSelection(
     if (!counter) return;
     const streams = Array.from(form.querySelectorAll("[data-hosted-mcp-stream-checkbox]")).filter((b) => b.checked);
     if (streams.length === 0) {
-      counter.textContent = "Nothing selected yet.";
+      counter.textContent = "Nada seleccionado todavía.";
       return;
     }
     const sourceCount = sources.filter((s) => streamsFor(s).some((b) => b.checked)).length;
     counter.textContent =
-      plural(sourceCount, "source", "sources") + " · " + plural(streams.length, "data type", "data types");
+      plural(sourceCount, "fuente", "fuentes") + " · " + plural(streams.length, "tipo de dato", "tipos de datos");
   };
   // Keep the disclosure's own state in sync with the <details>. The label and
   // aria-expanded are on a real control now, so both must track "open"
@@ -3291,7 +3291,7 @@ export async function renderHostedMcpSourceSelection(
     const open = source.open;
     disclosure.setAttribute("aria-expanded", open ? "true" : "false");
     const label = disclosure.querySelector(".hosted-ui-disclosure-label");
-    if (label) label.textContent = open ? "Hide data" : "Choose data";
+    if (label) label.textContent = open ? "Ocultar datos" : "Elegir datos";
   };
   const syncSource = (source) => {
     const sourceBox = source.querySelector("[data-hosted-mcp-source-checkbox]");
@@ -3536,8 +3536,8 @@ export async function renderHostedMcpSourceSelection(
     if (reviewDuration) {
       reviewDuration.textContent =
         decision.accessMode === "single_use"
-          ? "One-time access — one retrieval, then no more without your approval."
-          : "Ongoing access — including new matching records, until you revoke it.";
+          ? "Acceso único — una consulta y ninguna más sin su aprobación."
+          : "Acceso continuo — incluidos registros nuevos, hasta que usted lo revoque.";
     }
     if (!decisionField) return;
     if (!hasSelection) {
@@ -3582,7 +3582,7 @@ export async function renderHostedMcpSourceSelection(
     }
     if (!sourceBoxes().some((sourceBox) => sourceBox.checked)) {
       event.preventDefault();
-      setError(error?.dataset.defaultMessage || "Choose at least one data source to continue.");
+      setError(error?.dataset.defaultMessage || "Elija al menos una fuente de datos para continuar.");
       return;
     }
     const incomplete = sources.find((source) => {
@@ -3593,7 +3593,7 @@ export async function renderHostedMcpSourceSelection(
     if (incomplete) {
       event.preventDefault();
       incomplete.open = true;
-      setError("Choose data from each selected source, or clear the source.");
+      setError("Elija datos de cada fuente seleccionada, o quite esa fuente.");
       return;
     }
     // The digest is computed asynchronously (SubtleCrypto), so hold the
@@ -3626,8 +3626,8 @@ export async function renderHostedMcpSourceSelection(
   // the name in `clientIdentityBlock`, so a resolved name is never shown as
   // though the server had verified it (spec-core.md:706-730).
   const pickerTitle = clientDisplay
-    ? `${clientDisplay.displayName} wants to read your data`
-    : "Choose what this app can read";
+    ? `${clientDisplay.displayName} solicita leer sus datos`
+    : "Elija qué puede leer esta aplicación";
 
   // The uniform-kind summary ("All sources below are connector-backed") is
   // gone with the per-row badge: it stated a protocol classification the
@@ -3652,7 +3652,7 @@ export async function renderHostedMcpSourceSelection(
   // control, rather than describing the breadth as inevitable. The approval
   // artifact restates the same term (spec-core.md:873-877).
   const fieldsAndTimeRangeSummary =
-    '<p class="hosted-ui-fields-timerange-summary">Each data type you check is shared in full unless you narrow it. Open a data type to choose fields or a date range.</p>';
+    '<p class="hosted-ui-fields-timerange-summary">Cada tipo de dato marcado se comparte completo, salvo que lo limite. Abra un tipo de dato para elegir campos o fechas.</p>';
 
   // PROTOCOL: the stream-selection controls and the access-mode fieldset are
   // both server-enforced (spec section 706) — wrap them together so the whole
@@ -3660,7 +3660,7 @@ export async function renderHostedMcpSourceSelection(
   // its categories visually distinct.
   const protocolSelectionBlock = renderAuthorshipBlock(
     "protocol",
-    "Streams and access mode your server will enforce",
+    "Datos y acceso que el servidor hará cumplir",
     `${sourceKindSummaryInline}${fieldsAndTimeRangeSummary}<div class="hosted-ui-option-group">${options}</div>${accessModeControl}`,
     ui
   );
@@ -3668,8 +3668,8 @@ export async function renderHostedMcpSourceSelection(
   return ui.renderHostedDocument({
     body: [
       ui.renderPageIntro({
-        eyebrow: "Data access request",
-        lede: "Choose what it can read. Anything you leave unchecked stays private.",
+        eyebrow: "Solicitud de acceso a datos",
+        lede: "Elija qué puede leer. Lo que no marque sigue siendo privado.",
         title: pickerTitle,
       }),
       clientIdentityBlock,
@@ -3697,7 +3697,7 @@ export async function renderHostedMcpSourceSelection(
       .filter(Boolean)
       .join("\n"),
     providerName,
-    title: `${providerName} — Choose data sources`,
+    title: `${providerName} — Autorizar acceso a datos`,
   });
 }
 

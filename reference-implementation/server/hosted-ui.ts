@@ -175,7 +175,7 @@ export const HOSTED_UI_CSS = `:root {
   --background: oklch(0.985 0.004 90);
   --foreground: oklch(0.18 0.005 270);
   --card: oklch(1 0 0);
-  --primary: oklch(0.46 0.11 255);
+  --primary: #003876;
   --primary-foreground: oklch(0.99 0.002 90);
   --muted: oklch(0.955 0.004 270);
   --muted-foreground: oklch(0.47 0.008 270);
@@ -236,6 +236,15 @@ html[data-theme="dark"] {
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+
+.hosted-ui-demo-banner {
+  margin: 0 0 1rem;
+  padding: 0.375rem 0.75rem;
+  border-left: 3px solid #ce1126;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
 
 html {
   background: var(--background);
@@ -1051,7 +1060,7 @@ export function renderHostedDocument({
   // `light` both render the light mark (matches the pre-existing default).
   const markSurface = safeThemeChoice === "dark" ? "dark" : "light";
   return `<!DOCTYPE html>
-<html lang="en" data-theme="${safeThemeChoice}">
+<html lang="es" data-theme="${safeThemeChoice}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -1062,6 +1071,7 @@ export function renderHostedDocument({
 <body ${HOSTED_UI_BRAND_MARKER}>
 <main class="hosted-ui-page" aria-labelledby="hosted-ui-page-title">
 ${renderBrandHeader({ providerName })}
+<p class="hosted-ui-demo-banner" role="note">Demostración · datos ficticios · no es un servicio oficial</p>
 ${body}
 ${renderBrandFooter({ surface: markSurface })}
 </main>
