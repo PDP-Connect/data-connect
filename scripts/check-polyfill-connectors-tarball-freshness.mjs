@@ -135,6 +135,7 @@ export function evaluate({
   pinOnUpstreamMain,
   pinWithinAcceptedRange,
   contentDifferences,
+  rebuildError,
   drift,
 }) {
   const errors = []
@@ -158,7 +159,11 @@ export function evaluate({
         `accept post-cutover manifests. Add RI support and raise LAST_ACCEPTED_PIN in the same change.`
     )
   }
-  if (contentDifferences.length > 0) {
+  if (rebuildError) {
+    errors.push(
+      `could not rebuild pin ${pin} to compare content: ${rebuildError}`
+    )
+  } else if (contentDifferences.length > 0) {
     const shown = contentDifferences.slice(0, 20).join("\n  ")
     errors.push(
       `vendored tarball is not what pin ${pin} produces (${contentDifferences.length} differences):\n  ${shown}`
@@ -240,14 +245,16 @@ function rebuildDigests(pin, scratch) {
     recursive: true,
     force: true,
   })
-  return fileDigests(join(unpacked, "package"))
+  // Whole extraction root: npm strips the first path component of every entry,
+  // so a root other than package/ would still install.
+  return fileDigests(unpacked)
 }
 
 function vendoredDigests(scratch) {
   const unpacked = join(scratch, "vendored")
   run("mkdir", ["-p", unpacked])
   run("tar", ["-xzf", TARBALL_PATH, "-C", unpacked])
-  return fileDigests(join(unpacked, "package"))
+  return fileDigests(unpacked)
 }
 
 function report({ errors, warnings }) {
@@ -280,12 +287,17 @@ function main() {
   const scratch = mkdtempSync(
     join(process.env.RUNNER_TEMP ?? tmpdir(), "polyfill-pin-check-")
   )
-  let contentDifferences
+  // A failed rebuild is reported next to the cheap rules, not instead of them, so a
+  // pin moved past LAST_ACCEPTED_PIN names that cause.
+  let contentDifferences = []
+  let rebuildError
   try {
     contentDifferences = diffFileDigests(
       vendoredDigests(scratch),
       rebuildDigests(pin, scratch)
     )
+  } catch (error) {
+    rebuildError = error.message
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
@@ -303,6 +315,7 @@ function main() {
       pinOnUpstreamMain: isAncestor(pin, mainSha),
       pinWithinAcceptedRange: isAncestor(pin, LAST_ACCEPTED_PIN),
       contentDifferences,
+      rebuildError,
       drift: {
         mainSha,
         commitsBehind: Number(

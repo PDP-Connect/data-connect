@@ -104,6 +104,32 @@ describe("check-polyfill-connectors-tarball-freshness decision", () => {
     }
   })
 
+  it("reports the accepted-range error before a failed rebuild", () => {
+    const { errors } = evaluate({
+      ...clean,
+      pinWithinAcceptedRange: false,
+      rebuildError: "npm run generate:connector-index exited 1: Missing script",
+    })
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toMatch(/newer than LAST_ACCEPTED_PIN/)
+    expect(errors[1]).toMatch(/could not rebuild pin/)
+  })
+
+  it("fails on a top-level archive entry outside package/", () => {
+    // npm strips the first path component of every entry, so zzz/x installs as x.
+    const rebuilt = { "package/connector-index.json": "1" }
+    const vendored = { ...rebuilt, "zzz/connector-index.json": "2" }
+    expect(diffFileDigests(vendored, rebuilt)).toEqual([
+      "only in vendored tarball: zzz/connector-index.json",
+    ])
+    expect(
+      evaluate({
+        ...clean,
+        contentDifferences: diffFileDigests(vendored, rebuilt),
+      }).errors
+    ).toHaveLength(1)
+  })
+
   it("reports added, removed and changed files", () => {
     expect(
       diffFileDigests({ a: "1", b: "2" }, { a: "1", b: "3", c: "4" })
