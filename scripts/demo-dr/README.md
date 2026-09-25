@@ -48,6 +48,9 @@ chmod +x /tmp/gitwrap.sh && npm ci --git=/tmp/gitwrap.sh
 
 ## Run
 
+Hosted instance for the team: see [FLY.md](./FLY.md) (`https://pdpp-demo-rd.fly.dev`).
+
+
 The connectors in Claude and ChatGPT need a public HTTPS URL. Start the tunnel first, because the server must know its public origin at boot:
 
 ```bash
@@ -69,7 +72,7 @@ Menu names in both products change often; the only input either needs is the `/m
 ## Suggested script
 
 1. *"¿Para qué programas sociales podría calificar mi hogar? ¿Y cuándo vence mi licencia de conducir?"*
-2. Sign in (cédula is pre-filled; type the password). On the consent screen, open SIUBEN, tick both streams, leave INTRANT unticked, choose "Mantener el acceso hasta que yo lo revoque", approve.
+2. Sign in (cédula is pre-filled; type the password). On the consent screen, tick SIUBEN, leave INTRANT unticked, optionally open SIUBEN to narrow fields or dates, pick when access ends (90 días / 1 año / sin fecha de fin), then **Autorizar acceso**.
 3. The assistant answers about the household (ICV-2, current programmes, school-age children) and says it cannot see the licence.
 4. Open `https://<origin>/grants`: every read is listed, including "Query rejected" for the licence.
 5. Open the grant package, tick the confirmation, **Revoke package**. Ask the assistant again: it can no longer read.
@@ -87,7 +90,7 @@ Set `CHROMIUM_PATH` if Playwright's bundled browser is not installed. Run it aga
 
 ## Known gaps (say them out loud)
 
-- The consent screen grants whole streams: no per-field choice, no date window. The server-assigned purpose is the same for every app.
+- The server-assigned purpose is the same for every app.
 - The cédula field is decorative; the password is the real check. There is no Cuenta Única, OIDC or `cedula` claim involved.
 - The console (grants, revoke) is in English; only the citizen-facing pages are in Spanish.
 - `pdpp seed` prints "Dataset summary … records: 0"; that summary call has no owner session. The records are there.

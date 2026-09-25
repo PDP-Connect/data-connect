@@ -1,0 +1,63 @@
+# fly.toml — DR citizen-assistant demo (pdpp-demo-rd), 2-week internal demo.
+#
+# Cheapest useful shape: one always-on shared-cpu-1x machine, SQLite on a Fly
+# volume, no Postgres. Based on deploy/flyio/fly.toml.
+#
+#   internet ─HTTPS─▶ console :3000 ─▶ AS 127.0.0.1:7662 / RS 127.0.0.1:7663
+#                                             │
+#                                   /var/lib/pdpp (volume "pdpp_data")
+#                                   pdpp.sqlite, credential key, model cache
+#
+# Deploy from the repo root (build context = cwd; `dockerfile` is resolved
+# relative to THIS file's directory):
+#   fly deploy --config scripts/demo-dr/fly.toml
+#
+# Secret (not in this file): PDPP_OWNER_PASSWORD. See scripts/demo-dr/FLY.md.
+
+app = "pdpp-demo-rd"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+  target = "core"
+
+[env]
+  NODE_ENV = "production"
+  PDPP_REFERENCE_ORIGIN = "https://pdpp-demo-rd.fly.dev"
+  PDPP_INSTANCE_NAME = "Asistente Ciudadano · demo PDPP"
+  # Required: the console 403s ("Host not allowed") any Host not listed here.
+  PDPP_TRUSTED_HOSTS = "pdpp-demo-rd.fly.dev"
+
+# SQLite, credential key and caches live here (image sets PDPP_DB_PATH=/var/lib/pdpp/pdpp.sqlite).
+# No DATABASE_URL, so the runtime selects SQLite.
+[mounts]
+  source = "pdpp_data"
+  destination = "/var/lib/pdpp"
+  initial_size = "1gb"
+
+# Always on: MCP clients must never hit a cold start.
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+# TCP, not HTTP: every console route enforces the Host allowlist above, and a
+# check probe does not send Host: pdpp-demo-rd.fly.dev, so an HTTP check 403s.
+[checks.console]
+  type = "tcp"
+  port = 3000
+  grace_period = "30s"
+  interval = "30s"
+  timeout = "5s"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

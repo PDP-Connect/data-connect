@@ -609,6 +609,14 @@ const INTRANT_LICENCIAS_CONDUCIR = [
   },
 ];
 
+// DR demo records by stream, for seeding a deployed server over HTTPS
+// (scripts/demo-dr/seed-remote.ts) with the same data `pdpp seed` loads locally.
+export const DR_DEMO_RECORDS_BY_STREAM: Readonly<Record<string, readonly SeedRecord[]>> = {
+  clasificacion_hogar: SIUBEN_CLASIFICACION_HOGAR,
+  licencias_conducir: INTRANT_LICENCIAS_CONDUCIR,
+  miembros_hogar: SIUBEN_MIEMBROS_HOGAR,
+};
+
 // ─── Connector-owned fixture registry ──────────────────────────────────────
 //
 // One declarative entry per fixture family: its connector_key, the stream
