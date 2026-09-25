@@ -233,7 +233,7 @@ function renderAuthorization(auth: CitizenAuthorization, csrfField: string, lang
   ${revokedRow}
 </dl>`;
   const action = auth.status === "active" ? renderRevokeForm(auth, csrfField, lang) : "";
-  return `<article class="cu-card" data-grant-id="${escapeHtml(auth.grantIds[0])}" data-grant-ids="${escapeHtml(auth.grantIds.join(" "))}" data-grant-status="${auth.status}">
+  return `<article class="cu-card" data-grant-id="${escapeHtml(auth.grantIds[0])}" data-grant-ids="${escapeHtml(auth.grantIds.join(" "))}" data-package-id="${escapeHtml(auth.packageId ?? "")}" data-grant-status="${auth.status}">
   <div class="cu-grant-head"><h2>${escapeHtml(auth.clientName)}</h2><span class="cu-badge" data-status="${auth.status}">${pickLang(lang, statusEs, statusEn)}</span></div>
   <div class="cu-card-body">${summary}${renderReads(auth, lang)}${action}</div>
 </article>`;

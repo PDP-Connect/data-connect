@@ -38,6 +38,8 @@ export interface CitizenAuthorization {
   clientName: string;
   expiresAt: string | null;
   grantIds: string[];
+  /** Package the consent created, when it covered several sources. */
+  packageId: string | null;
   issuedAt: string;
   purposeCode: string | null;
   purposeDescription: string | null;
@@ -193,6 +195,7 @@ function groupAuthorizations(grants: CitizenGrant[], now: number): CitizenAuthor
       clientName: first.clientName,
       expiresAt: first.expiresAt,
       grantIds: members.map((grant) => grant.grantId),
+      packageId: first.packageId,
       issuedAt: first.issuedAt,
       purposeCode: first.purposeCode,
       purposeDescription: first.purposeDescription,

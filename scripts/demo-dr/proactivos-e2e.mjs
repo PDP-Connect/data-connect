@@ -129,7 +129,7 @@ async function revokeGrant(tab, grantId) {
   await tab.locator(revokeForms).first().waitFor({ timeout: NAV_TIMEOUT_MS });
   const candidates = [
     tab.locator(`${revokeForms}[action*='/${grantId}/']`),
-    tab.locator(`[data-grant-id="${grantId}"] ${revokeForms}, ${revokeForms}[data-grant-id="${grantId}"]`),
+    tab.locator(`[data-grant-id="${grantId}"] ${revokeForms}, [data-package-id="${grantId}"] ${revokeForms}, ${revokeForms}[data-grant-id="${grantId}"]`),
     tab.locator(revokeForms),
   ];
   let form = candidates[2].first();
@@ -195,7 +195,7 @@ try {
   check((await page.locator(`[data-icv="${EXPECTED_ICV}"]`).count()) === 1, `household ${EXPECTED_ICV} received from SIUBEN`);
   check((await page.locator(SEL.member).count()) === EXPECTED_MEMBERS, `${EXPECTED_MEMBERS} household member rows`);
   const grantId = await page.locator(SEL.grant).getAttribute("data-grant-id");
-  check(/^grt_[0-9a-z]+$/.test(grantId ?? ""), `authorization card shows grant ${grantId}`);
+  check(/^(grt|gpkg)_[0-9a-z]+$/.test(grantId ?? ""), `authorization card shows grant ${grantId}`);
   check((await page.locator(SEL.grant).getAttribute("data-grant-status")) === "active", `authorization ${C.active}`);
   check(!LICENCE_PATTERN.test(html), "page does not mention the driving licence");
   const misAut = page.locator(SEL.misAut);
