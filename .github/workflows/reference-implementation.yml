@@ -212,7 +212,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -225,7 +225,7 @@ jobs:
         with:
           node-version: "24.21.0"
 
-      - name: Check vendored connector-manifests tarball is not stale
+      - name: Check vendored connector-manifests tarball matches its pin
         run: node scripts/check-polyfill-connectors-tarball-freshness.mjs
 
   gate:
