@@ -65,12 +65,9 @@ test("non-HTTPS public origin is a violation", () => {
   );
 });
 
-test("empty owner password is a violation", () => {
+test("empty owner password uses first-boot owner setup instead of failing preflight", () => {
   const violations = evaluateFlyioCoreEnv(validCoreEnv({ PDPP_OWNER_PASSWORD: "" }));
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is empty")),
-    true
-  );
+  assert.deepEqual(violations, []);
 });
 
 test("missing database URL is a violation", () => {
@@ -123,7 +120,7 @@ test("forbids topology variables owned by the platform-core image", () => {
   );
 });
 
-test("committed core env template fails only because values are intentionally unfilled", () => {
+test("committed core env template fails only because non-owner values are intentionally unfilled", () => {
   const coreText = readFileSync(path.join(repoRoot, "deploy/flyio/core.env.example"), "utf8");
   const violations = evaluateFlyioCoreEnv(parseEnv(coreText));
   assert.equal(
@@ -131,8 +128,8 @@ test("committed core env template fails only because values are intentionally un
     true
   );
   assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is empty")),
-    true
+    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD")),
+    false
   );
   assert.equal(
     violations.some((v) => v.includes("No durable database URL is set")),

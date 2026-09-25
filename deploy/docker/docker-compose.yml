@@ -29,7 +29,10 @@ services:
       PDPP_REFERENCE_ORIGIN: ${PDPP_REFERENCE_ORIGIN:-http://localhost:7662}
       # Mark this as hosted so an unclaimed instance requires the setup wizard.
       # Only the console port is published below; AS/RS ports stay private.
-      PDPP_BIND_HOST: 0.0.0.0
+      # Loopback works with the localhost origin. Set 0.0.0.0 for a hosted
+      # public-origin deployment; keep local and proxy hosts in the allowlist.
+      PDPP_BIND_HOST: ${PDPP_BIND_HOST:-127.0.0.1}
+      PDPP_TRUSTED_HOSTS: ${PDPP_TRUSTED_HOSTS:-localhost,127.0.0.1}
       PDPP_CONNECTOR_ENVIRONMENT_POLICY: ${PDPP_CONNECTOR_ENVIRONMENT_POLICY:-}
       # Postgres is the storage backend; the runtime selects it because this
       # database URL is present. Credentials live on the compose-private

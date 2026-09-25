@@ -7,28 +7,19 @@ Two paths, by intent:
 - **Production** — the same one-service Core Compose stack with Postgres +
   pgvector for a node you intend to keep.
 
-Both run the same `core` image the Railway button and the Fly.io launch path
-use: the Authorization Server and Resource Server, listening directly on the
-published port. The public `core` image also bundles Patchright/Chromium,
-enables semantic search downloads, and persists its model cache under
-`/var/lib/pdpp`.
+Both use the root `Dockerfile` `core` target. That target builds the same
+bundled Core runtime as the Railway button and the Fly.io launch path: the
+operator console listens on container port `3000`, and the Authorization
+Server and Resource Server listen on loopback inside the container. The
+published image is `ghcr.io/pdp-connect/data-connect/core:*`; it bundles
+Patchright/Chromium, enables semantic search downloads, and persists runtime
+state under `/var/lib/pdpp`.
 
-**Architecture note (differs from the pdpp original this was ported from):**
-pdpp's `core` image bundled the operator console and the reference AS/RS in
-one container via a supervisor process (`deploy/railway/core-supervisor.ts`),
-with the console on the public port and AS/RS on loopback. data-connect's
-`deploy/docker/Dockerfile` `core` stage does **not** do this today — it is
-identical to `reference-browser` (reference AS/RS only; see that Dockerfile's
-own stage comments). The console (`apps/console`) is a separate standalone
-Next.js app with its own `apps/console/Dockerfile`, not bundled into `core`.
-This README's instructions below describe the AS/RS-only `core` image as it
-exists in this repo now; anywhere the original pdpp docs assumed a bundled
-console, that assumption does not hold here yet. See the root
-`docker-compose.yml`'s `web` service for how the console is composed
-alongside `reference` today, and `deploy/railway/core-supervisor.ts` /
-`deploy/railway/core-first-boot.ts` for the ported (but currently unwired)
-supervisor that would restore the combined-image behavior if a future change
-wires it into the Dockerfile.
+The repository also still has `deploy/docker/Dockerfile`. Its `core` stage is
+only `FROM reference-browser AS core`, so that path remains AS/RS-only and
+does not build the bundled console + AS/RS Core runtime. Use the root
+`Dockerfile --target core` for bundled Core images and for the OCI/runtime
+identity contract described below.
 
 ## Building from `main` (or any commit) with a real identity
 
@@ -37,69 +28,61 @@ exact git SHA as its runtime identity (`PDPP_REFERENCE_REVISION`, the env var
 the acceptance receipt reads). Build with:
 
 ```sh
-docker build -f deploy/docker/Dockerfile --target core \
+docker build --target core \
   --build-arg PDPP_REFERENCE_REVISION="$(git rev-parse HEAD)" \
-  -t pdpp:candidate .
+  -t data-connect-core:candidate .
 ```
 
-An ordinary local `docker build -f deploy/docker/Dockerfile --target core .`
+An ordinary local root `docker build --target core .`
 with no `PDPP_REFERENCE_REVISION` is still valid: the runtime revision
 defaults to the honest value `unknown` rather than a fabricated SHA. That
 build is for local development only and must never be treated as
 attributable to a commit.
 
-**Known gap in this repo today, verified by actually building the image:**
-`deploy/docker/Dockerfile` sets `PDPP_REFERENCE_REVISION` as a runtime `ENV`,
-but — unlike the pdpp Dockerfile this tooling was ported from — it does not
-set an `org.opencontainers.image.revision` OCI label at all (no
-`PDPP_BUILD_REVISION` build-arg, no `LABEL` instruction). Building `--target
-core` both with and without `--build-arg PDPP_REFERENCE_REVISION=$(git
-rev-parse HEAD)` confirms `deploy/docker/check-image-identity.sh` fails in
-**both** `--require-known` and `--allow-unknown` mode against either image:
-the script treats a completely absent label as its own violation, distinct
-from (and not rescued by) `--allow-unknown`, which only widens acceptance for
-a label that is literally present and set to `"unknown"`. This is not a bug
-in the check script — it is faithfully reporting an identity contract this
-Dockerfile does not implement yet. Adding the label (and ideally a matching
-`PDPP_BUILD_REVISION` build-arg, mirroring the pdpp Dockerfile) is a
-follow-up to this restoration; until then, this check cannot pass in either
-mode against images built from this repo.
+The root `Dockerfile` `core` target also stamps
+`org.opencontainers.image.revision` from `PDPP_BUILD_REVISION`, defaulting it
+to the same value as `PDPP_REFERENCE_REVISION`, and fails the build if the two
+identities diverge. For release or production builds, pass the full commit SHA
+and the OCI metadata together:
+
+```sh
+docker build --target core \
+  --build-arg PDPP_REFERENCE_REVISION="$(git rev-parse HEAD)" \
+  --build-arg PDPP_BUILD_SOURCE="https://github.com/PDP-Connect/data-connect" \
+  --build-arg PDPP_BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --build-arg PDPP_BUILD_DIRTY="$(git diff --quiet && git diff --cached --quiet && echo 0 || echo 1)" \
+  --build-arg PDPP_BUILD_COMPOSITION=core \
+  -t data-connect-core:candidate .
+```
 
 ## Quickstart
 
 ```sh
-docker run -d --name pdpp --restart unless-stopped -p 127.0.0.1:7662:7662 \
+docker run -d --name pdpp --restart unless-stopped \
+  -p 127.0.0.1:7662:3000 \
+  -e PDPP_BIND_HOST=127.0.0.1 \
+  -e PDPP_REFERENCE_ORIGIN=http://localhost:7662 \
+  -e PDPP_TRUSTED_HOSTS=localhost,127.0.0.1 \
   -v pdpp_data:/var/lib/pdpp \
   ghcr.io/pdp-connect/data-connect/core:latest && docker logs -f pdpp
 ```
 
 The command keeps the container running in the background and follows its logs
-so the first-boot password is visible immediately. Press `Ctrl-C` to stop
-following the logs; it does not stop the container. On first boot the
-container generates an owner password, saves it to the `pdpp_data` volume,
-and prints a one-time banner:
+so the first-boot setup token is visible immediately. The port flag publishes
+the Core container's console port, host `127.0.0.1:7662` to container `3000`;
+the AS/RS ports are internal loopback listeners in this image. Press `Ctrl-C`
+to stop following the logs; it does not stop the container. On first boot with
+no `PDPP_OWNER_PASSWORD`, the reference server creates a one-time setup token
+and serves the claim wizard at `/setup`. Find the `setupToken` field in the
+reference server's startup logs.
 
-```
-[core] ────────────────────────────────────────────────────────────────
-[core] First boot — generated an owner password for this instance.
-[core]
-[core]   Dashboard:      http://localhost:7662/
-[core]   Owner password: hCJ3hQ0X8evNNCH9R9KqL5Ai
-[core]
-[core] Saved to /var/lib/pdpp/owner-password (on the data volume), so restarts keep
-[core] this password. To change it, set the PDPP_OWNER_PASSWORD environment
-[core] variable and restart; the environment variable always wins.
-[core] This password is printed only on first boot.
-[core] ────────────────────────────────────────────────────────────────
-```
-
-Open the dashboard URL, sign in with the printed password, and connect your
-first source. Records live in SQLite on the `pdpp_data` volume; restarts and
-container replacements keep your data and your password. Prefer to choose the
-password yourself? Add `-e PDPP_OWNER_PASSWORD=...` when you create the
-container. Keep that setting in your deployment configuration for future
-replacements; an environment value wins over the password stored on the
-volume, and no generated-password banner is printed.
+Open `http://localhost:7662/setup`, enter the setup token, and choose the
+owner password. Records, browser profiles, connector artifacts, and the
+generated credential encryption key live on the `pdpp_data` volume; restarts
+and container replacements keep them. Prefer scripted setup? Add
+`-e PDPP_OWNER_PASSWORD=...` when you create the container. Keep that setting
+in your deployment configuration for future replacements; an environment value
+skips the setup wizard.
 
 The first request can arrive while the reference services are still warming up.
 PDPP shows a startup page and retries automatically; wait for the dashboard
@@ -113,6 +96,27 @@ an HTTPS reverse proxy in front and set
 `-e PDPP_REFERENCE_ORIGIN=https://your-domain` so the advertised OAuth
 metadata matches the real origin — or use the production path below.
 
+### Use a tunnel for remote MCP access
+
+Keep the Docker port bound to host loopback and point the tunnel at
+`http://127.0.0.1:7662`. Set the tunnel's public hostname as the advertised
+origin and allow it as a trusted host when you start Core:
+
+```sh
+export TUNNEL_HOST=your-subdomain.example-tunnel.com
+docker run -d --name pdpp --restart unless-stopped \
+  -p 127.0.0.1:7662:3000 \
+  -e PDPP_BIND_HOST=0.0.0.0 \
+  -e PDPP_REFERENCE_ORIGIN="https://${TUNNEL_HOST}" \
+  -e PDPP_TRUSTED_HOSTS="localhost,127.0.0.1,${TUNNEL_HOST}" \
+  -v pdpp_data:/var/lib/pdpp \
+  ghcr.io/pdp-connect/data-connect/core:latest
+```
+
+If the container already exists, recreate it with the same volume and updated
+environment. The tunnel needs to forward the public hostname to the local
+address above; do not publish the container port directly.
+
 ## Production
 
 [`docker-compose.yml`](./docker-compose.yml) runs one Core application service
@@ -122,30 +126,41 @@ plus Postgres with pgvector. No repository clone required:
 mkdir pdpp && cd pdpp
 curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
 umask 077
-PDPP_OWNER_PASSWORD="$(openssl rand -base64 24)"
 PDPP_CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-printf 'PDPP_OWNER_PASSWORD=%s\nPDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' \
-  "$PDPP_OWNER_PASSWORD" "$PDPP_CREDENTIAL_ENCRYPTION_KEY" > .env
+printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$PDPP_CREDENTIAL_ENCRYPTION_KEY" > .env
 echo PDPP_CORE_IMAGE=ghcr.io/pdp-connect/data-connect/core:latest >> .env
-docker compose up -d && printf '\nPDPP is running at http://localhost:7662/\nOwner password: %s\n\nKeep this password with the .env file.\n' "$PDPP_OWNER_PASSWORD"
+docker compose up -d && printf '\nPDPP is running at http://localhost:7662/\nOpen /setup and use the one-time setup token from: docker compose logs core\n\n'
 ```
 
-The password is generated in the terminal, saved in `.env`, and printed only
-after the stack starts successfully. The encryption key is saved but never
-printed.
+The encryption key is saved but never printed. With no
+`PDPP_OWNER_PASSWORD`, the hosted instance boots locked; open
+`http://localhost:7662/setup` and use the one-time setup token from
+`docker compose logs core` to choose the owner password. For scripted
+deployments, add an owner password to `.env` before starting the stack:
 
-The compose file refuses to boot until both secrets exist in `.env` — the
-owner password gates the dashboard, and the credential encryption key seals
-any connector credentials you store. Keep `.env` with your backups.
+```sh
+printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
+```
+
+The compose file refuses to boot until the credential encryption key exists in
+`.env`; it seals any connector credentials you store. Keep `.env` with your
+backups. `PDPP_OWNER_PASSWORD` is optional: set it for scripted deployments or
+leave it unset to claim the install at `/setup`.
 
 Configuration knobs (all optional, set in `.env`):
 
 ```sh
 PDPP_REFERENCE_ORIGIN=https://pdpp.example.com  # public origin; default http://localhost:7662
-PDPP_WEB_PORT=7662                              # published reference AS port
+PDPP_BIND_HOST=127.0.0.1                        # default; use 0.0.0.0 for hosted public-origin setup
+PDPP_TRUSTED_HOSTS=localhost,127.0.0.1          # include your tunnel or reverse-proxy host
+PDPP_WEB_PORT=7662                              # host port mapped to container port 3000
 PDPP_POSTGRES_PASSWORD=...                      # change if you ever publish Postgres
 PDPP_EMBEDDING_DOWNLOAD_ALLOWED=0               # opt out of semantic search model download
 ```
+
+For a public tunnel or reverse proxy, set `PDPP_REFERENCE_ORIGIN` to its HTTPS
+origin and add its hostname to `PDPP_TRUSTED_HOSTS`. Keep
+`localhost,127.0.0.1` in the list for the Core service's internal requests.
 
 To enable the API-backed Google Maps Data Portability source, create a Google
 OAuth client for your PDPP origin and add the callback URL to Google exactly as
@@ -187,8 +202,9 @@ runtime diagnostics surface (`GET /_ref/deployment`).
 
 ## Storage and upgrades
 
-- Quickstart: everything (SQLite database, owner password, credential
-  encryption key) lives on the `pdpp_data` volume. Back up the volume.
+- Quickstart: everything (SQLite database, setup state, browser profiles,
+  connector artifacts, and the generated credential encryption key) lives on
+  the `pdpp_data` volume. Back up the volume.
 - Bulk connector artifacts that must survive an upgrade — the Slack workspace
   archive, downloaded statement PDFs — live under
   `/var/lib/pdpp/connector-artifacts`, on that same volume. One volume covers
@@ -252,10 +268,10 @@ docker compose down --volumes                          # production (deletes dat
 - [`deploy/flyio/README.md`](../flyio/README.md) — the Fly.io `fly launch`
   path for the same image.
 - [`deploy/railway/core-first-boot.ts`](../railway/core-first-boot.ts) — the
-  first-boot owner-credential bootstrap. In pdpp this was tested by
-  `pnpm docker:first-boot:test` (`scripts/docker-core-first-boot.test.ts`);
-  that test file was not part of this deploy-tooling restoration and does not
-  exist in this repo yet.
+  first-boot credential encryption-key bootstrap. Owner-password setup is
+  handled by the reference server's `/setup` flow.
+- [`scripts/docker-core-first-boot.test.ts`](../../scripts/docker-core-first-boot.test.ts)
+  covers the local Core first-boot contract.
 - [`../../docker-compose.yml`](../../docker-compose.yml) — the
   development/owner stack (connector credentials, fixtures, browser services);
   not the self-host entry point.

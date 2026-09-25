@@ -11,7 +11,6 @@
 // This script is offline: it reads a dotenv-style file and catches avoidable
 // deploy mistakes before a live Fly run:
 //   - public origin not set, or not HTTPS;
-//   - owner data left ungated;
 //   - durable Postgres not attached as PDPP_DATABASE_URL or DATABASE_URL;
 //   - topology variables that should remain owned by the Core image.
 //
@@ -75,12 +74,9 @@ export function evaluateFlyioCoreEnv(coreEnv: EnvMap): string[] {
     violations.push(`PDPP_REFERENCE_ORIGIN must be an https:// origin for a public deploy; got "${origin}".`);
   }
 
-  if (isPlaceholder(coreEnv.PDPP_OWNER_PASSWORD)) {
-    violations.push(
-      "PDPP_OWNER_PASSWORD is empty. A public origin with no owner password serves the " +
-        "dashboard and device-approval surfaces anonymously. Set a non-empty secret."
-    );
-  }
+  // Owner setup is either first-boot `/setup` or the explicit
+  // PDPP_OWNER_PASSWORD override. The one-time setup token is generated at
+  // runtime, so this offline config check cannot observe it.
 
   if (isPlaceholder(coreEnv.PDPP_DATABASE_URL) && isPlaceholder(coreEnv.DATABASE_URL)) {
     violations.push(

@@ -13,7 +13,7 @@
 // make those live checks fail for an avoidable reason:
 //
 //   - public origin not set, or not HTTPS;
-//   - owner data left ungated (empty PDPP_OWNER_PASSWORD on a public origin);
+//   - split-service owner-password overrides that would drift between services;
 //   - credential key provider missing, which would block owner-captured
 //     static-secret connector setup after the user has already gathered a
 //     provider credential;
@@ -118,6 +118,21 @@ function requireSame(violations: string[], consoleEnv: EnvMap, referenceEnv: Env
   }
 }
 
+function requireSameIfEitherSet(
+  violations: string[],
+  consoleEnv: EnvMap,
+  referenceEnv: EnvMap,
+  key: string,
+  label: string
+): void {
+  const consoleValue = envValue(consoleEnv, key);
+  const referenceValue = envValue(referenceEnv, key);
+  if (isPlaceholder(consoleValue) && isPlaceholder(referenceValue)) {
+    return;
+  }
+  requireSame(violations, consoleEnv, referenceEnv, key, label);
+}
+
 function isRailwayPrivateUrl(url: string | undefined, port: number): boolean {
   if (isPlaceholder(url)) {
     return false;
@@ -176,13 +191,9 @@ export function evaluateRailwayDeployEnv(env: EnvMap): string[] {
     violations.push(`PDPP_REFERENCE_ORIGIN must be an https:// origin for a public deploy; got "${origin}".`);
   }
 
-  // 2. Owner gate required.
-  if (isPlaceholder(env.PDPP_OWNER_PASSWORD)) {
-    violations.push(
-      "PDPP_OWNER_PASSWORD is empty. A public origin with no owner password serves the dashboard and " +
-        "device-approval surfaces anonymously. Set a non-empty secret."
-    );
-  }
+  // 2. Owner setup is either first-boot `/setup` or the explicit
+  // PDPP_OWNER_PASSWORD override. The one-time setup token is generated at
+  // runtime, so this offline config check cannot observe it.
 
   // 3. Instance-level credential key provider. Railway templates should
   // generate PDPP_CREDENTIAL_ENCRYPTION_KEY automatically; Docker/Kubernetes
@@ -300,7 +311,7 @@ export function evaluateRailwayServiceEnvs({
     'composed mode: reference PDPP_REFERENCE_MODE must be "composed" when set.'
   );
 
-  requireSame(violations, consoleEnv, referenceEnv, "PDPP_OWNER_PASSWORD", "owner gate");
+  requireSameIfEitherSet(violations, consoleEnv, referenceEnv, "PDPP_OWNER_PASSWORD", "owner gate");
 
   const consoleAsUrl = consoleEnv.PDPP_AS_URL;
   if (!isRailwayPrivateUrlWithPortReference(consoleAsUrl, "reference.PORT")) {

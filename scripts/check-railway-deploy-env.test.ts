@@ -149,12 +149,9 @@ test("non-HTTPS public origin is a violation", () => {
   );
 });
 
-test("empty owner password is a violation", () => {
+test("empty owner password uses first-boot owner setup instead of failing preflight", () => {
   const violations = evaluateRailwayDeployEnv(validPostgresEnv({ PDPP_OWNER_PASSWORD: "" }));
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is empty")),
-    true
-  );
+  assert.deepEqual(violations, []);
 });
 
 test("missing credential key provider is a violation", () => {
@@ -232,9 +229,7 @@ test("unknown storage backend is a violation", () => {
   );
 });
 
-test("the committed env.example is a template and fails the contract with placeholder/empty findings", () => {
-  // The example uses Railway reference variables for topology, but intentionally
-  // leaves the owner password empty because it is not a committed secret.
+test("the committed env.example is a valid first-boot setup template", () => {
   const text = readFileSync(path.join(repoRoot, "deploy/railway/env.example"), "utf8");
   const violations = evaluateRailwayDeployEnv(parseEnv(text));
   assert.equal(
@@ -242,8 +237,8 @@ test("the committed env.example is a template and fails the contract with placeh
     false
   );
   assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is empty")),
-    true
+    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD")),
+    false
   );
 });
 
@@ -283,29 +278,10 @@ test("core service env rejects topology variables owned by the image", () => {
   );
 });
 
-test("committed core env template fails only because the owner secret is not committed", () => {
+test("committed core env template satisfies the selected Railway deploy contract", () => {
   const coreText = readFileSync(path.join(repoRoot, "deploy/railway/core.env.example"), "utf8");
   const violations = evaluateRailwayCoreServiceEnv(parseEnv(coreText));
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_REFERENCE_ORIGIN is not set")),
-    false
-  );
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is empty")),
-    true
-  );
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_DATABASE_URL")),
-    false
-  );
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_AS_URL")),
-    false
-  );
-  assert.equal(
-    violations.some((v) => v.includes("PDPP_RS_URL")),
-    false
-  );
+  assert.deepEqual(violations, []);
 });
 
 test("service env preflight rejects mismatched shared values", () => {
@@ -315,6 +291,27 @@ test("service env preflight rejects mismatched shared values", () => {
   });
   assert.equal(
     violations.some((v) => v.includes("must match")),
+    true
+  );
+});
+
+test("split-service envs allow first-boot owner setup when both omit the password override", () => {
+  assert.deepEqual(
+    evaluateRailwayServiceEnvs({
+      consoleEnv: validConsoleServiceEnv({ PDPP_OWNER_PASSWORD: "" }),
+      referenceEnv: validReferenceServiceEnv({ PDPP_OWNER_PASSWORD: "" }),
+    }),
+    []
+  );
+});
+
+test("split-service envs reject a one-sided explicit owner-password override", () => {
+  const violations = evaluateRailwayServiceEnvs({
+    consoleEnv: validConsoleServiceEnv({ PDPP_OWNER_PASSWORD: "s3cret-owner-pw" }),
+    referenceEnv: validReferenceServiceEnv({ PDPP_OWNER_PASSWORD: "" }),
+  });
+  assert.equal(
+    violations.some((v) => v.includes("owner gate: reference PDPP_OWNER_PASSWORD is not set")),
     true
   );
 });
@@ -373,7 +370,7 @@ test("service env preflight requires reference hosted-MCP self-calls to stay loo
   );
 });
 
-test("committed service env templates fail only because the owner secret is not committed", () => {
+test("committed split-service env templates satisfy the owner setup contract", () => {
   const consoleText = readFileSync(path.join(repoRoot, "deploy/railway/console.env.example"), "utf8");
   const referenceText = readFileSync(path.join(repoRoot, "deploy/railway/reference.env.example"), "utf8");
   const violations = evaluateRailwayServiceEnvs({
@@ -385,8 +382,8 @@ test("committed service env templates fail only because the owner secret is not 
     false
   );
   assert.equal(
-    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD is not set")),
-    true
+    violations.some((v) => v.includes("PDPP_OWNER_PASSWORD")),
+    false
   );
   assert.equal(
     violations.some((v) => v.includes("reference PORT must not be set")),
