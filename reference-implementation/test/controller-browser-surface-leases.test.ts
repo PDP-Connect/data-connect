@@ -656,7 +656,7 @@ test("host lease CDP URL reaches readiness and release returns the host surface"
     hostRequests.map(({ method, url }) => [method, url]),
     [
       ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
-      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/leases/host-surface-8"],
+      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_ready"],
     ]
   );
 });
