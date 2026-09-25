@@ -147,8 +147,14 @@ try {
     revokeForm.locator("button[type=submit]").first().click(),
   ]);
   await consoleTab.waitForLoadState("load");
+  // The console streams the page in; wait for the banner, not just the URL.
+  const revokedBanner = await consoleTab
+    .getByText("Autorización revocada")
+    .first()
+    .waitFor({ timeout: NAV_TIMEOUT_MS })
+    .then(() => true, () => false);
   await shot(consoleTab, "console-revoked");
-  check((await consoleTab.innerText("body")).includes("Autorización revocada"), "console shows the revoked banner");
+  check(revokedBanner, "console shows the revoked banner");
   await consoleTab.close();
 
   // 7. Back on the portal: the re-read is refused, the received copy stays.
