@@ -157,6 +157,7 @@ interface RawStreamSelection {
 interface GrantSelection {
   access_mode: string;
   client_claims?: unknown | undefined;
+  expires_at?: string | undefined;
   purpose_code: string;
   purpose_description?: string | undefined;
   retention?: unknown | undefined;
@@ -932,6 +933,7 @@ const SUPPORTED_PENDING_CLIENT_FIELDS = new Set(["client_display", "client_id", 
 const SUPPORTED_PENDING_SELECTION_FIELDS = new Set([
   "access_mode",
   "client_claims",
+  "expires_at",
   "purpose_code",
   "purpose_description",
   "retention",
@@ -1635,11 +1637,45 @@ interface AuthorizationDetailInput extends Record<string, unknown> {
   streams?: RawStreamSelection[];
 }
 
+// Requester-declared grant end, e.g. "2027-01-31T23:59:59-04:00". RFC 3339
+// date-time with an explicit offset; same meaning as the grant's `expires_at`.
+const RFC3339_DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/i;
+// Same ceiling as the owner-picked expiry (hosted-mcp-grant-expiry.ts): a typo'd
+// year must not become a decades-long grant.
+const MAX_REQUESTED_EXPIRY_MS = 5 * 365 * 24 * 60 * 60 * 1000;
+
+/** Validate a detail's `expires_at` and normalize it to ISO UTC; absent stays absent. */
+function requireRequestedExpiry(value: unknown, accessMode: unknown): string | undefined {
+  if (value === undefined) {
+    return;
+  }
+  const parsed = typeof value === "string" && RFC3339_DATE_TIME_RE.test(value) ? Date.parse(value) : Number.NaN;
+  if (Number.isNaN(parsed)) {
+    invalidGrantInitiationRequest("expires_at must be an RFC 3339 date-time with a time zone offset");
+  }
+  if (accessMode === "single_use") {
+    invalidGrantInitiationRequest("expires_at applies to continuous access only");
+  }
+  const remainingMs = parsed - Date.now();
+  if (remainingMs <= 0) {
+    invalidGrantInitiationRequest("expires_at must be in the future");
+  }
+  if (remainingMs > MAX_REQUESTED_EXPIRY_MS) {
+    invalidGrantInitiationRequest("expires_at must be within five years");
+  }
+  return new Date(parsed).toISOString();
+}
+
 function requireAuthorizationDetailInput(detail: unknown, _index: number): AuthorizationDetailInput {
-  const validated = validateCoreSelectionRequest(detail);
+  // `expires_at` is a reference extension the contract schema does not list;
+  // validate it here and the rest of the detail against the contract.
+  const { expires_at: rawExpiresAt, ...contractDetail } = isRecord(detail) ? detail : {};
+  const validated = validateCoreSelectionRequest(isRecord(detail) ? contractDetail : detail);
+  const expiresAt = requireRequestedExpiry(rawExpiresAt, validated.access_mode);
   const hasPreset = isNonEmptyString(validated.selection_preset);
   return {
     ...validated,
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
     access_mode: validated.access_mode,
     ...(hasPreset
       ? { selection_preset: validated.selection_preset as string }
@@ -1790,6 +1826,7 @@ async function normalizeAuthorizationDetail(
     selection: {
       access_mode: detail.access_mode,
       client_claims: detail.client_claims || undefined,
+      ...(isNonEmptyString(detail.expires_at) ? { expires_at: detail.expires_at } : {}),
       purpose_code: detail.purpose_code as string,
       purpose_description: isNonEmptyString(detail.purpose_description) ? detail.purpose_description : undefined,
       retention: detail.retention || undefined,
@@ -1848,6 +1885,10 @@ async function normalizeStagedGrantRequestBatch(
   const entries = await Promise.all(
     envelope.authorization_details.map((detail, index) => normalizeAuthorizationDetail(detail, index, opts))
   );
+  // One consent, one end date: every child grant of the package ends together.
+  if (new Set(entries.map((entry) => entry.selection.expires_at ?? null)).size > 1) {
+    invalidGrantInitiationRequest("Every authorization_details entry must declare the same expires_at");
+  }
   if (opts.acceptedProviderNativeRevision) {
     const acceptedSourceId = opts.acceptedProviderNativeRevision.source.id;
     const acceptedSourceCount = entries.filter((entry) => entry.source_binding.id === acceptedSourceId).length;
@@ -6685,7 +6726,7 @@ async function buildReviewedBatchApprovalState(
   const expiresAt =
     firstResolvedEntry.entry.selection.access_mode === "single_use"
       ? (opts.reviewExpiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
-      : null;
+      : (firstResolvedEntry.entry.selection.expires_at ?? null);
   const review = buildBatchApprovalReviewArtifact({
     approvedIndexes,
     client: request.client,
@@ -6745,7 +6786,8 @@ async function persistApprovedBatchGrantAtomically({
   for (const resolved of resolvedEntries) {
     const grantId = generateId("grt");
     const issuedAt = createdAt;
-    const expiresAt = resolved.entry.selection.access_mode === "single_use" ? (reviewPayload.expires_at ?? null) : null;
+    // Reviewed end: server-set for single_use, requester-declared (or none) for continuous.
+    const expiresAt = reviewPayload.expires_at ?? null;
     const grant = materializeCoreResolvedGrant({
       accessMode: resolved.entry.selection.access_mode,
       clientId: registeredClient.client_id,
@@ -7265,7 +7307,7 @@ export async function getPendingConsent(
         expiresAt:
           request.selection.access_mode === "single_use"
             ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-            : null,
+            : (request.selection.expires_at ?? null),
         request,
         resolvedStreams: resolvedStreams ?? [],
         subjectId: opts.subjectId,
@@ -8846,6 +8888,38 @@ export async function createHostedMcpGrantPackage({
     token: packageToken,
     trace_context: traceContext,
   };
+}
+
+function grantStreamNames(grantJson: unknown): string[] {
+  const grant = typeof grantJson === "string" ? parsePackageJson(grantJson) : grantJson;
+  const streams = isRecord(grant) && Array.isArray(grant.streams) ? grant.streams : [];
+  return streams.map((stream) => (isRecord(stream) ? stream.name : null)).filter(isNonEmptyString);
+}
+
+/**
+ * REST reads with a package token act as the member grant that covers the
+ * stream, so that grant's own checks (fields, expiry, revocation) apply.
+ *
+ *   GET /v1/streams/control_prenatal/records  (package token)
+ *     → introspect(sns member token) → read as the sns grant
+ *
+ * A stream no member covers falls back to the first member, which refuses it.
+ * Other tokens, and requests naming no stream, introspect unchanged.
+ */
+export async function introspectPackageStreamRead<
+  T extends { active?: boolean; grant_package_id?: unknown; pdpp_token_kind?: unknown },
+>(token: string, stream: unknown, introspectToken: (token: string) => Promise<T>): Promise<T> {
+  const info = await introspectToken(token);
+  if (!(info.active && info.pdpp_token_kind === "mcp_package" && isNonEmptyString(stream))) {
+    return info;
+  }
+  if (!isNonEmptyString(info.grant_package_id)) {
+    return info;
+  }
+
+  const members = await getGrantPackageStore().listActiveMembers(info.grant_package_id);
+  const member = members.find((row) => grantStreamNames(row.grant_json).includes(stream)) ?? members[0];
+  return member?.token_id ? introspectToken(member.token_id) : info;
 }
 
 /**

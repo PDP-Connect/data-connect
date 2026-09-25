@@ -4092,11 +4092,11 @@ test("GET /consent renders the consent page for a freshly staged pending grant",
     const html = await consentResp.text();
     assert.equal(consentResp.status, 200, "a live pending-consent request_uri must render the consent page");
     assert.ok(html.includes("<!DOCTYPE html>"), "consent page is a full hosted document");
-    assert.ok(
-      /action="\/consent\/review"/.test(html),
-      "consent page must require review before approval for this request_uri"
-    );
-    assert.doesNotMatch(html, /action="\/consent\/approve"/, "an unreviewed request must not offer final approval");
+    // Declared authorize requests get one screen: reviewed server-side, so it
+    // offers final approval bound to the review revision.
+    assert.match(html, /action="\/consent\/approve"/, "one screen offers final approval");
+    assert.match(html, /name="approval_review_revision"/, "approval is bound to the server-side review");
+    assert.doesNotMatch(html, /action="\/consent\/review"/, "no separate review step");
   } finally {
     await closeServer(server);
   }

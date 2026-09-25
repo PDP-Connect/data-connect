@@ -33,11 +33,13 @@ import { executeAsConsentDecision } from "../../operations/as-consent-decision/i
 import type { AsConsentExchangeConsumeResult } from "../../operations/as-consent-exchange/index.ts";
 import { executeAsConsentExchange } from "../../operations/as-consent-exchange/index.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
+import { resolveDemoLang } from "../demo-i18n.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import type { ConsentUiRenderer, PendingGrant } from "./as-consent-ui-helpers.ts";
 import {
   HOSTED_DENIAL_COPY,
+  renderDeclaredConsentHtml,
   renderPendingConsentNotFoundHtml,
   renderPendingGrantConsentHtml,
 } from "./as-consent-ui-helpers.ts";
@@ -47,6 +49,7 @@ import {
 interface RouteRequest {
   accepts: (types: string[]) => string | false;
   readonly body?: Readonly<Record<string, unknown>>;
+  readonly headers: { cookie?: string | string[] | undefined };
   is: (mimeType: string) => boolean | null;
   readonly ownerAuth?: { subjectId?: string } | null;
   readonly query: Readonly<Record<string, unknown>>;
@@ -420,6 +423,7 @@ function parseStructuredSourceNarrowing(raw: unknown): Record<number, SourceNarr
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+const AI_TRAINING_PURPOSE = "https://pdpp.dev/purpose/ai_training";
 const CANONICAL_NON_NEGATIVE_INTEGER_KEY_RE = /^(0|[1-9][0-9]*)$/;
 const NARROW_STREAMS_KEY = /^narrow_streams_(\d+)$/;
 const NARROW_FIELDS_KEY = /^narrow_fields_(\d+)__(.+)$/;
@@ -707,6 +711,37 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
     return false;
   }
 
+  // Declared requests (GET /oauth/authorize with authorization_details) get ONE
+  // screen: the review is finalized here, with every requested source, so the
+  // page's "Allow" posts the reviewed revision straight to /consent/approve.
+  //
+  //   GET /consent ─(review here)─▶ one screen ─POST /consent/approve─▶ redirect_uri?code
+  //
+  // Returns null for other requests, which keep the review → approve pages.
+  async function reviewDeclaredRequest(
+    req: RouteRequest,
+    deviceCode: string | null,
+    pending: PendingGrant
+  ): Promise<PendingGrant | null> {
+    if (!(deviceCode && (await ctx.findOAuthDenyRedirect(deviceCode)))) {
+      return null;
+    }
+    if (pending.reviewRevision) {
+      return pending;
+    }
+    // ai_training needs the owner's explicit opt-in checkbox at review.
+    if (pending.request.selection?.purpose_code === AI_TRAINING_PURPOSE) {
+      return null;
+    }
+    const allSources = pending.batch ? { approvedSourceIndexes: (pending.cards ?? []).map((card) => card.index) } : {};
+    return await ctx.consentStore.getPendingConsentByDeviceCode(deviceCode, {
+      baseUrl: resolveBaseUrlForRequest(req),
+      finalizeReview: true,
+      subjectId: resolveSubjectId(req),
+      ...allSources,
+    });
+  }
+
   // Primary consent shell for the current provider-connect request/approval profile.
   app.get(
     "/consent",
@@ -718,7 +753,7 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           ctx.pdppError(res, 400, "invalid_request", "request_uri or approval_id is required");
           return;
         }
-        const { pending } = await getPendingGrantFromRequestUri(requestUri, {
+        const { deviceCode, pending } = await getPendingGrantFromRequestUri(requestUri, {
           baseUrl: resolveBaseUrlForRequest(req),
           ...(ctx.ownerAuth.enabled ? { subjectId: ctx.ownerAuth.subjectId } : {}),
         });
@@ -727,6 +762,19 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           return;
         }
         const csrfToken = ctx.ownerAuth.ensureCsrfToken(req, res);
+        const reviewed = await reviewDeclaredRequest(req, deviceCode, pending);
+        if (reviewed) {
+          res.send(
+            renderDeclaredConsentHtml(reviewed, requestUri, {
+              csrfFieldName: ctx.ownerAuth.csrfFieldName,
+              csrfToken,
+              lang: resolveDemoLang(req),
+              providerName: ctx.providerName,
+              ui: ctx.consentUi,
+            })
+          );
+          return;
+        }
         res.send(
           renderPendingGrantConsentHtml(
             pending,

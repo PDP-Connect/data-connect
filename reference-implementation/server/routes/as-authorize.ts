@@ -33,6 +33,7 @@ import type {
   PendingGrantRequest,
 } from "./as-consent-ui-helpers.ts";
 import { resolveGrantExpiry } from "../hosted-mcp-grant-expiry.ts";
+import { requestedDemoLang } from "../demo-i18n.ts";
 import {
   type StreamScopeError,
   type StreamScopeSelection,
@@ -732,7 +733,14 @@ async function initiateGrantAndRedirect(
     redirectUri: pkce.redirectUri,
     state: pkce.state,
   });
-  return res.redirect(302, output.authorization_url);
+  // Carry the client's ui_locales / lang to the consent page, e.g. /consent?request_uri=…&lang=en.
+  const lang = requestedDemoLang({ headers: {}, query: req.query });
+  if (!lang) {
+    return res.redirect(302, output.authorization_url);
+  }
+  const consentUrl = new URL(output.authorization_url);
+  consentUrl.searchParams.set("lang", lang);
+  return res.redirect(302, consentUrl.toString());
 }
 
 // ─── Source-loop helper (extracted to reduce POST handler complexity) ─────────

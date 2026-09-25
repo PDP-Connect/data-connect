@@ -20,6 +20,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CITIZEN_GLYPHS, type CitizenShell, renderCitizenCard } from "../citizen-ui.ts";
+import { type DemoLang, pickLang } from "../demo-i18n.ts";
 import {
   HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID,
   HOSTED_MCP_GRANT_EXPIRY_OPTIONS,
@@ -55,7 +56,14 @@ export interface ConsentUiRenderer {
       hidden: Array<{ name: string; value: string }>;
     }>
   ) => string;
-  renderHostedDocument: (opts: { title: string; providerName: string; body: string; shell?: CitizenShell }) => string;
+  renderHostedDocument: (opts: {
+    title: string;
+    providerName: string;
+    body: string;
+    shell?: CitizenShell;
+    currentUrl?: string;
+    lang?: DemoLang;
+  }) => string;
   renderKeyValueList: (items: Array<{ label: string; value?: unknown; html?: string }>) => string;
   renderPageIntro: (opts: { eyebrow: string; title: string; lede?: string }) => string;
   renderResultState: (opts: { tone: string; title: string; body: string }) => string;
@@ -2329,6 +2337,7 @@ const ES_ACCENTED_WORDS: Record<string, string> = {
   direccion: "dirección",
   educacion: "educación",
   expedicion: "expedición",
+  gestacion: "gestación",
   informacion: "información",
   numero: "número",
   ocupacion: "ocupación",
@@ -2515,7 +2524,11 @@ function renderCitizenClaims(claims: PendingClientClaims | null | undefined, ui:
   )}</div>`;
 }
 
-function renderTechnicalDetails(sections: TechSection[], ui: ConsentUiRenderer): string {
+function renderTechnicalDetails(
+  sections: TechSection[],
+  ui: ConsentUiRenderer,
+  summary = "Detalles técnicos"
+): string {
   const html = sections
     .map((section) => {
       const rows = section.facts
@@ -2524,7 +2537,7 @@ function renderTechnicalDetails(sections: TechSection[], ui: ConsentUiRenderer):
       return `<h3>${ui.escapeHtml(section.heading)}</h3><dl>${rows}</dl>`;
     })
     .join("");
-  return `<details class="cu-details"><summary>Detalles técnicos</summary>${html}</details>`;
+  return `<details class="cu-details"><summary>${ui.escapeHtml(summary)}</summary>${html}</details>`;
 }
 
 function renderCitizenConsentDocument(
@@ -2842,6 +2855,277 @@ export function renderPendingGrantConsentHtml(
     .join("\n");
 
   return renderCitizenConsentDocument(body, "Solicitud", providerName, ui);
+}
+
+// ─── DR demo: one-screen consent for declared requests ─────────────────────
+//
+// A client that declares its request on GET /oauth/authorize (one or more
+// authorization_details, optional expires_at) gets ONE screen, already
+// reviewed server-side: who asks, for what, from which institutions, which
+// fields, until when. "Allow" posts the reviewed revision to /consent/approve.
+//
+//   ┌ <client> solicita acceso a sus datos ────────────────┐
+//   │ Quién solicita · Para qué · Instituciones · Qué datos │
+//   │ Tipo de acceso · Hasta cuándo                         │
+//   │ ▸ Detalles técnicos                                   │
+//   │ [ Autorizar ]  [ Rechazar ]                           │
+//   └───────────────────────────────────────────────────────┘
+
+type ReviewedSource = Omit<ApprovalReviewSourceEntry, "index">;
+
+// English labels for the demo sources; other keys fall back to the key, humanized.
+const EN_STREAM_LABELS: Record<string, string> = {
+  clasificacion_hogar: "Household socio-economic classification",
+  control_prenatal: "Prenatal care",
+  licencias_conducir: "Driving licence",
+  miembros_hogar: "Registered household members",
+};
+const EN_FIELD_LABELS: Record<string, string> = {
+  categoria: "Category",
+  cedula: "Cédula (ID number)",
+  cedula_jefe_hogar: "Head of household's cédula",
+  centro_salud: "Health centre",
+  controles_prenatales: "Prenatal check-ups",
+  edad: "Age",
+  estado: "Status",
+  fecha_expedicion: "Issue date",
+  fecha_probable_parto: "Expected due date",
+  fecha_ultima_consulta: "Last check-up",
+  fecha_ultima_visita: "Last visit",
+  fecha_vencimiento: "Expiry date",
+  grupo_sanguineo: "Blood group",
+  hogar_id: "Household identifier",
+  icv_descripcion: "ICV description",
+  icv_grupo: "ICV group",
+  icv_puntaje: "ICV score",
+  id: "Identifier",
+  miembros_hogar: "Household members",
+  municipio: "Municipality",
+  nivel_educativo: "Education level",
+  nombre: "Name",
+  nombre_jefe_hogar: "Head of household's name",
+  numero_licencia: "Licence number",
+  ocupacion: "Occupation",
+  parentesco: "Relationship",
+  programas_activos: "Active programmes",
+  provincia: "Province",
+  restricciones: "Restrictions",
+  riesgo_obstetrico: "Obstetric risk",
+  semanas_gestacion: "Weeks of pregnancy",
+  sexo: "Sex",
+  source_updated_at: "Last updated",
+  tipo_sangre: "Blood type",
+  vacunas_embarazo: "Pregnancy vaccines",
+};
+const EN_ACCESS_MODE_LABELS: Record<string, string> = {
+  continuous: "Ongoing access",
+  single_use: "One-time access",
+};
+
+/** `semanas_gestacion` → "Weeks of pregnancy"; unknown keys → "Some key". */
+function humanizeFieldLabel(name: string, lang: DemoLang): string {
+  if (lang === "es") {
+    return humanizeEsLabel(name);
+  }
+  const known = EN_FIELD_LABELS[name];
+  if (known) {
+    return known;
+  }
+  const text = name.replace(/[_-]+/g, " ").trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** "2027-02-01T03:59:59Z" → "31 de enero de 2027" / "January 31, 2027" (Santo Domingo). */
+function formatEndDate(iso: string, lang: DemoLang): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return new Intl.DateTimeFormat(lang === "en" ? "en-US" : "es-DO", {
+    dateStyle: "long",
+    timeZone: DR_TIME_ZONE,
+  }).format(date);
+}
+
+function describeEndDate(expiresAt: string | null, lang: DemoLang): string {
+  if (!expiresAt) {
+    return pickLang(lang, "Hasta que usted la cancele", "Until you cancel it");
+  }
+  const date = formatEndDate(expiresAt, lang);
+  return pickLang(lang, `Hasta el ${date}`, `Until ${date}`);
+}
+
+function renderDeclaredStreams(source: ReviewedSource, lang: DemoLang, ui: ConsentUiRenderer): string {
+  const items = source.resolved_streams.map((stream) => {
+    const es = describeCitizenStream(source.source.id, stream.name);
+    const label = lang === "es" ? es.label : (EN_STREAM_LABELS[stream.name] ?? humanizeFieldLabel(stream.name, lang));
+    const detail = lang === "es" && es.detail ? `<small>${ui.escapeHtml(es.detail)}</small>` : "";
+    const chips = stream.fields
+      .map((field) => `<span class="cu-chip">${ui.escapeHtml(humanizeFieldLabel(field, lang))}</span>`)
+      .join("");
+    return `<li><b>${ui.escapeHtml(label)}</b>${detail}<div class="cu-chips">${chips}</div></li>`;
+  });
+  return `<ul class="cu-streams">${items.join("")}</ul>`;
+}
+
+function buildDeclaredTechSections(
+  review: ApprovalReviewArtifact,
+  sources: ReviewedSource[],
+  revision: string,
+  lang: DemoLang
+): TechSection[] {
+  const t = (es: string, en: string) => pickLang(lang, es, en);
+  return [
+    {
+      facts: [
+        { label: t("ID del cliente", "Client ID"), value: review.client.client_id },
+        { label: t("Modo de registro", "Registration mode"), value: review.client.registration_mode },
+        { label: t("ID del titular", "Subject ID"), value: review.subject.id },
+        { label: "expires_at", value: review.expires_at },
+        { label: "approval_review_revision", value: revision },
+      ],
+      heading: t("Solicitud", "Request"),
+    },
+    ...sources.map((source) => ({
+      facts: [
+        { label: t("ID de la fuente", "Source ID"), value: source.source.id },
+        { label: t("Versión de la declaración", "Declaration version"), value: source.source_declaration.version },
+        { label: t("Huella de la declaración", "Declaration digest"), value: source.source_declaration.digest },
+        { label: "purpose_code", value: source.purpose_code },
+        { label: "access_mode", value: source.access_mode },
+        ...source.resolved_streams.map((stream) => ({ label: stream.name, value: stream.fields.join(", ") })),
+      ],
+      heading: citizenSourceLabel(source.source.id),
+    })),
+  ];
+}
+
+function buildDeclaredActions(
+  pending: PendingGrant,
+  requestUri: string,
+  csrf: Array<{ name: string; value: string }>,
+  lang: DemoLang,
+  ui: ConsentUiRenderer
+): string {
+  const request = [{ name: "request_uri", value: requestUri }];
+  // Batch approval requires an explicit confirmation; the Allow click is it.
+  const confirm = pending.batch ? [{ name: "confirm_reviewed_decision", value: "1" }] : [];
+  const approveHidden = [
+    ...csrf,
+    { name: "approval_review_revision", value: pending.reviewRevision ?? "" },
+    ...request,
+    ...confirm,
+  ];
+  const allow = `<form class="hosted-ui-form" method="POST" action="/consent/approve">${hiddenInputs(
+    approveHidden,
+    ui
+  )}<button type="submit" class="cu-btn cu-block">${pickLang(lang, "Autorizar", "Allow")}</button></form>`;
+  const denyLabel = pickLang(lang, "Rechazar", "Deny");
+  const deny = `<form class="hosted-ui-form" method="POST" action="/consent/deny">${hiddenInputs(
+    [...csrf, ...request],
+    ui
+  )}<button type="submit" class="cu-btn cu-outline-danger cu-block">${denyLabel}</button></form>`;
+  return `<div class="cu-actions">${allow}${deny}</div>`;
+}
+
+/**
+ * The one consent screen for a declared request whose review the server has
+ * already finalized (`pending.review` + `pending.reviewRevision`).
+ */
+export function renderDeclaredConsentHtml(
+  pending: PendingGrant,
+  requestUri: string,
+  opts: {
+    csrfFieldName: string;
+    csrfToken: string | null;
+    lang: DemoLang;
+    providerName: string;
+    ui: ConsentUiRenderer;
+  }
+): string {
+  const { lang, ui } = opts;
+  const { review, reviewRevision } = pending;
+  if (!(review && reviewRevision)) {
+    throw new Error("Declared consent requires a finalized review");
+  }
+  const t = (es: string, en: string) => pickLang(lang, es, en);
+  const sources: ReviewedSource[] = review.version === "reference.batch-approval-review.v1" ? review.sources : [review];
+  const clientDisplay = buildConsentClientDisplay(review.client, ui);
+  const clientName = clientDisplay.displayName;
+
+  let identityNote = "";
+  if (clientDisplay.verifiedDomain) {
+    identityNote = renderCitizenNote(
+      `${t("Dominio verificado", "Verified domain")}: ${clientDisplay.verifiedDomain}`,
+      ui
+    );
+  } else if (clientDisplay.isUnverified) {
+    identityNote = renderCitizenNote(
+      t("Nombre declarado por la aplicación · no verificado", "Name stated by the app · not verified"),
+      ui
+    );
+  }
+  const purposes = [...new Set(sources.map((source) => source.purpose_description || source.purpose_code))];
+  const purposeHtml = `${purposes.map((purpose) => ui.escapeHtml(purpose)).join("<br>")}${renderCitizenNote(
+    t("Declarado por la aplicación", "Stated by the app"),
+    ui
+  )}`;
+  const institutionsHtml = sources.map((source) => ui.escapeHtml(citizenSourceLabel(source.source.id))).join("<br>");
+  const dataHtml = sources
+    .map((source) => {
+      const heading = `<p class="cu-text"><b>${ui.escapeHtml(citizenSourceLabel(source.source.id))}</b></p>`;
+      return `${heading}${renderDeclaredStreams(source, lang, ui)}`;
+    })
+    .join("");
+  const accessMode = sources[0]?.access_mode ?? "";
+  const accessLabel = lang === "es" ? accessModeLabel(accessMode) : (EN_ACCESS_MODE_LABELS[accessMode] ?? accessMode);
+
+  const endDateHtml = `<b data-expires-at="${ui.escapeHtml(review.expires_at ?? "")}">${ui.escapeHtml(
+    describeEndDate(review.expires_at, lang)
+  )}</b>`;
+  const rows: CitizenRow[] = [
+    {
+      authorship: "client",
+      html: `${ui.escapeHtml(clientName)}${identityNote}`,
+      label: t("Quién solicita", "Who is asking"),
+    },
+    { authorship: "client", html: purposeHtml, label: t("Para qué", "What for") },
+    { authorship: "protocol", html: institutionsHtml, label: t("De qué instituciones", "From which institutions") },
+    { authorship: "manifest", html: dataHtml, label: t("Qué datos", "Which data") },
+    { authorship: "protocol", html: ui.escapeHtml(accessLabel), label: t("Tipo de acceso", "Type of access") },
+    { authorship: "protocol", html: endDateHtml, label: t("Hasta cuándo", "Until when") },
+  ];
+
+  const csrf = opts.csrfToken ? [{ name: opts.csrfFieldName, value: opts.csrfToken }] : [];
+  const body = [
+    `<h2 class="cu-title">${ui.escapeHtml(
+      t(`${clientName} solicita acceso a sus datos`, `${clientName} is asking to access your data`)
+    )}</h2>`,
+    `<p class="cu-text">${ui.escapeHtml(
+      t(
+        "Solo se compartirá lo que aparece aquí. Puede cancelar esta autorización cuando quiera.",
+        "Only what is listed here will be shared. You can cancel this authorization at any time."
+      )
+    )}</p>`,
+    renderCitizenSummary(rows, ui),
+    renderTechnicalDetails(
+      buildDeclaredTechSections(review, sources, reviewRevision, lang),
+      ui,
+      t("Detalles técnicos", "Technical details")
+    ),
+    buildDeclaredActions(pending, requestUri, csrf, lang, ui),
+  ].join("\n");
+
+  const cardTitle = t(CONSENT_CARD_TITLE, "Data access authorization");
+  return ui.renderHostedDocument({
+    body: renderCitizenCard({ body, glyph: CITIZEN_GLYPHS.shield, title: cardTitle }),
+    // The ES | EN toggle reloads this same screen.
+    currentUrl: `/consent?request_uri=${encodeURIComponent(requestUri)}`,
+    lang,
+    providerName: opts.providerName,
+    shell: CONSENT_SHELL,
+    title: cardTitle,
+  });
 }
 
 // MCP picker HTML renderer.
