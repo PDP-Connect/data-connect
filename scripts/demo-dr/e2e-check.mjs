@@ -80,18 +80,17 @@ async function authorizeInBrowser(clientId, challenge, state) {
   await page.fill("#hosted-ui-password", OWNER_PASSWORD);
   await Promise.all([page.waitForLoadState("load"), page.click("button[type=submit]")]);
 
-  await page.waitForSelector("[data-hosted-mcp-picker-form]");
+  // Authorize hands the decision to the console's consent screen (/consent?challenge=…).
+  await page.waitForURL(/\/consent\?challenge=/);
+  const siuben = page.locator('input[type=checkbox][aria-label^="Compartir datos de SIUBEN"]');
+  await siuben.waitFor();
   await page.screenshot({ fullPage: true, path: join(SHOTS_DIR, "2-consent.png") });
 
-  const siuben = page.locator('[data-hosted-mcp-source][data-source-key*="siuben"]');
-  await siuben.locator("summary").click();
-  for (const box of await siuben.locator("[data-hosted-mcp-stream-checkbox]").all()) {
-    await box.check();
-  }
+  await siuben.check();
   await page.screenshot({ fullPage: true, path: join(SHOTS_DIR, "3-consent-siuben-selected.png") });
   await Promise.all([
     page.waitForURL((url) => url.toString().startsWith(REDIRECT_URI) || callbackUrl !== null, { timeout: 15_000 }).catch(() => {}),
-    page.click('[data-hosted-mcp-picker-form] button[type=submit][data-variant="primary"]'),
+    page.getByRole("button", { name: "Autorizar acceso" }).click(),
   ]);
   await page.waitForTimeout(500);
   if (!callbackUrl) {

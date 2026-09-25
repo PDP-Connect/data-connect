@@ -73,7 +73,7 @@ export function sourceAccountLabel(sourceName: string, account: string): string 
 export function clientPublishedLinks(
   links: ReadonlyArray<{ readonly href: string; readonly label: string }>
 ): ReadonlyArray<{ readonly href: string; readonly label: string }> {
-  return links.map((link) => ({ ...link, label: link.label === "Terms of service" ? "Terms" : link.label }));
+  return links.map((link) => ({ ...link, label: link.label === "Terms of service" ? "Términos" : link.label === "Privacy policy" ? "Política de privacidad" : link.label }));
 }
 
 export interface ConsentScreenModel {

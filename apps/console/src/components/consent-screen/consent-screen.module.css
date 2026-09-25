@@ -10,6 +10,10 @@
  */
 
 .page {
+  /* DR demo: DR blue for the consent act instead of copper. */
+  --human: #003876;
+  --human-foreground: #fff;
+  --human-tint: rgb(0 56 118 / 0.08);
   max-width: 960px;
   margin: 0 auto;
   padding: 2.5rem 1.5rem 4rem;

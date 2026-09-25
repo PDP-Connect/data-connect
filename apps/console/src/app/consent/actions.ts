@@ -60,13 +60,13 @@ async function postChallenge(challenge: string, action: "accept" | "reject", bod
   if (!response.ok) {
     const detail = (await response.json().catch(() => null)) as ChallengeError | null;
     throw new Error(
-      detail?.error_description || `This request could not be completed (${response.status}). Nothing was shared.`
+      detail?.error_description || `No se pudo completar esta solicitud (${response.status}). No se compartió nada.`
     );
   }
 
   const { redirect_url } = (await response.json()) as { redirect_url?: string };
   if (!redirect_url) {
-    throw new Error("The server approved this request but did not say where to return. Nothing was shared.");
+    throw new Error("El servidor aprobó esta solicitud pero no indicó a dónde volver. No se compartió nada.");
   }
   return redirect_url;
 }

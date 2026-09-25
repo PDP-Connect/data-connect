@@ -185,9 +185,9 @@ export const HOSTED_UI_CSS = `:root {
   --input: oklch(0.79 0.006 270);
   --success: oklch(0.5 0.11 158);
   --warning: oklch(0.58 0.13 70);
-  --human: oklch(0.55 0.11 45);
+  --human: #003876;
   --human-foreground: oklch(0.99 0.005 90);
-  --human-wash: oklch(0.55 0.11 45 / 0.08);
+  --human-wash: rgb(0 56 118 / 0.08);
   --radius: 0px;
   --radius-control: 2px;
   color-scheme: light;
@@ -207,9 +207,9 @@ html[data-theme="dark"] {
   --input: oklch(0.34 0.008 262);
   --success: oklch(0.76 0.13 158);
   --warning: oklch(0.8 0.14 75);
-  --human: oklch(0.76 0.12 45);
-  --human-foreground: oklch(0.16 0.01 45);
-  --human-wash: oklch(0.76 0.12 45 / 0.11);
+  --human: oklch(0.74 0.13 255);
+  --human-foreground: oklch(0.15 0.01 262);
+  --human-wash: oklch(0.74 0.13 255 / 0.11);
   color-scheme: dark;
 }
 
@@ -228,9 +228,9 @@ html[data-theme="dark"] {
     --input: oklch(0.34 0.008 262);
     --success: oklch(0.76 0.13 158);
     --warning: oklch(0.8 0.14 75);
-    --human: oklch(0.76 0.12 45);
-    --human-foreground: oklch(0.16 0.01 45);
-    --human-wash: oklch(0.76 0.12 45 / 0.11);
+    --human: oklch(0.74 0.13 255);
+    --human-foreground: oklch(0.15 0.01 262);
+    --human-wash: oklch(0.74 0.13 255 / 0.11);
     color-scheme: dark;
   }
 }
@@ -1104,7 +1104,7 @@ ${renderBrandFooter({ surface: markSurface })}
 export function renderBrandHeader({ providerName }: { providerName: unknown }): string {
   const safeProvider = escapeHtml(String(providerName ?? ""));
   return `<header class="hosted-ui-header">
-  <span class="hosted-ui-provider" aria-label="Provider">${safeProvider}</span>
+  <span class="hosted-ui-provider" aria-label="Proveedor">${safeProvider}</span>
 </header>`;
 }
 
@@ -1117,7 +1117,7 @@ export function renderBrandFooter({ surface = "light" }: { surface?: "light" | "
   return `<footer class="hosted-ui-footer">
   <a class="hosted-ui-footer-attribution-link" href="https://pdpp.dev">
   ${renderPdppMark({ size: 14, surface })}
-  <span class="hosted-ui-footer-attribution">Secured by PDPP</span>
+  <span class="hosted-ui-footer-attribution">Protegido por PDPP</span>
   </a>
 </footer>`;
 }
