@@ -9,6 +9,7 @@ import {
   buildManifest,
   installStagedDependencies,
   launchScript,
+  pruneForeignLibcPackages,
   pruneForeignPlatformPrebuilds,
   referenceStackRoot,
   stageReferenceStack,
@@ -222,6 +223,28 @@ describe("reference stack staging contract", () => {
         join(root, "node_modules", "better-sqlite3-multiple-ciphers")
       )
     ).toBe(false)
+  })
+  it("removes optional packages built for a libc the target does not use", () => {
+    const root = fixtureRoot()
+    const packages = {
+      "@img/sharp-linuxmusl-x64": ["musl"],
+      "@img/sharp-linux-x64": ["glibc"],
+      "canvas-linux-x64-musl": ["musl"],
+    }
+    for (const [name, libc] of Object.entries(packages)) {
+      mkdirSync(join(root, "node_modules", name), { recursive: true })
+      writeFileSync(
+        join(root, "node_modules", name, "package.json"),
+        JSON.stringify({ name, os: ["linux"], libc })
+      )
+    }
+
+    pruneForeignLibcPackages(root, "glibc")
+
+    expect(existsSync(join(root, "node_modules", "@img", "sharp-linuxmusl-x64"))).toBe(false)
+    expect(existsSync(join(root, "node_modules", "canvas-linux-x64-musl"))).toBe(false)
+    expect(existsSync(join(root, "node_modules", "@img", "sharp-linux-x64"))).toBe(true)
+    expect(existsSync(join(root, "node_modules", "tsx"))).toBe(true)
   })
   it("the staging module resolves its own helpers at import time", async () => {
     // Regression: an import of ./stage-generations.js was once inserted

@@ -411,6 +411,43 @@ export function pruneForeignPlatformPrebuilds(stageRoot) {
   }
 }
 
+// npm installs every optional platform package whose os/cpu match, even when
+// its package.json "libc" field names another C library (for example
+// @img/sharp-linuxmusl-x64 and @napi-rs/canvas-linux-x64-musl on a glibc
+// host). linuxdeploy then fails the AppImage on the unresolvable
+// libc.musl-x86_64.so.1 reference, as with the better-sqlite3 prebuilds above.
+// Delete top-level packages that declare a libc other than the host's.
+function hostLibc() {
+  if (process.platform !== "linux") return null
+  return process.report.getReport().header.glibcVersionRuntime
+    ? "glibc"
+    : "musl"
+}
+
+export function pruneForeignLibcPackages(stageRoot, libc = hostLibc()) {
+  if (!libc) return
+  const nodeModules = join(stageRoot, "node_modules")
+  if (!existsSync(nodeModules)) return
+  const packageDirs = []
+  for (const entry of readdirSync(nodeModules)) {
+    if (!entry.startsWith("@")) {
+      packageDirs.push(join(nodeModules, entry))
+      continue
+    }
+    for (const scoped of readdirSync(join(nodeModules, entry))) {
+      packageDirs.push(join(nodeModules, entry, scoped))
+    }
+  }
+  for (const packageDir of packageDirs) {
+    const manifestPath = join(packageDir, "package.json")
+    if (!existsSync(manifestPath)) continue
+    const declared = JSON.parse(readFileSync(manifestPath, "utf8")).libc
+    if (Array.isArray(declared) && !declared.includes(libc)) {
+      rmSync(packageDir, { recursive: true, force: true })
+    }
+  }
+}
+
 export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
   writeFileSync(
     join(stageRoot, "package.json"),
@@ -467,6 +504,7 @@ export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
     }
   )
   pruneForeignPlatformPrebuilds(stageRoot)
+  pruneForeignLibcPackages(stageRoot)
 }
 
 function nodeVersion(nodeBinary) {
