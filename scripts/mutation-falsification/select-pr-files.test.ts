@@ -12,6 +12,7 @@ import {
   type LineRange,
   mergeRanges,
   NO_CONFIGURATION_READ,
+  ownedByNestedTestRunner,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
   readsMutatedSource,
@@ -686,6 +687,65 @@ await runCommand("npm", ["--prefix", "apps/console", "run", "build"], { cwd: REP
   it("keeps a test that reads no relative path at all", () => {
     const source = `import assert from "node:assert/strict"\ntest("x", () => assert.ok(true))`
     expect(escapesCohortRoot("test/plain.test.ts", source)).toBe(false)
+  })
+
+  it("detects the same escape written as separate `..` arguments", () => {
+    // Verbatim from
+    // reference-implementation/test/postgres-template-eligibility-inventory.test.ts.
+    // `join` takes its segments either way, so this reads the repository-root
+    // PG-PROFILE-51-REPORT.md exactly as `"../../PG-PROFILE-51-REPORT.md"`
+    // would. Measuring only slash-joined literals missed it, and its ENOENT in
+    // the sandbox rejected the reference-implementation baseline -- every
+    // mutant inconclusive, the attempt with no evidence at all.
+    const source = `const reportPath = join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md");`
+    expect(escapesCohortRoot("test/postgres-template-eligibility-inventory.test.ts", source)).toBe(true)
+  })
+
+  it("keeps a segmented climb that stops at the cohort root", () => {
+    // The same spelling one level shallower stays inside the cohort, so the
+    // segmented form is measured against depth rather than assumed to escape.
+    const source = `const p = join(testDir, "..", "scripts", "postgres-template-eligibility.ts");`
+    expect(escapesCohortRoot("test/postgres-template-eligibility-inventory.test.ts", source)).toBe(false)
+  })
+
+  it("keeps a literal whose `..` is part of a filename", () => {
+    // `..` inside a name is not a traversal, and withholding on it would drop
+    // real coverage -- the expensive error of the two.
+    const source = `await readFile(join(__dirname, "fixtures", "archive..old.json"), "utf8")`
+    expect(escapesCohortRoot("test/plain.test.ts", source)).toBe(false)
+  })
+})
+
+describe("ownedByNestedTestRunner", () => {
+  it("withholds a vendored package's tests, which the cohort command cannot run", () => {
+    // vendor/brand-react declares its own `test` script requiring
+    // `--import tsx --import ./css-stub-register.ts`; its tests import `.tsx`
+    // components that `import "./components.css"`. Run under the cohort's bare
+    // `node --test` they died with ERR_UNKNOWN_FILE_EXTENSION and rejected the
+    // whole reference-implementation baseline.
+    const owners = new Set(["reference-implementation/vendor/brand-react/package.json"])
+    expect(
+      ownedByNestedTestRunner("vendor/brand-react/src/popover-dom.test.ts", "reference-implementation", (p) =>
+        owners.has(p)
+      )
+    ).toBe(true)
+  })
+
+  it("keeps a cohort test, whose nearest manifest is the cohort's own", () => {
+    // The cohort root's own package.json must not count, or the guard would
+    // withhold the entire suite it exists to protect.
+    const owners = new Set(["reference-implementation/package.json"])
+    expect(
+      ownedByNestedTestRunner("test/hosted-mcp-oauth.test.ts", "reference-implementation", (p) => owners.has(p))
+    ).toBe(false)
+  })
+
+  it("keeps a test under a nested package that declares no test script", () => {
+    // The signal is a declared `test` script, not the mere presence of a
+    // manifest -- withholding a runnable test is the expensive error.
+    expect(
+      ownedByNestedTestRunner("vendor/other/src/thing.test.ts", "reference-implementation", () => false)
+    ).toBe(false)
   })
 })
 
