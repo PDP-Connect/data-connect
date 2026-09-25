@@ -12,8 +12,8 @@ import { createSqliteConnectorInstanceStore } from "../reference-implementation/
 const origin = requiredEnv("PDPP_CORE_SMOKE_ORIGIN");
 const setupToken = requiredEnv("PDPP_CORE_SMOKE_SETUP_TOKEN");
 const ownerPassword = requiredEnv("PDPP_CORE_SMOKE_OWNER_PASSWORD");
-const fixtureRef = "waspflow/deployrestore-0923";
-const clientId = `https://raw.githubusercontent.com/PDP-Connect/data-connect/${fixtureRef}/scripts/fixtures/docker-core-smoke-cimd.json`;
+// Served from this checkout by the smoke's TLS ingress (see docker-core-demo-smoke.sh).
+const clientId = "https://cimd.pdpp-smoke.test/docker-core-smoke-cimd.json";
 const privateKeyPath = "/app/scripts/fixtures/docker-core-smoke-private-key.pem";
 
 function requiredEnv(name) {
