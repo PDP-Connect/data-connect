@@ -242,3 +242,11 @@ and refresh `package-lock.json` integrity — and skipped the `claude_code`/`cod
 connector-source copy, which is orthogonal to this pin and script-updates its own
 hardcoded targets pin-to-pin. See `scripts/check-polyfill-connectors-tarball-freshness.mjs`
 for the check that now fails CI instead of letting a future pin go silently stale.
+
+**Update (2026-09-25): pin moved to data-connectors commit `d2d9007a91cd7e5035d6d70e5273985354d8dfff`.**
+Rebuilt with `scripts/revendor-polyfill-connectors.sh` to clear the 7-day
+freshness limit. This is the last data-connectors commit before the 2026-09-22
+connector cutover; later pins change manifests this reference implementation
+does not yet accept (for example `heb` stream selections without `resources`).
+The bundled `claude_code` source stays at data-connectors@5f17986, as
+`packages/polyfill-connectors/vendor-source.json` records.
