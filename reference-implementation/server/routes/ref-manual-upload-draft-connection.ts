@@ -250,6 +250,7 @@ export interface MountRefManualUploadDraftConnectionContext {
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
   resolveActiveConnectorManifest?: (connectorId: string) => Promise<ConnectorManifestLike | null>;
+  resolveCatalogConnectorManifest?: (connectorId: string) => Promise<ConnectorManifestLike | null>;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
 }
@@ -313,6 +314,10 @@ async function resolveManualUploadConnectorManifest(
     const activeManifest = await ctx.resolveActiveConnectorManifest(connectorId);
     if (activeManifest) {
       return activeManifest;
+    }
+    const catalogManifest = await ctx.resolveCatalogConnectorManifest?.(connectorId);
+    if (catalogManifest) {
+      return catalogManifest;
     }
     throw error;
   }

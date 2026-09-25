@@ -33,7 +33,7 @@ const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
-const MANIFEST_REQUEST = /\/manifests\/sha256:[0-9a-f]{64}$/;
+const MANIFEST_REQUEST = /\/manifests\/(sha256:[0-9a-f]{64})$/;
 const BLOB_REQUEST = /\/blobs\/(sha256:[0-9a-f]{64})$/;
 
 export interface ConnectorInstallRecord {
@@ -703,6 +703,7 @@ async function installStagedEntry(options: {
 export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
+  resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -849,10 +850,56 @@ export function createConnectorInstallService(options: {
     assertCatalogEntry(entry, connectorId, digest);
     return installEntry(connectorId, entry);
   };
+  const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
+    const entry = (await catalog()).find(
+      (candidate) => candidate.connector_id === connectorId && candidate.latest === true
+    );
+    if (!entry) {
+      return null;
+    }
+    const core = await loadPinnedCore();
+    if (!core.fetchResolvedArtifact) {
+      throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
+    }
+    const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
+      if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
+        return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
+      }
+      return null;
+    };
+    const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
+    const artifact = await core.fetchResolvedArtifact(
+      { doc: {}, mode: "locked" },
+      {
+        artifactKind: "pdpp-collection-profile",
+        connectorId: entry.connector_id,
+        connectorKey: entry.connector_key,
+        entrypointPath: "dist/collection-profile.mjs",
+        manifestPath: "profile/collection-profile.json",
+        oci: {
+          digest: entry.digest,
+          registry: "ghcr.io",
+          repository: `pdp-connect/connector/${entry.connector_key}`,
+        },
+        provenancePath: "provenance.json",
+        version: entry.version ?? entry.digest,
+      },
+      {
+        fetchImpl: limitedTransport.fetchImpl,
+        ociCertificateIdentityResolver: identityResolver,
+      }
+    );
+    const manifest = isRecord(artifact) && isRecord(artifact.manifest) ? artifact.manifest : null;
+    if (!manifest || canonicalManifestKey(manifest) !== entry.connector_key) {
+      throw new Error("Signed connector manifest identity does not match the catalog entry.");
+    }
+    return manifest;
+  };
   return {
     addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
     install,
+    resolveManifestFromCatalog,
     listLocalSources: () => localSourceStore.list(),
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
@@ -969,7 +1016,7 @@ function extractManifestLayerDigests(buffer: Buffer): {
   }
 }
 
-export function createConfigLimitedFetch(baseFetch: FetchLike): {
+export function createConfigLimitedFetch(baseFetch: FetchLike, expectedManifestDigest?: string): {
   readonly fetchImpl: typeof fetch;
   readonly configDigest: () => string | null;
 } {
@@ -986,7 +1033,9 @@ export function createConfigLimitedFetch(baseFetch: FetchLike): {
       requestUrl = input.url;
     }
     const parsedUrl = new URL(requestUrl);
-    const manifestRequest = MANIFEST_REQUEST.test(parsedUrl.pathname);
+    const manifestMatch = MANIFEST_REQUEST.exec(parsedUrl.pathname);
+    const isExpectedManifest =
+      manifestMatch !== null && (!expectedManifestDigest || manifestMatch[1] === expectedManifestDigest);
     const blobMatch = BLOB_REQUEST.exec(parsedUrl.pathname);
     const isBoundedBlob =
       blobMatch?.[1] !== undefined &&
@@ -998,21 +1047,45 @@ export function createConfigLimitedFetch(baseFetch: FetchLike): {
       }
     }
     const originalArrayBuffer = response.arrayBuffer.bind(response);
-    Object.defineProperty(response, "arrayBuffer", {
-      configurable: true,
-      value: async () => {
-        const buffer = Buffer.from(await originalArrayBuffer());
-        if (isBoundedBlob && buffer.length > MAX_CONFIG_BYTES) {
-          throw new Error("Connector OCI config or profile exceeds the 1 MiB RI limit.");
-        }
-        if (manifestRequest) {
-          const layerDigests = extractManifestLayerDigests(buffer);
-          if (layerDigests) {
-            discoveredConfigDigest = layerDigests.configDigest;
-            discoveredProfileDigest = layerDigests.profileDigest;
+    let bufferPromise: Promise<Buffer> | null = null;
+    const readBuffer = async (): Promise<Buffer> => {
+      if (!bufferPromise) {
+        bufferPromise = originalArrayBuffer().then((arrayBuffer) => {
+          const buffer = Buffer.from(arrayBuffer);
+          if (isBoundedBlob && buffer.length > MAX_CONFIG_BYTES) {
+            throw new Error("Connector OCI config or profile exceeds the 1 MiB RI limit.");
           }
-        }
-        return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+          if (isExpectedManifest) {
+            const layerDigests = extractManifestLayerDigests(buffer);
+            // An unrelated or malformed response at a manifest-shaped path
+            // must not erase a digest already read from the OCI manifest.
+            if (layerDigests?.configDigest) {
+              discoveredConfigDigest = layerDigests.configDigest;
+              if (layerDigests.profileDigest) {
+                discoveredProfileDigest = layerDigests.profileDigest;
+              }
+            }
+          }
+          return buffer;
+        });
+      }
+      return bufferPromise;
+    };
+    Object.defineProperties(response, {
+      arrayBuffer: {
+        configurable: true,
+        value: async () => {
+          const buffer = await readBuffer();
+          return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        },
+      },
+      json: {
+        configurable: true,
+        value: async () => JSON.parse((await readBuffer()).toString("utf8")),
+      },
+      text: {
+        configurable: true,
+        value: async () => (await readBuffer()).toString("utf8"),
       },
     });
     return response;
@@ -1025,11 +1098,13 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   if (!core.fetchResolvedArtifact) {
     throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
   }
-  const identityResolver = ({ registry, repository }: { registry: string; repository: string }) =>
-    registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
-      ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
-      : null;
-  const preflightTransport = createConfigLimitedFetch(fetch);
+  const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
+    if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
+      return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
+    }
+    return null;
+  };
+  const preflightTransport = createConfigLimitedFetch(fetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
     { doc: {}, mode: "locked" },
     {
@@ -1055,9 +1130,11 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   const preflightOci = isRecord(preflight) && isRecord(preflight.oci) ? preflight.oci : null;
   const configDigest = preflightOci && typeof preflightOci.configDigest === "string" ? preflightOci.configDigest : null;
   if (!(configDigest && DIGEST.test(configDigest)) || (entry.config_digest && entry.config_digest !== configDigest)) {
-    throw new Error("OCI manifest config digest does not match the verified install identity.");
+    throw new Error(
+      `OCI preflight config digest does not match the verified install identity (catalog=${entry.config_digest ?? "none"}, manifest=${configDigest ?? "none"}).`
+    );
   }
-  const limitedTransport = createConfigLimitedFetch(fetch);
+  const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
   await core.installFromLock({
     artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,
@@ -1092,7 +1169,9 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   });
   const installedConfigDigest = limitedTransport.configDigest();
   if (!installedConfigDigest || installedConfigDigest !== configDigest) {
-    throw new Error("OCI manifest config digest does not match the verified install identity.");
+    throw new Error(
+      `OCI install config digest was not confirmed by the transport (preflight=${configDigest}, manifest=${installedConfigDigest ?? "none"}).`
+    );
   }
   normalizeCoreInstallLayout(root, entry.connector_id);
   return configDigest;

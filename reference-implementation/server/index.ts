@@ -790,6 +790,7 @@ interface ServerOpts {
   } | null;
   agentConnectTtlMs?: number;
   agentDiscoveryOrigin?: string | null;
+  connectorInstallService?: ReturnType<typeof createConnectorInstallService>;
   asIssuer?: string | null;
   asPort?: number;
   asPublicUrl?: string | null;
@@ -6647,6 +6648,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefStaticSecretDraftConnection>[1]);
 
+  const connectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      registerManifest: (manifest) =>
+        registerConnector(manifest, {
+          skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
+        }),
+    });
+
   {
     const resolvedDbPath = opts.dbPath || DB_PATH;
     const importBaseDir =
@@ -6671,6 +6681,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
         const inspected = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
         return inspected.status === "active" ? inspected.record.manifest : null;
       },
+      resolveCatalogConnectorManifest: (connectorId: string) =>
+        connectorInstallService.resolveManifestFromCatalog?.(connectorId) ?? Promise.resolve(null),
       resolveRegisteredConnectorManifest,
       setReferenceTraceId,
     } as unknown as Parameters<typeof mountRefManualUploadDraftConnection>[1]);
@@ -8210,11 +8222,14 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
-    service: createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest, {
-        skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
+    service:
+      opts.connectorInstallService ??
+      createConnectorInstallService({
+        registerManifest: (manifest) =>
+          registerConnector(manifest, {
+            skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
+          }),
       }),
-    }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
   // Owner-authenticated HTTP routes for both remote-access providers
@@ -9089,6 +9104,14 @@ export async function startServer(opts: ServerOpts = {}) {
   const providerAuthExchanger =
     opts.providerAuthExchanger ?? buildGenericProviderAuthExchanger(createRequestConnectorInstanceCredentialStore);
 
+  const connectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      registerManifest: (manifest) =>
+        registerConnector(manifest, {
+          skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
+        }),
+    });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
     acceptedProviderNativeRevision: opts.acceptedProviderNativeRevision,
@@ -9097,6 +9120,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl: configuredAsPublicUrl,
     clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
+    connectorInstallService,
     controller,
     ownerLive: resolveOwnerLive(opts),
     dbPath: opts.dbPath || DB_PATH,
@@ -9195,6 +9219,7 @@ export async function startServer(opts: ServerOpts = {}) {
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
   const rsApp = buildRsApp({
+    connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,

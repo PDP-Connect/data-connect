@@ -26,6 +26,9 @@ on:
     # production build installs that manifest and typechecks the console.
     paths:
       - "reference-implementation/type-shims/**"
+      - "reference-implementation/server/connector-install/**"
+      - "reference-implementation/server/routes/ref-manual-upload-draft-connection.ts"
+      - "reference-implementation/server/index.ts"
       - "reference-implementation/package.json"
       - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
@@ -46,6 +49,9 @@ on:
     # that affect the production image build.
     paths:
       - "reference-implementation/type-shims/**"
+      - "reference-implementation/server/connector-install/**"
+      - "reference-implementation/server/routes/ref-manual-upload-draft-connection.ts"
+      - "reference-implementation/server/index.ts"
       - "reference-implementation/package.json"
       - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
@@ -183,19 +189,19 @@ jobs:
         if: matrix.image == 'core'
         run: bash deploy/docker/check-image-identity.sh --require-known pdpp:ci-core-test
 
-      - name: Prove Core includes owner-facing connector manifests
-        if: matrix.image == 'core'
-        run: >-
-          docker run --rm --entrypoint sh pdpp:ci-core-test -ec
-          'test -d /console/packages/polyfill-connectors/manifests &&
-          test -n "$(find /console/packages/polyfill-connectors/manifests -maxdepth 1 -type f -name "*.json" -print -quit)"'
-
       - name: Prove the built Core image runs headed Patchright with durable profiles and interaction-scoped CDP
         if: matrix.image == 'core'
         env:
           PDPP_CORE_ORACLE_IMAGE: pdpp:ci-core-test
           PDPP_CORE_ORACLE_SKIP_BUILD: "1"
         run: bash scripts/core-headed-patchright-runtime-oracle.sh
+
+      - name: Smoke Kahtaf's Docker Core demo path
+        if: matrix.image == 'core'
+        env:
+          PDPP_CORE_SMOKE_IMAGE: pdpp:ci-core-test
+          PDPP_CORE_SMOKE_SKIP_BUILD: "1"
+        run: bash scripts/docker-core-demo-smoke.sh
 
   validate-neko:
     name: validate docker/neko image
