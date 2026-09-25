@@ -177,6 +177,16 @@ export interface OwnerAuthPlaceholder {
    * `issuer_subject_id`).
    */
   readOwnerSession: (req: AuthRequest) => OwnerSessionPayload | null;
+  /**
+   * True if a session payload was issued before the most recent logout for
+   * its subject. The session cookie itself is a stateless signed token with
+   * no session id, so a connection that authenticated once at open time
+   * (e.g. the owner-live SSE stream) has no other way to learn that the
+   * owner logged out after that point — its original request/cookie never
+   * changes. Long-lived connections must re-check this against the payload
+   * they captured at open time on every periodic tick.
+   */
+  sessionRevokedSince: (payload: OwnerSessionPayload) => boolean;
   renderCsrfField: (token: string) => string;
   requireCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
   requireOwnerSession: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
@@ -471,6 +481,7 @@ interface OwnerAuthRouteContext {
   readonly loginRateLimiter: OwnerLoginRateLimiter;
   readonly passwordMatches: (submitted: string) => boolean;
   readonly providerName: string;
+  readonly recordLogout: (subjectId: string) => void;
   readonly resolvedSubjectId: string;
   readonly rotateCsrfCookie: (req: AuthRequest, res: AuthResponse) => void;
   readonly session: SessionHelpers;
@@ -778,6 +789,7 @@ function handleOwnerLogout(req: AuthRequest, res: AuthResponse, context: OwnerAu
     replyLogoutCsrfFailure(req, res, context.providerName);
     return;
   }
+  context.recordLogout(context.resolvedSubjectId);
   context.session.clearSession(res, req);
   context.rotateCsrfCookie(req, res);
   if (wantsHtml(req)) {
@@ -852,6 +864,20 @@ export function createOwnerAuthPlaceholder({
   });
   const { enabled, subjectId: resolvedSubjectId } = sessionController;
   const session = buildSessionHelpers(sessionController);
+  // Logout timestamp per subject, in-memory only. The session cookie is a
+  // stateless signed `{ sub, iat, exp }` token with no session id, so this
+  // is the only server-side memory of "logged out" a long-lived connection
+  // (owner-live SSE) can consult against the payload it captured when it
+  // first authenticated. Cleared naturally when the process restarts, which
+  // is fine: a restarted process has no open connections predating it either.
+  const loggedOutAt = new Map<string, number>();
+  function recordLogout(subject: string): void {
+    loggedOutAt.set(subject, Date.now());
+  }
+  function sessionRevokedSince(payload: OwnerSessionPayload): boolean {
+    const revokedAt = loggedOutAt.get(payload.sub);
+    return revokedAt !== undefined && payload.iat * 1000 <= revokedAt;
+  }
   // CSRF protection is only meaningful when owner-auth is enabled (the
   // password gates everything). When disabled, the helpers no-op and
   // the routes stay open as before.
@@ -964,6 +990,7 @@ export function createOwnerAuthPlaceholder({
       loginRateLimiter,
       passwordMatches,
       providerName,
+      recordLogout,
       resolvedSubjectId,
       rotateCsrfCookie,
       session,
@@ -1016,6 +1043,7 @@ export function createOwnerAuthPlaceholder({
     renderCsrfField: renderCsrfHiddenField,
     requireCsrf,
     requireOwnerSession,
+    sessionRevokedSince,
     subjectId: resolvedSubjectId,
   };
 }

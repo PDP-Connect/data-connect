@@ -146,6 +146,56 @@ test("pings are real events on the configured interval", async () => {
   assert.ok(!chunks.some(chunk => chunk.startsWith(":")), "no comment-only keepalives")
 })
 
+test("a ping tick closes the stream once the owning session is revoked", async () => {
+  type Handler = (req: unknown, res: unknown) => unknown
+  const routes = new Map<string, Handler>()
+  const app = {
+    get: (path: string, ...args: unknown[]) => routes.set(`GET ${path}`, args.at(-1) as Handler),
+    post: (path: string, ...args: unknown[]) => routes.set(`POST ${path}`, args.at(-1) as Handler),
+  }
+  let revoked = false
+  mountOwnerLiveAs(app, {
+    live: createLiveRevisions(),
+    pdppError: () => undefined,
+    pingIntervalMs: 20,
+    requireOwnerSession: () => undefined,
+    sessionRevokedSince: () => revoked,
+  })
+  let minted = { events_path: "" }
+  const jsonRes = { json: (body: { events_path: string }) => (minted = body), status: () => jsonRes }
+  await routes.get("POST /_ref/owner-live/sessions")?.({}, jsonRes)
+  const token = minted.events_path.split("/")[3] ?? ""
+
+  const chunks: string[] = []
+  let ended = false
+  let onClose = () => undefined as void
+  await routes.get("GET /_ref/owner-live/:token/events")?.(
+    {
+      ownerSession: { exp: 0, iat: 0, sub: "owner" },
+      params: { token },
+      raw: { on: (_event: string, listener: () => void) => (onClose = listener) },
+    },
+    {
+      hijack: () => undefined,
+      json: () => undefined,
+      raw: {
+        end: () => (ended = true),
+        setHeader: () => undefined,
+        statusCode: 0,
+        write: (chunk: string) => chunks.push(chunk),
+      },
+      status: () => undefined,
+    }
+  )
+  await sleep(30)
+  assert.ok(!ended, "must not close before the session is revoked")
+
+  revoked = true
+  await sleep(30)
+  onClose()
+  assert.ok(ended, "the connection must be ended once sessionRevokedSince reports the session as revoked")
+})
+
 interface StartedServer {
   asPort: number
   asServer: { close: (cb: () => void) => void; closeAllConnections: () => void }
@@ -239,6 +289,82 @@ test("owner-live routes: owner session required; an external write reaches the s
       const invalidate = events.find(e => e.event === "invalidate")?.data as { topic: string } | undefined
       assert.equal(invalidate?.topic, "desktop.autostart")
       assert.ok(receivedAt - writeAt.value < 1500, `invalidate took ${receivedAt - writeAt.value} ms`)
+    } finally {
+      server.asServer.closeAllConnections()
+      server.rsServer.closeAllConnections()
+      await Promise.allSettled([
+        new Promise<void>(resolve => server.asServer.close(resolve)),
+        new Promise<void>(resolve => server.rsServer.close(resolve)),
+      ])
+    }
+  })
+})
+
+test("owner logout closes an already-open live stream instead of leaving it running", async () => {
+  await withTempDir(async dir => {
+    const live = createLiveRevisions()
+    registerDefaultLiveTopics(live, {
+      appConfigPath: join(dir, "config.json"),
+      autostartPath: join(dir, "autostart.json"),
+      remoteAccessPath: join(dir, "remote-access.json"),
+    })
+    const server = (await startServer({
+      asPort: 0,
+      autoEnrollEligibleSchedules: false,
+      dbPath: ":memory:",
+      ownerAuthLoginRateLimit: false,
+      ownerAuthPassword: OWNER_PASSWORD,
+      ownerLive: live,
+      ownerLivePingIntervalMs: 50,
+      quiet: true,
+      rsPort: 0,
+    })) as unknown as StartedServer
+    const asUrl = `http://localhost:${server.asPort}`
+    try {
+      const login = await fetch(`${asUrl}/owner/login`, {
+        body: JSON.stringify({ password: OWNER_PASSWORD }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        redirect: "manual",
+      })
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? ""
+      assert.ok(cookie, "owner login sets a session cookie")
+
+      const mint = await fetch(`${asUrl}/_ref/owner-live/sessions`, { headers: { cookie }, method: "POST" })
+      assert.equal(mint.status, 201)
+      const { events_path: eventsPath } = (await mint.json()) as { events_path: string }
+
+      const stream = await fetch(`${asUrl}${eventsPath}`, { headers: { accept: "text/event-stream", cookie } })
+      assert.equal(stream.status, 200)
+      const reader = (stream.body as ReadableStream<Uint8Array>).getReader()
+      const decoder = new TextDecoder()
+
+      // Wait for `hello` so the stream is confirmed live before logging out.
+      let buffer = ""
+      const helloDeadline = Date.now() + 2000
+      while (!buffer.includes("event: hello") && Date.now() < helloDeadline) {
+        const next = await reader.read()
+        if (next.done) break
+        buffer += decoder.decode(next.value, { stream: true })
+      }
+      assert.ok(buffer.includes("event: hello"), "stream must send hello before logout")
+
+      const logout = await fetch(`${asUrl}/owner/logout`, {
+        headers: { "Content-Type": "application/json", cookie },
+        method: "POST",
+      })
+      assert.ok([200, 204].includes(logout.status), `logout got ${logout.status}`)
+
+      // The stream must end on its own (server-initiated close) within a
+      // couple of ping intervals -- not merely stop emitting new events. If
+      // this reads until the timeout without the reader ever finishing, the
+      // stream stayed open past logout.
+      const closedOnItsOwn = await Promise.race([
+        reader.read().then(result => result.done === true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 2000)),
+      ])
+      await reader.cancel().catch(() => undefined)
+      assert.ok(closedOnItsOwn, "owner-live stream must close once its owning session is logged out")
     } finally {
       server.asServer.closeAllConnections()
       server.rsServer.closeAllConnections()

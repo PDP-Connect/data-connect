@@ -26,12 +26,14 @@
 
 import { randomBytes } from "node:crypto"
 import type { LiveRevisions } from "../live-revisions.ts"
+import type { OwnerSessionPayload } from "../owner-session.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 export const LIVE_PING_INTERVAL_MS = 25_000
 export const LIVE_TOKEN_TTL_MS = 60_000
 
 interface RawResponse {
+  end?: () => void
   flushHeaders?: () => void
   setHeader: (name: string, value: string) => void
   statusCode: number
@@ -39,6 +41,7 @@ interface RawResponse {
 }
 
 interface RouteRequest {
+  ownerSession?: OwnerSessionPayload
   params?: Record<string, string>
   raw?: { on: (event: "close", listener: () => void) => void }
 }
@@ -65,6 +68,16 @@ export interface MountOwnerLiveAsContext {
   pdppError: PdppError
   pingIntervalMs?: number
   requireOwnerSession: MiddlewareHandler
+  /**
+   * True once the session that authenticated this connection has been
+   * logged out. `requireOwnerSession` only runs once, at connect time; a
+   * long-lived SSE connection has no other way to learn about a later
+   * logout, since the browser's cookie change never reaches an
+   * already-open request. Checked on every ping tick so a logged-out
+   * owner's stream stops within one `pingIntervalMs` instead of staying
+   * open (and continuing to receive invalidate events) indefinitely.
+   */
+  sessionRevokedSince?: (payload: OwnerSessionPayload) => boolean
 }
 
 export function mountOwnerLiveAs(app: AppLike, ctx: MountOwnerLiveAsContext): void {
@@ -127,7 +140,18 @@ export function mountOwnerLiveAs(app: AppLike, ctx: MountOwnerLiveAsContext): vo
 
       // Subscribe before the snapshot so a change between the two is not lost.
       const unsubscribe = ctx.live.subscribe((topic, revision) => send("invalidate", { revision, topic }))
-      const ping = setInterval(() => send("ping", {}), pingIntervalMs)
+      const ownerSession = req.ownerSession
+      const ping = setInterval(() => {
+        if (ownerSession && ctx.sessionRevokedSince?.(ownerSession)) {
+          try {
+            raw.end?.()
+          } catch {
+            /* socket may already be gone; the close handler cleans up */
+          }
+          return
+        }
+        send("ping", {})
+      }, pingIntervalMs)
       req.raw.on("close", () => {
         closed = true
         clearInterval(ping)
