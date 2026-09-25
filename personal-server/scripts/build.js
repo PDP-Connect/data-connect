@@ -694,6 +694,26 @@ async function build() {
     cpSync(src, dest, { recursive: true, force: true });
   }
 
+  // @opendatalabs/personal-server-ts-server publishes dist/scripts/ alongside
+  // its runtime code, but that directory is the upstream package's own build
+  // and CI verification tooling: bundle-verification.js and verify-bundle.js
+  // resolve paths like `../../package-lock.json` relative to the *upstream*
+  // repository root and import `typescript`, a devDependency we correctly do
+  // not vendor. It is not reachable through any of the package's declared
+  // `exports` (".", "./config", "./runtime", "./mcp/tee") and nothing in this
+  // build imports it. Drop it before the import rewrite so it neither trips
+  // assertImportsStayInsideDist nor ships an artifact with a repo-relative
+  // import baked in. Remove this once upstream stops including it in `dist/`.
+  const vendoredServerScripts = join(
+    DIST,
+    'node_modules',
+    '@opendatalabs',
+    'personal-server-ts-server',
+    'dist',
+    'scripts'
+  );
+  rmSync(vendoredServerScripts, { recursive: true, force: true });
+
   rewriteCopiedPackageImports();
 
   // Re-download the better-sqlite3 prebuilt binary for the pkg target Node version.

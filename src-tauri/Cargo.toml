@@ -67,10 +67,17 @@ getrandom = "0.3.4"
 keyring = "4.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
+# `sigstore` 0.14.0 depends on `sha2 = "0.10"`, one major behind this crate's
+# own `sha2 = "0.11"`; that makes `sigstore::bundle::verify::Verifier::verify_digest`'s
+# `Sha256` a different type than the one this crate otherwise uses, even
+# though both are `sha2::Sha256`. This renamed dependency exists only to
+# construct the exact hasher type that API needs — remove it once `sigstore`
+# updates its own `sha2` requirement to 0.11 or later.
+sha2-for-sigstore = { package = "sha2", version = "0.10" }
 hex = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
-oci-client = "0.17"
+oci-client = "0.18"
 semver = "1.0"
 dirs = "7.0"
 dotenvy = "0.15"

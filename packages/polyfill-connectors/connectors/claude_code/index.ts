@@ -38,7 +38,9 @@ import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
 import {
 	type ArtifactCaptureContext,
 	ArtifactCaptureLedger,
+	type ArtifactCaptureStatus,
 	captureFileArtifact,
+	captureInlineArtifact,
 	openArtifactCapture,
 } from "../../src/artifact-capture.ts";
 import { readBoundedFilePreview } from "../../src/bounded-file-preview.ts";
@@ -78,6 +80,7 @@ import {
 	buildMemoryNoteRecord,
 	buildSkillRecord,
 	buildSlashCommandRecord,
+	buildUsageRecord,
 	extractContent,
 	LINE_PROGRESS_INTERVAL,
 	MESSAGE_CONTENT_PREVIEW_CHARS,
@@ -173,6 +176,13 @@ export const CLAUDE_CODE_KNOWN_LOCAL_STORES: KnownLocalStore[] = [
 		reason: "configuration is inventoried without payload content",
 	},
 	{
+		store: "stats_cache",
+		relativePath: "stats-cache.json",
+		stream: "usage",
+		classification: "collect",
+		reason: "declared aggregate usage-stats source",
+	},
+	{
 		store: "auth",
 		relativePath: "auth.json",
 		stream: null,
@@ -214,6 +224,7 @@ export function makeJsonlObservations(
 		messageCount: 0,
 		cwd: null,
 		gitBranch: null,
+		title: null,
 		userType: null,
 		entrypoint: null,
 		version: null,
@@ -249,6 +260,12 @@ export function observeJsonlFields(
 	}
 	if (obj.version && !obs.version) {
 		obs.version = obj.version;
+	}
+	// `ai-title` is a session-scoped row (not a message), emitted at most once
+	// per session by the CLI. Mirrors legacy `summarizeTranscript`'s
+	// `type === 'ai-title' && row.aiTitle` first-non-null read.
+	if (obj.type === "ai-title" && obj.aiTitle && !obs.title) {
+		obs.title = obj.aiTitle;
 	}
 	if (obj.timestamp) {
 		if (!obs.firstTimestamp || obj.timestamp < obs.firstTimestamp) {
@@ -295,6 +312,18 @@ export function isAttachmentType(type: string | undefined): boolean {
 
 // ─── Per-line record builders (pure) ────────────────────────────────────
 
+/**
+ * `imagePasteIds` is the CLI's own signal that a user message carries a
+ * pasted image (see the `[Image #N]` placeholder convention in message
+ * content parts). Legacy `hasPastedContent` read the equivalent signal
+ * (`pastedContents`) off `history.jsonl`; transcripts carry it as this
+ * array instead. A non-empty array means at least one paste; absence or an
+ * empty array means none.
+ */
+function hasPastedContent(obj: JsonlObject): boolean {
+	return Array.isArray(obj.imagePasteIds) && obj.imagePasteIds.length > 0;
+}
+
 export function buildMessageRecord(
 	obj: JsonlObject,
 	sessionId: string,
@@ -314,17 +343,54 @@ export function buildMessageRecord(
 		is_sidechain: obj.isSidechain ?? null,
 		user_type: obj.userType ?? null,
 		agent_id: obj.agentId ?? null,
+		has_pasted_content: hasPastedContent(obj),
 	};
 }
 
-export function buildAttachmentRecord(
+/**
+ * Full body for an inline attachment (tool_use/tool_result content already
+ * resident in the parsed JSONL line), captured via `captureInlineArtifact`
+ * the same way `emitToolResultFile` captures on-disk tool-result bodies. Null
+ * capture context (no store wired) or empty content both return no blob_ref,
+ * exactly as the file-backed path does — see artifact-capture.ts's own
+ * `unavailable` status.
+ */
+async function captureAttachmentBody(
+	content: string | null,
+	recordKey: string,
+	captureContext: ArtifactCaptureContext | null,
+): Promise<{
+	artifact_capture: ArtifactCaptureStatus | null;
+	artifact_sha256: string | null;
+	blob_ref: null;
+}> {
+	if (!content) {
+		return { artifact_capture: null, artifact_sha256: null, blob_ref: null };
+	}
+	const captured = await captureInlineArtifact({
+		content,
+		context: captureContext,
+		mimeType: "text/plain",
+		recordKey,
+		stream: "attachments",
+	});
+	return {
+		artifact_capture: captured.status,
+		artifact_sha256: captured.sha256,
+		blob_ref: null,
+	};
+}
+
+export async function buildAttachmentRecord(
 	obj: JsonlObject,
 	sessionId: string,
 	uuid: string,
-): RecordData {
+	captureContext: ArtifactCaptureContext | null = null,
+): Promise<RecordData> {
 	const att = obj.attachment || {};
 	const content = extractContent(att) || extractContent(obj);
 	const previewResult = safeTextPreview(content, ATTACHMENT_PREVIEW_CHARS);
+	const capture = await captureAttachmentBody(content, uuid, captureContext);
 	return {
 		id: uuid,
 		session_id: sessionId,
@@ -337,6 +403,7 @@ export function buildAttachmentRecord(
 			previewResult.kind === "binary" ? previewResult.reason : null,
 		content_bytes: null,
 		timestamp: obj.timestamp || null,
+		...capture,
 	};
 }
 
@@ -346,6 +413,10 @@ export function buildAttachmentRecord(
  *  codex/gmail pattern: one stable bag so parseJsonlFile becomes pure
  *  orchestration and the helper is individually testable. */
 export interface LineEmitDeps {
+	/** Artifact spool + outbox for full-fidelity attachment-body capture.
+	 *  Null/omitted disables it — records still emit, with `artifact_capture:
+	 *  "unavailable"` (see captureInlineArtifact). */
+	captureContext?: ArtifactCaptureContext | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	requested: Map<string, StreamScope>;
 }
@@ -410,7 +481,12 @@ export async function processJsonlLine({
 	) {
 		await deps.emitRecord(
 			"attachments",
-			buildAttachmentRecord(obj, sessionId, uuid),
+			await buildAttachmentRecord(
+				obj,
+				sessionId,
+				uuid,
+				deps.captureContext ?? null,
+			),
 		);
 	}
 }
@@ -744,6 +820,7 @@ function updateSessionAccumulator(
 		cwd: obs.cwd,
 		entrypoint: obs.entrypoint,
 		gitBranch: obs.gitBranch,
+		title: obs.title,
 		userType: obs.userType,
 		version: obs.version,
 	});
@@ -898,6 +975,58 @@ function markFileContentAndShouldSkip(
 async function readBoundedUtf8(path: string): Promise<string | null> {
 	const preview = await readBoundedFilePreview(path);
 	return preview?.buffer.toString("utf8") ?? null;
+}
+
+interface EmitUsageArgs {
+	claudeHome: string;
+	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	fileMtimes: Record<string, number>;
+	newMtimes: Record<string, number>;
+	requested: Map<string, StreamScope>;
+}
+
+/**
+ * `stats-cache.json` re-derives its full aggregate on every write (the CLI
+ * owns the file; the connector never sees a diff), so this follows the same
+ * whole-file content-gate pattern as skills/slash_commands/memory_notes
+ * rather than an incremental cursor — see §6 "per-record fingerprint
+ * cursors" in the authoring guide (this is the single-record case of that
+ * pattern: one record, gated on the one file's content).
+ */
+async function emitUsage({
+	claudeHome,
+	requested,
+	emitRecord,
+	fileMtimes,
+	newMtimes,
+}: EmitUsageArgs): Promise<void> {
+	if (!requested.has("usage")) {
+		return;
+	}
+	const statsPath = join(claudeHome, "stats-cache.json");
+	const raw = await readBoundedUtf8(statsPath);
+	// A missing file is an honest "no usage stats yet", not a read failure:
+	// buildUsageRecord(null) emits the same source="stats-cache-missing"
+	// record legacy's buildUsage returned for this case.
+	if (raw === null) {
+		if (markFileContentAndShouldSkip(fileMtimes, newMtimes, statsPath, "")) {
+			return;
+		}
+		await emitRecord("usage", buildUsageRecord(null));
+		return;
+	}
+	if (markFileContentAndShouldSkip(fileMtimes, newMtimes, statsPath, raw)) {
+		return;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		// Malformed JSON is a shape anomaly, not a missing-file case: don't
+		// claim stats-cache-missing for a file that exists but doesn't parse.
+		return;
+	}
+	await emitRecord("usage", buildUsageRecord(parsed));
 }
 
 async function emitSkills({
@@ -1426,6 +1555,12 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 	const lastTimestamp = readStringOrNull(value.lastTimestamp);
 	const cwd = readStringOrNull(value.cwd);
 	const gitBranch = readStringOrNull(value.gitBranch);
+	// `title` is undefined (not null) on a cursor written before this field
+	// existed. Default it to null rather than rejecting the whole cursor:
+	// a persisted title is not itself a fact that needs a rebuild to recover,
+	// unlike a field with no safe default.
+	const title =
+		value.title === undefined ? null : readStringOrNull(value.title);
 	const userType = readStringOrNull(value.userType);
 	const entrypoint = readStringOrNull(value.entrypoint);
 	const version = readStringOrNull(value.version);
@@ -1435,6 +1570,7 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 		lastTimestamp === undefined ||
 		cwd === undefined ||
 		gitBranch === undefined ||
+		title === undefined ||
 		userType === undefined ||
 		entrypoint === undefined ||
 		version === undefined ||
@@ -1452,6 +1588,7 @@ function readJsonlObservations(value: unknown): JsonlObservations | undefined {
 		lastTimestamp,
 		messageCount: value.messageCount,
 		sessionId,
+		title,
 		userType,
 		version,
 	};
@@ -1474,8 +1611,14 @@ function readSessionAccumulator(
 		"user_type",
 		"version",
 	];
+	// `title` is undefined (not null) on an aggregate written before this field
+	// existed; default it to null rather than rejecting the aggregate, so an
+	// older cursor doesn't force a full session rebuild over one added field.
+	const title =
+		value.title === undefined ? null : readStringOrNull(value.title);
 	if (
 		textFields.some((field) => readStringOrNull(value[field]) === undefined) ||
+		title === undefined ||
 		typeof value.id !== "string" ||
 		typeof value.project_path !== "string" ||
 		typeof value.message_count !== "number" ||
@@ -1493,6 +1636,7 @@ function readSessionAccumulator(
 		message_count: value.message_count,
 		project_path: value.project_path,
 		started_at: value.started_at as string | null,
+		title,
 		user_type: value.user_type as string | null,
 		version: value.version as string | null,
 	};
@@ -2007,6 +2151,7 @@ async function scanSessionSource(input: {
 }
 
 async function scanChildSource(input: {
+	captureContext?: ArtifactCaptureContext | null;
 	cursor: ClaudeChildFileCursorV1 | undefined;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	emitRecords: boolean;
@@ -2043,6 +2188,7 @@ async function scanChildSource(input: {
 			await processJsonlLine({
 				buildOnly: !input.emitRecords,
 				deps: {
+					captureContext: input.captureContext ?? null,
 					emitRecord: async (stream, data) => {
 						input.telemetry.transcriptRecordsEmitted += 1;
 						await input.emitRecord(stream, data);
@@ -2331,6 +2477,8 @@ async function runSkillsAndCommands(
 		newSkillsMtimes: Record<string, number>;
 		slashCommandMtimes: Record<string, number>;
 		newSlashCommandMtimes: Record<string, number>;
+		usageMtimes: Record<string, number>;
+		newUsageMtimes: Record<string, number>;
 	},
 ): Promise<void> {
 	// A scan that FAILED must not checkpoint. The cursor is a claim about what
@@ -2339,6 +2487,7 @@ async function runSkillsAndCommands(
 	// subsequent runs. Track each scan's outcome and gate its STATE on success.
 	let skillsScanned = true;
 	let slashCommandsScanned = true;
+	let usageScanned = true;
 	try {
 		await emitSkills({
 			claudeHome,
@@ -2369,6 +2518,22 @@ async function runSkillsAndCommands(
 			type: "PROGRESS",
 			message:
 				"Claude Code phase=index pass=index stream=slash_commands scan_skipped=true",
+		});
+	}
+	try {
+		await emitUsage({
+			claudeHome,
+			requested,
+			emitRecord,
+			fileMtimes: state.usageMtimes,
+			newMtimes: state.newUsageMtimes,
+		});
+	} catch {
+		usageScanned = false;
+		await emit({
+			type: "PROGRESS",
+			message:
+				"Claude Code phase=index pass=index stream=usage scan_skipped=true",
 		});
 	}
 	if (requested.has("skills")) {
@@ -2408,6 +2573,23 @@ async function runSkillsAndCommands(
 			});
 		}
 	}
+	if (requested.has("usage")) {
+		if (usageScanned) {
+			await emit({
+				type: "STATE",
+				stream: "usage",
+				cursor: { file_mtimes: state.newUsageMtimes, fetched_at: nowIso() },
+			});
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "usage",
+				reason: "source_unreadable",
+				message:
+					"The Claude Code usage stats file could not be read, so usage totals are unknown for this run",
+			});
+		}
+	}
 }
 
 function streamFileMtimes(
@@ -2417,7 +2599,8 @@ function streamFileMtimes(
 		| "messages"
 		| "sessions"
 		| "skills"
-		| "slash_commands",
+		| "slash_commands"
+		| "usage",
 ): Record<string, number> | undefined {
 	return state[stream]?.file_mtimes;
 }
@@ -2682,6 +2865,7 @@ if (isMainModule(import.meta.url)) {
 					streamFileMtimes(typedState, "slash_commands") ?? {};
 				const memoryNoteMtimes =
 					streamFileMtimes(typedState, "memory_notes") ?? {};
+				const usageMtimes = streamFileMtimes(typedState, "usage") ?? {};
 				const newSkillsMtimes: Record<string, number> = { ...skillsMtimes };
 				const newSlashCommandMtimes: Record<string, number> = {
 					...slashCommandMtimes,
@@ -2689,6 +2873,7 @@ if (isMainModule(import.meta.url)) {
 				const newMemoryNoteMtimes: Record<string, number> = {
 					...memoryNoteMtimes,
 				};
+				const newUsageMtimes: Record<string, number> = { ...usageMtimes };
 
 				await emitLocalInventoryStreams({
 					claudeHome,
@@ -2704,6 +2889,8 @@ if (isMainModule(import.meta.url)) {
 					newSkillsMtimes,
 					slashCommandMtimes,
 					newSlashCommandMtimes,
+					usageMtimes,
+					newUsageMtimes,
 				});
 
 				// The parent-first state machine intentionally keeps the temporal
@@ -3058,6 +3245,7 @@ if (isMainModule(import.meta.url)) {
 								childSourceGaps,
 								() =>
 									scanChildSource({
+										captureContext,
 										cursor: priorChildCursors[source.path],
 										emitRecord: countingEmitRecord,
 										emitRecords: !candidateLegacyBaseline,
@@ -3089,6 +3277,7 @@ if (isMainModule(import.meta.url)) {
 									childSourceGaps,
 									() =>
 										scanChildSource({
+											captureContext,
 											cursor: undefined,
 											emitRecord: countingEmitRecord,
 											emitRecords: true,

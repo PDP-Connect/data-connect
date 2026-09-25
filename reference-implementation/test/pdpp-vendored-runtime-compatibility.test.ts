@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("withdrawn device runtime rejects STREAM_EVIDENCE while protocol 0.0.2 still validates it", async () => {
+test("withdrawn device runtime rejects unsupported events while protocol 0.0.3 validates them", async () => {
   const runtime = await import("@pdpp/collector-runtime");
   const protocol = await import("@pdpp/connector-protocol");
   const emitter = {
@@ -30,15 +30,16 @@ test("withdrawn device runtime rejects STREAM_EVIDENCE while protocol 0.0.2 stil
     protocol_capabilities: [protocol.STREAM_EVIDENCE_CAPABILITY],
   };
 
-  assert.equal(protocol.CONNECTOR_PROTOCOL_VERSION, "0.0.2");
+  assert.equal(protocol.CONNECTOR_PROTOCOL_VERSION, "0.0.3");
   assert.doesNotThrow(() =>
     protocol.validateStreamEvidenceCounts({
       considered: 4,
       outcomes: { emitted: 1, gapped: 1, unaccounted: 1, unchanged: 1 },
     })
   );
-  assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, "0.0.2");
+  assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, "0.0.3");
   assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
+  assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("BLOB"), false);
   assert.throws(
     () => runtime.assertPlacementOrThrow(emitter, runtime.COLLECTOR_RUNTIME_CAPABILITIES),
     (error: unknown) => {
