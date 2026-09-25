@@ -12,8 +12,7 @@ const TIME_ZONE = "America/Santo_Domingo";
 // Every visible string, by language.
 const T = {
   es: {
-    simBar: "Simulación · no es el portal oficial",
-    simBarNote: "— demostración con datos ficticios",
+    simBar: "Entorno de demostración · datos ficticios",
     brand: "Servicios Proactivos · Ministerio de Administración Pública",
     brandSub: "Portal de servicios · simulación",
     myRequests: "Mis trámites",
@@ -62,6 +61,8 @@ const T = {
     memberCols: ["Nombre", "Parentesco", "Edad"],
     updated: (d) => `Actualizado al ${d}`,
     noData: "No recibido",
+    notShared: "No lo compartió",
+    members: "Quiénes viven en el hogar",
     planTitle: "Qué haremos",
     planVaccines: (c) => `Vacunas: programaremos las primeras vacunas de su bebé${c ? ` en ${c}` : ""}.`,
     planBenefit: "Bono por hijo: lo incluiremos para su hogar al registrarse el nacimiento.",
@@ -76,6 +77,8 @@ const T = {
     sourceNames: {
       sns: "SNS · expediente de salud (control prenatal)",
       siuben: "SIUBEN · ficha del hogar (clasificación y miembros)",
+      siubenHogar: "SIUBEN · ficha del hogar (clasificación)",
+      siubenMiembros: "SIUBEN · ficha del hogar (miembros)",
     },
     reRead: "Volver a consultar",
     misAutorizaciones: "Ver o revocar en Mis autorizaciones",
@@ -114,8 +117,7 @@ const T = {
     footerRight: "No afiliado al MAP ni al Gobierno de la República Dominicana",
   },
   en: {
-    simBar: "Simulation · not the official portal",
-    simBarNote: "— demo with fictitious data",
+    simBar: "Demo environment · fictitious data",
     brand: "Servicios Proactivos · Ministry of Public Administration",
     brandSub: "Service portal · simulation",
     myRequests: "My requests",
@@ -164,6 +166,8 @@ const T = {
     memberCols: ["Name", "Relationship", "Age"],
     updated: (d) => `Updated ${d}`,
     noData: "Not received",
+    notShared: "You didn't share this",
+    members: "Who lives in the household",
     planTitle: "What we will do",
     planVaccines: (c) => `Vaccinations: we will schedule your baby's first vaccinations${c ? ` at ${c}` : ""}.`,
     planBenefit: "Child benefit: we will add it for your household when the birth is registered.",
@@ -178,6 +182,8 @@ const T = {
     sourceNames: {
       sns: "SNS · health record (prenatal care)",
       siuben: "SIUBEN · household file (classification and members)",
+      siubenHogar: "SIUBEN · household file (classification)",
+      siubenMiembros: "SIUBEN · household file (members)",
     },
     reRead: "Read again",
     misAutorizaciones: "View or revoke in Mis autorizaciones",
@@ -247,11 +253,11 @@ export function formatDateTime(date, lang, clock) {
 
 // ── Shared chrome ───────────────────────────────────────────────────────────
 
-// Amber bar + ES|EN toggle; each link points to the current path with ?lang.
+// Small muted demo line + ES|EN toggle; each link points to the current path with ?lang.
 function simBar(t, lang, path) {
   const link = (code) =>
     `<a data-lang-toggle="${code}" href="${esc(path)}?lang=${code}"${code === lang ? ' aria-current="true"' : ""}>${code.toUpperCase()}</a>`;
-  return `<div class="sim-bar" role="note">${esc(t.simBar)} <span>${esc(t.simBarNote)}</span>
+  return `<div class="sim-bar" role="note">${esc(t.simBar)}
   <nav class="lang-toggle" aria-label="Idioma / Language">${link(LANG.ES)} | ${link(LANG.EN)}</nav>
 </div>`;
 }
@@ -391,24 +397,45 @@ function row(label, value, attr = "") {
   return `<dt>${esc(label)}</dt><dd${attr}>${esc(shown)}</dd>`;
 }
 
-function healthCard(t, lang, p) {
+// Granted = in the token's authorization_details (see server.mjs grantedStreams).
+const isStreamGranted = (granted, stream) => !granted || stream in granted;
+const isFieldGranted = (granted, stream, field) =>
+  isStreamGranted(granted, stream) && (!granted?.[stream] || granted[stream].includes(field));
+
+// Neutral line for what the citizen chose not to share.
+function notSharedRow(t, label, key) {
+  return `<dt>${esc(label)}</dt><dd class="not-shared" data-not-shared="${esc(key)}">${esc(t.notShared)}</dd>`;
+}
+
+function healthCard(t, lang, p, granted) {
+  if (!isStreamGranted(granted, "control_prenatal")) {
+    return `<div class="data-card"><h3><span class="tag">SNS</span>${esc(t.healthRecord)}</h3><p class="muted not-shared" data-not-shared="control_prenatal">${esc(t.notShared)}</p></div>`;
+  }
   if (!p) {
     return `<div class="data-card"><h3><span class="tag">SNS</span>${esc(t.healthRecord)}</h3><p class="muted">${esc(t.noData)}</p></div>`;
   }
   const updated = formatDateLong(p.source_updated_at, lang);
-  return `<div class="data-card" data-source="sns">
+  const centre = isFieldGranted(granted, "control_prenatal", "centro_salud")
+    ? row(t.centre, p.centro_salud)
+    : notSharedRow(t, t.centre, "centro_salud");
+  return `<div class="data-card" data-source="sns" data-received-fields="${esc(Object.keys(p).sort().join(" "))}">
   <h3><span class="tag">SNS</span>${esc(t.healthRecord)}</h3>
   <dl>
     ${row(t.dueDate, formatDateLong(p.fecha_probable_parto, lang), ` data-due-date="${esc(p.fecha_probable_parto)}"`)}
     ${row(t.weeks, p.semanas_gestacion)}
-    ${row(t.centre, p.centro_salud)}
+    ${centre}
   </dl>
   ${updated ? `<p class="muted">${esc(t.updated(updated))}</p>` : ""}
 </div>`;
 }
 
-function householdCard(t, lang, h, miembros) {
-  if (!h && miembros.length === 0) {
+function householdCard(t, lang, h, miembros, granted) {
+  const hogarGranted = isStreamGranted(granted, "clasificacion_hogar");
+  const miembrosGranted = isStreamGranted(granted, "miembros_hogar");
+  if (!(hogarGranted || miembrosGranted)) {
+    return `<div class="data-card"><h3><span class="tag">SIUBEN</span>${esc(t.householdFile)}</h3><p class="muted not-shared" data-not-shared="siuben">${esc(t.notShared)}</p></div>`;
+  }
+  if (!h && miembros.length === 0 && miembrosGranted) {
     return `<div class="data-card"><h3><span class="tag">SIUBEN</span>${esc(t.householdFile)}</h3><p class="muted">${esc(t.noData)}</p></div>`;
   }
   const icv = [h?.icv_grupo, h?.icv_descripcion].filter(Boolean).join(" · ");
@@ -417,27 +444,52 @@ function householdCard(t, lang, h, miembros) {
     .map((m) => `<tr data-member><td>${esc(m.nombre)}</td><td>${esc(m.parentesco)}</td><td>${esc(m.edad)}</td></tr>`)
     .join("\n      ");
   const updated = formatDateLong(h?.source_updated_at, lang);
-  return `<div class="data-card" data-source="siuben">
-  <h3><span class="tag">SIUBEN</span>${esc(t.householdFile)}</h3>
-  <dl>
-    ${row(t.icv, icv, ` data-icv="${esc(h?.icv_grupo)}"`)}
+  const hogarRows = hogarGranted
+    ? `${row(t.icv, icv, ` data-icv="${esc(h?.icv_grupo)}"`)}
     ${row(t.place, place)}
-    ${row(t.membersCount, h?.miembros_hogar ?? miembros.length)}
-  </dl>
-  <table>
+    ${row(t.membersCount, h?.miembros_hogar ?? miembros.length)}`
+    : notSharedRow(t, t.icv, "clasificacion_hogar");
+  const members = miembrosGranted
+    ? `<table>
     <thead><tr>${t.memberCols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
     <tbody>
       ${rows}
     </tbody>
-  </table>
+  </table>`
+    : `<dl>${notSharedRow(t, t.members, "miembros_hogar")}</dl>`;
+  return `<div class="data-card" data-source="siuben">
+  <h3><span class="tag">SIUBEN</span>${esc(t.householdFile)}</h3>
+  <dl>
+    ${hogarRows}
+  </dl>
+  ${members}
   ${updated ? `<p class="muted">${esc(t.updated(updated))}</p>` : ""}
 </div>`;
+}
+
+// SIUBEN label that names only the granted streams.
+function sourceName(t, key, granted) {
+  if (key !== "siuben" || !granted) {
+    return t.sourceNames[key];
+  }
+  const hogar = "clasificacion_hogar" in granted;
+  const miembros = "miembros_hogar" in granted;
+  if (hogar && !miembros) {
+    return t.sourceNames.siubenHogar;
+  }
+  return miembros && !hogar ? t.sourceNames.siubenMiembros : t.sourceNames.siuben;
+}
+
+// Sources with at least one granted stream.
+function grantedSources(g) {
+  const streamsOf = { siuben: ["clasificacion_hogar", "miembros_hogar"], sns: ["control_prenatal"] };
+  return g.sources.filter((key) => !g.granted || (streamsOf[key] ?? []).some((s) => s in g.granted));
 }
 
 function grantCard(t, lang, result, purpose, misAutorizacionesUrl) {
   const g = result.grant;
   const status = g.revoked ? `<span class="revoked">${esc(t.revoked)}</span>` : `<span class="active">${esc(t.active)}</span>`;
-  const sources = g.sources.map((s) => `<div>${esc(t.sourceNames[s])}</div>`).join("");
+  const sources = grantedSources(g).map((s) => `<div>${esc(sourceName(t, s, g.granted))}</div>`).join("");
   const reRead = g.revoked
     ? ""
     : `<form method="POST" action="/volver-a-consultar" class="inline-form" data-action="re-read"><button class="btn btn-outline-blue" type="submit">${esc(t.reRead)}</button></form>`;
@@ -486,7 +538,8 @@ export function renderListo({ lang, result, notice, error, path, purpose, misAut
   const centre = result.prenatal?.centro_salud;
   const receivedLine = result.grant.revoked ? t.keptCopy(received) : t.receivedAt(received);
 
-  const body = `<main class="container">
+  const grantedList = result.grant.granted ? Object.keys(result.grant.granted).sort().join(" ") : "";
+  const body = `<main class="container" data-granted-streams="${esc(grantedList)}">
   ${listoAlert(t, lang, result, notice, error)}
   <section class="done">
     <h1>${esc(t.doneTitle)}</h1>
@@ -506,8 +559,8 @@ export function renderListo({ lang, result, notice, error, path, purpose, misAut
         <h2>${esc(t.received)}</h2>
         <p class="muted" data-received>${esc(receivedLine)}</p>
         <div class="data-cards">
-          ${healthCard(t, lang, result.prenatal)}
-          ${householdCard(t, lang, result.hogar, result.miembros)}
+          ${healthCard(t, lang, result.prenatal, result.grant.granted)}
+          ${householdCard(t, lang, result.hogar, result.miembros, result.grant.granted)}
         </div>
       </section>
     </div>

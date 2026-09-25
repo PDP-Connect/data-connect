@@ -8,9 +8,13 @@
 //
 // Usage:
 //   PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=... LANG=es \
-//   VIDEO_DIR=./tmp/video [CHROMIUM_PATH=...] node scripts/demo-dr/record-demo.mjs
+//   VIDEO_DIR=./tmp/video [CHROMIUM_PATH=...] [DESELECT=1] [CAPTIONS=0] node scripts/demo-dr/record-demo.mjs
 //
-// Writes <VIDEO_DIR>/demo-<lang>.webm.
+// DESELECT=1: on consent, visibly untick the household-members stream and the
+// health-centre field; /listo then pauses on the "not shared" lines.
+// CAPTIONS=0: no on-screen captions or highlight rings (on by default).
+//
+// Writes <VIDEO_DIR>/demo-<lang>[-deselect].webm.
 
 import { mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +24,8 @@ const PORTAL_URL = (process.env.PORTAL_URL ?? "http://localhost:8866").replace(/
 const OWNER_PASSWORD = process.env.OWNER_PASSWORD;
 const VIDEO_DIR = process.env.VIDEO_DIR ?? "tmp/demo-video";
 const LANG = process.env.LANG === "en" ? "en" : "es";
+const DESELECT = process.env.DESELECT === "1";
+const CAPTIONS = process.env.CAPTIONS !== "0";
 const NAV_TIMEOUT_MS = 30_000;
 const SIZE = { height: 800, width: 1280 };
 
@@ -30,6 +36,8 @@ const PAUSE_LONG = 5_000;
 const KEY_DELAY = 120;
 const SCROLL_STEP_PX = 6;
 const SCROLL_TICK_MS = 16;
+const CAPTION_MS = 4_000;
+const RING_PAD_PX = 6;
 
 // Stable selectors (data attributes and form actions, not text).
 const SEL = {
@@ -38,6 +46,62 @@ const SEL = {
   grant: "[data-grant-id]",
   misAut: "a[data-mis-autorizaciones]",
   revokeForms: "form[action*='/owner/autorizaciones/'][action$='/revocar']",
+  offer: "[data-offer]",
+  needs: "ul.needs",
+  until: "[data-until]",
+  signInCard: ".cu-card",
+  consentRow: ".cu-summary > div",
+  approve: "form[action$='/consent/approve'] button[type=submit]",
+  dropStream: "label.cu-pick:has(input[data-consent-stream='miembros_hogar'])",
+  dropField: "li[data-consent-stream-row='control_prenatal'] label:has(input[data-consent-field='centro_salud'])",
+  received: ".data-cards",
+  notShared: "[data-not-shared]",
+  reads: "ol.cu-reads, .cu-reads-empty",
+  revokedNotice: "[data-notice='revoked']",
+};
+
+// Consent summary rows, in page order (as-consent-ui-helpers renderDeclaredConsentHtml).
+const ROW = { WHO: 0, PURPOSE: 1, INSTITUTIONS: 2, DATA: 3, UNTIL: 5 };
+
+// On-screen captions, one per beat, in the video's language.
+const BEATS = {
+  offer: {
+    en: "Servicios Proactivos offers to arrange the baby's vaccinations and child benefit — no application needed.",
+    es: "Servicios Proactivos ofrece organizar las vacunas y el bono por hijo, sin que María lo solicite.",
+  },
+  needs: { en: "It says exactly what it needs, and why.", es: "Dice exactamente qué necesita y para qué." },
+  until: { en: "…and until when.", es: "…y hasta cuándo." },
+  signIn: {
+    en: "The same Cuenta Única sign-in as any government service.",
+    es: "El mismo inicio de sesión de Cuenta Única que cualquier servicio del Estado.",
+  },
+  who: { en: "One screen: who is asking…", es: "Una sola pantalla: quién solicita…" },
+  purpose: { en: "…for what purpose…", es: "…para qué…" },
+  data: { en: "…from which institutions, and which fields.", es: "…de qué instituciones y qué datos." },
+  dropStream: {
+    en: "María chooses what to share: she unticks her household members…",
+    es: "María decide qué compartir: desmarca los miembros del hogar…",
+  },
+  dropField: { en: "…and her health centre.", es: "…y su centro de salud." },
+  ends: { en: "Access ends on 31 January 2027.", es: "El acceso termina el 31 de enero de 2027." },
+  approve: { en: "She approves.", es: "María autoriza." },
+  received: {
+    en: "The service received only what she allowed: the due date from SNS, the household classification from SIUBEN.",
+    es: "El servicio recibió solo lo que ella autorizó: la fecha probable de parto (SNS) y la clasificación del hogar (SIUBEN).",
+  },
+  notShared: {
+    en: "What she unticked never left the institutions.",
+    es: "Lo que desmarcó nunca salió de las instituciones.",
+  },
+  reads: {
+    en: "She can see every permission, and what was read and when.",
+    es: "Ve cada autorización, y qué se leyó y cuándo.",
+  },
+  revoke: { en: "…and cancel it at any time.", es: "…y puede cancelarla en cualquier momento." },
+  revoked: {
+    en: "Once revoked, the service can no longer read her records.",
+    es: "Una vez revocada, el servicio ya no puede leer sus datos.",
+  },
 };
 
 if (!OWNER_PASSWORD) {
@@ -101,6 +165,106 @@ async function toTop(page) {
   await glide(page, -y);
 }
 
+// ── Captions + highlight ring (recording overlay only; the apps are untouched) ──
+//
+//   ┌──────────── page ────────────┐
+//   │   ╔═ amber ring ═╗           │  absolutely positioned over the target's box
+//   │   ║   target     ║           │  (document coordinates, pointer-events: none)
+//   │   ╚══════════════╝           │
+//   │ ▓▓ caption bar (fixed) ▓▓▓▓▓ │  dark, white 24px, max 2 lines
+//   └──────────────────────────────┘
+// Injected on demand, so every newly loaded page gets it again.
+async function ensureOverlay(page) {
+  await page.evaluate(() => {
+    if (document.getElementById("rec-caption")) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.textContent = `
+#rec-caption { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 2147483647;
+  max-width: min(1200px, 94vw); padding: 12px 24px; border-radius: 12px; background: rgba(10, 14, 22, .86);
+  color: #fff; font: 500 22px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; text-align: center;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .35); pointer-events: none; opacity: 0; transition: opacity .35s; }
+#rec-caption.on { opacity: 1; }
+#rec-ring { position: absolute; z-index: 2147483646; pointer-events: none; border: 3px solid #FFB300; border-radius: 10px;
+  box-shadow: 0 0 0 4px rgba(255, 179, 0, .25), 0 0 22px 6px rgba(255, 179, 0, .45);
+  opacity: 0; transition: opacity .3s; animation: rec-pulse 1.4s ease-in-out infinite; }
+#rec-ring.on { opacity: 1; }
+@keyframes rec-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.015); } }`;
+    const caption = Object.assign(document.createElement("div"), { id: "rec-caption" });
+    const ring = Object.assign(document.createElement("div"), { id: "rec-ring" });
+    document.head.append(style);
+    document.body.append(ring, caption);
+  });
+}
+
+// Ring around the union of every element the locators match.
+async function showRing(page, locators) {
+  const boxes = [];
+  for (const locator of locators) {
+    for (const el of await locator.all()) {
+      const box = await el.boundingBox();
+      if (box) {
+        boxes.push(box);
+      }
+    }
+  }
+  if (boxes.length === 0) {
+    return;
+  }
+  const left = Math.min(...boxes.map((b) => b.x));
+  const top = Math.min(...boxes.map((b) => b.y));
+  const right = Math.max(...boxes.map((b) => b.x + b.width));
+  const bottom = Math.max(...boxes.map((b) => b.y + b.height));
+  await page.evaluate(
+    ({ left, top, right, bottom, pad }) => {
+      const ring = document.getElementById("rec-ring");
+      Object.assign(ring.style, {
+        height: `${bottom - top + 2 * pad}px`,
+        left: `${left + window.scrollX - pad}px`,
+        top: `${top + window.scrollY - pad}px`,
+        width: `${right - left + 2 * pad}px`,
+      });
+      ring.classList.add("on");
+    },
+    { bottom, left, pad: RING_PAD_PX, right, top },
+  );
+}
+
+async function hideOverlay(page) {
+  await page.evaluate(() => {
+    document.getElementById("rec-caption")?.classList.remove("on");
+    document.getElementById("rec-ring")?.classList.remove("on");
+  });
+}
+
+// One beat: bring the target into view, caption + ring, hold, then clear.
+// `hold` runs while both are shown (e.g. an untick); without captions only the pacing remains.
+async function beat(page, key, targets, { hold = null, ms = CAPTION_MS } = {}) {
+  const list = Array.isArray(targets) ? targets : [targets];
+  const first = list[0]?.first();
+  if (first && (await first.count()) > 0) {
+    await glideTo(first);
+  }
+  if (!CAPTIONS) {
+    await pause(page, ms);
+    await hold?.();
+    return;
+  }
+  await ensureOverlay(page);
+  await page.evaluate((text) => {
+    const caption = document.getElementById("rec-caption");
+    caption.textContent = text;
+    caption.classList.add("on");
+  }, BEATS[key][LANG]);
+  await showRing(page, list);
+  await pause(page, ms);
+  await hold?.();
+  await hideOverlay(page);
+  await pause(page, 400);
+}
+
 // Click and wait for the page to navigate to a URL matching `until`.
 async function clickTo(page, locator, until) {
   await locator.scrollIntoViewIfNeeded();
@@ -116,7 +280,7 @@ async function signIn(page) {
   if ((await page.locator("input[type=password]").count()) === 0) {
     return;
   }
-  await pause(page);
+  await beat(page, "signIn", page.locator(SEL.signInCard));
   await password.click();
   await password.pressSequentially(OWNER_PASSWORD, { delay: KEY_DELAY });
   await pause(page, PAUSE_SHORT);
@@ -126,6 +290,19 @@ async function signIn(page) {
   await submit.hover();
   await Promise.all([page.waitForLoadState("load"), submit.click()]);
   await page.waitForLoadState("load");
+}
+
+// Untick one consent box where the viewer can see it: caption, hover, pause, click.
+async function untick(page, key, selector) {
+  const label = page.locator(selector).first();
+  await beat(page, key, label, {
+    hold: async () => {
+      await label.hover();
+      await pause(page, PAUSE_SHORT);
+      await label.locator("input[type=checkbox]").click();
+      await pause(page, PAUSE_SHORT);
+    },
+  });
 }
 
 // Consent: a review step if present, then read the whole screen and Allow.
@@ -138,8 +315,23 @@ async function consent(page) {
     await page.waitForLoadState("load");
   }
 
-  await pause(page, PAUSE_LONG);
-  await readPage(page);
+  await pause(page, PAUSE_SHORT);
+  const rows = page.locator(SEL.consentRow);
+  if (CAPTIONS) {
+    await beat(page, "who", rows.nth(ROW.WHO));
+    await beat(page, "purpose", rows.nth(ROW.PURPOSE));
+    await beat(page, "data", [rows.nth(ROW.INSTITUTIONS), rows.nth(ROW.DATA)], { ms: PAUSE_LONG });
+  } else {
+    await readPage(page);
+  }
+  if (DESELECT) {
+    await untick(page, "dropStream", SEL.dropStream);
+    await untick(page, "dropField", SEL.dropField);
+  }
+  if (CAPTIONS) {
+    await beat(page, "ends", rows.nth(ROW.UNTIL));
+    await beat(page, "approve", page.locator(SEL.approve).first(), { ms: PAUSE_SHORT * 2 });
+  }
 
   const approveForm = page.locator("form[action$='/consent/approve']").first();
   const required = approveForm.locator("input[type=checkbox][required]");
@@ -179,9 +371,10 @@ async function revoke(page, grantId) {
     await pause(page, PAUSE);
   }
 
-  // Down to the revoke button, past "what was read".
+  // "What was read", then down to the revoke button.
+  await beat(page, "reads", target.locator(SEL.reads).first(), { ms: PAUSE_LONG });
   await glideTo(form);
-  await pause(page, PAUSE_LONG);
+  await pause(page, PAUSE_SHORT);
 
   const boxes = form.locator("input[type=checkbox]");
   for (let i = 0; i < (await boxes.count()); i++) {
@@ -190,7 +383,7 @@ async function revoke(page, grantId) {
   const button = form.locator("button[type=submit]").first();
   await button.scrollIntoViewIfNeeded();
   await button.hover();
-  await pause(page, PAUSE_SHORT);
+  await beat(page, "revoke", button);
   await Promise.all([page.waitForLoadState("load"), button.click()]);
   await page.waitForURL(/\/owner\/autorizaciones/, { timeout: NAV_TIMEOUT_MS });
   await page.waitForLoadState("load");
@@ -208,8 +401,15 @@ const video = page.video();
 try {
   step("1. Servicios Proactivos offer");
   await page.goto(`${PORTAL_URL}/?lang=${LANG}`);
-  await pause(page, PAUSE_LONG);
-  await readPage(page);
+  await pause(page, PAUSE_SHORT);
+  if (CAPTIONS) {
+    await beat(page, "offer", page.locator(SEL.offer), { ms: PAUSE_LONG });
+    await beat(page, "needs", page.locator(SEL.needs));
+    await beat(page, "until", page.locator(SEL.until));
+  } else {
+    await pause(page, PAUSE);
+    await readPage(page);
+  }
   await toTop(page);
   await pause(page, PAUSE_SHORT);
 
@@ -225,7 +425,11 @@ try {
 
   step("5. /listo: data received");
   await page.waitForURL(`${PORTAL_URL}/listo`, { timeout: NAV_TIMEOUT_MS });
-  await pause(page, PAUSE_LONG);
+  await pause(page, PAUSE);
+  await beat(page, "received", page.locator(SEL.received), { ms: PAUSE_LONG });
+  if (DESELECT) {
+    await beat(page, "notShared", page.locator(SEL.notShared), { ms: PAUSE_LONG });
+  }
   await readPage(page);
   const grantId = await page.locator(SEL.grant).getAttribute("data-grant-id");
   const misAut = page.locator(SEL.misAut);
@@ -254,7 +458,8 @@ try {
   await page.goto(`${PORTAL_URL}/listo`);
   await pause(page);
   await clickTo(page, page.locator(SEL.reRead).first(), `${PORTAL_URL}/listo`);
-  await pause(page, PAUSE_LONG);
+  await pause(page, PAUSE_SHORT);
+  await beat(page, "revoked", page.locator(SEL.revokedNotice), { ms: PAUSE_LONG });
   await readPage(page);
   await toTop(page);
   await pause(page, PAUSE_LONG);
@@ -267,6 +472,6 @@ try {
 }
 
 // Playwright names the file by a random id; give it a stable one.
-const out = join(VIDEO_DIR, `demo-${LANG}.webm`);
+const out = join(VIDEO_DIR, `demo-${LANG}${DESELECT ? "-deselect" : ""}.webm`);
 renameSync(await video.path(), out);
 console.log(`video: ${out}`);

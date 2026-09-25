@@ -742,6 +742,69 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
     });
   }
 
+  // Declared one-screen consent: the owner may untick streams or optional
+  // fields. The reviewed full request is checked first, then the review is
+  // re-finalized with the narrowing (auth.ts proves it is a subset, never
+  // broader) and that narrowed revision is what gets approved.
+  //
+  //   posted revision == reviewed request ─▶ refinalize(indexes, narrowing) ─▶ approve(new revision)
+  //
+  // Returns the revision to approve, `undefined` when the form carries no
+  // deselection, or null when a response was already sent.
+  async function narrowDeclaredApproval(
+    req: RouteRequest,
+    res: RouteResponse,
+    requestUri: string | null | undefined
+  ): Promise<string | null | undefined> {
+    if (req.body?.declared_narrowing !== "1") {
+      return undefined;
+    }
+    const deviceCode = requestUri ? ctx.consentStore.parseRequestUri(requestUri) : null;
+    const reviewed = deviceCode
+      ? await ctx.consentStore.getPendingConsentByDeviceCode(deviceCode, { baseUrl: resolveBaseUrlForRequest(req) })
+      : null;
+    if (!(deviceCode && requestUri && reviewed?.batch && (await ctx.findOAuthDenyRedirect(deviceCode)))) {
+      ctx.pdppError(res, 400, "invalid_request", "declared_narrowing applies to declared batch requests only");
+      return null;
+    }
+    if (!(reviewed.reviewRevision && req.body.approval_review_revision === reviewed.reviewRevision)) {
+      ctx.pdppError(res, 400, "invalid_request", "Pending consent review is stale");
+      return null;
+    }
+
+    // A source is kept when at least one of its streams stays ticked.
+    const narrowing = parseFlatFormNarrowing(req.body) ?? {};
+    const approvedSourceIndexes = Object.entries(narrowing)
+      .filter(([, entry]) => (entry.streams?.length ?? 0) > 0)
+      .map(([index]) => Number(index));
+    if (approvedSourceIndexes.length === 0) {
+      res.status(400).send(
+        renderDeclaredConsentHtml(reviewed, requestUri, {
+          csrfFieldName: ctx.ownerAuth.csrfFieldName,
+          csrfToken: ctx.ownerAuth.ensureCsrfToken(req, res),
+          emptySelection: true,
+          lang: resolveDemoLang(req),
+          providerName: ctx.providerName,
+          ui: ctx.consentUi,
+        })
+      );
+      return null;
+    }
+
+    const narrowed = await ctx.consentStore.getPendingConsentByDeviceCode(deviceCode, {
+      approvedSourceIndexes,
+      baseUrl: resolveBaseUrlForRequest(req),
+      finalizeReview: true,
+      sourceNarrowing: pruneFlatNarrowingToApprovedSources(narrowing, approvedSourceIndexes) ?? {},
+      subjectId: resolveSubjectId(req),
+    });
+    if (!narrowed?.reviewRevision) {
+      ctx.pdppError(res, 400, "invalid_request", "Approval review could not be finalized");
+      return null;
+    }
+    return narrowed.reviewRevision;
+  }
+
   // Primary consent shell for the current provider-connect request/approval profile.
   app.get(
     "/consent",
@@ -873,11 +936,16 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
     ctx.ownerAuth.requireCsrf as RouteArg<RouteHandler | MiddlewareFn>,
     async (req: RouteRequest, res: RouteResponse): Promise<void> => {
       try {
-        const batchSelection = parseBatchApproveSelection(req.body);
         const requestUri = requestUriFrom(req);
         if (rejectFinalApprovalFrozenFacts(req, res)) {
           return;
         }
+        const narrowedRevision = await narrowDeclaredApproval(req, res, requestUri);
+        if (narrowedRevision === null) {
+          return;
+        }
+        // The declared screen's deselection was consumed above; do not re-read it as batch choices.
+        const batchSelection = narrowedRevision ? {} : parseBatchApproveSelection(req.body);
         if (await rejectInvalidReviewedBatchApproval(req, res, requestUri, batchSelection)) {
           return;
         }
@@ -886,7 +954,7 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
             action: "approve",
             approvalId: (req.body?.approval_id || req.query.approval_id) as string | null | undefined,
             approveOptions: {
-              approval_review_revision: req.body?.approval_review_revision,
+              approval_review_revision: narrowedRevision ?? req.body?.approval_review_revision,
               ...(req.body?.approval_review_revision ? {} : batchSelection),
             },
             requestUri,

@@ -8,8 +8,11 @@
 //
 // Usage:
 //   PORTAL_URL=http://localhost:8866 OWNER_PASSWORD=... SHOTS_DIR=./tmp/proactivos \
-//   [CHROMIUM_PATH=...] [LANG=en] [DENY_REPLAY=1] node scripts/demo-dr/proactivos-e2e.mjs
+//   [CHROMIUM_PATH=...] [LANG=en] [DENY_REPLAY=1] [DESELECT=1] node scripts/demo-dr/proactivos-e2e.mjs
 //
+// DESELECT=1 unticks the SIUBEN household-members stream and the SNS health
+// centre field on consent, then checks /listo marks them "not shared", the
+// token grants neither, and the SNS record arrives without centro_salud.
 // DENY_REPLAY=1 tolerates a PDPP /consent/deny that does not redirect back
 // (replays error=access_denied); by default that is a failure.
 
@@ -22,6 +25,7 @@ const OWNER_PASSWORD = process.env.OWNER_PASSWORD;
 const SHOTS_DIR = process.env.SHOTS_DIR ?? "tmp/proactivos-e2e";
 const LANG = process.env.LANG === "en" ? "en" : "es";
 const DENY_REPLAY = process.env.DENY_REPLAY === "1";
+const DESELECT = process.env.DESELECT === "1";
 const NAV_TIMEOUT_MS = 30_000;
 
 // Expected values from the fictitious seed (contract: María + Luis household).
@@ -33,8 +37,8 @@ const LICENCE_PATTERN = /licencia|intrant|conducir/i;
 
 // Visible copy the check asserts, per language.
 const COPY = {
-  en: { yes: "Say yes with Cuenta Única", due: "20 November 2026", revoked: "Revoked", active: "Active" },
-  es: { yes: "Decir sí con Cuenta Única", due: "20 de noviembre de 2026", revoked: "Revocada", active: "Vigente" },
+  en: { yes: "Say yes with Cuenta Única", due: "20 November 2026", revoked: "Revoked", active: "Active", notShared: "You didn't share this" },
+  es: { yes: "Decir sí con Cuenta Única", due: "20 de noviembre de 2026", revoked: "Revocada", active: "Vigente", notShared: "No lo compartió" },
 };
 const C = COPY[LANG];
 
@@ -45,7 +49,12 @@ const SEL = {
   grant: "[data-grant-id]",
   misAut: "a[data-mis-autorizaciones]",
   member: "tr[data-member]",
+  // Consent deselection (DESELECT=1): the members stream and the health-centre field.
+  dropStream: "input[data-consent-stream='miembros_hogar']",
+  dropField: "li[data-consent-stream-row='control_prenatal'] input[data-consent-field='centro_salud']",
 };
+const DROPPED_STREAM = "miembros_hogar";
+const DROPPED_FIELD = "centro_salud";
 
 if (!OWNER_PASSWORD) {
   throw new Error("OWNER_PASSWORD is required");
@@ -101,6 +110,14 @@ async function approveConsent(page) {
     await page.waitForLoadState("load");
   }
   await shot(page, "consent");
+  if (DESELECT) {
+    await page.locator(SEL.dropStream).uncheck();
+    await page.locator(SEL.dropField).uncheck();
+    check(!(await page.locator(SEL.dropStream).isChecked()), `consent: ${DROPPED_STREAM} unticked`);
+    check(!(await page.locator(SEL.dropField).isChecked()), `consent: ${DROPPED_FIELD} unticked`);
+    check((await page.locator("[data-required-field='fecha_probable_parto'] input[disabled]").count()) === 1, "required field shown as always included");
+    await shot(page, "consent-deselected");
+  }
   const approveForm = page.locator("form[action$='/consent/approve']").first();
   const approve = approveForm.locator("button[type=submit]:not([formaction])");
   check((await approve.count()) > 0, "consent page has an approve form");
@@ -191,9 +208,22 @@ try {
   const text = await page.innerText("body");
   check((await page.locator(`[data-due-date="${EXPECTED_DUE_DATE}"]`).count()) === 1, `due date ${EXPECTED_DUE_DATE} received from SNS`);
   check(text.includes(C.due), `lead shows "${C.due}"`);
-  check(text.includes(EXPECTED_CENTRE), "health centre shown");
   check((await page.locator(`[data-icv="${EXPECTED_ICV}"]`).count()) === 1, `household ${EXPECTED_ICV} received from SIUBEN`);
-  check((await page.locator(SEL.member).count()) === EXPECTED_MEMBERS, `${EXPECTED_MEMBERS} household member rows`);
+  const grantedStreams = ((await page.locator("[data-granted-streams]").getAttribute("data-granted-streams")) ?? "").split(" ");
+  const receivedFields = ((await page.locator("[data-source='sns'][data-received-fields]").getAttribute("data-received-fields")) ?? "").split(" ");
+  if (DESELECT) {
+    check(!text.includes(EXPECTED_CENTRE), "health centre not shown");
+    check((await page.locator(SEL.member).count()) === 0, "no household member rows");
+    check((await page.locator(`[data-not-shared='${DROPPED_STREAM}']`).innerText()).includes(C.notShared), `members marked "${C.notShared}"`);
+    check((await page.locator(`[data-not-shared='${DROPPED_FIELD}']`).innerText()).includes(C.notShared), `health centre marked "${C.notShared}"`);
+    check(!grantedStreams.includes(DROPPED_STREAM) && grantedStreams.includes("control_prenatal"), `token grants ${grantedStreams.join(",")} (no ${DROPPED_STREAM})`);
+    check(!receivedFields.includes(DROPPED_FIELD) && receivedFields.includes("fecha_probable_parto"), `SNS record fields from the RS lack ${DROPPED_FIELD}`);
+  } else {
+    check(text.includes(EXPECTED_CENTRE), "health centre shown");
+    check((await page.locator(SEL.member).count()) === EXPECTED_MEMBERS, `${EXPECTED_MEMBERS} household member rows`);
+    check(grantedStreams.includes(DROPPED_STREAM) && receivedFields.includes(DROPPED_FIELD), "token grants everything requested");
+    check((await page.locator("[data-not-shared]").count()) === 0, "nothing marked not shared");
+  }
   const grantId = await page.locator(SEL.grant).getAttribute("data-grant-id");
   check(/^(grt|gpkg)_[0-9a-z]+$/.test(grantId ?? ""), `authorization card shows grant ${grantId}`);
   check((await page.locator(SEL.grant).getAttribute("data-grant-status")) === "active", `authorization ${C.active}`);
@@ -207,7 +237,7 @@ try {
   await clickReRead(page);
   await shot(page, "listo-reread");
   check((await page.locator("[data-notice='verified']").count()) === 1, "re-read OK banner shown");
-  check((await page.locator(SEL.member).count()) === EXPECTED_MEMBERS, "re-read member rows");
+  check((await page.locator(SEL.member).count()) === (DESELECT ? 0 : EXPECTED_MEMBERS), "re-read member rows");
 
   // 5. Revoke in Mis autorizaciones (same browser, so the owner session carries over).
   const tab = await context.newPage();
@@ -217,6 +247,18 @@ try {
     await tab.goto(misAutHref);
   }
   await shot(tab, "mis-autorizaciones");
+  const card = tab.locator(`[data-grant-ids~="${grantId}"], [data-package-id="${grantId}"]`).first();
+  const cardReads = await card.locator("[data-read-stream]").evaluateAll((els) => els.map((el) => el.getAttribute("data-read-stream")));
+  check(cardReads.includes("control_prenatal"), `Mis autorizaciones lists reads: ${[...new Set(cardReads)].join(",")}`);
+  if (DESELECT) {
+    const listed = await card.locator("[data-granted-stream]").evaluateAll((els) =>
+      els.map((el) => [el.getAttribute("data-granted-stream"), el.getAttribute("data-granted-fields")])
+    );
+    const snsFields = (listed.find(([name]) => name === "control_prenatal")?.[1] ?? "").split(" ");
+    check(!cardReads.includes(DROPPED_STREAM), `no ${DROPPED_STREAM} read recorded`);
+    check(!listed.some(([name]) => name === DROPPED_STREAM), `Mis autorizaciones lists ${listed.map(([n]) => n).join(",")} only`);
+    check(snsFields.includes("fecha_probable_parto") && !snsFields.includes(DROPPED_FIELD), `Mis autorizaciones SNS fields lack ${DROPPED_FIELD}`);
+  }
   await revokeGrant(tab, grantId);
   await shot(tab, "mis-autorizaciones-revoked");
   check(/\/owner\/autorizaciones/.test(tab.url()), "revoke returns to Mis autorizaciones");

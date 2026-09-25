@@ -159,12 +159,22 @@ async function authorize(h: Harness, details: unknown[]): Promise<Response> {
   return await fetch(url, { redirect: "manual" });
 }
 
-function formFields(html: string, action: string): URLSearchParams {
+function formFields(html: string, action: string, unticked: string[] = []): URLSearchParams {
   const form = new RegExp(`<form[^>]*action="${action}"[^>]*>([\\s\\S]*?)</form>`).exec(html);
   assert.ok(form, `form ${action} present`);
   const params = new URLSearchParams();
   for (const input of (form[1] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) {
     params.append(input[1] ?? "", (input[2] ?? "").replaceAll("&amp;", "&").replaceAll("&quot;", '"'));
+  }
+  // Inputs outside the form that join it via form="…", as a browser posts them:
+  // ticked boxes (minus `unticked` values) and hidden twins.
+  const id = /<form[^>]*id="([^"]+)"[^>]*action=/.exec(form[0])?.[1];
+  const joined = id ? html.matchAll(new RegExp(`<input type="(checkbox|hidden)" form="${id}" name="([^"]+)" value="([^"]*)"`, "g")) : [];
+  for (const [, type, name, value] of joined) {
+    if (type === "checkbox" && unticked.includes(value ?? "")) {
+      continue;
+    }
+    params.append(name ?? "", value ?? "");
   }
   return params;
 }
@@ -179,8 +189,13 @@ async function post(url: string, body: URLSearchParams): Promise<Response> {
 }
 
 // Approve the one screen and exchange the code: the portal's whole round trip.
-async function approveAndExchange(h: Harness, html: string, verifier: string): Promise<Record<string, unknown>> {
-  const approve = await post(`${h.asUrl}/consent/approve`, formFields(html, "/consent/approve"));
+async function approveAndExchange(
+  h: Harness,
+  html: string,
+  verifier: string,
+  unticked: string[] = []
+): Promise<Record<string, unknown>> {
+  const approve = await post(`${h.asUrl}/consent/approve`, formFields(html, "/consent/approve", unticked));
   assert.equal(approve.status, FOUND, await approve.text());
   const callback = new URL(approve.headers.get("location") ?? "");
   assert.equal(callback.searchParams.get("state"), "st-1");
@@ -336,5 +351,57 @@ test("deny on the one screen returns error=access_denied to the client", async (
     assert.equal(`${callback.origin}${callback.pathname}`, REDIRECT_URI);
     assert.equal(callback.searchParams.get("error"), "access_denied");
     assert.equal(callback.searchParams.get("state"), "st-1");
+  });
+});
+
+test("the citizen unticks a stream and a field: the grant covers only what stays ticked", async () => {
+  await withHarness(async (h) => {
+    const details = [
+      {
+        ...detail(SIUBEN, "clasificacion_hogar", ["id", "icv_grupo", "provincia"]),
+        streams: [
+          { fields: ["id", "icv_grupo", "provincia"], name: "clasificacion_hogar" },
+          { fields: ["id", "nombre", "parentesco"], name: "miembros_hogar" },
+        ],
+      },
+      detail(INTRANT, "licencias_conducir", ["id", "categoria", "fecha_vencimiento", "nombre"]),
+    ];
+    const { html, verifier } = await declare(h, details);
+
+    // Streams and optional fields are ticked boxes; schema-required ones are fixed.
+    assert.match(html, /name="narrow_streams_0" value="miembros_hogar" data-consent-stream="miembros_hogar" checked/);
+    assert.match(html, /data-consent-field="nombre" checked/);
+    assert.match(html, /data-required-field="icv_grupo"><input type="checkbox" checked disabled>/);
+    assert.match(html, /siempre incluido/);
+
+    // Nothing ticked: a validation message, no approval.
+    const allStreams = ["clasificacion_hogar", "miembros_hogar", "licencias_conducir"];
+    const empty = await post(`${h.asUrl}/consent/approve`, formFields(html, "/consent/approve", allStreams));
+    assert.equal(empty.status, BAD_REQUEST);
+    assert.match(await empty.text(), /data-consent-error="empty"/);
+
+    // Never broader than asked: a field the request did not include is refused.
+    const widened = formFields(html, "/consent/approve");
+    widened.append(`narrow_fields_1__${Buffer.from("licencias_conducir").toString("base64url")}`, "numero_licencia");
+    assert.equal((await post(`${h.asUrl}/consent/approve`, widened)).status, BAD_REQUEST);
+
+    const token = await approveAndExchange(h, html, verifier, ["miembros_hogar", "nombre"]);
+
+    // The token response says what was granted.
+    const granted = (token.authorization_details ?? []) as Array<{ streams: Array<{ fields: string[]; name: string }> }>;
+    const streams = granted.flatMap((d) => d.streams);
+    assert.deepEqual(streams.map((s) => s.name).sort(), ["clasificacion_hogar", "licencias_conducir"]);
+    const licenceFields = streams.find((s) => s.name === "licencias_conducir")?.fields ?? [];
+    assert.deepEqual([...licenceFields].sort(), ["categoria", "fecha_vencimiento", "id"]);
+
+    // A deselected stream is refused; a deselected field never leaves the RS.
+    const members = await read(h, token.access_token, "miembros_hogar");
+    assert.equal(members.status, UNAUTHORIZED);
+    assert.equal(((await members.json()) as { error?: { code?: string } }).error?.code, "context.stream_not_allowed");
+    const licence = await read(h, token.access_token, "licencias_conducir");
+    const licenceBody = (await licence.json()) as { data: Array<{ data: Record<string, unknown> }> };
+    assert.equal(licence.status, OK, JSON.stringify(licenceBody));
+    assert.equal("nombre" in (licenceBody.data[0]?.data ?? {}), false);
+    assert.equal(licenceBody.data[0]?.data.categoria, "02");
   });
 });

@@ -10042,6 +10042,12 @@ export async function exchangeOAuthAuthorizationCode({
   const tokenInfo = await requireOAuthAuthorizationCodeTokenInfo(row, normalized.clientId);
   if (row.grant_id) {
     response.authorization_details = [buildGrantedAuthorizationDetail(tokenInfo.grant)];
+  } else if (row.package_id) {
+    // One detail per child grant: what the owner actually granted, which may be
+    // narrower than what was asked (RFC 9396 §7).
+    const access = await getGrantPackageAccess(row.package_id);
+    const members = Array.isArray(access?.members) ? access.members : [];
+    response.authorization_details = members.map((member) => buildGrantedAuthorizationDetail(member.grant));
   }
   const refresh =
     clientSupportsOAuthRefreshToken(registeredClient) && (await authorizationCodeBindingSupportsRefresh(row, tokenInfo))

@@ -122,7 +122,7 @@ test("language toggle keeps the current query and marks the active language", ()
     title: "t",
   });
   assert.ok(html.includes('<html lang="en">'));
-  assert.ok(html.includes("Simulation · not the official portal"));
+  assert.ok(html.includes("Demo environment · fictitious data"));
   assert.ok(
     html.includes(
       'data-lang-toggle="en" href="/owner/login?return_to=%2Foauth%2Fauthorize&amp;lang=en" hreflang="en" aria-current="true"'
@@ -133,7 +133,7 @@ test("language toggle keeps the current query and marks the active language", ()
 
 test("shell defaults to Spanish", () => {
   const html = renderCitizenDocument({ body: "", shell: "citizen-grants", title: "t" });
-  assert.ok(html.includes("Simulación · no es el portal oficial"));
+  assert.ok(html.includes("Entorno de demostración · datos ficticios"));
   assert.ok(html.includes("Vista simulada de cómo podría verse en Soy Yo RD"));
   assert.ok(html.includes('data-lang-toggle="es" href="?lang=es" hreflang="es" aria-current="true"'));
 });

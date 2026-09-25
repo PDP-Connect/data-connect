@@ -175,7 +175,7 @@ function renderSources(auth: CitizenAuthorization, lang: DemoLang): string {
       const chips = stream.fields
         .map((field) => `<span class="cu-chip">${escapeHtml(humanize(FIELD_LABELS, field, lang))}</span>`)
         .join("");
-      return `<li><b>${escapeHtml(humanize(STREAM_LABELS, stream.name, lang))}</b><small>${escapeHtml(source.name)}</small><div class="cu-chips">${chips}</div></li>`;
+      return `<li data-granted-stream="${escapeHtml(stream.name)}" data-granted-fields="${escapeHtml(stream.fields.join(" "))}"><b>${escapeHtml(humanize(STREAM_LABELS, stream.name, lang))}</b><small>${escapeHtml(source.name)}</small><div class="cu-chips">${chips}</div></li>`;
     })
   );
   return `<ul class="cu-streams">${items.join("")}</ul>`;

@@ -2,7 +2,7 @@
 
 Built to the working-session documents (28 September 2026): the facilitators' guide, the working-session deck (slides 8, 14, 19–23), the technical note and the scoping note. The story is María's, from the deck: Servicios Proactivos offers to arrange her baby's vaccinations and child benefit without an application, and asks, once, to look at her health record and her household file, for that purpose, until a date. She says yes, sees the grant, and can cancel it.
 
-Every page carries "Simulación · no es el portal oficial" and an **ES | EN** toggle in the same bar. The language carries across the whole flow. All people and records are fictitious; no logos or seals.
+Every page carries a small "Entorno de demostración · datos ficticios" line with an **ES | EN** toggle beside it. The language carries across the whole flow. All people and records are fictitious; no logos or seals.
 
 ## URLs
 

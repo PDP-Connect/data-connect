@@ -9,7 +9,7 @@
  * not load the shared hosted-ui stylesheet; every selector is `cu-` prefixed
  * so nothing leaks into other hosted pages.
  *
- *   ┌ amber sim bar: "Simulación · no es el portal oficial"  ES | EN ┐
+ *   ┌ muted demo line: "Entorno de demostración · datos ficticios"  ES | EN ┐
  *   ├ nav: text wordmark ──────────────────────────────────┤
  *   │           ┌ card: glyph + title ┐                    │
  *   │           │ body                │                    │
@@ -100,13 +100,12 @@ body.cu-page {
   -webkit-font-smoothing: antialiased;
 }
 .cu-sim-bar {
-  background: var(--sim-bg); border-bottom: 1px solid var(--sim-border); color: var(--sim-text);
-  font-size: 13px; font-weight: 600; text-align: center; padding: 6px 16px; letter-spacing: .2px;
+  max-width: 1400px; margin: 0 auto; padding: 4px 24px; text-align: right;
+  font-size: 11px; font-weight: 400; color: var(--cu-text-muted); letter-spacing: .2px;
 }
-.cu-sim-bar span { font-weight: 400; }
-.cu-sim-lang { margin-left: 12px; white-space: nowrap; }
-.cu-sim-lang a { color: var(--sim-text); font-weight: 400; }
-.cu-sim-lang a[aria-current="true"] { font-weight: 700; text-decoration: none; }
+.cu-sim-lang { margin-left: 10px; white-space: nowrap; }
+.cu-sim-lang a { color: var(--cu-text-muted); }
+.cu-sim-lang a[aria-current="true"] { font-weight: 600; color: var(--cu-primary); text-decoration: none; }
 .cu-nav { background: #fff; box-shadow: 0 1.5px 4px 0 #00000040; }
 .cu-nav-inner { max-width: 1400px; margin: 0 auto; height: 72px; padding: 0 24px; display: flex; align-items: center; gap: 16px; }
 .cu-wordmark { flex: 1; display: flex; flex-direction: column; line-height: 1.1; color: var(--cu-primary); text-decoration: none; }
@@ -183,6 +182,16 @@ a.cu-link { color: var(--cu-info); font-size: 14px; text-decoration: underline; 
 .cu-streams li small { display: block; font-size: 12px; color: var(--cu-text-muted); line-height: 1.45; }
 .cu-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .cu-chip { font-size: 12px; background: var(--cu-bg); color: var(--cu-primary); border: 1px solid var(--cu-hairline); border-radius: 60px; padding: 2px 10px; }
+.cu-pick { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.cu-pick b { display: inline; }
+.cu-picks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 6px 0 0 24px; font-size: 13px; overflow-wrap: normal; }
+.cu-pick-field { display: block; padding-left: 22px; text-indent: -22px; cursor: pointer; }
+.cu-pick-field small { display: inline; font-size: 11px; color: var(--cu-text-muted); }
+.cu-pick-field input[disabled] { cursor: default; }
+.cu-pick input, .cu-pick-field input { accent-color: var(--cu-primary); width: 16px; height: 16px; margin: 0; }
+.cu-pick-field input { vertical-align: -3px; margin-right: 6px; }
+.cu-streams li:has(> .cu-pick input:not(:checked)) .cu-picks { opacity: .4; }
+.cu-summary dd > .cu-note:first-child { margin: 0 0 10px; }
 .cu-warning { background: var(--sim-bg); border: 1px solid var(--sim-border); color: var(--sim-text); border-radius: 8px; padding: 10px 14px; margin: 0 0 22px; font-size: 13px; line-height: 1.5; }
 .cu-warning b { display: block; }
 .cu-claims { margin: 0 0 22px; font-size: 13px; }
@@ -210,6 +219,7 @@ a.cu-link { color: var(--cu-info); font-size: 14px; text-decoration: underline; 
   .cu-foot-grid { grid-template-columns: 1fr 1fr; }
   .cu-card-body { padding: 20px 16px 28px; }
   .cu-summary > div, .cu-details dl { grid-template-columns: 1fr; gap: 2px; }
+  .cu-picks { grid-template-columns: 1fr; }
 }
 `;
 
@@ -294,7 +304,7 @@ export function renderCitizenDocument({
 <style>${CITIZEN_CSS}</style>
 </head>
 <body class="cu-page" data-shell="${shell}" data-lang="${lang}">
-<div class="cu-sim-bar" role="note">${t("Simulación · no es el portal oficial", "Simulation · not the official portal")} <span>— ${t("demostración con datos ficticios", "demo with fictitious data")}</span>${renderLangToggle(lang, currentUrl)}</div>
+<div class="cu-sim-bar" role="note">${t("Entorno de demostración · datos ficticios", "Demo environment · fictitious data")}${renderLangToggle(lang, currentUrl)}</div>
 <nav class="cu-nav"><div class="cu-nav-inner">
   <a class="cu-wordmark" href="#"><b>${escapeText(brand.wordmark)}</b><small>${escapeText(brand.subtitle)}</small></a>
   ${brand.navAction}

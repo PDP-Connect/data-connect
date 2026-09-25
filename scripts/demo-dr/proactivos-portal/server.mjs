@@ -12,7 +12,7 @@
 //                                                              sign-in + one consent screen
 //   GET /callback?code&state ◀─────────────────────────────── 302 redirect_uri
 //                        token exchange ─────────────────────▶ POST /oauth/token
-//                        read 3 streams (one Bearer) ────────▶ GET /v1/streams/*/records
+//                        read granted streams (one Bearer) ──▶ GET /v1/streams/*/records
 //                   ◀──  302 /listo  (what was received + the authorization)
 //   POST /volver-a-consultar ─▶ re-read (stored Bearer) ─────▶ GET /v1/streams/*/records
 //                   ◀──  302 /listo  (re-read OK, or "revoked" if 401/403)
@@ -235,9 +235,26 @@ function exchangeCode(clientId, code, verifier) {
   });
 }
 
+// What the citizen granted, from the token response's authorization_details:
+// stream -> granted fields (null = every field). The citizen may untick
+// streams or fields on the consent screen, so this can be narrower than asked.
+// Without authorization_details, assume what was requested.
+function grantedStreams(tokens) {
+  const details = Array.isArray(tokens.authorization_details) ? tokens.authorization_details : null;
+  if (!details) {
+    return Object.fromEntries([...REQUESTED_STREAMS].map((name) => [name, null]));
+  }
+  const granted = {};
+  for (const stream of details.flatMap((d) => d.streams ?? [])) {
+    granted[stream.name] = Array.isArray(stream.fields) ? stream.fields : null;
+  }
+  return granted;
+}
+
 // All records of one stream, following `links.next` pagination.
-async function readStream(token, stream) {
-  if (!REQUESTED_STREAMS.has(stream)) {
+// Streams the citizen did not grant are not read.
+async function readStream(token, stream, granted) {
+  if (!(REQUESTED_STREAMS.has(stream) && stream in granted)) {
     return [];
   }
   const records = [];
@@ -253,12 +270,12 @@ async function readStream(token, stream) {
 // "siuben:miembro:2" < "siuben:miembro:10"
 const byId = (a, b) => String(a.id).localeCompare(String(b.id), "es", { numeric: true });
 
-// Reads the three streams with the one token.
-async function readAll(token) {
+// Reads the granted streams (of the three) with the one token.
+async function readAll(token, granted) {
   const [prenatal, hogares, miembros] = await Promise.all([
-    readStream(token, STREAM.PRENATAL),
-    readStream(token, STREAM.HOGAR),
-    readStream(token, STREAM.MIEMBROS),
+    readStream(token, STREAM.PRENATAL, granted),
+    readStream(token, STREAM.HOGAR, granted),
+    readStream(token, STREAM.MIEMBROS, granted),
   ]);
   return { hogar: hogares[0] ?? null, miembros: miembros.sort(byId), prenatal: prenatal[0] ?? null };
 }
@@ -339,14 +356,15 @@ async function callback(url, res, session) {
 
   try {
     const tokens = await exchangeCode(pending.clientId, url.searchParams.get("code") ?? "", pending.verifier);
-    const data = await readAll(tokens.access_token);
+    const granted = grantedStreams(tokens);
+    const data = await readAll(tokens.access_token, granted);
     session.result = {
       ...data,
-      grant: { ids: grantIds(tokens), revoked: false, sources: SOURCE_KEYS, until: END_DATE_VALUE },
+      grant: { granted, ids: grantIds(tokens), revoked: false, sources: SOURCE_KEYS, until: END_DATE_VALUE },
       receivedAt: new Date(),
     };
     session.access = { grantId: grantIds(tokens)[0], token: tokens.access_token };
-    console.log(`grant ${grantIds(tokens).join(",")}: read prenatal=${Boolean(data.prenatal)} hogar=${Boolean(data.hogar)} miembros=${data.miembros.length}`);
+    console.log(`grant ${grantIds(tokens).join(",")}: granted ${Object.keys(granted).join(",")}; read prenatal=${Boolean(data.prenatal)} hogar=${Boolean(data.hogar)} miembros=${data.miembros.length}`);
     redirect(res, "/listo");
   } catch (err) {
     console.error("callback failed:", err.message);
@@ -368,7 +386,7 @@ async function reRead(res, session) {
   }
 
   try {
-    Object.assign(result, await readAll(session.access.token));
+    Object.assign(result, await readAll(session.access.token, result.grant.granted));
     result.receivedAt = new Date();
     session.notice = { at: new Date(), kind: "verified" };
     console.log(`grant ${session.access.grantId}: re-read ok`);

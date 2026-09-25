@@ -2955,15 +2955,76 @@ function describeEndDate(expiresAt: string | null, lang: DemoLang): string {
   return pickLang(lang, `Hasta el ${date}`, `Until ${date}`);
 }
 
-function renderDeclaredStreams(source: ReviewedSource, lang: DemoLang, ui: ConsentUiRenderer): string {
+// Owner deselection on the declared screen. Inputs sit outside the Allow form
+// and join it through `form=`; names follow the batch narrowing contract
+// (narrow_streams_<index>, narrow_fields_<index>__<b64url stream>).
+//
+//   [x] Miembros del hogar          ← stream: untick = not granted
+//       [x] Nombre  [x] Edad        ← optional field: untick = not granted
+//       [x] Parentesco (disabled)   ← schema-required: always included
+const DECLARED_APPROVE_FORM_ID = "declared-approve";
+
+interface DeclaredPicker {
+  index: number;
+  requiredFields: (stream: string) => string[];
+}
+
+type DeclaredSnapshotEntry = {
+  source_declaration_snapshot?: {
+    declaration?: { streams?: Array<{ name?: string; schema?: { required?: unknown } }> };
+  };
+};
+
+/** Schema-required fields of one requested stream, from the request's retained declaration. */
+function declaredRequiredFields(pending: PendingGrant, index: number, streamName: string): string[] {
+  const entries = (pending.request as { entries?: DeclaredSnapshotEntry[] }).entries;
+  const streams = entries?.[index]?.source_declaration_snapshot?.declaration?.streams ?? [];
+  const required = streams.find((stream) => stream.name === streamName)?.schema?.required;
+  return Array.isArray(required) ? required.filter((field): field is string => typeof field === "string") : [];
+}
+
+function renderDeclaredField(
+  field: string,
+  inputName: string,
+  required: boolean,
+  lang: DemoLang,
+  ui: ConsentUiRenderer
+): string {
+  const label = ui.escapeHtml(humanizeFieldLabel(field, lang));
+  const value = ui.escapeHtml(field);
+  if (!required) {
+    return `<label class="cu-pick-field"><input type="checkbox" form="${DECLARED_APPROVE_FORM_ID}" name="${inputName}" value="${value}" data-consent-field="${value}" checked> ${label}</label>`;
+  }
+  // Disabled boxes are not posted; the hidden twin keeps the field in the narrowing.
+  const always = pickLang(lang, "siempre incluido", "always included");
+  return `<label class="cu-pick-field" data-required-field="${value}"><input type="checkbox" checked disabled> ${label} <small>${always}</small></label><input type="hidden" form="${DECLARED_APPROVE_FORM_ID}" name="${inputName}" value="${value}">`;
+}
+
+function renderDeclaredStreams(
+  source: ReviewedSource,
+  lang: DemoLang,
+  ui: ConsentUiRenderer,
+  picker: DeclaredPicker | null
+): string {
   const items = source.resolved_streams.map((stream) => {
     const es = describeCitizenStream(source.source.id, stream.name);
     const label = lang === "es" ? es.label : (EN_STREAM_LABELS[stream.name] ?? humanizeFieldLabel(stream.name, lang));
     const detail = lang === "es" && es.detail ? `<small>${ui.escapeHtml(es.detail)}</small>` : "";
-    const chips = stream.fields
-      .map((field) => `<span class="cu-chip">${ui.escapeHtml(humanizeFieldLabel(field, lang))}</span>`)
+    if (!picker) {
+      const chips = stream.fields
+        .map((field) => `<span class="cu-chip">${ui.escapeHtml(humanizeFieldLabel(field, lang))}</span>`)
+        .join("");
+      return `<li><b>${ui.escapeHtml(label)}</b>${detail}<div class="cu-chips">${chips}</div></li>`;
+    }
+
+    const name = ui.escapeHtml(stream.name);
+    const toggle = `<label class="cu-pick"><input type="checkbox" form="${DECLARED_APPROVE_FORM_ID}" name="narrow_streams_${picker.index}" value="${name}" data-consent-stream="${name}" checked> <b>${ui.escapeHtml(label)}</b></label>`;
+    const required = picker.requiredFields(stream.name);
+    const fieldInput = `narrow_fields_${picker.index}__${encodeStreamKey(stream.name)}`;
+    const fields = stream.fields
+      .map((field) => renderDeclaredField(field, fieldInput, required.includes(field), lang, ui))
       .join("");
-    return `<li><b>${ui.escapeHtml(label)}</b>${detail}<div class="cu-chips">${chips}</div></li>`;
+    return `<li data-consent-stream-row="${name}">${toggle}${detail}<div class="cu-picks">${fields}</div></li>`;
   });
   return `<ul class="cu-streams">${items.join("")}</ul>`;
 }
@@ -3016,8 +3077,10 @@ function buildDeclaredActions(
     ...request,
     ...confirm,
   ];
-  const allow = `<form class="hosted-ui-form" method="POST" action="/consent/approve">${hiddenInputs(
-    approveHidden,
+  // Batch requests carry the owner's deselection (see renderDeclaredStreams).
+  const narrowing = pending.batch ? [{ name: "declared_narrowing", value: "1" }] : [];
+  const allow = `<form class="hosted-ui-form" id="${DECLARED_APPROVE_FORM_ID}" method="POST" action="/consent/approve">${hiddenInputs(
+    [...approveHidden, ...narrowing],
     ui
   )}<button type="submit" class="cu-btn cu-block">${pickLang(lang, "Autorizar", "Allow")}</button></form>`;
   const denyLabel = pickLang(lang, "Rechazar", "Deny");
@@ -3038,6 +3101,8 @@ export function renderDeclaredConsentHtml(
   opts: {
     csrfFieldName: string;
     csrfToken: string | null;
+    /** The owner unticked every stream: nothing to approve. */
+    emptySelection?: boolean;
     lang: DemoLang;
     providerName: string;
     ui: ConsentUiRenderer;
@@ -3074,9 +3139,23 @@ export function renderDeclaredConsentHtml(
   const dataHtml = sources
     .map((source) => {
       const heading = `<p class="cu-text"><b>${ui.escapeHtml(citizenSourceLabel(source.source.id))}</b></p>`;
-      return `${heading}${renderDeclaredStreams(source, lang, ui)}`;
+      const index = "index" in source && typeof source.index === "number" ? source.index : null;
+      const picker =
+        pending.batch && index !== null
+          ? { index, requiredFields: (stream: string) => declaredRequiredFields(pending, index, stream) }
+          : null;
+      return `${heading}${renderDeclaredStreams(source, lang, ui, picker)}`;
     })
     .join("");
+  const pickHint = pending.batch
+    ? renderCitizenNote(
+        t(
+          "Desmarque lo que no quiera compartir. Se compartirá solo lo marcado.",
+          "Untick anything you don't want to share. Only what is ticked will be shared."
+        ),
+        ui
+      )
+    : "";
   const accessMode = sources[0]?.access_mode ?? "";
   const accessLabel = lang === "es" ? accessModeLabel(accessMode) : (EN_ACCESS_MODE_LABELS[accessMode] ?? accessMode);
 
@@ -3091,21 +3170,35 @@ export function renderDeclaredConsentHtml(
     },
     { authorship: "client", html: purposeHtml, label: t("Para qué", "What for") },
     { authorship: "protocol", html: institutionsHtml, label: t("De qué instituciones", "From which institutions") },
-    { authorship: "manifest", html: dataHtml, label: t("Qué datos", "Which data") },
+    { authorship: "manifest", html: `${pickHint}${dataHtml}`, label: t("Qué datos", "Which data") },
     { authorship: "protocol", html: ui.escapeHtml(accessLabel), label: t("Tipo de acceso", "Type of access") },
     { authorship: "protocol", html: endDateHtml, label: t("Hasta cuándo", "Until when") },
   ];
 
   const csrf = opts.csrfToken ? [{ name: opts.csrfFieldName, value: opts.csrfToken }] : [];
+  const emptyNote = opts.emptySelection
+    ? `<div class="cu-warning" role="alert" data-consent-error="empty">${ui.escapeHtml(
+        t(
+          "Marque al menos un dato para autorizar, o use Rechazar.",
+          "Tick at least one item to allow, or use Deny."
+        )
+      )}</div>`
+    : "";
   const body = [
+    emptyNote,
     `<h2 class="cu-title">${ui.escapeHtml(
       t(`${clientName} solicita acceso a sus datos`, `${clientName} is asking to access your data`)
     )}</h2>`,
     `<p class="cu-text">${ui.escapeHtml(
-      t(
-        "Solo se compartirá lo que aparece aquí. Puede cancelar esta autorización cuando quiera.",
-        "Only what is listed here will be shared. You can cancel this authorization at any time."
-      )
+      pending.batch
+        ? t(
+            "Solo se compartirá lo que deje marcado aquí. Puede cancelar esta autorización cuando quiera.",
+            "Only what you leave ticked here will be shared. You can cancel this authorization at any time."
+          )
+        : t(
+            "Solo se compartirá lo que aparece aquí. Puede cancelar esta autorización cuando quiera.",
+            "Only what is listed here will be shared. You can cancel this authorization at any time."
+          )
     )}</p>`,
     renderCitizenSummary(rows, ui),
     renderTechnicalDetails(
