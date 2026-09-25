@@ -39,32 +39,24 @@
  * `assertNoSymlinks` forbids links inside a staged tree.
  *
  * So the generation directory is the durable artifact and the stable path
- * is a materialised copy of it. That costs one extra copy per CHANGED
- * build (unchanged content reuses its generation and is skipped entirely)
- * and leaves every packaging path working untouched.
+ * is a materialised copy of it. Each changed build also retains its previous
+ * stable copy. This currently has no disk bound: no cross-platform owner
+ * registry proves when those old trees are unused. Staging warns whenever
+ * more than KEEP_GENERATIONS trees exist; cleanup requires that ownership
+ * proof.
  */
 
 import {
   cpSync,
   existsSync,
+  lstatSync,
   readdirSync,
   readlinkSync,
   renameSync,
   rmSync,
 } from "node:fs"
+import { randomUUID } from "node:crypto"
 import { join, resolve } from "node:path"
-
-/**
- * Synchronous in-process sleep. Measured 2026-09-21: using `spawnSync` to
- * launch a whole new Node process as a poll tick (the original approach)
- * costs ~50ms of process-spawn overhead on top of the intended interval --
- * that overhead compounds across a poll loop into multi-second waits for a
- * process that actually exited almost immediately, which defeats the point
- * of polling instead of sleeping a fixed duration.
- */
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
 
 /**
  * How many generations to keep per sidecar. Two covers the case this
@@ -77,13 +69,8 @@ export const KEEP_GENERATIONS = 2
  * PIDs of processes whose current working directory is inside
  * `targetDirectory`, via `/proc/<pid>/cwd`.
  *
- * Linux only. macOS and Windows have no equivalent without a new
- * dependency and return `[]`, which is safe in both directions here: the
- * pruner keeps a generation it cannot prove is idle only on Linux, and
- * elsewhere it may delete a generation whose process is gone anyway --
- * the STABLE path it published is a separate copy either way, so a running
- * process never loses the directory it booted from mid-flight on the
- * platform where we can detect it.
+ * Linux only. This is diagnostic; an empty result does not prove a directory
+ * is unused, and the collector does not use it to delete generations.
  */
 export function findProcessesUsingDirectory(targetDirectory, procRoot = "/proc") {
   if (process.platform !== "linux" || !existsSync(procRoot)) return []
@@ -116,102 +103,20 @@ export function findProcessesUsingDirectory(targetDirectory, procRoot = "/proc")
 }
 
 /**
- * Block (synchronously) until every pid in `pids` is confirmed gone, or
- * `timeoutMs` elapses -- whichever first. Polls process liveness rather
- * than sleeping a fixed duration: measured live 2026-09-21 (three real
- * incidents against the console, most recently within the hour --
- * `InvariantError: client reference manifest for route "/connect" does not
- * exist`, a 500 that blocked testing), a fixed sleep-then-swap is not
- * actually load-bearing -- a server mid-request (or one that does not exit
- * cleanly on the first SIGTERM at all) can still be alive, with its own
- * module/file resolution mid-flight against the directory tree, at the
- * exact moment the swap below runs underneath it. There is no
- * "has released this specific directory" signal from outside a process on
- * Linux short of confirming the PID itself is gone, so this polls
- * liveness -- the strongest check actually available -- instead of
- * guessing a duration.
+ * Publish a copy at the stable path while retaining its previous directory.
+ * Renaming the old tree preserves its files for existing processes; staging
+ * never signals processes it does not own.
  */
-function waitForProcessesToExit(pids, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  let remaining = pids
-  while (remaining.length > 0 && Date.now() < deadline) {
-    sleepSync(25)
-    remaining = remaining.filter((pid) => isProcessAlive(pid))
-  }
-  return remaining
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Stop any process still running from inside `targetDirectory`, so a
- * restage never leaves a server running against a directory tree that is
- * about to be swapped out from under it (see this module's own doc comment
- * for the live incident this fixes). Graceful SIGTERM first, escalating to
- * SIGKILL only for whatever is still alive after `gracefulTimeoutMs` --
- * ACTUALLY WAITS for the process to be gone (polled, see
- * `waitForProcessesToExit`) rather than a fixed sleep that may or may not
- * be long enough. A best-effort safety net for the dev/rebuild loop, not a
- * substitute for the Tauri supervisor's own lifecycle management of the
- * process IT started -- this only catches a process still bound to a stage
- * directory whose owning app session is no longer tracking it as "the one
- * to stop before restaging" (e.g. a previous dev session, or an iterative
- * rebuild against an already-launched app).
- */
-export function stopProcessesUsingDirectory(targetDirectory, gracefulTimeoutMs = 3000) {
-  const pids = findProcessesUsingDirectory(targetDirectory)
-  if (pids.length === 0) return
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGTERM")
-    } catch {
-      // Already exited, or not ours to signal (EPERM) -- either way there
-      // is nothing more this script can safely do about it.
-    }
-  }
-  const stillAlive = waitForProcessesToExit(pids, gracefulTimeoutMs)
-  for (const pid of stillAlive) {
-    try {
-      process.kill(pid, "SIGKILL")
-    } catch {
-      // Already exited in the gap between the poll and this call.
-    }
-  }
-  // A final short wait for the OS to actually reap the SIGKILLed
-  // processes (kill(pid, 0) can still briefly report a zombie as
-  // "alive"); the swap below does not depend on this succeeding --
-  // findProcessesUsingDirectory strips "(deleted)" so a process that
-  // somehow outlives even SIGKILL's effect is still found and stopped on
-  // the NEXT restage rather than silently forgotten.
-  waitForProcessesToExit(stillAlive, 500)
-}
-
-/**
- * Point the stable `<parent>/<name>` path at `generationDirectory` by
- * materialising a copy beside it and renaming it into place.
- *
- * Stops whatever is currently running from `targetDirectory` FIRST, and
- * blocks until it is confirmed gone -- this is load-bearing for
- * correctness, not merely cleanup: a live process whose cwd is the stable
- * path can still be serving requests, with module/file resolution against
- * that exact directory tree in flight, at the moment the swap below
- * replaces it. `stopProcessesUsingDirectory`'s doc comment has the full
- * incident detail.
- *
- * The rename itself is atomic, so a reader never sees a partially-populated
- * stable path -- unlike the previous delete-then-copy, which left no
- * directory there at all for the duration of the copy.
- */
-export function publishStageGeneration(targetDirectory, generationDirectory) {
-  if (existsSync(targetDirectory)) {
-    stopProcessesUsingDirectory(targetDirectory)
+export function publishStageGeneration(
+  targetDirectory,
+  generationDirectory,
+  matchesCurrentStage,
+) {
+  if (
+    existsSync(targetDirectory) &&
+    matchesCurrentStage?.(targetDirectory, generationDirectory)
+  ) {
+    return
   }
   const swapDirectory = `${targetDirectory}.swap-${process.pid}`
   rmSync(swapDirectory, { force: true, recursive: true })
@@ -219,37 +124,67 @@ export function publishStageGeneration(targetDirectory, generationDirectory) {
     recursive: true,
     dereference: true,
   })
-  rmSync(targetDirectory, { force: true, recursive: true })
-  renameSync(swapDirectory, targetDirectory)
+  const previousDirectory = `${targetDirectory}.previous-${randomUUID()}`
+  const movedPrevious = existsSync(targetDirectory)
+  if (movedPrevious) renameSync(targetDirectory, previousDirectory)
+  try {
+    renameSync(swapDirectory, targetDirectory)
+  } catch (error) {
+    if (movedPrevious) renameSync(previousDirectory, targetDirectory)
+    throw error
+  }
 }
 
 /**
- * Delete `<name>-<id>` generation directories under `parent`, keeping the
- * newest `keep` and never removing one a live process is running from.
- *
- * Without this every changed rebuild would leave a full staged tree on
- * disk forever.
+ * Move a newly built tree into its deterministic generation path, or reuse an
+ * existing tree only after its caller proves that the contents match.
  */
-export function collectOldStageGenerations(parent, name, keep = KEEP_GENERATIONS) {
-  let entries
+export function installStageGeneration(
+  generationDirectory,
+  temporaryDirectory,
+  matchesExistingGeneration,
+) {
+  if (!existsSync(generationDirectory)) {
+    renameSync(temporaryDirectory, generationDirectory)
+    return
+  }
+  const existingStats = lstatSync(generationDirectory)
+  if (!existingStats.isDirectory() || existingStats.isSymbolicLink()) {
+    throw new Error(
+      `Existing immutable stage at ${generationDirectory} is not a real directory; refusing to replace it`,
+    )
+  }
+  if (!matchesExistingGeneration(generationDirectory, temporaryDirectory)) {
+    throw new Error(
+      `Existing immutable stage at ${generationDirectory} does not match this build; refusing to replace a tree a process may be using`,
+    )
+  }
+  rmSync(temporaryDirectory, { force: true, recursive: true })
+}
+
+/**
+ * Retain old generations until their owner can prove they are unused.
+ *
+ * The current process model has no cross-platform generation reference
+ * registry, so pruning based on cwd scans can delete files used by a live
+ * process on platforms where those scans are unavailable.
+ */
+export function collectOldStageGenerations(_parent, _name, _keep = KEEP_GENERATIONS) {
+  let count = 0
   try {
-    entries = readdirSync(parent, { withFileTypes: true })
+    count = readdirSync(_parent, { withFileTypes: true }).filter(
+      (entry) => entry.isDirectory() && entry.name.startsWith(`${_name}-`),
+    ).length
   } catch {
     return []
   }
-  const prefix = `${name}-`
-  const generations = entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
-    .map((entry) => join(parent, entry.name))
-    .sort()
-  const removed = []
-  for (const generation of generations.slice(
-    0,
-    Math.max(0, generations.length - keep)
-  )) {
-    if (findProcessesUsingDirectory(generation).length > 0) continue
-    rmSync(generation, { force: true, recursive: true })
-    removed.push(generation)
+  const excess = Math.max(0, count - _keep)
+  if (excess > 0) {
+    console.warn(
+      `[stage-generations] ${_name}: retaining ${excess} prior build generation(s) and all previous stable trees; staged disk use can grow without bound until cross-platform ownership tracking is available.`,
+    )
   }
-  return removed
+  // A process may have its cwd or open files in a generation, and no
+  // cross-platform owner registry can currently prove it unused.
+  return []
 }

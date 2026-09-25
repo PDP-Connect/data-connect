@@ -469,7 +469,7 @@ pnpm reference-contract:check-generated
 
 For an end-to-end operator runbook (Docker host or RunPod CPU Pod, env vars,
 dashboard verification, MCP wiring), see
-[`docs/operator/selfhost-quickstart.md`](../docs/operator/selfhost-quickstart.md).
+[`deploy/docker/README.md`](../deploy/docker/README.md).
 
 The notes below are the topology reference; the quickstart is the procedure.
 

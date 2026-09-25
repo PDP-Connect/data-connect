@@ -597,6 +597,94 @@ test("a failed update retains the previously active digest root", async () => {
   }
 });
 
+test("selecting a retained digest root does not redownload or delete it", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const retained = entry;
+  const next = {
+    ...entry,
+    config_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    latest: true,
+    version: "2.0.0",
+  };
+  let current = retained;
+  let rejectRetainedDownload = false;
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [current],
+      dataDir,
+      installArtifact: (root, candidate) => {
+        if (rejectRetainedDownload && candidate.digest === retained.digest) {
+          throw new Error("retained digest must be reused without redownload");
+        }
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const first = await service.install("github", retained.digest);
+    current = next;
+    const second = await service.update("github");
+    assert.equal(existsSync(join(first.root, "dist", "collection-profile.mjs")), true);
+    assert.equal(second.digest, next.digest);
+
+    current = retained;
+    rejectRetainedDownload = true;
+    const restored = await service.install("github", retained.digest);
+
+    assert.equal(restored.digest, retained.digest);
+    assert.equal(existsSync(join(first.root, "dist", "collection-profile.mjs")), true);
+    assert.equal(
+      await resolveActiveConnectorPath(createFileConnectorInstallStore(dataDir), "github"),
+      join(first.root, "dist", "collection-profile.mjs")
+    );
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a retained digest registration failure keeps the current active root", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const retained = entry;
+  const next = {
+    ...entry,
+    config_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    latest: true,
+    version: "2.0.0",
+  };
+  let current = retained;
+  let registrationCount = 0;
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [current],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => {
+        registrationCount += 1;
+        return registrationCount === 3 ? Promise.reject(new Error("manifest registration failed")) : Promise.resolve();
+      },
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    await service.install("github", retained.digest);
+    current = next;
+    const active = await service.update("github");
+    current = retained;
+
+    await assert.rejects(() => service.install("github", retained.digest), RE_REGISTRATION_FAILED);
+
+    assert.equal((await service.status())[0]?.digest, active.digest);
+    assert.equal(
+      await resolveActiveConnectorPath(createFileConnectorInstallStore(dataDir), "github"),
+      join(active.root, "dist", "collection-profile.mjs")
+    );
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a post-publication registration failure restores the previous active root", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   const next = {

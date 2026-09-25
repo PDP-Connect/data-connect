@@ -6,7 +6,7 @@
 // the returned surface id opaque.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(test)]
@@ -28,13 +28,14 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct AcquireRequest {
+    /// Stable idempotency key for acquisition and cancellation.
     run_id: String,
     connector_id: String,
     #[serde(default)]
     headless: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct AcquireResponse {
     surface_id: String,
     cdp_url: String,
@@ -48,7 +49,10 @@ struct ErrorResponse<'a> {
 }
 
 struct BrowserSurfaceLease {
+    run_id: String,
     connector_id: String,
+    headless: bool,
+    response: AcquireResponse,
     child: Child,
 }
 
@@ -57,6 +61,8 @@ struct HostState {
     resource_dir: Option<PathBuf>,
     browser_path_override: Option<PathBuf>,
     leases: Mutex<HashMap<String, BrowserSurfaceLease>>,
+    /// Prevent a late POST from recreating a lease after its run was released.
+    cancelled_runs: Mutex<HashSet<String>>,
     closed: AtomicBool,
 }
 
@@ -71,6 +77,7 @@ impl HostState {
             resource_dir,
             browser_path_override,
             leases: Mutex::new(HashMap::new()),
+            cancelled_runs: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
         }
     }
@@ -88,6 +95,20 @@ impl HostState {
             .map_err(|_| "Browser surface lease state is unavailable".to_string())?;
         if self.closed.load(Ordering::Acquire) {
             return Err("Browser surface host is shutting down".into());
+        }
+        if self
+            .cancelled_runs
+            .lock()
+            .map_err(|_| "Browser surface lease state is unavailable".to_string())?
+            .contains(&request.run_id)
+        {
+            return Err("Run id has already been released".into());
+        }
+        if let Some(lease) = leases.values().find(|lease| lease.run_id == request.run_id) {
+            if lease.connector_id != request.connector_id || lease.headless != request.headless {
+                return Err("Run id is already bound to a different browser request".into());
+            }
+            return Ok(lease.response.clone());
         }
         if leases
             .values()
@@ -107,18 +128,22 @@ impl HostState {
         })?;
         let (child, endpoint) = launch_browser(&browser, &profile_dir, request.headless)?;
         let surface_id = format!("host-surface-{}", Uuid::new_v4().as_simple());
+        let response = AcquireResponse {
+            surface_id: surface_id.clone(),
+            cdp_url: endpoint,
+        };
         leases.insert(
             surface_id.clone(),
             BrowserSurfaceLease {
+                run_id: request.run_id,
                 connector_id: request.connector_id,
+                headless: request.headless,
+                response: response.clone(),
                 child,
             },
         );
 
-        Ok(AcquireResponse {
-            surface_id,
-            cdp_url: endpoint,
-        })
+        Ok(response)
     }
 
     fn release(&self, surface_id: &str) {
@@ -132,6 +157,28 @@ impl HostState {
         };
         if !super::pdpp_browser::terminate_browser(&mut lease.child) {
             log::warn!("Browser surface {surface_id} did not terminate cleanly");
+        }
+    }
+
+    fn release_run(&self, run_id: &str) {
+        let Ok(mut leases) = self.leases.lock() else {
+            log::error!("Browser surface lease state is poisoned during run release");
+            return;
+        };
+        let Ok(mut cancelled_runs) = self.cancelled_runs.lock() else {
+            log::error!("Browser surface cancellation state is poisoned during run release");
+            return;
+        };
+        cancelled_runs.insert(run_id.to_string());
+        let surface_id = leases
+            .iter()
+            .find_map(|(surface_id, lease)| (lease.run_id == run_id).then(|| surface_id.clone()));
+        if let Some(surface_id) = surface_id {
+            if let Some(mut lease) = leases.remove(&surface_id) {
+                if !super::pdpp_browser::terminate_browser(&mut lease.child) {
+                    log::warn!("Browser surface {surface_id} did not terminate cleanly");
+                }
+            }
         }
     }
 
@@ -494,6 +541,21 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
             state.release(surface_id);
             empty_response("204 No Content")
         }
+        ("DELETE", path) if path.starts_with("/browser-surface/runs/") => {
+            let run_id = &path["/browser-surface/runs/".len()..];
+            if run_id.is_empty() || run_id.contains('/') {
+                return json_response(
+                    "400 Bad Request",
+                    &ErrorResponse {
+                        error: "bad_request",
+                        message: Some("Invalid run id".into()),
+                    },
+                    None,
+                );
+            }
+            state.release_run(run_id);
+            empty_response("204 No Content")
+        }
         _ => empty_response("404 Not Found"),
     }
 }
@@ -776,6 +838,76 @@ while :; do sleep 1; done
         let profile_dir = host.state.profile_dir("chase").expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
+    }
+
+    #[test]
+    fn retry_after_lost_response_reuses_surface_and_run_delete_releases_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let payload = json!({
+            "run_id": "run-lost-response",
+            "connector_id": "github",
+            "headless": true,
+        });
+
+        // The first response is deliberately discarded, matching a client
+        // that timed out after the host launched the browser.
+        let discarded = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            payload.clone(),
+        );
+        assert_eq!(discarded.status, 200);
+
+        let retry = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            payload,
+        );
+        assert_eq!(retry.status, 200);
+        assert_eq!(retry.body, discarded.body);
+        let response: AcquireResponse = serde_json::from_slice(&retry.body).expect("response");
+        let pid = host
+            .state
+            .leases
+            .lock()
+            .expect("lease state")
+            .get(&response.surface_id)
+            .expect("single owned surface")
+            .child
+            .id();
+        assert_eq!(host.state.leases.lock().expect("lease state").len(), 1);
+
+        let released = request(
+            &host,
+            "DELETE",
+            "/browser-surface/runs/run-lost-response",
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(released.status, 204);
+        wait_for_process_exit(pid);
+        assert!(host.state.leases.lock().expect("lease state").is_empty());
+
+        // A late POST cannot resurrect a run whose cancellation was already
+        // observed by the host.
+        let late_acquire = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({
+                "run_id": "run-lost-response",
+                "connector_id": "github",
+                "headless": true,
+            }),
+        );
+        assert_eq!(late_acquire.status, 500);
+        assert!(host.state.leases.lock().expect("lease state").is_empty());
     }
 
     #[test]

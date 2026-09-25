@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url"
 import {
   KEEP_GENERATIONS,
   collectOldStageGenerations,
+  installStageGeneration,
   publishStageGeneration,
 } from "./stage-generations.js"
 
@@ -410,10 +411,18 @@ export function pruneForeignPlatformPrebuilds(stageRoot) {
   }
 }
 
-function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
+export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
   writeFileSync(
     join(stageRoot, "package.json"),
     `${JSON.stringify(createStagedPackageJson(projectRoot, stageRoot), null, 2)}\n`
+  )
+  // Pin the stage to the workspace's already-resolved versions instead of
+  // letting npm re-resolve semver ranges against the live registry: the
+  // cache's source-input hash does not otherwise change when a transitive
+  // dependency publishes a new version matching an existing range.
+  copyFileSync(
+    join(projectRoot, "package-lock.json"),
+    join(stageRoot, "package-lock.json")
   )
   runNpm(
     nodeBinary,
@@ -422,7 +431,6 @@ function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
       "--ignore-scripts",
       "--omit=dev",
       "--install-links",
-      "--no-package-lock",
       "--no-audit",
       "--no-fund",
     ],
@@ -600,6 +608,18 @@ export function verifyReferenceStackRoot(stageRoot) {
   return manifest
 }
 
+function matchesReferenceGeneration(existingRoot, candidateRoot) {
+  try {
+    assertNoSymlinks(existingRoot)
+    assertNoSymlinks(candidateRoot)
+    const existingManifest = verifyReferenceStackRoot(existingRoot)
+    const candidateManifest = verifyReferenceStackRoot(candidateRoot)
+    return JSON.stringify(existingManifest) === JSON.stringify(candidateManifest)
+  } catch {
+    return false
+  }
+}
+
 export function stageReferenceStack({
   projectRoot = DEFAULT_PROJECT_ROOT,
   outputRoot,
@@ -691,28 +711,38 @@ export function stageReferenceStack({
       join(temporaryRoot, "manifest.json"),
       `${JSON.stringify(manifest, null, 2)}\n`
     )
-    // Land this build in its own immutable generation directory, then
-    // publish the stable `ri` path from it. Deleting the stable path while
-    // a server is running inside it leaves that process alive against an
-    // unlinked inode -- see the incident described in
-    // `ensure-console-stack.js`'s `findProcessesUsingDirectory` doc comment
-    // and the research-corpus entry it cites. The RI is a tsx API server
-    // rather than a Next build, so it has no static-chunk skew, but the
-    // deleted-directory hazard is identical and this also closes the window
-    // where the old rmSync-then-copy sequence left NO stable path on disk.
+    // Land this build in its deterministic immutable generation directory.
+    // Reuse an existing directory only after its manifest and file hashes
+    // match this candidate; never replace a possibly live generation.
     mkdirSync(parent, { recursive: true })
     const generationRoot = join(
       parent,
       `ri-${manifest.inputs.sha256.slice(0, 12)}`
     )
-    rmSync(generationRoot, { force: true, recursive: true })
-    copyDereferencedTree(temporaryRoot, generationRoot)
+    const generationCandidate = join(parent, `.ri-generation-${process.pid}`)
+    rmSync(generationCandidate, { force: true, recursive: true })
+    copyDereferencedTree(temporaryRoot, generationCandidate)
+    assertNoSymlinks(generationCandidate)
+    verifyReferenceStackRoot(generationCandidate)
+    installStageGeneration(
+      generationRoot,
+      generationCandidate,
+      matchesReferenceGeneration,
+    )
     assertNoSymlinks(generationRoot)
     verifyReferenceStackRoot(generationRoot)
-    publishStageGeneration(resolvedOutputRoot, generationRoot)
+    publishStageGeneration(
+      resolvedOutputRoot,
+      generationRoot,
+      matchesReferenceGeneration,
+    )
     collectOldStageGenerations(parent, "ri", KEEP_GENERATIONS)
     return { manifest, reused: false, root: resolvedOutputRoot }
   } finally {
+    rmSync(join(parent, `.ri-generation-${process.pid}`), {
+      force: true,
+      recursive: true,
+    })
     rmSync(temporaryRoot, { force: true, recursive: true })
   }
 }

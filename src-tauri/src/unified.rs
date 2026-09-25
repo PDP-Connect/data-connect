@@ -5276,25 +5276,244 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     /// shutdown is tearing down. This asserts the guard every watcher now
     /// consults, rather than the loops themselves (which need a real
     /// `AppHandle`).
+    fn watcher_declaration_body<'a>(source: &'a str, watcher_name: &str) -> &'a str {
+        let declaration = format!("pub(crate) fn {watcher_name}(");
+        let matches = rust_declaration_starts(source, &declaration);
+        let [start] = matches.as_slice() else {
+            if matches.is_empty() {
+                panic!("{watcher_name} must have an exact pub(crate) fn declaration");
+            }
+            panic!("{watcher_name} must have exactly one pub(crate) fn declaration");
+        };
+        let body_open = find_code_byte(source, *start + declaration.len(), b'{')
+            .unwrap_or_else(|| panic!("{watcher_name} declaration must have a function body"));
+        let body_close = matching_body_close(source, body_open).unwrap_or_else(|| {
+            panic!("{watcher_name} declaration must have a balanced function body")
+        });
+        &source[body_open + 1..body_close]
+    }
+
+    fn rust_declaration_starts(source: &str, declaration: &str) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut index = 0;
+        while index < source.len() {
+            if starts_line_declaration(source, index) && source[index..].starts_with(declaration) {
+                starts.push(index);
+                index += declaration.len();
+                continue;
+            }
+            index = next_code_index(source, index);
+        }
+        starts
+    }
+
+    fn starts_line_declaration(source: &str, index: usize) -> bool {
+        let line_start = source[..index]
+            .rfind('\n')
+            .map(|offset| offset + 1)
+            .unwrap_or(0);
+        source[line_start..index].trim().is_empty()
+    }
+
+    fn find_code_byte(source: &str, mut index: usize, target: u8) -> Option<usize> {
+        while index < source.len() {
+            if source.as_bytes()[index] == target {
+                return Some(index);
+            }
+            index = next_code_index(source, index);
+        }
+        None
+    }
+
+    fn matching_body_close(source: &str, body_open: usize) -> Option<usize> {
+        let mut depth = 1;
+        let mut index = body_open + 1;
+        while index < source.len() {
+            match source.as_bytes()[index] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+            index = next_code_index(source, index);
+        }
+        None
+    }
+
+    fn next_code_index(source: &str, index: usize) -> usize {
+        if source[index..].starts_with("//") {
+            return source[index..]
+                .find('\n')
+                .map(|offset| index + offset + 1)
+                .unwrap_or(source.len());
+        }
+        if source[index..].starts_with("/*") {
+            return block_comment_end(source, index + 2);
+        }
+        if let Some(end) = raw_string_end(source, index) {
+            return end;
+        }
+        if source.as_bytes()[index] == b'"' {
+            return string_end(source, index + 1);
+        }
+        index + source[index..].chars().next().unwrap().len_utf8()
+    }
+
+    fn block_comment_end(source: &str, mut index: usize) -> usize {
+        let mut depth = 1;
+        while index < source.len() {
+            if source[index..].starts_with("/*") {
+                depth += 1;
+                index += 2;
+            } else if source[index..].starts_with("*/") {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return index;
+                }
+            } else {
+                index += source[index..].chars().next().unwrap().len_utf8();
+            }
+        }
+        source.len()
+    }
+
+    fn string_end(source: &str, mut index: usize) -> usize {
+        let mut escaped = false;
+        while index < source.len() {
+            let byte = source.as_bytes()[index];
+            index += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return index;
+            }
+        }
+        source.len()
+    }
+
+    fn raw_string_end(source: &str, index: usize) -> Option<usize> {
+        let bytes = source.as_bytes();
+        if bytes[index] != b'r' {
+            return None;
+        }
+        let mut hashes = 0;
+        let mut cursor = index + 1;
+        while cursor < source.len() && bytes[cursor] == b'#' {
+            hashes += 1;
+            cursor += 1;
+        }
+        if cursor >= source.len() || bytes[cursor] != b'"' {
+            return None;
+        }
+        cursor += 1;
+        while cursor < source.len() {
+            if bytes[cursor] == b'"' {
+                let suffix_end = cursor + 1 + hashes;
+                if suffix_end <= source.len()
+                    && source[cursor + 1..suffix_end]
+                        .bytes()
+                        .all(|byte| byte == b'#')
+                {
+                    return Some(suffix_end);
+                }
+            }
+            cursor += source[cursor..].chars().next().unwrap().len_utf8();
+        }
+        Some(source.len())
+    }
+
     #[test]
     fn watchers_stop_once_shutdown_is_requested() {
         let source = include_str!("unified.rs");
         for watcher in [
-            "pub(crate) fn spawn_remote_access_config_watcher",
-            "pub(crate) fn spawn_autostart_watcher",
-            "pub(crate) fn spawn_open_external_url_watcher",
-            "pub(crate) fn spawn_origin_verification_watcher",
+            "spawn_remote_access_config_watcher",
+            "spawn_autostart_watcher",
+            "spawn_origin_verification_watcher",
         ] {
-            let start = source
-                .find(watcher)
-                .unwrap_or_else(|| panic!("{watcher} must exist"));
-            let body = &source[start..start + 1600];
+            let body = watcher_declaration_body(source, watcher);
             assert!(
                 body.contains("shutdown_has_been_requested"),
                 "{watcher} must stop once shutdown is requested, or it can act \
                  on the stack while it is being torn down"
             );
         }
+    }
+
+    #[test]
+    fn watcher_declaration_scan_requires_a_real_declaration() {
+        let source = r##"
+            fn mentions_spawn_remote_access_config_watcher() {}
+            // pub(crate) fn spawn_remote_access_config_watcher() { fake_line_comment(); }
+            const NOTE: &str = "pub(crate) fn spawn_remote_access_config_watcher() { fake_string(); }";
+            const RAW: &str = r#"pub(crate) fn spawn_remote_access_config_watcher() { fake_raw_string(); }"#;
+            /* pub(crate) fn spawn_remote_access_config_watcher() { fake_block_comment(); } */
+            pub(crate) fn spawn_remote_access_config_watcher_for_test() {}
+            pub(crate) fn spawn_remote_access_config_watcher() {
+                shutdown_has_been_requested();
+            }
+        "##;
+
+        let body = watcher_declaration_body(source, "spawn_remote_access_config_watcher");
+
+        assert!(body.contains("shutdown_has_been_requested"));
+        assert!(!body.contains("fake_line_comment"));
+        assert!(!body.contains("fake_string"));
+        assert!(!body.contains("fake_raw_string"));
+        assert!(!body.contains("fake_block_comment"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must have an exact pub(crate) fn declaration")]
+    fn watcher_declaration_scan_rejects_missing_targets() {
+        let source = r##"
+            // pub(crate) fn spawn_open_external_url_watcher() {}
+            const NOTE: &str = "pub(crate) fn spawn_open_external_url_watcher() {}";
+            const RAW: &str = r#"pub(crate) fn spawn_open_external_url_watcher() {}"#;
+            /* pub(crate) fn spawn_open_external_url_watcher() {} */
+        "##;
+
+        let _body = watcher_declaration_body(source, "spawn_open_external_url_watcher");
+    }
+
+    #[test]
+    #[should_panic(expected = "must have exactly one pub(crate) fn declaration")]
+    fn watcher_declaration_scan_rejects_ambiguous_targets() {
+        let source = r#"
+            pub(crate) fn spawn_autostart_watcher() {}
+            pub(crate) fn spawn_autostart_watcher() {}
+        "#;
+
+        let _body = watcher_declaration_body(source, "spawn_autostart_watcher");
+    }
+
+    #[test]
+    fn watcher_declaration_scan_returns_only_the_balanced_body() {
+        let source = r#"
+            pub(crate) fn spawn_origin_verification_watcher() {
+                if shutdown_has_been_requested() {
+                    inside_target();
+                }
+                let _note = "} pub(crate) fn spawn_origin_verification_watcher() { fake_string(); }";
+                // }
+                /* } */
+            }
+
+            pub(crate) fn later_function() {
+                outside_target();
+            }
+        "#;
+
+        let body = watcher_declaration_body(source, "spawn_origin_verification_watcher");
+
+        assert!(body.contains("inside_target"));
+        assert!(!body.contains("outside_target"));
     }
 
     /// A reading that proved the origin reaches this console, taken at

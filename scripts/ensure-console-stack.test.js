@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   collectOldGenerations,
@@ -394,7 +394,7 @@ describe("ensure console stack", () => {
     }
   })
 
-  it("stops a live server at the STABLE path (the real production cwd) before restaging it, even one that ignores SIGTERM", async () => {
+  it("preserves a live server at the stable path while publishing a new stable stage", async () => {
     // IMPORTANT SCOPE NOTE, found during independent review, fixed in this
     // same pass: the test above ("keeps a running server's build directory
     // intact...") exercises a process whose cwd is inside a GENERATION
@@ -417,13 +417,9 @@ describe("ensure console stack", () => {
     // `InvariantError: client reference manifest for route "/connect" does
     // not exist`, a 500 that blocked testing.
     //
-    // The fix: `publishStageGeneration` (stage-generations.js) now stops
-    // whatever is running from the stable path and BLOCKS UNTIL CONFIRMED
-    // GONE (polled liveness, escalating SIGTERM -> SIGKILL) before the swap
-    // proceeds -- not a fixed sleep. This test proves that directly: the
-    // live process here deliberately ignores SIGTERM
-    // (`process.on('SIGTERM', () => {})`), so surviving the restage would
-    // mean the fix only handles the easy case. It must not survive.
+    // Publication must preserve the old tree and leave process ownership to
+    // the supervisor. A cwd scan cannot prove that the staging command owns
+    // the process, so it must never signal it.
     const root = createConsoleBuildFixture()
     let child
     try {
@@ -438,7 +434,7 @@ describe("ensure console stack", () => {
         process.execPath,
         [
           "-e",
-          "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30000)",
+          "setTimeout(() => {}, 30000)",
         ],
         { cwd: stablePath, stdio: "ignore" }
       )
@@ -455,15 +451,10 @@ describe("ensure console stack", () => {
         projectRoot: root,
       })
 
-      // The SIGTERM-ignoring process must be gone (escalated to SIGKILL)
-      // before the restage completes -- not merely "eventually," but by
-      // the time stageConsoleStack has already returned, since the swap it
-      // performs happens only after stopProcessesUsingDirectory confirms
-      // the pid is dead.
-      expect(findProcessesUsingDirectory(stablePath)).not.toContain(child.pid)
-      // And the new build is what a freshly-launched server (or a
-      // freshly-issued request against the now-current stable path) would
-      // actually see -- no stale content survives to be served.
+      const previous = readdirSync(dirname(stablePath)).find((entry) => entry.startsWith("console.previous-"))
+      expect(previous).toBeDefined()
+      expect(findProcessesUsingDirectory(join(dirname(stablePath), previous))).toContain(child.pid)
+      expect(readFileSync(join(dirname(stablePath), previous, "apps/console/.next/static/app.js"), "utf8")).toBe("static")
       expect(
         readFileSync(
           join(second.stageDirectory, "apps/console/.next/static/app.js"),
@@ -496,21 +487,37 @@ describe("ensure console stack", () => {
     }
   })
 
-  it("reuses one generation for unchanged content and prunes old ones", () => {
+  it("reuses an unchanged generation without removing a process's directory", async () => {
     const root = createConsoleBuildFixture()
     const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
     const generations = () =>
       readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+    let child
     try {
       stageConsoleStack({ build: false, profile: "release", projectRoot: root })
       const afterFirst = generations()
+      const generationPath = join(stageParent, afterFirst[0])
+      const proofPath = join(root, "live-generation-proof.txt")
+      child = spawn(
+        process.execPath,
+        [
+          "-e",
+          "setTimeout(() => { const fs = require('node:fs'); fs.writeFileSync(process.env.PROOF, fs.existsSync('manifest.json') ? 'preserved' : 'missing') }, 100)",
+        ],
+        { cwd: generationPath, env: { ...process.env, PROOF: proofPath }, stdio: "ignore" },
+      )
       // Identical content restages onto the same generation id rather than
-      // growing a new directory every rebuild.
+      // replacing the directory an existing process is using.
       stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      await new Promise((resolveWait, rejectWait) => {
+        child.once("error", rejectWait)
+        child.once("close", resolveWait)
+      })
       expect(generations()).toEqual(afterFirst)
+      expect(readFileSync(proofPath, "utf8")).toBe("preserved")
 
-      // Three distinct builds, with nothing running: the pruner keeps the
-      // newest two.
+      // Keep all generations because the pruner cannot prove that an old
+      // generation is unused on every supported platform.
       for (const value of ["v2", "v3", "v4"]) {
         writeFileSync(
           join(root, "apps", "console", ".next", "static", "app.js"),
@@ -518,8 +525,9 @@ describe("ensure console stack", () => {
         )
         stageConsoleStack({ build: false, profile: "release", projectRoot: root })
       }
-      expect(generations().length).toBeLessThanOrEqual(2)
+      expect(generations().length).toBe(4)
     } finally {
+      child?.kill("SIGKILL")
       rmSync(root, { force: true, recursive: true })
     }
   })
