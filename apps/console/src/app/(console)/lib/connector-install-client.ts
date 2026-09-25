@@ -76,9 +76,11 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
 }
 
 export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
+  let catalogUnavailableReason: ConnectorInstallSnapshot["catalogUnavailableReason"];
   const [catalog, status, localSources] = await Promise.all([
     listConnectorInstallCatalog().catch((err: unknown) => {
       if (isTransientConnectorInstallCatalogError(err)) {
+        catalogUnavailableReason = "transient_busy";
         return [];
       }
       return Promise.reject(err);
@@ -86,7 +88,7 @@ export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSna
     listConnectorInstallStatus(),
     listConnectorLocalSources(),
   ]);
-  return { catalog, localSources, status };
+  return { catalog, ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}), localSources, status };
 }
 
 export interface InstallConnectorInput {

@@ -6,7 +6,8 @@
 import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
-import { useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
@@ -32,6 +33,13 @@ import {
   filterCatalogForDevelopmentVisibility,
 } from "../lib/source-setup-development.ts";
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
+
+const TRANSIENT_CATALOG_RETRY_DELAY_MS = 5000;
+let transientCatalogRetryAttempted = false;
+let transientCatalogRefreshInFlight = false;
+let transientCatalogPendingSnapshotId: string | null = null;
+
+type ConnectorCatalogRecoveryState = "exhausted" | "refreshing" | "scheduled";
 
 export interface ExistingSourceSetupLink {
   connectionId: string;
@@ -314,13 +322,130 @@ function SourceSetupDetails({ entry }: { entry: ConnectorCatalogEntry }) {
   );
 }
 
+function resetTransientCatalogRetry(): void {
+  transientCatalogRetryAttempted = false;
+  transientCatalogRefreshInFlight = false;
+  transientCatalogPendingSnapshotId = null;
+}
+
+function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | null): {
+  readonly refreshManually: () => void;
+  readonly recoveryState: ConnectorCatalogRecoveryState;
+} {
+  const router = useRouter();
+  const [recoveryState, setRecoveryState] = useState<ConnectorCatalogRecoveryState>("exhausted");
+  const retryTimerRef = useRef<number | null>(null);
+
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  const refreshCatalog = useCallback(() => {
+    if (transientCatalogRefreshInFlight || !busySnapshotId) {
+      return;
+    }
+    transientCatalogRefreshInFlight = true;
+    transientCatalogPendingSnapshotId = busySnapshotId;
+    setRecoveryState("refreshing");
+    try {
+      router.refresh();
+    } catch {
+      transientCatalogRefreshInFlight = false;
+      transientCatalogPendingSnapshotId = null;
+      setRecoveryState("exhausted");
+    }
+  }, [busySnapshotId, router]);
+
+  const refreshManually = useCallback(() => {
+    transientCatalogRetryAttempted = true;
+    clearRetryTimer();
+    refreshCatalog();
+  }, [clearRetryTimer, refreshCatalog]);
+
+  useEffect(() => {
+    if (!enabled) {
+      resetTransientCatalogRetry();
+      clearRetryTimer();
+      setRecoveryState("exhausted");
+      return;
+    }
+    if (transientCatalogRefreshInFlight && transientCatalogPendingSnapshotId !== busySnapshotId) {
+      transientCatalogRefreshInFlight = false;
+      transientCatalogPendingSnapshotId = null;
+      setRecoveryState("exhausted");
+      return;
+    }
+    if (transientCatalogRefreshInFlight) {
+      setRecoveryState("refreshing");
+      return;
+    }
+    if (transientCatalogRetryAttempted) {
+      setRecoveryState("exhausted");
+      return clearRetryTimer;
+    }
+    setRecoveryState("scheduled");
+    retryTimerRef.current = window.setTimeout(() => {
+      transientCatalogRetryAttempted = true;
+      retryTimerRef.current = null;
+      refreshCatalog();
+    }, TRANSIENT_CATALOG_RETRY_DELAY_MS);
+    return clearRetryTimer;
+  }, [busySnapshotId, clearRetryTimer, enabled, refreshCatalog]);
+
+  return { recoveryState, refreshManually };
+}
+
+function ConnectorCatalogRecoveryNotice({
+  enabled,
+  recoveryState,
+  refreshManually,
+}: {
+  enabled: boolean;
+  recoveryState: ConnectorCatalogRecoveryState;
+  refreshManually: () => void;
+}) {
+  if (!enabled) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 grid gap-2 rounded-sm border border-status-warning-border bg-status-warning-bg p-3 text-status-warning-fg" data-testid="connector-install-catalog-recovery">
+      <p className="pdpp-caption">
+        {recoveryState === "refreshing"
+          ? "Checking the package catalog now. Retry will be available again if the catalog is still busy."
+          : recoveryState === "scheduled"
+            ? "The package catalog is refreshing. This page will retry once in a few seconds; use Retry now if package actions still do not appear."
+            : "The package catalog is still busy. Use Retry to check again for package actions."}
+      </p>
+      <div>
+        <IcButton
+          disabled={recoveryState === "refreshing"}
+          onClick={refreshManually}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          Retry
+        </IcButton>
+      </div>
+    </div>
+  );
+}
+
 function SourceSetupCard({
   entry,
   existingSources,
+  installCatalogRecoveryState,
+  installCatalogTransientlyUnavailable,
   installLifecycle,
 }: {
   entry: ConnectorCatalogEntry;
   existingSources: readonly ExistingSourceSetupLink[];
+  installCatalogRecoveryState: ConnectorCatalogRecoveryState;
+  installCatalogTransientlyUnavailable: boolean;
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
@@ -332,8 +457,9 @@ function SourceSetupCard({
   // button that can never do anything.
   const isUnavailable = sourceSetupRowIsUnavailable(entry);
   const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
+  const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle?.installed;
   const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
-  const action = packageNeedsInstall || isUnavailable ? null : sourceSetupAction(entry);
+  const action = packageNeedsInstall || packageAvailabilityUnknown || isUnavailable ? null : sourceSetupAction(entry);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
@@ -372,8 +498,27 @@ function SourceSetupCard({
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
             Not installable: no setup path is available here.
           </span>
+        ) : packageAvailabilityUnknown ? (
+          <span className="pdpp-caption text-status-warning-fg" data-testid="connector-install-catalog-transient">
+            {installCatalogRecoveryState === "scheduled"
+              ? "Package availability is unknown while the catalog is busy; this page will retry once shortly."
+              : installCatalogRecoveryState === "refreshing"
+                ? "Checking package availability now."
+                : "Package availability is unknown while the catalog is busy; use Retry to check again."}
+          </span>
         ) : installModel ? (
-          <ConnectorInstallRow compact model={installModel} />
+          <>
+            <ConnectorInstallRow compact model={installModel} />
+            {installCatalogTransientlyUnavailable ? (
+              <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-catalog-transient">
+                {installCatalogRecoveryState === "scheduled"
+                  ? "This page will check the package catalog for updates shortly."
+                  : installCatalogRecoveryState === "refreshing"
+                    ? "Checking the package catalog for updates now."
+                    : "The package catalog is still busy; use Retry to check for updates."}
+              </span>
+            ) : null}
+          </>
         ) : (
           <span className="pdpp-caption text-muted-foreground">Package status unavailable</span>
         )}
@@ -405,10 +550,14 @@ function SourceSetupCard({
 function SourceSetupCardList({
   entries,
   existingSourcesByConnector,
+  installCatalogRecoveryState,
+  installCatalogTransientlyUnavailable,
   installLifecycleByConnector,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installCatalogRecoveryState: ConnectorCatalogRecoveryState;
+  installCatalogTransientlyUnavailable: boolean;
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
 }) {
   return (
@@ -417,6 +566,8 @@ function SourceSetupCardList({
         <SourceSetupCard
           entry={entry}
           existingSources={existingSourcesByConnector?.[entry.connectorKey] ?? []}
+          installCatalogRecoveryState={installCatalogRecoveryState}
+          installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
           installLifecycle={
             installLifecycleByConnector === null
               ? null
@@ -436,6 +587,8 @@ export function SourceSetupCatalog({
   action,
   catalog,
   existingSourcesByConnector,
+  installCatalogBusySnapshotId = null,
+  installCatalogTransientlyUnavailable = false,
   installLifecycleByConnector = null,
   query,
 }: {
@@ -449,6 +602,8 @@ export function SourceSetupCatalog({
    * connector's existing-sources list is exact by construction.
    */
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
+  installCatalogBusySnapshotId?: string | null;
+  installCatalogTransientlyUnavailable?: boolean;
   /** Null means the install route is not available on this server. */
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   query: string;
@@ -457,6 +612,10 @@ export function SourceSetupCatalog({
     subscribeToDeveloperMode,
     getDeveloperModeSnapshot,
     getDeveloperModeServerSnapshot,
+  );
+  const connectorCatalogRecovery = useConnectorCatalogRecovery(
+    installCatalogTransientlyUnavailable,
+    installCatalogBusySnapshotId
   );
   // Developer mode (Settings) is the single control for development-tier
   // visibility; this surface never grows a second toggle for the same
@@ -493,6 +652,11 @@ export function SourceSetupCatalog({
           .
         </p>
       ) : null}
+      <ConnectorCatalogRecoveryNotice
+        enabled={installCatalogTransientlyUnavailable}
+        recoveryState={connectorCatalogRecovery.recoveryState}
+        refreshManually={connectorCatalogRecovery.refreshManually}
+      />
       <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label className="sr-only" htmlFor="source_q">
           Search data sources
@@ -512,6 +676,8 @@ export function SourceSetupCatalog({
           <SourceSetupCardList
             entries={scannableEntries}
             existingSourcesByConnector={existingSourcesByConnector}
+            installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
+            installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
             installLifecycleByConnector={installLifecycleByConnector}
           />
           {unavailableEntries.length > 0 ? (
@@ -524,6 +690,8 @@ export function SourceSetupCatalog({
                 <SourceSetupCardList
                   entries={unavailableEntries}
                   existingSourcesByConnector={existingSourcesByConnector}
+                  installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
+                  installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
                   installLifecycleByConnector={installLifecycleByConnector}
                 />
               </div>

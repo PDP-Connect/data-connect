@@ -67,6 +67,7 @@ export interface ConnectorInstallStatusResponse {
 
 export interface ConnectorInstallSnapshot {
   readonly catalog: readonly ConnectorInstallCatalogEntry[];
+  readonly catalogUnavailableReason?: "transient_busy";
   readonly localSources?: readonly ConnectorLocalSource[];
   readonly status: readonly ConnectorInstallStatus[];
 }

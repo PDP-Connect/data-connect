@@ -95,7 +95,7 @@ function routeRequest(pathname: string, host: string, cookie?: string): Paramete
   } as Parameters<typeof proxy>[0]
 }
 
-test("settings redirects signed-out owners and lets signed-in owners through", () => {
+test("settings redirects signed-out owners and lets signed-in owners through", async () => {
   const previousNodeEnv = Object.getOwnPropertyDescriptor(process.env, "NODE_ENV")
   Object.defineProperty(process.env, "NODE_ENV", {
     configurable: true,
@@ -104,13 +104,13 @@ test("settings redirects signed-out owners and lets signed-in owners through", (
     writable: true,
   })
   try {
-    const signedOut = proxy(routeRequest("/settings", "console.test"))
-  assert.equal(signedOut.status, 307)
-  assert.equal(new URL(signedOut.headers.get("location") ?? "").pathname, "/owner/login")
+    const signedOut = await proxy(routeRequest("/settings", "console.test"))
+    assert.equal(signedOut.status, 307)
+    assert.equal(new URL(signedOut.headers.get("location") ?? "").pathname, "/owner/login")
 
-    const signedIn = proxy(routeRequest("/settings", "console.test", "session"))
-  assert.equal(signedIn.status, 200)
-  assert.equal(signedIn.headers.get("location"), null)
+    const signedIn = await proxy(routeRequest("/settings", "console.test", "session"))
+    assert.equal(signedIn.status, 200)
+    assert.equal(signedIn.headers.get("location"), null)
   } finally {
     if (previousNodeEnv) {
       Object.defineProperty(process.env, "NODE_ENV", previousNodeEnv)
