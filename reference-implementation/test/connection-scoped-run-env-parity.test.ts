@@ -40,8 +40,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const INDEX_PATH = fileURLToPath(new URL("../server/index.ts", import.meta.url));
-const LEAF_PATH = fileURLToPath(new URL("../server/connection-scoped-run-env.ts", import.meta.url));
 /** A bare JS identifier — hoisted so the matcher is compiled once, not per key. */
 const IDENTIFIER_PATTERN = /^[A-Za-z_$][\w$]*$/;
 
@@ -115,7 +113,10 @@ function recordName(chunk: string, into: Set<string>): void {
 }
 
 test("both connection-scoped static-secret resolvers pass the same arguments", async () => {
-  const [indexSource, leafSource] = await Promise.all([readFile(INDEX_PATH, "utf8"), readFile(LEAF_PATH, "utf8")]);
+  const [indexSource, leafSource] = await Promise.all([
+    readFile(fileURLToPath(new URL("../server/index.ts", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../server/connection-scoped-run-env.ts", import.meta.url)), "utf8"),
+  ]);
   const indexArgs = resolverArgumentNames(indexSource, "server/index.ts");
   const leafArgs = resolverArgumentNames(leafSource, "server/connection-scoped-run-env.ts");
   assert.deepEqual(
@@ -127,7 +128,7 @@ test("both connection-scoped static-secret resolvers pass the same arguments", a
 });
 
 test("the live resolver forwards the registered manifest", async () => {
-  const indexSource = await readFile(INDEX_PATH, "utf8");
+  const indexSource = await readFile(fileURLToPath(new URL("../server/index.ts", import.meta.url)), "utf8");
   const indexArgs = resolverArgumentNames(indexSource, "server/index.ts");
   assert.ok(
     indexArgs.includes("manifest"),
