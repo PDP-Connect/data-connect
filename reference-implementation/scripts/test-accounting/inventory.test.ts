@@ -613,6 +613,10 @@ test("keeps the source-revision stale-publication PostgreSQL skip title in the e
   const name = "PostgreSQL stale failure publication cannot overwrite newer evidence";
   assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
 });
+test("keeps the stale-semantic-page PostgreSQL skip title in the exact receipt mapping", () => {
+  const name = "PostgreSQL: a stale semantic page cannot overwrite the index after manifest B publishes";
+  assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
+});
 test("keeps the source-revision trigger-omission PostgreSQL skip title in the exact receipt mapping", () => {
   const name = "PostgreSQL trigger omission fails before migration and a live writer waits for the atomic reinstall";
   assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));

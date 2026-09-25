@@ -64,6 +64,7 @@ interface MinimalElement {
   readonly hidden: boolean;
   readonly indeterminate: boolean;
   open: boolean;
+  readonly nextElementSibling: MinimalElement | null;
   querySelector: (selector: string) => MinimalElement | null;
   querySelectorAll: (selector: string) => Iterable<MinimalElement>;
   readonly textContent: string | null;

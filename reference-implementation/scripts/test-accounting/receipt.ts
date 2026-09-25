@@ -117,6 +117,7 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "PostgreSQL projection faults preserve canonical record, schedule, and lifecycle writes, then repair passes after recovery",
   "PostgreSQL trigger omission fails before migration and a live writer waits for the atomic reinstall",
   "PostgreSQL: a stale lexical page cannot overwrite the index after manifest B publishes",
+  "PostgreSQL: a stale semantic page cannot overwrite the index after manifest B publishes",
   "PostgreSQL stale failure publication cannot overwrite newer evidence",
   "Postgres: every setup-binding kind promotes on success, stays hidden on abandon, survives its revoke path",
   "postgresFetchUpcoming: live Postgres in-flight partition workers never exceed the configured limit",
