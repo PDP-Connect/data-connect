@@ -39,9 +39,11 @@
  * `assertNoSymlinks` forbids links inside a staged tree.
  *
  * So the generation directory is the durable artifact and the stable path
- * is a materialised copy of it. That costs one extra copy per CHANGED
- * build (unchanged content reuses its generation and is skipped entirely)
- * and leaves every packaging path working untouched.
+ * is a materialised copy of it. Each changed build also retains its previous
+ * stable copy. This currently has no disk bound: no cross-platform owner
+ * registry proves when those old trees are unused. Staging warns whenever
+ * more than KEEP_GENERATIONS trees exist; cleanup requires that ownership
+ * proof.
  */
 
 import {
@@ -66,13 +68,8 @@ export const KEEP_GENERATIONS = 2
  * PIDs of processes whose current working directory is inside
  * `targetDirectory`, via `/proc/<pid>/cwd`.
  *
- * Linux only. macOS and Windows have no equivalent without a new
- * dependency and return `[]`, which is safe in both directions here: the
- * pruner keeps a generation it cannot prove is idle only on Linux, and
- * elsewhere it may delete a generation whose process is gone anyway --
- * the STABLE path it published is a separate copy either way, so a running
- * process never loses the directory it booted from mid-flight on the
- * platform where we can detect it.
+ * Linux only. This is diagnostic; an empty result does not prove a directory
+ * is unused, and the collector does not use it to delete generations.
  */
 export function findProcessesUsingDirectory(targetDirectory, procRoot = "/proc") {
   if (process.platform !== "linux" || !existsSync(procRoot)) return []
@@ -135,8 +132,21 @@ export function publishStageGeneration(targetDirectory, generationDirectory) {
  * process on platforms where those scans are unavailable.
  */
 export function collectOldStageGenerations(_parent, _name, _keep = KEEP_GENERATIONS) {
-  // A process may have its cwd or open files in a generation on platforms
-  // where we cannot enumerate those references. Retain generations until a
-  // generation owner can prove they are unused.
+  let count = 0
+  try {
+    count = readdirSync(_parent, { withFileTypes: true }).filter(
+      (entry) => entry.isDirectory() && entry.name.startsWith(`${_name}-`),
+    ).length
+  } catch {
+    return []
+  }
+  const excess = Math.max(0, count - _keep)
+  if (excess > 0) {
+    console.warn(
+      `[stage-generations] ${_name}: retaining ${excess} prior build generation(s) and all previous stable trees; staged disk use can grow without bound until cross-platform ownership tracking is available.`,
+    )
+  }
+  // A process may have its cwd or open files in a generation, and no
+  // cross-platform owner registry can currently prove it unused.
   return []
 }
