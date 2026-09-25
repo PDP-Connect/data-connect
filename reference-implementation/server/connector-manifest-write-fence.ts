@@ -32,6 +32,117 @@ export function storedConnectorManifestStreamRevision(manifest: Record<string, u
   return storedConnectorManifestRevision({ connector_id: manifest.connector_id, streams: manifest.streams });
 }
 
+function connectorManifestStreamNames(manifest: Record<string, unknown>): string[] {
+  if (!Array.isArray(manifest.streams)) {
+    throw new TypeError("Connector manifest streams must be an array");
+  }
+  const names = manifest.streams.map((stream) => {
+    if (!stream || typeof stream !== "object" || Array.isArray(stream)) {
+      throw new TypeError("Connector manifest stream must be an object");
+    }
+    const name = (stream as Record<string, unknown>).name;
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError("Connector manifest stream name must be a non-empty string");
+    }
+    return name;
+  });
+  if (new Set(names).size !== names.length) {
+    throw new TypeError("Connector manifest stream names must be unique");
+  }
+  return names;
+}
+
+function selectedManifestStreams(manifest: Record<string, unknown>, names: readonly string[]): unknown[] | null {
+  if (!Array.isArray(manifest.streams)) {
+    return null;
+  }
+  const wantedNames = new Set(names);
+  const byName = new Map<string, unknown>();
+  for (const stream of manifest.streams) {
+    if (!stream || typeof stream !== "object" || Array.isArray(stream)) {
+      continue;
+    }
+    const name = (stream as Record<string, unknown>).name;
+    if (typeof name !== "string" || !wantedNames.has(name)) {
+      continue;
+    }
+    if (byName.has(name)) {
+      return null;
+    }
+    byName.set(name, stream);
+  }
+  const selected = names.map((name) => byName.get(name));
+  return selected.every((stream) => stream !== undefined) ? selected : null;
+}
+
+function assertCurrentManifestStreamSubset(
+  connectorId: string,
+  expectedManifest: Record<string, unknown>,
+  storedManifest: unknown,
+  hasActivation: boolean
+): void {
+  if (!storedManifest) {
+    if (hasActivation) {
+      throw new Error(`Connector ${connectorId} manifest revision changed during derived repair`);
+    }
+    return; // Native manifests may have no registry row or OCI activation.
+  }
+  const manifest = typeof storedManifest === "string" ? JSON.parse(storedManifest) : storedManifest;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error(`Connector ${connectorId} manifest revision changed during derived repair`);
+  }
+  const names = connectorManifestStreamNames(expectedManifest);
+  const expectedStreams = selectedManifestStreams(expectedManifest, names);
+  const storedStreams = selectedManifestStreams(manifest as Record<string, unknown>, names);
+  if (!expectedStreams || !storedStreams) {
+    throw new Error(`Connector ${connectorId} manifest revision changed during derived repair`);
+  }
+  const expectedRevision = storedConnectorManifestStreamRevision({ connector_id: connectorId, streams: expectedStreams });
+  const currentRevision = storedConnectorManifestStreamRevision({ connector_id: connectorId, streams: storedStreams });
+  if (currentRevision !== expectedRevision) {
+    throw new Error(`Connector ${connectorId} manifest revision changed during derived repair`);
+  }
+}
+
+/**
+ * Confirm only the declared streams being repaired still match storage.
+ * Reconciliation passes intentionally narrow a manifest to one dirty stream,
+ * so comparing the full manifest would reject valid work and block repairs.
+ */
+export async function assertConnectorManifestStreamSubsetWithClient(
+  client: PostgresTransactionClient,
+  connectorId: string,
+  expectedManifest: Record<string, unknown>
+): Promise<void> {
+  await lockConnectorManifestPublication(client, connectorId);
+  const row = await client.query<{ manifest: unknown }>(
+    "SELECT manifest FROM connectors WHERE connector_id=$1 FOR SHARE",
+    [connectorId]
+  );
+  const activation = row.rows[0]
+    ? null
+    : await client.query("SELECT 1 FROM connector_activations WHERE connector_id=$1", [connectorId]);
+  assertCurrentManifestStreamSubset(
+    connectorId,
+    expectedManifest,
+    row.rows[0]?.manifest,
+    Boolean(activation?.rowCount)
+  );
+}
+
+export function assertConnectorManifestStreamSubsetSync(
+  connectorId: string,
+  expectedManifest: Record<string, unknown>
+): void {
+  const row = getDb()
+    .prepare("SELECT manifest FROM connectors WHERE connector_id=?")
+    .get<{ manifest: string }>(connectorId);
+  const activation = row
+    ? null
+    : getDb().prepare("SELECT 1 FROM connector_activations WHERE connector_id=?").get(connectorId);
+  assertCurrentManifestStreamSubset(connectorId, expectedManifest, row?.manifest, Boolean(activation));
+}
+
 export function assertCurrentManifestRevision(
   connectorId: string,
   expectedRevision: string,

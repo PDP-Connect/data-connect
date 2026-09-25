@@ -821,10 +821,6 @@ function scanDynamicImportSpecifiers(
   walk(program, (node, _parent, ancestors) => {
     const enclosingFunctionName = enclosingFunctionNameOf(ancestors);
 
-    // Dynamic `import(...)` parses as its own `ImportExpression` node (its
-    // specifier is `.source`, not a `CallExpression`'s first argument) —
-    // @babel/parser has never modeled it as a call with an `Import`
-    // pseudo-callee.
     if (node.type === "ImportExpression") {
       const source = nodeField(node, "source");
       if (source) {
@@ -840,6 +836,16 @@ function scanDynamicImportSpecifiers(
       return;
     }
     const callee = node.callee as Node;
+    if (callee.type === "Import") {
+      const [first] = nodeArrayField(node, "arguments");
+      if (first) {
+        const resolvedPath = resolveImportSpecifierPath(first, analysis, enclosingFunctionName, fileDir);
+        if (resolvedPath && isConnectorModulePath(resolvedPath)) {
+          report(node, "connector-module-import");
+        }
+      }
+      return;
+    }
     if (!isIdentifier(callee, "require")) {
       return;
     }

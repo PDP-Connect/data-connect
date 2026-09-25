@@ -776,7 +776,7 @@ const SIGN_IN_FORBIDDEN_COPY = [
 
 function assertOwnerSignInCopy(html: string): void {
   assert.match(html, /<title>DataConnect — Owner sign-in<\/title>/);
-  assert.match(html, /<span class="hosted-ui-wordmark">DataConnect<\/span>/);
+  assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">DataConnect<\/span>/);
   assert.match(html, /<h1 id="hosted-ui-page-title" class="pdpp-display">Sign in to DataConnect<\/h1>/);
   assert.ok(
     html.includes("This password keeps other people from seeing your data or changing which apps can use it."),

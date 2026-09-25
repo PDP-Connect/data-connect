@@ -231,6 +231,19 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // runtime data the operator supplied when adding a local source), not
   // RI-committed provider/connector policy.
   "reference-implementation/server/connector-install/local-source.ts:327",
+  // readCredentialRecoveryStateMarker() reads a fixed filename under
+  // PDPP_DATA_DIR ("credential-recovery-state.json"). This is operator/runtime
+  // recovery state written by the recovery kit, not RI-committed connector
+  // policy or provider identity data.
+  "reference-implementation/server/index.ts:2219",
+  // applyRecoveryOwnerSessionReset() reads a fixed filename under PDPP_DATA_DIR
+  // ("owner-session-recovery-reset.json"). It is consumed only as an owner
+  // session reset marker for recovered deployments.
+  "reference-implementation/server/index.ts:2289",
+  // readRequestState(path) reads owner-password window request state from
+  // fixed filenames under PDPP_DATA_DIR. The JSON contains request status and
+  // OS reauth handoff state, never connector/provider policy.
+  "reference-implementation/server/owner-password-owner-set.ts:145",
   // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
   // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
   // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
@@ -1578,20 +1591,25 @@ export function scanFileDataLoads(
     return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
   }
 
-  /** Dynamic `import(...)` (a Babel `ImportExpression` node, not a `CallExpression` —
-   * unlike `require(...)`, `@babel/parser` has never modeled dynamic import as a call
-   * with an `Import` pseudo-callee; that legacy shape belongs to older non-Babel
-   * parsers) reaching a sibling JSON/YAML resource. Returns true if this call site
-   * was handled. */
+  /** Dynamic `import(...)` reaching a sibling JSON/YAML resource. Babel parser
+   * versions have represented this as either `ImportExpression.source` or
+   * `CallExpression` with an `Import` callee, so support both AST shapes. */
   function checkDynamicImportExpression(node: Node, enclosingFunctionName: string | null): boolean {
-    if (node.type !== "ImportExpression") {
-      return false;
+    if (node.type === "ImportExpression") {
+      const source = nodeField(node, "source");
+      if (!source) {
+        return true;
+      }
+      return checkResolvedImportLikeSource(node, source, enclosingFunctionName);
     }
-    const source = nodeField(node, "source");
-    if (!source) {
-      return true;
+    if (node.type === "CallExpression" && (node.callee as Node)?.type === "Import") {
+      const [first] = nodeArrayField(node, "arguments");
+      if (!first) {
+        return true;
+      }
+      return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
     }
-    return checkResolvedImportLikeSource(node, source, enclosingFunctionName);
+    return false;
   }
 
   /** Shared resolution/classification tail for `require(...)`'s and dynamic
@@ -1745,6 +1763,9 @@ export function scanFileDataLoads(
       return;
     }
     if (checkRequireCall(node, callee, enclosingFunctionName)) {
+      return;
+    }
+    if (checkDynamicImportExpression(node, enclosingFunctionName)) {
       return;
     }
     if (checkReadFileCall(node, callee, parent, enclosingFunctionName)) {

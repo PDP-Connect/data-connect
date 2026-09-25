@@ -56,9 +56,8 @@ import {
 } from "./connection-identity.ts";
 import { withConnectorInstanceWrite } from "./connector-instance-write-coordinator.ts";
 import {
-  assertConnectorManifestRevisionSync,
-  assertConnectorManifestRevisionWithClient,
-  storedConnectorManifestRevision,
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
 } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertOwnerSearchFilterAuthority } from "./manifest-read-authority.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
@@ -351,21 +350,17 @@ async function maybeLexicalBackfillPhaseForTest(point: string, context: JsonObje
   await lexicalBackfillPhaseHook?.(point, context);
 }
 
-async function assertLexicalBackfillManifestRevisionCurrent(
+async function assertLexicalBackfillManifestCurrent(
   connectorId: string,
   manifest: LexicalBackfillManifest
 ): Promise<void> {
-  const auth = await import(new URL("./auth.ts", import.meta.url).href);
-  const { storage_binding: _storageBinding, ...registerableManifest } = manifest as unknown as Record<string, unknown>;
-  const { storedManifest } = auth.normalizeConnectorManifestForStorage(registerableManifest);
-  const expectedRevision = storedConnectorManifestRevision(storedManifest);
   if (isPostgresStorageBackend()) {
     await withPostgresTransaction((client) =>
-      assertConnectorManifestRevisionWithClient(client, connectorId, expectedRevision)
+      assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest as unknown as Record<string, unknown>)
     );
     return;
   }
-  assertConnectorManifestRevisionSync(connectorId, expectedRevision);
+  assertConnectorManifestStreamSubsetSync(connectorId, manifest as unknown as Record<string, unknown>);
 }
 const lexicalBackfillJobs = new Map<string, LexicalBackfillJob>();
 
@@ -1471,7 +1466,7 @@ export async function lexicalIndexBackfillForManifest({
         connectorId,
         connectorInstanceId,
       });
-      await assertLexicalBackfillManifestRevisionCurrent(connectorId, manifest);
+      await assertLexicalBackfillManifestCurrent(connectorId, manifest);
       // No connector-instance writer-admission fence here. The scan +
       // per-page durable write below is the SAME shape records.ts's
       // maintainRecordIndexesWithinPermit already uses for live-ingest

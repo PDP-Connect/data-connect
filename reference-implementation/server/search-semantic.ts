@@ -67,9 +67,8 @@ import {
 } from "./connection-identity.ts";
 import { withConnectorInstanceWrite } from "./connector-instance-write-coordinator.ts";
 import {
-  assertConnectorManifestRevisionSync,
-  assertConnectorManifestRevisionWithClient,
-  storedConnectorManifestRevision,
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
 } from "./connector-manifest-write-fence.ts";
 import { getDb } from "./db.ts";
 import { intraOpNumThreadsForWorkLimit, resolveEmbeddingConcurrency } from "./embedding-concurrency.ts";
@@ -2544,7 +2543,7 @@ async function rebuildSemanticIndexForStream({
   progressJob = null,
   existingKeys = null,
   signal = null,
-  expectedManifestRevision,
+  manifest,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2554,7 +2553,7 @@ async function rebuildSemanticIndexForStream({
   progressJob?: SemanticBackfillJob | null;
   existingKeys?: Set<string> | null;
   signal?: AbortSignal | null;
-  expectedManifestRevision: string;
+  manifest: SemanticBackfillManifest;
 }): Promise<number> {
   const usePostgres = isPostgresStorageBackend();
   const index = usePostgres ? null : ensureVectorIndex();
@@ -2629,10 +2628,10 @@ async function rebuildSemanticIndexForStream({
     // O(the whole rebuild).
     if (usePostgres) {
       await withPostgresTransaction((client) =>
-        assertConnectorManifestRevisionWithClient(client, connectorId, expectedManifestRevision)
+        assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest)
       );
     } else {
-      assertConnectorManifestRevisionSync(connectorId, expectedManifestRevision);
+      assertConnectorManifestStreamSubsetSync(connectorId, manifest);
     }
     await withConnectorInstanceWrite(connectorInstanceId, async () => {
       if (usePostgres) {
@@ -2756,24 +2755,17 @@ interface SemanticBackfillIdentity {
   modelId: string;
 }
 
-async function expectedSemanticBackfillManifestRevision(manifest: SemanticBackfillManifest): Promise<string> {
-  const auth = await import(new URL("./auth.ts", import.meta.url).href);
-  const { storage_binding: _storageBinding, ...registerableManifest } = manifest as unknown as Record<string, unknown>;
-  const { storedManifest } = auth.normalizeConnectorManifestForStorage(registerableManifest);
-  return storedConnectorManifestRevision(storedManifest);
-}
-
-async function assertSemanticBackfillManifestRevisionCurrent(
+async function assertSemanticBackfillManifestCurrent(
   connectorId: string,
-  expectedRevision: string
+  manifest: SemanticBackfillManifest
 ): Promise<void> {
   if (isPostgresStorageBackend()) {
     await withPostgresTransaction((client) =>
-      assertConnectorManifestRevisionWithClient(client, connectorId, expectedRevision)
+      assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest)
     );
     return;
   }
-  assertConnectorManifestRevisionSync(connectorId, expectedRevision);
+  assertConnectorManifestStreamSubsetSync(connectorId, manifest);
 }
 
 interface SemanticBackfillContext {
@@ -2783,8 +2775,8 @@ interface SemanticBackfillContext {
   currentModel: string;
   index: SemanticIndex | null;
   log: (message: string) => void;
+  manifest: SemanticBackfillManifest;
   signal: AbortSignal | null;
-  expectedManifestRevision: string;
   usePostgres: boolean;
   vectorIndex: SemanticIndex;
 }
@@ -3029,7 +3021,7 @@ async function rebuildSemanticBackfillInstance({
     recordsToScan,
     signal,
     stream,
-    expectedManifestRevision: context.expectedManifestRevision,
+    manifest: context.manifest,
   });
   log(
     `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
@@ -3197,8 +3189,7 @@ export async function semanticIndexBackfillForManifest({
     return;
   }
   const connectorId = manifest.connector_id;
-  const expectedManifestRevision = await expectedSemanticBackfillManifestRevision(manifest);
-  await assertSemanticBackfillManifestRevisionCurrent(connectorId, expectedManifestRevision);
+  await assertSemanticBackfillManifestCurrent(connectorId, manifest);
   const connectorInstanceIds = await resolveSemanticBackfillConnectorInstanceIds({ connectorId, manifest });
   await runSequential(connectorInstanceIds, async (connectorInstanceId) => {
     // No connector-instance writer-admission fence around the whole
@@ -3213,7 +3204,6 @@ export async function semanticIndexBackfillForManifest({
       log,
       manifest,
       signal,
-      expectedManifestRevision,
     });
   });
 }
@@ -3226,13 +3216,11 @@ async function backfillSemanticIndexForConnectorInstance({
   log,
   signal,
   fencedConnectorInstanceId,
-  expectedManifestRevision,
 }: {
   manifest: SemanticBackfillManifest;
   log: (message: string) => void;
   signal: AbortSignal | null;
   fencedConnectorInstanceId: string;
-  expectedManifestRevision: string;
 }): Promise<void> {
   const connectorId = manifest.connector_id;
   activeBackfillCount += 1;
@@ -3292,8 +3280,8 @@ async function backfillSemanticIndexForConnectorInstance({
           currentModel,
           index,
           log,
+          manifest,
           signal,
-          expectedManifestRevision,
           usePostgres,
           vectorIndex,
         },

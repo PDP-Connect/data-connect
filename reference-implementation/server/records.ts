@@ -66,7 +66,7 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
-import { assertConnectorManifestRevisionSync, storedConnectorManifestRevision } from "./connector-manifest-write-fence.ts";
+import { assertConnectorManifestStreamSubsetSync } from "./connector-manifest-write-fence.ts";
 import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-model.ts";
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
@@ -8724,12 +8724,6 @@ function planSemanticTimeRepairs(
 }
 
 
-async function expectedStoredManifestRevision(manifest: StoredManifest): Promise<string> {
-  const auth = await import(new URL("./auth.ts", import.meta.url).href);
-  const { storedManifest } = auth.normalizeConnectorManifestForStorage(manifest as unknown as Record<string, unknown>);
-  return storedConnectorManifestRevision(storedManifest);
-}
-
 // Registration changes can alter the manifest-derived sort facts of already
 // accepted SQLite rows. SQLite deliberately stores only semantic_time (cursor
 // and primary-key positions are derived from canonical record JSON at read
@@ -8742,7 +8736,6 @@ export async function backfillSqliteRecordSemanticTimesForManifest(
 ) {
   const mode: SemanticTimeBackfillMode = options.mode ?? "drift";
   const dryRun = options.dryRun === true;
-  const expectedRevision = await expectedStoredManifestRevision(manifest);
   const connectorId =
     canonicalConnectorKey(manifest.connector_key || manifest.connector_id) ??
     manifest.connector_key ??
@@ -8785,7 +8778,7 @@ export async function backfillSqliteRecordSemanticTimesForManifest(
       connectorInstanceId,
     });
     await withConnectorInstanceWrite(connectorInstanceId, async () => {
-      assertConnectorManifestRevisionSync(connectorId, expectedRevision);
+      assertConnectorManifestStreamSubsetSync(connectorId, manifest as unknown as Record<string, unknown>);
       await maybeSqliteRecordSortBackfillPhaseForTest("inside-instance-fence", {
         connectorId,
         connectorInstanceId,

@@ -12,11 +12,11 @@
  *     one the LIVE server installs for BOTH the controller path (manual runs,
  *     `/_ref/run-now`) and the scheduler path (automatic runs).
  *
- * They drifted. The leaf module forwarded `isStaticSecretCaptureOptional` to
- * `resolveStaticSecretRunEnv`; the `index.ts` copy did not. Because only the
- * `index.ts` copy runs in production, the drift was invisible to every existing
- * test — `static-secret-run-credentials.test.ts` proves the SEAM honors the
- * argument, but nothing proved the live caller passes it.
+ * They drifted. Older revisions forwarded `isStaticSecretCaptureOptional`
+ * through the leaf module only; the current seam derives optional capture from
+ * the registered profile manifest instead. Because only the `index.ts` copy
+ * runs in production, this test pins the live caller to the same manifest-
+ * forwarding contract as the leaf caller.
  *
  * Consequence of the omission: `resolveStaticSecretRunEnv` treats a missing
  * credential as a soft `null` (proceed without an env fragment, let the
@@ -126,12 +126,12 @@ test("both connection-scoped static-secret resolvers pass the same arguments", a
   );
 });
 
-test("the live resolver forwards isStaticSecretCaptureOptional", async () => {
+test("the live resolver forwards the registered manifest", async () => {
   const indexSource = await readFile(INDEX_PATH, "utf8");
   const indexArgs = resolverArgumentNames(indexSource, "server/index.ts");
   assert.ok(
-    indexArgs.includes("isStaticSecretCaptureOptional"),
-    "server/index.ts installs the resolver the live server uses; without isStaticSecretCaptureOptional a " +
-      "credential_capture.required:false connector has its run refused instead of falling back to manual sign-in"
+    indexArgs.includes("manifest"),
+    "server/index.ts installs the resolver the live server uses; without the registered manifest a " +
+      "credential_capture.required:false connector cannot fall back to manual sign-in"
   );
 });
