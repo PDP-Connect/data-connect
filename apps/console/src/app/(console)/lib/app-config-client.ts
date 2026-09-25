@@ -28,6 +28,15 @@ export interface AppConfig {
   closeToTray: boolean
 }
 
+export interface AppConfigEnvelope {
+  config: AppConfig
+  revision: string
+}
+
+export type AppConfigPatch = {
+  [K in keyof AppConfig]: { field: K; value: AppConfig[K] }
+}[keyof AppConfig]
+
 async function appConfigFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   await verifyDashboardSession()
   const token = await getOwnerToken()
@@ -64,14 +73,19 @@ function unwrapData(payload: unknown): unknown {
 }
 
 export async function getAppConfig(): Promise<AppConfig> {
-  const payload = await appConfigFetch("/v1/owner/app-config")
-  return unwrapData(payload) as AppConfig
+  return (await getAppConfigEnvelope()).config
 }
 
-export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
+export async function getAppConfigEnvelope(): Promise<AppConfigEnvelope> {
+  const payload = await appConfigFetch("/v1/owner/app-config") as { data: AppConfig; revision: string }
+  return { config: unwrapData(payload) as AppConfig, revision: payload.revision }
+}
+
+export async function patchAppConfig(patch: AppConfigPatch, revision: string): Promise<AppConfigEnvelope> {
   const payload = await appConfigFetch("/v1/owner/app-config", {
-    body: JSON.stringify(config),
+    body: JSON.stringify(patch),
+    headers: { "If-Match": revision },
     method: "POST",
-  })
-  return unwrapData(payload) as AppConfig
+  }) as { data: AppConfig; revision: string }
+  return { config: unwrapData(payload) as AppConfig, revision: payload.revision }
 }

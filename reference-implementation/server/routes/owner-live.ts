@@ -26,14 +26,13 @@
 
 import { randomBytes } from "node:crypto"
 import type { LiveRevisions } from "../live-revisions.ts"
-import type { OwnerSessionPayload } from "../owner-session.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
 
 export const LIVE_PING_INTERVAL_MS = 25_000
 export const LIVE_TOKEN_TTL_MS = 60_000
 
 interface RawResponse {
-  end?: () => void
+  end: () => void
   flushHeaders?: () => void
   setHeader: (name: string, value: string) => void
   statusCode: number
@@ -41,7 +40,7 @@ interface RawResponse {
 }
 
 interface RouteRequest {
-  ownerSession?: OwnerSessionPayload
+  headers: { cookie?: string }
   params?: Record<string, string>
   raw?: { on: (event: "close", listener: () => void) => void }
 }
@@ -63,21 +62,13 @@ interface AppLike {
 type PdppError = (res: RouteResponse, status: number, code: string, message: string) => unknown
 
 export interface MountOwnerLiveAsContext {
+  isOwnerSessionActive: (req: RouteRequest) => Promise<boolean>
   live: LiveRevisions
   now?: () => number
+  onSessionLogout: (req: RouteRequest, listener: () => void) => () => void
   pdppError: PdppError
   pingIntervalMs?: number
   requireOwnerSession: MiddlewareHandler
-  /**
-   * True once the session that authenticated this connection has been
-   * logged out. `requireOwnerSession` only runs once, at connect time; a
-   * long-lived SSE connection has no other way to learn about a later
-   * logout, since the browser's cookie change never reaches an
-   * already-open request. Checked on every ping tick so a logged-out
-   * owner's stream stops within one `pingIntervalMs` instead of staying
-   * open (and continuing to receive invalidate events) indefinitely.
-   */
-  sessionRevokedSince?: (payload: OwnerSessionPayload) => boolean
 }
 
 export function mountOwnerLiveAs(app: AppLike, ctx: MountOwnerLiveAsContext): void {
@@ -129,35 +120,54 @@ export function mountOwnerLiveAs(app: AppLike, ctx: MountOwnerLiveAsContext): vo
       raw.flushHeaders?.()
 
       let closed = false
+      let pendingSend = Promise.resolve()
       const send = (name: string, data: unknown) => {
+        // Preserve event order while the shared session store is consulted.
+        // Local logout callbacks cannot observe revocation by another instance.
+        pendingSend = pendingSend.then(async () => {
         if (closed) return
         try {
-          raw.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
+            const eventData = await data
+            if (closed) return
+            if (!(await ctx.isOwnerSessionActive(req))) {
+              close()
+              return
+            }
+            if (!closed) raw.write(`event: ${name}\ndata: ${JSON.stringify(eventData)}\n\n`)
         } catch {
-          /* socket already gone; the close handler cleans up */
+            // Store failures must not leave an authenticated stream running.
+            close()
         }
+        })
+        return pendingSend
       }
 
       // Subscribe before the snapshot so a change between the two is not lost.
       const unsubscribe = ctx.live.subscribe((topic, revision) => send("invalidate", { revision, topic }))
-      const ownerSession = req.ownerSession
+      const hello = send("hello", ctx.live.snapshot().then(revisions => ({ revisions })))
+      let pingPending = false
       const ping = setInterval(() => {
-        if (ownerSession && ctx.sessionRevokedSince?.(ownerSession)) {
-          try {
-            raw.end?.()
-          } catch {
-            /* socket may already be gone; the close handler cleans up */
-          }
-          return
-        }
-        send("ping", {})
+        if (closed || pingPending) return
+        pingPending = true
+        void send("ping", {}).finally(() => { pingPending = false })
       }, pingIntervalMs)
-      req.raw.on("close", () => {
+      let stopWatchingLogout: () => void = () => undefined
+      const close = () => {
+        if (closed) return
         closed = true
         clearInterval(ping)
         unsubscribe()
-      })
-      send("hello", { revisions: await ctx.live.snapshot() })
+        stopWatchingLogout()
+        try {
+          raw.end()
+        } catch {
+          /* response already gone; subscriptions and timer are still removed */
+        }
+      }
+      stopWatchingLogout = ctx.onSessionLogout(req, close)
+      if (closed) stopWatchingLogout()
+      req.raw.on("close", close)
+      await hello
     }
   )
 }

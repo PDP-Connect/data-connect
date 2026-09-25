@@ -15,10 +15,12 @@ import {
   type ConnectorInstallSnapshot,
   type ConnectorInstallStatus,
   parseConnectorInstallCatalogResponse,
+  parseConnectorInstallResponse,
   parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
+import { isTransientConnectorInstallCatalogError } from "./connector-install-transient.ts";
 import {
   getOwnerToken,
   getRsInternalUrl,
@@ -74,12 +76,19 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
 }
 
 export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
+  let catalogUnavailableReason: ConnectorInstallSnapshot["catalogUnavailableReason"];
   const [catalog, status, localSources] = await Promise.all([
-    listConnectorInstallCatalog(),
+    listConnectorInstallCatalog().catch((err: unknown) => {
+      if (isTransientConnectorInstallCatalogError(err)) {
+        catalogUnavailableReason = "transient_busy";
+        return [];
+      }
+      return Promise.reject(err);
+    }),
     listConnectorInstallStatus(),
     listConnectorLocalSources(),
   ]);
-  return { catalog, localSources, status };
+  return { catalog, ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}), localSources, status };
 }
 
 export interface InstallConnectorInput {
@@ -87,15 +96,8 @@ export interface InstallConnectorInput {
   readonly digest: string;
 }
 
-function parseStatusRecord(payload: unknown, operation: "install" | "update"): ConnectorInstallStatus {
-  const [status] = parseConnectorInstallStatusResponse({
-    data: [payload],
-    object: "connector_install_status",
-  }).data;
-  if (!status) {
-    throw new Error(`The connector ${operation} response did not include an active status record.`);
-  }
-  return status;
+function parseStatusRecord(payload: unknown): ConnectorInstallStatus {
+  return parseConnectorInstallResponse(payload);
 }
 
 function parseLocalSourceRecord(payload: unknown, operation: "add" | "reload"): ConnectorLocalSource {
@@ -118,7 +120,7 @@ export async function installConnector(input: InstallConnectorInput): Promise<Co
     }),
     method: "POST",
   });
-  return parseStatusRecord(payload, "install");
+  return parseStatusRecord(payload);
 }
 
 export async function updateConnector(connectorId: string): Promise<ConnectorInstallStatus> {
@@ -126,7 +128,7 @@ export async function updateConnector(connectorId: string): Promise<ConnectorIns
     body: JSON.stringify({ connector_id: connectorId }),
     method: "POST",
   });
-  return parseStatusRecord(payload, "update");
+  return parseStatusRecord(payload);
 }
 
 export async function addConnectorLocalSource(sourcePath: string): Promise<ConnectorLocalSource> {

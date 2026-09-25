@@ -10,7 +10,7 @@
  * set_autostart_enabled, in src-tauri/src/commands/desktop_settings.rs) --
  * unreachable from the console's http://127.0.0.1:{port} window. Unlike
  * app-config, autostart is an imperative OS action only the Tauri/Rust
- * process can perform, so POST here hands off to a request/ack file the
+ * process can perform, so POST here hands off to a command/result bridge the
  * desktop app's spawn_autostart_watcher polls and applies -- these tests use
  * a fake AutostartStore rather than the real file-backed one, since
  * autostart-store.test.ts already covers that store's file-polling
@@ -18,9 +18,12 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import type { AutostartState, AutostartStore } from "../server/autostart-store.ts";
+import { createAutostartStore, type AutostartState, type AutostartStore } from "../server/autostart-store.ts";
 import { mountOwnerAutostart } from "../server/routes/owner-autostart.ts";
 
 interface CapturedResponse {
@@ -68,11 +71,9 @@ function fakeStore(initial: AutostartState): AutostartStore & { state: Autostart
     requestChange: async (desiredEnabled: boolean) => {
       store.state = {
         ...store.state,
-        appliedRequestId: store.state.requestId + 1,
-        desiredEnabled,
         enabled: desiredEnabled,
         error: null,
-        requestId: store.state.requestId + 1,
+        pending: false,
       };
       return store.state;
     },
@@ -101,7 +102,7 @@ function mountWithStore(store: AutostartStore): FakeApp["routes"] {
 
 test("GET autostart projects only enabled/error/pending, not request bookkeeping", async () => {
   const routes = mountWithStore(
-    fakeStore({ appliedRequestId: 2, desiredEnabled: true, enabled: true, error: null, requestId: 2 })
+    fakeStore({ enabled: true, error: null, pending: false })
   );
   const handler = routes.get("GET /v1/owner/autostart");
   assert.ok(handler);
@@ -112,7 +113,7 @@ test("GET autostart projects only enabled/error/pending, not request bookkeeping
 
 test("GET autostart reports a requested change the desktop app has not applied yet as pending", async () => {
   const routes = mountWithStore(
-    fakeStore({ appliedRequestId: 2, desiredEnabled: true, enabled: false, error: null, requestId: 3 })
+    fakeStore({ enabled: false, error: null, pending: true })
   );
   const { captured, res } = makeRes();
   await routes.get("GET /v1/owner/autostart")?.({}, res);
@@ -137,7 +138,7 @@ test("GET autostart surfaces a load failure (desktop app not seeded yet) via han
 
 test("POST autostart requests a change and returns the applied result", async () => {
   const routes = mountWithStore(
-    fakeStore({ appliedRequestId: 0, desiredEnabled: false, enabled: false, error: null, requestId: 0 })
+    fakeStore({ enabled: false, error: null, pending: false })
   );
   const handler = routes.get("POST /v1/owner/autostart");
   const { captured, res } = makeRes();
@@ -147,7 +148,7 @@ test("POST autostart requests a change and returns the applied result", async ()
 
 test("POST autostart rejects a malformed body before it reaches the store", async () => {
   const routes = mountWithStore(
-    fakeStore({ appliedRequestId: 0, desiredEnabled: false, enabled: false, error: null, requestId: 0 })
+    fakeStore({ enabled: false, error: null, pending: false })
   );
   const handler = routes.get("POST /v1/owner/autostart");
   const { captured, res } = makeRes();
@@ -157,7 +158,7 @@ test("POST autostart rejects a malformed body before it reaches the store", asyn
 
 test("POST autostart returns a 409 when the watcher never applies the request within the timeout", async () => {
   const store: AutostartStore = {
-    load: async () => ({ appliedRequestId: 0, desiredEnabled: false, enabled: false, error: null, requestId: 0 }),
+    load: async () => ({ enabled: false, error: null, pending: false }),
     requestChange: async () => {
       throw new Error("Autostart change was not applied by the desktop app within 5s");
     },
@@ -168,4 +169,58 @@ test("POST autostart returns a 409 when the watcher never applies the request wi
   await handler?.({ body: { enabled: true } }, res);
   assert.equal(captured.status, 409);
   assert.match(String((captured.body as { error: { message: string } }).error.message), /was not applied/);
+});
+
+test("POST autostart returns native failure as a 409", async () => {
+  const routes = mountWithStore({
+    load: async () => ({ enabled: false, error: null, pending: false }),
+    requestChange: async () => { throw new Error("permission denied"); },
+  });
+  const response = makeRes();
+  await routes.get("POST /v1/owner/autostart")?.({ body: { enabled: true } }, response.res);
+  assert.equal(response.captured.status, 409);
+  assert.deepEqual(response.captured.body, { error: { code: "autostart_not_applied", message: "permission denied" } });
+});
+
+test("concurrent POSTs return only their own public OS results", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "autostart-route-"));
+  try {
+    const routes = mountWithStore(createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 500 }));
+    const post = routes.get("POST /v1/owner/autostart")!;
+    const yes = makeRes();
+    const no = makeRes();
+    const yesRequest = post({ body: { enabled: true } }, yes.res);
+    const noRequest = post({ body: { enabled: false } }, no.res);
+    const commandDir = join(dir, "autostart-commands");
+    // Only match finalized command files: the store writes each command via
+    // a `<name>.<uuid>.tmp` staging file that it atomically renames into
+    // place, so a transient `.tmp` name can appear in the listing and vanish
+    // by the time it is read. Matching the store's own filename shape (see
+    // `autostart-store.ts`'s `ast_[A-Za-z0-9_-]{22}.json` pattern) excludes
+    // those staging files instead of racing to read them.
+    const commandFileName = /^ast_[A-Za-z0-9_-]{22}\.json$/;
+    let commands: Array<{ commandId: string; desiredEnabled: boolean }> = [];
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const names = (await readdir(commandDir).catch(() => [])).filter(name => commandFileName.test(name));
+      if (names.length === 2) {
+        commands = await Promise.all(names.map(async name => JSON.parse(await readFile(join(commandDir, name), "utf8"))));
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(commands.length, 2);
+    const resultDir = join(dir, "autostart-results");
+    await mkdir(resultDir);
+    for (const command of commands) {
+      await writeFile(join(resultDir, `${command.commandId}.json`), JSON.stringify({
+        commandId: command.commandId, kind: "set_autostart_enabled", desiredEnabled: command.desiredEnabled,
+        status: "succeeded", enabled: command.desiredEnabled, error: null,
+      }));
+    }
+    await Promise.all([yesRequest, noRequest]);
+    assert.deepEqual(yes.captured.body, { data: { enabled: true, error: null, pending: false }, object: "autostart_state" });
+    assert.deepEqual(no.captured.body, { data: { enabled: false, error: null, pending: false }, object: "autostart_state" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -1,19 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * `createAutostartStore` is a request/ack protocol, not direct persistence:
- * `requestChange` writes a desired-state request to `autostart.json` under
- * `PDPP_DATA_DIR` and polls for `src-tauri/src/unified.rs::
- * spawn_autostart_watcher` to apply it and write back the result. These
- * tests simulate the watcher directly (writing `appliedRequestId`/`enabled`
- * to the file) rather than running the real Tauri process, mirroring how
- * `remote-access-store.test.ts` exercises the store in isolation from the
- * Rust side.
- */
-
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,92 +11,84 @@ import { createAutostartStore } from "../server/autostart-store.ts";
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "autostart-store-"));
-  try {
-    await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
-test("load throws honestly when the desktop app has not seeded the state file yet", async () => {
+async function commands(dir: string): Promise<Array<{ commandId: string; desiredEnabled: boolean }>> {
+  const path = join(dir, "autostart-commands");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const names = await readdir(path).catch(() => []);
+    if (names.filter(name => name.endsWith(".json")).length >= 2) {
+      return Promise.all(names.filter(name => name.endsWith(".json"))
+        .map(async name => JSON.parse(await readFile(join(path, name), "utf8"))));
+    }
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error("two commands were not written");
+}
+
+async function answer(dir: string, commandId: string, desiredEnabled: boolean, enabled = desiredEnabled,
+  error: string | null = null): Promise<void> {
+  const path = join(dir, "autostart-results");
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, commandId + ".json"), JSON.stringify({
+    commandId, kind: "set_autostart_enabled", desiredEnabled,
+    status: error ? "failed" : "succeeded", enabled, error,
+    startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+  }));
+}
+
+test("load reports unavailable until native observed state is seeded", async () => {
   await withTempDir(async dir => {
     const store = createAutostartStore(dir);
     await assert.rejects(store.load(), /not available yet/);
+    await writeFile(join(dir, "autostart-state.json"), JSON.stringify({
+      enabled: false, error: null, observedAt: new Date().toISOString(), revision: "one",
+    }));
+    assert.deepEqual(await store.load(), { enabled: false, error: null, pending: false });
   });
 });
 
-test("load reads back whatever the desktop app last wrote", async () => {
+test("opposite concurrent commands only resolve from their own results", async () => {
   await withTempDir(async dir => {
-    await writeFile(
-      join(dir, "autostart.json"),
-      JSON.stringify({
-        appliedRequestId: 0,
-        desiredEnabled: true,
-        enabled: true,
-        error: null,
-        requestId: 0,
-      }),
-      "utf8"
-    );
-    const store = createAutostartStore(dir);
-    assert.deepEqual(await store.load(), {
-      appliedRequestId: 0,
-      desiredEnabled: true,
-      enabled: true,
-      error: null,
-      requestId: 0,
-    });
+    const store = createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 500 });
+    const first = store.requestChange(true);
+    const second = store.requestChange(false);
+    const written = await commands(dir);
+    assert.equal(new Set(written.map(command => command.commandId)).size, 2);
+    const yes = written.find(command => command.desiredEnabled)!;
+    const no = written.find(command => !command.desiredEnabled)!;
+    await answer(dir, no.commandId, false);
+    assert.deepEqual(await second, { enabled: false, error: null, pending: false });
+    const firstState = await Promise.race([first.then(() => "resolved"), new Promise(resolve => setTimeout(() => resolve("pending"), 30))]);
+    assert.equal(firstState, "pending", "B's result must not satisfy A");
+    await answer(dir, yes.commandId, true);
+    assert.deepEqual(await first, { enabled: true, error: null, pending: false });
   });
 });
 
-test("requestChange writes a bumped requestId and resolves once the watcher applies it", async () => {
+test("stale result cannot satisfy a new request and timeout leaves its command", async () => {
   await withTempDir(async dir => {
-    const path = join(dir, "autostart.json");
-    await writeFile(
-      path,
-      JSON.stringify({
-        appliedRequestId: 0,
-        desiredEnabled: false,
-        enabled: false,
-        error: null,
-        requestId: 0,
-      }),
-      "utf8"
-    );
-    const store = createAutostartStore(dir);
-
-    // Simulate the Rust watcher applying the request shortly after it lands.
-    const applyAfterWrite = (async () => {
-      const deadline = Date.now() + 2000;
-      while (Date.now() < deadline) {
-        const current = JSON.parse(await readFile(path, "utf8"));
-        if (current.requestId === 1) {
-          await writeFile(
-            path,
-            JSON.stringify({ ...current, appliedRequestId: 1, enabled: true, error: null }),
-            "utf8"
-          );
-          return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
-      throw new Error("watcher simulation never observed requestId 1");
-    })();
-
-    const [result] = await Promise.all([store.requestChange(true), applyAfterWrite]);
-    assert.deepEqual(result, {
-      appliedRequestId: 1,
-      desiredEnabled: true,
-      enabled: true,
-      error: null,
-      requestId: 1,
-    });
-  });
-});
-
-test("requestChange throws if the watcher never applies the request", async () => {
-  await withTempDir(async dir => {
-    const store = createAutostartStore(dir);
+    const store = createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 50 });
+    await answer(dir, "ast_AAAAAAAAAAAAAAAAAAAAAA", true);
     await assert.rejects(store.requestChange(true), /was not applied/);
+    assert.equal((await readdir(join(dir, "autostart-commands"))).length, 1);
+  });
+});
+
+test("failed native result is rejected for that command", async () => {
+  await withTempDir(async dir => {
+    const store = createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 500 });
+    const request = store.requestChange(true);
+    const path = join(dir, "autostart-commands");
+    let commandId = "";
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const files = await readdir(path).catch(() => []);
+      if (files.length) { commandId = files[0]!.replace(".json", ""); break; }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.ok(commandId);
+    await answer(dir, commandId, true, false, "permission denied");
+    await assert.rejects(request, /permission denied/);
   });
 });

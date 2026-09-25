@@ -2,19 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { getOwnerDeviceAuthorizationByUserCode, initiateOwnerDeviceAuthorization } from "../server/auth.ts";
+import { tmpdir } from "node:os";
+import { getOwnerDeviceAuthorizationByUserCode, initiateOwnerDeviceAuthorization, introspect } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { closeDb, getDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { createOwnerPasswordVerifier } from "../server/owner-password-verifier.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-const SPOTIFY_MANIFEST = JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")) as {
+const SPOTIFY_MANIFEST = JSON.parse(
+  readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
+) as {
   connector_id: string;
   [key: string]: unknown;
 };
@@ -164,8 +171,15 @@ async function reviewPendingConsent(
   subjectId?: string
 ): Promise<string> {
   const resp = await fetch(`${asUrl}/consent/review`, {
-    body: JSON.stringify({ request_uri: requestUri, ...(subjectId ? { subject_id: subjectId } : {}) }),
-    headers: { Accept: "application/json", "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({
+      request_uri: requestUri,
+      ...(subjectId ? { subject_id: subjectId } : {}),
+    }),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: cookie,
+    },
     method: "POST",
   });
   const text = await resp.text();
@@ -277,7 +291,11 @@ interface LoginResult {
 
 async function login(asUrl: string, password: string, { returnTo = "/consent" } = {}): Promise<LoginResult> {
   const csrf = await fetchCsrf(asUrl, "/owner/login");
-  const body = new URLSearchParams({ _csrf: csrf.csrfField || "", password, return_to: returnTo });
+  const body = new URLSearchParams({
+    _csrf: csrf.csrfField || "",
+    password,
+    return_to: returnTo,
+  });
   const resp = await fetch(`${asUrl}/owner/login`, {
     body: body.toString(),
     headers: {
@@ -363,7 +381,9 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     assert.ok(consentText.includes("Consent request"), "renders consent body");
     assert.ok(consentText.includes("Longview"), "renders client details");
 
-    const device = await initiateOwnerDeviceAuthorization("longview", { baseUrl: asUrl });
+    const device = await initiateOwnerDeviceAuthorization("longview", {
+      baseUrl: asUrl,
+    });
     const devicePage = await fetch(`${asUrl}/device?user_code=${device.user_code}`, {
       headers: { Accept: "text/html" },
       redirect: "manual",
@@ -372,6 +392,162 @@ test("owner-auth placeholder: when PDPP_OWNER_PASSWORD unset, /consent and /devi
     const deviceText = await devicePage.text();
     assert.ok(deviceText.includes("Subject ID"), "unauth mode shows freeform subject id field");
   });
+});
+
+test("hosted first run stays locked until /setup claims the install once", async () => {
+  const setupToken = "setup-token-for-owner-claim";
+  const password = "a newly chosen owner password";
+  await withServer(
+    {
+      referenceOrigin: "https://setup.example.test",
+      trustedMetadataHosts: "localhost",
+      ownerSetupToken: setupToken,
+    },
+    async ({ asUrl }) => {
+      const setupPage = await fetch(`${asUrl}/setup`);
+      assert.equal(setupPage.status, 200, await setupPage.text());
+      assert.equal((await fetch(`${asUrl}/owner/session`)).status, 401, "owner gate is closed before claim");
+      const loginBeforeClaim = await fetch(`${asUrl}/owner/login`, {
+        redirect: "manual",
+      });
+      assert.equal(loginBeforeClaim.status, 302);
+      assert.equal(loginBeforeClaim.headers.get("location"), "/setup");
+
+      const postClaim = (token: string) =>
+        fetch(`${asUrl}/setup`, {
+          body: new URLSearchParams({ token, password }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        });
+      assert.equal((await postClaim("wrong-token")).status, 403);
+      assert.equal((await postClaim(setupToken)).status, 201);
+      assert.equal((await postClaim(setupToken)).status, 403, "claim token is one-time");
+
+      const signedIn = await login(asUrl, password);
+      assert.equal(signedIn.status, 302, "new verifier activates owner login without a restart");
+      assert.ok(signedIn.cookie);
+    }
+  );
+});
+
+test("owner-auth-required loopback first run stays locked until /setup claims the install once", async () => {
+  const setupToken = "loopback-required-setup-token";
+  const password = "a newly chosen loopback owner password";
+  const previousRequired = process.env.PDPP_OWNER_AUTH_REQUIRED;
+  process.env.PDPP_OWNER_AUTH_REQUIRED = "1";
+  try {
+    await withServer(
+      {
+        referenceOrigin: "http://localhost:3200",
+        trustedMetadataHosts: "localhost",
+        ownerSetupToken: setupToken,
+      },
+      async ({ asUrl }) => {
+        const setupPage = await fetch(`${asUrl}/setup`);
+        assert.equal(setupPage.status, 200, await setupPage.text());
+        assert.equal((await fetch(`${asUrl}/owner/session`)).status, 401, "owner gate is closed before claim");
+        const loginBeforeClaim = await fetch(`${asUrl}/owner/login`, {
+          redirect: "manual",
+        });
+        assert.equal(loginBeforeClaim.status, 302);
+        assert.equal(loginBeforeClaim.headers.get("location"), "/setup");
+
+        const claimed = await fetch(`${asUrl}/setup`, {
+          body: new URLSearchParams({ token: setupToken, password }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        });
+        assert.equal(claimed.status, 201);
+
+        const signedIn = await login(asUrl, password);
+        assert.equal(signedIn.status, 302, "new verifier activates owner login without a restart");
+        assert.ok(signedIn.cookie);
+      }
+    );
+  } finally {
+    if (previousRequired === undefined) delete process.env.PDPP_OWNER_AUTH_REQUIRED;
+    else process.env.PDPP_OWNER_AUTH_REQUIRED = previousRequired;
+  }
+});
+
+test("public console /setup proxies the first-run form claim to the loopback AS", async (t) => {
+  const previousAsUrl = process.env.PDPP_AS_URL;
+  t.after(() => {
+    if (previousAsUrl === undefined) delete process.env.PDPP_AS_URL;
+    else process.env.PDPP_AS_URL = previousAsUrl;
+  });
+
+  // Keep the console route outside this package's NodeNext type program while
+  // exercising the exact public handler at runtime.
+  const loadModule = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{
+    GET: (request: Request) => Promise<Response>;
+    POST: (request: Request) => Promise<Response>;
+  }>;
+  const publicRoute = await loadModule(new URL("../../apps/console/src/app/setup/route.ts", import.meta.url).href);
+  const setupToken = "public-console-setup-token";
+  const password = "password claimed through public console";
+  await withServer(
+    {
+      referenceOrigin: "https://setup.example.test",
+      trustedMetadataHosts: "localhost",
+      ownerSetupToken: setupToken,
+    },
+    async ({ asUrl }) => {
+      process.env.PDPP_AS_URL = asUrl;
+      const publicUrl = "https://setup.example.test/setup";
+      const setupPage = await publicRoute.GET(new Request(publicUrl, { headers: { Accept: "text/html" } }));
+      assert.equal(setupPage.status, 200);
+      assert.match(await setupPage.text(), /Claim this install/);
+
+      const formRequest = () =>
+        new Request(publicUrl, {
+          body: new URLSearchParams({ token: setupToken, password }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        });
+      const claimed = await publicRoute.POST(formRequest());
+      assert.equal(claimed.status, 201, await claimed.text());
+      assert.equal((await publicRoute.POST(formRequest())).status, 403, "setup token is consumed once");
+      assert.equal((await login(asUrl, password)).status, 302, "the claim enables owner login immediately");
+    }
+  );
+});
+
+test("setup throttles wrong tokens and does not override an environment password", async () => {
+  await withServer(
+    {
+      referenceOrigin: "https://setup.example.test",
+      trustedMetadataHosts: "localhost",
+      ownerSetupToken: "setup-token-for-owner-claim",
+      ownerAuthLoginRateLimit: { max: 1, maxLocal: 1, windowMs: 60_000 },
+    },
+    async ({ asUrl }) => {
+      const submit = () =>
+        fetch(`${asUrl}/setup`, {
+          body: new URLSearchParams({
+            token: "wrong",
+            password: "a sufficiently long password",
+          }).toString(),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          method: "POST",
+        });
+      assert.equal((await submit()).status, 403);
+      assert.equal((await submit()).status, 429);
+    }
+  );
+
+  await withServer(
+    {
+      referenceOrigin: "https://setup.example.test",
+      trustedMetadataHosts: "localhost",
+      ownerSetupToken: "should-not-be-used",
+      ownerAuthPassword: TEST_PASSWORD,
+    },
+    async ({ asUrl }) => {
+      assert.equal((await fetch(`${asUrl}/setup`)).status, 404);
+      assert.equal((await login(asUrl, TEST_PASSWORD)).status, 302);
+    }
+  );
 });
 
 test("owner-auth placeholder: open local-dev HTML display defers subject-bound resolution to JSON review", async () => {
@@ -388,8 +564,14 @@ test("owner-auth placeholder: open local-dev HTML display defers subject-bound r
     assert.match(displayHtml, CONSENT_REQUEST_PATTERN);
 
     const review = await fetch(`${asUrl}/consent/review`, {
-      body: JSON.stringify({ request_uri: requestUri, subject_id: customSubjectId }),
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request_uri: requestUri,
+        subject_id: customSubjectId,
+      }),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
       method: "POST",
     });
     const reviewText = await review.text();
@@ -402,14 +584,23 @@ test("owner-auth placeholder: open local-dev HTML display defers subject-bound r
     assert.ok(reviewBody.approval_review_revision, "review materializes a revision");
 
     const approved = await fetch(`${asUrl}/consent/approve`, {
-      body: JSON.stringify({ approval_review_revision: reviewBody.approval_review_revision, request_uri: requestUri }),
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approval_review_revision: reviewBody.approval_review_revision,
+        request_uri: requestUri,
+      }),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
       method: "POST",
     });
     const approvedText = await approved.text();
     assert.equal(approved.status, 200, approvedText);
     const approvedBody = JSON.parse(approvedText) as {
-      grant?: { streams?: Array<{ instance_ids?: string[] }>; subject?: { id?: string } };
+      grant?: {
+        streams?: Array<{ instance_ids?: string[] }>;
+        subject?: { id?: string };
+      };
     };
     assert.equal(
       approvedBody.grant?.subject?.id,
@@ -499,6 +690,77 @@ test("owner-auth placeholder: wrong password with valid CSRF returns 401 and iss
   });
 });
 
+test("owner-auth placeholder accepts an app-managed scrypt verifier", async () => {
+  const password = "app managed owner password";
+  const ownerAuthPasswordVerifier = await createOwnerPasswordVerifier(password);
+  await withServer({ ownerAuthLoginRateLimit: false, ownerAuthPasswordVerifier }, async ({ asUrl }) => {
+    const result = await login(asUrl, password);
+    assert.equal(result.status, 302);
+    assert.ok(result.cookie?.startsWith("pdpp_owner_session="), "successful verifier check issues a session");
+
+    const wrong = await login(asUrl, "different app managed password");
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.cookie, null, "wrong password does not issue a session");
+  });
+});
+
+test("owner-auth loads a database verifier before hosted posture and login", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pdpp-owner-password-startup-"));
+  const dbPath = join(dir, "pdpp.sqlite");
+  const password = "persisted app managed password";
+  initDb(dbPath);
+  try {
+    await setOwnerPassword(createOwnerPasswordVerifierStore(), password);
+  } finally {
+    closeDb();
+  }
+
+  try {
+    await withServer({ dbPath }, async ({ asUrl }) => {
+      assert.equal((await login(asUrl, password)).status, 302);
+      assert.equal((await login(asUrl, "not the persisted password")).status, 401);
+    });
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("owner-auth uses the configured password when both password sources are present", async () => {
+  const environmentPassword = "operator environment password";
+  const verifierPassword = "database owner password";
+  const ownerAuthPasswordVerifier = await createOwnerPasswordVerifier(verifierPassword);
+  await withServer(
+    {
+      ownerAuthLoginRateLimit: false,
+      ownerAuthPassword: environmentPassword,
+      ownerAuthPasswordVerifier,
+    },
+    async ({ asUrl }) => {
+      assert.equal((await login(asUrl, environmentPassword)).status, 302);
+      assert.equal((await login(asUrl, verifierPassword)).status, 401);
+    }
+  );
+});
+
+test("owner-auth consumes a legacy password file even when the configured password wins", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pdpp-owner-password-env-migration-"));
+  const dbPath = join(dir, "pdpp.sqlite");
+  const legacyPasswordPath = join(dir, "owner-password");
+  const legacyPassword = "legacy generated owner password";
+  const environmentPassword = "operator environment password";
+  await writeFile(legacyPasswordPath, `${legacyPassword}\n`, { mode: 0o600 });
+
+  try {
+    await withServer({ dbPath, ownerAuthPassword: environmentPassword }, async ({ asUrl }) => {
+      assert.equal((await login(asUrl, environmentPassword)).status, 302);
+      assert.equal((await login(asUrl, legacyPassword)).status, 401);
+      await assert.rejects(readFile(legacyPasswordPath), { code: "ENOENT" });
+    });
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 // ── 3a. sign-in page copy: product identity, no operator detail ──────────────
 // The sign-in page is the auth gate for local and server-exposed instances
 // alike. It names the product, says what the password protects, and keeps
@@ -514,7 +776,7 @@ const SIGN_IN_FORBIDDEN_COPY = [
 
 function assertOwnerSignInCopy(html: string): void {
   assert.match(html, /<title>DataConnect — Owner sign-in<\/title>/);
-  assert.match(html, /<span class="hosted-ui-wordmark">DataConnect<\/span>/);
+  assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">DataConnect<\/span>/);
   assert.match(html, /<h1 id="hosted-ui-page-title" class="pdpp-display">Sign in to DataConnect<\/h1>/);
   assert.ok(
     html.includes("This password keeps other people from seeing your data or changing which apps can use it."),
@@ -528,13 +790,19 @@ function assertOwnerSignInCopy(html: string): void {
 
 test("owner-auth: sign-in page names DataConnect and prints no operator detail", async () => {
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
-    const page = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" } });
+    const page = await fetch(`${asUrl}/owner/login`, {
+      headers: { Accept: "text/html" },
+    });
     assert.equal(page.status, 200);
     assertOwnerSignInCopy(await page.text());
 
     const csrf = await fetchCsrf(asUrl, "/owner/login");
     const wrong = await fetch(`${asUrl}/owner/login`, {
-      body: new URLSearchParams({ _csrf: csrf.csrfField ?? "", password: "wrong", return_to: "/" }).toString(),
+      body: new URLSearchParams({
+        _csrf: csrf.csrfField ?? "",
+        password: "wrong",
+        return_to: "/",
+      }).toString(),
       headers: {
         Accept: "text/html",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -554,7 +822,10 @@ test("owner-auth: sign-in page names DataConnect and prints no operator detail",
 //        recovers without any operator/admin action ─────────────────────────
 test("owner-auth placeholder: repeated failed logins are throttled with a Retry-After", async () => {
   await withServer(
-    { ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 }, ownerAuthPassword: TEST_PASSWORD },
+    {
+      ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 },
+      ownerAuthPassword: TEST_PASSWORD,
+    },
     async ({ asUrl }) => {
       const attempt1 = await login(asUrl, "wrong-1");
       assert.equal(attempt1.status, 401, "first wrong attempt is a normal 401");
@@ -573,7 +844,10 @@ test("owner-auth placeholder: repeated failed logins are throttled with a Retry-
 
 test("owner-auth placeholder: the legitimate owner is never permanently stranded — correct password clears the throttle immediately", async () => {
   await withServer(
-    { ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 }, ownerAuthPassword: TEST_PASSWORD },
+    {
+      ownerAuthLoginRateLimit: { max: 2, maxLocal: 2, windowMs: 60_000 },
+      ownerAuthPassword: TEST_PASSWORD,
+    },
     async ({ asUrl }) => {
       await login(asUrl, "wrong-1");
       const successAfterOneMiss = await login(asUrl, TEST_PASSWORD);
@@ -596,13 +870,15 @@ test("owner-auth placeholder: throttling never applies to the disabled (no-passw
     // show the disabled page every time, never a 429, regardless of how many
     // times it's requested.
     for (let i = 0; i < 3; i += 1) {
-      const resp = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" } });
+      const resp = await fetch(`${asUrl}/owner/login`, {
+        headers: { Accept: "text/html" },
+      });
       assert.equal(resp.status, 200, `GET /owner/login #${i + 1} while disabled is never throttled`);
     }
   });
 });
 
-// ── 4. correct password issues a valid signed session cookie ─────────────────
+// ── 4. correct password issues a valid opaque session cookie ─────────────────
 test("owner-auth placeholder: correct password issues a session cookie and redirects to return_to", async () => {
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
     const { status, cookie, location } = await login(asUrl, TEST_PASSWORD);
@@ -647,7 +923,10 @@ test("owner-auth placeholder: authenticated /consent/approve issues a grant and 
     const approvalReviewRevision = await reviewPendingConsent(asUrl, requestUri, cookie || "");
 
     const approveResp = await fetch(`${asUrl}/consent/approve`, {
-      body: JSON.stringify({ approval_review_revision: approvalReviewRevision, request_uri: requestUri }),
+      body: JSON.stringify({
+        approval_review_revision: approvalReviewRevision,
+        request_uri: requestUri,
+      }),
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -656,7 +935,10 @@ test("owner-auth placeholder: authenticated /consent/approve issues a grant and 
       method: "POST",
     });
     assert.equal(approveResp.status, 200);
-    const body = (await approveResp.json()) as { grant_id?: string; token?: string };
+    const body = (await approveResp.json()) as {
+      grant_id?: string;
+      token?: string;
+    };
     assert.ok(body.grant_id, "grant issued");
     assert.ok(body.token, "owner/app token issued");
     const tokenRows = getDb().prepare("SELECT subject_id FROM tokens WHERE grant_id = ?").all(body.grant_id) as {
@@ -684,7 +966,9 @@ test("owner-auth placeholder: authenticated /consent/approve issues a grant and 
 
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
     const { cookie } = await login(asUrl, TEST_PASSWORD);
-    const device = await initiateOwnerDeviceAuthorization("longview", { baseUrl: asUrl });
+    const device = await initiateOwnerDeviceAuthorization("longview", {
+      baseUrl: asUrl,
+    });
     const userCode = device.user_code;
     assert.ok(typeof userCode === "string", "device authorization returns a user code");
 
@@ -697,7 +981,10 @@ test("owner-auth placeholder: authenticated /consent/approve issues a grant and 
     assert.ok(csrf.csrfCookie?.startsWith("pdpp_owner_csrf="), "/device GET sets a CSRF cookie");
 
     const approveDeviceResp = await fetch(`${asUrl}/device/approve`, {
-      body: new URLSearchParams({ _csrf: csrfField, user_code: userCode }).toString(),
+      body: new URLSearchParams({
+        _csrf: csrfField,
+        user_code: userCode,
+      }).toString(),
       headers: {
         Accept: "text/html",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -760,7 +1047,9 @@ test("owner-auth placeholder: enabled — submitted subject_id is ignored during
   // and on /device/approve the configured subject is persisted into the owner session
   await withServer({ ownerAuthPassword: TEST_PASSWORD, ownerAuthSubjectId: CUSTOM_SUBJECT_ID }, async ({ asUrl }) => {
     const { cookie } = await login(asUrl, TEST_PASSWORD);
-    const device = await initiateOwnerDeviceAuthorization("longview", { baseUrl: asUrl });
+    const device = await initiateOwnerDeviceAuthorization("longview", {
+      baseUrl: asUrl,
+    });
     const userCode = device.user_code;
     assert.ok(typeof userCode === "string", "device authorization returns a user code");
 
@@ -784,11 +1073,13 @@ test("owner-auth placeholder: enabled — submitted subject_id is ignored during
     assert.equal(approveDeviceResp.status, 200);
 
     const rows = getDb()
-      .prepare(`
+      .prepare(
+        `
         SELECT subject_id FROM tokens
         WHERE token_kind = 'owner'
         ORDER BY created_at DESC
-    `)
+    `
+      )
       .all();
     const [ownerTokenRow] = rows;
     assert.ok(ownerTokenRow, "owner token row exists");
@@ -890,6 +1181,12 @@ test("owner-auth placeholder: logout clears the session cookie", async () => {
     const setCookie = resp.headers.get("set-cookie");
     assert.ok(setCookie?.includes("pdpp_owner_session="), "sets clearing cookie");
     assert.ok(setCookie?.includes("Max-Age=0"), "cookie is expired");
+
+    const reused = await fetch(`${asUrl}/owner/session`, {
+      headers: { Accept: "application/json", Cookie: cookie || "" },
+      redirect: "manual",
+    });
+    assert.equal(reused.status, 401, "logout revokes the server-side session record");
   });
 });
 
@@ -898,7 +1195,10 @@ test("owner-auth placeholder: enabled — GET /owner/session admits only a valid
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
     const check = (cookie?: string) =>
       fetch(`${asUrl}/owner/session`, {
-        headers: { Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+        headers: {
+          Accept: "application/json",
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
         redirect: "manual",
       });
 
@@ -919,7 +1219,442 @@ test("owner-auth placeholder: enabled — GET /owner/session admits only a valid
 
 test("owner-auth placeholder: disabled on loopback — GET /owner/session admits open local dev", async () => {
   await withServer({}, async ({ asUrl }) => {
-    const resp = await fetch(`${asUrl}/owner/session`, { headers: { Accept: "application/json" } });
+    const resp = await fetch(`${asUrl}/owner/session`, {
+      headers: { Accept: "application/json" },
+    });
     assert.equal(resp.status, 204);
   });
+});
+
+test("owner-auth: session inventory lists revocable devices and owner device-flow bearers without exposing bearer values", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const first = await login(asUrl, TEST_PASSWORD);
+    const second = await login(asUrl, TEST_PASSWORD);
+    assert.ok(first.cookie && second.cookie);
+
+    const tokenValue = "owner-device-flow-secret-for-session-inventory-test";
+    getDb()
+      .prepare(
+        "INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, expires_at) VALUES(?, NULL, ?, ?, 'owner', ?)"
+      )
+      .run(tokenValue, OWNER_SUBJECT_ID, "inventory-test-client", new Date(Date.now() + 60_000).toISOString());
+
+    const list = await fetchJson(`${asUrl}/owner/sessions`, {
+      headers: { Accept: "application/json", Cookie: first.cookie },
+    });
+    assert.equal(list.status, 200);
+    const body = list.body as {
+      sessions: Array<{
+        id: string;
+        label: string;
+        createdAt: number;
+        lastSeenAt: number;
+        ipAddress: string | null;
+        current: boolean;
+      }>;
+      bearers: Array<{
+        id: string;
+        label: string;
+        createdAt: string;
+        expiresAt: string | null;
+      }>;
+    };
+    assert.equal(body.sessions.length, 2);
+    assert.ok(body.sessions.every((session) => session.label.length > 0));
+    assert.ok(
+      body.sessions.every((session) => Number.isFinite(session.createdAt) && Number.isFinite(session.lastSeenAt))
+    );
+    assert.equal(body.sessions.filter((session) => session.current).length, 1);
+    assert.ok(body.sessions.find((session) => session.current)?.ipAddress, "the AS records the peer IP");
+    assert.equal(body.bearers.length, 1);
+    assert.match(body.bearers[0]?.id ?? "", /^tok_[A-Za-z0-9_-]{43}$/u);
+    assert.ok(body.bearers[0]?.createdAt.endsWith("Z"), "database timestamps are projected as explicit UTC values");
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(tokenValue, "u"), "the bearer secret never leaves the AS");
+
+    const tokenPublicId = `tok_${createHash("sha256").update(tokenValue).digest("base64url")}`;
+    const revokedBearer = await fetch(`${asUrl}/owner/bearers/${tokenPublicId}/revoke`, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: first.cookie,
+      },
+      method: "POST",
+    });
+    assert.equal(revokedBearer.status, 204);
+    assert.equal(
+      getDb().prepare("SELECT revoked FROM tokens WHERE token_id = ?").get<{ revoked: number }>(tokenValue)?.revoked,
+      1
+    );
+
+    const revokedOthers = await fetch(`${asUrl}/owner/sessions/revoke-others`, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: first.cookie,
+      },
+      method: "POST",
+    });
+    assert.equal(revokedOthers.status, 204);
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: first.cookie },
+        })
+      ).status,
+      204,
+      "revoke-others preserves the current session"
+    );
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: second.cookie },
+        })
+      ).status,
+      401,
+      "the other browser is immediately refused"
+    );
+
+    const remaining = await fetchJson(`${asUrl}/owner/sessions`, {
+      headers: { Accept: "application/json", Cookie: first.cookie },
+    });
+    const remainingBody = remaining.body as { sessions: Array<{ id: string }> };
+    assert.equal(remainingBody.sessions.length, 1);
+    const revokedCurrent = await fetch(`${asUrl}/owner/sessions/${remainingBody.sessions[0]?.id}/revoke`, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: first.cookie,
+      },
+      method: "POST",
+    });
+    assert.equal(revokedCurrent.status, 204);
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: first.cookie },
+        })
+      ).status,
+      401
+    );
+  });
+});
+
+test("owner-auth: revoke-all ends the current and every other browser session", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const first = await login(asUrl, TEST_PASSWORD);
+    const second = await login(asUrl, TEST_PASSWORD);
+    assert.ok(first.cookie && second.cookie);
+
+    const revoked = await fetch(`${asUrl}/owner/sessions/revoke-all`, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: first.cookie,
+      },
+      method: "POST",
+    });
+    assert.equal(revoked.status, 204);
+    assert.equal(
+      getDb()
+        .prepare("SELECT COUNT(*) AS count FROM owner_sessions WHERE subject_id = ? AND revoked_at IS NULL")
+        .get<{ count: number }>(OWNER_SUBJECT_ID)?.count,
+      0
+    );
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: first.cookie },
+        })
+      ).status,
+      401,
+      "the session making the request is also revoked"
+    );
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: second.cookie },
+        })
+      ).status,
+      401,
+      "every other browser session is revoked"
+    );
+  });
+});
+
+test("owner-auth: app-managed password change keeps this session and ends other sessions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pdpp-owner-password-change-"));
+  const dbPath = join(directory, "owner.sqlite");
+  const oldPassword = "correct-horse-battery-staple";
+  const newPassword = "a-new-password-with-fifteen-plus";
+  try {
+    initDb(dbPath);
+    await setOwnerPassword(createOwnerPasswordVerifierStore(), oldPassword);
+    closeDb();
+    await withServer(
+      {
+        dbPath,
+      },
+      async ({ asUrl }) => {
+        const first = await login(asUrl, oldPassword);
+        const second = await login(asUrl, oldPassword);
+        assert.ok(first.cookie && second.cookie);
+        const change = (currentPassword: string, newPassword: string) =>
+          fetch(`${asUrl}/owner/password/change`, {
+            body: JSON.stringify({ currentPassword, newPassword }),
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json",
+              Cookie: first.cookie as string,
+            },
+            method: "POST",
+          });
+
+        const wrongCurrentPassword = await change("wrong current password", newPassword);
+        assert.equal(wrongCurrentPassword.status, 401);
+        assert.equal(
+          ((await wrongCurrentPassword.json()) as { error?: { code?: string; message?: string } }).error?.code,
+          "owner_password_invalid"
+        );
+        assert.equal((await change(oldPassword, "too-short")).status, 400);
+        assert.equal((await change(oldPassword, newPassword)).status, 204);
+        assert.equal(
+          (
+            await fetch(`${asUrl}/owner/session`, {
+              headers: { Cookie: first.cookie as string },
+            })
+          ).status,
+          204
+        );
+        assert.equal(
+          (
+            await fetch(`${asUrl}/owner/session`, {
+              headers: { Cookie: second.cookie as string },
+            })
+          ).status,
+          401
+        );
+        assert.equal((await login(asUrl, oldPassword)).status, 401);
+        assert.equal((await login(asUrl, newPassword)).status, 302);
+      }
+    );
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("owner-device approval is fenced against app-password rotation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pdpp-owner-device-password-race-"));
+  const dbPath = join(directory, "owner.sqlite");
+  const initialPassword = "initial owner device password";
+  const resetPassword = "reset owner device password";
+  let releaseApproval: () => void = () => undefined;
+  let markApprovalPaused: () => void = () => undefined;
+  const approvalPaused = new Promise<void>((resolve) => {
+    markApprovalPaused = resolve;
+  });
+  const approvalResume = new Promise<void>((resolve) => {
+    releaseApproval = resolve;
+  });
+  let pauseNextApproval = true;
+  try {
+    initDb(dbPath);
+    await setOwnerPassword(createOwnerPasswordVerifierStore(), initialPassword);
+    closeDb();
+
+    await withServer(
+      {
+        dbPath,
+        ownerDeviceApprovalBeforeDecision: async () => {
+          if (!pauseNextApproval) return;
+          pauseNextApproval = false;
+          markApprovalPaused();
+          await approvalResume;
+        },
+      },
+      async ({ asUrl }) => {
+        const firstSession = await login(asUrl, initialPassword);
+        const firstCookie = firstSession.cookie;
+        assert.ok(firstCookie);
+        const device = await initiateOwnerDeviceAuthorization("longview", { baseUrl: asUrl });
+        if (typeof device.user_code !== "string" || typeof device.device_code !== "string") {
+          throw new Error("Device authorization did not return its codes.");
+        }
+        const userCode = device.user_code;
+        const deviceCode = device.device_code;
+        const csrf = await fetchHostedFormCsrf(
+          asUrl,
+          `/device?user_code=${encodeURIComponent(userCode)}`,
+          firstCookie
+        );
+        assert.ok(csrf.csrfField);
+        const sendApproval = (cookie: string, csrfCookie: string, csrfField: string) =>
+          fetch(`${asUrl}/device/approve`, {
+            body: new URLSearchParams({ _csrf: csrfField, user_code: userCode }).toString(),
+            headers: {
+              Accept: "text/html",
+              "Content-Type": "application/x-www-form-urlencoded",
+              Cookie: `${cookie}; ${csrfCookie}`,
+            },
+            method: "POST",
+            redirect: "manual",
+          });
+
+        const inFlightApproval = sendApproval(firstCookie, csrf.csrfCookie ?? "", csrf.csrfField);
+        await Promise.race([
+          approvalPaused,
+          inFlightApproval.then(async (response) => {
+            throw new Error(`Approval returned ${response.status} before the test barrier: ${await response.text()}`);
+          }),
+        ]);
+
+        const passwordStore = createOwnerPasswordVerifierStore();
+        const resetVerifier = await createOwnerPasswordVerifier(resetPassword);
+        assert.equal(await passwordStore.writeAndRevokeAccess(resetVerifier, OWNER_SUBJECT_ID), true);
+        releaseApproval();
+
+        const staleApprovalResponse = await inFlightApproval;
+        assert.equal(staleApprovalResponse.status, 409);
+        const stillPending = getDb()
+          .prepare("SELECT status, token_id FROM owner_device_auth WHERE device_code = ?")
+          .get<{ status: string; token_id: string | null }>(deviceCode);
+        assert.deepEqual(stillPending, { status: "pending", token_id: null });
+
+        const secondSession = await login(asUrl, resetPassword);
+        const secondCookie = secondSession.cookie;
+        assert.ok(secondCookie);
+        const secondCsrf = await fetchHostedFormCsrf(
+          asUrl,
+          `/device?user_code=${encodeURIComponent(userCode)}`,
+          secondCookie
+        );
+        assert.ok(secondCsrf.csrfField);
+        const completedApproval = await sendApproval(
+          secondCookie,
+          secondCsrf.csrfCookie ?? "",
+          secondCsrf.csrfField
+        );
+        assert.equal(completedApproval.status, 200);
+        const approved = getDb()
+          .prepare("SELECT token_id FROM owner_device_auth WHERE device_code = ?")
+          .get<{ token_id: string | null }>(deviceCode);
+        const tokenId = approved?.token_id;
+        assert.ok(tokenId);
+        assert.equal((await introspect(tokenId)).active, true);
+
+        const nextVerifier = await createOwnerPasswordVerifier("final owner device password");
+        const activeVerifier = await passwordStore.readVersioned();
+        if (!activeVerifier) throw new Error("Expected stored verifier after the first reset.");
+        assert.equal(
+          await passwordStore.writeAndRevokeAccess(
+            nextVerifier,
+            OWNER_SUBJECT_ID,
+            null,
+            activeVerifier.revision
+          ),
+          true
+        );
+        assert.equal((await introspect(tokenId)).active, false);
+      }
+    );
+  } finally {
+    releaseApproval();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("owner-auth: env-managed password change is rejected and source remains env", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const { cookie } = await login(asUrl, TEST_PASSWORD);
+    assert.ok(cookie);
+    const source = await fetch(`${asUrl}/owner/password`, {
+      headers: { Accept: "application/json", Cookie: cookie },
+    });
+    assert.deepEqual(await source.json(), {
+      object: "owner_password",
+      source: "env",
+      minimumLength: 15,
+    });
+    const response = await fetch(`${asUrl}/owner/password/change`, {
+      body: JSON.stringify({
+        currentPassword: TEST_PASSWORD,
+        newPassword: "another-long-password-here",
+      }),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      method: "POST",
+    });
+    assert.equal(response.status, 409);
+    assert.equal(((await response.json()) as { error?: { code?: string } }).error?.code, "owner_password_env_managed");
+  });
+});
+
+test("owner-auth: desktop sign-in reuses one labeled This computer session row", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const loginDesktop = async () => {
+      const response = await fetch(`${asUrl}/owner/login`, {
+        body: JSON.stringify({ password: TEST_PASSWORD }),
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-PDPP-Owner-Session-Label": "This computer",
+        },
+        method: "POST",
+        redirect: "manual",
+      });
+      assert.equal(response.status, 302);
+      assert.match(response.headers.get("set-cookie") ?? "", /^pdpp_owner_session=/u);
+      return extractSessionCookie(getRawSetCookieList(response));
+    };
+
+    const priorCookie = await loginDesktop();
+    const currentCookie = await loginDesktop();
+    assert.ok(priorCookie && currentCookie);
+    assert.equal(
+      getDb()
+        .prepare("SELECT COUNT(*) AS count FROM owner_sessions WHERE subject_id = ? AND device_key = 'desktop-shell'")
+        .get<{ count: number }>(OWNER_SUBJECT_ID)?.count,
+      1,
+      "repeated shell login updates its device slot instead of adding inventory rows"
+    );
+    const list = await fetchJson(`${asUrl}/owner/sessions`, {
+      headers: { Accept: "application/json", Cookie: currentCookie },
+    });
+    assert.equal(list.status, 200);
+    const sessions = (list.body as { sessions: Array<{ label: string; current: boolean }> }).sessions;
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0]?.label, "This computer");
+    assert.equal(sessions[0]?.current, true);
+    assert.equal(
+      (
+        await fetch(`${asUrl}/owner/session`, {
+          headers: { Accept: "application/json", Cookie: priorCookie },
+        })
+      ).status,
+      401
+    );
+  });
+});
+
+test("owner-auth: an SQLite owner session survives an authorization-server restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pdpp-owner-session-restart-"));
+  const dbPath = join(directory, "pdpp.sqlite");
+  let cookie = "";
+  try {
+    await withServer({ dbPath, ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+      const loginResult = await login(asUrl, TEST_PASSWORD);
+      assert.ok(loginResult.cookie);
+      cookie = loginResult.cookie;
+    });
+    await withServer({ dbPath, ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+      const response = await fetch(`${asUrl}/owner/session`, {
+        headers: { Accept: "application/json", Cookie: cookie },
+      });
+      assert.equal(response.status, 204, "the durable hashed session remains valid after a process restart");
+    });
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
 });

@@ -66,6 +66,7 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
+import { assertConnectorManifestStreamSubsetSync } from "./connector-manifest-write-fence.ts";
 import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-model.ts";
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
@@ -8722,6 +8723,7 @@ function planSemanticTimeRepairs(
   return { repairable, toAbsence, toSemanticDate, updates };
 }
 
+
 // Registration changes can alter the manifest-derived sort facts of already
 // accepted SQLite rows. SQLite deliberately stores only semantic_time (cursor
 // and primary-key positions are derived from canonical record JSON at read
@@ -8776,6 +8778,7 @@ export async function backfillSqliteRecordSemanticTimesForManifest(
       connectorInstanceId,
     });
     await withConnectorInstanceWrite(connectorInstanceId, async () => {
+      assertConnectorManifestStreamSubsetSync(connectorId, manifest as unknown as Record<string, unknown>);
       await maybeSqliteRecordSortBackfillPhaseForTest("inside-instance-fence", {
         connectorId,
         connectorInstanceId,

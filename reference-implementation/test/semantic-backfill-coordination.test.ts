@@ -117,13 +117,11 @@ const baseManifest = {
 };
 
 const semanticManifest = {
-  connector_id: "semantic-fence",
-  protocol_version: "0.1.0",
-  streams: [
-    { name: "first", query: { search: { semantic_fields: ["subject"] } } },
-    { name: "later", query: { search: { semantic_fields: ["subject"] } } },
-  ],
-  version: "1.0.0",
+  ...baseManifest,
+  streams: baseManifest.streams.map((stream) => ({
+    ...stream,
+    query: { search: { semantic_fields: ["subject"] } },
+  })),
 };
 
 test("semantic backfill does NOT hold one instance fence through the whole rebuild — a same-instance write proceeds while an embed is in flight, and both a different instance's write and the eventual backfill converge correctly", async () => {
@@ -165,6 +163,7 @@ test("semantic backfill does NOT hold one instance fence through the whole rebui
   try {
     await registerConnector(baseManifest);
     await ingestRecord(target("cin_semantic_fence_a"), record("first", "a-first", "first blocked"));
+    await registerConnector(semanticManifest, { backfillRetrievalIndexes: false });
     assert.deepEqual(connectorInstanceWriteCoordinatorStatsForTests(), {
       activeOwnerships: 0,
       activeWriters: 0,
@@ -260,6 +259,7 @@ test("direct ingest queued before semantic backfill is repaired by the later per
     // The initial row makes the instance discoverable while the later direct
     // ingest is still queued behind the test-held instance fence.
     await ingestRecord(target(connectorInstanceId), record("first", "existing", "existing semantic row"));
+    await registerConnector(semanticManifest, { backfillRetrievalIndexes: false });
     const entered = deferred();
     const release = deferred();
     const heldPromise = withConnectorInstanceWrite(connectorInstanceId, async () => {
@@ -354,6 +354,7 @@ test("REQUIRED DISCRIMINATOR: all configured admission slots held by long startu
       }
       const liveIngestInstanceId = "cin_saturation_live_ingest";
       await ingestRecord(target(liveIngestInstanceId), record("first", "seed", "seed text"));
+      await registerConnector(semanticManifest, { backfillRetrievalIndexes: false });
 
       // Start every holder's rebuild concurrently — each one's FIRST
       // embed call blocks, so by the time all holderCount entered-signals
@@ -365,9 +366,9 @@ test("REQUIRED DISCRIMINATOR: all configured admission slots held by long startu
         holderBackfills.push(
           semanticIndexBackfillForManifest({
             manifest: {
-              connector_id: "semantic-fence",
+              ...semanticManifest,
               storage_binding: { connector_instance_id: instanceId },
-              streams: [{ name: "first", query: { search: { semantic_fields: ["subject"] } } }],
+              streams: [semanticManifest.streams[0]],
             } as unknown as NonNullable<SemanticBackfillOptions["manifest"]>,
           })
         );

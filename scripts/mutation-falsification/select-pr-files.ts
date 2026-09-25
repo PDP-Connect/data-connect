@@ -530,6 +530,13 @@ function isProductionSourceExtension(path: string): boolean {
   )
 }
 
+function isCohortTestPath(entryPath: string, cohort: CohortDefinition): boolean {
+  if (cohort.root !== ".") {
+    return entryPath.startsWith(`${cohort.root}/`)
+  }
+  return cohort.productionPrefixes.some((prefix) => entryPath.startsWith(prefix))
+}
+
 /**
  * Classify one diff entry for one cohort.
  *
@@ -596,9 +603,12 @@ export function selectCohortTests(
     if (!isTestPath(entry.path) || !isProductionSourceExtension(entry.path)) {
       continue
     }
-    // Test files live inside the cohort root but outside the production
-    // prefixes, so cohort membership is decided by the root here.
-    if (cohort.root !== "." && !entry.path.startsWith(`${cohort.root}/`)) {
+    // Non-root cohorts can keep tests beside their own root even when tests
+    // live outside production prefixes. Root cohorts share the repository root,
+    // so their tests must be narrowed by production prefix; otherwise the
+    // scripts cohort picks up client/reference tests that its Stryker config
+    // cannot honestly run for script mutants.
+    if (!isCohortTestPath(entry.path, cohort)) {
       continue
     }
     selected.push(toCohortRelative(entry.path, cohort.root))
@@ -670,6 +680,14 @@ export function ownedByNestedTestRunner(
  * The exclusion is recorded in the intent packet rather than applied silently.
  */
 export function escapesCohortRoot(testPath: SelectedFile, testSource: string): boolean {
+  // Git can walk out of a Stryker sandbox to the enclosing checkout metadata.
+  // A test that asks for the repository root can then read files outside the
+  // copied cohort. That is the same boundary as an explicit ../ path, but the
+  // traversal is hidden behind Git.
+  if (/\bexecFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]rev-parse["'`]\s*,\s*["'`]--show-toplevel["'`]/.test(testSource)) {
+    return true
+  }
+
   // How far the test's own directory sits below the cohort root. A `../` budget
   // larger than this climbs past the root, which is what leaves the sandbox.
   const depth = testPath.split("/").length - 1

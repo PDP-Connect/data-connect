@@ -1,17 +1,30 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   installStagedDependencies,
   launchScript,
+  manifestTarget,
   pruneForeignLibcPackages,
   pruneForeignPlatformPrebuilds,
+  referenceGenerationId,
   referenceStackRoot,
+  sourceInputHash,
   stageReferenceStack,
   verifyReferenceStackRoot,
 } from "./ensure-reference-stack.js"
@@ -63,6 +76,75 @@ function fixtureRoot() {
   return root
 }
 
+function tauriHookFixture() {
+  const root = fixtureRoot()
+  const target = "x86_64-unknown-linux-gnu"
+  const binaryDirectory = join(root, "src-tauri", "binaries")
+  mkdirSync(binaryDirectory, { recursive: true })
+  const nodeBinary = join(
+    binaryDirectory,
+    `pdpp-node-${target}`
+  )
+  writeFileSync(
+    nodeBinary,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    { mode: 0o755 }
+  )
+  chmodSync(nodeBinary, 0o755)
+  writeFileSync(
+    join(binaryDirectory, "pdpp-node-aarch64-apple-darwin"),
+    "not selected by the Tauri target triple\n"
+  )
+
+  writeFileSync(
+    join(root, "package.json"),
+    JSON.stringify({ devDependencies: { tsx: "4.0.0" } })
+  )
+  writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+  writeFileSync(
+    join(root, "reference-implementation", "package.json"),
+    JSON.stringify({ dependencies: {} })
+  )
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true })
+  writeFileSync(join(root, "node_modules", ".bin", "tsx"), "")
+
+  for (const [name, path] of [
+    ["@pdpp/collector-runtime", "packages/collector-runtime"],
+    ["@pdpp/connector-protocol", "packages/connector-protocol"],
+    ["@pdpp/display", "reference-implementation/vendor/display"],
+    ["@pdpp/cli", "reference-implementation/vendor/cli"],
+    ["@pdpp/read-core", "reference-implementation/vendor/read-core"],
+    ["@pdpp/mcp-server", "reference-implementation/vendor/mcp-server"],
+  ]) {
+    const packageRoot = join(root, path)
+    mkdirSync(packageRoot, { recursive: true })
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name, version: "1.0.0" })
+    )
+  }
+  for (const path of [
+    "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz",
+    "reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz",
+  ]) {
+    writeFileSync(join(root, path), "fixture tarball")
+  }
+
+  const fakeNpm = join(root, "fake-npm.mjs")
+  const nativeExtension =
+    process.platform === "darwin"
+      ? "dylib"
+      : process.platform === "win32"
+        ? "dll"
+        : "so"
+  writeFileSync(
+    fakeNpm,
+    `import { mkdirSync, writeFileSync } from "node:fs"\nimport { join } from "node:path"\n\nif (process.argv[2] === "install") {\n  const files = [\n    ["node_modules/tsx/package.json", "{}\\n"],\n    ["node_modules/patchright/package.json", "{}\\n"],\n    ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "sqlite\\n"],\n    ["node_modules/sqlite-vec/build/Release/vec0.${nativeExtension}", "vec\\n"],\n  ]\n  for (const [path, content] of files) {\n    const filePath = join(process.cwd(), path)\n    mkdirSync(join(filePath, ".."), { recursive: true })\n    writeFileSync(filePath, content)\n  }\n}\n`
+  )
+
+  return { fakeNpm, nodeBinary, root, target }
+}
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0))
     rmSync(root, { force: true, recursive: true })
@@ -79,6 +161,43 @@ describe("reference stack staging contract", () => {
     expect(() =>
       referenceStackRoot("/workspace/data-connect", "../release")
     ).toThrow(/invalid Tauri profile/)
+  })
+
+  it("uses Tauri's target triple in build hooks", () => {
+    expect(
+      manifestTarget(undefined, {
+        TAURI_ENV_PLATFORM: "linux",
+        TAURI_ENV_ARCH: "x86_64",
+        TAURI_ENV_TARGET_TRIPLE: "x86_64-unknown-linux-gnu",
+      })
+    ).toBe("x86_64-unknown-linux-gnu")
+    expect(
+      manifestTarget("explicit-target", {
+        TAURI_ENV_TARGET_TRIPLE: "x86_64-unknown-linux-gnu",
+      })
+    ).toBe("explicit-target")
+  })
+
+  it("keys immutable reference generations by the complete manifest", () => {
+    const manifest = {
+      profile: "release",
+      target: "x86_64-unknown-linux-gnu",
+      node: { abi: "127", version: "24.21.0" },
+      inputs: { sha256: "same-source" },
+      files: [{ path: "native.node", sha256: "linux-bytes" }],
+    }
+    expect(referenceGenerationId(manifest)).toBe(
+      referenceGenerationId({ ...manifest })
+    )
+    expect(
+      referenceGenerationId({ ...manifest, target: "aarch64-apple-darwin" })
+    ).not.toBe(referenceGenerationId(manifest))
+    expect(
+      referenceGenerationId({
+        ...manifest,
+        files: [{ path: "native.node", sha256: "different-bytes" }],
+      })
+    ).not.toBe(referenceGenerationId(manifest))
   })
 
   it("requires the verifier root to use the same profile-scoped contract", () => {
@@ -215,6 +334,60 @@ describe("reference stack staging contract", () => {
     })
   }
 
+  it("prunes the musl canvas addon from a glibc Linux stage", () => {
+    const root = fixtureRoot()
+    const nativePackage = join(
+      root,
+      "node_modules",
+      "@napi-rs",
+      "canvas-linux-x64-gnu"
+    )
+    const muslPackage = join(
+      root,
+      "node_modules",
+      "@napi-rs",
+      "canvas-linux-x64-musl"
+    )
+    mkdirSync(nativePackage, { recursive: true })
+    mkdirSync(muslPackage, { recursive: true })
+    writeFileSync(join(nativePackage, "package.json"), "{}\n")
+    writeFileSync(join(muslPackage, "package.json"), "{}\n")
+
+    pruneForeignPlatformPrebuilds(root, { platform: "linux", arch: "x64" })
+
+    expect(existsSync(nativePackage)).toBe(true)
+    expect(existsSync(muslPackage)).toBe(false)
+  })
+
+  it("keeps only the current platform and architecture ONNX runtime files", () => {
+    const root = fixtureRoot()
+    const napiRoot = join(
+      root,
+      "node_modules",
+      "onnxruntime-node",
+      "bin",
+      "napi-v6"
+    )
+    for (const relativePath of [
+      "linux/x64/onnxruntime_binding.node",
+      "linux/arm64/onnxruntime_binding.node",
+      "darwin/arm64/onnxruntime_binding.node",
+      "win32/x64/onnxruntime_binding.node",
+    ]) {
+      const file = join(napiRoot, relativePath)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, "fixture addon\n")
+    }
+
+    pruneForeignPlatformPrebuilds(root, { platform: "linux", arch: "x64" })
+
+    expect(readdirSync(join(napiRoot, "linux", "x64"))).toEqual([
+      "onnxruntime_binding.node",
+    ])
+    expect(readdirSync(napiRoot)).toEqual(["linux"])
+    expect(readdirSync(join(napiRoot, "linux"))).toEqual(["x64"])
+  })
+
   it("does nothing when neither package ships a prebuilds directory", () => {
     const root = fixtureRoot()
     expect(() => pruneForeignPlatformPrebuilds(root)).not.toThrow()
@@ -288,6 +461,51 @@ describe("reference stack staging contract", () => {
     expect(result).toEqual({ manifest, reused: true, root })
   })
 
+  it.skipIf(process.platform !== "linux")(
+    "reuses the explicit release stage from Tauri's target-triple hook",
+    () => {
+      const { fakeNpm, nodeBinary, root, target } = tauriHookFixture()
+      const environmentKeys = [
+        "PDPP_NODE_BINARY",
+        "TARGET",
+        "TAURI_ENV_TARGET",
+        "TAURI_ENV_TARGET_TRIPLE",
+        "npm_execpath",
+      ]
+      const previousEnvironment = Object.fromEntries(
+        environmentKeys.map(key => [key, process.env[key]])
+      )
+      try {
+        for (const key of environmentKeys) delete process.env[key]
+        process.env.npm_execpath = fakeNpm
+        const explicitStage = stageReferenceStack({
+          projectRoot: root,
+          nodeBinary,
+          profile: "release",
+          target,
+        })
+        process.env.TAURI_ENV_TARGET_TRIPLE = target
+        const hookStage = stageReferenceStack({
+          projectRoot: root,
+          profile: "release",
+        })
+
+        expect(explicitStage.reused).toBe(false)
+        expect(hookStage).toEqual({
+          manifest: explicitStage.manifest,
+          reused: true,
+          root: explicitStage.root,
+        })
+      } finally {
+        for (const key of environmentKeys) {
+          const value = previousEnvironment[key]
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
+    }
+  )
+
   it("fails closed, without deleting anything, on a stage that matches by metadata but is missing a required file", () => {
     // A corrupt/incomplete stage can still match on metadata (interrupted
     // publish, partial disk write, external deletion of one file). Cache
@@ -349,6 +567,36 @@ describe("reference stack staging contract", () => {
       expect(after.inputs.sha256).not.toBe(before.inputs.sha256)
     })
   }
+
+  it("excludes workspace build output (dist/) from the source-input hash", () => {
+    // Regression for #249: beforeBuildCommand reruns ensure-reference-stack.js
+    // after the release workflow's own explicit staging step already ran it.
+    // Both runs call buildWorkspacePackages, which rebuilds dist/ (including
+    // dist/.tsbuildinfo) for packages/collector-runtime, packages/connector-protocol,
+    // reference-implementation/vendor/read-core, and reference-implementation/vendor/mcp-server.
+    // Those dist/ files are not behavioral source inputs. The build hook
+    // must also use the same target triple as the explicit staging step;
+    // Tauri provides it as TAURI_ENV_TARGET_TRIPLE.
+    const projectRoot = process.cwd()
+    const distDir = join(projectRoot, "packages", "collector-runtime", "dist")
+    const tsbuildinfoPath = join(distDir, ".tsbuildinfo")
+    const preexisting = existsSync(distDir)
+    if (!preexisting) mkdirSync(distDir, { recursive: true })
+    const originalContent = existsSync(tsbuildinfoPath)
+      ? readFileSync(tsbuildinfoPath, "utf8")
+      : undefined
+    try {
+      writeFileSync(tsbuildinfoPath, "buildinfo-run-A\n")
+      const hashA = sourceInputHash(projectRoot)
+      writeFileSync(tsbuildinfoPath, "buildinfo-run-B\n")
+      const hashB = sourceInputHash(projectRoot)
+      expect(hashB).toBe(hashA)
+    } finally {
+      if (!preexisting) rmSync(distDir, { force: true, recursive: true })
+      else if (originalContent === undefined) rmSync(tsbuildinfoPath, { force: true })
+      else writeFileSync(tsbuildinfoPath, originalContent)
+    }
+  })
 
   it("prunes a symlinked node_modules before traversing into it (cycle-safe)", () => {
     // Only the source tree carries the cycle: staged dependencies must
@@ -438,6 +686,7 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     const invocations = JSON.parse(readFileSync(invocationsPath, "utf8"))
     const installArgs = invocations.find(args => args[0] === "install")
     expect(installArgs).toBeDefined()
+    expect(installArgs).toContain("--allow-git=all")
     expect(installArgs).not.toContain("--no-package-lock")
   })
 })

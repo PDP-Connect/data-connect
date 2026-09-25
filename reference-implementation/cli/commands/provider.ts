@@ -42,6 +42,7 @@ interface ProviderSummary {
   response_types_supported?: string[];
   token_endpoint: string | null;
   token_endpoint_auth_methods_supported: string[];
+  token_endpoint_auth_signing_alg_values_supported?: string[];
 }
 
 function baseProviderSummary(discovered: DiscoveredProvider): ProviderSummary {
@@ -96,6 +97,12 @@ function applyOptionalProviderFields(summary: ProviderSummary, metadata: Authori
     metadata.client_id_metadata_document_supported !== undefined
   ) {
     summary.client_id_metadata_document_supported = metadata.client_id_metadata_document_supported;
+  }
+  if (
+    "token_endpoint_auth_signing_alg_values_supported" in metadata &&
+    metadata.token_endpoint_auth_signing_alg_values_supported !== undefined
+  ) {
+    summary.token_endpoint_auth_signing_alg_values_supported = metadata.token_endpoint_auth_signing_alg_values_supported;
   }
 }
 

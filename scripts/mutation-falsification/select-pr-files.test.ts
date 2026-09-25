@@ -39,6 +39,12 @@ const referenceCohort: CohortDefinition = {
   ],
 }
 
+const scriptsCohort: CohortDefinition = {
+  name: "scripts",
+  root: ".",
+  productionPrefixes: ["scripts/"],
+}
+
 const inputs: ExecutionInputs = {
   cohortRoot: ".",
   configDigest: "sha256:config",
@@ -366,6 +372,15 @@ describe("selectCohortTests", () => {
     expect(selectCohortTests(diff, referenceCohort)).toEqual([])
   })
 
+  it("narrows root cohort tests by production prefix", () => {
+    const diff = parseNameStatusZ(
+      "M\0apps/console/src/core.test.ts\0" +
+        "M\0reference-implementation/test/acknowledged-loss.test.ts\0" +
+        "M\0scripts/check-dockerfile-copy-paths.test.ts\0"
+    )
+    expect(selectCohortTests(diff, scriptsCohort)).toEqual(["scripts/check-dockerfile-copy-paths.test.ts"])
+  })
+
   it("takes a renamed test's destination, since that is the file at head", () => {
     const diff = parseNameStatusZ(
       "R100\0reference-implementation/test/old.test.ts\0reference-implementation/test/new.test.ts\0"
@@ -659,6 +674,12 @@ describe("escapesCohortRoot", () => {
     const source = `const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-implementation.yml");`
     expect(escapesCohortRoot("scripts/ci-console-prebuild.test.ts", source)).toBe(true)
+  })
+
+  it("detects repository-root reads discovered through Git metadata", () => {
+    const source = `const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+await readFile(join(root, "test-accounting.manifest.json"));`
+    expect(escapesCohortRoot("scripts/test-accounting/inventory.test.ts", source)).toBe(true)
   })
 
   it("detects an above-root path reached through a directory alias", () => {

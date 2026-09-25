@@ -127,18 +127,27 @@ function assertNoSymlinks(root, current = root) {
   }
 }
 
-function walkFiles(root, { current = root, skipNodeModules = false, output = [] } = {}) {
+function walkFiles(
+  root,
+  { current = root, skipNodeModules = false, skipDist = false, output = [] } = {}
+) {
   for (const entry of readdirSync(current, { withFileTypes: true }).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   )) {
     // Prune before recursing, not after: skipNodeModules avoids walking a
     // dependency tree only to discard it. stagedFileHashes needs the real
-    // staged node_modules, so it omits skipNodeModules.
+    // staged node_modules, so it omits skipNodeModules. skipDist likewise
+    // excludes build output (e.g. tsc's dist/, including dist/.tsbuildinfo,
+    // which is not byte-stable across two consecutive builds of unchanged
+    // source): sourceInputFiles must hash only source, not the build's own
+    // prior output, or the recipe rebuilds its own cache key out from under
+    // itself every time buildWorkspacePackages runs.
     if (skipNodeModules && entry.name === "node_modules") continue
+    if (skipDist && entry.name === "dist") continue
     const filePath = join(current, entry.name)
     const fileStats = statSync(filePath)
     if (fileStats.isDirectory())
-      walkFiles(root, { current: filePath, skipNodeModules, output })
+      walkFiles(root, { current: filePath, skipNodeModules, skipDist, output })
     else if (fileStats.isFile()) output.push(filePath)
   }
   return output
@@ -162,7 +171,9 @@ function sourceInputFiles(projectRoot) {
     join(projectRoot, "scripts", "ensure-reference-stack.js"),
     join(projectRoot, "scripts", "stage-generations.js"),
     ...roots.flatMap(root =>
-      existsSync(root) ? walkFiles(root, { skipNodeModules: true }) : []
+      existsSync(root)
+        ? walkFiles(root, { skipNodeModules: true, skipDist: true })
+        : []
     ),
   ]
     .filter(
@@ -173,7 +184,7 @@ function sourceInputFiles(projectRoot) {
     .sort()
 }
 
-function sourceInputHash(projectRoot) {
+export function sourceInputHash(projectRoot) {
   const hash = createHash("sha256")
   for (const filePath of sourceInputFiles(projectRoot)) {
     hash.update(relative(projectRoot, filePath).split("\\").join("/"))
@@ -184,13 +195,23 @@ function sourceInputHash(projectRoot) {
   return hash.digest("hex")
 }
 
-function manifestTarget(target) {
+function targetFromEnvironment(env = process.env) {
+  return env.TAURI_ENV_TARGET_TRIPLE || env.TAURI_ENV_TARGET || env.TARGET
+}
+
+export function manifestTarget(target, env = process.env) {
   return (
     target ||
-    process.env.TAURI_ENV_TARGET_TRIPLE ||
-    process.env.TARGET ||
+    targetFromEnvironment(env) ||
     `${process.platform}-${process.arch}`
   )
+}
+
+export function referenceGenerationId(manifest) {
+  return createHash("sha256")
+    .update(JSON.stringify(manifest))
+    .digest("hex")
+    .slice(0, 12)
 }
 
 function manifestProfile(profile) {
@@ -261,7 +282,7 @@ function defaultNodeBinary(projectRoot) {
   const candidates = nodeSidecarCandidates(projectRoot)
   if (candidates.length === 1) return candidates[0]
   if (candidates.length > 1) {
-    const target = process.env.TAURI_ENV_TARGET_TRIPLE || process.env.TARGET
+    const target = targetFromEnvironment()
     const matching = candidates.find(
       candidate => target && candidate.includes(target)
     )
@@ -395,8 +416,11 @@ const PACKAGES_WITH_PLATFORM_PREBUILDS = [
   "better-sqlite3-multiple-ciphers",
 ]
 
-export function pruneForeignPlatformPrebuilds(stageRoot) {
-  const keep = `${process.platform}-${process.arch}.node`
+export function pruneForeignPlatformPrebuilds(
+  stageRoot,
+  { platform = process.platform, arch = process.arch } = {}
+) {
+  const keep = `${platform}-${arch}.node`
   for (const packageName of PACKAGES_WITH_PLATFORM_PREBUILDS) {
     const prebuildsDir = join(
       stageRoot,
@@ -407,6 +431,46 @@ export function pruneForeignPlatformPrebuilds(stageRoot) {
     if (!existsSync(prebuildsDir)) continue
     for (const entry of readdirSync(prebuildsDir)) {
       if (entry !== keep) rmSync(join(prebuildsDir, entry), { force: true })
+    }
+  }
+
+  // The napi-rs canvas package includes both glibc and musl addons for the
+  // current Linux architecture. linuxdeploy treats the musl addon as a Linux
+  // ELF and fails when ldd cannot resolve its musl loader on our glibc target.
+  // The matching GNU addon is the one loaded by the shipped Linux runtime.
+  if (platform === "linux") {
+    rmSync(
+      join(stageRoot, "node_modules", "@napi-rs", `canvas-linux-${arch}-musl`),
+      { force: true, recursive: true }
+    )
+
+    const napiRoot = join(
+      stageRoot,
+      "node_modules",
+      "onnxruntime-node",
+      "bin"
+    )
+    if (existsSync(napiRoot)) {
+      for (const napiVersion of readdirSync(napiRoot)) {
+        const versionRoot = join(napiRoot, napiVersion)
+        if (!statSync(versionRoot).isDirectory()) continue
+        for (const runtimePlatform of readdirSync(versionRoot)) {
+          const platformRoot = join(versionRoot, runtimePlatform)
+          if (!statSync(platformRoot).isDirectory()) continue
+          if (runtimePlatform !== platform) {
+            rmSync(platformRoot, { force: true, recursive: true })
+            continue
+          }
+          for (const runtimeArch of readdirSync(platformRoot)) {
+            if (runtimeArch !== arch) {
+              rmSync(join(platformRoot, runtimeArch), {
+                force: true,
+                recursive: true,
+              })
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -465,6 +529,7 @@ export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
     nodeBinary,
     [
       "install",
+      "--allow-git=all",
       "--ignore-scripts",
       "--omit=dev",
       "--install-links",
@@ -753,9 +818,13 @@ export function stageReferenceStack({
     // Reuse an existing directory only after its manifest and file hashes
     // match this candidate; never replace a possibly live generation.
     mkdirSync(parent, { recursive: true })
+    // Source identity alone is not a generation identity: native modules,
+    // Node ABI, profile, and target are part of the manifest too. Name the
+    // immutable directory from the complete artifact description so builds
+    // with identical source but different outputs never collide.
     const generationRoot = join(
       parent,
-      `ri-${manifest.inputs.sha256.slice(0, 12)}`
+      `ri-${referenceGenerationId(manifest)}`
     )
     const generationCandidate = join(parent, `.ri-generation-${process.pid}`)
     rmSync(generationCandidate, { force: true, recursive: true })

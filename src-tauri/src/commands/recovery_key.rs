@@ -12,28 +12,17 @@
 //! remote-access provider, though, there is no HTTP-native way to answer this
 //! request either: the recovery code is derived from a value the reference
 //! server has no way to read (the Rust process's OS-keychain-backed database
-//! key). This module's watcher mirrors the ACTUAL existing precedent for that
-//! situation in this codebase -- `remote_access.rs`'s
-//! `remote_access_config_path`/`spawn_remote_access_config_watcher` pair,
-//! where Rust and the reference server agree on one shared JSON file under
-//! `PDPP_DATA_DIR` and Rust polls it -- rather than a request/ack protocol,
-//! which does not exist anywhere in this codebase today (despite an earlier
-//! description of this task assuming an autostart-watcher precedent for it;
-//! no such watcher exists in this repo -- see the recovery-key PR notes).
+//! key).
 //!
-//! `recovery-export.json` shape:
-//! `{ "requestId": u64, "appliedRequestId": u64 | null, "code": string | null, "error": string | null }`
-//! RS bumps `requestId` to ask for a fresh export. The watcher notices
-//! `requestId != appliedRequestId`, computes the code (or an error), and
-//! writes `appliedRequestId = requestId` plus either `code` or `error`. RS
-//! polls until `appliedRequestId == requestId`, reads the result, and -- this
-//! is the one place this file differs from the remote-access precedent, and
-//! it is a real disclosure -- immediately writes `code: null` back so the
-//! plaintext recovery code does not linger on disk after the round trip.
+//! The reference server writes one private command file under
+//! `recovery-export-commands/rky_*.json`. The watcher answers with one
+//! private result file under `recovery-export-results/rky_*.json`, removes
+//! the command, and lets the server consume and unlink the short-lived result.
 
 use crate::owner_credential::{
-    database_encryption_key_path, database_is_encrypted, load_or_create_database_encryption_key,
-    DatabaseKeyError,
+    DatabaseKeyError, credential_encryption_key_path, database_encryption_key_path,
+    database_is_encrypted, load_or_create_credential_encryption_key,
+    load_or_create_database_encryption_key,
 };
 use crate::recovery_code;
 use crate::unified::unified_database_path;
@@ -43,65 +32,151 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
-const RECOVERY_EXPORT_FILE: &str = "recovery-export.json";
+const LEGACY_RECOVERY_EXPORT_FILE: &str = "recovery-export.json";
+const RECOVERY_EXPORT_COMMANDS_DIR: &str = "recovery-export-commands";
+const RECOVERY_EXPORT_RESULTS_DIR: &str = "recovery-export-results";
+const RECOVERY_EXPORT_RESULT_TTL: Duration = Duration::from_secs(120);
 const WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct RecoveryExportState {
-    request_id: u64,
-    applied_request_id: Option<u64>,
-    code: Option<String>,
-    error: Option<String>,
+struct RecoveryExportCommand {
+    command_id: String,
+    kind: String,
+    created_at: String,
+    expires_at: String,
 }
 
-fn recovery_export_path(app: &AppHandle) -> Result<PathBuf, String> {
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryExportResult {
+    command_id: String,
+    status: String,
+    code: Option<String>,
+    error: Option<String>,
+    created_at: String,
+    expires_at: String,
+    consumed_at: Option<String>,
+}
+
+fn recovery_export_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|path| path.join(crate::unified::UNIFIED_DB_DIRECTORY).join(RECOVERY_EXPORT_FILE))
+        .map(|path| path.join(crate::unified::UNIFIED_DB_DIRECTORY))
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-fn load_recovery_export_state(path: &Path) -> Result<RecoveryExportState, String> {
-    if !path.exists() {
-        return Ok(RecoveryExportState::default());
-    }
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read recovery export state: {error}"))?;
-    if content.trim().is_empty() {
-        return Ok(RecoveryExportState::default());
-    }
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse recovery export state: {error}"))
+fn command_dir(root: &Path) -> PathBuf {
+    root.join(RECOVERY_EXPORT_COMMANDS_DIR)
 }
 
-/// Writes `recovery-export.json` and locks it to 0600 immediately after the
-/// write. Unlike `remote-access.json` (config only), this file transiently
-/// carries the plaintext database encryption key in its `code` field, so it
-/// needs the same file-mode protection every other secret in this codebase
-/// gets in `owner_credential.rs` -- world-readable default permissions would
-/// let any local user read the key for as long as it sits on disk.
-fn save_recovery_export_state(path: &Path, state: &RecoveryExportState) -> Result<(), String> {
+fn result_dir(root: &Path) -> PathBuf {
+    root.join(RECOVERY_EXPORT_RESULTS_DIR)
+}
+
+fn legacy_recovery_export_path(root: &Path) -> PathBuf {
+    root.join(LEGACY_RECOVERY_EXPORT_FILE)
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn ttl_iso(ttl: Duration) -> String {
+    (chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_default()).to_rfc3339()
+}
+
+fn is_expired(value: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|expires_at| expires_at <= chrono::Utc::now())
+        .unwrap_or(true)
+}
+
+fn load_recovery_export_command(path: &Path) -> Result<RecoveryExportCommand, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read recovery export command: {error}"))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("Failed to parse recovery export command: {error}"))
+}
+
+/// Writes recovery export command/result files and locks them to 0600.
+/// Result files transiently carry plaintext recovery material, so they need
+/// the same file-mode protection every other secret in this codebase gets in
+/// `owner_credential.rs`.
+fn save_private_json<T: Serialize>(path: &Path, value: &T, context: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create recovery export directory: {error}"))?;
     }
-    crate::atomic_write::write_json_atomically(
-        path,
-        state,
-        "Failed to write recovery export state",
-    )?;
-    // set_permissions runs after the write, same ordering as before this
-    // atomic-write change -- narrowing this window further (e.g. by
-    // creating the temp file pre-locked to 0600) is a separate hardening
-    // task, not part of the write-corruption fix this function exists for.
+    crate::atomic_write::write_json_atomically(path, value, context)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Failed to protect recovery export state: {error}"))?;
+            .map_err(|error| format!("Failed to protect recovery export file: {error}"))?;
     }
     Ok(())
+}
+
+fn list_command_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let dir = command_dir(root);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|error| {
+        format!(
+            "Failed to read recovery export command directory {}: {error}",
+            dir.display()
+        )
+    })? {
+        let path = entry
+            .map_err(|error| format!("Failed to read recovery export command entry: {error}"))?
+            .path();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name.starts_with("rky_") && file_name.ends_with(".json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn cleanup_expired_recovery_exports(root: &Path) {
+    for dir in [command_dir(root), result_dir(root)] {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten().take(100) {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                let _ = fs::remove_file(&path);
+                continue;
+            };
+            let expires_at = serde_json::from_str::<serde_json::Value>(&content)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("expiresAt")
+                        .and_then(|expires_at| expires_at.as_str())
+                        .map(str::to_owned)
+                });
+            if expires_at.as_deref().map(is_expired).unwrap_or(true) {
+                if dir.ends_with(RECOVERY_EXPORT_RESULTS_DIR) {
+                    if let Some(name) = path.file_name() {
+                        let _ = fs::remove_file(command_dir(root).join(name));
+                    }
+                }
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 const NO_VAULT_MESSAGE: &str = "No encrypted vault exists yet. There is nothing to back up until DataConnect has started at least once.";
@@ -124,6 +199,27 @@ fn export_recovery_code_at(key_path: &Path, database_path: &Path) -> Result<Stri
     recovery_code::encode(&credential).map_err(|error| error.to_string())
 }
 
+fn export_recovery_kit_v2_at(
+    database_key_path: &Path,
+    credential_key_path: &Path,
+    database_path: &Path,
+) -> Result<String, String> {
+    if !database_is_encrypted(database_path)? {
+        return Err(NO_VAULT_MESSAGE.to_string());
+    }
+
+    let database_encryption_key =
+        load_or_create_database_encryption_key(database_key_path, database_path)
+            .map_err(DatabaseKeyError::into_message)?;
+    let credential_encryption_key =
+        load_or_create_credential_encryption_key(credential_key_path, database_path)?;
+    let kit = recovery_code::RecoveryKitV2 {
+        database_encryption_key: Some(database_encryption_key),
+        credential_encryption_key,
+    };
+    recovery_code::encode_v2(&kit).map_err(|error| error.to_string())
+}
+
 fn export_recovery_code(app: &AppHandle) -> Result<String, String> {
     if crate::unified::attach_mode() {
         // Attach mode has no local database key at all -- a different
@@ -136,77 +232,121 @@ fn export_recovery_code(app: &AppHandle) -> Result<String, String> {
     }
     let database_path = unified_database_path(app)?;
     let key_path = database_encryption_key_path(app)?;
-    export_recovery_code_at(&key_path, &database_path)
+    let credential_key_path = credential_encryption_key_path(app)?;
+    export_recovery_kit_v2_at(&key_path, &credential_key_path, &database_path)
 }
 
 /// Tauri command for the recovery window / any future in-process caller.
 /// Not reachable from the console window (see module docs) -- Settings goes
-/// through the `recovery-export.json` file protocol below instead.
+/// through the recovery export command/result file protocol below instead.
 #[tauri::command]
 pub(crate) fn export_database_encryption_recovery_code(app: AppHandle) -> Result<String, String> {
     export_recovery_code(&app)
 }
 
 /// Spawn the poller that answers Settings' "Export recovery code" requests.
-/// Mirrors `spawn_remote_access_config_watcher`'s shared-file-polling shape
-/// (see module docs for why this differs from a request/ack scheme).
+/// The reference server creates one command file per request; this watcher
+/// answers each command with one expiring result file.
 pub(crate) fn spawn_recovery_export_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_applied: Option<u64> = None;
         loop {
             tokio::time::sleep(WATCHER_POLL_INTERVAL).await;
-            tick_recovery_export_watcher(&app, &mut last_applied);
+            tick_recovery_export_watcher(&app);
         }
     });
 }
 
-fn tick_recovery_export_watcher(app: &AppHandle, last_applied: &mut Option<u64>) {
-    let path = match recovery_export_path(app) {
-        Ok(path) => path,
+fn tick_recovery_export_watcher(app: &AppHandle) {
+    let root = match recovery_export_root(app) {
+        Ok(root) => root,
         Err(error) => {
-            log::warn!("Recovery export watcher could not resolve its state path: {error}");
+            log::warn!("Recovery export watcher could not resolve its root path: {error}");
             return;
         }
     };
-    let state = match load_recovery_export_state(&path) {
-        Ok(state) => state,
+
+    let _ = fs::remove_file(legacy_recovery_export_path(&root));
+    cleanup_expired_recovery_exports(&root);
+
+    let paths = match list_command_paths(&root) {
+        Ok(paths) => paths,
         Err(error) => {
-            log::warn!("Recovery export watcher could not read its state file: {error}");
+            log::warn!("Recovery export watcher could not list command files: {error}");
             return;
         }
     };
-    if Some(state.request_id) == *last_applied {
-        return;
-    }
 
-    let started = Instant::now();
-    let result = export_recovery_code(app);
-    let ok = result.is_ok();
-    log::info!(
-        "Recovery export watcher: request_id={} duration_ms={} ok={ok}",
-        state.request_id,
-        started.elapsed().as_millis()
-    );
+    for path in paths {
+        let command = match load_recovery_export_command(&path) {
+            Ok(command) => command,
+            Err(error) => {
+                log::warn!("Recovery export watcher could not read command: {error}");
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+        };
+        let file_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if command.command_id != file_stem
+            || !command.command_id.starts_with("rky_")
+            || command.kind != "export_database_encryption_recovery_code"
+        {
+            log::warn!(
+                "Recovery export watcher ignored invalid command file {}",
+                path.display()
+            );
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        if is_expired(&command.expires_at) {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
 
-    let next_state = match result {
-        Ok(code) => RecoveryExportState {
-            request_id: state.request_id,
-            applied_request_id: Some(state.request_id),
-            code: Some(code),
-            error: None,
-        },
-        Err(error) => RecoveryExportState {
-            request_id: state.request_id,
-            applied_request_id: Some(state.request_id),
-            code: None,
-            error: Some(error),
-        },
-    };
-    if let Err(error) = save_recovery_export_state(&path, &next_state) {
-        log::warn!("Recovery export watcher could not write its state file: {error}");
-        return;
+        let started = Instant::now();
+        let result = export_recovery_code(app);
+        let ok = result.is_ok();
+        log::info!(
+            "Recovery export watcher: command_id={} duration_ms={} ok={ok}",
+            command.command_id,
+            started.elapsed().as_millis()
+        );
+
+        let result = match result {
+            Ok(code) => RecoveryExportResult {
+                command_id: command.command_id.clone(),
+                status: "succeeded".to_string(),
+                code: Some(code),
+                error: None,
+                created_at: now_iso(),
+                expires_at: ttl_iso(RECOVERY_EXPORT_RESULT_TTL),
+                consumed_at: None,
+            },
+            Err(error) => RecoveryExportResult {
+                command_id: command.command_id.clone(),
+                status: "failed".to_string(),
+                code: None,
+                error: Some(error),
+                created_at: now_iso(),
+                expires_at: ttl_iso(RECOVERY_EXPORT_RESULT_TTL),
+                consumed_at: None,
+            },
+        };
+        let result_path = result_dir(&root).join(format!("{}.json", command.command_id));
+        if let Err(error) = save_private_json(
+            &result_path,
+            &result,
+            "Failed to write recovery export result",
+        ) {
+            log::warn!("Recovery export watcher could not write result file: {error}");
+            continue;
+        }
+        if let Err(error) = fs::remove_file(&path) {
+            log::warn!("Recovery export watcher could not remove answered command: {error}");
+        }
     }
-    *last_applied = Some(state.request_id);
 }
 
 #[cfg(test)]
@@ -215,48 +355,75 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn export_state_round_trips_through_json() {
+    fn export_result_round_trips_through_private_json() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join(RECOVERY_EXPORT_FILE);
+        let path = directory.path().join("rky_test.json");
 
-        let state = RecoveryExportState {
-            request_id: 3,
-            applied_request_id: Some(3),
+        let result = RecoveryExportResult {
+            command_id: "rky_test".to_string(),
+            status: "succeeded".to_string(),
             code: Some("AB12-CD34".to_string()),
             error: None,
+            created_at: now_iso(),
+            expires_at: ttl_iso(RECOVERY_EXPORT_RESULT_TTL),
+            consumed_at: None,
         };
-        save_recovery_export_state(&path, &state).expect("saved state");
-        let loaded = load_recovery_export_state(&path).expect("loaded state");
-        assert_eq!(loaded, state);
+        save_private_json(&path, &result, "save test result").expect("saved result");
+        let loaded: RecoveryExportResult =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read result"))
+                .expect("loaded result");
+        assert_eq!(loaded, result);
     }
 
     #[cfg(unix)]
     #[test]
-    fn saved_export_state_file_is_locked_to_owner_only() {
+    fn saved_export_result_file_is_locked_to_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join(RECOVERY_EXPORT_FILE);
-        let state = RecoveryExportState {
-            request_id: 1,
-            applied_request_id: Some(1),
+        let path = directory.path().join("rky_test.json");
+        let result = RecoveryExportResult {
+            command_id: "rky_test".to_string(),
+            status: "succeeded".to_string(),
             code: Some("plaintext-key-must-not-be-world-readable".to_string()),
             error: None,
+            created_at: now_iso(),
+            expires_at: ttl_iso(RECOVERY_EXPORT_RESULT_TTL),
+            consumed_at: None,
         };
 
-        save_recovery_export_state(&path, &state).expect("saved state");
+        save_private_json(&path, &result, "save test result").expect("saved result");
 
         let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "recovery-export.json must be 0600, got {mode:o}");
+        assert_eq!(
+            mode, 0o600,
+            "recovery export result must be 0600, got {mode:o}"
+        );
     }
 
     #[test]
-    fn missing_export_state_file_defaults_to_zero_request_id() {
+    fn expired_result_cleanup_removes_matching_command() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join(RECOVERY_EXPORT_FILE);
+        let root = directory.path();
+        let command_path = command_dir(root).join("rky_test.json");
+        let result_path = result_dir(root).join("rky_test.json");
+        fs::create_dir_all(command_dir(root)).expect("command dir");
+        fs::create_dir_all(result_dir(root)).expect("result dir");
+        fs::write(
+            &command_path,
+            r#"{"commandId":"rky_test","kind":"export_database_encryption_recovery_code","createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("command");
+        fs::write(
+            &result_path,
+            r#"{"commandId":"rky_test","status":"succeeded","code":"SECRET","error":null,"createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:00:00Z","consumedAt":null}"#,
+        )
+        .expect("result");
 
-        let loaded = load_recovery_export_state(&path).expect("default state");
-        assert_eq!(loaded, RecoveryExportState::default());
+        cleanup_expired_recovery_exports(root);
+
+        assert!(!command_path.exists());
+        assert!(!result_path.exists());
     }
 
     #[test]
@@ -286,7 +453,8 @@ mod tests {
     #[test]
     fn export_succeeds_and_round_trips_when_a_vault_exists() {
         let directory = tempdir().expect("temp directory");
-        let key_path = directory.path().join("database-encryption-key");
+        let database_key_path = directory.path().join("database-encryption-key");
+        let credential_key_path = directory.path().join("credential-encryption-key");
         let database_path = directory.path().join("pdpp.sqlite");
         fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
 
@@ -297,40 +465,57 @@ mod tests {
         // second call -- that stability is what the recovery code actually
         // has to round-trip against, independent of which backend (keychain
         // vs 0600 file) this environment happens to route through.
-        let first_code = export_recovery_code_at(&key_path, &database_path).expect("export code");
+        let first_code =
+            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
+                .expect("export recovery kit");
         let second_code =
-            export_recovery_code_at(&key_path, &database_path).expect("export code again");
+            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
+                .expect("export recovery kit again");
         assert_eq!(first_code, second_code);
 
-        let decoded = recovery_code::decode(&first_code).expect("recovery code decodes");
-        assert!(!decoded.is_empty());
+        let decoded = recovery_code::decode_v2(&first_code).expect("recovery kit decodes");
+        assert!(decoded.database_encryption_key.is_some());
+        assert!(!decoded.credential_encryption_key.is_empty());
     }
 
     #[test]
-    fn rs_style_cleanup_clears_the_code_field_after_reading_it() {
-        // Simulates the RS-side half of the round trip: after RS observes
-        // appliedRequestId == requestId and reads the code, it must write
-        // the code field back to null so the plaintext code does not linger
-        // on disk. This test proves the file shape supports that write
-        // (RS itself is exercised by reference-implementation's own tests).
+    fn exported_v2_kit_imports_both_keys() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join(RECOVERY_EXPORT_FILE);
+        let database_key_path = directory.path().join("database-encryption-key");
+        let credential_key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let code =
+            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
+                .expect("export recovery kit");
+        let database_key =
+            load_or_create_database_encryption_key(&database_key_path, &database_path)
+                .map_err(DatabaseKeyError::into_message)
+                .expect("database key");
+        let credential_key =
+            load_or_create_credential_encryption_key(&credential_key_path, &database_path)
+                .expect("credential key");
 
-        let answered = RecoveryExportState {
-            request_id: 1,
-            applied_request_id: Some(1),
-            code: Some("SECRET-CODE".to_string()),
-            error: None,
-        };
-        save_recovery_export_state(&path, &answered).expect("saved answered state");
+        let imported = recovery_code::decode_for_import(&code).expect("import decodes kit");
+        assert_eq!(imported.database_encryption_key, database_key);
+        assert_eq!(imported.credential_encryption_key, Some(credential_key));
+    }
 
-        let mut read_back = load_recovery_export_state(&path).expect("loaded state");
-        assert_eq!(read_back.code.as_deref(), Some("SECRET-CODE"));
-        read_back.code = None;
-        save_recovery_export_state(&path, &read_back).expect("cleared state");
+    #[test]
+    fn legacy_v1_code_still_imports_the_database_key() {
+        let directory = tempdir().expect("temp directory");
+        let database_key_path = directory.path().join("database-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let code =
+            export_recovery_code_at(&database_key_path, &database_path).expect("export v1 code");
+        let database_key =
+            load_or_create_database_encryption_key(&database_key_path, &database_path)
+                .map_err(DatabaseKeyError::into_message)
+                .expect("database key");
 
-        let cleared = load_recovery_export_state(&path).expect("loaded cleared state");
-        assert_eq!(cleared.code, None);
-        assert_eq!(cleared.applied_request_id, Some(1));
+        let imported = recovery_code::decode_for_import(&code).expect("import decodes v1");
+        assert_eq!(imported.database_encryption_key, database_key);
+        assert_eq!(imported.credential_encryption_key, None);
     }
 }

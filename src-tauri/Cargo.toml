@@ -120,3 +120,6 @@ gtk = "0.18"
 # matching this crate's MSRV -- verified against crates.io's published
 # rust_version per release, not assumed.
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+robius-authentication = "0.3.1"

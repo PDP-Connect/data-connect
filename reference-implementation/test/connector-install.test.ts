@@ -120,6 +120,84 @@ test("a corrupted active entrypoint fails closed", async () => {
   }
 });
 
+test("status skips a stale active record with missing bytes and reinstall repairs it", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    rmSync(active.root, { force: true, recursive: true });
+
+    assert.deepEqual(await service.status(), []);
+    assert.equal(await resolveActiveConnectorPath(createFileConnectorInstallStore(dataDir), "github"), null);
+
+    const repaired = await service.install("github", digest);
+    assert.equal(repaired.digest, digest);
+    assert.equal((await service.status())[0]?.digest, digest);
+    assert.equal(existsSync(join(repaired.root, "dist", "collection-profile.mjs")), true);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("status skips a corrupt expected root and reinstall replaces it safely", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    writeFileSync(join(active.root, "dist", "collection-profile.mjs"), "tampered\n");
+
+    assert.deepEqual(await service.status(), []);
+
+    const repaired = await service.install("github", digest);
+    assert.equal((await service.status())[0]?.digest, digest);
+    assert.equal(readFileSync(join(repaired.root, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("reinstall refuses to replace a symlinked active digest root", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const outsideDir = mkdtempSync(join(tmpdir(), "pdpp-connector-outside-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const active = await service.install("github", digest);
+    rmSync(active.root, { force: true, recursive: true });
+    symlinkSync(outsideDir, active.root, "dir");
+
+    assert.deepEqual(await service.status(), []);
+    await assert.rejects(() => service.install("github", digest), /already exists without a matching active record/);
+    assert.deepEqual(readdirSync(outsideDir), []);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+    rmSync(outsideDir, { force: true, recursive: true });
+  }
+});
+
 test("an active root outside the configured data directory is invalid", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   const outsideDir = mkdtempSync(join(tmpdir(), "pdpp-connector-outside-"));
@@ -359,6 +437,80 @@ test("concurrent installs are serialized by the process-safe lock", async () => 
     releaseStage?.();
     await first;
   } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("catalog remains readable while an install holds the install lock", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let enteredResolve: (() => void) | undefined;
+  let releaseStage: (() => void) | undefined;
+  const entered = new Promise<void>((resolve) => {
+    enteredResolve = resolve;
+  });
+  const stageReleased = new Promise<void>((resolve) => {
+    releaseStage = resolve;
+  });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => ({ entries: [entry], generatedAt: "2026-09-24T00:00:00.000Z" }),
+      dataDir,
+      installArtifact: async (root) => {
+        enteredResolve?.();
+        await stageReleased;
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const installing = service.install("github", digest);
+    await entered;
+
+    assert.equal((await service.catalog())[0]?.digest, digest);
+
+    releaseStage?.();
+    await installing;
+  } finally {
+    releaseStage?.();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("concurrent catalog reads share one in-flight refresh", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let enteredResolve: (() => void) | undefined;
+  let releaseRefresh: (() => void) | undefined;
+  let loadCount = 0;
+  const entered = new Promise<void>((resolve) => {
+    enteredResolve = resolve;
+  });
+  const refreshReleased = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        loadCount += 1;
+        enteredResolve?.();
+        await refreshReleased;
+        return [entry];
+      },
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const first = service.catalog();
+    await entered;
+    const second = service.catalog();
+
+    releaseRefresh?.();
+    const [firstEntries, secondEntries] = await Promise.all([first, second]);
+
+    assert.equal(loadCount, 1);
+    assert.deepEqual(secondEntries, firstEntries);
+    assert.equal(firstEntries[0]?.digest, digest);
+  } finally {
+    releaseRefresh?.();
     rmSync(dataDir, { force: true, recursive: true });
   }
 });

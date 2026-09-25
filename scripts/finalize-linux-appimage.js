@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Restore the pkg personal-server binary after Tauri's Linux bundler runs
- * patchelf on resource ELF files, then rebuild the AppImage from that AppDir.
+ * Restore the pkg personal-server binary and staged stacks after Tauri's Linux
+ * bundler runs patchelf on resource ELF files, then rebuild the AppImage.
  */
 
 import { spawnSync } from "node:child_process"
@@ -17,7 +17,7 @@ import {
   rmSync,
 } from "node:fs"
 import { homedir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const ROOT = resolve(import.meta.dirname, "..")
@@ -32,7 +32,10 @@ const defaultAppImageDir = join(
 const appImageDir = resolve(process.argv[3] || defaultAppImageDir)
 const sourceDist = join(ROOT, "personal-server", "dist")
 const sourceReferenceStack = join(
-  dirname(dirname(appImageDir)),
+  ROOT,
+  "src-tauri",
+  "target",
+  "release",
   "reference-stack"
 )
 

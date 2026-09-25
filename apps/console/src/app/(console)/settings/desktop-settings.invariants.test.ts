@@ -78,10 +78,9 @@ test("start-minimized reads and writes go through the generic app-config actions
   const setting = await readFile(SETTING_FILE, "utf8")
 
   assert.match(setting, /useLiveQuery\("desktop\.app-config", loadAppConfig\)/)
-  assert.match(setting, /saveAppConfig\(\{ \.\.\.\(await loadAppConfig\(\)\), \.\.\.patch \}\)/)
-  assert.match(setting, /saveAppConfigField\(\{ startMinimized: next \}\)/)
+  assert.match(setting, /saveAppConfigField\(\{ field: "startMinimized", value: next \}\)/)
   assert.match(setting, /import \{[^}]*loadAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
-  assert.match(setting, /import \{[^}]*saveAppConfigAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
+  assert.match(setting, /import \{[^}]*saveAppConfigFieldAction[^}]*\} from "\.\/desktop-settings-actions\.ts"/)
 })
 
 test("both toggles are off by default in their copy, matching the surveyed field default", async () => {
@@ -105,7 +104,7 @@ test("close-to-tray defaults to true and reads/writes through the generic app-co
   // does when config.json has no closeToTray key at all.
   assert.match(setting, /const closeToTray = asCloseToTray\(appConfig\.data\)/)
   assert.match(setting, /checked=\{stateIsKnown && closeToTray\}/)
-  assert.match(setting, /saveAppConfigField\(\{ closeToTray: next \}\)/)
+  assert.match(setting, /saveAppConfigField\(\{ field: "closeToTray", value: next \}\)/)
   assert.match(
     setting,
     /candidate\.closeToTray !== false/,

@@ -4,14 +4,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from "react"
-import { exportRecoveryCodeAction } from "./recovery-key-actions.ts"
+import { exportRecoveryKitAction } from "./recovery-key-actions.ts"
 
 /**
- * Exports the desktop database encryption key as a printable recovery code
- * (src-tauri/src/recovery_code.rs). This is the ONLY durable copy of that
- * key an owner can access outside the OS keychain -- a lost keychain entry
- * with no recovery code on hand is permanent, total data loss of the
- * encrypted Personal Server vault.
+ * Exports the Personal Server recovery kit as a printable code. The kit holds
+ * encryption keys only: the credential-vault key, plus the SQLite database key
+ * when this server uses an encrypted SQLite vault. It does not back up the
+ * database file or a Postgres database.
  *
  * The warning copy below is deliberately about CUSTODY, not phishing: per
  * ai/research/product-design/local-vault-key-recovery-artifact-should-be-a-checksummed-code-not-a-raw-keyfile-or-bip39-mnemonic.md,
@@ -21,11 +20,11 @@ import { exportRecoveryCodeAction } from "./recovery-key-actions.ts"
  * any UI during normal use.
  */
 export function RecoveryKeySetting({
-  exportCode: suppliedExportCode,
+  exportKit: suppliedExportKit,
 }: {
-  exportCode?: typeof exportRecoveryCodeAction
+  exportKit?: typeof exportRecoveryKitAction
 } = {}) {
-  const exportCode = suppliedExportCode ?? exportRecoveryCodeAction
+  const exportKit = suppliedExportKit ?? exportRecoveryKitAction
   const [code, setCode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -35,7 +34,7 @@ export function RecoveryKeySetting({
     setBusy(true)
     setError(null)
     setCopyState("idle")
-    void exportCode()
+    void exportKit()
       .then(result => {
         if (!result.ok) {
           setError(result.message)
@@ -61,7 +60,7 @@ export function RecoveryKeySetting({
   return (
     <div className="grid gap-3">
       <p className="pdpp-caption text-muted-foreground">
-        Anyone who has this code can read everything in your Personal Server vault. Store it somewhere only you control, such as a password manager or a safe.
+        This code restores encryption keys only. Keep your database backup separately. Anyone who has both can read everything in your Personal Server vault.
       </p>
 
       {error ? (
@@ -84,11 +83,11 @@ export function RecoveryKeySetting({
               onClick={copyCode}
               type="button"
             >
-              {copyState === "copied" ? "Copied" : "Copy to clipboard"}
+              {copyState === "copied" ? "Copied" : "Copy kit"}
             </button>
             {copyState === "failed" ? (
               <span className="pdpp-caption text-muted-foreground">
-                Could not copy automatically. Select the text above and copy it manually.
+                Could not copy automatically. Select the kit above and copy it manually.
               </span>
             ) : null}
           </div>
@@ -101,7 +100,7 @@ export function RecoveryKeySetting({
         onClick={runExport}
         type="button"
       >
-        {busy ? "Exporting…" : code ? "Export again" : "Export recovery code"}
+        {busy ? "Exporting…" : code ? "Export kit again" : "Export recovery kit"}
       </button>
     </div>
   )

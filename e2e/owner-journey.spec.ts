@@ -23,6 +23,53 @@ const OWNER_PASSWORD = process.env.E2E_OWNER_PASSWORD ?? ""
 
 const CONNECTOR_ROW_FLOOR = 20
 const MIN_SVG_ROW_PROPORTION = 0.5
+const LOADING_OR_SKELETON_TEXT = /\b(?:Loading(?:…|\.\.\.)|Skeleton)\b/i
+
+const OWNER_SURFACES: readonly {
+  path: string
+  labels: readonly RegExp[]
+}[] = [
+  {
+    path: "/",
+    labels: [/\bWhere you stand\b/i, /\bSource attention\b/i, /\bNotifications\b/i],
+  },
+  { path: "/connect", labels: [/\bConnect apps\b/i] },
+  {
+    path: "/sources",
+    labels: [/\bSources\b/i, /\bNo sources yet\b|\brecords?\b[\s\S]*\bstreams?\b/i],
+  },
+  { path: "/sources/add", labels: [/\bAdd source\b/i] },
+  {
+    path: "/explore",
+    labels: [
+      /\bExplore\b/i,
+      /Search or filter|Search records|text across every searchable stream|\boperators\b.*\bcon:/i,
+      /\bFilters\b/i,
+      /\bnewest\b.*\boldest\b/i,
+    ],
+  },
+  { path: "/grants", labels: [/\bGrants\b/i] },
+  { path: "/audit", labels: [/\bAudit\b/i] },
+  { path: "/syncs", labels: [/\bSyncs\b/i] },
+  {
+    path: "/schedules",
+    labels: [
+      /\bSchedules\b/i,
+      /\bScheduled connections\b|\bNo scheduled connections yet\b/i,
+      /\bscheduled\b.*\bunscheduled\b/i,
+    ],
+  },
+  { path: "/search", labels: [/\b(?:Search|trace|grant|run)\b/i] },
+  {
+    path: "/device-exporters",
+    labels: [/\b(?:Local device exporters|Enrolled devices)\b/i],
+  },
+  { path: "/deployment", labels: [/\bDeployment\b/i] },
+  {
+    path: "/event-subscriptions",
+    labels: [/\b(?:Client event subscriptions|Event subscriptions)\b/i],
+  },
+]
 
 async function loginAsOwner(
   page: import("@playwright/test").Page
@@ -49,6 +96,32 @@ async function loginAsOwner(
   ).toBeLessThan(400)
   await page.waitForLoadState("networkidle")
 }
+
+test("owner routes render resolved labels instead of login or skeleton shells", async ({
+  page,
+}) => {
+  await loginAsOwner(page)
+
+  for (const surface of OWNER_SURFACES) {
+    await page.goto(`${BASE_URL}${surface.path}`, { waitUntil: "networkidle" })
+
+    const url = new URL(page.url())
+    expect(
+      `${url.pathname}${url.search}`,
+      `${surface.path} must not redirect an authenticated owner to login`
+    ).not.toContain("/owner/login")
+
+    const text = (await page.locator("main").innerText()).replace(/\s+/g, " ").trim()
+    expect(text, `${surface.path} must render visible owner content`).not.toBe("")
+    expect(text, `${surface.path} must render resolved content`).not.toMatch(
+      LOADING_OR_SKELETON_TEXT
+    )
+
+    for (const label of surface.labels) {
+      expect(text, `${surface.path} must render ${label}`).toMatch(label)
+    }
+  }
+})
 
 test("sources/add renders many connectors, not the empty-catalog regression", async ({
   page,

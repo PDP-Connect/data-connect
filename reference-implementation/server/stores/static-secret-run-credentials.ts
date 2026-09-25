@@ -5,34 +5,6 @@ import { ConnectorInstanceCredentialError as ConnectorInstanceCredentialErrorCla
 
 export const ConnectorInstanceCredentialError = ConnectorInstanceCredentialErrorClass;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/**
- * Orchestration seam between the per-connection encrypted credential store and
- * connection-scoped subprocess injection.
- *
- * This is the single place a run-orchestration path calls to obtain the env
- * fragment for one static-secret connector run. It recovers the connection's
- * secret from the store (which fails closed when the credential is absent or
- * revoked) and maps it to the connector's env var(s) via the pure injection
- * registry from `@pdpp/polyfill-connectors/runner`.
- *
- * The injection functions (`isStaticSecretConnector`,
- * `buildConnectionScopedSecretEnv`) are INJECTED rather than imported so this
- * server-side seam does not hard-wire a new dependency edge onto the connector
- * package, matching the wider route-family adapter pattern (e.g.
- * `owner-connection-revoke.ts`). The eventual run/capture route supplies them
- * from the runner barrel.
- *
- * The returned fragment is spread into the per-run `connector.env`; it is never
- * placed in `process.env` and is never logged. The fail-closed behavior here is
- * the load-bearing guard: a revoked or deleted credential yields NO env
- * fragment, so a run cannot be assembled with a stale secret. See
- * add-static-secret-owner-connect-primitive design Decisions 5 & 7.
- */
-
 export class StaticSecretRunCredentialError extends Error {
   code: string;
 
@@ -43,35 +15,6 @@ export class StaticSecretRunCredentialError extends Error {
   }
 }
 
-function assertRunOwnerSubjectId(ownerSubjectId: unknown): asserts ownerSubjectId is string {
-  if (typeof ownerSubjectId !== "string" || ownerSubjectId.trim().length === 0) {
-    throw new StaticSecretRunCredentialError(
-      "owner_subject_required",
-      "A nonblank ownerSubjectId is required to resolve a static-secret run env."
-    );
-  }
-}
-
-/**
- * Resolve the connection-scoped secret env fragment for one run.
- *
- * @param {object} args
- * @param {string} args.connectorId - the connector type (e.g. 'gmail').
- * @param {string} args.connectorInstanceId - the connection being run.
- * @param {string} args.ownerSubjectId - owner scoping for recovery.
- * @param {unknown} [args.sourceBinding] - non-secret connection setup binding.
- * @param {object} args.credentialStore - a connector-instance credential store.
- * @param {(connectorId: string) => boolean} args.isStaticSecretConnector -
- *   injected from the runner barrel.
- * @param {(connectorId: string, recovered: object) => Record<string,string>}
- *   args.buildConnectionScopedSecretEnv - injected from the runner barrel.
- * @returns {Promise<Record<string,string> | null>} env fragment carrying only
- *   this connection's secret, or null when a browser-session connection has no
- *   optional stored login credential.
- * @throws {StaticSecretRunCredentialError} on a configuration/usage error.
- * @throws {ConnectorInstanceCredentialError} (fail closed) when the credential
- *   is absent, revoked, or provider-rejected.
- */
 export interface RecoveredCredential {
   credentialKind: string;
   secret: string;
@@ -81,79 +24,280 @@ export interface StaticSecretCredentialStore {
   recoverSecret: (args: { connectorInstanceId: string; ownerSubjectId: string }) => Promise<RecoveredCredential>;
 }
 
+interface CaptureField {
+  readonly env: readonly string[];
+  readonly name: string;
+  readonly required: boolean;
+  readonly secret: boolean;
+}
+
+interface StaticSecretProfile {
+  readonly credentialKind: string;
+  readonly fields: readonly CaptureField[];
+  readonly required: boolean;
+}
+
+interface InjectionMapping {
+  readonly bundleEnvAliases?: Readonly<Record<string, readonly string[]>>;
+  readonly credentialKind: string;
+  readonly secretBundleFields?: readonly string[];
+  readonly requiredBundleFields?: readonly string[];
+  readonly secretEnvAliases?: readonly string[];
+  readonly setupEnvAliases?: Readonly<Record<string, readonly string[]>>;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function nonblank(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function assertRunOwnerSubjectId(ownerSubjectId: unknown): asserts ownerSubjectId is string {
+  if (typeof ownerSubjectId !== "string" || ownerSubjectId.trim().length === 0) {
+    throw new StaticSecretRunCredentialError(
+      "owner_subject_required",
+      "A nonblank ownerSubjectId is required to resolve a static-secret run env.",
+    );
+  }
+}
+
+function staticSecretProfile(connectorId: string, manifest: unknown): StaticSecretProfile | null {
+  const setup = record(record(manifest)?.setup);
+  if (setup?.modality !== "static_secret") {
+    return null;
+  }
+  const capture = record(setup.credential_capture);
+  const credentialKind = nonblank(capture?.kind) ?? nonblank(capture?.credential_kind);
+  if (!capture || !credentialKind || !Array.isArray(capture.fields)) {
+    throw new StaticSecretRunCredentialError(
+      "static_secret_manifest_invalid",
+      `Connector '${connectorId}' declares static_secret setup without a valid credential_capture contract.`,
+    );
+  }
+  const fields: CaptureField[] = [];
+  for (const value of capture.fields) {
+    const field = record(value);
+    const name = nonblank(field?.name);
+    if (!field || !name) {
+      throw new StaticSecretRunCredentialError(
+        "static_secret_manifest_invalid",
+        `Connector '${connectorId}' declares an invalid credential_capture field.`,
+      );
+    }
+    const env = Array.isArray(field.env)
+      ? field.env.map(nonblank).filter((alias): alias is string => alias !== null)
+      : [];
+    const secret = field.secret === true || field.type === "password";
+    if (secret && env.length === 0) {
+      throw new StaticSecretRunCredentialError(
+        "static_secret_manifest_invalid",
+        `Connector '${connectorId}' declares secret field '${name}' without env aliases.`,
+      );
+    }
+    fields.push({ env, name, required: field.required !== false, secret });
+  }
+  if (!fields.some((field) => field.secret)) {
+    throw new StaticSecretRunCredentialError(
+      "static_secret_manifest_invalid",
+      `Connector '${connectorId}' declares static_secret setup without a secret field.`,
+    );
+  }
+  return { credentialKind, fields, required: capture.required !== false };
+}
+
+export function isStaticSecretProfileManifest(manifest: unknown): boolean {
+  try {
+    return staticSecretProfile("manifest-check", manifest) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function defaultMapping(profile: StaticSecretProfile): InjectionMapping {
+  const secretFields = profile.fields.filter((field) => field.secret);
+  const setupFields = profile.fields.filter((field) => !field.secret);
+  if (profile.credentialKind === "secret_bundle") {
+    return {
+      bundleEnvAliases: Object.fromEntries(profile.fields.map((field) => [field.name, field.env])),
+      credentialKind: profile.credentialKind,
+      secretBundleFields: profile.fields.map((field) => field.name),
+      requiredBundleFields: profile.fields.filter((field) => field.required).map((field) => field.name),
+    };
+  }
+  const setupEnvAliases = Object.fromEntries(setupFields.map((field) => [field.name, field.env]));
+  if (profile.credentialKind === "username_password") {
+    return {
+      bundleEnvAliases: Object.fromEntries(secretFields.map((field) => [field.name, field.env])),
+      credentialKind: profile.credentialKind,
+      requiredBundleFields: secretFields.filter((field) => field.required).map((field) => field.name),
+      secretBundleFields: secretFields.map((field) => field.name),
+      setupEnvAliases,
+    };
+  }
+  if (secretFields.length === 1) {
+    return {
+      credentialKind: profile.credentialKind,
+      secretEnvAliases: secretFields[0]?.env ?? [],
+      setupEnvAliases,
+    };
+  }
+  return {
+    bundleEnvAliases: Object.fromEntries(secretFields.map((field) => [field.name, field.env])),
+    credentialKind: profile.credentialKind,
+    secretBundleFields: secretFields.map((field) => field.name),
+    requiredBundleFields: secretFields.filter((field) => field.required).map((field) => field.name),
+    setupEnvAliases,
+  };
+}
+
+function recoveredMapping(
+  connectorId: string,
+  profile: StaticSecretProfile,
+  recovered: RecoveredCredential,
+): InjectionMapping {
+  const current = defaultMapping(profile);
+  if (recovered.credentialKind === current.credentialKind) {
+    return current;
+  }
+  throw new StaticSecretRunCredentialError(
+    "credential_kind_mismatch",
+    `Connector '${connectorId}' expects credential kind '${current.credentialKind}', but recovered '${recovered.credentialKind}'.`,
+  );
+}
+
+function parseCredentialBundle(connectorId: string, secret: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(secret);
+  } catch {
+    throw new StaticSecretRunCredentialError(
+      "recovered_secret_bundle_invalid",
+      `Connector '${connectorId}' expects a sealed JSON credential bundle.`,
+    );
+  }
+  const source = record(parsed);
+  if (!source) {
+    throw new StaticSecretRunCredentialError(
+      "recovered_secret_bundle_invalid",
+      `Connector '${connectorId}' expects a sealed JSON credential bundle object.`,
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(source).flatMap(([key, value]) => {
+      const cleaned = nonblank(value);
+      return cleaned ? [[key, cleaned]] : [];
+    }),
+  );
+}
+
+function setAliases(target: Record<string, string>, aliases: readonly string[] | undefined, value: string): void {
+  for (const alias of aliases ?? []) {
+    target[alias] = value;
+  }
+}
+
+function buildSecretEnv(
+  connectorId: string,
+  profile: StaticSecretProfile,
+  mapping: InjectionMapping,
+  recovered: RecoveredCredential,
+  sourceBinding: unknown,
+): Record<string, string> {
+  if (typeof recovered.secret !== "string" || recovered.secret.length === 0) {
+    throw new StaticSecretRunCredentialError(
+      "recovered_secret_invalid",
+      `Cannot inject an empty credential for '${connectorId}'.`,
+    );
+  }
+  const fragment: Record<string, string> = {};
+  let includeSetupFields = true;
+  if (mapping.secretEnvAliases) {
+    if (recovered.secret === "{}" && !profile.required) {
+      includeSetupFields = false;
+    } else {
+      setAliases(fragment, mapping.secretEnvAliases, recovered.secret);
+    }
+  }
+  if (mapping.bundleEnvAliases) {
+    const values = parseCredentialBundle(connectorId, recovered.secret);
+    const requiredFields = new Set(mapping.requiredBundleFields ?? []);
+    if (!profile.required && Object.keys(values).length === 0) {
+      includeSetupFields = false;
+    }
+    if (profile.required && !(mapping.secretBundleFields ?? []).some((fieldName) => values[fieldName])) {
+      throw new StaticSecretRunCredentialError(
+        "recovered_secret_bundle_field_missing",
+        `Connector '${connectorId}' credential bundle contains no secret fields.`,
+      );
+    }
+    for (const [fieldName, aliases] of Object.entries(mapping.bundleEnvAliases)) {
+      const value = values[fieldName];
+      if (!value) {
+        if (requiredFields.has(fieldName)) {
+          throw new StaticSecretRunCredentialError(
+            "recovered_secret_bundle_field_missing",
+            `Connector '${connectorId}' credential bundle is missing required field '${fieldName}'.`,
+          );
+        }
+        continue;
+      }
+      setAliases(fragment, aliases, value);
+    }
+  }
+  if (includeSetupFields) {
+    const setupFields = record(record(sourceBinding)?.setup_fields) ?? {};
+    for (const [fieldName, aliases] of Object.entries(mapping.setupEnvAliases ?? {})) {
+      const value = nonblank(setupFields[fieldName]);
+      if (value) {
+        setAliases(fragment, aliases, value);
+      }
+    }
+  }
+  return fragment;
+}
+
+/** Resolve one connection's secret env solely from its registered profile manifest. */
 export async function resolveStaticSecretRunEnv({
   connectorId,
   connectorInstanceId,
   ownerSubjectId,
   sourceBinding,
   credentialStore,
-  isStaticSecretConnector,
-  isStaticSecretCaptureOptional,
-  buildConnectionScopedSecretEnv,
+  manifest,
 }: {
-  buildConnectionScopedSecretEnv: (
-    connectorId: string,
-    recovered: RecoveredCredential,
-    sourceBinding?: unknown
-  ) => Record<string, string>;
   connectorId: string;
   connectorInstanceId: string;
   credentialStore: StaticSecretCredentialStore | null | undefined;
-  isStaticSecretCaptureOptional?: (connectorId: string) => boolean;
-  isStaticSecretConnector: (connectorId: string) => boolean;
+  manifest: unknown;
   ownerSubjectId: string;
   sourceBinding?: unknown;
 }): Promise<Record<string, string> | null> {
-  if (typeof isStaticSecretConnector !== "function" || typeof buildConnectionScopedSecretEnv !== "function") {
-    throw new StaticSecretRunCredentialError(
-      "injection_helpers_required",
-      "isStaticSecretConnector and buildConnectionScopedSecretEnv must be injected from the runner barrel."
-    );
-  }
-  if (!isStaticSecretConnector(connectorId)) {
-    throw new StaticSecretRunCredentialError(
-      "not_a_static_secret_connector",
-      `Connector '${connectorId}' is not a static-secret connector; no credential injection applies.`
-    );
+  const profile = staticSecretProfile(connectorId, manifest);
+  if (!profile) {
+    return null;
   }
   if (!credentialStore) {
     throw new StaticSecretRunCredentialError(
       "credential_store_required",
-      "A connector-instance credential store is required to resolve a static-secret run env."
+      "A connector-instance credential store is required to resolve a static-secret run env.",
     );
   }
   assertRunOwnerSubjectId(ownerSubjectId);
-  const browserSessionSource =
-    isRecord(sourceBinding) &&
-    (sourceBinding.kind === "browser_collector" || sourceBinding.kind === "browser_enrollment_shell");
-  // A missing/revoked/rejected credential falls back to `null` (no env
-  // fragment, run proceeds credential-less) under EITHER of two independent,
-  // provider-neutral conditions — never a connector-name check:
-  //   1. `browserSessionSource` — the CONNECTION is bound as a browser
-  //      session (`browser_collector`/`browser_enrollment_shell`); its
-  //      primary credential is the owner-authenticated browser session, so a
-  //      static secret is always secondary.
-  //   2. `captureOptional` — the CONNECTOR's own manifest declares
-  //      `credential_capture.required: false`, independent of
-  //      how this particular connection's `sourceBinding.kind` happens to be
-  //      set today. This closes the gap where a browser-bound-but-still-
-  //      static-secret-draft-bound connection (the real owner journey through
-  //      `/connect/static-secret/[connectorId]` today, since browser_collector
-  //      enrollment for this connector class remains proof-gated) would
-  //      otherwise fail closed on a deliberately blank optional credential —
-  //      the manifest already promises "leave these blank to sign in by
-  //      hand", and this is what makes that promise true at run time too.
-  // For every OTHER static-secret connector (required capture, no
-  // browser-session binding), recoverSecret's throw still propagates
-  // unmodified: the run is refused rather than started with no/stale
-  // credential.
-  const captureOptional = isStaticSecretCaptureOptional?.(connectorId) === true;
+  const binding = record(sourceBinding);
+  const browserSessionSource = binding?.kind === "browser_collector" || binding?.kind === "browser_enrollment_shell";
   let recovered: RecoveredCredential;
   try {
-    recovered = await credentialStore.recoverSecret({ connectorInstanceId, ownerSubjectId });
+    recovered = await credentialStore.recoverSecret({
+      connectorInstanceId,
+      ownerSubjectId,
+    });
   } catch (err) {
     if (
-      (browserSessionSource || captureOptional) &&
+      (browserSessionSource || !profile.required) &&
       err instanceof ConnectorInstanceCredentialError &&
       (err.code === "credential_not_found" || err.code === "credential_revoked" || err.code === "credential_rejected")
     ) {
@@ -161,5 +305,11 @@ export async function resolveStaticSecretRunEnv({
     }
     throw err;
   }
-  return buildConnectionScopedSecretEnv(connectorId, recovered, sourceBinding);
+  return buildSecretEnv(
+    connectorId,
+    profile,
+    recoveredMapping(connectorId, profile, recovered),
+    recovered,
+    sourceBinding,
+  );
 }

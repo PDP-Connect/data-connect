@@ -1915,7 +1915,7 @@ pub(crate) fn spawn_origin_verification_watcher(app: AppHandle) {
 /// Has a shutdown been requested? Used to make `Quitting` absorbing for the
 /// background watchers, which otherwise keep running (and can keep acting on
 /// the stack) for the whole shutdown budget.
-fn shutdown_has_been_requested(app: &AppHandle) -> bool {
+pub(crate) fn shutdown_has_been_requested(app: &AppHandle) -> bool {
     app.try_state::<UnifiedRuntimeState>()
         .and_then(|state| {
             state
@@ -2719,10 +2719,17 @@ pub(crate) async fn import_database_encryption_recovery_code(
     app: AppHandle,
     code: String,
 ) -> Result<(), String> {
-    let candidate_key = crate::recovery_code::decode(&code).map_err(|error| {
+    let imported = crate::recovery_code::decode_for_import(&code).map_err(|error| {
         log::info!("Recovery import: rejected at decode stage ({error})");
         "That code is not a valid recovery code. Check for a typo and try again.".to_string()
     })?;
+    let candidate_key = imported.database_encryption_key;
+    // A v2 kit also carries the credential encryption key. The local key
+    // still wins when it loads; the kit's key is used only when the local
+    // key cannot be loaded, and is persisted only after the kit's database
+    // key opens the vault.
+    let kit_credential_key = imported.credential_encryption_key;
+    let mut restored_credential_key = None;
 
     let secrets_app = app.clone();
     let attach = attach_mode();
@@ -2740,9 +2747,16 @@ pub(crate) async fn import_database_encryption_recovery_code(
         Ok(secrets) => (
             secrets.password,
             secrets.remote_access,
-            secrets.credential_encryption_key.ok_or_else(|| {
-                "Credential encryption key was not provisioned; cannot attempt recovery.".to_string()
-            })?,
+            match secrets.credential_encryption_key {
+                Some(key) => key,
+                None => {
+                    restored_credential_key = kit_credential_key.clone();
+                    restored_credential_key.clone().ok_or_else(|| {
+                        "Credential encryption key was not provisioned; cannot attempt recovery."
+                            .to_string()
+                    })?
+                }
+            },
         ),
         Err(DatabaseKeyError::Missing(_)) => {
             // Try the candidate anyway with what we CAN load independently:
@@ -2764,7 +2778,7 @@ pub(crate) async fn import_database_encryption_recovery_code(
                 load_remote_access_config(&app)?
             };
             let credential_key_app = app.clone();
-            let credential_encryption_key = tokio::task::spawn_blocking(move || {
+            let loaded_credential_key = tokio::task::spawn_blocking(move || {
                 let credential_encryption_key_path =
                     credential_encryption_key_path(&credential_key_app)?;
                 let database_path = unified_database_path(&credential_key_app)?;
@@ -2774,7 +2788,15 @@ pub(crate) async fn import_database_encryption_recovery_code(
                 )
             })
             .await
-            .map_err(|error| format!("Credential encryption key task failed: {error}"))??;
+            .map_err(|error| format!("Credential encryption key task failed: {error}"))?;
+            let credential_encryption_key = match (loaded_credential_key, &kit_credential_key) {
+                (Ok(key), _) => key,
+                (Err(_), Some(key)) => {
+                    restored_credential_key = Some(key.clone());
+                    key.clone()
+                }
+                (Err(error), None) => return Err(error),
+            };
             (
                 configured_owner_password().unwrap_or(owner_password),
                 remote_access,
@@ -2854,6 +2876,17 @@ pub(crate) async fn import_database_encryption_recovery_code(
         return Err(format!(
             "The code worked, but the key could not be saved for future launches: {error}"
         ));
+    }
+    if let Some(credential_key) = restored_credential_key.as_deref() {
+        if let Err(error) =
+            crate::owner_credential::save_credential_encryption_key(&app, credential_key)
+        {
+            log::error!("Recovery import: verified credential key could not be persisted: {error}");
+            teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
+            return Err(format!(
+                "The code worked, but the key could not be saved for future launches: {error}"
+            ));
+        }
     }
 
     finish_bootstrap(
@@ -3205,20 +3238,16 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
     });
 }
 
-/// Watch `autostart.json` for requests written by the reference server
+/// Answer autostart commands written by the reference server
 /// (`server/routes/owner-autostart.ts` via `server/autostart-store.ts`) and
 /// apply them with `tauri_plugin_autostart`, the only process that can
-/// perform this OS-level action (see `commands/desktop_settings.rs`'s
-/// `AutostartState` doc comment for why the server cannot do this itself).
+/// perform this OS-level action (see `commands/desktop_settings.rs` for the
+/// file protocol and why the server cannot do this itself).
 ///
 /// Modeled directly on `spawn_remote_access_config_watcher` above: same poll
-/// shape, same rationale for polling over a file-watch crate. Unlike that
-/// watcher, which restarts sidecars on ANY external change, this one seeds
-/// the state file from real `is_enabled()` truth on first read (never
-/// mutating for a request nobody made) and then only acts when
-/// `request_id != applied_request_id` -- see
-/// `desktop_settings::apply_autostart_desired_state`, which holds the pure
-/// decision logic this loop drives.
+/// shape, same rationale for polling over a file-watch crate.
+/// `desktop_settings::tick_autostart_protocol` holds the decision logic this
+/// loop drives.
 pub(crate) fn spawn_autostart_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -3235,34 +3264,14 @@ pub(crate) fn spawn_autostart_watcher(app: AppHandle) {
 }
 
 fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
-    use crate::commands::desktop_settings::{
-        apply_autostart_desired_state, autostart_state_path, load_autostart_state,
-        save_autostart_state, LoadedAutostartState,
-    };
+    use crate::commands::desktop_settings::{autostart_protocol_root, tick_autostart_protocol};
     use tauri_plugin_autostart::ManagerExt;
 
-    let path = autostart_state_path(app)?;
-    // A missing file needs no repair (normal on first-ever launch); a
-    // CORRUPT file (e.g. zero bytes from a process killed mid-write) is
-    // repaired immediately below by seeding+persisting the default state,
-    // so the identical parse failure cannot recur on the next tick. This
-    // is the fix for the reported incident: before this, a corrupt file
-    // was a hard error with no recovery, so the same "Failed to parse
-    // autostart state: EOF while parsing a value at line 1 column 0"
-    // fired every ~3s forever.
-    let current = match load_autostart_state(&path)? {
-        LoadedAutostartState::Present(state) => Some(state),
-        LoadedAutostartState::Missing => None,
-        LoadedAutostartState::Corrupt(error) => {
-            log::warn!(
-                "Autostart state file was empty or corrupt ({error}); resetting it to a fresh default instead of retrying the same parse failure forever"
-            );
-            None
-        }
-    };
+    let root = autostart_protocol_root(app)?;
     let manager = app.autolaunch();
-    let next = apply_autostart_desired_state(
-        current,
+    tick_autostart_protocol(
+        &root,
+        chrono::Utc::now(),
         || {
             manager
                 .is_enabled()
@@ -3278,8 +3287,7 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
                 .disable()
                 .map_err(|error| format!("Failed to disable autostart: {error}"))
         },
-    )?;
-    save_autostart_state(&path, &next)
+    )
 }
 
 /// Open the standalone recovery-code entry window, or focus it if it's

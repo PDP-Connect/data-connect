@@ -34,6 +34,16 @@ import {
   staticSecretConnectEntries,
   unsupportedNetworkEntries,
 } from "./connection-catalog.ts";
+import { parseConnectorInstallCatalogResponse } from "./connector-install-contract.ts";
+import {
+  CONNECTOR_INSTALL_FIXTURE_DIGESTS,
+  connectorInstallCatalogFixture,
+} from "./connector-install-fixtures.ts";
+import {
+  buildConnectorInstallLifecycleByConnector,
+  connectorInstallRowModel,
+  connectorLookupKey,
+} from "./connector-install-presentation.ts";
 import {
   isRunnableAddOffer,
   publicTierLabel,
@@ -180,6 +190,41 @@ test("owner catalog keeps manifest-known connectors when a template exists", () 
     withOneTemplate.map((entry) => entry.connectorKey).sort(),
     ["github", "strava", "ynab"]
   );
+});
+
+test("owner catalog uses the signed runtime install catalog when local manifests and templates are absent", () => {
+  const installCatalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const catalog = buildOwnerConnectorCatalog([], [], installCatalog);
+
+  assert.deepEqual(
+    catalog.map((entry) => entry.connectorKey).sort(),
+    ["github", "imessage", "signal"]
+  );
+  const github = catalog.find((entry) => entry.connectorKey === "github");
+  assert.ok(github);
+  assert.equal(github.displayName, "GitHub");
+  assert.equal(github.publicTier, "supported");
+  assert.equal(github.setupModality, "provider_authorization");
+});
+
+test("runtime install catalog inventory joins to the latest package digest for Add Source install actions", () => {
+  const installCatalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const catalog = buildOwnerConnectorCatalog([], [], installCatalog);
+  const lifecycle = buildConnectorInstallLifecycleByConnector(installCatalog, []);
+  const github = catalog.find((entry) => entry.connectorKey === "github");
+  assert.ok(github);
+
+  const model = connectorInstallRowModel(github, lifecycle[connectorLookupKey(github.connectorKey)] ?? {
+    catalog: null,
+    installed: null,
+  });
+
+  assert.deepEqual(model.action, {
+    digest: CONNECTOR_INSTALL_FIXTURE_DIGESTS.githubCurrent,
+    kind: "install",
+    version: "1.1.0",
+  });
+  assert.equal(model.connectorId, "github");
 });
 
 test("owner catalog joins staged URI identities through explicit manifest keys", () => {
@@ -503,7 +548,7 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) are e
 test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe never render actionless or unavailable", async () => {
   // Discrimination guard for the static-secret injection-registry fix: these
   // four connectors declare a real static_secret setup and are present in
-  // STATIC_SECRET_CONNECTOR_REGISTRY (packages/polyfill-connectors/src/
+  // STATIC_SECRET_CONNECTOR_REGISTRY (@pdpp/polyfill-connectors/src/
   // static-secret-injection.ts). If either the manifest or the registry drift,
   // Add Source must not silently strand them with no route or a "not
   // available" verdict.
@@ -514,7 +559,8 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
   // deliberately curated subset (see its own package.json) vendored for
   // @pdpp/local-collector's build only, not a general-purpose mirror of the
   // full @pdpp/polyfill-connectors package, and does not carry this file.
-  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import("@pdpp/polyfill-connectors/static-secret-injection");
+  const staticSecretInjectionModule = "@pdpp/polyfill-connectors/static-secret-injection";
+  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(staticSecretInjectionModule);
   for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);

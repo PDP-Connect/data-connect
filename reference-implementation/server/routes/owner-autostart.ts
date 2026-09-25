@@ -17,9 +17,8 @@
 // app-config, though: it is an imperative OS action
 // (`tauri_plugin_autostart`) that only the Tauri/Rust process can perform, so
 // this route does not persist the setting itself -- it hands the request to
-// `AutostartStore` (`../autostart-store.ts`), which writes a request into
-// `autostart.json` and polls for `src-tauri/src/unified.rs::
-// spawn_autostart_watcher` to apply it and write back the result.
+// `AutostartStore` (`../autostart-store.ts`), which publishes one command file
+// and polls for that command's result from `spawn_autostart_watcher`.
 
 import type { AutostartState, AutostartStore } from "../autostart-store.ts"
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts"
@@ -49,12 +48,9 @@ export interface MountOwnerAutostartContext {
 }
 
 // Project only `enabled`/`error`/`pending` out of the full internal state --
-// `requestId`/`appliedRequestId` are request bookkeeping this server
-// shouldn't leak. `pending` is true while a requested change has not been
-// applied yet, so another tab can say "Applying…" instead of painting the
-// desired value as fact.
+// Command identity stays inside the store and is never exposed to the console.
 function toResponseShape(state: AutostartState): { enabled: boolean; error: string | null; pending: boolean } {
-  return { enabled: state.enabled, error: state.error, pending: state.appliedRequestId < state.requestId }
+  return { enabled: state.enabled, error: state.error, pending: state.pending }
 }
 
 export function mountOwnerAutostart(app: AppLike, ctx: MountOwnerAutostartContext): void {

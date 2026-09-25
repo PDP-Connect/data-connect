@@ -25,15 +25,9 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import {
-  normalizeHostedThemeChoice,
-  renderBrandHeader,
-  renderDataConnectMark,
-  renderPdppMark,
-} from "../server/hosted-ui.ts";
+import { normalizeHostedThemeChoice, renderBrandFooter, renderPdppMark } from "../server/hosted-ui.ts";
 
 // --- normalizeHostedThemeChoice ---------------------------------------------
 
@@ -87,45 +81,26 @@ test("renderPdppMark: an empty title makes the mark decorative (presentation + a
   assert.equal(svg.includes('role="img"'), false, 'not role="img" when decorative');
 });
 
-// --- renderDataConnectMark / renderBrandHeader --------------------------------
+// --- renderPdppMark: surface (light/dark palette) ---------------------------
 
-function svgGeometry(svg: string): string[] {
-  return [...svg.matchAll(/<(stop|rect|path)\b[^>]*>/g)].map((match) =>
-    match[0]
-      .replace(/\s*\/?>$/, "")
-      .replace(/url\(#[^)]+\)/, "url(#)")
-      .replace(/\s+/g, " ")
-  );
-}
-
-test("renderDataConnectMark: geometry matches the console's DataConnect mark asset", () => {
-  const asset = readFileSync(
-    new URL("../../apps/console/public/brand/dataconnect-mark.svg", import.meta.url),
-    "utf8"
-  );
-  const expected = svgGeometry(asset);
-  assert.equal(expected.length, 6, "asset has 3 gradient stops, 1 rect, 2 paths");
-  assert.deepEqual(svgGeometry(renderDataConnectMark()), expected);
+test("renderPdppMark: light surface (default) uses the real light-mark colors from apps/console/public/brand/pdpp-mark.svg", () => {
+  const svg = renderPdppMark();
+  assert.ok(svg.includes("oklch(0.52 0.11 45)"), "warm fill matches pdpp-mark.svg");
+  assert.ok(svg.includes("oklch(0.58 0.18 253)"), "cool fill matches pdpp-mark.svg");
+  assert.ok(svg.includes("oklch(0.985 0.005 85)"), "counter fill matches pdpp-mark.svg");
 });
 
-test('renderDataConnectMark: defaults to an accessible "DataConnect" label; empty title is decorative', () => {
-  assert.ok(renderDataConnectMark().includes('role="img" aria-label="DataConnect"'));
-  const decorative = renderDataConnectMark({ title: "" });
-  assert.ok(decorative.includes('role="presentation" aria-hidden="true"'));
-  assert.equal(decorative.includes("aria-label"), false);
+test("renderPdppMark: dark surface uses the real night-mark colors from apps/console/public/brand/pdpp-mark-dark.svg", () => {
+  const svg = renderPdppMark({ surface: "dark" });
+  assert.ok(svg.includes("oklch(0.72 0.12 45)"), "warm fill matches pdpp-mark-dark.svg");
+  assert.ok(svg.includes("oklch(0.74 0.16 253)"), "cool fill matches pdpp-mark-dark.svg");
+  assert.ok(svg.includes("oklch(0.16 0.01 60)"), "counter fill matches pdpp-mark-dark.svg");
 });
 
-test("renderBrandHeader: the default instance name shows the product brand only", () => {
-  const header = renderBrandHeader({ providerName: "DataConnect" });
-  assert.ok(header.includes('<span class="hosted-ui-wordmark">DataConnect</span>'));
-  assert.equal(header.includes("PDPP"), false, "no PDPP wordmark or mark label");
-  assert.equal(header.includes("hosted-ui-instance-monogram"), false);
-  assert.equal(header.includes("hosted-ui-provider"), false);
-});
+// --- renderBrandFooter --------------------------------------------------------
 
-test("renderBrandHeader: a configured instance name keeps its monogram and label", () => {
-  const header = renderBrandHeader({ providerName: "Tim's Data Server" });
-  assert.ok(header.includes('<span class="hosted-ui-wordmark">DataConnect</span>'));
-  assert.ok(header.includes('<span class="hosted-ui-instance-monogram" aria-hidden="true">TD</span>'));
-  assert.ok(header.includes('<span class="hosted-ui-provider" aria-label="Provider">Tim&#39;s Data Server</span>'));
+test("renderBrandFooter: links Secured by PDPP to https://pdpp.dev", () => {
+  const html = renderBrandFooter();
+  assert.match(html, /<a class="hosted-ui-footer-attribution-link" href="https:\/\/pdpp\.dev">/);
+  assert.ok(html.includes("Secured by PDPP"));
 });

@@ -92,6 +92,12 @@ export interface MountAsDeviceUiContext {
   ownerAuthDefaultSubjectId: string;
   /** Whether owner-session auth is enabled on this server instance. */
   ownerAuthEnabled: boolean;
+  /** Reads the active owner session hash and credential revision from server state. */
+  readOwnerAuthorizationFence: (
+    req: RouteRequest
+  ) => Promise<{ credentialRevision?: string | null; sessionIdHash?: string } | null>;
+  /** Test seam for holding the request after authorization capture and before approval persistence. */
+  beforeOwnerDeviceApproval?: () => Promise<void> | void;
   /** The subject ID of the currently signed-in owner. Only valid when ownerAuthEnabled is true. */
   ownerSubjectId: string;
   /** Human-readable display name for the provider (shown in page titles). */
@@ -210,9 +216,16 @@ export function mountAsDeviceUi(app: AppLike, ctx: MountAsDeviceUiContext): void
     const subjectId = ctx.ownerAuthEnabled
       ? ctx.ownerSubjectId
       : (req.body?.subject_id as string) || ctx.ownerAuthDefaultSubjectId;
+    const authorizationFence = ctx.ownerAuthEnabled ? await ctx.readOwnerAuthorizationFence(req) : null;
+    if (ctx.ownerAuthEnabled && !authorizationFence) {
+      ctx.oauthError(res, 401, "owner_session_required", "Sign in again to approve device access.");
+      return;
+    }
+    await ctx.beforeOwnerDeviceApproval?.();
     const outcome = await executeAsDeviceDecision(
       {
         action: "approve",
+        ...(authorizationFence === null ? {} : { authorizationFence }),
         approvalId: req.body?.approval_id as string | null | undefined,
         subjectId,
         userCode: req.body?.user_code as string | null | undefined,

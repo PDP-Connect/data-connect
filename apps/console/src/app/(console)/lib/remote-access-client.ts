@@ -21,7 +21,6 @@ import {
   getOwnerToken,
   getRsInternalUrl,
   ReferenceServerUnreachableError,
-  ResourceServerHttpError,
 } from "./owner-token.ts"
 import type {
   CloudflareTunnelInspection,
@@ -29,6 +28,25 @@ import type {
   RemoteAccessInspection,
 } from "../settings/remote-access.ts"
 import { verifyDashboardSession } from "./verify-session.ts"
+
+export class RemoteAccessRequestError extends Error {
+  readonly code?: string
+
+  constructor(message: string, code?: string) {
+    super(message)
+    this.name = "RemoteAccessRequestError"
+    this.code = code
+  }
+}
+
+function errorCodeFromBodyText(bodyText: string): string | undefined {
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { code?: unknown } }
+    return typeof parsed.error?.code === "string" ? parsed.error.code : undefined
+  } catch {
+    return undefined
+  }
+}
 
 async function remoteAccessFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   await verifyDashboardSession()
@@ -50,10 +68,9 @@ async function remoteAccessFetch(path: string, init: RequestInit = {}): Promise<
   }
   if (!response.ok) {
     const body = await response.text()
-    throw new ResourceServerHttpError(
-      path,
-      response.status,
-      describeErrorText(body, `remote access request failed (${response.status})`)
+    throw new RemoteAccessRequestError(
+      describeErrorText(body, `remote access request failed (${response.status})`),
+      errorCodeFromBodyText(body)
     )
   }
   return response.json()

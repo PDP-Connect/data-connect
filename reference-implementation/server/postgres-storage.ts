@@ -1370,6 +1370,28 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+/** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
+export async function withPostgresBulkTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPostgresBulkPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
+    const value = await fn(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch { /* Preserve the write error. */ }
+    const timeoutError = asPostgresStatementTimeoutError(err);
+    if (timeoutError) {
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** Read an already-initialized deployment without bootstrap DDL or migrations. */
 export async function withPostgresReadOnlyTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await getPostgresPool().connect();
@@ -1577,6 +1599,19 @@ async function bootstrapPostgresSchemaOnce({
       CREATE TABLE IF NOT EXISTS connector_installs (
         connector_id TEXT PRIMARY KEY,
         record_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS connector_activations (
+        connector_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK (state IN ('active', 'repair_required')),
+        record_json TEXT NOT NULL,
+        canonical_manifest_json TEXT NOT NULL,
+        manifest_revision TEXT NOT NULL,
+        activation_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        repair_reason TEXT,
+        repair_error_json TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -2197,6 +2232,21 @@ async function bootstrapPostgresSchemaOnce({
       ALTER TABLE pending_consents
         ADD COLUMN IF NOT EXISTS approval_review_json JSONB;
 
+      CREATE TABLE IF NOT EXISTS consent_challenges (
+        id TEXT PRIMARY KEY,
+        owner_subject_id TEXT NOT NULL,
+        authorization_request_json JSONB NOT NULL,
+        client_json JSONB NOT NULL,
+        render_model_inputs_json JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+        decision_digest TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decided_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pg_consent_challenges_owner_status_expires
+        ON consent_challenges(owner_subject_id, status, expires_at);
+
       CREATE TABLE IF NOT EXISTS agent_connect_attempts (
         id TEXT PRIMARY KEY,
         request_uri TEXT NOT NULL,
@@ -2301,6 +2351,30 @@ async function bootstrapPostgresSchemaOnce({
       );
       CREATE INDEX IF NOT EXISTS idx_pg_owner_device_auth_status_expires
         ON owner_device_auth(status, expires_at);
+
+      CREATE TABLE IF NOT EXISTS owner_sessions (
+        id_hash TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL UNIQUE,
+        subject_id TEXT NOT NULL,
+        device_key TEXT,
+        label TEXT NOT NULL,
+        user_agent TEXT,
+        ip_address TEXT,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        last_seen_at BIGINT NOT NULL,
+        revoked_at BIGINT,
+        UNIQUE(subject_id, device_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_owner_sessions_subject_active
+        ON owner_sessions(subject_id, revoked_at, expires_at);
+
+      CREATE TABLE IF NOT EXISTS owner_password_verifier (
+        singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+        verifier_json TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS web_push_subscriptions (
         id TEXT PRIMARY KEY,
@@ -5897,11 +5971,27 @@ async function mergeEquivalentPostgresConnectorInstances(
 
   await sequentially(existingTables, async (table) => {
     // These rows are derived from canonical records/manifests (or from the
-    // canonical summary authorities), never an authority themselves. Keeping
-    // the canonical row and dropping the legacy projection avoids a fake
-    // uniqueness conflict while ensuring no stale legacy identity survives.
-    // The normal index/evidence reconciliation rebuilds any omitted value.
+    // canonical summary authorities), never an authority themselves. A
+    // legacy-only projection is discarded and repaired later, preserving the
+    // boot path's no-inline-rewrite contract. When both identities already
+    // hold rebuildable rows, the canonical rows are the stale duplicate cache:
+    // clear them first so the legacy cache can be retained under the
+    // canonical id without a uniqueness conflict.
     if (PG_REBUILDABLE_INSTANCE_REFERENCE_TABLES.has(table)) {
+      const both = await client.query(
+        `SELECT
+           EXISTS(SELECT 1 FROM ${table} WHERE connector_instance_id = $1) AS legacy_present,
+           EXISTS(SELECT 1 FROM ${table} WHERE connector_instance_id = $2) AS canonical_present`,
+        [legacyId, canonicalId]
+      );
+      if (both.rows[0].legacy_present && both.rows[0].canonical_present) {
+        await client.query(`DELETE FROM ${table} WHERE connector_instance_id = $1`, [canonicalId]);
+        await client.query(`UPDATE ${table} SET connector_instance_id = $1 WHERE connector_instance_id = $2`, [
+          canonicalId,
+          legacyId,
+        ]);
+        return;
+      }
       await client.query(`DELETE FROM ${table} WHERE connector_instance_id = $1`, [legacyId]);
       return;
     }
@@ -6225,8 +6315,10 @@ async function rewritePostgresAuthoritativeConnectorId(
  * row exists for it — enqueuing every stream the connector ever wrote would
  * hand the maintenance sweep work it does not need to do.
  *
- * Both the delete and the dirty mark run on the caller's transaction client,
- * so a rollback discards them together with the identity change. A dirty
+ * The dirty mark always runs on the caller's transaction client. The caller
+ * may also ask this helper to delete the projection rows in the same
+ * transaction; exact duplicate coalescence delays deletion until the merge
+ * routine can decide whether the class is legacy-only or two-sided. A dirty
  * mark that survived a rolled-back identity change would point the sweep at
  * a scope whose canonical identity does not exist yet.
  */
@@ -6237,14 +6329,19 @@ async function enqueuePostgresLocalDeviceProjectionRepair(
     newConnectorId,
     nowIso,
     oldConnectorId,
+    deleteProjectionRows = true,
     repairConnectorInstanceId = connectorInstanceId,
+    scopeConnectorInstanceIds = [connectorInstanceId],
   }: {
     connectorInstanceId: string;
+    deleteProjectionRows?: boolean;
     newConnectorId: string;
     nowIso: string;
     oldConnectorId: string;
     /** The canonical identity that owns the rebuilt projection. */
     repairConnectorInstanceId?: string;
+    /** Instance ids whose stream-keyed projections identify dirty scopes. */
+    scopeConnectorInstanceIds?: readonly string[];
   }
 ): Promise<number> {
   const scopes = new Set<string>();
@@ -6259,17 +6356,19 @@ async function enqueuePostgresLocalDeviceProjectionRepair(
     if (await hasPostgresColumn(client, table, "stream")) {
       const streams = await client.query<{ stream: string }>(
         `SELECT DISTINCT stream FROM ${pgIdentifier(table)}
-          WHERE connector_id = $1 AND connector_instance_id = $2`,
-        [oldConnectorId, connectorInstanceId]
+          WHERE connector_id = $1 AND connector_instance_id = ANY($2::text[])`,
+        [oldConnectorId, scopeConnectorInstanceIds]
       );
       for (const { stream } of streams.rows) {
         scopes.add(stream);
       }
     }
-    await client.query(`DELETE FROM ${pgIdentifier(table)} WHERE connector_id = $1 AND connector_instance_id = $2`, [
-      oldConnectorId,
-      connectorInstanceId,
-    ]);
+    if (deleteProjectionRows) {
+      await client.query(`DELETE FROM ${pgIdentifier(table)} WHERE connector_id = $1 AND connector_instance_id = $2`, [
+        oldConnectorId,
+        connectorInstanceId,
+      ]);
+    }
   });
 
   await sequentially([...scopes].sort(), async (stream) => {
@@ -6731,10 +6830,12 @@ async function coalesceExactPostgresLocalDeviceBindingDuplicates(client: PoolCli
         // biome-ignore lint/performance/noAwaitInLoops: each generic merger operates on the same locked class transaction.
         repairScopesEnqueued += await enqueuePostgresLocalDeviceProjectionRepair(client, {
           connectorInstanceId: legacyId,
+          deleteProjectionRows: false,
           newConnectorId: revalidated.connectorId,
           nowIso: new Date().toISOString(),
           oldConnectorId: revalidated.connectorId,
           repairConnectorInstanceId: revalidated.canonicalId,
+          scopeConnectorInstanceIds: [revalidated.canonicalId, legacyId],
         });
         // A COMPLETE receipt is the authority that the source table already
         // points at the stable identity. This branch may not even inspect

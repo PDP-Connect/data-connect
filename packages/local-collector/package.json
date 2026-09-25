@@ -60,7 +60,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#ee11b09dc4e4c3acb1a1e0606ced0429f761be27",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
     "@pdpp/collector-runtime": "0.0.1",
     "@pdpp/connector-protocol": "0.0.1",
     "playwright": "^1.63.0",

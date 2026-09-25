@@ -33,7 +33,7 @@ const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
-const MANIFEST_REQUEST = /\/manifests\/sha256:[0-9a-f]{64}$/;
+const MANIFEST_REQUEST = /\/manifests\/(sha256:[0-9a-f]{64})$/;
 const BLOB_REQUEST = /\/blobs\/(sha256:[0-9a-f]{64})$/;
 
 export interface ConnectorInstallRecord {
@@ -396,10 +396,10 @@ function reclaimStaleLock(lockDir: string, ownerPid: number): boolean {
   }
 }
 
-function acquireInstallLock(dataDir: string): () => void {
+function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): () => void {
   assertNoSymlinkComponents(dataDir);
   mkdirSync(dataDir, { recursive: true });
-  const lockDir = join(dataDir, ".connector-install.lock");
+  const lockDir = join(dataDir, lockName);
   for (;;) {
     try {
       mkdirSync(lockDir);
@@ -410,12 +410,12 @@ function acquireInstallLock(dataDir: string): () => void {
       }
       const ownerPid = readLockOwner(lockDir);
       if (ownerPid === null) {
-        throw new Error("Another connector installation is in progress.", { cause: error });
+        throw new Error(busyMessage, { cause: error });
       }
       if (reclaimStaleLock(lockDir, ownerPid)) {
         continue;
       }
-      throw new Error("Another connector installation is in progress.", { cause: error });
+      throw new Error(busyMessage, { cause: error });
     }
   }
   writeFileSync(join(lockDir, "pid"), `${String(process.pid)}\n`, { mode: 0o600 });
@@ -427,6 +427,14 @@ function acquireInstallLock(dataDir: string): () => void {
     released = true;
     rmSync(lockDir, { force: true, recursive: true });
   };
+}
+
+function acquireInstallLock(dataDir: string): () => void {
+  return acquireDirectoryLock(dataDir, ".connector-install.lock", "Another connector installation is in progress.");
+}
+
+function acquireCatalogStateLock(dataDir: string): () => void {
+  return acquireDirectoryLock(dataDir, ".connector-catalog.lock", "Another connector catalog refresh is in progress.");
 }
 
 function sha256(path: string): string {
@@ -708,6 +716,7 @@ async function installStagedEntry(options: {
 export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
+  resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -735,46 +744,55 @@ export function createConnectorInstallService(options: {
     options.store ||
     (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(dataDir);
+  let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
-    const previousHighWater = await store.getCatalogHighWater();
-    const loaded = options.catalogLoader
-      ? await options.catalogLoader()
-      : await loadCatalogFromPinnedCore(previousHighWater);
-    const snapshot: ConnectorCatalogSnapshot = Array.isArray(loaded)
-      ? { entries: loaded as readonly ConnectorCatalogEntry[] }
-      : (loaded as ConnectorCatalogSnapshot);
-    if (!Array.isArray(snapshot.entries)) {
-      throw new Error("Verified connector catalog has an invalid entry list.");
-    }
-    for (const entry of snapshot.entries) {
-      assertCatalogEntry(entry, entry.connector_id, entry.digest);
-    }
-    const highWater =
-      snapshot.generatedAt ??
-      snapshot.entries
-        .map((entry) => entry.digest)
-        .sort()
-        .join(",");
-    if (snapshot.generatedAt && !Number.isFinite(Date.parse(snapshot.generatedAt))) {
-      throw new Error("Verified connector catalog has an invalid generated_at timestamp.");
-    }
-    if (
-      snapshot.generatedAt &&
-      previousHighWater &&
-      Number.isFinite(Date.parse(previousHighWater)) &&
-      Date.parse(snapshot.generatedAt) < Date.parse(previousHighWater)
-    ) {
-      throw new Error("Catalog rollback refused by high-water mark.");
-    }
-    await store.setCatalogHighWater(highWater);
-    return snapshot.entries;
-  };
-  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
-    const release = acquireInstallLock(dataDir);
+    const release = acquireCatalogStateLock(dataDir);
     try {
-      return await loadCatalog();
+      const previousHighWater = await store.getCatalogHighWater();
+      const loaded = options.catalogLoader
+        ? await options.catalogLoader()
+        : await loadCatalogFromPinnedCore(previousHighWater);
+      const snapshot: ConnectorCatalogSnapshot = Array.isArray(loaded)
+        ? { entries: loaded as readonly ConnectorCatalogEntry[] }
+        : (loaded as ConnectorCatalogSnapshot);
+      if (!Array.isArray(snapshot.entries)) {
+        throw new Error("Verified connector catalog has an invalid entry list.");
+      }
+      for (const entry of snapshot.entries) {
+        assertCatalogEntry(entry, entry.connector_id, entry.digest);
+      }
+      const highWater =
+        snapshot.generatedAt ??
+        snapshot.entries
+          .map((entry) => entry.digest)
+          .sort()
+          .join(",");
+      if (snapshot.generatedAt && !Number.isFinite(Date.parse(snapshot.generatedAt))) {
+        throw new Error("Verified connector catalog has an invalid generated_at timestamp.");
+      }
+      if (
+        snapshot.generatedAt &&
+        previousHighWater &&
+        Number.isFinite(Date.parse(previousHighWater)) &&
+        Date.parse(snapshot.generatedAt) < Date.parse(previousHighWater)
+      ) {
+        throw new Error("Catalog rollback refused by high-water mark.");
+      }
+      await store.setCatalogHighWater(highWater);
+      return snapshot.entries;
     } finally {
       release();
+    }
+  };
+  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+    const refresh = catalogRefresh ?? loadCatalog();
+    catalogRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (catalogRefresh === refresh) {
+        catalogRefresh = undefined;
+      }
     }
   };
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
@@ -784,17 +802,43 @@ export function createConnectorInstallService(options: {
       const existing = await store.getActive(connectorId);
       if (existsSync(root)) {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
-          return reuseExistingInstall(root, entry, existing, existing, dataDir, options.registerManifest, store);
-        }
-        if (existing) {
-          return reuseExistingInstall(root, entry, null, existing, dataDir, options.registerManifest, store);
-        }
-        // A crash can leave the published directory between rename and the
-        // active-record commit. It is not trusted merely because its name is
-        // digest-shaped, so discard it safely and retry from the signed source.
-        removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
-        if (existsSync(root)) {
-          throw new Error("Connector digest root already exists without a matching active record.");
+          const inspected = await inspectActiveConnector(store, connectorId);
+          if (inspected.status === "active") {
+            return await reuseExistingInstall(
+              root,
+              entry,
+              existing,
+              existing,
+              dataDir,
+              options.registerManifest,
+              store
+            );
+          }
+          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
+          if (existsSync(root)) {
+            throw new Error("Connector digest root already exists without a matching active record.");
+          }
+        } else if (existing) {
+          return await reuseExistingInstall(root, entry, null, existing, dataDir, options.registerManifest, store);
+        } else {
+          // A crash can leave the published directory between rename and the
+          // active-record commit. Do not delete a valid retained root only
+          // because its active record is missing.
+          try {
+            readVerifiedRecord(root, entry);
+            throw new Error("Connector digest root already exists without a matching active record.");
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === "Connector digest root already exists without a matching active record."
+            ) {
+              throw error;
+            }
+          }
+          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
+          if (existsSync(root)) {
+            throw new Error("Connector digest root already exists without a matching active record.");
+          }
         }
       }
       assertNoSymlinkComponents(dataDir);
@@ -829,18 +873,61 @@ export function createConnectorInstallService(options: {
     assertCatalogEntry(entry, connectorId, digest);
     return installEntry(connectorId, entry);
   };
+  const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
+    const entry = (await catalog()).find(
+      (candidate) => candidate.connector_id === connectorId && candidate.latest === true
+    );
+    if (!entry) {
+      return null;
+    }
+    const core = await loadPinnedCore();
+    if (!core.fetchResolvedArtifact) {
+      throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
+    }
+    const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
+      if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
+        return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
+      }
+      return null;
+    };
+    const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
+    const artifact = await core.fetchResolvedArtifact(
+      { doc: {}, mode: "locked" },
+      {
+        artifactKind: "pdpp-collection-profile",
+        connectorId: entry.connector_id,
+        connectorKey: entry.connector_key,
+        entrypointPath: "dist/collection-profile.mjs",
+        manifestPath: "profile/collection-profile.json",
+        oci: {
+          digest: entry.digest,
+          registry: "ghcr.io",
+          repository: `pdp-connect/connector/${entry.connector_key}`,
+        },
+        provenancePath: "provenance.json",
+        version: entry.version ?? entry.digest,
+      },
+      {
+        fetchImpl: limitedTransport.fetchImpl,
+        ociCertificateIdentityResolver: identityResolver,
+      }
+    );
+    const manifest = isRecord(artifact) && isRecord(artifact.manifest) ? artifact.manifest : null;
+    if (!manifest || canonicalManifestKey(manifest) !== entry.connector_key) {
+      throw new Error("Signed connector manifest identity does not match the catalog entry.");
+    }
+    return manifest;
+  };
   return {
     addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
     install,
+    resolveManifestFromCatalog,
     listLocalSources: () => localSourceStore.list(),
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
-    status: async () => {
-      const records = await store.listActive();
-      return records.map((record) => verifyStoredRecord(record.root, record, dataDir));
-    },
+    status: async () => (await listVerifiedActiveConnectors(store)).verified,
     async update(connectorId) {
       const entries = await catalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);
@@ -952,7 +1039,7 @@ function extractManifestLayerDigests(buffer: Buffer): {
   }
 }
 
-export function createConfigLimitedFetch(baseFetch: FetchLike): {
+export function createConfigLimitedFetch(baseFetch: FetchLike, expectedManifestDigest?: string): {
   readonly fetchImpl: typeof fetch;
   readonly configDigest: () => string | null;
 } {
@@ -969,7 +1056,9 @@ export function createConfigLimitedFetch(baseFetch: FetchLike): {
       requestUrl = input.url;
     }
     const parsedUrl = new URL(requestUrl);
-    const manifestRequest = MANIFEST_REQUEST.test(parsedUrl.pathname);
+    const manifestMatch = MANIFEST_REQUEST.exec(parsedUrl.pathname);
+    const isExpectedManifest =
+      manifestMatch !== null && (!expectedManifestDigest || manifestMatch[1] === expectedManifestDigest);
     const blobMatch = BLOB_REQUEST.exec(parsedUrl.pathname);
     const isBoundedBlob =
       blobMatch?.[1] !== undefined &&
@@ -981,21 +1070,45 @@ export function createConfigLimitedFetch(baseFetch: FetchLike): {
       }
     }
     const originalArrayBuffer = response.arrayBuffer.bind(response);
-    Object.defineProperty(response, "arrayBuffer", {
-      configurable: true,
-      value: async () => {
-        const buffer = Buffer.from(await originalArrayBuffer());
-        if (isBoundedBlob && buffer.length > MAX_CONFIG_BYTES) {
-          throw new Error("Connector OCI config or profile exceeds the 1 MiB RI limit.");
-        }
-        if (manifestRequest) {
-          const layerDigests = extractManifestLayerDigests(buffer);
-          if (layerDigests) {
-            discoveredConfigDigest = layerDigests.configDigest;
-            discoveredProfileDigest = layerDigests.profileDigest;
+    let bufferPromise: Promise<Buffer> | null = null;
+    const readBuffer = async (): Promise<Buffer> => {
+      if (!bufferPromise) {
+        bufferPromise = originalArrayBuffer().then((arrayBuffer) => {
+          const buffer = Buffer.from(arrayBuffer);
+          if (isBoundedBlob && buffer.length > MAX_CONFIG_BYTES) {
+            throw new Error("Connector OCI config or profile exceeds the 1 MiB RI limit.");
           }
-        }
-        return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+          if (isExpectedManifest) {
+            const layerDigests = extractManifestLayerDigests(buffer);
+            // An unrelated or malformed response at a manifest-shaped path
+            // must not erase a digest already read from the OCI manifest.
+            if (layerDigests?.configDigest) {
+              discoveredConfigDigest = layerDigests.configDigest;
+              if (layerDigests.profileDigest) {
+                discoveredProfileDigest = layerDigests.profileDigest;
+              }
+            }
+          }
+          return buffer;
+        });
+      }
+      return bufferPromise;
+    };
+    Object.defineProperties(response, {
+      arrayBuffer: {
+        configurable: true,
+        value: async () => {
+          const buffer = await readBuffer();
+          return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        },
+      },
+      json: {
+        configurable: true,
+        value: async () => JSON.parse((await readBuffer()).toString("utf8")),
+      },
+      text: {
+        configurable: true,
+        value: async () => (await readBuffer()).toString("utf8"),
       },
     });
     return response;
@@ -1008,11 +1121,13 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   if (!core.fetchResolvedArtifact) {
     throw new Error("Pinned connector installer core does not expose fetchResolvedArtifact.");
   }
-  const identityResolver = ({ registry, repository }: { registry: string; repository: string }) =>
-    registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`
-      ? core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY
-      : null;
-  const preflightTransport = createConfigLimitedFetch(fetch);
+  const identityResolver = ({ registry, repository }: { registry: string; repository: string }) => {
+    if (registry === "ghcr.io" && repository === `pdp-connect/connector/${entry.connector_key}`) {
+      return core.DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY;
+    }
+    return null;
+  };
+  const preflightTransport = createConfigLimitedFetch(fetch, entry.digest);
   const preflight = await core.fetchResolvedArtifact(
     { doc: {}, mode: "locked" },
     {
@@ -1038,9 +1153,11 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   const preflightOci = isRecord(preflight) && isRecord(preflight.oci) ? preflight.oci : null;
   const configDigest = preflightOci && typeof preflightOci.configDigest === "string" ? preflightOci.configDigest : null;
   if (!(configDigest && DIGEST.test(configDigest)) || (entry.config_digest && entry.config_digest !== configDigest)) {
-    throw new Error("OCI manifest config digest does not match the verified install identity.");
+    throw new Error(
+      `OCI preflight config digest does not match the verified install identity (catalog=${entry.config_digest ?? "none"}, manifest=${configDigest ?? "none"}).`
+    );
   }
-  const limitedTransport = createConfigLimitedFetch(fetch);
+  const limitedTransport = createConfigLimitedFetch(fetch, entry.digest);
   await core.installFromLock({
     artifactCertificateIdentityResolver: () => null,
     fetchImpl: limitedTransport.fetchImpl,
@@ -1075,7 +1192,9 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
   });
   const installedConfigDigest = limitedTransport.configDigest();
   if (!installedConfigDigest || installedConfigDigest !== configDigest) {
-    throw new Error("OCI manifest config digest does not match the verified install identity.");
+    throw new Error(
+      `OCI install config digest was not confirmed by the transport (preflight=${configDigest}, manifest=${installedConfigDigest ?? "none"}).`
+    );
   }
   normalizeCoreInstallLayout(root, entry.connector_id);
   return configDigest;

@@ -31,6 +31,7 @@ import {
   type StaticSecretSetupFieldLike,
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
+import type { ConnectorInstallCatalogEntry } from "./connector-install-contract.ts";
 
 /**
  * Minimal manifest shape the catalog reads. The real `ConnectorManifest`
@@ -103,6 +104,54 @@ export interface CatalogManifestLike {
     } | null;
     modality?: string | null;
   } | null;
+}
+
+function catalogManifestFromInstallEntry(entry: ConnectorInstallCatalogEntry): CatalogManifestLike {
+  const connectorId = entry.catalog_connector_id ?? entry.connector_id;
+  return {
+    capabilities: {
+      public_listing: { tier: entry.tier ?? "development" },
+    },
+    connector_id: connectorId,
+    connector_key: entry.connector_key,
+    display_name: entry.display_name ?? entry.connector_key,
+    runtime_requirements: { bindings: entry.bindings },
+    setup: entry.setup_modality ? { modality: entry.setup_modality } : null,
+  };
+}
+
+function latestInstallCatalogManifests(
+  installCatalog: readonly ConnectorInstallCatalogEntry[]
+): CatalogManifestLike[] {
+  const byKey = new Map<string, ConnectorInstallCatalogEntry>();
+  for (const entry of installCatalog) {
+    const key = canonicalConnectorKey(entry.connector_key);
+    const previous = byKey.get(key);
+    if (!previous || entry.latest || !previous.latest) {
+      byKey.set(key, entry);
+    }
+  }
+  return [...byKey.values()].map(catalogManifestFromInstallEntry);
+}
+
+function mergeAvailabilityManifests(
+  runtimeCatalogManifests: readonly CatalogManifestLike[],
+  manifests: readonly CatalogManifestLike[]
+): CatalogManifestLike[] {
+  const byKey = new Map<string, CatalogManifestLike>();
+  const put = (manifest: CatalogManifestLike) => {
+    const key = cleanManifestText(manifest.connector_key) ?? cleanManifestText(manifest.connector_id);
+    if (key) {
+      byKey.set(canonicalConnectorKey(key), manifest);
+    }
+  };
+  for (const manifest of runtimeCatalogManifests) {
+    put(manifest);
+  }
+  for (const manifest of manifests) {
+    put(manifest);
+  }
+  return [...byKey.values()];
 }
 
 /**
@@ -518,10 +567,13 @@ function actionableOwnerActionFromTemplate(
  */
 export function buildOwnerConnectorCatalog(
   manifests: readonly CatalogManifestLike[],
-  templates: readonly OwnerConnectorTemplateLike[]
+  templates: readonly OwnerConnectorTemplateLike[],
+  installCatalog: readonly ConnectorInstallCatalogEntry[] = []
 ): ConnectorCatalogEntry[] {
   const manifestsByKey = new Map<string, CatalogManifestLike>();
-  for (const manifest of manifests) {
+  const runtimeCatalogManifests = latestInstallCatalogManifests(installCatalog);
+  const availabilityManifests = mergeAvailabilityManifests(runtimeCatalogManifests, manifests);
+  for (const manifest of availabilityManifests) {
     for (const identity of [manifest.connector_key, manifest.connector_id]) {
       const cleanIdentity = cleanManifestText(identity);
       if (cleanIdentity) {
@@ -531,7 +583,7 @@ export function buildOwnerConnectorCatalog(
   }
 
   if (templates.length === 0) {
-    return buildConnectorCatalog(manifests);
+    return buildConnectorCatalog(availabilityManifests);
   }
 
   const entries: ConnectorCatalogEntry[] = [];
@@ -624,10 +676,11 @@ export function buildOwnerConnectorCatalog(
     entries.push(entry);
   }
 
-  // Templates ENRICH the catalog; they never gate it. A manifest-known connector
-  // the owner has not connected yet must still be offered on /sources/add — the
-  // page's whole job is offering connectors to add. Before this, a single
-  // registered template collapsed the list to just that connector.
+  // Templates ENRICH the catalog; they never gate it. A manifest-known or
+  // signed-runtime-catalog connector the owner has not connected yet must still
+  // be offered on /sources/add — the page's whole job is offering connectors to
+  // add. Before this, a single registered template collapsed the list to just
+  // that connector.
   const coveredKeys = new Set<string>();
   for (const covered of entries) {
     for (const identity of [covered.connectorKey]) {
@@ -637,7 +690,7 @@ export function buildOwnerConnectorCatalog(
       }
     }
   }
-  for (const manifestOnlyEntry of buildConnectorCatalog(manifests)) {
+  for (const manifestOnlyEntry of buildConnectorCatalog(availabilityManifests)) {
     const identities = [manifestOnlyEntry.connectorKey]
       .map((identity) => cleanManifestText(identity))
       .filter((identity): identity is string => Boolean(identity))

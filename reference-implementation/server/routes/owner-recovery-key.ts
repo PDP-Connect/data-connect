@@ -21,9 +21,9 @@
 // no independent way to compute this value -- the recovery code is derived
 // from the Rust process's OS-keychain-backed database key, which only Rust
 // can read. This route is therefore a pure relay: `RecoveryKeyStore`
-// (`../recovery-key-store.ts`) writes a request into `recovery-export.json`
-// under `PDPP_DATA_DIR`, the Tauri watcher answers it, and this route waits
-// for and returns that answer. It never computes or stores the code itself.
+// (`../recovery-key-store.ts`) writes a private command under `PDPP_DATA_DIR`,
+// the Tauri watcher answers with a short-lived result, and this route returns
+// the code after the store consumes that result.
 //
 // This route MUST NEVER log the code. `handleError`/`pdppError` on the
 // failure path only ever see the store's error MESSAGE (e.g. "no vault

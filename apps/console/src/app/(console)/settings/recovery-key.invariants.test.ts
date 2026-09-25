@@ -17,7 +17,7 @@ test("the settings page mounts the Vault recovery code section with the recovery
   assert.match(page, /title="Vault recovery code"/)
 })
 
-test("the warning copy is about custody, not phishing", async () => {
+test("the warning copy is about custody and says the kit is keys-only", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
   // Per the research entry backing this design (local vault key recovery
   // artifacts): none of 1Password/Signal/Bitwarden/Proton/Apple/age treat
@@ -30,8 +30,9 @@ test("the warning copy is about custody, not phishing", async () => {
   const warningMatch = setting.match(/<p className="pdpp-caption text-muted-foreground">\s*([\s\S]*?)\s*<\/p>/)
   assert.ok(warningMatch, "expected a rendered warning paragraph")
   const warningText = warningMatch?.[1] ?? ""
+  assert.match(warningText, /restores encryption keys only/)
+  assert.match(warningText, /database backup separately/)
   assert.match(warningText, /read everything in your Personal Server vault/)
-  assert.match(warningText, /Store it somewhere only you control/)
   assert.doesNotMatch(
     warningText,
     /phishing/i,
@@ -41,9 +42,9 @@ test("the warning copy is about custody, not phishing", async () => {
 
 test("the setting goes through the server action, not a direct fetch or invoke() call", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
-  assert.match(setting, /import \{ exportRecoveryCodeAction \} from "\.\/recovery-key-actions\.ts"/)
-  assert.doesNotMatch(setting, /invoke\(/, "recovery key export has no Tauri-native reason to use invoke()")
-  assert.doesNotMatch(setting, /fetch\(/, "recovery key export must go through the server action, not a direct fetch")
+  assert.match(setting, /import \{ exportRecoveryKitAction \} from "\.\/recovery-key-actions\.ts"/)
+  assert.doesNotMatch(setting, /invoke\(/, "recovery kit export has no Tauri-native reason to use invoke()")
+  assert.doesNotMatch(setting, /fetch\(/, "recovery kit export must go through the server action, not a direct fetch")
 })
 
 test("the exported code is rendered in a selectable, copyable block", async () => {
@@ -52,9 +53,9 @@ test("the exported code is rendered in a selectable, copyable block", async () =
   assert.match(setting, /navigator\.clipboard\?\.writeText/)
 })
 
-test("the action calls the recovery-key client and requires dashboard access, matching the remote-access precedent", async () => {
+test("the action calls the recovery-kit client and requires dashboard access, matching the remote-access precedent", async () => {
   const actions = await readFile(ACTIONS_FILE, "utf8")
   assert.match(actions, /"use server"/)
   assert.match(actions, /await requireDashboardAccess\("\/settings"\)/)
-  assert.match(actions, /exportDatabaseEncryptionRecoveryCode\(\)/)
+  assert.match(actions, /exportRecoveryKitCode\(\)/)
 })

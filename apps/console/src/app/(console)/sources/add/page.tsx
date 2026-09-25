@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
@@ -44,6 +45,8 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   let catalog: ConnectorCatalogEntry[] = [];
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
+  let installCatalogBusySnapshotId: string | null = null;
+  let installCatalogTransientlyUnavailable = false;
   let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
   let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
@@ -71,10 +74,12 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
           ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
         ])
       );
-      catalog = buildOwnerConnectorCatalog(manifests, templates);
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;
+      installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
+      installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
       localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
       // EXACT per-connector existing-sources lookup — one `GET
       // /_ref/connections?connector_id=` call per catalog entry (bounded by
@@ -126,6 +131,8 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         action={dashboardRoutes.section.addSource}
         catalog={catalog}
         existingSourcesByConnector={existingSourcesByConnector}
+        installCatalogBusySnapshotId={installCatalogBusySnapshotId}
+        installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
         installLifecycleByConnector={installLifecycleByConnector}
         query={sourceQuery}
       />

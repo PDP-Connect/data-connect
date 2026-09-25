@@ -1,161 +1,110 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Coverage for the RS-side half of the recovery-export.json file protocol
- * (server/recovery-key-store.ts). A real Tauri watcher answering the file is
- * exercised only by src-tauri/src/commands/recovery_key.rs's own Rust tests
- * (no Rust process runs here) -- this file fakes "the watcher" by writing the
- * expected answer directly, the same way owner-remote-access-route.test.ts
- * fakes the transport rather than a real HTTP server.
- */
-
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { createRecoveryKeyStore } from "../server/recovery-key-store.ts";
 
-const RECOVERY_EXPORT_FILE = "recovery-export.json";
-
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "recovery-key-store-"));
-  try {
-    await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
-test("requestExport resolves with the code once the watcher answers", async () => {
-  await withTempDir(async (dir) => {
-    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 2_000 });
-    const path = join(dir, RECOVERY_EXPORT_FILE);
+async function waitCommands(dir: string, count: number): Promise<string[]> {
+  const path = join(dir, "recovery-export-commands");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const names = await readdir(path).catch(() => []);
+    const published = names.filter(name => name.endsWith(".json"));
+    if (published.length >= count) return published.map(name => name.slice(0, -".json".length));
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error("commands were not written");
+}
 
-    const exportPromise = store.requestExport();
+async function result(dir: string, commandId: string, code: string | null, expiresAt = new Date(Date.now() + 120_000),
+  status = "succeeded"): Promise<void> {
+  const path = join(dir, "recovery-export-results");
+  await mkdir(path, { recursive: true });
+  const temporary = join(path, commandId + ".tmp");
+  await writeFile(temporary, JSON.stringify({
+    commandId, status, code, error: status === "failed" ? "No encrypted vault exists yet." : null,
+    createdAt: new Date().toISOString(), expiresAt: expiresAt.toISOString(), consumedAt: null,
+  }), { mode: 0o600 });
+  await rename(temporary, join(path, commandId + ".json"));
+}
 
-    // Simulate the Tauri watcher: wait for the request to land, then answer it.
-    let requestId = 0;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const content = await readFile(path, "utf8").catch(() => "{}");
-      const parsed = JSON.parse(content || "{}") as { requestId?: number };
-      if (parsed.requestId) {
-        requestId = parsed.requestId;
-        break;
-      }
+test("concurrent exports have distinct 0600 commands and consume their own results once", async () => {
+  await withTempDir(async dir => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 500 });
+    const first = store.requestExport();
+    const second = store.requestExport();
+    const ids = await waitCommands(dir, 2);
+    assert.equal(new Set(ids).size, 2);
+    for (const id of ids) {
+      const mode = (await stat(join(dir, "recovery-export-commands", id + ".json"))).mode & 0o777;
+      assert.equal(mode, 0o600);
     }
-    assert.ok(requestId > 0, "watcher never observed a request");
-    await writeFile(
-      path,
-      JSON.stringify({ appliedRequestId: requestId, code: "AB12-CD34", error: null, requestId }),
-      "utf8"
-    );
-
-    const code = await exportPromise;
-    assert.equal(code, "AB12-CD34");
+    await result(dir, ids[1]!, "CODE-B");
+    await result(dir, ids[0]!, "CODE-A");
+    const codes = await Promise.all([first, second]);
+    assert.deepEqual(codes.sort(), ["CODE-A", "CODE-B"]);
+    assert.deepEqual(await readdir(join(dir, "recovery-export-results")), []);
+    assert.deepEqual(await readdir(join(dir, "recovery-export-commands")), []);
   });
 });
 
-test("requestExport locks recovery-export.json to owner-only permissions", async () => {
-  await withTempDir(async (dir) => {
-    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 2_000 });
-    const path = join(dir, RECOVERY_EXPORT_FILE);
-
-    const exportPromise = store.requestExport();
-
-    let requestId = 0;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const content = await readFile(path, "utf8").catch(() => "{}");
-      const parsed = JSON.parse(content || "{}") as { requestId?: number };
-      if (parsed.requestId) {
-        requestId = parsed.requestId;
-        break;
-      }
-    }
-    assert.ok(requestId > 0, "watcher never observed a request");
-    await writeFile(
-      path,
-      JSON.stringify({ appliedRequestId: requestId, code: "AB12-CD34", error: null, requestId }),
-      "utf8"
-    );
-
-    await exportPromise;
-
-    const mode = (await stat(path)).mode & 0o777;
-    assert.equal(mode, 0o600, `recovery-export.json must be 0600, got ${mode.toString(8)}`);
+test("mismatched result id is ignored, then matching result succeeds", async () => {
+  await withTempDir(async dir => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 500 });
+    const request = store.requestExport();
+    const [id] = await waitCommands(dir, 1);
+    const path = join(dir, "recovery-export-results", id + ".json");
+    await result(dir, "rky_AAAAAAAAAAAAAAAAAAAAAA", "WRONG");
+    await mkdir(join(dir, "recovery-export-results"), { recursive: true });
+    const temporary = path + ".tmp";
+    await writeFile(temporary, JSON.stringify({
+      commandId: "rky_AAAAAAAAAAAAAAAAAAAAAA", status: "succeeded", code: "WRONG", error: null,
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120_000).toISOString(), consumedAt: null,
+    }));
+    await rename(temporary, path);
+    const settled = await Promise.race([request.then(() => "resolved"), new Promise(resolve => setTimeout(() => resolve("pending"), 30))]);
+    assert.equal(settled, "pending");
+    await result(dir, id!, "RIGHT");
+    assert.equal(await request, "RIGHT");
   });
 });
 
-test("requestExport clears the code field from disk after reading it", async () => {
-  await withTempDir(async (dir) => {
-    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 2_000 });
-    const path = join(dir, RECOVERY_EXPORT_FILE);
-
-    const exportPromise = store.requestExport();
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const content = await readFile(path, "utf8").catch(() => "{}");
-      const parsed = JSON.parse(content || "{}") as { requestId?: number };
-      if (parsed.requestId) {
-        await writeFile(
-          path,
-          JSON.stringify({
-            appliedRequestId: parsed.requestId,
-            code: "SECRET-PLAINTEXT-CODE",
-            error: null,
-            requestId: parsed.requestId,
-          }),
-          "utf8"
-        );
-        break;
-      }
-    }
-    await exportPromise;
-
-    // Give the store's own post-read write a moment to land.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const finalContent = await readFile(path, "utf8");
-    const finalState = JSON.parse(finalContent) as { code: string | null };
-    assert.equal(finalState.code, null, "plaintext code must not linger on disk after the round trip");
+test("expired result is rejected and cleaned; consumed response cannot replay after restart", async () => {
+  await withTempDir(async dir => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 300 });
+    const request = store.requestExport();
+    const [id] = await waitCommands(dir, 1);
+    await result(dir, id!, "OLD", new Date(Date.now() - 1000));
+    await assert.rejects(request, /expired/);
+    await assert.rejects(stat(join(dir, "recovery-export-results", id + ".json")), { code: "ENOENT" });
+    const restarted = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 50 });
+    await assert.rejects(restarted.requestExport(), /Timed out/);
   });
 });
 
-test("requestExport propagates a refusal error without treating it as a code", async () => {
-  await withTempDir(async (dir) => {
-    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 2_000 });
-    const path = join(dir, RECOVERY_EXPORT_FILE);
-
-    const exportPromise = store.requestExport();
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const content = await readFile(path, "utf8").catch(() => "{}");
-      const parsed = JSON.parse(content || "{}") as { requestId?: number };
-      if (parsed.requestId) {
-        await writeFile(
-          path,
-          JSON.stringify({
-            appliedRequestId: parsed.requestId,
-            code: null,
-            error: "No encrypted vault exists yet.",
-            requestId: parsed.requestId,
-          }),
-          "utf8"
-        );
-        break;
-      }
-    }
-
-    await assert.rejects(exportPromise, /No encrypted vault exists yet/);
+test("native failure propagates without returning secret material", async () => {
+  await withTempDir(async dir => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 500 });
+    const request = store.requestExport();
+    const [id] = await waitCommands(dir, 1);
+    await result(dir, id!, null, new Date(Date.now() + 120_000), "failed");
+    await assert.rejects(request, /No encrypted vault exists yet/);
   });
 });
 
-test("requestExport times out cleanly when nothing answers the request", async () => {
-  await withTempDir(async (dir) => {
-    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 10, pollTimeoutMs: 100 });
+test("timeout withdraws its command so a late watcher cannot mint an orphaned secret", async () => {
+  await withTempDir(async dir => {
+    const store = createRecoveryKeyStore(dir, { pollIntervalMs: 5, pollTimeoutMs: 40 });
     await assert.rejects(store.requestExport(), /Timed out/);
+    assert.deepEqual(await readdir(join(dir, "recovery-export-commands")), []);
   });
 });

@@ -9,16 +9,15 @@
 // at the owner-session capture page, but it never carries the credential itself.
 
 import {
-  isBundledStaticSecretCredentialKind,
-  isFullyBundledStaticSecretCredentialKind,
-} from "../polyfill-connectors-runtime.ts";
-
-import {
   type ConnectorManifestLike,
   expectedStaticSecretCredentialKind,
   type StaticSecretSetupField,
   staticSecretCredentialCaptureFromManifest,
 } from "../connection-setup-plan.ts";
+import {
+  isBundledStaticSecretCredentialKind,
+  isFullyBundledStaticSecretCredentialKind,
+} from "../polyfill-connectors-runtime.ts";
 import {
   assertStaticSecretActiveCredentialReplacementAllowed,
   isStaticSecretBindingUniqueConflict,
@@ -1212,8 +1211,8 @@ async function storeAndRespond(
  *   - still returns 200/201 and a `run_connection` next step, because a
  *     blank optional choice is a VALID, complete setup outcome — the
  *     connector's own manual-sign-in fallback is what makes the run able to
- *     proceed with zero credentials (see `isStaticSecretCaptureOptional` in
- *     `static-secret-injection.ts` for the run-time half of this contract).
+ *     proceed with zero credentials; run-time handling reads the same
+ *     `credential_capture.required` policy from the installed profile.
  * No credential probe runs (there is nothing to probe) and no
  * active-replacement guard runs (there is nothing to replace).
  */

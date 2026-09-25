@@ -5,8 +5,8 @@
  * Split deployment: only the authorization server holds
  * `PDPP_OWNER_PASSWORD`; the console process does not.
  *
- * In this topology `verifyDashboardSession()` passes every request through
- * and expects the AS to judge the forwarded cookie. The owner bearer that
+ * In this topology the console must still ask the AS to judge the forwarded
+ * cookie because it does not hold the password. The owner bearer that
  * `getOwnerToken()` returns goes straight to the RS, which checks only the
  * bearer. So `getOwnerToken()` must establish that the CURRENT request is the
  * owner's before it hands out a cached or in-flight bearer. The process-wide
@@ -30,6 +30,7 @@ import {
 
 type OwnerTokenModule = typeof import("./owner-token.ts");
 type SettingsActions = typeof import("../settings/desktop-settings-actions.ts");
+type VerifyModule = typeof import("./verify-session.ts");
 
 let reference: Awaited<ReturnType<typeof startReference>>;
 let fetches: ReturnType<typeof recordFetches>;
@@ -39,14 +40,16 @@ let getOwnerToken: OwnerTokenModule["getOwnerToken"];
 let isOwnerSessionGateEnabled: OwnerTokenModule["isOwnerSessionGateEnabled"];
 let loadAppConfigAction: SettingsActions["loadAppConfigAction"];
 let saveAppConfigAction: SettingsActions["saveAppConfigAction"];
+let verifyDashboardSession: VerifyModule["verifyDashboardSession"];
 
 test.before(async () => {
   installNextRequestMocks(test);
   delete process.env.PDPP_OWNER_PASSWORD;
   reference = await startReference({ ownerAuthPassword: OWNER_PASSWORD });
   ({ clearOwnerToken, getOwnerToken, isOwnerSessionGateEnabled } = await import("./owner-token.ts"));
+  ({ verifyDashboardSession } = await import("./verify-session.ts"));
   ({ loadAppConfigAction, saveAppConfigAction } = await import("../settings/desktop-settings-actions.ts"));
-  ownerCookie = await issueSessionCookie(OWNER_PASSWORD);
+  ownerCookie = await issueSessionCookie(reference.asUrl, OWNER_PASSWORD);
   fetches = recordFetches();
 });
 
@@ -70,6 +73,39 @@ async function warmCache(): Promise<string> {
 
 test("split topology: the console holds no password, so its local gate is off", () => {
   assert.equal(isOwnerSessionGateEnabled(), false);
+});
+
+test("split: the DAL checks the AS even when the console has no password", async () => {
+  await assert.rejects(asRequest(null, () => verifyDashboardSession()), isLoginRedirect);
+  assert.ok(asCalls().some((url) => url === `${reference.asUrl}/owner/session`));
+  await asRequest(ownerCookie, () => verifyDashboardSession());
+});
+
+test("split: AS session-check failures do not redirect to sign-in or release a cached bearer", async () => {
+  await warmCache();
+  const originalFetch = globalThis.fetch;
+  const mintsBefore = mintCalls().length;
+  try {
+    for (const status of [503, 404]) {
+      globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        return url === `${reference.asUrl}/owner/session`
+          ? Promise.resolve(new Response("AS unavailable", { status }))
+          : originalFetch(input, init);
+      };
+      await assert.rejects(
+        asRequest(ownerCookie, () => verifyDashboardSession()),
+        new RegExp(`owner session check failed \\(${status}\\)`)
+      );
+      await assert.rejects(
+        asRequest(ownerCookie, () => getOwnerToken()),
+        new RegExp(`owner session check failed \\(${status}\\)`)
+      );
+    }
+    assert.equal(mintCalls().length, mintsBefore, "a failed AS check must not start a bearer mint");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("split: authenticated request, then anonymous request — the cached bearer is not handed out", async () => {
@@ -129,19 +165,19 @@ test("split: concurrent anonymous and authenticated requests on a cold cache", a
   assert.equal(ownerResult.status, "fulfilled");
 });
 
-test("split: an expired session cookie is refused even with a warm cache", async () => {
+test("split: an unknown session cookie is refused even with a warm cache", async () => {
   await warmCache();
-  const expired = await issueSessionCookie(OWNER_PASSWORD, { expired: true });
-  await assert.rejects(asRequest(expired, () => getOwnerToken()), isLoginRedirect);
+  await assert.rejects(asRequest("unknown-session-id", () => getOwnerToken()), isLoginRedirect);
 });
 
 test("split: after logout the browser has no session, and the warm cache does not stand in for one", async () => {
   await warmCache();
+  const logoutCookie = await issueSessionCookie(reference.asUrl, OWNER_PASSWORD);
   const logout = await fetch(`${reference.asUrl}/owner/logout`, {
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      Cookie: `pdpp_owner_session=${ownerCookie}`,
+      Cookie: `pdpp_owner_session=${logoutCookie}`,
     },
     method: "POST",
   });
@@ -150,13 +186,19 @@ test("split: after logout the browser has no session, and the warm cache does no
   await assert.rejects(asRequest(null, () => getOwnerToken()), isLoginRedirect);
 });
 
-test("split: after a password rotation, a cookie signed under the previous password is refused", async () => {
-  // The AS signs sessions with a key derived from its current password, so a
-  // rotation invalidates every earlier cookie. Present one signed under a
-  // different password while the cache is warm.
+test("split: a session revoked by logout is refused", async () => {
   await warmCache();
-  const previousPasswordCookie = await issueSessionCookie("the-password-before-rotation");
-  await assert.rejects(asRequest(previousPasswordCookie, () => getOwnerToken()), isLoginRedirect);
+  const revocableCookie = await issueSessionCookie(reference.asUrl, OWNER_PASSWORD);
+  const logout = await fetch(`${reference.asUrl}/owner/logout`, {
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: `pdpp_owner_session=${revocableCookie}`,
+    },
+    method: "POST",
+  });
+  assert.equal(logout.status, 204);
+  await assert.rejects(asRequest(revocableCookie, () => getOwnerToken()), isLoginRedirect);
 });
 
 test("split: owner read and mutation through the Server Actions reach the real RS only for the owner", async () => {
@@ -176,8 +218,10 @@ test("split: owner read and mutation through the Server Actions reach the real R
 
   // Anonymous mutation: refused, and the stored config is unchanged.
   const rsWritesBefore = fetches.calls.filter((url) => url.startsWith(reference.rsUrl)).length;
-  const attack = await asRequest(null, () => saveAppConfigAction({ ...initial, closeToTray: !initial.closeToTray }));
-  assert.equal(attack.ok, false);
+  await assert.rejects(
+    asRequest(null, () => saveAppConfigAction({ ...initial, closeToTray: !initial.closeToTray })),
+    isLoginRedirect
+  );
   assert.equal(
     fetches.calls.filter((url) => url.startsWith(reference.rsUrl)).length,
     rsWritesBefore,

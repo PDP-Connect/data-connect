@@ -7,16 +7,31 @@
 //! the keychain backend is unavailable at runtime, such as headless Linux.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-use tauri::{AppHandle, Manager};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
+pub(crate) const OWNER_PASSWORD_OWNER_SET_MARKER_FILE: &str = "owner-password-owner-set.json";
+const OWNER_PASSWORD_WINDOW_REQUEST_FILE: &str = "owner-password-window-request.json";
+const OWNER_PASSWORD_WINDOW_REQUEST_PREFIX: &str = "owner-password-window-request-";
+const OWNER_PASSWORD_RECOVERY_WINDOW_REQUEST_FILE: &str =
+    "owner-password-recovery-window-request.json";
+const OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE: &str = "owner-password-stack-restart-request.json";
+const OWNER_OS_REAUTH_REQUEST_FILE: &str = "owner-os-reauth-request.json";
+const OWNER_OS_REAUTH_REQUEST_PREFIX: &str = "owner-os-reauth-request-";
+const OWNER_OS_REAUTH_RESULT_PREFIX: &str = "owner-os-reauth-result-";
 const CREDENTIAL_ENCRYPTION_KEY_FILE: &str = "credential-encryption-key";
 const DATABASE_ENCRYPTION_KEY_FILE: &str = "database-encryption-key";
 const GENERATED_SECRET_BYTES: usize = 32;
+const OWNER_PASSWORD_MIN_LENGTH: usize = 15;
+const OWNER_PASSWORD_WINDOW_LABEL: &str = "owner-password";
+const OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const OWNER_OS_REAUTH_GRANT_TTL: Duration = Duration::from_secs(120);
 const KEYRING_SERVICE: &str = "com.vana.dataconnect";
 const OWNER_KEYRING_USERNAME: &str = "owner";
 const PROVIDER_CREDENTIAL_USERNAME_PREFIX: &str = "remote-access-provider:";
@@ -26,6 +41,44 @@ const DATABASE_ENCRYPTION_KEYRING_USERNAME: &str = "database-encryption-key";
 trait CredentialStore {
     fn load(&mut self) -> Result<Option<String>, String>;
     fn save(&mut self, credential: &str) -> Result<(), String>;
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct OwnerPasswordRequestState {
+    request_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_request_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    not_before_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deadline_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_for_request_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_consumed_request_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerReauthGrant {
+    expires_unix_ms: u64,
+    purpose: String,
+    reauth_request_id: u64,
+    window_request_id: Option<u64>,
+}
+
+static OWNER_REAUTH_GRANTS: OnceLock<Mutex<HashMap<String, OwnerReauthGrant>>> = OnceLock::new();
+
+fn owner_reauth_grants() -> &'static Mutex<HashMap<String, OwnerReauthGrant>> {
+    OWNER_REAUTH_GRANTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 struct SystemKeyring {
@@ -185,10 +238,32 @@ pub(crate) fn load_or_create_database_encryption_key(
 /// same 0600 app-data-file fallback every other credential in this module
 /// uses), after a recovery code has been verified to actually open the vault.
 /// Mirrors `save_owner_credential`'s shape exactly.
-pub(crate) fn save_database_encryption_key(app: &AppHandle, credential: &str) -> Result<(), String> {
+pub(crate) fn save_database_encryption_key(
+    app: &AppHandle,
+    credential: &str,
+) -> Result<(), String> {
     let path = database_encryption_key_path(app)?;
     let mut store = SystemKeyring::new(DATABASE_ENCRYPTION_KEYRING_USERNAME);
     save_database_encryption_key_with_store(&path, &mut store, credential)
+}
+
+/// Replace the durable instance credential key after a v2 recovery kit has
+/// been verified against the database key in the same kit.
+pub(crate) fn save_credential_encryption_key(
+    app: &AppHandle,
+    credential: &str,
+) -> Result<(), String> {
+    let path = credential_encryption_key_path(app)?;
+    let mut store = SystemKeyring::new(CREDENTIAL_ENCRYPTION_KEYRING_USERNAME);
+    save_credential_encryption_key_with_store(&path, &mut store, credential)
+}
+
+pub(crate) fn generate_recovered_v1_credential_encryption_key() -> Result<String, String> {
+    let mut bytes = [0u8; GENERATED_SECRET_BYTES];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        format!("Failed to generate recovered credential encryption key: {error}")
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Load the durable instance credential key, or create it only when no sealed
@@ -213,6 +288,853 @@ pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result
     let path = owner_credential_path(app)?;
     let mut store = SystemKeyring::owner();
     save_owner_credential_with_store(&path, &mut store, credential)
+}
+
+pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join(crate::unified::UNIFIED_DB_DIRECTORY)
+                .join(OWNER_PASSWORD_OWNER_SET_MARKER_FILE)
+        })
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+pub(crate) fn owner_password_owner_set_marker_exists(app: &AppHandle) -> Result<bool, String> {
+    Ok(owner_password_owner_set_marker_path(app)?.exists())
+}
+
+pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), String> {
+    let path = owner_password_owner_set_marker_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Failed to create owner password marker directory: {error}")
+        })?;
+    }
+    let marker = serde_json::json!({
+        "source": "desktop-owner-set",
+        "version": 1,
+    });
+    crate::atomic_write::write_json_atomically(
+        &path,
+        &marker,
+        "Failed to write owner password marker",
+    )
+}
+
+fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join(crate::unified::UNIFIED_DB_DIRECTORY)
+                .join(file_name)
+        })
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+fn owner_password_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+    owner_password_request_file_path(app, OWNER_PASSWORD_WINDOW_REQUEST_FILE)
+}
+
+fn owner_password_recovery_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+    owner_password_request_file_path(app, OWNER_PASSWORD_RECOVERY_WINDOW_REQUEST_FILE)
+}
+
+fn owner_password_stack_restart_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+    owner_password_request_file_path(app, OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE)
+}
+
+fn owner_os_reauth_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+    owner_password_request_file_path(app, OWNER_OS_REAUTH_REQUEST_FILE)
+}
+
+fn owner_password_window_request_file_path(
+    app: &AppHandle,
+    request_id: u64,
+) -> Result<PathBuf, String> {
+    owner_password_request_file_path(
+        app,
+        &format!("{OWNER_PASSWORD_WINDOW_REQUEST_PREFIX}{request_id}.json"),
+    )
+}
+
+fn owner_os_reauth_request_file_path(app: &AppHandle, request_id: u64) -> Result<PathBuf, String> {
+    owner_password_request_file_path(
+        app,
+        &format!("{OWNER_OS_REAUTH_REQUEST_PREFIX}{request_id}.json"),
+    )
+}
+
+fn owner_os_reauth_result_path(app: &AppHandle, request_id: u64) -> Result<PathBuf, String> {
+    owner_password_request_file_path(
+        app,
+        &format!("{OWNER_OS_REAUTH_RESULT_PREFIX}{request_id}.json"),
+    )
+}
+
+fn request_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join(crate::unified::UNIFIED_DB_DIRECTORY))
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+fn request_ids_with_prefix(app: &AppHandle, prefix: &str) -> Result<Vec<u64>, String> {
+    let dir = request_directory(app)?;
+    let mut ids = Vec::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+        Err(error) => return Err(format!("Failed to read owner request directory: {error}")),
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(raw) = name
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if let Ok(id) = raw.parse::<u64>() {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+fn load_owner_password_request_state(
+    path: &Path,
+    label: &str,
+) -> Result<OwnerPasswordRequestState, String> {
+    if !path.exists() {
+        return Ok(OwnerPasswordRequestState::default());
+    }
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("Failed to read {label}: {error}"))?;
+    if content.trim().is_empty() {
+        return Ok(OwnerPasswordRequestState::default());
+    }
+    serde_json::from_str(&content).map_err(|error| format!("Failed to parse {label}: {error}"))
+}
+
+fn save_owner_password_request_state(
+    path: &Path,
+    state: &OwnerPasswordRequestState,
+    label: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {label} directory: {error}"))?;
+    }
+    crate::atomic_write::write_json_atomically(path, state, &format!("Failed to write {label}"))
+}
+
+fn unix_time_ms_now() -> Result<u64, String> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("System time is before the Unix epoch: {error}"))?;
+    Ok(duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
+fn pending_owner_password_request_id(
+    state: &OwnerPasswordRequestState,
+    last_seen_request_id: u64,
+    now_unix_ms: u64,
+) -> Option<u64> {
+    let completed_request_id = state.completed_request_id.unwrap_or(0);
+    (state.request_id > completed_request_id
+        && state.request_id != last_seen_request_id
+        && state
+            .not_before_unix_ms
+            .map_or(true, |not_before| now_unix_ms >= not_before))
+    .then_some(state.request_id)
+}
+
+fn incomplete_owner_password_request_id(state: &OwnerPasswordRequestState) -> Option<u64> {
+    let completed_request_id = state.completed_request_id.unwrap_or(0);
+    (state.request_id > completed_request_id).then_some(state.request_id)
+}
+
+fn complete_owner_password_request_at(
+    path: &Path,
+    label: &str,
+    request_id: u64,
+) -> Result<(), String> {
+    if request_id == 0 {
+        return Ok(());
+    }
+    let mut state = load_owner_password_request_state(path, label)?;
+    let completed_request_id = state.completed_request_id.unwrap_or(0);
+    if request_id <= completed_request_id {
+        return Ok(());
+    }
+    state.completed_request_id = Some(request_id);
+    save_owner_password_request_state(path, &state, label)
+}
+
+fn owner_os_reauth_result_exists(app: &AppHandle, request_id: u64) -> Result<bool, String> {
+    Ok(owner_os_reauth_result_path(app, request_id)?.exists())
+}
+
+fn complete_owner_os_reauth_request_at(
+    app: &AppHandle,
+    request_id: u64,
+    result: Result<&'static str, String>,
+) -> Result<(), String> {
+    if owner_os_reauth_result_exists(app, request_id)? {
+        return Ok(());
+    }
+    let request_path = owner_os_reauth_request_file_path(app, request_id)?;
+    let path = owner_os_reauth_result_path(app, request_id)?;
+    let mut state = load_owner_password_request_state(&request_path, "owner OS re-auth request")?;
+    if state.completed_request_id.unwrap_or(0) >= request_id {
+        return Ok(());
+    }
+    state.request_id = request_id;
+    state.completed_request_id = Some(request_id);
+    match result {
+        Ok(status) => {
+            state.status = Some(status.to_string());
+            state.error = None;
+            if status == "authenticated" {
+                let expires_unix_ms = unix_time_ms_now()?.saturating_add(
+                    OWNER_OS_REAUTH_GRANT_TTL
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                );
+                let grant_id = uuid::Uuid::new_v4().to_string();
+                state.grant_id = Some(grant_id.clone());
+                owner_reauth_grants()
+                    .lock()
+                    .map_err(|_| "Owner re-auth grant registry is unavailable.".to_string())?
+                    .insert(
+                        grant_id,
+                        OwnerReauthGrant {
+                            expires_unix_ms,
+                            purpose: "change".to_string(),
+                            reauth_request_id: request_id,
+                            window_request_id: None,
+                        },
+                    );
+            }
+        }
+        Err(error) => {
+            let status = if error.contains("timed out") {
+                "timed_out"
+            } else if error.contains("OS re-auth failed") {
+                "canceled"
+            } else {
+                "failed"
+            };
+            state.status = Some(status.to_string());
+            state.error = Some(error);
+        }
+    }
+    save_owner_password_request_state(&request_path, &state, "owner OS re-auth request")?;
+    save_owner_password_request_state(&path, &state, "owner OS re-auth result")
+}
+
+fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u64>, String> {
+    let recovery_path = owner_password_recovery_window_request_path(app)?;
+    let recovery_state =
+        load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
+    if let Some(request_id) = incomplete_owner_password_request_id(&recovery_state) {
+        return Ok(Some(request_id));
+    }
+    let path = owner_password_window_request_path(app)?;
+    let state = load_owner_password_request_state(&path, "owner-password window request")?;
+    Ok(incomplete_owner_password_request_id(&state))
+}
+
+fn current_owner_password_window_request_state(
+    app: &AppHandle,
+    request_id: u64,
+) -> Result<OwnerPasswordRequestState, String> {
+    let recovery_path = owner_password_recovery_window_request_path(app)?;
+    let recovery_state =
+        load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
+    if recovery_state.request_id == request_id
+        && recovery_state.completed_request_id.unwrap_or(0) < request_id
+    {
+        return Ok(recovery_state);
+    }
+    let path = owner_password_window_request_file_path(app, request_id)?;
+    let state = load_owner_password_request_state(&path, "owner-password window request")?;
+    if state.request_id == request_id {
+        return Ok(state);
+    }
+    let index_path = owner_password_window_request_path(app)?;
+    load_owner_password_request_state(&index_path, "owner-password window request")
+}
+
+fn consume_owner_password_window_authority(
+    app: &AppHandle,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    let request_id = request_id
+        .ok_or_else(|| "Open the password window from Settings before saving.".to_string())?;
+    let recovery_path = owner_password_recovery_window_request_path(app)?;
+    let recovery_state =
+        load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
+    let is_recovery_request = recovery_state.request_id == request_id
+        && recovery_state.completed_request_id.unwrap_or(0) < request_id;
+    let mut state = if is_recovery_request {
+        recovery_state
+    } else {
+        current_owner_password_window_request_state(app, request_id)?
+    };
+    if state.request_id != request_id || state.completed_request_id.unwrap_or(0) >= request_id {
+        return Err("This password window request is no longer active.".to_string());
+    }
+    match state.purpose.as_deref() {
+        Some("initial_setup") => {
+            if owner_password_owner_set_marker_exists(app)? {
+                return Err("Use Settings to change the existing owner password.".to_string());
+            }
+        }
+        Some("recovery") => {}
+        Some("change") => {
+            let grant_id = state.grant_id.clone().ok_or_else(|| {
+                "Confirm in Settings before saving the owner password.".to_string()
+            })?;
+            let now = unix_time_ms_now()?;
+            let grant = owner_reauth_grants()
+                .lock()
+                .map_err(|_| "Owner re-auth grant registry is unavailable.".to_string())?
+                .remove(&grant_id);
+            if grant.is_none_or(|grant| {
+                grant.expires_unix_ms <= now
+                    || grant.purpose != "change"
+                    || grant.window_request_id != Some(request_id)
+            }) || state.grant_consumed_request_id.is_some()
+            {
+                return Err("Confirm in Settings before saving the owner password.".to_string());
+            }
+            state.grant_consumed_request_id = Some(request_id);
+        }
+        _ => {
+            return Err("This password window request is missing a supported purpose.".to_string())
+        }
+    }
+    if is_recovery_request {
+        save_owner_password_request_state(&recovery_path, &state, "owner-password recovery request")
+    } else {
+        let request_path = owner_password_window_request_file_path(app, request_id)?;
+        save_owner_password_request_state(&request_path, &state, "owner-password window request")
+    }
+}
+
+fn complete_owner_password_window_request(
+    app: &AppHandle,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    if let Some(request_id) = request_id {
+        let recovery_path = owner_password_recovery_window_request_path(app)?;
+        let recovery_state =
+            load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
+        if recovery_state.request_id == request_id {
+            complete_owner_password_request_at(
+                &recovery_path,
+                "owner-password recovery request",
+                request_id,
+            )?;
+            return Ok(());
+        }
+        let request_path = owner_password_window_request_file_path(app, request_id)?;
+        complete_owner_password_request_at(
+            &request_path,
+            "owner-password window request",
+            request_id,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn capture_pending_owner_password_stack_restart_request_id(
+    app: &AppHandle,
+) -> Result<Option<u64>, String> {
+    let path = owner_password_stack_restart_request_path(app)?;
+    let state = load_owner_password_request_state(&path, "owner-password stack-restart request")?;
+    Ok(incomplete_owner_password_request_id(&state))
+}
+
+pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Result<(), String> {
+    let path = owner_password_recovery_window_request_path(app)?;
+    let previous = load_owner_password_request_state(&path, "owner-password recovery request")?;
+    let next_request_id = unix_time_ms_now()?
+        .max(previous.request_id)
+        .max(previous.completed_request_id.unwrap_or(0))
+        .saturating_add(1);
+    let state = OwnerPasswordRequestState {
+        request_id: next_request_id,
+        purpose: Some("recovery".to_string()),
+        ..OwnerPasswordRequestState::default()
+    };
+    save_owner_password_request_state(&path, &state, "owner-password recovery request")
+}
+
+pub(crate) fn complete_owner_password_stack_restart_request(
+    app: &AppHandle,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    if let Some(request_id) = request_id {
+        let path = owner_password_stack_restart_request_path(app)?;
+        complete_owner_password_request_at(
+            &path,
+            "owner-password stack-restart request",
+            request_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn queue_delayed_owner_password_stack_restart_request(app: &AppHandle) -> Result<(), String> {
+    let path = owner_password_stack_restart_request_path(app)?;
+    let mut state =
+        load_owner_password_request_state(&path, "owner-password stack-restart request")?;
+    let next_request_id = state
+        .request_id
+        .max(state.completed_request_id.unwrap_or(0))
+        .saturating_add(1)
+        .max(1);
+    state.request_id = next_request_id;
+    state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+    save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
+}
+
+pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            let now_unix_ms = match unix_time_ms_now() {
+                Ok(now) => now,
+                Err(error) => {
+                    log::warn!("Owner password window watcher could not read system time: {error}");
+                    continue;
+                }
+            };
+            let request_ids =
+                match request_ids_with_prefix(&app, OWNER_PASSWORD_WINDOW_REQUEST_PREFIX) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        log::warn!(
+                            "Owner password window watcher could not list requests: {error}"
+                        );
+                        continue;
+                    }
+                };
+            for request_id in request_ids {
+                let path = match owner_password_window_request_file_path(&app, request_id) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        log::warn!(
+                            "Owner password window watcher could not resolve request path: {error}"
+                        );
+                        continue;
+                    }
+                };
+                let mut state =
+                    match load_owner_password_request_state(&path, "owner-password window request")
+                    {
+                        Ok(state) => state,
+                        Err(error) => {
+                            log::warn!(
+                            "Owner password window watcher could not read request file: {error}"
+                        );
+                            continue;
+                        }
+                    };
+                if state.request_id != request_id
+                    || state.completed_request_id.unwrap_or(0) >= request_id
+                    || state.status.as_deref() == Some("opened")
+                    || state
+                        .not_before_unix_ms
+                        .map_or(false, |not_before| now_unix_ms < not_before)
+                {
+                    continue;
+                }
+                if state.purpose.as_deref() == Some("change") {
+                    let Some(grant_id) = state.grant_id.clone() else {
+                        log::warn!("Owner password change request missing re-auth grant id");
+                        state.completed_request_id = Some(request_id);
+                        let _ = save_owner_password_request_state(
+                            &path,
+                            &state,
+                            "owner-password window request",
+                        );
+                        continue;
+                    };
+                    let result = owner_reauth_grants()
+                        .lock()
+                        .map_err(|_| "Owner re-auth grant registry is unavailable.".to_string())
+                        .and_then(|mut grants| {
+                            let grant = grants
+                                .get_mut(&grant_id)
+                                .ok_or_else(|| "Owner password window request has no live re-auth grant.".to_string())?;
+                            if grant.expires_unix_ms <= now_unix_ms
+                                || grant.purpose != "change"
+                                || state.grant_for_request_id != Some(grant.reauth_request_id)
+                            {
+                                return Err("Owner password window request re-auth grant is invalid or expired.".to_string());
+                            }
+                            grant.window_request_id = Some(request_id);
+                            Ok(())
+                        });
+                    if let Err(error) = result {
+                        log::warn!("{error}");
+                        state.completed_request_id = Some(request_id);
+                        let _ = save_owner_password_request_state(
+                            &path,
+                            &state,
+                            "owner-password window request",
+                        );
+                        continue;
+                    }
+                } else if state.purpose.as_deref() == Some("initial_setup") {
+                    match owner_password_owner_set_marker_exists(&app) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            log::warn!("Owner password initial setup request refused: marker already exists");
+                            state.completed_request_id = Some(request_id);
+                            let _ = save_owner_password_request_state(
+                                &path,
+                                &state,
+                                "owner-password window request",
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "Owner password window watcher could not read marker: {error}"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    log::warn!("Owner password window request missing supported purpose");
+                    state.completed_request_id = Some(request_id);
+                    let _ = save_owner_password_request_state(
+                        &path,
+                        &state,
+                        "owner-password window request",
+                    );
+                    continue;
+                }
+                state.status = Some("opened".to_string());
+                let _ = save_owner_password_request_state(
+                    &path,
+                    &state,
+                    "owner-password window request",
+                );
+                open_owner_password_window(&app);
+            }
+            let recovery_path = match owner_password_recovery_window_request_path(&app) {
+                Ok(path) => path,
+                Err(error) => {
+                    log::warn!(
+                        "Owner password watcher could not resolve recovery request path: {error}"
+                    );
+                    continue;
+                }
+            };
+            let mut recovery_state = match load_owner_password_request_state(
+                &recovery_path,
+                "owner-password recovery request",
+            ) {
+                Ok(state) => state,
+                Err(error) => {
+                    log::warn!("Owner password watcher could not read recovery request: {error}");
+                    continue;
+                }
+            };
+            let request_id = recovery_state.request_id;
+            if recovery_state.purpose.as_deref() == Some("recovery")
+                && recovery_state.completed_request_id.unwrap_or(0) < request_id
+                && recovery_state.status.as_deref() != Some("opened")
+            {
+                recovery_state.status = Some("opened".to_string());
+                let _ = save_owner_password_request_state(
+                    &recovery_path,
+                    &recovery_state,
+                    "owner-password recovery request",
+                );
+                open_owner_password_window(&app);
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_seen_request_id = 0_u64;
+        loop {
+            tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            if crate::unified::shutdown_has_been_requested(&app) {
+                log::debug!("Owner password stack-restart watcher stopping: shutdown requested");
+                return;
+            }
+            let path = match owner_password_stack_restart_request_path(&app) {
+                Ok(path) => path,
+                Err(error) => {
+                    log::warn!(
+                        "Owner password stack-restart watcher could not resolve request path: {error}"
+                    );
+                    continue;
+                }
+            };
+            let state = match load_owner_password_request_state(
+                &path,
+                "owner-password stack-restart request",
+            ) {
+                Ok(state) => state,
+                Err(error) => {
+                    log::warn!(
+                        "Owner password stack-restart watcher could not read request file: {error}"
+                    );
+                    continue;
+                }
+            };
+            let now_unix_ms = match unix_time_ms_now() {
+                Ok(now) => now,
+                Err(error) => {
+                    log::warn!(
+                        "Owner password stack-restart watcher could not read system time: {error}"
+                    );
+                    continue;
+                }
+            };
+            let Some(request_id) =
+                pending_owner_password_request_id(&state, last_seen_request_id, now_unix_ms)
+            else {
+                continue;
+            };
+            match crate::unified::restart_after_remote_access_config(app.clone()).await {
+                Ok(()) => {
+                    last_seen_request_id = request_id;
+                    if let Err(error) = complete_owner_password_request_at(
+                        &path,
+                        "owner-password stack-restart request",
+                        request_id,
+                    ) {
+                        log::warn!(
+                            "Owner password stack-restart watcher could not record completion: {error}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!("Owner password stack-restart request failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
+}
+
+pub(crate) fn spawn_owner_os_reauth_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            if crate::unified::shutdown_has_been_requested(&app) {
+                log::debug!("Owner OS re-auth watcher stopping: shutdown requested");
+                return;
+            }
+            let now_unix_ms = match unix_time_ms_now() {
+                Ok(now) => now,
+                Err(error) => {
+                    log::warn!("Owner OS re-auth watcher could not read system time: {error}");
+                    continue;
+                }
+            };
+            let request_ids = match request_ids_with_prefix(&app, OWNER_OS_REAUTH_REQUEST_PREFIX) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    log::warn!("Owner OS re-auth watcher could not list requests: {error}");
+                    continue;
+                }
+            };
+            for request_id in request_ids {
+                if owner_os_reauth_result_exists(&app, request_id).unwrap_or(false) {
+                    continue;
+                }
+                let path = match owner_os_reauth_request_file_path(&app, request_id) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        log::warn!(
+                            "Owner OS re-auth watcher could not resolve request path: {error}"
+                        );
+                        continue;
+                    }
+                };
+                let state =
+                    match load_owner_password_request_state(&path, "owner OS re-auth request") {
+                        Ok(state) => state,
+                        Err(error) => {
+                            log::warn!(
+                                "Owner OS re-auth watcher could not read request file: {error}"
+                            );
+                            continue;
+                        }
+                    };
+                if state.request_id != request_id
+                    || state.completed_request_id.unwrap_or(0) >= request_id
+                {
+                    continue;
+                }
+                let fresh_now_unix_ms = match unix_time_ms_now() {
+                    Ok(now) => now,
+                    Err(error) => {
+                        log::warn!(
+                            "Owner OS re-auth watcher could not refresh system time: {error}"
+                        );
+                        continue;
+                    }
+                };
+                if state
+                    .deadline_unix_ms
+                    .is_some_and(|deadline| fresh_now_unix_ms >= deadline)
+                {
+                    if let Err(error) = complete_owner_os_reauth_request_at(
+                        &app,
+                        request_id,
+                        Err("OS re-authentication timed out.".to_string()),
+                    ) {
+                        log::warn!("Owner OS re-auth watcher could not record timeout: {error}");
+                    }
+                    continue;
+                }
+                let deadline_unix_ms = state.deadline_unix_ms.unwrap_or(
+                    fresh_now_unix_ms.saturating_add(
+                        OWNER_OS_REAUTH_GRANT_TTL
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                    ),
+                );
+                let result = owner_os_reauthenticate(deadline_unix_ms).await;
+                if let Err(error) = complete_owner_os_reauth_request_at(&app, request_id, result) {
+                    log::warn!("Owner OS re-auth watcher could not record completion: {error}");
+                }
+            }
+        }
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn owner_os_reauthenticate(deadline_unix_ms: u64) -> Result<&'static str, String> {
+    use robius_authentication::{
+        AndroidText, BiometricStrength, Context, PolicyBuilder, Text, WindowsText,
+    };
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    let policy = PolicyBuilder::new()
+        .biometrics(Some(BiometricStrength::Strong))
+        .password(true)
+        .build()
+        .ok_or_else(|| "Could not build OS re-auth policy.".to_string())?;
+    let text = Text {
+        android: AndroidText {
+            title: "DataConnect",
+            subtitle: None,
+            description: Some("Confirm before changing or revealing the owner password."),
+        },
+        apple: "change or reveal the DataConnect owner password",
+        windows: WindowsText::new(
+            "DataConnect",
+            "Confirm before changing or revealing the owner password.",
+        )
+        .ok_or_else(|| "Could not build OS re-auth prompt text.".to_string())?,
+    };
+    let (tx, rx) = oneshot::channel();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    Context::new(())
+        .authenticate(text, &policy, {
+            let tx = Arc::clone(&tx);
+            move |result| {
+                if let Ok(mut sender) = tx.lock() {
+                    if let Some(tx) = sender.take() {
+                        let _ = tx.send(result);
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("Could not start OS re-auth prompt: {error:?}"))?;
+    let now = unix_time_ms_now()?;
+    let remaining = Duration::from_millis(deadline_unix_ms.saturating_sub(now));
+    tokio::time::timeout(remaining, rx)
+        .await
+        .map_err(|_| "OS re-authentication timed out.".to_string())?
+        .map_err(|_| "OS re-authentication result channel closed.".to_string())?
+        .map_err(|error| format!("OS re-auth failed: {error:?}"))?;
+    Ok("authenticated")
+}
+
+#[cfg(target_os = "linux")]
+async fn owner_os_reauthenticate(_deadline_unix_ms: u64) -> Result<&'static str, String> {
+    Ok("skipped_linux_polkit_unverified")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+async fn owner_os_reauthenticate(_deadline_unix_ms: u64) -> Result<&'static str, String> {
+    Err("OS re-auth is unavailable on this platform.".to_string())
+}
+
+fn open_owner_password_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(OWNER_PASSWORD_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let result = WebviewWindowBuilder::new(
+        app,
+        OWNER_PASSWORD_WINDOW_LABEL,
+        WebviewUrl::App("owner-password.html".into()),
+    )
+    .title("DataConnect - Set owner password")
+    .inner_size(520.0, 420.0)
+    .min_inner_size(460.0, 360.0)
+    .center()
+    .resizable(true)
+    .build();
+    match result {
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(error) => log::error!("Failed to open the DataConnect owner-password window: {error}"),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn set_desktop_owner_password(
+    app: AppHandle,
+    password: String,
+) -> Result<(), String> {
+    let window_request_id = current_owner_password_window_request_id(&app)?;
+    if configured_owner_password().is_some() {
+        return Err(
+            "This password is set by the environment. Change PDPP_OWNER_PASSWORD and restart DataConnect."
+                .to_string(),
+        );
+    }
+    if password.chars().count() < OWNER_PASSWORD_MIN_LENGTH {
+        return Err(format!(
+            "Owner passwords must be at least {OWNER_PASSWORD_MIN_LENGTH} characters long."
+        ));
+    }
+    consume_owner_password_window_authority(&app, window_request_id)?;
+    save_owner_credential(&app, &password)?;
+    mark_owner_password_owner_set(&app)?;
+    queue_delayed_owner_password_stack_restart_request(&app)?;
+    complete_owner_password_window_request(&app, window_request_id)?;
+    if let Some(window) = app.get_webview_window(OWNER_PASSWORD_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+    Ok(())
 }
 
 /// True once this device has an owner credential -- always true once the
@@ -376,6 +1298,25 @@ fn save_database_encryption_key_with_store(
     write_owner_credential_file(path, credential)
 }
 
+fn save_credential_encryption_key_with_store(
+    path: &Path,
+    store: &mut impl CredentialStore,
+    credential: &str,
+) -> Result<(), String> {
+    if credential.trim().is_empty() {
+        return Err("Credential encryption key cannot be empty".to_string());
+    }
+
+    if store.save(credential).is_ok() {
+        if path.exists() {
+            write_owner_credential_file(path, credential)?;
+        }
+        return Ok(());
+    }
+
+    write_owner_credential_file(path, credential)
+}
+
 fn load_or_create_secret_with_store(
     path: &Path,
     store: &mut impl CredentialStore,
@@ -508,9 +1449,9 @@ fn write_owner_credential_file(path: &Path, credential: &str) -> Result<(), Stri
 
 fn log_fallback_store(label: &str, keyring_error: Option<&str>) {
     match keyring_error {
-        Some(error) => log::warn!(
-            "{label} store: 0600 app-data fallback; OS keychain unavailable ({error})"
-        ),
+        Some(error) => {
+            log::warn!("{label} store: 0600 app-data fallback; OS keychain unavailable ({error})")
+        }
         None => {
             log::warn!("{label} store: 0600 app-data fallback; OS keychain write failed")
         }
@@ -518,10 +1459,9 @@ fn log_fallback_store(label: &str, keyring_error: Option<&str>) {
 }
 
 fn read_secret(path: &Path, label: &str) -> Result<String, String> {
-    let credential = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read {label}: {error}"))?;
-    let credential = credential.trim().to_string();
-    if credential.is_empty() {
+    let credential =
+        fs::read_to_string(path).map_err(|error| format!("Failed to read {label}: {error}"))?;
+    if credential.trim().is_empty() {
         return Err(format!("{label} file is empty"));
     }
     #[cfg(unix)]
@@ -620,6 +1560,182 @@ mod tests {
             self.value = Some(credential.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn read_secret_preserves_non_whitespace_fallback_bytes() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        let expected = "  owner password with surrounding whitespace  \n";
+        fs::write(&path, expected).expect("fallback credential file");
+
+        let credential = read_secret(&path, "Owner credential").expect("credential");
+
+        assert_eq!(credential, expected);
+    }
+
+    #[test]
+    fn read_secret_rejects_all_whitespace_fallback_file() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-credential");
+        fs::write(&path, "  \n\t  ").expect("fallback credential file");
+
+        let error = read_secret(&path, "Owner credential").expect_err("empty credential");
+
+        assert!(error.contains("Owner credential file is empty"));
+    }
+
+    #[test]
+    fn completed_owner_password_request_does_not_replay() {
+        let state = OwnerPasswordRequestState {
+            request_id: 42,
+            completed_request_id: Some(42),
+            not_before_unix_ms: None,
+            ..Default::default()
+        };
+
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), None);
+    }
+
+    #[test]
+    fn incomplete_owner_password_request_replays_after_restart() {
+        let state = OwnerPasswordRequestState {
+            request_id: 42,
+            completed_request_id: None,
+            not_before_unix_ms: None,
+            ..Default::default()
+        };
+
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), Some(42));
+        assert_eq!(pending_owner_password_request_id(&state, 42, 1000), None);
+    }
+
+    #[test]
+    fn completing_owner_password_request_persists_current_request_id() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("owner-password-window-request.json");
+        fs::write(&path, r#"{"requestId":7}"#).expect("request file");
+
+        complete_owner_password_request_at(&path, "owner-password window request", 7)
+            .expect("completed request");
+        let state = load_owner_password_request_state(&path, "owner-password window request")
+            .expect("request state");
+
+        assert_eq!(state.request_id, 7);
+        assert_eq!(state.completed_request_id, Some(7));
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), None);
+    }
+
+    #[test]
+    fn newer_owner_password_request_runs_after_completed_request() {
+        let state = OwnerPasswordRequestState {
+            request_id: 8,
+            completed_request_id: Some(7),
+            not_before_unix_ms: None,
+            ..Default::default()
+        };
+
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), Some(8));
+    }
+
+    #[test]
+    fn older_owner_password_request_does_not_run_after_completed_request() {
+        let state = OwnerPasswordRequestState {
+            request_id: 6,
+            completed_request_id: Some(7),
+            not_before_unix_ms: None,
+            ..Default::default()
+        };
+
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), None);
+    }
+
+    #[test]
+    fn owner_password_request_waits_until_not_before_time() {
+        let state = OwnerPasswordRequestState {
+            request_id: 9,
+            completed_request_id: None,
+            not_before_unix_ms: Some(2_000),
+            ..Default::default()
+        };
+
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1_999), None);
+        assert_eq!(pending_owner_password_request_id(&state, 0, 2_000), Some(9));
+    }
+
+    #[test]
+    fn delayed_restart_request_is_newer_than_completed_request() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory
+            .path()
+            .join("owner-password-stack-restart-request.json");
+        let state = OwnerPasswordRequestState {
+            request_id: 2,
+            completed_request_id: Some(5),
+            not_before_unix_ms: None,
+            ..Default::default()
+        };
+        save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
+            .expect("seed request");
+
+        let mut state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("request state");
+        let next_request_id = state
+            .request_id
+            .max(state.completed_request_id.unwrap_or(0))
+            .saturating_add(1)
+            .max(1);
+        state.request_id = next_request_id;
+        state.not_before_unix_ms = Some(180_000);
+        save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
+            .expect("delayed request");
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("request state");
+
+        assert_eq!(state.request_id, 6);
+        assert_eq!(
+            pending_owner_password_request_id(&state, 0, 180_000),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn exact_completion_does_not_complete_newer_request() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory
+            .path()
+            .join("owner-password-stack-restart-request.json");
+        fs::write(&path, r#"{"requestId":8}"#).expect("request file");
+
+        complete_owner_password_request_at(&path, "owner-password stack-restart request", 7)
+            .expect("completed request");
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("request state");
+
+        assert_eq!(state.request_id, 8);
+        assert_eq!(state.completed_request_id, Some(7));
+        assert_eq!(pending_owner_password_request_id(&state, 0, 1000), Some(8));
+    }
+
+    #[test]
+    fn owner_password_stack_restart_watcher_stops_during_shutdown() {
+        let source = include_str!("owner_credential.rs");
+        let start = source
+            .find("pub(crate) fn spawn_owner_password_stack_restart_watcher")
+            .expect("owner-password stack restart watcher must exist");
+        let end = source[start..]
+            .find("fn open_owner_password_window")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("shutdown_has_been_requested(&app)"),
+            "owner-password stack restart watcher must stop once shutdown is requested"
+        );
     }
 
     #[test]
@@ -744,8 +1860,7 @@ mod tests {
         let expected = expected_owner_password_for_test("owner-password");
 
         assert!(
-            verify_owner_credential_with_store(&path, &mut store, &expected)
-                .expect("verification")
+            verify_owner_credential_with_store(&path, &mut store, &expected).expect("verification")
         );
         assert!(
             !verify_owner_credential_with_store(&path, &mut store, "wrong-password")
@@ -762,8 +1877,7 @@ mod tests {
         let expected = expected_owner_password_for_test("owner-password");
 
         assert!(
-            verify_owner_credential_with_store(&path, &mut store, &expected)
-                .expect("verification")
+            verify_owner_credential_with_store(&path, &mut store, &expected).expect("verification")
         );
         assert!(
             !verify_owner_credential_with_store(&path, &mut store, "wrong-password")
@@ -830,7 +1944,10 @@ mod tests {
 
         assert_eq!(key.len(), 43);
         assert_eq!(store.value.as_deref(), None);
-        assert_eq!(fs::read_to_string(key_path).expect("database key file"), key);
+        assert_eq!(
+            fs::read_to_string(key_path).expect("database key file"),
+            key
+        );
     }
 
     #[test]
@@ -849,7 +1966,9 @@ mod tests {
         .expect_err("missing key must not be replaced");
 
         assert!(matches!(error, DatabaseKeyError::Missing(_)));
-        assert!(error.to_string().contains("Database encryption key is missing"));
+        assert!(error
+            .to_string()
+            .contains("Database encryption key is missing"));
         assert!(!key_path.exists());
     }
 
