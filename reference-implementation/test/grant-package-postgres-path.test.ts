@@ -55,6 +55,7 @@ import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../ser
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { basicIntrospectionAuthorization } from "../server/introspection-http.ts";
+import { parseHostedMcpSelection } from "../server/hosted-mcp-selection.ts";
 import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
   computeHostedMcpDecisionDigest,
@@ -345,7 +346,10 @@ async function completeMultiSourcePackageFlow({
   const modelResponse = await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${params.get("consent_challenge")}`);
   assert.equal(modelResponse.status, 200);
   const model = modelResponse.body as HostedMcpConsentChallengeModel;
-  const sources = model.sources.filter((source) => connectorIds.includes(source.connectorId));
+  const sources = model.sources.filter((source) => {
+    const selection = parseHostedMcpSelection(source.selectionValue);
+    return selection !== null && connectorIds.includes(selection.connectorId);
+  });
   assert.equal(sources.length, connectorIds.length);
   params.set("access_mode", "continuous");
   params.set("grant_expiry", model.grantExpiry.defaultId);
@@ -355,6 +359,7 @@ async function completeMultiSourcePackageFlow({
     computeHostedMcpDecisionDigest({
       accessMode: "continuous",
       clientId: client.client_id,
+      grantExpiry: model.grantExpiry.defaultId,
       sources: sources.map((source) => ({
         sourceKey: source.id,
         streamNames: source.streams.map((stream) => stream.name).sort(),

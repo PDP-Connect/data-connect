@@ -37,6 +37,7 @@ import {
   type StreamScopeError,
   type StreamScopeSelection,
   parseSubmittedStreamScopes,
+  resolveStreamScopeCapability,
   resolveStreamScopeSelection,
   scopeFieldsInputName,
   scopeSinceInputName,
@@ -292,6 +293,8 @@ export interface MountAsAuthorizeContext {
   ) => unknown;
   /** Provider name for picker HTML rendering. */
   providerName: string;
+  /** Best-effort cleanup for a package created before downstream code issuance failed. */
+  revokeGrantPackage?: (packageId: string, opts?: { request_id?: string | null }) => Promise<unknown>;
   /** CSRF enforcement middleware. */
   requireCsrf: MiddlewareHandler;
   /** Owner-session enforcement middleware. */
@@ -325,7 +328,14 @@ interface SourceEntryAccumulator {
    * `rejectIfHostedMcpDecisionUnbound` compares what the owner said they
    * approved against what would actually be granted.
    */
-  decisionSources: Array<{ sourceKey: string; streamNames: string[] }>;
+  decisionSources: Array<{
+    sourceKey: string;
+    streams: Array<{
+      fields?: readonly string[] | null;
+      name: string;
+      timeRange?: { since?: string; until?: string } | null;
+    }>;
+  }>;
   seenChildKeys: Set<string>;
   sourceMetadata: Array<{ connector_display_name: string; display_name: string | null }>;
   sourcesWithEmptyStreams: Array<{ connectorId: string; connectionId: string | null; connectorLabel: string }>;
@@ -461,6 +471,11 @@ async function accumulateSourceEntry(
   // field/date restrictions validated just above and re-resolve "all streams"
   // against a declaration that may have changed since this review.
   const issuedStreamNames = issuedStreamNamesForSource(manifest, narrowedStreamNames);
+  const digestStreams = decisionStreamsForDigest(manifest, sourceKey, issuedStreamNames, submittedBody);
+  if ("error" in digestStreams) {
+    oauthError(res, 400, "invalid_request", digestStreams.error.message);
+    return "rejected";
+  }
 
   acc.authorizationDetails.push(
     buildHostedMcpAuthorizationDetailForConnector(
@@ -480,10 +495,7 @@ async function accumulateSourceEntry(
   // means. These are the same names now issued on the detail above.
   acc.decisionSources.push({
     sourceKey: caps.hostedMcpSourceKey({ connectionId, connectorId }),
-    streamNames: [
-      ...(issuedStreamNames ??
-        (manifest.streams ?? []).map((stream) => stream.name).filter((name): name is string => typeof name === "string")),
-    ].sort(),
+    streams: digestStreams.streams,
   });
   acc.sourceMetadata.push({
     connector_display_name: manifest.display_name || manifest.name || connectorId,
@@ -538,6 +550,66 @@ function resolveSubmittedStreamScopes(
     }
   }
   return { scopes };
+}
+
+function decisionStreamsForDigest(
+  manifest: ConsentPickerManifest,
+  sourceKey: string,
+  issuedStreamNames: string[] | null,
+  body: Record<string, unknown> | null | undefined
+):
+  | { error: StreamScopeError }
+  | {
+      streams: Array<{
+        fields?: readonly string[] | null;
+        name: string;
+        timeRange?: { since?: string; until?: string } | null;
+      }>;
+    } {
+  const selectedNames =
+    issuedStreamNames ??
+    (manifest.streams ?? [])
+      .map((stream) => stream.name)
+      .filter((name): name is string => typeof name === "string");
+  const selectedNameSet = new Set(selectedNames);
+  const submitted = parseSubmittedStreamScopes(body, sourceKey);
+  const streams: Array<{
+    fields?: readonly string[] | null;
+    name: string;
+    timeRange?: { since?: string; until?: string } | null;
+  }> = [];
+  for (const stream of manifest.streams ?? []) {
+    if (!selectedNameSet.has(stream.name)) {
+      continue;
+    }
+    const entry: { fields?: readonly string[] | null; name: string; timeRange?: { since?: string; until?: string } | null } = {
+      name: stream.name,
+    };
+    const streamSubmission = submitted.get(stream.name);
+    if (streamSubmission) {
+      const resolved = resolveStreamScopeSelection(stream, streamSubmission);
+      if ("error" in resolved) {
+        return { error: resolved.error };
+      }
+      if (Array.isArray(streamSubmission.fields)) {
+        const capability = resolveStreamScopeCapability(stream);
+        const permitted = new Set([...capability.requiredFields, ...capability.optionalFields]);
+        entry.fields = [
+          ...new Set([
+            ...streamSubmission.fields
+              .map((field) => field.trim())
+              .filter((field) => permitted.has(field)),
+            ...capability.requiredFields,
+          ]),
+        ].sort();
+      }
+      if (resolved.selection.timeRange) {
+        entry.timeRange = resolved.selection.timeRange;
+      }
+    }
+    streams.push(entry);
+  }
+  return { streams };
 }
 
 // Resolves the narrowed stream name list for a source, accounting for:
@@ -722,7 +794,7 @@ async function issuePackageAuthCodeRedirect(
   },
   ctx: Pick<
     MountAsAuthorizeContext,
-    "stageOAuthAuthorizationCodeRequest" | "issueOAuthAuthorizationCodeForPackageDeviceCode" | "oauthError"
+    "stageOAuthAuthorizationCodeRequest" | "issueOAuthAuthorizationCodeForPackageDeviceCode"
   >
 ): Promise<unknown> {
   const deviceCode = `mcpdev_${randomBytes(16).toString("hex")}`;
@@ -740,7 +812,9 @@ async function issuePackageAuthCodeRedirect(
     token: packageResult.token,
   });
   if (!issued) {
-    return ctx.oauthError(res, 500, "server_error", "Failed to issue authorization code for package");
+    const err = new Error("Failed to issue authorization code for package");
+    Object.assign(err, { code: "server_error" });
+    throw err;
   }
   const redirectUrl = new URL(issued.redirect_uri);
   redirectUrl.searchParams.set("code", issued.code);
@@ -931,6 +1005,7 @@ async function buildPackageAndRedirect(
     | "issueOAuthAuthorizationCodeForPackageDeviceCode"
     | "oauthError"
     | "providerName"
+    | "revokeGrantPackage"
     | "stageOAuthAuthorizationCodeRequest"
   >,
   client: OAuthClient | null,
@@ -943,9 +1018,7 @@ async function buildPackageAndRedirect(
     consumeChallenge: () => Promise<boolean>;
     /** Undoes `consumeChallenge` when minting fails. See `releaseApprovalChallenge`. */
     releaseChallenge: () => Promise<void>;
-  },
-  /** Owner-chosen grant expiry; null means no scheduled end date. */
-  grantExpiresAt: string | null = null
+  }
 ): Promise<unknown> {
   const { body, packageAccessMode } = approval;
   if (acc.sourcesWithEmptyStreams.length > 0) {
@@ -980,10 +1053,15 @@ async function buildPackageAndRedirect(
   // produced the same value; and its handler opened with
   // `if (!carriedDigest) return false;`, so omitting the field skipped the
   // check entirely rather than failing.
+  const expiryResult = resolveGrantExpiry(body.grant_expiry, packageAccessMode);
+  if ("error" in expiryResult) {
+    return ctx.oauthError(res, 400, "invalid_request", expiryResult.error);
+  }
   const submittedDecisionDigest = typeof body.decision_digest === "string" ? body.decision_digest.trim() : "";
   const resolvedDecisionDigest = computeHostedMcpDecisionDigest({
     accessMode: packageAccessMode,
     clientId: pkce.clientId,
+    grantExpiry: typeof body.grant_expiry === "string" ? body.grant_expiry.trim() : "",
     sources: acc.decisionSources,
   });
   if (submittedDecisionDigest !== resolvedDecisionDigest) {
@@ -1012,21 +1090,18 @@ async function buildPackageAndRedirect(
     return;
   }
 
-  // Consumption and issuance must land together. State the approval depends on
-  // can still change at this boundary — a source revoked between validation and
-  // minting makes `createHostedMcpGrantPackage` reject — and a claimed
-  // challenge left `accepted` would record a decision that authorized no grant
-  // and answer the owner's honest retry with 404. Releasing the claim back to
-  // pending leaves the challenge exactly as the failed attempt found it, so the
-  // owner can fix the source and approve again. Single-use is unaffected: the
-  // release is conditional on this request's own claim still standing.
+  // If package creation itself fails, nothing was minted, so the challenge is
+  // released to pending and the owner can retry. Once a package exists, any
+  // downstream auth-code failure must NOT release the challenge: retrying the
+  // same accepted decision would create another package. Instead, best-effort
+  // revoke the created package and leave the challenge terminal.
   let packageResult: Awaited<ReturnType<MountAsAuthorizeContext["createHostedMcpGrantPackage"]>>;
   try {
     packageResult = await ctx.createHostedMcpGrantPackage({
       authorizationDetails: acc.authorizationDetails,
       clientId: pkce.clientId,
       connectionIds: acc.connectionIds,
-      opts: { grantExpiresAt, reviewDigest },
+      opts: { grantExpiresAt: expiryResult.expiresAt, reviewDigest },
       sourceMetadata: acc.sourceMetadata,
       storageBindings: acc.storageBindings,
       subjectId: ownerSubjectId,
@@ -1035,7 +1110,24 @@ async function buildPackageAndRedirect(
     await approval.releaseChallenge();
     throw err;
   }
-  return issuePackageAuthCodeRedirect(res, packageResult, pkce, ctx);
+  try {
+    return await issuePackageAuthCodeRedirect(res, packageResult, pkce, ctx);
+  } catch (err) {
+    if (ctx.revokeGrantPackage) {
+      try {
+        await ctx.revokeGrantPackage(packageResult.package_id, { request_id: null });
+      } catch {
+        // Preserve the original issuance failure. The challenge remains
+        // accepted, so the same approval cannot create a second package.
+      }
+    }
+    return ctx.oauthError(
+      res,
+      500,
+      (err as { code?: string }).code || "server_error",
+      (err as Error).message || "Failed to issue authorization code for package"
+    );
+  }
 }
 
 // ─── Request-intake resolution (extracted to reduce POST handler complexity) ─
@@ -1145,11 +1237,6 @@ async function handleHostedMcpPackageApproval(
     return;
   }
 
-  const expiryResult = resolveGrantExpiry(body.grant_expiry, packageAccessMode);
-  if ("error" in expiryResult) {
-    return ctx.oauthError(res, 400, "invalid_request", expiryResult.error);
-  }
-
   return await buildPackageAndRedirect(
     req,
     res,
@@ -1158,8 +1245,7 @@ async function handleHostedMcpPackageApproval(
     ownerSubjectId,
     ctx,
     client,
-    { body, consumeChallenge, packageAccessMode, releaseChallenge },
-    expiryResult.expiresAt
+    { body, consumeChallenge, packageAccessMode, releaseChallenge }
   );
 }
 

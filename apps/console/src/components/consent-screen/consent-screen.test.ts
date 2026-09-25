@@ -396,18 +396,13 @@ test("the data range and the grant expiry stay separate fields", () => {
   );
 });
 
-test("the data range is NOT folded into the approval artifact digest", () => {
-  // The digest binds the client, the access mode, and which streams were
-  // approved — terms the AS re-resolves independently. The range goes through
-  // the manifest-checked narrowing path instead, which can reject a range the
-  // stream cannot honor; a digest over it would bind a value the AS may
-  // legitimately normalize (`until` is exclusive).
+test("the data range is folded into the approval artifact digest", () => {
   const digestCall = ACTIONS_SOURCE.slice(
     ACTIONS_SOURCE.indexOf("computeHostedMcpDecisionDigest({"),
     ACTIONS_SOURCE.indexOf("return postChallenge")
   );
   assert.ok(digestCall.length > 0, "vacuity guard: the digest call must be found");
-  assert.doesNotMatch(digestCall, /streamRanges|stream_range/, "the digest must not cover the data range");
+  assert.match(digestCall, /streamRanges|timeRange/, "the digest must cover the data range");
 });
 
 test("the owner's selected fields are submitted through the declaration-checked narrowing path", () => {
@@ -422,13 +417,13 @@ test("the owner's selected fields are submitted through the declaration-checked 
   );
 });
 
-test("field narrowing is NOT folded into the approval artifact digest", () => {
+test("field narrowing is folded into the approval artifact digest", () => {
   const digestCall = ACTIONS_SOURCE.slice(
     ACTIONS_SOURCE.indexOf("computeHostedMcpDecisionDigest({"),
     ACTIONS_SOURCE.indexOf("return postChallenge")
   );
   assert.ok(digestCall.length > 0, "vacuity guard: the digest call must be found");
-  assert.doesNotMatch(digestCall, /streamFields|stream_fields/, "the digest must not cover manifest-normalized field choices");
+  assert.match(digestCall, /streamFields|fields/, "the digest must cover selected fields");
 });
 
 test("source disclosures use the native details open state, not an invalid DOM defaultOpen prop", () => {

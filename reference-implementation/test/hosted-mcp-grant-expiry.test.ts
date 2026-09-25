@@ -180,8 +180,13 @@ test("the fixed option ids still resolve, and a non-date keyword is still an err
 
 test("a date-shaped value that is not a real date is refused as a date problem", () => {
   // `2026-13-45` matches the shape but names no day.
-  const result = resolveGrantExpiry("2026-13-45", "continuous", NOW);
+  const impossibleMonth = resolveGrantExpiry("2026-13-45", "continuous", NOW);
 
-  assert.ok("error" in result);
-  assert.doesNotMatch(result.error, /how long this access should last/);
+  assert.ok("error" in impossibleMonth);
+  assert.doesNotMatch(impossibleMonth.error, /how long this access should last/);
+
+  // `Date.parse` rolls this to March 3 unless we round-trip the calendar day.
+  const impossibleDay = resolveGrantExpiry("2026-02-31", "continuous", Date.parse("2026-01-01T00:00:00.000Z"));
+  assert.ok("error" in impossibleDay);
+  assert.doesNotMatch(impossibleDay.error, /how long this access should last/);
 });

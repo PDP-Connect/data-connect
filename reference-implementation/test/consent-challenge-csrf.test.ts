@@ -110,6 +110,7 @@ test("password-enabled consent challenges enforce CSRF for browser form media ty
       decision_digest: computeHostedMcpDecisionDigest({
         clientId: client.client_id,
         accessMode: model.accessMode.value,
+        grantExpiry: model.grantExpiry.defaultId,
         sources: [{ sourceKey: source.id, streamNames: [stream.name] }],
       }),
       source_id: [source.id],

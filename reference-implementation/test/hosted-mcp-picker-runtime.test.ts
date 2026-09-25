@@ -22,7 +22,7 @@
 // above at the level they were actually observed: in-browser behavior.
 
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -30,11 +30,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { computeHostedMcpDecisionDigest } from "../server/hosted-mcp-decision-digest.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
 interface JsdomModule {
-  JSDOM: new (html: string, options?: { runScripts?: "dangerously" }) => { readonly window: unknown };
+  JSDOM: new (
+    html: string,
+    options?: { beforeParse?: (window: Record<string, unknown>) => void; runScripts?: "dangerously" }
+  ) => { readonly window: unknown };
 }
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as JsdomModule;
@@ -53,6 +57,7 @@ interface MinimalDomEvent {
 interface MinimalElement {
   checked: boolean;
   click: () => void;
+  closest: (selector: string) => MinimalElement | null;
   readonly dataset: Record<string, string | undefined>;
   readonly disabled: boolean;
   dispatchEvent: (event: MinimalDomEvent) => boolean;
@@ -203,7 +208,12 @@ async function openPickerDom() {
     // runScripts: 'dangerously' executes the inline picker <script>, wiring the
     // real event listeners the browser would. The IIFE also runs its initial
     // syncSource pass on load, exactly as in a browser.
-    const dom = new JSDOM(html, { runScripts: "dangerously" });
+    const dom = new JSDOM(html, {
+      beforeParse(window) {
+        Object.defineProperty(window, "crypto", { configurable: true, value: webcrypto });
+      },
+      runScripts: "dangerously",
+    });
     const window = dom.window as MinimalWindow;
     const { document } = window;
     const form = mustExist(document.querySelector("[data-hosted-mcp-picker-form]"), "picker form must render");
@@ -407,6 +417,63 @@ test("picker runtime: a valid single-stream selection submits (not prevented)", 
     p.submit();
     const prevented = p.submit();
     assert.equal(prevented, false, "a valid one-stream selection must never be trapped by the binding guard");
+  } finally {
+    await p.close();
+  }
+});
+
+test("picker runtime: decision digest matches the AS payload for expiry, selected fields, and date range", async () => {
+  const p = await openPickerDom();
+  try {
+    const stream = mustExist(
+      p.streamBoxes().find((candidate) => candidate.dataset.streamName === "saved_tracks"),
+      "the fixture must render the saved_tracks stream"
+    );
+    const sourceKey = mustExist(stream.dataset.sourceKey, "stream checkbox must carry its source key");
+    const scope = mustExist(
+      stream.closest(".hosted-ui-stream-option")?.nextElementSibling,
+      "the stream must carry scope controls beside its checkbox"
+    );
+    const fieldInputs = Array.from(scope.querySelectorAll('input[name^="narrow_fields_"]'));
+    assert.ok(fieldInputs.length > 1, "the fixture must expose optional field checkboxes");
+    for (const input of fieldInputs) {
+      input.checked = input.value === "artist_names";
+    }
+    const since = mustExist(scope.querySelector('input[name^="narrow_since_"]'), "the fixture must expose a start date");
+    const until = mustExist(scope.querySelector('input[name^="narrow_until_"]'), "the fixture must expose an end date");
+    since.value = "2025-01-01";
+    until.value = "2025-01-31";
+    const expiry = mustExist(
+      p.form.querySelector('input[name="grant_expiry"][value="1y"]'),
+      "the picker must offer the one-year grant expiry"
+    );
+    expiry.checked = true;
+    stream.checked = true;
+
+    p.fire(stream, "change");
+    p.fire(scope, "change");
+    p.fire(expiry, "change");
+    const actual = await p.awaitDecisionDigest();
+    const clientId = mustExist(p.form.querySelector('input[name="client_id"]')?.value, "form must carry client_id");
+    const expected = computeHostedMcpDecisionDigest({
+      accessMode: "continuous",
+      clientId,
+      grantExpiry: "1y",
+      sources: [
+        {
+          sourceKey,
+          streams: [
+            {
+              fields: ["artist_names", "id", "name"],
+              name: "saved_tracks",
+              timeRange: { since: "2025-01-01", until: "2025-01-31" },
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(actual, expected, "browser digest must match the AS recomputation payload");
   } finally {
     await p.close();
   }

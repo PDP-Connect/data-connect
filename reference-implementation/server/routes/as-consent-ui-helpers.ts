@@ -2667,7 +2667,9 @@ function renderStreamScopeControls(
 
   const summary = canNarrowFields ? `All ${totalFields} fields · all dates` : "All dates";
 
-  return `<details class="hosted-ui-scope" data-hosted-mcp-stream-scope data-stream="${ui.escapeHtml(streamName)}">
+  return `<details class="hosted-ui-scope" data-hosted-mcp-stream-scope data-stream="${ui.escapeHtml(streamName)}" data-required-fields="${ui.escapeHtml(
+    JSON.stringify(scope.requiredFields)
+  )}">
       <summary class="hosted-ui-scope-summary">${ui.escapeHtml(summary)}</summary>
       ${fieldControls}
       ${dateControls}
@@ -3438,19 +3440,68 @@ export async function renderHostedMcpSourceSelection(
   const reviewDuration = form.querySelector("[data-hosted-mcp-review-duration]");
   const clientId = form.querySelector('input[name="client_id"]')?.value || "";
 
+  const normalizeDateBound = (value, bound) => {
+    if (!value || !value.trim()) return null;
+    const trimmed = value.trim();
+    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(trimmed)) return trimmed;
+    const parsed = Date.parse(trimmed + "T00:00:00.000Z");
+    if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== trimmed) return trimmed;
+    return new Date(bound === "until" ? parsed + 24 * 60 * 60 * 1000 : parsed).toISOString();
+  };
+
+  const uniqueSorted = (values) => Array.from(new Set(values.map((value) => String(value).trim()).filter(Boolean))).sort();
+
+  const readRequiredFields = (scope) => {
+    if (!scope) return [];
+    try {
+      const parsed = JSON.parse(scope.dataset.requiredFields || "[]");
+      return Array.isArray(parsed) ? parsed.map((value) => String(value)) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const readStreamDecision = (streamBox) => {
+    const scope = streamBox.closest(".hosted-ui-stream-option")?.nextElementSibling;
+    const stream = { name: streamBox.dataset.streamName || "" };
+    if (!scope?.matches?.("[data-hosted-mcp-stream-scope]")) {
+      return stream;
+    }
+    const fieldInputs = Array.from(scope.querySelectorAll('input[name^="narrow_fields_"]'));
+    if (fieldInputs.length > 0) {
+      stream.fields = uniqueSorted([
+        ...fieldInputs.filter((input) => input.checked).map((input) => input.value),
+        ...readRequiredFields(scope),
+      ]);
+    }
+    const since = normalizeDateBound(scope.querySelector('input[name^="narrow_since_"]')?.value || "", "since");
+    const until = normalizeDateBound(scope.querySelector('input[name^="narrow_until_"]')?.value || "", "until");
+    if (since || until) {
+      stream.timeRange = Object.assign({}, since ? { since } : {}, until ? { until } : {});
+    }
+    return stream;
+  };
+
   const readDecision = () => {
     const selected = [];
     for (const source of sources) {
-      const streamNames = streamsFor(source)
+      const streams = streamsFor(source)
         .filter((streamBox) => streamBox.checked)
-        .map((streamBox) => streamBox.dataset.streamName || "");
-      if (streamNames.length > 0) {
-        selected.push({ sourceKey: source.dataset.sourceKey || "", streamNames: streamNames.sort() });
+        .map(readStreamDecision)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      if (streams.length > 0) {
+        selected.push({ sourceKey: source.dataset.sourceKey || "", streams });
       }
     }
     selected.sort((a, b) => (a.sourceKey < b.sourceKey ? -1 : a.sourceKey > b.sourceKey ? 1 : 0));
     const modeInput = form.querySelector('input[name="access_mode"]:checked');
-    return { accessMode: modeInput ? modeInput.value : "continuous", clientId, sources: selected };
+    const expiryInput = form.querySelector('input[name="grant_expiry"]:checked');
+    return {
+      accessMode: modeInput ? modeInput.value : "continuous",
+      clientId,
+      grantExpiry: expiryInput ? expiryInput.value : "",
+      sources: selected,
+    };
   };
 
   // Must produce byte-identical JSON to the server's canonicalization:
@@ -3471,7 +3522,7 @@ export async function renderHostedMcpSourceSelection(
 
   const refreshDecision = async () => {
     const decision = readDecision();
-    const total = decision.sources.reduce((sum, source) => sum + source.streamNames.length, 0);
+    const total = decision.sources.reduce((sum, source) => sum + source.streams.length, 0);
     const hasSelection = total > 0;
     if (review) {
       if (reviewEmpty) reviewEmpty.hidden = hasSelection;

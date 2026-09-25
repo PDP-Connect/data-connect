@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
+import { parseHostedMcpSelection } from "../server/hosted-mcp-selection.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import {
   computeHostedMcpDecisionDigest,
@@ -332,7 +333,10 @@ async function completeMultiSourcePackageFlow({
   assert.equal(modelResponse.status, 200);
   const model = modelResponse.body as HostedMcpConsentChallengeModel;
   const selectedConnectorIds = new Set(connectorIds);
-  const chosen = model.sources.filter((source) => selectedConnectorIds.has(source.connectorId));
+  const chosen = model.sources.filter((source) => {
+    const selection = parseHostedMcpSelection(source.selectionValue);
+    return selection !== null && selectedConnectorIds.has(selection.connectorId);
+  });
   assert.equal(chosen.length, connectorIds.length, "every requested connector must be available for approval");
 
   // Submit the same reviewed, whole-source decision as the console. Keep both
@@ -343,6 +347,7 @@ async function completeMultiSourcePackageFlow({
       decision_digest: computeHostedMcpDecisionDigest({
         accessMode: "continuous",
         clientId: client.client_id,
+        grantExpiry: model.grantExpiry.defaultId,
         sources: chosen.map((source) => ({
           sourceKey: source.id,
           streamNames: source.streams.map((stream) => stream.name).sort(),

@@ -83,9 +83,17 @@ export async function acceptConsentChallenge(
   const decisionDigest = computeHostedMcpDecisionDigest({
     accessMode: decision.accessMode,
     clientId,
+    grantExpiry: decision.grantExpiry,
     sources: decision.sources.map((source) => ({
       sourceKey: source.sourceId,
-      streamNames: [...source.streamNames],
+      streams: source.streamNames.map((streamName, index) => {
+        const streamId = source.streamIds[index] ?? `${source.sourceId}:${streamName}`;
+        return {
+          fields: decision.streamFields[streamId] ?? null,
+          name: streamName,
+          timeRange: decision.streamRanges[streamId] ?? null,
+        };
+      }),
     })),
   });
 
@@ -96,11 +104,9 @@ export async function acceptConsentChallenge(
     review_digest: decision.reviewDigest,
     source_id: decision.sources.map((source) => source.sourceId),
     stream: decision.sources.flatMap((source) => source.streamIds),
-    // Per-stream field and DATA-range narrowing. Deliberately NOT part of
-    // `decision_digest`: the digest binds the client, the access mode, and
-    // which streams were approved. These values go through the same
-    // declaration-checked narrowing the form POST uses, which may reject or
-    // normalize them against the manifest.
+    // Per-stream field and DATA-range narrowing. These are included in
+    // `decision_digest` above and then independently declaration-checked by
+    // the AS before issuance.
     stream_fields: decision.streamFields,
     stream_range: decision.streamRanges,
   });

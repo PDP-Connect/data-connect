@@ -5306,6 +5306,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     requireOwnerSession: ownerAuth.requireOwnerSession as unknown as Parameters<
       typeof mountAsAuthorize
     >[1]["requireOwnerSession"],
+    ...(revokeGrantPackage
+      ? {
+          revokeGrantPackage: revokeGrantPackage as unknown as NonNullable<
+            Parameters<typeof mountAsAuthorize>[1]["revokeGrantPackage"]
+          >,
+        }
+      : {}),
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<

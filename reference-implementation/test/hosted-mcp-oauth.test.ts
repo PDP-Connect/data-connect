@@ -43,9 +43,11 @@ interface CloseableTestServer {
   readonly asServer: { closeAllConnections?: () => void; close: (callback: () => void) => void };
   readonly rsPort: number;
   readonly rsServer: { closeAllConnections?: () => void; close: (callback: () => void) => void };
+  readonly schedulerManager?: { stop?: () => void } | null;
 }
 
 async function closeServer(server: CloseableTestServer): Promise<void> {
+  server.schedulerManager?.stop?.();
   server.asServer.closeAllConnections?.();
   server.rsServer.closeAllConnections?.();
   await Promise.allSettled([
@@ -401,6 +403,7 @@ function appendDecisionDigest(
     computeHostedMcpDecisionDigest({
       accessMode,
       clientId,
+      grantExpiry: "",
       sources: sources.map(({ connectorId, connectionId = null, streamNames }) => ({
         sourceKey: hostedMcpSourceKey({ connectionId, connectorId }),
         streamNames: [...streamNames].sort(),
@@ -931,6 +934,7 @@ function pickerConsentAcceptBody({
     decision_digest: computeHostedMcpDecisionDigest({
       accessMode,
       clientId,
+      grantExpiry: model.grantExpiry.defaultId,
       sources: chosen.map(({ source, streams }) => ({
         sourceKey: source.id,
         streamNames: streams.map((stream) => stream.name).sort(),
@@ -2923,6 +2927,7 @@ function buildHostedMcpPickerForm({
     computeHostedMcpDecisionDigest({
       accessMode: accessMode ?? "continuous",
       clientId: client.client_id,
+      grantExpiry: "",
       sources: sourceSelections.map(({ connectorId, connectionId = null, streamNames }) => ({
         sourceKey: hostedMcpSourceKey({ connectionId, connectorId }),
         streamNames: [...streamNames].sort(),
@@ -5949,6 +5954,7 @@ test("the picker renders a live summary of the decision as the approval artifact
     const wrongDigest = computeHostedMcpDecisionDigest({
       accessMode: "continuous",
       clientId: client.client_id,
+      grantExpiry: model.grantExpiry.defaultId,
       sources: [{ sourceKey: source.id, streamNames: [mustExist(submittedStreams[0], "stream").name] }],
     });
 
@@ -6274,9 +6280,14 @@ function consentChallengeAcceptBody({
     decision_digest: computeHostedMcpDecisionDigest({
       accessMode,
       clientId: client.client_id,
+      grantExpiry: model.grantExpiry.defaultId,
       sources: chosen.map(({ source, streams }) => ({
         sourceKey: source.id,
-        streamNames: streams.map((stream) => stream.name).sort(),
+        streams: streams.map((stream) => ({
+          fields: digestFieldsForSubmittedSelection(stream, streamFields?.[stream.id]),
+          name: stream.name,
+          timeRange: streamRanges?.[stream.id] ?? null,
+        })),
       })),
     }),
     grant_expiry: model.grantExpiry.defaultId,
@@ -6286,6 +6297,21 @@ function consentChallengeAcceptBody({
     ...(streamFields ? { stream_fields: streamFields } : {}),
     ...(streamRanges ? { stream_range: streamRanges } : {}),
   };
+}
+
+function digestFieldsForSubmittedSelection(
+  stream: ConsentChallengeModelStream,
+  submittedFields: string[] | undefined
+): string[] | null {
+  if (!submittedFields) {
+    return null;
+  }
+  return [
+    ...new Set([
+      ...submittedFields,
+      ...stream.fields.filter((field) => field.required).map((field) => field.name),
+    ]),
+  ].sort();
 }
 
 /**
@@ -6608,6 +6634,7 @@ test("a tampered source_id on a consent challenge cannot widen the grant beyond 
       decision_digest: computeHostedMcpDecisionDigest({
         accessMode: "continuous",
         clientId: client.client_id,
+        grantExpiry: model.grantExpiry.defaultId,
         sources: [{ sourceKey: forgedSourceId, streamNames: [] }],
       }),
       grant_expiry: model.grantExpiry.defaultId,
@@ -6628,6 +6655,48 @@ test("a tampered source_id on a consent challenge cannot widen the grant beyond 
     await closeServer(server);
   }
 });
+
+for (const tamper of ["grant expiry", "stream fields", "stream range"] as const) {
+  test(`consent challenge rejects ${tamper} changed after decision digest`, async () => {
+    const server = await startOpenTestServer();
+    const asUrl = `http://localhost:${server.asPort}`;
+    try {
+      await registerAuthorizedSpotify(asUrl);
+      const client = await registerAuthCodeClient(asUrl);
+      const challenge = await startConsentChallenge(asUrl, client, `tampered-${tamper}`);
+      const model = await fetchConsentChallengeModel(asUrl, challenge);
+      const source = mustExist(model.sources[0], "source");
+      const stream = mustExist(source.streams.find((entry) => entry.name === "saved_tracks"), "saved tracks");
+      const optionalField = mustExist(stream.fields.find((field) => !field.required), "optional field").name;
+      const body = consentChallengeAcceptBody({
+        chosen: [{ source, streams: [stream] }],
+        client,
+        model,
+        streamFields: { [stream.id]: [optionalField] },
+        streamRanges: { [stream.id]: { since: "2025-01-01", until: "2025-01-31" } },
+      });
+      if (tamper === "grant expiry") {
+        body.grant_expiry = "never";
+      } else if (tamper === "stream fields") {
+        body.stream_fields = { [stream.id]: stream.fields.filter((field) => field.required).map((field) => field.name) };
+      } else {
+        body.stream_range = { [stream.id]: { since: "2025-02-01", until: "2025-02-28" } };
+      }
+      const before = await countGrantPackagesForOwner();
+      const rejected = await postConsentChallenge(asUrl, challenge, "accept", body);
+      assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+      assert.equal(rejected.body.error, "invalid_request");
+      assert.match(stringField(rejected.body, "error_description"), /changed|confirm|approved/i);
+      assert.equal(await countGrantPackagesForOwner(), before, "a tampered decision mints nothing");
+      const pending = getDb()
+        .prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?")
+        .get<{ status: string; decision_digest: string | null }>(challenge);
+      assert.deepEqual(pending, { decision_digest: null, status: "pending" });
+    } finally {
+      await closeServer(server);
+    }
+  });
+}
 
 // Locks the snapshot binding: the console commits to the `review_digest` it
 // was served, and the AS recomputes it from a fresh resolve. A stale one means

@@ -89,6 +89,10 @@ function resolveDatedExpiry(raw: string, nowMs: number): { error: string } | { e
   if (Number.isNaN(parsed)) {
     return { error: "That is not a date this server can use. Pick another." };
   }
+  const parsedDate = new Date(parsed);
+  if (parsedDate.toISOString().slice(0, 10) !== raw) {
+    return { error: "That is not a date this server can use. Pick another." };
+  }
   if (parsed <= nowMs) {
     return { error: "Choose an end date in the future." };
   }
