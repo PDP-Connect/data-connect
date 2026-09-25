@@ -78,14 +78,19 @@ The earlier MIVHED portal (`scripts/demo-dr/mived-portal`, app `mived-demo-rd`) 
 
 ## Reset before presenting
 
-Removes every grant and record, then re-seeds, so Mis autorizaciones shows only what is created in the room.
+Removes every grant and record, re-seeds, and restarts the portal so it re-registers its client. Mis autorizaciones then shows only what is created in the room.
 
 ```sh
-fly ssh console -a pdpp-demo-rd -C "rm -f /var/lib/pdpp/pdpp.sqlite /var/lib/pdpp/pdpp.sqlite-shm /var/lib/pdpp/pdpp.sqlite-wal"
-fly apps restart pdpp-demo-rd
-ORIGIN=https://pdpp-demo-rd.fly.dev OWNER_PASSWORD=… node --import tsx scripts/demo-dr/seed-remote.ts
-fly apps restart proactivos-demo-rd   # the portal re-registers its client
+OWNER_PASSWORD=… scripts/demo-dr/reset-live.sh
 ```
+
+## Fallback recording
+
+```sh
+LANG=es PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… VIDEO_DIR=./video node scripts/demo-dr/record-demo.mjs
+```
+
+Each run creates and revokes a grant, so reset afterwards.
 
 ## Tear down after the demo
 
