@@ -263,10 +263,14 @@ async function readAll(token) {
   return { hogar: hogares[0] ?? null, miembros: miembros.sort(byId), prenatal: prenatal[0] ?? null };
 }
 
-// Grant id(s) from the token response: `grant_id`, or `grant_ids` if the
-// server issues one grant per source.
+// Authorization id(s) from the token response. A multi-source consent returns
+// one `grant_package_id` (one child grant per source); single grants return `grant_id`.
 function grantIds(tokens) {
-  const ids = [tokens.grant_id, ...(Array.isArray(tokens.grant_ids) ? tokens.grant_ids : [])].filter(Boolean);
+  const ids = [
+    tokens.grant_package_id,
+    tokens.grant_id,
+    ...(Array.isArray(tokens.grant_ids) ? tokens.grant_ids : []),
+  ].filter(Boolean);
   return [...new Set(ids)];
 }
 
@@ -341,7 +345,7 @@ async function callback(url, res, session) {
       grant: { ids: grantIds(tokens), revoked: false, sources: SOURCE_KEYS, until: END_DATE_VALUE },
       receivedAt: new Date(),
     };
-    session.access = { grantId: tokens.grant_id, token: tokens.access_token };
+    session.access = { grantId: grantIds(tokens)[0], token: tokens.access_token };
     console.log(`grant ${grantIds(tokens).join(",")}: read prenatal=${Boolean(data.prenatal)} hogar=${Boolean(data.hogar)} miembros=${data.miembros.length}`);
     redirect(res, "/listo");
   } catch (err) {
