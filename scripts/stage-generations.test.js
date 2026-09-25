@@ -13,7 +13,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   findProcessesUsingDirectory,
   collectOldStageGenerations,
@@ -95,10 +95,15 @@ describe("stage-generations shared staging primitives", () => {
     const current = join(root, "console-current")
     mkdirSync(old)
     mkdirSync(current)
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
     try {
       expect(collectOldStageGenerations(root, "console", 1)).toEqual([])
       expect(existsSync(old)).toBe(true)
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("staged disk use can grow without bound"),
+      )
     } finally {
+      warning.mockRestore()
       rmSync(root, { force: true, recursive: true })
     }
   })
