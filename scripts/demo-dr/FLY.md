@@ -64,9 +64,20 @@ fly ssh console --app "$APP" -C "ls -la /var/lib/pdpp"
 fly apps restart "$APP"          # data and grants survive (volume)
 ```
 
+## MIVHED portal (second app)
+
+Stateless; its OAuth client registers itself with the PDPP app on first use.
+
+```sh
+fly apps create mived-demo-rd -o <org>
+(cd scripts/demo-dr/mived-portal && fly deploy --ha=false)   # one machine: sessions are in memory
+PORTAL_URL=https://mived-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/mived-e2e.mjs
+```
+
 ## Tear down after the demo
 
 ```sh
 fly apps destroy "$APP" --yes    # also deletes the machine and volume
+fly apps destroy mived-demo-rd --yes
 fly volumes list --app "$APP"    # expect: app not found
 ```
