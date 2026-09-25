@@ -867,6 +867,8 @@ interface ServerOpts {
   ownerAuthSessionTtlSeconds?: number;
   /** Revision registry for the owner live channel; defaults to one per process. */
   ownerLive?: LiveRevisions;
+  /** Owner live channel ping/session-revocation check interval; test-only override of LIVE_PING_INTERVAL_MS. */
+  ownerLivePingIntervalMs?: number;
   ownerAuthSubjectId?: string;
   ownerExposurePosture?: {
     allowUnauthenticatedOwnerWhenDisabled: boolean;
@@ -5994,6 +5996,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     live: resolveOwnerLive(opts),
     onSessionLogout: ownerAuth.onSessionLogout,
     pdppError,
+    pingIntervalMs: opts.ownerLivePingIntervalMs,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountOwnerLiveAs>[1]);
 
@@ -9129,6 +9132,7 @@ export async function startServer(opts: ServerOpts = {}) {
     connectorInstallService,
     controller,
     ownerLive: resolveOwnerLive(opts),
+    ownerLivePingIntervalMs: opts.ownerLivePingIntervalMs,
     dbPath: opts.dbPath || DB_PATH,
     dynamicClientRegistrationInitialAccessTokens: resolveDynamicClientRegistrationInitialAccessTokens(opts),
     enableDynamicClientRegistration: resolveDynamicClientRegistrationEnabled(opts),

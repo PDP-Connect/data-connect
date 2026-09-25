@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { existsSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { createServer } from "node:http"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
@@ -101,6 +102,40 @@ async function fetchConsole(port, pathname) {
   return fetch(`http://127.0.0.1:${port}${pathname}`, { redirect: "manual" })
 }
 
+async function assertAgentRoutes(port) {
+  const catalogResponse = await fetchConsole(port, "/.well-known/skills/index.json")
+  if (catalogResponse.status !== 200) {
+    throw new Error(`agent skill catalog failed: ${catalogResponse.status}`)
+  }
+  const catalog = await catalogResponse.json()
+  const files = catalog.skills?.flatMap(skill => skill.files || []) || []
+  if (files.length === 0) throw new Error("agent skill catalog is empty")
+
+  for (const file of files) {
+    const pathname = new URL(file.url).pathname
+    const response = await fetchConsole(port, pathname)
+    if (response.status !== 200) {
+      throw new Error(`traced agent skill file failed: ${pathname} (${response.status})`)
+    }
+    const body = Buffer.from(await response.arrayBuffer())
+    const digest = createHash("sha256").update(body).digest("hex")
+    if (body.byteLength !== file.bytes || digest !== file.sha256) {
+      throw new Error(`traced agent skill file does not match its catalog marker: ${pathname}`)
+    }
+  }
+
+  const fullTextResponse = await fetchConsole(port, "/llms-full.txt")
+  if (fullTextResponse.status !== 200) {
+    throw new Error(`full agent skill index failed: ${fullTextResponse.status}`)
+  }
+  const fullText = await fullTextResponse.text()
+  for (const file of files) {
+    if (!fullText.includes(`## ${file.repo_path}`)) {
+      throw new Error(`full agent skill index is missing ${file.repo_path}`)
+    }
+  }
+}
+
 export async function smokeConsoleStack({
   nodeBinary,
   profile = "release",
@@ -176,6 +211,7 @@ export async function smokeConsoleStack({
       if (rewrite.status !== 200)
         throw new Error(`rewrite failed for ${pathname}: ${rewrite.status}`)
     }
+    await assertAgentRoutes(consolePort)
     return { response, stageDirectory }
   } finally {
     if (child.exitCode === null) {

@@ -77,6 +77,21 @@ describe("console window capabilities", () => {
     expect(hasFs).toBe(false)
   })
 
+  it("grants notification:default so Notification.requestPermission() is not rejected by the ACL", () => {
+    // The notification plugin's init script overrides window.Notification in
+    // every webview (including this one, WebviewUrl::External) and routes
+    // requestPermission()/isPermissionGranted() through
+    // invoke("plugin:notification|..."). Without this permission, the
+    // console's web-push-settings.tsx call to Notification.requestPermission()
+    // is silently denied by Tauri's capability ACL even though the identical
+    // code works in a plain browser (which has no Tauri override).
+    const stringPermissions = document.permissions.filter(
+      (permission): permission is string => typeof permission === "string"
+    )
+
+    expect(stringPermissions).toContain("notification:default")
+  })
+
   it("grants no shell capability at all -- outbound links are opened by Rust's on_navigation handler, not invoke()", () => {
     // shell:allow-open (#186) never worked here: this window is
     // WebviewUrl::External, which never receives Tauri's invoke() bridge

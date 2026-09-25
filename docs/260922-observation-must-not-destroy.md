@@ -66,7 +66,7 @@ that only reports.
 
 ## Related
 
-- `docs/architecture.md`, the supervisor and sidecar lifecycle this governs.
+- `src-tauri/src/unified.rs`, the supervisor and sidecar lifecycle this governs.
 - `OriginVerification` in the same file records when a reading was taken, so a
   stale one decays to unknown instead of reading as healthy. The two rules are
   duals: do not claim what you have not observed, and do not change what you
