@@ -144,6 +144,38 @@ test("host lease POST returns the host CDP URL and release DELETE targets host s
 	);
 });
 
+test("release after a lost acquire response targets the stable run id", async () => {
+	const calls: MockRequest[] = [];
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		calls.push({
+			...(init?.body === undefined ? {} : { body: String(init.body) }),
+			...(init?.method === undefined ? {} : { method: init.method }),
+			url: String(input),
+		});
+		if (init?.method === "POST") {
+			throw new Error("response was lost after host acquisition");
+		}
+		return { json: async () => ({}), ok: true, status: 204 } as Response;
+	}) as typeof fetch;
+	const allocator = hostAllocator(fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-lost-response", surfaceId: "surface_1" });
+	const request: EnsureBrowserSurfaceRequest = {
+		connectorId: "chase",
+		profileKey: "chase",
+		surfaceId: "surface_1",
+	};
+
+	await assert.rejects(allocator.ensureSurface(request), /unreachable/);
+	await allocator.releaseRun("run-lost-response");
+
+	assert.equal(calls[0]?.method, "POST");
+	assert.equal(calls[1]?.method, "DELETE");
+	assert.equal(
+		calls[1]?.url,
+		"http://127.0.0.1:9916/agent/browser-surface/runs/run-lost-response",
+	);
+});
+
 test("host endpoint failure terminalizes admission before a connector can start", async () => {
 	const mock = createMockHostEndpoint({
 		json: async () => ({}),

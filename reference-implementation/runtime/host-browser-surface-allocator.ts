@@ -122,7 +122,6 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				`no run_id was bound for browser surface ${request.surfaceId}`,
 			);
 		}
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
 		const response = await this.#requestJson("POST", this.#leasesUrl(), {
 			run_id: runId,
 			connector_id: request.connectorId,
@@ -148,6 +147,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		const record = { hostSurfaceId: hostLease.surface_id, runId, surface };
 		this.#leasesBySurfaceId.set(request.surfaceId, record);
 		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
+		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
 		return surface;
 	}
 
@@ -163,8 +163,16 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 
 	async releaseRun(runId: string): Promise<void> {
 		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
+			([, pendingRunId]) => pendingRunId === runId,
+		)?.[0];
+		await this.#requestNoContent("DELETE", this.#runUrl(runId));
 		if (surfaceId) {
-			await this.stopSurface({ reason: "operator", surfaceId });
+			this.#leasesBySurfaceId.delete(surfaceId);
+			this.#surfaceIdsByRunId.delete(runId);
+		}
+		if (pendingSurfaceId) {
+			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
 		}
 	}
 
@@ -186,6 +194,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 
 	#leaseUrl(hostSurfaceId: string): string {
 		return `${this.#leasesUrl()}/${encodeURIComponent(hostSurfaceId)}`;
+	}
+
+	#runUrl(runId: string): string {
+		return `${this.#endpoint}/browser-surface/runs/${encodeURIComponent(runId)}`;
 	}
 
 	#leasesUrl(): string {
