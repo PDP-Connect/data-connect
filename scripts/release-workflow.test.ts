@@ -136,11 +136,16 @@ function substituteActionsExpressions(script: string) {
 }
 
 describe("release workflow", () => {
-  it("builds manual-install artifacts on demand without an updater", () => {
+  it("runs the installer matrix on branch and release events without an updater", () => {
     const workflow = readReleaseWorkflow()
 
     expect(workflow).toContain("workflow_dispatch:")
-    expect(workflow).toContain("pull_request:")
+    expect(workflow).toContain(
+      "push:\n    branches:\n      - main\n      - integration/unified-stack"
+    )
+    expect(workflow).toContain('      - "v*"')
+    expect(workflow).toContain("types: [published]")
+    expect(workflow).not.toContain("  pull_request:")
     expect(workflow).toContain("Stage verified release artifacts")
     expect(workflow).toContain("Publish complete platform set")
     expect(workflow).toContain("ubuntu-22.04")

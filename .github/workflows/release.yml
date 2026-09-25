@@ -1,9 +1,16 @@
 name: Release manual-install artifacts
 
 on:
-  pull_request:
+  # Exercise the matrix on branch promotions and tag builds. The release event
+  # remains the signed artifact publication path.
+  push:
+    branches:
+      - main
+      - integration/unified-stack
+    tags:
+      - "v*"
   release:
-    types: [created]
+    types: [published]
   workflow_dispatch:
     inputs:
       ref:
@@ -105,7 +112,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify checked-out release identity
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}

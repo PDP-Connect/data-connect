@@ -3,10 +3,9 @@ name: mutation
 # Reactive mutation testing: for each pull request revision, mutate the
 # production files that revision changed and publish the evidence as artifacts.
 #
-# There is no schedule. The trigger is the pull request itself, so the scope of
-# every run is bounded by what actually changed rather than by a time or mutant
-# budget. There are no duration, budget, or admission constants in this
-# workflow, in the Stryker configurations it invokes, or in the adapter it runs.
+# There is no schedule. Each pull request freezes the changed production lines
+# into an intent packet. Each matrix job has a 90-minute ceiling, and its Stryker
+# step has a 60-minute ceiling. A timed-out run is incomplete evidence, never a pass.
 #
 # This job is advisory. It publishes evidence a reviewer can read; it does not
 # block merge. Advisory does not mean permissive: failed or incomplete evidence
@@ -47,6 +46,7 @@ jobs:
   mutation:
     name: mutate changed production files (${{ matrix.cohort }})
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -236,6 +236,7 @@ jobs:
         if: steps.intent.outputs.applicability == 'applicable'
         id: observe
         continue-on-error: true
+        timeout-minutes: 60
         env:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
