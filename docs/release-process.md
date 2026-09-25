@@ -33,6 +33,21 @@ Creating the GitHub release triggers `.github/workflows/release.yml` (`on: relea
 
 For example, `v1.5.1` publishes `core:1.5.1` and moves `core:latest` only if `latest` is older than 1.5.1. Re-running an older release publishes its version tag again but does not move `latest` back. GitHub keeps at most one pending job in the concurrency group, so a newer pending promoter can replace an older one and the replaced job shows as cancelled. Re-run a cancelled promoter if needed; re-running is safe.
 
+## Clean-install acceptance (manual)
+
+`release.yml` can also install an existing release on fresh macOS 15 (arm64 and Intel) and Windows VMs and check the installed app. Run it with a release tag; this skips the build and runs only the `clean-install` job:
+
+```bash
+gh workflow run release.yml --ref <branch> -f release_tag=<tag>
+```
+
+The job downloads that release's `.dmg` or `-setup.exe` assets, so the release must already have them. For a rehearsal, create a **published prerelease**, not a draft:
+
+- GitHub does not start workflows for the `created` event of a draft release, so a draft never gets built assets.
+- A prerelease still runs the build and publishes its versioned Core image, but `promote-core-latest` skips prereleases, so `core:latest` does not move.
+
+The job checks that the VM is fresh, that the app reached the owner-password-not-yet-set state, and that the bundled sidecars serve HTTP. It does not open or check the owner setup UI, which is behind owner sign-in. Logs upload as `clean-install-<platform>` artifacts.
+
 ## Direct answers (branch + tag confusion)
 
 - **Do I create a new branch first?**  

@@ -24,12 +24,22 @@ import path from "node:path"
 import { parseArgs } from "node:util"
 import { isMainModule } from "./is-main-module.js"
 
-// Names mirror src-tauri/src/owner_credential.rs, console_port.rs and unified.rs.
-export const OWNER_SET_MARKER = "owner-password-owner-set.json"
+// Paths relative to Tauri's app_data_dir() for dev.dataconnect. The desktop
+// gives the RI and console `<appData>/unified` as their data dir
+// (src-tauri/src/unified.rs:1043-1047, UNIFIED_DB_DIRECTORY at :74).
+// Owner-set marker: owner_credential.rs:293-299 (written only when the owner
+// sets a password, :1131).
+export const OWNER_SET_MARKER = path.join(
+  "unified",
+  "owner-password-owner-set.json"
+)
 // Logged by load_or_create_secret_with_store in owner_credential.rs.
 export const OWNER_CREDENTIAL_READY =
   /Owner credential: load_or_create exit duration_ms=\d+ ok=true/
-export const CONSOLE_PORT_FILE = "console-port.json"
+// Console port: read and persisted with the same `unified` data_dir
+// (unified.rs:1107 and :1131 -> :399; file name console_port.rs:52).
+export const CONSOLE_PORT_FILE = path.join("unified", "console-port.json")
+// RI database: unified.rs:74-75, :804.
 export const UNIFIED_DB = path.join("unified", "pdpp.sqlite")
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))

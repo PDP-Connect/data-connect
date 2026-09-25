@@ -586,7 +586,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR" installer
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer -- "$RELEASE_TAG"
           mapfile -t assets < <(find installer -type f)
           if [ "${#assets[@]}" -ne 1 ]; then
             echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found ${#assets[@]}."
@@ -642,7 +642,9 @@ jobs:
           Get-ChildItem $installDir | Out-File -Append "$env:EVIDENCE_DIR/install.log"
           Start-Process -FilePath $exe.FullName
           "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
-          "APP_LOG_DIR=$(Join-Path $appData 'logs')" >> $env:GITHUB_ENV
+          # Tauri app_log_dir() on Windows is the local, not roaming, app-data
+          # folder (tauri 2.11.6 src/path/desktop.rs:285-287).
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
 
       # First-run claim: fresh install, app ran, owner password not yet set.
       # Also checks the sidecars serve. It does not render or check the setup
@@ -660,7 +662,9 @@ jobs:
         run: |
           mkdir -p "$EVIDENCE_DIR/app-logs" "$EVIDENCE_DIR/run-leases"
           [ -d "${APP_LOG_DIR:-}" ] && cp -R "$APP_LOG_DIR"/. "$EVIDENCE_DIR/app-logs/" || true
-          [ -f "${APP_DATA_DIR:-}/console-port.json" ] && cp "$APP_DATA_DIR/console-port.json" "$EVIDENCE_DIR/" || true
+          [ -f "${APP_DATA_DIR:-}/unified/console-port.json" ] && cp "$APP_DATA_DIR/unified/console-port.json" "$EVIDENCE_DIR/" || true
+          # Run leases: <appData>/run (unified.rs:2250-2254, run_lease.rs:172-177).
+          # Windows has none: process_start_ticks is None there (run_lease.rs:157-160).
           [ -d "${APP_DATA_DIR:-}/run" ] && cp "$APP_DATA_DIR"/run/*.json "$EVIDENCE_DIR/run-leases/" 2>/dev/null || true
           [ -d "${APP_DATA_DIR:-}" ] && ls -laR "$APP_DATA_DIR" > "$EVIDENCE_DIR/app-data-listing.txt" 2>&1 || true
           if [ "$RUNNER_OS" = "Windows" ]; then

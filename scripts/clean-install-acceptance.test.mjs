@@ -69,7 +69,7 @@ describe("clean-install acceptance", () => {
   async function startConsole(overrides) {
     server = await fakeConsole(overrides)
     writeFileSync(
-      path.join(dir, CONSOLE_PORT_FILE),
+      path.join(dir, "unified", "console-port.json"),
       JSON.stringify({ port: server.address().port })
     )
   }
@@ -118,6 +118,29 @@ describe("clean-install acceptance", () => {
     )
     const { failures } = await checkOnce(dir, { logFile })
     expect(failures.join()).toContain("owner credential as ready")
+  })
+
+  it("reads the port and marker from the desktop's real unified/ layout", async () => {
+    // Literal paths from src-tauri (unified.rs:1043-1047, owner_credential.rs:293-299),
+    // not the module's constants, so a wrong constant fails here.
+    await startConsole()
+    writeFileSync(
+      path.join(dir, "unified", "owner-password-owner-set.json"),
+      "{}"
+    )
+    const { failures, evidence } = await checkOnce(dir, { logFile })
+    expect(evidence.consolePort).toBe(server.address().port)
+    expect(failures.join()).toContain("owner-password-owner-set.json exists")
+  })
+
+  it("ignores a console port file at the app-data root", async () => {
+    server = await fakeConsole()
+    writeFileSync(
+      path.join(dir, "console-port.json"),
+      JSON.stringify({ port: server.address().port })
+    )
+    const { failures } = await checkOnce(dir, { logFile })
+    expect(failures.join()).toContain("console-port.json missing or invalid")
   })
 
   it("rejects an install whose console never wrote its port", async () => {
