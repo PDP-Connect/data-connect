@@ -5276,25 +5276,79 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     /// shutdown is tearing down. This asserts the guard every watcher now
     /// consults, rather than the loops themselves (which need a real
     /// `AppHandle`).
+    fn watcher_declaration_body<'a>(source: &'a str, watcher_name: &str) -> &'a str {
+        let declaration = format!("pub(crate) fn {watcher_name}(");
+        let mut matches = source.match_indices(&declaration);
+        let (start, _) = matches.next().unwrap_or_else(|| {
+            panic!("{watcher_name} must have an exact pub(crate) fn declaration")
+        });
+        assert!(
+            matches.next().is_none(),
+            "{watcher_name} must have exactly one pub(crate) fn declaration"
+        );
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("{watcher_name} declaration must have a function body"));
+        let next_declaration = source[body_start..]
+            .find("\npub(crate) fn ")
+            .map(|offset| body_start + offset)
+            .unwrap_or(source.len());
+        &source[body_start..next_declaration]
+    }
+
     #[test]
     fn watchers_stop_once_shutdown_is_requested() {
         let source = include_str!("unified.rs");
         for watcher in [
-            "pub(crate) fn spawn_remote_access_config_watcher",
-            "pub(crate) fn spawn_autostart_watcher",
-            "pub(crate) fn spawn_open_external_url_watcher",
-            "pub(crate) fn spawn_origin_verification_watcher",
+            "spawn_remote_access_config_watcher",
+            "spawn_autostart_watcher",
+            "spawn_origin_verification_watcher",
         ] {
-            let start = source
-                .find(watcher)
-                .unwrap_or_else(|| panic!("{watcher} must exist"));
-            let body = &source[start..start + 1600];
+            let body = watcher_declaration_body(source, watcher);
             assert!(
                 body.contains("shutdown_has_been_requested"),
                 "{watcher} must stop once shutdown is requested, or it can act \
                  on the stack while it is being torn down"
             );
         }
+    }
+
+    #[test]
+    fn watcher_declaration_scan_requires_an_exact_declaration() {
+        let source = r#"
+            fn mentions_spawn_remote_access_config_watcher() {}
+            const NOTE: &str = "pub(crate) fn spawn_remote_access_config_watcher";
+            pub(crate) fn spawn_remote_access_config_watcher_for_test() {}
+            pub(crate) fn spawn_remote_access_config_watcher() {
+                shutdown_has_been_requested();
+            }
+        "#;
+
+        let body = watcher_declaration_body(source, "spawn_remote_access_config_watcher");
+
+        assert!(body.contains("shutdown_has_been_requested"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must have an exact pub(crate) fn declaration")]
+    fn watcher_declaration_scan_rejects_missing_targets() {
+        let source = r#"
+            const NOTE: &str = "pub(crate) fn spawn_open_external_url_watcher";
+        "#;
+
+        let _body = watcher_declaration_body(source, "spawn_open_external_url_watcher");
+    }
+
+    #[test]
+    #[should_panic(expected = "must have exactly one pub(crate) fn declaration")]
+    fn watcher_declaration_scan_rejects_ambiguous_targets() {
+        let source = r#"
+            pub(crate) fn spawn_autostart_watcher() {}
+            pub(crate) fn spawn_autostart_watcher() {}
+        "#;
+
+        let _body = watcher_declaration_body(source, "spawn_autostart_watcher");
     }
 
     /// A reading that proved the origin reaches this console, taken at
