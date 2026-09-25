@@ -20,6 +20,7 @@
  */
 
 import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
+import { type CitizenShell, renderCitizenDocument } from "./citizen-ui.ts";
 
 export const HOSTED_UI_CSS_PATH = "/__pdpp/hosted-ui.css";
 export const HOSTED_UI_BRAND_MARKER = "data-pdpp-hosted-ui";
@@ -30,6 +31,8 @@ type HostedThemeChoice = "light" | "dark" | "system";
 interface HostedDocumentArgs {
   body: string;
   providerName: unknown;
+  // DR demo: render inside the citizen shell instead of the PDPP chrome.
+  shell?: CitizenShell;
   themeChoice?: unknown;
   title: unknown;
 }
@@ -1050,8 +1053,12 @@ export function renderHostedDocument({
   title,
   providerName,
   body,
+  shell,
   themeChoice = "system",
 }: HostedDocumentArgs): string {
+  if (shell) {
+    return renderCitizenDocument({ body, shell, title });
+  }
   const safeTitle = escapeHtml(title);
   const safeThemeChoice = normalizeHostedThemeChoice(themeChoice);
   // The mark is an inline SVG with hardcoded fills, not CSS-token-driven, so

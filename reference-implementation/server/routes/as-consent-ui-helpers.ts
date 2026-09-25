@@ -16,6 +16,10 @@
 //   test/security-consent-token-handoff.test.js
 
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { CITIZEN_GLYPHS, type CitizenShell, renderCitizenCard } from "../citizen-ui.ts";
 import {
   HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID,
   HOSTED_MCP_GRANT_EXPIRY_OPTIONS,
@@ -51,7 +55,7 @@ export interface ConsentUiRenderer {
       hidden: Array<{ name: string; value: string }>;
     }>
   ) => string;
-  renderHostedDocument: (opts: { title: string; providerName: string; body: string }) => string;
+  renderHostedDocument: (opts: { title: string; providerName: string; body: string; shell?: CitizenShell }) => string;
   renderKeyValueList: (items: Array<{ label: string; value?: unknown; html?: string }>) => string;
   renderPageIntro: (opts: { eyebrow: string; title: string; lede?: string }) => string;
   renderResultState: (opts: { tone: string; title: string; body: string }) => string;
@@ -1813,13 +1817,6 @@ function buildReviewedSourceFacts(
   ];
 }
 
-function displayAiTrainingDecision(value: boolean | null): string {
-  if (value === null) {
-    return "Not applicable";
-  }
-  return value ? "Agreed" : "Not agreed";
-}
-
 function renderReviewedNarrowing(
   narrowing: BatchApprovalReviewArtifact["source_narrowing"][string] | undefined,
   ui: ConsentUiRenderer
@@ -2288,6 +2285,262 @@ function hiddenInputs(fields: Array<{ name: string; value: string }>, ui: Consen
     .join("");
 }
 
+// ─── DR demo: citizen consent pages ──────────────────────────────────────────
+//
+// Single declared requests (authorization_details) render in the citizen
+// shell (`citizen-ui.ts`): Spanish copy (usted), humanized values, and the
+// protocol internals collapsed under "Detalles técnicos". Form actions,
+// hidden inputs, names and values are unchanged.
+//
+//   GET /consent ──▶ solicitud (summary) ──POST /consent/review──▶
+//   confirmación (summary + <details>) ──POST /consent/approve──▶ redirect
+
+const CONSENT_SHELL = "dr-consent";
+const CONSENT_CARD_TITLE = "Autorización de acceso a datos";
+const ES_NONE = "Ninguno";
+const DR_TIME_ZONE = "America/Santo_Domingo";
+const WILDCARD_STREAM = "*";
+
+const ACCESS_MODE_LABELS: Record<string, string> = {
+  continuous: "Acceso continuo",
+  single_use: "Consulta única",
+};
+
+const RETENTION_ON_EXPIRY_ES: Record<string, string> = {
+  anonymize: "se anonimizan",
+  delete: "se eliminan",
+};
+
+// ISO 8601 duration designators → Spanish singular/plural, e.g. P30D → "30 días".
+const ISO_DURATION_UNITS: ReadonlyArray<readonly [string, string]> = [
+  ["año", "años"],
+  ["mes", "meses"],
+  ["semana", "semanas"],
+  ["día", "días"],
+];
+
+// Unaccented manifest keys → Spanish spelling, e.g. `cedula` → "cédula".
+const ES_ACCENTED_WORDS: Record<string, string> = {
+  categoria: "categoría",
+  cedula: "cédula",
+  clasificacion: "clasificación",
+  codigo: "código",
+  descripcion: "descripción",
+  direccion: "dirección",
+  educacion: "educación",
+  expedicion: "expedición",
+  informacion: "información",
+  numero: "número",
+  ocupacion: "ocupación",
+  telefono: "teléfono",
+  ultima: "última",
+  ultimo: "último",
+  vehiculo: "vehículo",
+};
+const ES_LABEL_ACRONYMS = new Set(["icv", "id", "nss", "rnc", "url"]);
+const ES_FIELD_LABEL_OVERRIDES: Record<string, string> = {
+  id: "Identificador",
+  source_updated_at: "Última actualización",
+};
+
+type CitizenRow = { authorship?: ConsentAuthorship; html: string; label: string };
+type TechFact = { label: string; value: string | null | undefined };
+type TechSection = { facts: TechFact[]; heading: string };
+
+/** `cedula_jefe_hogar` → "Cédula jefe hogar"; `icv_puntaje` → "ICV puntaje". */
+function humanizeEsLabel(name: string): string {
+  const override = ES_FIELD_LABEL_OVERRIDES[name];
+  if (override) {
+    return override;
+  }
+  const words = name
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLowerCase();
+      return ES_LABEL_ACRONYMS.has(lower) ? lower.toUpperCase() : (ES_ACCENTED_WORDS[lower] ?? lower);
+    });
+  const [first = "", ...rest] = words;
+  if (!first) {
+    return name;
+  }
+  return [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(" ");
+}
+
+function accessModeLabel(mode: string | null | undefined): string {
+  return ACCESS_MODE_LABELS[mode ?? ""] ?? String(mode ?? ES_NONE);
+}
+
+function formatIsoDuration(value: string): string {
+  const match = /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?$/.exec(value);
+  if (!match) {
+    return value;
+  }
+  const parts = ISO_DURATION_UNITS.map(([one, many], index) => {
+    const count = Number(match[index + 1] ?? 0);
+    return count ? `${count} ${count === 1 ? one : many}` : null;
+  }).filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : value;
+}
+
+function describeRetention(retention: { max_duration?: string | null; on_expiry?: string | null } | null | undefined) {
+  if (!retention?.max_duration) {
+    return null;
+  }
+  const duration = formatIsoDuration(retention.max_duration);
+  const onExpiry = RETENTION_ON_EXPIRY_ES[retention.on_expiry ?? ""];
+  return onExpiry ? `Los datos ${onExpiry} después de ${duration}.` : `Hasta ${duration}.`;
+}
+
+/** ISO timestamp → "26 de septiembre de 2026, 12:11 a. m." (Santo Domingo). */
+function formatEsDate(iso: string | null | undefined): string {
+  if (!iso) {
+    return "Sin fecha de vencimiento";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return new Intl.DateTimeFormat("es-DO", { dateStyle: "long", timeStyle: "short", timeZone: DR_TIME_ZONE }).format(
+    date
+  );
+}
+
+// Source display names and stream descriptions come from the shipped fixture
+// manifests (the demo sources), read once. Unknown sources fall back to ids.
+interface CitizenSourceInfo {
+  displayName: string | null;
+  streams: Map<string, string | null>;
+}
+
+const FIXTURE_MANIFESTS_DIR = fileURLToPath(new URL("../../fixtures/seed-manifests/", import.meta.url));
+let citizenSourceCache: Map<string, CitizenSourceInfo> | null = null;
+
+function loadCitizenSources(): Map<string, CitizenSourceInfo> {
+  const byId = new Map<string, CitizenSourceInfo>();
+  let files: string[];
+  try {
+    files = readdirSync(FIXTURE_MANIFESTS_DIR).filter((file) => file.endsWith(".json"));
+  } catch {
+    return byId;
+  }
+  for (const file of files) {
+    let manifest: ConsentPickerManifest;
+    try {
+      manifest = JSON.parse(readFileSync(join(FIXTURE_MANIFESTS_DIR, file), "utf8")) as ConsentPickerManifest;
+    } catch {
+      continue;
+    }
+    const info: CitizenSourceInfo = {
+      displayName: manifest.display_name ?? null,
+      streams: new Map((manifest.streams ?? []).map((stream) => [stream.name, stream.description ?? null])),
+    };
+    for (const key of [manifest.manifest_uri, manifest.connector_id]) {
+      if (key) {
+        byId.set(key, info);
+      }
+    }
+  }
+  return byId;
+}
+
+function lookupCitizenSource(sourceId: string | null | undefined): CitizenSourceInfo | null {
+  if (!sourceId) {
+    return null;
+  }
+  citizenSourceCache ??= loadCitizenSources();
+  return citizenSourceCache.get(sourceId) ?? null;
+}
+
+function citizenSourceLabel(sourceId: string | null | undefined): string {
+  return lookupCitizenSource(sourceId)?.displayName ?? sourceId ?? ES_NONE;
+}
+
+/** Manifest description "Head: detail" → label + detail; else humanized key. */
+function describeCitizenStream(sourceId: string | null | undefined, streamName: string) {
+  const description = consentSafeStreamDescription(lookupCitizenSource(sourceId)?.streams.get(streamName));
+  if (!description) {
+    return { detail: null, label: humanizeEsLabel(streamName) };
+  }
+  const colon = description.indexOf(":");
+  if (colon <= 0) {
+    return { detail: null, label: description };
+  }
+  return { detail: description.slice(colon + 1).trim(), label: description.slice(0, colon).trim() };
+}
+
+function renderCitizenStreams(
+  sourceId: string | null | undefined,
+  streams: Array<{ extra?: string[]; fields?: string[] | null; name: string }>,
+  ui: ConsentUiRenderer
+): string {
+  const items = streams.map((stream) => {
+    const { label, detail } = describeCitizenStream(sourceId, stream.name);
+    const fieldChips = stream.fields?.length
+      ? stream.fields.map((field) => `<span class="cu-chip">${ui.escapeHtml(humanizeEsLabel(field))}</span>`)
+      : [`<span class="cu-chip">Todos los campos</span>`];
+    const extras = (stream.extra ?? []).map((text) => `<span class="cu-chip">${ui.escapeHtml(text)}</span>`);
+    const detailHtml = detail ? `<small>${ui.escapeHtml(detail)}</small>` : "";
+    return `<li><b>${ui.escapeHtml(label)}</b>${detailHtml}<div class="cu-chips">${[...fieldChips, ...extras].join("")}</div></li>`;
+  });
+  return `<ul class="cu-streams">${items.join("")}</ul>`;
+}
+
+function renderCitizenSummary(rows: CitizenRow[], ui: ConsentUiRenderer): string {
+  const html = rows
+    .map((row) => {
+      const authorship = row.authorship ? ` data-authorship="${row.authorship}"` : "";
+      return `<div${authorship}><dt>${ui.escapeHtml(row.label)}</dt><dd>${row.html}</dd></div>`;
+    })
+    .join("");
+  return `<dl class="cu-summary">${html}</dl>`;
+}
+
+function renderCitizenNote(text: string, ui: ConsentUiRenderer): string {
+  return `<span class="cu-note">${ui.escapeHtml(text)}</span>`;
+}
+
+function renderCitizenClaims(claims: PendingClientClaims | null | undefined, ui: ConsentUiRenderer): string {
+  const commitments = Array.isArray(claims?.commitments)
+    ? claims.commitments.filter((c: unknown): c is string => typeof c === "string" && c.trim() !== "")
+    : [];
+  if (commitments.length === 0) {
+    return "";
+  }
+  const items = commitments.map((c) => `<li>${ui.escapeHtml(c)}</li>`).join("");
+  return `<div class="cu-claims" data-authorship="client"><b>Lo que la aplicación dice que hará</b><ul>${items}</ul>${renderCitizenNote(
+    "Son afirmaciones de la aplicación; su servidor no las hace cumplir.",
+    ui
+  )}</div>`;
+}
+
+function renderTechnicalDetails(sections: TechSection[], ui: ConsentUiRenderer): string {
+  const html = sections
+    .map((section) => {
+      const rows = section.facts
+        .map((fact) => `<dt>${ui.escapeHtml(fact.label)}</dt><dd>${ui.escapeHtml(fact.value || ES_NONE)}</dd>`)
+        .join("");
+      return `<h3>${ui.escapeHtml(section.heading)}</h3><dl>${rows}</dl>`;
+    })
+    .join("");
+  return `<details class="cu-details"><summary>Detalles técnicos</summary>${html}</details>`;
+}
+
+function renderCitizenConsentDocument(
+  body: string,
+  title: string,
+  providerName: string,
+  ui: ConsentUiRenderer
+): string {
+  return ui.renderHostedDocument({
+    body: renderCitizenCard({ body, glyph: CITIZEN_GLYPHS.shield, title: CONSENT_CARD_TITLE }),
+    providerName,
+    shell: CONSENT_SHELL,
+    title: `${CONSENT_CARD_TITLE} · ${title}`,
+  });
+}
+
 function buildSingleConsentActions({
   csrfFieldName,
   csrfToken,
@@ -2307,35 +2560,98 @@ function buildSingleConsentActions({
   const reviewHidden = pending.reviewRevision
     ? [{ name: "approval_review_revision", value: pending.reviewRevision }]
     : [];
+  const requestHidden = [{ name: "request_uri", value: requestUri }];
+  const aiTrainingCheck = isAiTraining
+    ? '<label class="cu-check"><input type="checkbox" name="ai_training_consented" value="1" required /> Acepto expresamente el uso de estos datos para entrenar inteligencia artificial</label>'
+    : "";
   const allowAction = pending.reviewRevision
-    ? ui.renderActionRow([
-        {
-          action: "/consent/approve",
-          hidden: [...csrfHidden, ...reviewHidden, { name: "request_uri", value: requestUri }],
-          label: "Allow access",
-          method: "POST",
-          variant: "primary",
-        },
-      ])
-    : `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Finalize consent review">
-${hiddenInputs(csrfHidden, ui)}<input type="hidden" name="request_uri" value="${ui.escapeHtml(requestUri)}" />
-${
-  isAiTraining
-    ? '<label class="hosted-ui-source-toggle"><input type="checkbox" name="ai_training_consented" value="1" required /> I explicitly agree to AI training use</label>'
-    : ""
-}
-<button type="submit" class="hosted-ui-button" data-variant="primary">Allow access</button>
+    ? `<form class="hosted-ui-form" method="POST" action="/consent/approve">${hiddenInputs(
+        [...csrfHidden, ...reviewHidden, ...requestHidden],
+        ui
+      )}<button type="submit" class="cu-btn cu-block">Autorizar</button></form>`
+    : `<form class="hosted-ui-form" method="POST" action="/consent/review" aria-label="Revisar la autorización">
+${hiddenInputs([...csrfHidden, ...requestHidden], ui)}
+${aiTrainingCheck}
+<button type="submit" class="cu-btn cu-block">Continuar</button>
 </form>`;
-  const denyAction = ui.renderActionRow([
+  const denyAction = `<form class="hosted-ui-form" method="POST" action="/consent/deny">${hiddenInputs(
+    [...csrfHidden, ...requestHidden],
+    ui
+  )}<button type="submit" class="cu-btn cu-outline-danger cu-block">Rechazar</button></form>`;
+  return `<div class="cu-actions">${allowAction}${denyAction}</div>`;
+}
+
+function buildReviewedTechnicalSections(review: SingleApprovalReviewArtifact): TechSection[] {
+  const { client, source_declaration: declaration } = review;
+  const authority = declaration.resource_authority;
+  const authorityFacts: TechFact[] = [];
+  if (authority?.status === "verified") {
+    authorityFacts.push({ label: "Autoridad del recurso", value: `Verificada (${authority.authority_binding})` });
+  } else if (authority?.status === "local_operator_provisioned") {
+    authorityFacts.push({ label: "Autoridad del recurso", value: "Aprovisionada por el operador local" });
+  }
+  const aiTraining =
+    review.ai_training_consented === null ? "No aplica" : review.ai_training_consented ? "Aceptado" : "No aceptado";
+  const streamSections = review.resolved_streams.map((stream) => ({
+    facts: [
+      { label: "IDs de instancia", value: stream.instance_ids.join(", ") },
+      { label: "Campos", value: stream.fields.join(", ") },
+      { label: "Recursos", value: stream.resources?.join(", ") },
+      ...(stream.time_constraint
+        ? [
+            { label: "Campo de tiempo", value: stream.time_constraint.field },
+            { label: "Desde", value: stream.time_constraint.since },
+            { label: "Hasta", value: stream.time_constraint.until },
+          ]
+        : [{ label: "Restricción temporal", value: null }]),
+    ],
+    heading: `Flujo ${stream.name}`,
+  }));
+  return [
     {
-      action: "/consent/deny",
-      hidden: [...csrfHidden, { name: "request_uri", value: requestUri }],
-      label: "Deny",
-      method: "POST",
-      variant: "danger",
+      facts: [
+        { label: "ID del cliente", value: client.client_id },
+        { label: "Modo de registro", value: client.registration_mode },
+        { label: "Nombre para mostrar", value: client.client_display?.name },
+        { label: "URI del cliente", value: client.client_display?.uri },
+        { label: "URI del logotipo", value: client.client_display?.logo_uri },
+        { label: "URI de la política", value: client.client_display?.policy_uri },
+        { label: "URI de los términos", value: client.client_display?.tos_uri },
+        { label: "ID del titular", value: review.subject.id },
+      ],
+      heading: "Aplicación y titular",
     },
-  ]);
-  return [allowAction, denyAction].join("\n");
+    {
+      facts: [
+        { label: "ID de la fuente", value: review.source.id },
+        { label: "Tipo de fuente", value: review.source.kind },
+        { label: "Versión de la declaración", value: declaration.version },
+        { label: "Huella de la declaración", value: declaration.digest },
+        ...(declaration.accepted_revision_reference
+          ? [{ label: "Revisión aceptada", value: declaration.accepted_revision_reference }]
+          : []),
+        ...authorityFacts,
+        ...(declaration.publisher_attribution
+          ? [{ label: "Editor declarado", value: `${declaration.publisher_attribution.id} (no verificado)` }]
+          : []),
+      ],
+      heading: "Fuente",
+    },
+    {
+      facts: [
+        { label: "Código de propósito", value: review.purpose_code },
+        { label: "Descripción del propósito", value: review.purpose_description },
+        { label: "Modo de acceso", value: review.access_mode },
+        { label: "Preajuste de selección", value: review.selection_preset },
+        { label: "Duración de conservación", value: review.retention?.max_duration },
+        { label: "Al vencer la conservación", value: review.retention?.on_expiry },
+        { label: "Entrenamiento de IA", value: aiTraining },
+        { label: "Vencimiento de la autorización", value: review.expires_at },
+      ],
+      heading: "Propósito y condiciones",
+    },
+    ...streamSections,
+  ];
 }
 
 function renderReviewedSingleConsentHtml(
@@ -2355,58 +2671,42 @@ function renderReviewedSingleConsentHtml(
     requestUri,
     ui,
   });
+  const clientName = review.client.client_display?.name || review.client.client_id;
+  const purpose = review.purpose_description || review.purpose_code;
+  const retention = describeRetention(review.retention);
+  const rows: CitizenRow[] = [
+    { authorship: "client", html: ui.escapeHtml(clientName), label: "Quién solicita" },
+    { authorship: "client", html: ui.escapeHtml(purpose), label: "Para qué" },
+    { authorship: "protocol", html: ui.escapeHtml(citizenSourceLabel(review.source.id)), label: "Fuente" },
+    {
+      authorship: "protocol",
+      html: renderCitizenStreams(review.source.id, review.resolved_streams, ui),
+      label: "Qué datos",
+    },
+    { authorship: "protocol", html: ui.escapeHtml(accessModeLabel(review.access_mode)), label: "Tipo de acceso" },
+    { authorship: "protocol", html: ui.escapeHtml(formatEsDate(review.expires_at)), label: "Vence" },
+  ];
+  if (retention) {
+    rows.push({ authorship: "client", html: ui.escapeHtml(retention), label: "Conservación" });
+  }
+  if (review.ai_training_consented !== null) {
+    rows.push({
+      authorship: "protocol",
+      html: review.ai_training_consented ? "Aceptado" : "No aceptado",
+      label: "Entrenamiento de IA",
+    });
+  }
   const body = [
-    ui.renderPageIntro({
-      eyebrow: "Final approval",
-      lede: "These are the exact facts your server saved when you completed review.",
-      title: "Approve the reviewed data access",
-    }),
-    ui.renderSurface({
-      ariaLabel: "Reviewed consent decision",
-      children: [
-        renderAuthorshipBlock(
-          "protocol",
-          "Reviewed client and subject",
-          ui.renderKeyValueList([
-            ...buildReviewedClientFacts(review.client),
-            { label: "Subject ID", value: review.subject.id },
-          ]),
-          ui
-        ),
-        renderAuthorshipBlock(
-          "protocol",
-          "Reviewed source declaration",
-          ui.renderKeyValueList(buildReviewedSourceFacts(review.source, review.source_declaration)),
-          ui
-        ),
-        renderAuthorshipBlock(
-          "client",
-          "Reviewed purpose",
-          [ui.renderKeyValueList(buildReviewedSelectionFacts(review)), buildClientClaimsBlock(review.client_claims, ui)]
-            .filter(Boolean)
-            .join("\n"),
-          ui
-        ),
-        renderAuthorshipBlock(
-          "protocol",
-          "Reviewed approval conditions",
-          ui.renderKeyValueList([
-            { label: "AI training consent", value: displayAiTrainingDecision(review.ai_training_consented) },
-            { label: "Grant expiry", value: displayOptional(review.expires_at) },
-          ]),
-          ui
-        ),
-        `<span class="pdpp-title">Exact reviewed streams</span>${renderReviewedStreams(review.resolved_streams, ui)}`,
-        actions,
-      ].join("\n"),
-      surface: "human",
-    }),
-  ].join("\n");
-  return ui.renderHostedDocument({
-    body,
-    providerName,
-    title: `${providerName} — Reviewed consent`,
-  });
+    `<h2 class="cu-title">Confirme la autorización</h2>`,
+    `<p class="cu-text">Esto es exactamente lo que su servidor guardó al revisar la solicitud. Solo se compartirá lo que aparece aquí.</p>`,
+    renderCitizenSummary(rows, ui),
+    renderCitizenClaims(review.client_claims, ui),
+    renderTechnicalDetails(buildReviewedTechnicalSections(review), ui),
+    actions,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return renderCitizenConsentDocument(body, "Confirmación", providerName, ui);
 }
 
 /**
@@ -2443,72 +2743,82 @@ export function renderPendingGrantConsentHtml(
   const selection = request.selection || {};
   const sourceBinding = request.source_binding;
   const clientDisplay = buildConsentClientDisplay(client, ui);
-  const sourceLabel = sourceBinding?.id || "this source";
-  const sourceFactLabel = sourceBinding?.kind === "provider_native" ? "Provider" : "Connector";
+  const clientName = clientDisplay.displayName;
+  const sourceId = sourceBinding?.id ?? null;
 
   const requestedStreams = Array.isArray(selection.streams) ? selection.streams : [];
   const manifestStreamNames = Array.isArray(pending.manifestStreamNames) ? pending.manifestStreamNames : null;
+  const isWildcard = requestedStreams.length === 1 && requestedStreams[0]?.name === WILDCARD_STREAM;
 
-  const streamsBlock = buildStreamsBlock(requestedStreams, sourceLabel, manifestStreamNames, ui);
+  // Wildcard: every manifest stream, all fields. Otherwise the declared list,
+  // with its time/view/optional qualifiers as extra chips.
+  const citizenStreams = isWildcard
+    ? (manifestStreamNames ?? []).map((name) => ({ name }))
+    : requestedStreams.map((stream) => {
+        const since = stream.time_constraint?.since ?? stream.time_range?.since;
+        const extra = [
+          since ? `Desde ${formatEsDate(since)}` : null,
+          stream.view ? `Vista: ${stream.view}` : null,
+          stream.necessity === "optional" ? "Opcional" : null,
+        ].filter((x): x is string => x !== null);
+        return { extra, fields: stream.fields ?? null, name: stream.name };
+      });
+  const streamsListHtml =
+    citizenStreams.length > 0
+      ? renderCitizenStreams(sourceId, citizenStreams, ui)
+      : ui.escapeHtml("Todos los datos de esta fuente");
+  // Wildcard keeps an explicit "everything" disclosure, with the count.
+  const wildcardCount = citizenStreams.length > 0 ? ` (${citizenStreams.length})` : "";
+  const streamsHtml = isWildcard
+    ? `<div class="cu-warning" role="note"><b>Todos los datos</b>${ui.escapeHtml(
+        `Se solicitan todos los conjuntos de datos de ${citizenSourceLabel(sourceId)}${wildcardCount}.`
+      )}</div>${streamsListHtml}`
+    : streamsListHtml;
 
-  const isContinuous = selection.access_mode === "continuous";
-  const hasRetentionBound = Boolean(selection.retention?.max_duration);
-
-  let continuousBlock = "";
-  if (isContinuous) {
-    const continuousBody = hasRetentionBound
-      ? "This is long-lived access — the client may keep reading until the grant is revoked or its retention bound is reached."
-      : "This is long-lived access with no explicit expiry. The client may keep reading until you revoke the grant.";
-    continuousBlock = `
-      <div class="hosted-ui-warning" role="note">
-        <span class="hosted-ui-warning-title">Continuous access</span>
-        <span class="hosted-ui-warning-body">${ui.escapeHtml(continuousBody)}</span>
-      </div>`;
+  // Identity note: a self-described name is a claim unless this server
+  // verified the client's domain or an operator vouched for it.
+  let identityNote = "";
+  if (clientDisplay.verifiedDomain) {
+    identityNote = renderCitizenNote(`Dominio verificado: ${clientDisplay.verifiedDomain}`, ui);
+  } else if (clientDisplay.isUnverified) {
+    identityNote = renderCitizenNote("Nombre declarado por la aplicación · no verificado", ui);
   }
 
-  // PROTOCOL: facts the owner's server enforces or verifies. The client-identity
-  // origin (for CIMD clients), the source binding, the access mode, and the
-  // retention bound are all server-determined — never client-asserted.
-  const protocolFactsRaw: Array<{ label: string; value?: unknown; html?: string } | null> = [
-    ...clientDisplay.protocolFacts,
-    sourceBinding?.id ? { label: sourceFactLabel, value: sourceBinding.id } : null,
-    { label: "Access mode", value: selection.access_mode },
-    selection.retention
-      ? {
-          label: "Retention",
-          value: `${selection.retention.on_expiry} after ${selection.retention.max_duration}`,
-        }
-      : null,
+  const rows: CitizenRow[] = [
+    { authorship: "client", html: `${ui.escapeHtml(clientName)}${identityNote}`, label: "Quién solicita" },
   ];
-  const protocolFacts = protocolFactsRaw.filter(
-    (x): x is { label: string; value?: unknown; html?: string } => x !== null
-  );
-  const protocolBlock =
-    protocolFacts.length > 0
-      ? renderAuthorshipBlock("protocol", "Protocol facts", ui.renderKeyValueList(protocolFacts), ui)
-      : "";
-
-  // CLIENT: the client's own claims about itself — its self-described app name
-  // and the free-text purpose it stated. Rendered as claims, never as facts.
-  const clientFactsRaw: Array<{ label: string; value?: unknown; html?: string }> = [...clientDisplay.clientFacts];
   const clientPurpose = selection.purpose_description || selection.purpose_code;
   if (clientPurpose) {
-    clientFactsRaw.push({ label: "Stated purpose", value: clientPurpose });
+    rows.push({
+      authorship: "client",
+      html: `${ui.escapeHtml(clientPurpose)}${renderCitizenNote("Declarado por la aplicación", ui)}`,
+      label: "Para qué",
+    });
   }
-  const clientIdentityBlock =
-    clientFactsRaw.length > 0
-      ? renderAuthorshipBlock("client", "Client-authored display", ui.renderKeyValueList(clientFactsRaw), ui)
-      : "";
+  if (sourceId) {
+    rows.push({ authorship: "protocol", html: ui.escapeHtml(citizenSourceLabel(sourceId)), label: "Fuente" });
+  }
+  rows.push({ authorship: "manifest", html: streamsHtml, label: "Qué datos" });
+  rows.push({
+    authorship: "protocol",
+    html: ui.escapeHtml(accessModeLabel(selection.access_mode)),
+    label: "Tipo de acceso",
+  });
+  const retention = describeRetention(selection.retention);
+  if (retention) {
+    rows.push({ authorship: "protocol", html: ui.escapeHtml(retention), label: "Conservación" });
+  }
 
-  // CLIENT: top-level client_claims.commitments, if any.
-  const clientClaimsBlock = buildClientClaimsBlock(selection.client_claims, ui);
-
-  // MANIFEST: the streams the owner's server is being asked to project, named
-  // and described by the resolved manifest (owner-trusted human descriptions).
-  const manifestBlock = renderAuthorshipBlock("manifest", "Requested streams", streamsBlock, ui);
+  let continuousBlock = "";
+  if (selection.access_mode === "continuous") {
+    const continuousBody = selection.retention?.max_duration
+      ? "Es un acceso prolongado: la aplicación podrá seguir leyendo hasta que usted revoque la autorización o se cumpla el plazo de conservación."
+      : "Es un acceso prolongado sin fecha de fin explícita. La aplicación podrá seguir leyendo hasta que usted revoque la autorización.";
+    continuousBlock = `<div class="cu-warning" role="note"><b>Acceso continuo</b>${ui.escapeHtml(continuousBody)}</div>`;
+  }
 
   const codeBlock = pending.userCode
-    ? `<div><span class="pdpp-eyebrow">Verification code</span><div class="hosted-ui-code">${ui.escapeHtml(pending.userCode)}</div></div>`
+    ? `<p class="cu-code">Código de verificación<b>${ui.escapeHtml(pending.userCode)}</b></p>`
     : "";
   const actions = buildSingleConsentActions({
     csrfFieldName,
@@ -2520,33 +2830,18 @@ export function renderPendingGrantConsentHtml(
   });
 
   const body = [
-    ui.renderPageIntro({
-      eyebrow: "Data access request",
-      lede: "Review what this app is asking for. Your server will only release what you allow here.",
-      title: `${clientDisplay.titleName} wants access to your data`,
-    }),
-    ui.renderSurface({
-      ariaLabel: "Consent request",
-      children: [
-        codeBlock,
-        clientIdentityBlock,
-        clientClaimsBlock,
-        manifestBlock,
-        protocolBlock,
-        continuousBlock,
-        actions,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      surface: "human",
-    }),
-  ].join("\n");
+    `<h2 class="cu-title">${ui.escapeHtml(clientName)} solicita acceso a sus datos</h2>`,
+    `<p class="cu-text">Revise qué solicita esta aplicación. Su servidor solo entregará lo que usted autorice aquí.</p>`,
+    codeBlock,
+    renderCitizenSummary(rows, ui),
+    renderCitizenClaims(selection.client_claims, ui),
+    continuousBlock,
+    actions,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  return ui.renderHostedDocument({
-    body,
-    providerName,
-    title: `${providerName} — Consent request`,
-  });
+  return renderCitizenConsentDocument(body, "Solicitud", providerName, ui);
 }
 
 // MCP picker HTML renderer.

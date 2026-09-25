@@ -20,6 +20,7 @@
  */
 import crypto from "node:crypto";
 import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
+import { CITIZEN_GLYPHS, renderCitizenCard, renderCitizenDocument } from "./citizen-ui.ts";
 import {
   escapeHtml as hostedEscape,
   readHostedThemeChoiceFromCookieHeader,
@@ -120,6 +121,7 @@ interface AuthAppLike {
 }
 
 interface LoginPageOptions {
+  clientName?: string | null;
   csrfToken: string;
   error: string | null;
   providerName: string;
@@ -242,42 +244,96 @@ function wantsHtml(req: AuthRequest): boolean {
   return accept.includes("text/html");
 }
 
-function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice }: LoginPageOptions): string {
+const AUTHORIZE_PATH = "/oauth/authorize";
+
+// DR demo: cédula mask (000-0000000-0) and password show/hide toggle.
+const LOGIN_PAGE_SCRIPT = `(function () {
+  var cedula = document.getElementById("hosted-ui-cedula");
+  if (cedula) {
+    cedula.addEventListener("input", function () {
+      var d = cedula.value.replace(/\\D/g, "").slice(0, 11);
+      var out = d.slice(0, 3);
+      if (d.length > 3) out += "-" + d.slice(3, 10);
+      if (d.length > 10) out += "-" + d.slice(10);
+      cedula.value = out;
+    });
+  }
+  var toggle = document.getElementById("cu-toggle-password");
+  var pw = document.getElementById("hosted-ui-password");
+  if (toggle && pw) {
+    toggle.addEventListener("click", function () {
+      var show = pw.type === "password";
+      pw.type = show ? "text" : "password";
+      toggle.setAttribute("aria-label", show ? "Ocultar contraseña" : "Mostrar contraseña");
+      toggle.setAttribute("aria-pressed", String(show));
+    });
+  }
+})();`;
+
+const EYE_ICON = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const ARROW_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m12 16 4-4-4-4M8 12h8"/></svg>`;
+
+/**
+ * Name of the app the owner continues to, from the authorize URL's client_id.
+ * Best effort: any lookup failure falls back to generic copy.
+ */
+async function resolveLoginClientName(returnTo: string): Promise<string | null> {
+  let url: URL;
+  try {
+    url = new URL(returnTo, "http://localhost");
+  } catch {
+    return null;
+  }
+  const clientId = url.pathname === AUTHORIZE_PATH ? url.searchParams.get("client_id") : null;
+  if (!clientId) {
+    return null;
+  }
+  try {
+    // Lazy import: the client store belongs to the AS module, loaded by then.
+    const { getRegisteredClient } = await import("./auth.ts");
+    const name = (await getRegisteredClient(clientId))?.metadata?.client_name;
+    return typeof name === "string" && name.trim() ? name.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderLoginPage({ clientName, error, returnTo, csrfToken }: LoginPageOptions): string {
   const safeReturnTo = typeof returnTo === "string" ? returnTo : "";
-  const errorBlock = error ? `<div class="hosted-ui-error" role="alert">${hostedEscape(error)}</div>` : "";
-  // DR demo: styled as a simulated Cuenta Única sign-in. The cédula field is
+  const errorBlock = error ? `<div class="hosted-ui-error cu-error" role="alert">${hostedEscape(error)}</div>` : "";
+  const continueTo = clientName
+    ? `Continuarás a <b>${hostedEscape(clientName)}</b>`
+    : "Continuarás a la aplicación que solicitó tus datos";
+
+  // DR demo: simulated Cuenta Única sign-in. The cédula field is
   // presentational only; the owner password is still the real check.
-  const form = `<form class="hosted-ui-surface" method="POST" action="/owner/login" data-surface="human" aria-label="Inicio de sesión">
+  const body = `<div class="cu-client">${CITIZEN_GLYPHS.home}<span>${continueTo}</span></div>
+<p class="cu-lead">Inicia sesión con tu número de cédula y contraseña.</p>
+<form method="POST" action="/owner/login" data-surface="human" aria-label="Inicio de sesión">
   ${renderCsrfHiddenField(csrfToken)}
   <input type="hidden" name="return_to" value="${hostedEscape(safeReturnTo)}" />
   ${errorBlock}
-  <div class="hosted-ui-field">
-    <label for="hosted-ui-cedula">Cédula</label>
-    <input id="hosted-ui-cedula" type="text" name="cedula_demo" inputmode="numeric" autocomplete="username" value="000-1234567-8" placeholder="000-0000000-0" />
+  <div class="cu-field">
+    <label for="hosted-ui-cedula">Número de cédula <span>*</span></label>
+    <input id="hosted-ui-cedula" type="text" name="cedula_demo" inputmode="numeric" autocomplete="username" value="000-1234567-8" placeholder="000-0000000-0" maxlength="13" />
   </div>
-  <div class="hosted-ui-field">
-    <label for="hosted-ui-password">Contraseña</label>
+  <div class="cu-field cu-has-adorn">
+    <label for="hosted-ui-password">Contraseña <span>*</span></label>
     <input id="hosted-ui-password" type="password" name="password" autofocus autocomplete="current-password" required />
+    <button type="button" class="cu-adorn" id="cu-toggle-password" aria-label="Mostrar contraseña" aria-pressed="false">${EYE_ICON}</button>
   </div>
-  <div class="hosted-ui-actions">
-    <button type="submit" class="hosted-ui-button" data-variant="primary">Iniciar sesión</button>
-  </div>
-</form>`;
+  <div class="cu-row-links"><a class="cu-link" href="#">¿Olvidaste tu contraseña?</a></div>
+  <button type="submit" class="cu-btn cu-block">Iniciar sesión ${ARROW_ICON}</button>
+</form>
+<div class="cu-divider">o</div>
+<a class="cu-btn cu-outline cu-block" href="#">Recuperar cuenta</a>
+<div class="cu-alt"><span class="cu-q">¿No tienes una cuenta?</span> <a class="cu-link" href="#">Regístrate aquí.</a></div>`;
 
-  const body = [
-    renderPageIntro({
-      eyebrow: "Cuenta Única Ciudadana · simulación",
-      lede: "Inicie sesión con su cédula para revisar qué datos se solicitan. Esta pantalla simula el inicio de sesión de Cuenta Única para la demostración; no es el portal oficial.",
-      title: "Iniciar sesión",
-    }),
-    form,
-  ].join("\n");
-
-  return renderHostedDocument({
-    body,
-    providerName,
-    themeChoice,
-    title: `${providerName} — Iniciar sesión`,
+  return renderCitizenDocument({
+    body: renderCitizenCard({ body, glyph: CITIZEN_GLYPHS.lock, title: "Cuenta Única Ciudadana" }),
+    script: LOGIN_PAGE_SCRIPT,
+    shell: "cuenta-unica",
+    title: "Cuenta Única Ciudadana (simulación) · Iniciar sesión",
   });
 }
 
@@ -692,15 +748,14 @@ function replyLoginRateLimited(
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(429).send(
       renderHostedDocument({
-        body: [
-          renderPageIntro({
-            eyebrow: "Owner sign-in",
-            lede: `Too many sign-in attempts from this address. Try again in about ${retryAfterSeconds} seconds.`,
-            title: "Slow down",
-          }),
-        ].join("\n"),
+        body: renderCitizenCard({
+          body: `<p class="cu-lead">Demasiados intentos de inicio de sesión desde esta dirección. Intenta de nuevo en unos ${retryAfterSeconds} segundos.</p>`,
+          glyph: CITIZEN_GLYPHS.lock,
+          title: "Espera un momento",
+        }),
         providerName,
-        title: `${providerName} — Slow down`,
+        shell: "cuenta-unica",
+        title: "Cuenta Única Ciudadana (simulación) · Espera un momento",
       })
     );
     return;
@@ -768,7 +823,7 @@ function replyLogoutCsrfFailure(req: AuthRequest, res: AuthResponse, providerNam
     });
 }
 
-function sendOwnerLoginPage(
+async function sendOwnerLoginPage(
   res: AuthResponse,
   providerName: string,
   csrfToken: string,
@@ -776,10 +831,12 @@ function sendOwnerLoginPage(
   status: number,
   error: string | null,
   themeChoice?: string
-): void {
+): Promise<void> {
+  const clientName = await resolveLoginClientName(returnTo);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.status(status).send(
     renderLoginPage({
+      clientName,
       csrfToken,
       error,
       providerName,
@@ -807,8 +864,10 @@ async function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context:
   const currentSession = await context.session.readSession(req);
   if (!currentSession) {
     const csrfToken = context.ensureCsrfToken(req, res);
+    const clientName = await resolveLoginClientName(returnTo);
     res.status(200).send(
       renderLoginPage({
+        clientName,
         csrfToken,
         error: null,
         providerName: context.providerName,
@@ -857,13 +916,13 @@ async function handleOwnerLoginPost(
   // its programmatic contract and reaches the password branch.
   if (shouldRequireCsrf(req) && !context.csrfPairValid(req)) {
     const csrfToken = context.ensureCsrfToken(req, res);
-    sendOwnerLoginPage(
+    await sendOwnerLoginPage(
       res,
       context.providerName,
       csrfToken,
       returnTo,
       403,
-      "Session expired or form replay detected. Please try again.",
+      "La sesión expiró o el formulario ya se envió. Inténtalo de nuevo.",
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;
@@ -884,13 +943,13 @@ async function handleOwnerLoginPost(
   const passwordMatch = await context.passwordMatches(submitted);
   if (!passwordMatch.matched) {
     const csrfToken = context.ensureCsrfToken(req, res);
-    sendOwnerLoginPage(
+    await sendOwnerLoginPage(
       res,
       context.providerName,
       csrfToken,
       returnTo,
       401,
-      "Cédula o contraseña incorrecta.",
+      "La cédula o la contraseña no son correctas.",
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;
@@ -898,13 +957,13 @@ async function handleOwnerLoginPost(
   context.loginRateLimiter.recordSuccess(req);
   if (!(await context.session.issueSession(res, req, passwordMatch.credentialRevision))) {
     const csrfToken = context.ensureCsrfToken(req, res);
-    sendOwnerLoginPage(
+    await sendOwnerLoginPage(
       res,
       context.providerName,
       csrfToken,
       returnTo,
       401,
-      "The password changed during sign-in. Try again with the current password.",
+      "La contraseña cambió durante el inicio de sesión. Inténtalo de nuevo con la contraseña actual.",
       readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
     );
     return;
