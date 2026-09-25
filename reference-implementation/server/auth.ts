@@ -9682,6 +9682,21 @@ export async function stageOAuthAuthorizationCodeRequest({
   return { ...row, status: "pending" };
 }
 
+// Staged redirect target for a denied authorize request (RFC 6749 §4.1.2.1).
+// Null when the consent did not come through GET /oauth/authorize.
+export async function findOAuthDenyRedirect(
+  deviceCode: unknown
+): Promise<{ redirect_uri: string; state: string | null } | null> {
+  if (!isNonEmptyString(deviceCode)) {
+    return null;
+  }
+  const row = await getOAuthCodeStore().getByDeviceCode(deviceCode);
+  if (row?.status !== "pending") {
+    return null;
+  }
+  return { redirect_uri: row.redirect_uri, state: row.state };
+}
+
 export async function issueOAuthAuthorizationCodeForDeviceCode(
   deviceCode: unknown,
   { grantId, token }: { grantId: string; token: string }

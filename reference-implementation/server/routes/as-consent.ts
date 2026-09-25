@@ -134,6 +134,9 @@ export interface MountAsConsentContext {
     grant: Record<string, unknown>;
     recoveryProof?: string;
   }) => Promise<string> | string;
+  findOAuthDenyRedirect: (
+    deviceCode: string | null
+  ) => Promise<{ redirect_uri: string; state: string | null } | null>;
   handleError: (res: unknown, err: unknown) => void;
   issueOAuthAuthorizationCodeForDeviceCode: (
     deviceCode: string | null,
@@ -250,6 +253,17 @@ function buildOAuthRedirectUrl(oauthCode: { redirect_uri: string; code: string; 
   redirectUrl.searchParams.set("code", oauthCode.code);
   if (oauthCode.state) {
     redirectUrl.searchParams.set("state", oauthCode.state);
+  }
+  return redirectUrl.toString();
+}
+
+// RFC 6749 §4.1.2.1: return a refused authorize request to the client.
+// e.g. https://client/cb?error=access_denied&state=xyz
+function buildOAuthDenyUrl(target: { redirect_uri: string; state: string | null }): string {
+  const redirectUrl = new URL(target.redirect_uri);
+  redirectUrl.searchParams.set("error", "access_denied");
+  if (target.state) {
+    redirectUrl.searchParams.set("state", target.state);
   }
   return redirectUrl.toString();
 }
@@ -900,6 +914,14 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           return;
         }
         await ctx.agentConnectAttemptStore.fail(outcome.requestUri, "denied");
+
+        // Authorize-endpoint requests carry a validated redirect_uri; send the browser back.
+        const denyTarget = await ctx.findOAuthDenyRedirect(ctx.consentStore.parseRequestUri(outcome.requestUri));
+        if (denyTarget) {
+          res.redirect(302, buildOAuthDenyUrl(denyTarget));
+          return;
+        }
+
         res.send(
           ctx.consentUi.renderHostedDocument({
             body: [

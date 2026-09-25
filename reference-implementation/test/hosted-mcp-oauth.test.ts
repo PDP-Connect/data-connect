@@ -5827,6 +5827,57 @@ test("POST /oauth/authorize/mcp-package/cancel refuses to redirect to an unregis
   }
 });
 
+test("POST /consent/deny on an authorize-endpoint request redirects with error=access_denied and the original state", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const state = "deny-state";
+
+    // Stage an inline authorization_details request through GET /oauth/authorize.
+    const authorizeUrl = new URL(`${asUrl}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", client.client_id);
+    authorizeUrl.searchParams.set("redirect_uri", "https://client.example/callback");
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("state", state);
+    authorizeUrl.searchParams.set("code_challenge", pkceChallenge(randomBytes(32).toString("base64url")));
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("authorization_details", JSON.stringify(hostedMcpAuthorizationDetails(spotify)));
+    const authorizeResp = await fetch(authorizeUrl, { redirect: "manual" });
+    assert.equal(authorizeResp.status, 302);
+    const consentUrl = new URL(mustExist(authorizeResp.headers.get("location"), "authorize Location"), asUrl);
+    const requestUri = mustExist(consentUrl.searchParams.get("request_uri"), "consent redirect must carry request_uri");
+
+    const denyResp = await fetch(`${asUrl}/consent/deny`, {
+      body: new URLSearchParams({ request_uri: requestUri }).toString(),
+      headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.equal(denyResp.status, 302, await denyResp.clone().text());
+    const location = new URL(mustExist(denyResp.headers.get("location"), "deny Location"));
+    assert.equal(location.origin, "https://client.example");
+    assert.equal(location.pathname, "/callback");
+    assert.equal(location.searchParams.get("error"), "access_denied");
+    assert.equal(location.searchParams.get("state"), state);
+    assert.equal(location.searchParams.get("code"), null);
+
+    // The pending request stays denied: a later approve cannot mint a code.
+    const approveResp = await fetch(`${asUrl}/consent/approve`, {
+      body: new URLSearchParams({ request_uri: requestUri }).toString(),
+      headers: { Accept: "text/html", "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.notEqual(approveResp.status, 302);
+    assert.ok(approveResp.status >= 400);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("POST /oauth/authorize/mcp-package/cancel rejects an unknown client without redirecting", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
