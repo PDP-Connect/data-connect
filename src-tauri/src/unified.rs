@@ -5296,11 +5296,20 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     fn rust_declaration_starts(source: &str, declaration: &str) -> Vec<usize> {
         let mut starts = Vec::new();
         let mut index = 0;
+        let mut brace_depth = 0;
         while index < source.len() {
-            if starts_line_declaration(source, index) && source[index..].starts_with(declaration) {
+            if brace_depth == 0
+                && starts_line_declaration(source, index)
+                && source[index..].starts_with(declaration)
+            {
                 starts.push(index);
                 index += declaration.len();
                 continue;
+            }
+            match source.as_bytes()[index] {
+                b'{' => brace_depth += 1,
+                b'}' => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
             }
             index = next_code_index(source, index);
         }
@@ -5313,6 +5322,17 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             .map(|offset| offset + 1)
             .unwrap_or(0);
         source[line_start..index].trim().is_empty()
+    }
+
+    fn contains_code(source: &str, token: &str) -> bool {
+        let mut index = 0;
+        while index < source.len() {
+            if source[index..].starts_with(token) {
+                return true;
+            }
+            index = next_code_index(source, index);
+        }
+        false
     }
 
     fn find_code_byte(source: &str, mut index: usize, target: u8) -> Option<usize> {
@@ -5357,10 +5377,31 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         if let Some(end) = raw_string_end(source, index) {
             return end;
         }
+        if let Some(end) = char_literal_end(source, index) {
+            return end;
+        }
         if source.as_bytes()[index] == b'"' {
             return string_end(source, index + 1);
         }
         index + source[index..].chars().next().unwrap().len_utf8()
+    }
+
+    fn char_literal_end(source: &str, index: usize) -> Option<usize> {
+        let bytes = source.as_bytes();
+        let quote = if bytes.get(index) == Some(&b'b') && bytes.get(index + 1) == Some(&b'\'') {
+            index + 1
+        } else if bytes.get(index) == Some(&b'\'') {
+            index
+        } else {
+            return None;
+        };
+        let mut cursor = quote + 1;
+        if bytes.get(cursor) == Some(&b'\\') {
+            cursor += 2;
+        } else {
+            cursor += source.get(cursor..)?.chars().next()?.len_utf8();
+        }
+        (bytes.get(cursor) == Some(&b'\'')).then_some(cursor + 1)
     }
 
     fn block_comment_end(source: &str, mut index: usize) -> usize {
@@ -5439,7 +5480,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         ] {
             let body = watcher_declaration_body(source, watcher);
             assert!(
-                body.contains("shutdown_has_been_requested"),
+                contains_code(body, "shutdown_has_been_requested"),
                 "{watcher} must stop once shutdown is requested, or it can act \
                  on the stack while it is being torn down"
             );
@@ -5483,6 +5524,20 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    #[should_panic(expected = "must have an exact pub(crate) fn declaration")]
+    fn watcher_declaration_scan_rejects_nested_fake_targets() {
+        let source = r#"
+            fn unrelated_helper() {
+                pub(crate) fn spawn_open_external_url_watcher() {
+                    shutdown_has_been_requested();
+                }
+            }
+        "#;
+
+        let _body = watcher_declaration_body(source, "spawn_open_external_url_watcher");
+    }
+
+    #[test]
     #[should_panic(expected = "must have exactly one pub(crate) fn declaration")]
     fn watcher_declaration_scan_rejects_ambiguous_targets() {
         let source = r#"
@@ -5514,6 +5569,29 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 
         assert!(body.contains("inside_target"));
         assert!(!body.contains("outside_target"));
+    }
+
+    #[test]
+    fn watcher_declaration_scan_ignores_braces_in_character_literals() {
+        let source = r#"
+            const OPEN: char = '{';
+            const CLOSE: char = '}';
+            pub(crate) fn spawn_origin_verification_watcher() {
+                shutdown_has_been_requested();
+            }
+        "#;
+
+        let body = watcher_declaration_body(source, "spawn_origin_verification_watcher");
+        assert!(contains_code(body, "shutdown_has_been_requested"));
+    }
+
+    #[test]
+    fn watcher_guard_marker_in_comments_and_strings_is_not_code() {
+        let source = r#"
+            // shutdown_has_been_requested()
+            let note = "shutdown_has_been_requested()";
+        "#;
+        assert!(!contains_code(source, "shutdown_has_been_requested"));
     }
 
     /// A reading that proved the origin reaches this console, taken at
