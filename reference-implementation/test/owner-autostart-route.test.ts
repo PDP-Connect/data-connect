@@ -192,9 +192,16 @@ test("concurrent POSTs return only their own public OS results", async () => {
     const yesRequest = post({ body: { enabled: true } }, yes.res);
     const noRequest = post({ body: { enabled: false } }, no.res);
     const commandDir = join(dir, "autostart-commands");
+    // Only match finalized command files: the store writes each command via
+    // a `<name>.<uuid>.tmp` staging file that it atomically renames into
+    // place, so a transient `.tmp` name can appear in the listing and vanish
+    // by the time it is read. Matching the store's own filename shape (see
+    // `autostart-store.ts`'s `ast_[A-Za-z0-9_-]{22}.json` pattern) excludes
+    // those staging files instead of racing to read them.
+    const commandFileName = /^ast_[A-Za-z0-9_-]{22}\.json$/;
     let commands: Array<{ commandId: string; desiredEnabled: boolean }> = [];
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      const names = await readdir(commandDir).catch(() => []);
+      const names = (await readdir(commandDir).catch(() => [])).filter(name => commandFileName.test(name));
       if (names.length === 2) {
         commands = await Promise.all(names.map(async name => JSON.parse(await readFile(join(commandDir, name), "utf8"))));
         break;
