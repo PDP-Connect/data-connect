@@ -634,6 +634,14 @@ export function selectCohortTests(
  * The exclusion is recorded in the intent packet rather than applied silently.
  */
 export function escapesCohortRoot(testPath: SelectedFile, testSource: string): boolean {
+  // Git can walk out of a Stryker sandbox to the enclosing checkout metadata.
+  // A test that asks for the repository root can then read files outside the
+  // copied cohort. That is the same boundary as an explicit ../ path, but the
+  // traversal is hidden behind Git.
+  if (/\bexecFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]rev-parse["'`]\s*,\s*["'`]--show-toplevel["'`]/.test(testSource)) {
+    return true
+  }
+
   // How far the test's own directory sits below the cohort root. A `../` budget
   // larger than this climbs past the root, which is what leaves the sandbox.
   const depth = testPath.split("/").length - 1

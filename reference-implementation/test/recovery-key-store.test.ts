@@ -18,7 +18,8 @@ async function waitCommands(dir: string, count: number): Promise<string[]> {
   const path = join(dir, "recovery-export-commands");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const names = await readdir(path).catch(() => []);
-    if (names.length >= count) return names.map(name => name.replace(".json", ""));
+    const published = names.filter(name => name.endsWith(".json"));
+    if (published.length >= count) return published.map(name => name.slice(0, -".json".length));
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   throw new Error("commands were not written");

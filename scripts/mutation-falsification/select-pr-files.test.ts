@@ -675,6 +675,12 @@ const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-impleme
     expect(escapesCohortRoot("scripts/ci-console-prebuild.test.ts", source)).toBe(true)
   })
 
+  it("detects repository-root reads discovered through Git metadata", () => {
+    const source = `const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+await readFile(join(root, "test-accounting.manifest.json"));`
+    expect(escapesCohortRoot("scripts/test-accounting/inventory.test.ts", source)).toBe(true)
+  })
+
   it("detects an above-root path reached through a directory alias", () => {
     const source = `const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
