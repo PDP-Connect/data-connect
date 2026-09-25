@@ -64,20 +64,34 @@ fly ssh console --app "$APP" -C "ls -la /var/lib/pdpp"
 fly apps restart "$APP"          # data and grants survive (volume)
 ```
 
-## MIVHED portal (second app)
+## Servicios Proactivos portal (second app)
 
 Stateless; its OAuth client registers itself with the PDPP app on first use.
 
 ```sh
-fly apps create mived-demo-rd -o <org>
-(cd scripts/demo-dr/mived-portal && fly deploy --ha=false)   # one machine: sessions are in memory
-PORTAL_URL=https://mived-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/mived-e2e.mjs
+fly apps create proactivos-demo-rd -o <org>
+(cd scripts/demo-dr/proactivos-portal && fly deploy --ha=false)   # one machine: sessions are in memory
+LANG=es PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/proactivos-e2e.mjs
+```
+
+The earlier MIVHED portal (`scripts/demo-dr/mived-portal`, app `mived-demo-rd`) is superseded.
+
+## Reset before presenting
+
+Removes every grant and record, then re-seeds, so Mis autorizaciones shows only what is created in the room.
+
+```sh
+fly ssh console -a pdpp-demo-rd -C "rm -f /var/lib/pdpp/pdpp.sqlite /var/lib/pdpp/pdpp.sqlite-shm /var/lib/pdpp/pdpp.sqlite-wal"
+fly apps restart pdpp-demo-rd
+ORIGIN=https://pdpp-demo-rd.fly.dev OWNER_PASSWORD=… node --import tsx scripts/demo-dr/seed-remote.ts
+fly apps restart proactivos-demo-rd   # the portal re-registers its client
 ```
 
 ## Tear down after the demo
 
 ```sh
 fly apps destroy "$APP" --yes    # also deletes the machine and volume
-fly apps destroy mived-demo-rd --yes
+fly apps destroy proactivos-demo-rd --yes
+fly apps destroy mived-demo-rd --yes   # superseded portal, if still running
 fly volumes list --app "$APP"    # expect: app not found
 ```

@@ -1,50 +1,64 @@
-# DR demo: ministry-to-ministry permissioning
+# DR demo: the consent screen (slide 8)
 
-The story: MIVHED needs a household's SIUBEN classification to assess a housing application. Instead of asking the citizen for a paper certificate, it asks for permission to read exactly those records, for that stated purpose, until she withdraws it. The citizen signs in with Cuenta Única, reviews the request, approves it, and the form fills itself. When she revokes the permission, MIVHED can no longer read the data.
+Built to the working-session documents (28 September 2026): the facilitators' guide, the working-session deck (slides 8, 14, 19–23), the technical note and the scoping note. The story is María's, from the deck: Servicios Proactivos offers to arrange her baby's vaccinations and child benefit without an application, and asks, once, to look at her health record and her household file, for that purpose, until a date. She says yes, sees the grant, and can cancel it.
 
-Every page is marked "Simulación · no es el portal oficial". All people and records are fictitious. No logos or official seals are used.
+Every page carries "Simulación · no es el portal oficial" and an **ES | EN** toggle in the same bar. The language carries across the whole flow. All people and records are fictitious; no logos or seals.
 
 ## URLs
 
 | What | URL |
 |---|---|
-| MIVHED portal (start here) | https://mived-demo-rd.fly.dev |
-| PDPP authorization server | https://pdpp-demo-rd.fly.dev |
-| Citizen's grant list (operator console, English) | https://pdpp-demo-rd.fly.dev/grants |
+| Start here: Servicios Proactivos (simulated) | https://proactivos-demo-rd.fly.dev (`?lang=en` for English) |
+| Mis autorizaciones (simulated Soy Yo RD view) | https://pdpp-demo-rd.fly.dev/owner/autorizaciones |
 
-The password is shared separately. The cédula field is pre-filled with `000-1234567-8` and is presentational.
+The password is shared separately. The cédula field is pre-filled (`000-1234567-8`, María) and is presentational.
 
-## Script (about 3 minutes)
+## Before presenting (set-up, per the guide)
 
-1. **MIVHED portal.** "A citizen applies for a housing programme. The ministry needs her household's socio-economic classification, which SIUBEN holds." Click **Completar con mis datos del SIUBEN**.
-2. **Cuenta Única sign-in.** "Same login she uses for every GOB.DO service. The banner says which service she's continuing to." Type the password.
-3. **Authorization request.** "This is the one new screen. It says who is asking, for what purpose, from which institution, exactly which fields, and that access is continuous until she revokes it." Point out that the INTRANT licence is not requested. Click **Continuar**.
-4. **Confirmation.** "She confirms the exact request the server recorded, including that it has no end date. The technical record is there for auditors, collapsed." Click **Autorizar**.
-5. **Back at MIVHED.** The form is filled from SIUBEN, each field tagged as sourced from SIUBEN, with the authorization's identifier, purpose and access type. "She didn't carry a certificate, and SIUBEN released only what she approved." Click **Volver a consultar el SIUBEN**: "MIVHED re-checks with SIUBEN under the same authorization" (banner: *Datos verificados nuevamente…*).
-6. **Revocation.** Click **Ver o revocar esta autorización** (opens a new tab), tick **Confirmo que quiero revocar esta autorización**, click **Revocar autorización**. "Every release is logged and she can withdraw it." Back on the MIVHED tab, click **Volver a consultar el SIUBEN** again: SIUBEN refuses, the portal shows *El ciudadano revocó esta autorización*, marks it **Revocada**, and keeps only the copy already received.
+1. Reset the demo so only today's grant shows (see FLY.md, "Reset before presenting").
+2. Run the flow once on the venue screen, on the room's network and on the phone hotspot.
+3. Check the fallback recording opens (demo-es.mp4 / demo-en.mp4).
 
-Optional: at step 3 click **Rechazar**. She is returned to MIVHED with a message and the form stays empty.
+## Script: three to four minutes, slide 8's order
 
-## How this maps to slide 11
+Say first: "The same login you run today, then one screen."
 
-- Steps 1–2: Citizen signs in to Cuenta Única (simulated sign-in page).
-- Steps 3–4: PDPP authorisation server shows the request and records the grant.
-- Step 5: The recipient (MIVHED) calls the resource server with a token tied to the grant; only the granted fields come back.
-- Step 6: The citizen revokes the grant; the recipient's next read is refused.
+1. **The offer.** Servicios Proactivos: "Cuando nazca su bebé, podemos organizar sus vacunas y el bono por hijo… sin que tenga que solicitarlos." It says what it will need (health record from SNS, household file from SIUBEN) and until when. Click **Decir sí con Cuenta Única**.
+2. **Sign in.** The Cuenta Única-style sign-in, as for any GOB.DO service. It names the service she's continuing to. Type the password.
+3. **The one screen.** Read it aloud: *who is asking* (Servicios Proactivos), *for what purpose*, *from which institutions* (SNS, SIUBEN), *which fields*, *until when* ("Hasta el 31 de enero de 2027"). "Only what's on this screen is shared." Click **Autorizar**.
+4. **The grant, in use.** Back at Servicios Proactivos: the due date from SNS and the household from SIUBEN arrived; nobody carried a paper. The authorization card shows the purpose and the end date.
+5. **See it and cancel it.** Click **Ver o revocar en Mis autorizaciones**: what she allowed, until when, and what was read and when. Click **Revocar**.
+6. Optional, one line: back on Servicios Proactivos, **Volver a consultar** is now refused; it keeps only the copy it already received.
 
-Not shown: the X-Road hop between MIVHED and SIUBEN. Here the resource server answers directly.
+Back to slide 8: "That screen is what the first implementation builds beside Cuenta Única."
+
+## Rules from the guide
+
+- Show nothing beyond the consent flow: no operator console, dashboards, settings or network views.
+- No AI. The AI-assistant (MCP) path in README.md is not part of this demo.
+- Never debug in front of the room: hotspot, then the recording, then the three lines on slide 8 spoken.
+- Questions about what is behind the screen go to slides 13 and 14 and the technical note.
+
+## How it maps to slide 14
+
+| Step | Here |
+|---|---|
+| 01–02 Sign in to Cuenta Única; it tells the authorisation server who this is | Simulated Cuenta Única sign-in (password stands in for the real login and cédula claim) |
+| 03 The recipient asked for fields, purpose, window; the consent screen shows them | Servicios Proactivos sends the request; the one screen shows it |
+| 04 Approve; the grant is recorded; the recipient gets a token | Autorizar; one grant covering both institutions |
+| 05–06 Recipient calls the service; resource server returns only granted fields | Reads of the SNS and SIUBEN records, only the requested fields |
+| 07 Release logged | "What was read" in Mis autorizaciones |
+
+Not shown: X-Road between the recipient and the institutions; the real Cuenta Única; Soy Yo RD itself (Mis autorizaciones is a simulated view of how it could look there, per the scoping note: no change to Soy Yo RD).
 
 ## Known limits
 
-- The requester cannot set an end date; continuous access lasts until revoked. `ACCESS_MODE=single_use` on the portal switches to a single read (expires 24 hours after approval).
-- The grant page used for revocation is the operator console: the revoke section is in Spanish, the rest in English.
-- The same fictitious citizen is shared by everyone using the demo, so anyone with the password sees everyone's grants.
+- One fictitious citizen is shared by everyone with the password; reset before presenting.
+- The end date is declared by the requester (reference extension; the published spec has no field for it yet).
 
-## Verify before presenting
+## Verify
 
 ```bash
-PORTAL_URL=https://mived-demo-rd.fly.dev OWNER_PASSWORD=… SHOTS_DIR=/tmp/demo-shots \
-  node scripts/demo-dr/mived-e2e.mjs
+LANG=es PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/proactivos-e2e.mjs
+LANG=en PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/proactivos-e2e.mjs
 ```
-
-The AI-assistant (MCP) path still works as a backup; see README.md.

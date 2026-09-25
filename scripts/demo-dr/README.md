@@ -48,7 +48,7 @@ chmod +x /tmp/gitwrap.sh && npm ci --git=/tmp/gitwrap.sh
 
 ## Run
 
-Hosted instance for the team: see [FLY.md](./FLY.md) (`https://pdpp-demo-rd.fly.dev`). The ministry-to-ministry demo (MIVHED portal, no AI) is in [DEMO.md](./DEMO.md).
+Hosted instance for the team: see [FLY.md](./FLY.md) (`https://pdpp-demo-rd.fly.dev`). The working-session demo (Servicios Proactivos, no AI) is in [DEMO.md](./DEMO.md); the AI-assistant path below is not part of it.
 
 
 The connectors in Claude and ChatGPT need a public HTTPS URL. Start the tunnel first, because the server must know its public origin at boot:
