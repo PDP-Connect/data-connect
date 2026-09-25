@@ -20,6 +20,7 @@ import {
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
+import { isTransientConnectorInstallCatalogError } from "./connector-install-transient.ts";
 import {
   getOwnerToken,
   getRsInternalUrl,
@@ -76,7 +77,12 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
 
 export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
   const [catalog, status, localSources] = await Promise.all([
-    listConnectorInstallCatalog(),
+    listConnectorInstallCatalog().catch((err: unknown) => {
+      if (isTransientConnectorInstallCatalogError(err)) {
+        return [];
+      }
+      return Promise.reject(err);
+    }),
     listConnectorInstallStatus(),
     listConnectorLocalSources(),
   ]);
