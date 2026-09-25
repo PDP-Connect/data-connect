@@ -23,6 +23,7 @@ jobs:
     env:
       APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
       APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      APPLE_NOTARIZATION_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ASC_API_KEY_KEY_BASE64 != '' && secrets.APPLE_ASC_API_KEY_ID != '' && secrets.APPLE_ASC_API_KEY_ISSUER_UUID != '' }}
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     strategy:
@@ -210,13 +211,6 @@ jobs:
           codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-          for stack_root in \
-            src-tauri/target/release/reference-stack/ri \
-            src-tauri/target/release/reference-stack/console; do
-            find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
-              -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-            node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
-          done
 
       # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
       # below deletes every Tauri-produced .dmg and rebuilds it with
@@ -272,12 +266,33 @@ jobs:
                 ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
                 codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
                 find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
-                  find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
-                    -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+
+                sign_reference_stack() {
+                  local stack_root="$1"
+                  local candidate description code_bundle
+
+                  while IFS= read -r -d '' candidate; do
+                    description=$(file -b "$candidate")
+                    if [[ "$description" == *Mach-O* && ( "$description" == *executable* || "$description" == *shared\ library* || "$description" == *bundle* ) ]]; then
+                      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$candidate"
+                    fi
+                  done < <(find "$stack_root" -type f -print0)
+
+                  while IFS= read -r -d '' code_bundle; do
+                    codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$code_bundle"
+                  done < <(find "$stack_root" -depth -type d \( \
+                    -name '*.app' -o -name '*.appex' -o -name '*.bundle' -o \
+                    -name '*.framework' -o -name '*.kext' -o -name '*.plugin' -o \
+                    -name '*.qlgenerator' -o -name '*.systemextension' -o -name '*.xpc' \
+                  \) -print0)
+
                   node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
+                }
+
+                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
+                  sign_reference_stack "$stack_root"
                 done
-                codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+                codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
               fi
 
               version=$(node -p "require('./src-tauri/tauri.conf.json').version")
@@ -318,6 +333,42 @@ jobs:
               node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
             fi
           fi
+
+      - name: Warn when notarization credentials are unavailable
+        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true' && env.APPLE_NOTARIZATION_AVAILABLE != 'true'
+        run: echo "::warning::macOS artifacts will be signed but not notarized because App Store Connect credentials are not configured."
+
+      - name: Notarize and staple macOS DMGs
+        if: matrix.os_family == 'macos' && env.APPLE_NOTARIZATION_AVAILABLE == 'true'
+        env:
+          APPLE_ASC_API_KEY_KEY_BASE64: ${{ secrets.APPLE_ASC_API_KEY_KEY_BASE64 }}
+          APPLE_ASC_API_KEY_ID: ${{ secrets.APPLE_ASC_API_KEY_ID }}
+          APPLE_ASC_API_KEY_ISSUER_UUID: ${{ secrets.APPLE_ASC_API_KEY_ISSUER_UUID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          key_path="$RUNNER_TEMP/app-store-connect-key.p8"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s' "$APPLE_ASC_API_KEY_KEY_BASE64" | base64 --decode > "$key_path"
+
+          shopt -s nullglob
+          dmg_paths=("$bundle_root"/dmg/*.dmg)
+          if [ "${#dmg_paths[@]}" -eq 0 ]; then
+            echo "No macOS DMGs found to notarize."
+            exit 1
+          fi
+
+          for dmg_path in "${dmg_paths[@]}"; do
+            xcrun notarytool submit "$dmg_path" \
+              --key "$key_path" \
+              --key-id "$APPLE_ASC_API_KEY_ID" \
+              --issuer "$APPLE_ASC_API_KEY_ISSUER_UUID" \
+              --wait
+            xcrun stapler staple "$dmg_path"
+            xcrun stapler validate "$dmg_path"
+          done
 
       - name: Stage verified release artifacts
         if: github.event_name == 'release'

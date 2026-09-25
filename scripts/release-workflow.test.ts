@@ -144,7 +144,7 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       'codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}'
     )
-    expect(workflow).toContain("codesign --force --deep --options runtime")
+    expect(workflow).not.toContain("codesign --force --deep --options runtime")
     expect(workflow).toContain(
       "node scripts/create-macos-dmg.mjs --volume-name DataConnect"
     )
