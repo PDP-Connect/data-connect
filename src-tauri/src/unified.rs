@@ -5949,6 +5949,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            "reveal-proof-test",
             &remote_access,
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
