@@ -23,13 +23,78 @@
 // ─── Protocol message shapes ────────────────────────────────────────────
 
 /** Wire version whose additions require a coordinated runtime rollout. */
-export const CONNECTOR_PROTOCOL_VERSION = "0.0.2" as const;
+export const CONNECTOR_PROTOCOL_VERSION = "0.0.3" as const;
+
+/** Maximum bytes in a host-mediated connector blob. */
+export const HOST_BLOB_MAX_BYTES = 33_554_432;
+
+/** Capability required by a connector that emits BLOB. */
+export const HOST_BLOB_CAPABILITY = "BLOB" as const;
+
+/** A closed spool file committed by the host before its matching RECORD. */
+export interface HostBlobMessage {
+  file: string;
+  /** Same scalar or ordered compound key as the immediately following RECORD. */
+  key: string | readonly string[];
+  mime_type: "application/json";
+  sha256: string;
+  size_bytes: number;
+  stream: string;
+  type: "BLOB";
+}
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const SPOOL_BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Validate an untrusted BLOB event before resolving a path or reading bytes. */
+export function validateHostBlobMessage(value: unknown): asserts value is HostBlobMessage {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Connector emitted invalid BLOB message");
+  }
+  const message = value as Record<string, unknown>;
+  const fields = Object.keys(message).sort();
+  const expected = ["file", "key", "mime_type", "sha256", "size_bytes", "stream", "type"].sort();
+  if (
+    fields.length !== expected.length ||
+    fields.some((field, index) => field !== expected[index]) ||
+    message.type !== "BLOB" ||
+    typeof message.stream !== "string" ||
+    message.stream.length === 0 ||
+    !isRecordKey(message.key) ||
+    typeof message.file !== "string" ||
+    message.file.length > 128 ||
+    !SPOOL_BASENAME_RE.test(message.file) ||
+    message.file.includes("..") ||
+    message.mime_type !== "application/json" ||
+    !Number.isSafeInteger(message.size_bytes) ||
+    (message.size_bytes as number) <= 0 ||
+    (message.size_bytes as number) > HOST_BLOB_MAX_BYTES ||
+    typeof message.sha256 !== "string" ||
+    !SHA256_HEX_RE.test(message.sha256)
+  ) {
+    throw new Error("Connector emitted invalid BLOB message");
+  }
+}
+
+/** Scalar and compound keys are distinct; compound member order is significant. */
+export function recordKeysEqual(left: string | readonly string[], right: string | readonly string[]): boolean {
+  if (typeof left === "string" || typeof right === "string") {
+    return left === right;
+  }
+  return left.length === right.length && left.every((part, index) => part === right[index]);
+}
+
+function isRecordKey(value: unknown): value is string | readonly string[] {
+  return typeof value === "string"
+    ? value.length > 0
+    : Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string" && part.length > 0);
+}
 
 /** Capability required by a connector that emits STREAM_EVIDENCE. */
 export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 
 /** Protocol capabilities that can be advertised by a connector or runtime. */
-export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY;
+export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | typeof HOST_BLOB_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -40,7 +105,10 @@ export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY;
  * copy of the allowed values, so a new capability is added here once and
  * every boundary picks it up.
  */
-export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [STREAM_EVIDENCE_CAPABILITY];
+export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+  STREAM_EVIDENCE_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
+];
 
 function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
   return (CONNECTOR_PROTOCOL_CAPABILITIES as readonly unknown[]).includes(value);
@@ -551,6 +619,7 @@ export interface ProgressExtra {
 export type SkipResultBoundaryClaim = "provider_history_boundary";
 
 export type EmittedMessage =
+  | HostBlobMessage
   | {
       type: "RECORD";
       stream: string;
