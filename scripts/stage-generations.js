@@ -49,6 +49,7 @@
 import {
   cpSync,
   existsSync,
+  lstatSync,
   readdirSync,
   readlinkSync,
   renameSync,
@@ -106,7 +107,17 @@ export function findProcessesUsingDirectory(targetDirectory, procRoot = "/proc")
  * Renaming the old tree preserves its files for existing processes; staging
  * never signals processes it does not own.
  */
-export function publishStageGeneration(targetDirectory, generationDirectory) {
+export function publishStageGeneration(
+  targetDirectory,
+  generationDirectory,
+  matchesCurrentStage,
+) {
+  if (
+    existsSync(targetDirectory) &&
+    matchesCurrentStage?.(targetDirectory, generationDirectory)
+  ) {
+    return
+  }
   const swapDirectory = `${targetDirectory}.swap-${process.pid}`
   rmSync(swapDirectory, { force: true, recursive: true })
   cpSync(generationDirectory, swapDirectory, {
@@ -122,6 +133,33 @@ export function publishStageGeneration(targetDirectory, generationDirectory) {
     if (movedPrevious) renameSync(previousDirectory, targetDirectory)
     throw error
   }
+}
+
+/**
+ * Move a newly built tree into its deterministic generation path, or reuse an
+ * existing tree only after its caller proves that the contents match.
+ */
+export function installStageGeneration(
+  generationDirectory,
+  temporaryDirectory,
+  matchesExistingGeneration,
+) {
+  if (!existsSync(generationDirectory)) {
+    renameSync(temporaryDirectory, generationDirectory)
+    return
+  }
+  const existingStats = lstatSync(generationDirectory)
+  if (!existingStats.isDirectory() || existingStats.isSymbolicLink()) {
+    throw new Error(
+      `Existing immutable stage at ${generationDirectory} is not a real directory; refusing to replace it`,
+    )
+  }
+  if (!matchesExistingGeneration(generationDirectory, temporaryDirectory)) {
+    throw new Error(
+      `Existing immutable stage at ${generationDirectory} does not match this build; refusing to replace a tree a process may be using`,
+    )
+  }
+  rmSync(temporaryDirectory, { force: true, recursive: true })
 }
 
 /**

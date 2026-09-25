@@ -15,27 +15,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import {
-  findProcessesUsingDirectory,
   collectOldStageGenerations,
+  findProcessesUsingDirectory,
+  installStageGeneration,
   publishStageGeneration,
 } from "./stage-generations.js"
 
 /**
  * Spawn `script` detached (via `setsid`), reparented off this test process
- * entirely, and return its pid.
- *
- * The real target of this module's process-liveness checks is never a
- * child of the Node script that finds it via `/proc` scanning -- it is a
- * sidecar owned by the Tauri/Rust supervisor. Spawning test processes with
- * plain `child_process.spawn` instead would make THIS test process their
- * parent, and a blocking, event-loop-starving poll (see `stage-generations.js`'s
- * `sleepSync`) never lets Node's own SIGCHLD reaper run in that case -- the
- * child sits as a real kernel zombie, and `kill(pid, 0)` correctly (if
- * confusingly) keeps reporting it alive for as long as the poll blocks.
- * Verified 2026-09-21: that same scenario against a `setsid`-detached
- * process (reaped by init, exactly as a production sidecar is not reaped by
- * this script) resolves in ~25ms, matching the fast path this module is
- * meant to provide.
+ * entirely, and return its pid. This models a sidecar owned by a different
+ * process, which lets the test prove publication never signals it.
  */
 function spawnDetached(script, cwd) {
   const command = `setsid ${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)} </dev/null >/dev/null 2>&1 & echo $!`
@@ -108,13 +97,47 @@ describe("stage-generations shared staging primitives", () => {
     }
   })
 
-  it("publishStageGeneration does not attempt to stop anything when the target path does not exist yet (cold start)", () => {
+  it("reuses a deterministic generation only after its contents are approved", () => {
+    const root = mkdtempSync(join(tmpdir(), "stage-generations-reuse-"))
+    const generation = join(root, "console-content-id")
+    const candidate = join(root, "candidate")
+    mkdirSync(generation)
+    mkdirSync(candidate)
+    writeFileSync(join(generation, "marker.txt"), "same")
+    writeFileSync(join(candidate, "marker.txt"), "same")
+    try {
+      installStageGeneration(
+        generation,
+        candidate,
+        (existing, next) =>
+          readFileSync(join(existing, "marker.txt"), "utf8") ===
+          readFileSync(join(next, "marker.txt"), "utf8"),
+      )
+      expect(existsSync(candidate)).toBe(false)
+      expect(readFileSync(join(generation, "marker.txt"), "utf8")).toBe("same")
+
+      mkdirSync(candidate)
+      writeFileSync(join(candidate, "marker.txt"), "different")
+      expect(() =>
+        installStageGeneration(
+          generation,
+          candidate,
+          (existing, next) =>
+            readFileSync(join(existing, "marker.txt"), "utf8") ===
+            readFileSync(join(next, "marker.txt"), "utf8"),
+        ),
+      ).toThrow(/refusing to replace/)
+      expect(readFileSync(join(generation, "marker.txt"), "utf8")).toBe("same")
+      expect(existsSync(candidate)).toBe(true)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("publishes a new stage on cold start", () => {
     // lane unifydefault-0921 makes the unified stack the default, so a
     // first launch on a clean machine reaches staging with no prior
-    // `reference-stack` directory at all -- stopProcessesUsingDirectory
-    // must not be invoked (there's nothing to stop, and findProcessesUsingDirectory
-    // would just scan /proc for zero benefit) and the publish must succeed
-    // as a plain first-time creation.
+    // `reference-stack` directory at all. Publication creates it directly.
     const root = mkdtempSync(join(tmpdir(), "stage-generations-cold-"))
     const target = join(root, "stable")
     const generation = join(root, "gen-a")
