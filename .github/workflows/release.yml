@@ -11,6 +11,11 @@ on:
         required: false
         default: main
         type: string
+      release_tag:
+        description: Existing release tag to clean-install on fresh VMs instead of building (leave empty to build)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +25,8 @@ env:
 
 jobs:
   build:
+    # A dispatch with release_tag only runs clean-install against that release.
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     env:
       APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
       APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
@@ -396,9 +403,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     permissions:
       contents: read
-      id-token: write
       packages: write
-      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -537,3 +542,138 @@ jobs:
 
           docker buildx imagetools create --tag "$image:latest" "$image@$CANDIDATE_DIGEST"
           echo "Promoted $image:latest to $CANDIDATE_VERSION ($CANDIDATE_DIGEST)."
+
+  # Installs an existing release's assets on fresh hosted VMs, launches the
+  # installed app with no human, and checks it. Verification only: it never
+  # builds or publishes, and it runs only on a dispatch that names a release.
+  clean-install:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            asset_pattern: "*_aarch64.dmg"
+          - platform: macos-15-intel
+            asset_pattern: "*_x86_64.dmg"
+          - platform: windows-latest
+            asset_pattern: "*-setup.exe"
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      # Only the acceptance script comes from the repo. The app under test is
+      # the release asset, never a source-tree build.
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download release installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATTERN: ${{ matrix.asset_pattern }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR" installer
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer
+          mapfile -t assets < <(find installer -type f)
+          if [ "${#assets[@]}" -ne 1 ]; then
+            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found ${#assets[@]}."
+            exit 1
+          fi
+          echo "INSTALLER=${assets[0]}" >> "$GITHUB_ENV"
+          shasum -a 256 "${assets[0]}" | tee "$EVIDENCE_DIR/installer.sha256"
+
+      - name: Install and launch (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_data="$HOME/Library/Application Support/dev.dataconnect"
+          if [ -e "$app_data" ]; then
+            echo "::error::$app_data exists before install; the VM is not clean."
+            exit 1
+          fi
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$INSTALLER" -nobrowse -readonly -mountpoint "$mount_dir" | tee "$EVIDENCE_DIR/install.log"
+          ditto "$mount_dir/DataConnect.app" /Applications/DataConnect.app
+          hdiutil detach "$mount_dir" | tee -a "$EVIDENCE_DIR/install.log"
+          codesign -dv --verbose=2 /Applications/DataConnect.app >>"$EVIDENCE_DIR/install.log" 2>&1 || true
+          # Hosted macOS runners keep a logged-in Aqua session, so LaunchServices
+          # starts the real bundle the same way a Finder double-click does.
+          open -a /Applications/DataConnect.app
+          echo "APP_DATA_DIR=$app_data" >> "$GITHUB_ENV"
+          echo "APP_LOG_DIR=$HOME/Library/Logs/dev.dataconnect" >> "$GITHUB_ENV"
+
+      - name: Install and launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          # Tauri NSIS installers are per-user here (installMode currentUser)
+          # and accept the standard NSIS silent flag.
+          $install = Start-Process -FilePath (Resolve-Path $env:INSTALLER) -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $uninstall | Format-List | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output "::error::No app executable in $installDir"; exit 1 }
+          Get-ChildItem $installDir | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          "APP_LOG_DIR=$(Join-Path $appData 'logs')" >> $env:GITHUB_ENV
+
+      # First-run claim: fresh install, app ran, owner password not yet set.
+      # Also checks the sidecars serve. It does not render or check the setup
+      # UI, which sits behind owner sign-in.
+      - name: Assert owner password not yet set and sidecars serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      # Collect logs and non-secret state only. The app-data directory also
+      # holds the owner credential and encryption keys, so it is never uploaded
+      # whole.
+      - name: Collect evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$EVIDENCE_DIR/app-logs" "$EVIDENCE_DIR/run-leases"
+          [ -d "${APP_LOG_DIR:-}" ] && cp -R "$APP_LOG_DIR"/. "$EVIDENCE_DIR/app-logs/" || true
+          [ -f "${APP_DATA_DIR:-}/console-port.json" ] && cp "$APP_DATA_DIR/console-port.json" "$EVIDENCE_DIR/" || true
+          [ -d "${APP_DATA_DIR:-}/run" ] && cp "$APP_DATA_DIR"/run/*.json "$EVIDENCE_DIR/run-leases/" 2>/dev/null || true
+          [ -d "${APP_DATA_DIR:-}" ] && ls -laR "$APP_DATA_DIR" > "$EVIDENCE_DIR/app-data-listing.txt" 2>&1 || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096" > "$EVIDENCE_DIR/processes.txt" || true
+          else
+            ps -axo pid,ppid,command > "$EVIDENCE_DIR/processes.txt" || true
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-install-${{ matrix.platform }}
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14

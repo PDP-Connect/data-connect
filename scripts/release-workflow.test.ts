@@ -256,8 +256,8 @@ describe("release workflow", () => {
       "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
     )
     expect(publishCoreImage).toContain("packages: write")
-    expect(publishCoreImage).toContain("id-token: write")
-    expect(publishCoreImage).toContain("attestations: write")
+    expect(publishCoreImage).not.toContain("id-token:")
+    expect(publishCoreImage).not.toContain("attestations:")
     expect(publishCoreImage).toContain("ghcr.io/${GITHUB_REPOSITORY,,}/core")
     expect(publishCoreImage).toContain(
       "node scripts/verify-release-ref.mjs --release-tag"
@@ -272,6 +272,69 @@ describe("release workflow", () => {
     expect(buildAndPushCore).toContain(
       "PDPP_REFERENCE_REVISION=${{ github.sha }}"
     )
+  })
+
+  it("runs clean-install instead of build only on a dispatch that names a release", () => {
+    const workflow = readReleaseWorkflow()
+    type Trigger = { event: string; releaseTag?: string }
+    // Evaluates the simple ==, !=, &&, || job gates this workflow uses.
+    const runs = (job: string, trigger: Trigger) => {
+      const gate = new RegExp(`\\n  ${job}:\\n(?:    #.*\\n)*    if: (.*)\\n`)
+      const match = workflow.match(gate)
+      if (!match) return true
+      const expression = match[1]
+        .replaceAll("github.event_name", "event")
+        .replaceAll("inputs.release_tag", "releaseTag")
+        .replaceAll("!github.event.release.prerelease", "true")
+        .replaceAll("!=", "!==")
+        .replaceAll(/([^!=])==/g, "$1===")
+      return new Function("event", "releaseTag", `return ${expression}`)(
+        trigger.event,
+        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : ""
+      )
+    }
+    const scenarios: Array<[Trigger, string[]]> = [
+      [{ event: "workflow_dispatch", releaseTag: "v2.4.0" }, ["clean-install"]],
+      [{ event: "workflow_dispatch", releaseTag: "" }, ["build"]],
+      [{ event: "pull_request" }, ["build"]],
+      [
+        { event: "release" },
+        ["build", "publish", "publish-core-image", "promote-core-latest"],
+      ],
+    ]
+    const jobs = [
+      "build",
+      "publish",
+      "publish-core-image",
+      "promote-core-latest",
+      "clean-install",
+    ]
+    for (const [trigger, expected] of scenarios) {
+      expect(
+        jobs.filter(job => runs(job, trigger)),
+        JSON.stringify(trigger)
+      ).toEqual(expected)
+    }
+
+    expect(workflow).toContain(
+      '      release_tag:\n        description: Existing release tag to clean-install on fresh VMs instead of building (leave empty to build)\n        required: false\n        default: ""'
+    )
+    const cleanInstall = workflow.slice(
+      workflow.indexOf("\n  clean-install:\n")
+    )
+    expect(cleanInstall).toContain(
+      "    permissions:\n      contents: read\n    strategy:"
+    )
+    for (const platform of ["macos-15", "macos-15-intel", "windows-latest"]) {
+      expect(cleanInstall).toContain(`          - platform: ${platform}\n`)
+    }
+    expect(cleanInstall.match(/          - platform: /g)).toHaveLength(3)
+    expect(cleanInstall).not.toMatch(/needs:|write|gh release upload|docker\//)
+    expect(cleanInstall).toContain("if: always()")
+    expect(readWorkflowStep(workflow, "Upload evidence")).toContain(
+      "if: always()"
+    )
+    expect(workflow).not.toContain("clean-install-acceptance.yml")
   })
 
   it("pushes only versioned Core tags and serializes only latest promotion", () => {
