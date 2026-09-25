@@ -607,7 +607,7 @@ test("host endpoint failure fails controller admission before connector spawn", 
   assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
 });
 
-test("host lease CDP URL reaches readiness and release returns the host surface", async (t) => {
+test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
   const hostRequests: { method: string; url: string }[] = [];
   const hostFetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -656,7 +656,7 @@ test("host lease CDP URL reaches readiness and release returns the host surface"
     hostRequests.map(({ method, url }) => [method, url]),
     [
       ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
-      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/leases/host-surface-8"],
+      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_ready"],
     ]
   );
 });

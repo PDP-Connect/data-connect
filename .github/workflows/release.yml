@@ -218,6 +218,12 @@ jobs:
             node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
           done
 
+      - name: Clear cached AppImage staging output
+        if: matrix.os_family == 'linux'
+        run: |
+          rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage"
+          rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage_deb"
+
       # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
       # below deletes every Tauri-produced .dmg and rebuilds it with
       # scripts/create-macos-dmg.mjs, which retries and detaches stale devices on hdiutil
@@ -238,6 +244,8 @@ jobs:
       - name: Build unsigned Tauri app
         if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
         with:
           args: --target ${{ matrix.target }}${{ matrix.os_family == 'macos' && ' --bundles app' || '' }}
 

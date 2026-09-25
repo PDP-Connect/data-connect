@@ -49,13 +49,15 @@ trap 'rm -rf "$tmpdir"; cleanup' EXIT
 
 curl -fsS "$ORIGIN/.well-known/oauth-authorization-server" > "$tmpdir/as.json"
 curl -fsS "$ORIGIN/.well-known/oauth-protected-resource" > "$tmpdir/rs.json"
+curl -fsS "$ORIGIN/manifest.webmanifest" > "$tmpdir/manifest.json"
 
-node --input-type=module - "$tmpdir/as.json" "$tmpdir/rs.json" "$ORIGIN" <<'NODE'
+node --input-type=module - "$tmpdir/as.json" "$tmpdir/rs.json" "$tmpdir/manifest.json" "$ORIGIN" <<'NODE'
 import { readFileSync } from 'node:fs';
 
-const [asPath, rsPath, origin] = process.argv.slice(2);
+const [asPath, rsPath, manifestPath, origin] = process.argv.slice(2);
 const as = JSON.parse(readFileSync(asPath, 'utf8'));
 const rs = JSON.parse(readFileSync(rsPath, 'utf8'));
+JSON.parse(readFileSync(manifestPath, 'utf8'));
 const combined = JSON.stringify({ as, rs });
 
 for (const internal of ['reference:', 'web:', 'http://reference', 'http://web']) {

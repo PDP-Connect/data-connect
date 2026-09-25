@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
@@ -311,6 +311,60 @@ describe("reference stack staging contract", () => {
     })
   }
 
+  it("prunes the musl canvas addon from a glibc Linux stage", () => {
+    const root = fixtureRoot()
+    const nativePackage = join(
+      root,
+      "node_modules",
+      "@napi-rs",
+      "canvas-linux-x64-gnu"
+    )
+    const muslPackage = join(
+      root,
+      "node_modules",
+      "@napi-rs",
+      "canvas-linux-x64-musl"
+    )
+    mkdirSync(nativePackage, { recursive: true })
+    mkdirSync(muslPackage, { recursive: true })
+    writeFileSync(join(nativePackage, "package.json"), "{}\n")
+    writeFileSync(join(muslPackage, "package.json"), "{}\n")
+
+    pruneForeignPlatformPrebuilds(root, { platform: "linux", arch: "x64" })
+
+    expect(existsSync(nativePackage)).toBe(true)
+    expect(existsSync(muslPackage)).toBe(false)
+  })
+
+  it("keeps only the current platform and architecture ONNX runtime files", () => {
+    const root = fixtureRoot()
+    const napiRoot = join(
+      root,
+      "node_modules",
+      "onnxruntime-node",
+      "bin",
+      "napi-v6"
+    )
+    for (const relativePath of [
+      "linux/x64/onnxruntime_binding.node",
+      "linux/arm64/onnxruntime_binding.node",
+      "darwin/arm64/onnxruntime_binding.node",
+      "win32/x64/onnxruntime_binding.node",
+    ]) {
+      const file = join(napiRoot, relativePath)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, "fixture addon\n")
+    }
+
+    pruneForeignPlatformPrebuilds(root, { platform: "linux", arch: "x64" })
+
+    expect(readdirSync(join(napiRoot, "linux", "x64"))).toEqual([
+      "onnxruntime_binding.node",
+    ])
+    expect(readdirSync(napiRoot)).toEqual(["linux"])
+    expect(readdirSync(join(napiRoot, "linux"))).toEqual(["x64"])
+  })
+
   it("does nothing when neither package ships a prebuilds directory", () => {
     const root = fixtureRoot()
     expect(() => pruneForeignPlatformPrebuilds(root)).not.toThrow()
@@ -587,6 +641,7 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     const invocations = JSON.parse(readFileSync(invocationsPath, "utf8"))
     const installArgs = invocations.find(args => args[0] === "install")
     expect(installArgs).toBeDefined()
+    expect(installArgs).toContain("--allow-git=all")
     expect(installArgs).not.toContain("--no-package-lock")
   })
 })

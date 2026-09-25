@@ -416,8 +416,11 @@ const PACKAGES_WITH_PLATFORM_PREBUILDS = [
   "better-sqlite3-multiple-ciphers",
 ]
 
-export function pruneForeignPlatformPrebuilds(stageRoot) {
-  const keep = `${process.platform}-${process.arch}.node`
+export function pruneForeignPlatformPrebuilds(
+  stageRoot,
+  { platform = process.platform, arch = process.arch } = {}
+) {
+  const keep = `${platform}-${arch}.node`
   for (const packageName of PACKAGES_WITH_PLATFORM_PREBUILDS) {
     const prebuildsDir = join(
       stageRoot,
@@ -428,6 +431,46 @@ export function pruneForeignPlatformPrebuilds(stageRoot) {
     if (!existsSync(prebuildsDir)) continue
     for (const entry of readdirSync(prebuildsDir)) {
       if (entry !== keep) rmSync(join(prebuildsDir, entry), { force: true })
+    }
+  }
+
+  // The napi-rs canvas package includes both glibc and musl addons for the
+  // current Linux architecture. linuxdeploy treats the musl addon as a Linux
+  // ELF and fails when ldd cannot resolve its musl loader on our glibc target.
+  // The matching GNU addon is the one loaded by the shipped Linux runtime.
+  if (platform === "linux") {
+    rmSync(
+      join(stageRoot, "node_modules", "@napi-rs", `canvas-linux-${arch}-musl`),
+      { force: true, recursive: true }
+    )
+
+    const napiRoot = join(
+      stageRoot,
+      "node_modules",
+      "onnxruntime-node",
+      "bin"
+    )
+    if (existsSync(napiRoot)) {
+      for (const napiVersion of readdirSync(napiRoot)) {
+        const versionRoot = join(napiRoot, napiVersion)
+        if (!statSync(versionRoot).isDirectory()) continue
+        for (const runtimePlatform of readdirSync(versionRoot)) {
+          const platformRoot = join(versionRoot, runtimePlatform)
+          if (!statSync(platformRoot).isDirectory()) continue
+          if (runtimePlatform !== platform) {
+            rmSync(platformRoot, { force: true, recursive: true })
+            continue
+          }
+          for (const runtimeArch of readdirSync(platformRoot)) {
+            if (runtimeArch !== arch) {
+              rmSync(join(platformRoot, runtimeArch), {
+                force: true,
+                recursive: true,
+              })
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -449,6 +492,7 @@ export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
     nodeBinary,
     [
       "install",
+      "--allow-git=all",
       "--ignore-scripts",
       "--omit=dev",
       "--install-links",
