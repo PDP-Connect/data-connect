@@ -13,7 +13,6 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
@@ -25,6 +24,7 @@ import {
   KEEP_GENERATIONS,
   collectOldStageGenerations,
   findProcessesUsingDirectory,
+  installStageGeneration,
   publishStageGeneration,
 } from "./stage-generations.js"
 
@@ -289,36 +289,7 @@ function writeManifest(stageDirectory, profile, serverRelativePath) {
   )
 }
 
-/**
- * Find PIDs of any running process whose current working directory resolves
- * inside `targetDirectory`, using `/proc/<pid>/cwd` (Linux only -- macOS and
- * Windows have no equivalent without a new dependency, and are silently
- * skipped: see this function's caller for why that gap is acceptable).
- *
- * Confirmed live, 2026-09-19: this staging step used to `rmSync` +
- * `renameSync` the target directory unconditionally, which is atomic at the
- * filesystem level but still pulls the directory out from under any
- * already-running server process whose `cwd` is inside it -- the OS keeps
- * the process alive against the now-unlinked inode (its `cwd` shows
- * `(deleted)`), so it keeps serving stale server-rendered HTML from memory
- * while every static asset request 404s, since Next's dev/standalone server
- * reads its build manifest and static-asset expectations once at boot and
- * never re-reads them (see the `nextjs-deployment` research-corpus entry on
- * version skew: the fix is one immutable build directory per process plus an
- * atomic process/front-door cutover, never patching files under a live
- * server). This app's normal boot sequence never hits this -- staging always
- * runs once, before the Tauri app is launched (`beforeDevCommand`/
- * `beforeBuildCommand`), so there is no live process to collide with. It
- * reproduces only when this script re-runs while a PREVIOUSLY staged console
- * process is still running against the same fixed target path, i.e. an
- * iterative rebuild against an already-launched app -- exactly what happened
- * here.
- */
-// Re-exported from the shared module rather than reimplemented here. The
-// two copies had already drifted once: this file's version did not strip
-// readlink's "(deleted)" suffix, so a process stranded by an earlier
-// in-place restage -- the exact case this staging change exists for -- was
-// invisible to it. One implementation, one place to fix.
+/** Diagnostic helper; an empty result cannot prove that a tree is unused. */
 export { findProcessesUsingDirectory }
 
 /**
@@ -336,6 +307,33 @@ function readGenerationId(stageDirectory) {
   return createHash("sha256").update(manifest).digest("hex").slice(0, 12)
 }
 
+function matchesConsoleGeneration(existingDirectory, candidateDirectory) {
+  try {
+    const manifestPath = join(existingDirectory, "manifest.json")
+    const candidateManifest = readFileSync(
+      join(candidateDirectory, "manifest.json"),
+      "utf8",
+    )
+    if (readFileSync(manifestPath, "utf8") !== candidateManifest) return false
+    const hashes = JSON.parse(candidateManifest).hashes
+    const expectedPaths = Object.keys(hashes).sort()
+    const existingFiles = walkFiles(existingDirectory).filter(
+      (file) => file.relativePath !== "manifest.json",
+    )
+    if (
+      existingFiles.length !== expectedPaths.length ||
+      existingFiles.some((file, index) => file.relativePath !== expectedPaths[index])
+    ) {
+      return false
+    }
+    return existingFiles.every(
+      (file) => hashes[file.relativePath] === hashFile(file.absolutePath),
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * Point the stable `console` path at `generationDirectory`.
  *
@@ -347,39 +345,20 @@ function readGenerationId(stageDirectory) {
  * link inside the bundle. The Tauri bundler's own `resources` glob
  * (`target/release/reference-stack/console/`) has the same requirement.
  *
- * So the generation directory is the durable artifact and this is a
- * materialised copy of it. That costs one extra copy per changed build and
- * keeps every packaging path working untouched, which is the right trade:
- * the bug being fixed is a DEV restage pulling a directory out from under a
- * running server, and a hardlink-backed copy makes the stable path a
- * different inode from the one the old process is holding.
+ * The stable copy keeps packaging paths unchanged. Publication moves the
+ * previous tree aside so current processes retain its files.
  */
 function publishGeneration(targetDirectory, generationDirectory) {
-  // `publishStageGeneration` (stage-generations.js) now stops and BLOCKS
-  // UNTIL CONFIRMED GONE whatever is still serving from the stable path
-  // before it swaps that path's contents -- this is load-bearing for
-  // correctness, not merely cleanup. Measured live 2026-09-21 (three real
-  // incidents, most recently within the hour -- `InvariantError: client
-  // reference manifest for route "/connect" does not exist`, a 500 that
-  // blocked testing): a live Next.js server whose cwd is the STABLE path
-  // (never a generation directory -- see production spawn in
-  // src-tauri/src/unified.rs's `console_process_spec`) can still be
-  // mid-request, with route module resolution in flight, at the exact
-  // moment an unguarded swap runs underneath it. See
-  // `stopProcessesUsingDirectory`'s doc comment in stage-generations.js for
-  // the full mechanism and why a fixed sleep was not actually sufficient.
-  publishStageGeneration(targetDirectory, generationDirectory)
+  // The shared publisher moves the old stable tree aside; it does not signal
+  // the process using that tree.
+  publishStageGeneration(
+    targetDirectory,
+    generationDirectory,
+    matchesConsoleGeneration,
+  )
 }
 
-/**
- * Delete generation directories that nothing is running from, keeping the
- * newest `keep`.
- *
- * Without this, every changed rebuild leaves a full console build on disk
- * forever. A generation is only removed when no live process has its cwd
- * inside it, so this never deletes the directory out from under the very
- * process the generation scheme exists to protect.
- */
+/** Report retained generations; cleanup waits for cross-platform ownership proof. */
 export function collectOldGenerations(targetParent, keep = KEEP_GENERATIONS) {
   return collectOldStageGenerations(targetParent, CONSOLE_STAGE_NAME, keep)
 }
@@ -434,33 +413,18 @@ export function stageConsoleStack({
     writeLauncher(temporaryDirectory, serverRelativePath)
     writeManifest(temporaryDirectory, validatedProfile, serverRelativePath)
 
-    // Move this build into its own immutable generation directory and point
-    // the stable path at it, instead of deleting and replacing the stable
-    // path in place.
-    //
-    // The old sequence (stop-whatever-is-running, rmSync, renameSync) is
-    // what produced the incident in `findProcessesUsingDirectory`'s doc
-    // comment: unlinking a directory a server is running inside leaves that
-    // process alive against a now-deleted inode, still answering
-    // server-rendered HTML from memory while every static chunk 404s.
-    // Reproduced here 2026-09-21 against a minimal server: after the
-    // in-place swap, `/` returned 200 referencing the OLD build id while
-    // `/chunk` returned 404, and the process's `/proc/<pid>/cwd` read
-    // `.../console (deleted)` -- the exact shape reported twice tonight.
-    //
-    // Under a generation directory the old build is never unlinked, so a
-    // process still running from it keeps serving a COHERENT old build
-    // (HTML and chunks agree) until it is stopped, which is what the
-    // research corpus calls for: one process per immutable build directory,
-    // cut over by swapping which directory is current, never by patching or
-    // deleting files under a live server. See
-    // ai/research/nextjs-deployment/version-skew-fix-is-one-process-per-immutable-build-directory-not-deploymentid.md
+    // Install this build at its deterministic immutable generation path.
+    // If that path already exists, reuse it only after verifying its manifest
+    // and every file hash; never remove and recreate a possibly live tree.
     const generationDirectory = join(
       targetParent,
       `${CONSOLE_STAGE_NAME}-${readGenerationId(temporaryDirectory)}`
     )
-    rmSync(generationDirectory, { force: true, recursive: true })
-    renameSync(temporaryDirectory, generationDirectory)
+    installStageGeneration(
+      generationDirectory,
+      temporaryDirectory,
+      matchesConsoleGeneration,
+    )
     publishGeneration(targetDirectory, generationDirectory)
     collectOldGenerations(targetParent, KEEP_GENERATIONS)
   } catch (error) {

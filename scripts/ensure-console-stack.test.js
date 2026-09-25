@@ -487,18 +487,34 @@ describe("ensure console stack", () => {
     }
   })
 
-  it("reuses unchanged generations and retains prior generations without an ownership proof", () => {
+  it("reuses an unchanged generation without removing a process's directory", async () => {
     const root = createConsoleBuildFixture()
     const stageParent = join(root, "src-tauri", "target", "release", "reference-stack")
     const generations = () =>
       readdirSync(stageParent).filter((entry) => entry.startsWith("console-"))
+    let child
     try {
       stageConsoleStack({ build: false, profile: "release", projectRoot: root })
       const afterFirst = generations()
+      const generationPath = join(stageParent, afterFirst[0])
+      const proofPath = join(root, "live-generation-proof.txt")
+      child = spawn(
+        process.execPath,
+        [
+          "-e",
+          "setTimeout(() => { const fs = require('node:fs'); fs.writeFileSync(process.env.PROOF, fs.existsSync('manifest.json') ? 'preserved' : 'missing') }, 100)",
+        ],
+        { cwd: generationPath, env: { ...process.env, PROOF: proofPath }, stdio: "ignore" },
+      )
       // Identical content restages onto the same generation id rather than
-      // growing a new directory every rebuild.
+      // replacing the directory an existing process is using.
       stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      await new Promise((resolveWait, rejectWait) => {
+        child.once("error", rejectWait)
+        child.once("close", resolveWait)
+      })
       expect(generations()).toEqual(afterFirst)
+      expect(readFileSync(proofPath, "utf8")).toBe("preserved")
 
       // Keep all generations because the pruner cannot prove that an old
       // generation is unused on every supported platform.
@@ -511,6 +527,7 @@ describe("ensure console stack", () => {
       }
       expect(generations().length).toBe(4)
     } finally {
+      child?.kill("SIGKILL")
       rmSync(root, { force: true, recursive: true })
     }
   })
