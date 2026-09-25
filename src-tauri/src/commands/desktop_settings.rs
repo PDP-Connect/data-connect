@@ -52,143 +52,195 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
 /// cannot reimplement OS autostart registration without creating a second,
 /// competing mechanism.
 ///
-/// This file, `autostart.json`, is the request/ack protocol that lets the
-/// reference server (`server/routes/owner-autostart.ts`) ask for a change
-/// and this process apply it, modeled on
-/// `unified.rs::spawn_remote_access_config_watcher`'s poll-a-shared-file
-/// shape. `desiredEnabled` + `requestId` are written by the server; the
-/// remaining fields are written by the watcher after it applies a change.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AutostartState {
-    pub(crate) desired_enabled: bool,
-    pub(crate) request_id: u64,
-    pub(crate) applied_request_id: u64,
-    pub(crate) enabled: bool,
-    pub(crate) error: Option<String>,
-}
+/// The file protocol shared with `reference-implementation/server/autostart-store.ts`
+/// lives under the same `unified` directory as `remote-access.json`:
+/// - `autostart-state.json`: observed OS state, written only by this process.
+/// - `autostart-commands/ast_*.json`: immutable commands, written only by the
+///   server.
+/// - `autostart-results/ast_*.json`: one result per command, written only by
+///   this process.
+pub(crate) const AUTOSTART_STATE_FILE: &str = "autostart-state.json";
+pub(crate) const AUTOSTART_COMMANDS_DIR: &str = "autostart-commands";
+pub(crate) const AUTOSTART_RESULTS_DIR: &str = "autostart-results";
+const AUTOSTART_COMMAND_KIND: &str = "set_autostart_enabled";
+/// Same window as `hasPendingCommand` in `autostart-store.ts`: an older
+/// command is no longer pending, so it is never applied late.
+const AUTOSTART_COMMAND_TTL: chrono::Duration = chrono::Duration::seconds(600);
 
-const AUTOSTART_STATE_FILE: &str = "autostart.json";
-
-/// Resolve the shared state file path, under the SAME directory
-/// `remote_access_config_path` uses (see `remote_access.rs`), so this
-/// process and the reference server agree on one file, never two.
-pub(crate) fn autostart_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+/// Resolve the shared protocol directory, the SAME directory
+/// `remote_access_config_path` uses (see `remote_access.rs`).
+pub(crate) fn autostart_protocol_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|path| {
-            path.join(crate::unified::UNIFIED_DB_DIRECTORY)
-                .join(AUTOSTART_STATE_FILE)
-        })
+        .map(|path| path.join(crate::unified::UNIFIED_DB_DIRECTORY))
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-/// What `load_autostart_state` found on disk. Distinguishes a state file
-/// that never existed from one that existed but was empty/unparseable --
-/// both mean "treat as absent and seed a fresh default", but the watcher
-/// tick logs and reacts to them differently. `Missing` needs no repair (the
-/// next `save_autostart_state` call will create it as part of normal
-/// operation); `Corrupt` means a stale, invalid file is sitting on disk
-/// RIGHT NOW and must be overwritten before the next tick, or the same
-/// parse failure recurs forever -- see `tick_autostart_watcher`.
-pub(crate) enum LoadedAutostartState {
-    Present(AutostartState),
-    Missing,
-    /// The file existed but its content was empty or failed to parse (e.g.
-    /// a zero-byte file left by a process killed mid-write). Carries the
-    /// underlying error for logging.
-    Corrupt(String),
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObservedAutostartState {
+    pub(crate) enabled: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) observed_at: String,
+    pub(crate) revision: String,
 }
 
-/// A zero-byte or otherwise unparseable `autostart.json` is an ordinary,
-/// expected artifact of this process being killed mid-write (a crash, a
-/// `kill -9`, or a rebuild terminating the dev binary) -- NOT a fatal
-/// condition. Treating it as fatal is exactly what produced the reported
-/// incident: an infinite "Autostart watcher tick failed: Failed to parse
-/// autostart state: EOF while parsing a value at line 1 column 0" loop that
-/// never recovered because nothing ever rewrote the file.
-///
-/// This function itself never fails on a parse error -- it reports
-/// `Corrupt` instead, so the caller can fall back to the default state and
-/// self-heal the file (see `tick_autostart_watcher` in `unified.rs`). It
-/// still returns `Err` for a genuine read failure (e.g. a permissions
-/// error), which is a different, real problem that retrying blindly would
-/// not fix either.
-pub(crate) fn load_autostart_state(path: &Path) -> Result<LoadedAutostartState, String> {
-    if !path.exists() {
-        return Ok(LoadedAutostartState::Missing);
-    }
-    let content = fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read autostart state: {error}"))?;
-    match serde_json::from_str(&content) {
-        Ok(state) => Ok(LoadedAutostartState::Present(state)),
-        Err(error) => Ok(LoadedAutostartState::Corrupt(format!(
-            "Failed to parse autostart state: {error}"
-        ))),
-    }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutostartCommand {
+    command_id: String,
+    kind: String,
+    desired_enabled: bool,
+    created_at: String,
 }
 
-pub(crate) fn save_autostart_state(path: &Path, state: &AutostartState) -> Result<(), String> {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AutostartResult {
+    pub(crate) command_id: String,
+    pub(crate) kind: String,
+    pub(crate) desired_enabled: bool,
+    pub(crate) status: String,
+    pub(crate) enabled: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) started_at: String,
+    pub(crate) finished_at: String,
+}
+
+fn iso(time: chrono::DateTime<chrono::Utc>) -> String {
+    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Same shape `autostart-store.ts` generates: `ast_` + 22 base64url chars.
+fn is_command_file_name(name: &str) -> bool {
+    name.strip_prefix("ast_")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|id| {
+            id.len() == 22
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
+}
+
+/// A missing, empty, or unparseable state file (e.g. zero bytes from a
+/// process killed mid-write) reads as `None` so the tick rewrites it rather
+/// than failing the same way every poll.
+fn load_observed_state(path: &Path) -> Option<ObservedAutostartState> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+}
+
+fn write_protocol_json<T: Serialize>(path: &Path, value: &T, context: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create autostart state directory: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| format!("{context}: {error}"))?;
     }
-    crate::atomic_write::write_json_atomically(path, state, "Failed to write autostart state")
+    crate::atomic_write::write_json_atomically(path, value, context)
 }
 
-/// Pure core of the autostart watcher tick: given the OS-independent
-/// "is_enabled"/"enable"/"disable" effects as closures, decide what the new
-/// state file contents should be. Kept separate from the `AppHandle`-driven
-/// polling loop in `unified.rs::spawn_autostart_watcher` so the seed and
-/// apply logic can run under a unit test without a real Tauri runtime --
-/// mirrors how `remote_access.rs`'s `validate_remote_access_config` is pure
-/// and unit-tested while its `AppHandle`-dependent callers are not.
-pub(crate) fn apply_autostart_desired_state<F, E, D>(
-    current: Option<AutostartState>,
+/// One watcher tick, with the OS effects passed in as closures so it runs
+/// under a unit test without a Tauri runtime:
+/// 1. Answer every unanswered, unexpired command in `createdAt` order with
+///    exactly one result file. Expired commands and their results are
+///    removed without being applied.
+/// 2. Rewrite `autostart-state.json` when the observed state changed or the
+///    file is missing/corrupt. It is seeded from `is_enabled()` without ever
+///    calling `enable()`/`disable()` for a change nobody asked for.
+pub(crate) fn tick_autostart_protocol<F, E, D>(
+    root: &Path,
+    now: chrono::DateTime<chrono::Utc>,
     is_enabled: F,
     mut enable: E,
     mut disable: D,
-) -> Result<AutostartState, String>
+) -> Result<(), String>
 where
     F: Fn() -> Result<bool, String>,
     E: FnMut() -> Result<(), String>,
     D: FnMut() -> Result<(), String>,
 {
-    let Some(state) = current else {
-        // First ever read: seed from real OS state without ever calling
-        // enable()/disable() for a change nobody asked for.
-        let enabled = is_enabled()?;
-        return Ok(AutostartState {
-            applied_request_id: 0,
-            desired_enabled: enabled,
-            enabled,
-            error: None,
-            request_id: 0,
-        });
+    let commands_dir = root.join(AUTOSTART_COMMANDS_DIR);
+    let results_dir = root.join(AUTOSTART_RESULTS_DIR);
+    let mut pending = Vec::new();
+    let entries = match fs::read_dir(&commands_dir) {
+        Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("Failed to read autostart commands: {error}")),
     };
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_command_file_name(&name) {
+            continue;
+        }
+        let command_path = entry.path();
+        let result_path = results_dir.join(&name);
+        let Some(command) = fs::read_to_string(&command_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<AutostartCommand>(&content).ok())
+        else {
+            continue;
+        };
+        let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(&command.created_at) else {
+            continue;
+        };
+        let created_at = created_at.with_timezone(&chrono::Utc);
+        if now - created_at >= AUTOSTART_COMMAND_TTL {
+            let _ = fs::remove_file(&command_path);
+            let _ = fs::remove_file(&result_path);
+            continue;
+        }
+        if command.kind != AUTOSTART_COMMAND_KIND
+            || format!("{}.json", command.command_id) != name
+            || result_path.exists()
+        {
+            continue;
+        }
+        pending.push((created_at, command, result_path));
+    }
+    pending.sort_by_key(|(created_at, _, _)| *created_at);
 
-    if state.request_id == state.applied_request_id {
-        return Ok(state);
+    let state_path = root.join(AUTOSTART_STATE_FILE);
+    let previous = load_observed_state(&state_path);
+    let mut error = previous.as_ref().and_then(|state| state.error.clone());
+    for (_, command, result_path) in pending {
+        let started_at = iso(chrono::Utc::now());
+        let mutation_error = if command.desired_enabled {
+            enable().err()
+        } else {
+            disable().err()
+        };
+        // Report OS truth from a fresh read, not the assumed outcome.
+        let enabled = is_enabled()?;
+        let succeeded = mutation_error.is_none() && enabled == command.desired_enabled;
+        let result = AutostartResult {
+            command_id: command.command_id,
+            kind: AUTOSTART_COMMAND_KIND.to_string(),
+            desired_enabled: command.desired_enabled,
+            status: if succeeded { "succeeded" } else { "failed" }.to_string(),
+            enabled,
+            error: mutation_error.clone(),
+            started_at,
+            finished_at: iso(chrono::Utc::now()),
+        };
+        write_protocol_json(&result_path, &result, "Failed to write autostart result")?;
+        error = mutation_error;
     }
 
-    let mutation_error = if state.desired_enabled {
-        enable().err()
-    } else {
-        disable().err()
-    };
-
-    // Refresh from a fresh is_enabled() read regardless of whether the
-    // mutation itself reported success, so the file always reflects OS
-    // truth rather than an assumed outcome.
     let enabled = is_enabled()?;
-
-    Ok(AutostartState {
-        applied_request_id: state.request_id,
-        desired_enabled: state.desired_enabled,
-        enabled,
-        error: mutation_error,
-        request_id: state.request_id,
-    })
+    let changed = previous
+        .as_ref()
+        .is_none_or(|state| state.enabled != enabled || state.error != error);
+    if changed {
+        let observed_at = iso(now);
+        let state = ObservedAutostartState {
+            enabled,
+            error,
+            revision: observed_at.clone(),
+            observed_at,
+        };
+        write_protocol_json(&state_path, &state, "Failed to write autostart state")?;
+    }
+    Ok(())
 }
 
 /// Whether the one-time "DataConnect keeps running in the tray" toast has
@@ -263,228 +315,247 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    use std::cell::Cell;
+
+    const COMMAND_ID: &str = "ast_AAAAAAAAAAAAAAAAAAAAAA";
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    /// Write a command exactly as `autostart-store.ts` `requestChange` does.
+    fn write_server_command(
+        root: &Path,
+        command_id: &str,
+        desired_enabled: bool,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let directory = root.join("autostart-commands");
+        fs::create_dir_all(&directory).expect("commands dir");
+        fs::write(
+            directory.join(format!("{command_id}.json")),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "commandId": command_id,
+                    "kind": "set_autostart_enabled",
+                    "desiredEnabled": desired_enabled,
+                    "createdAt": iso(created_at),
+                    "status": "accepted",
+                })
+            ),
+        )
+        .expect("command file");
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).expect("read json")).expect("parse json")
+    }
+
     #[test]
-    fn seeds_from_is_enabled_without_calling_enable_or_disable() {
-        let mut enable_calls = 0;
-        let mut disable_calls = 0;
-        let result = apply_autostart_desired_state(
-            None,
+    fn protocol_file_names_match_the_reference_server_store() {
+        // Pinned against reference-implementation/server/autostart-store.ts.
+        let store = include_str!("../../../reference-implementation/server/autostart-store.ts");
+        for name in [
+            AUTOSTART_STATE_FILE,
+            AUTOSTART_COMMANDS_DIR,
+            AUTOSTART_RESULTS_DIR,
+            AUTOSTART_COMMAND_KIND,
+        ] {
+            assert!(
+                store.contains(&format!("\"{name}\"")),
+                "autostart-store.ts no longer uses {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeds_observed_state_from_is_enabled_without_mutating() {
+        let dir = tempdir().expect("tempdir");
+        let calls = Cell::new(0);
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
             || Ok(true),
             || {
-                enable_calls += 1;
+                calls.set(calls.get() + 1);
                 Ok(())
             },
             || {
-                disable_calls += 1;
+                calls.set(calls.get() + 1);
                 Ok(())
             },
         )
-        .expect("seed should succeed");
+        .expect("tick");
 
-        assert_eq!(enable_calls, 0);
-        assert_eq!(disable_calls, 0);
+        assert_eq!(calls.get(), 0);
+        let state = read_json(&dir.path().join("autostart-state.json"));
+        assert_eq!(state["enabled"], true);
+        assert_eq!(state["error"], serde_json::Value::Null);
+        assert!(state["observedAt"].is_string());
+        assert!(state["revision"].is_string());
+    }
+
+    #[test]
+    fn corrupt_state_file_is_rewritten_instead_of_failing_every_tick() {
+        let dir = tempdir().expect("tempdir");
+        let state_path = dir.path().join("autostart-state.json");
+        fs::write(&state_path, b"").expect("zero-byte state file");
+
+        tick_autostart_protocol(dir.path(), now(), || Ok(false), || Ok(()), || Ok(()))
+            .expect("corrupt state must not fail the tick");
+
+        assert_eq!(read_json(&state_path)["enabled"], false);
+    }
+
+    #[test]
+    fn server_command_is_applied_and_answered_with_its_own_result() {
+        let dir = tempdir().expect("tempdir");
+        let enabled = Cell::new(false);
+        write_server_command(dir.path(), COMMAND_ID, true, now());
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Ok(enabled.get()),
+            || {
+                enabled.set(true);
+                Ok(())
+            },
+            || {
+                enabled.set(false);
+                Ok(())
+            },
+        )
+        .expect("tick");
+
+        let result = read_json(
+            &dir.path()
+                .join(format!("autostart-results/{COMMAND_ID}.json")),
+        );
+        assert_eq!(result["commandId"], COMMAND_ID);
+        assert_eq!(result["kind"], "set_autostart_enabled");
+        assert_eq!(result["desiredEnabled"], true);
+        assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["enabled"], true);
+        assert_eq!(result["error"], serde_json::Value::Null);
         assert_eq!(
-            result,
-            AutostartState {
-                applied_request_id: 0,
-                desired_enabled: true,
-                enabled: true,
-                error: None,
-                request_id: 0,
-            }
+            read_json(&dir.path().join("autostart-state.json"))["enabled"],
+            true
         );
     }
 
     #[test]
-    fn applies_a_pending_request_and_advances_applied_request_id() {
-        let current = AutostartState {
-            applied_request_id: 0,
-            desired_enabled: true,
-            enabled: false,
-            error: None,
-            request_id: 1,
-        };
-        let mut enable_calls = 0;
-        let result = apply_autostart_desired_state(
-            Some(current),
-            || Ok(true),
-            || {
-                enable_calls += 1;
-                Ok(())
-            },
-            || panic!("disable() should not be called when desired_enabled is true"),
-        )
-        .expect("apply should succeed");
+    fn failed_mutation_is_reported_as_failed_with_a_fresh_os_read() {
+        let dir = tempdir().expect("tempdir");
+        write_server_command(dir.path(), COMMAND_ID, true, now());
 
-        assert_eq!(enable_calls, 1);
-        assert_eq!(
-            result,
-            AutostartState {
-                applied_request_id: 1,
-                desired_enabled: true,
-                enabled: true,
-                error: None,
-                request_id: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn a_failed_mutation_still_refreshes_enabled_from_a_fresh_read_and_records_the_error() {
-        let current = AutostartState {
-            applied_request_id: 0,
-            desired_enabled: true,
-            enabled: false,
-            error: None,
-            request_id: 1,
-        };
-        let result = apply_autostart_desired_state(
-            Some(current),
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
             || Ok(false),
             || Err("permission denied".to_string()),
-            || panic!("disable() should not be called when desired_enabled is true"),
+            || Ok(()),
         )
-        .expect("apply should succeed even when the mutation itself failed");
+        .expect("tick");
 
-        assert_eq!(result.applied_request_id, 1);
-        assert_eq!(result.enabled, false);
-        assert_eq!(result.error.as_deref(), Some("permission denied"));
+        let result = read_json(
+            &dir.path()
+                .join(format!("autostart-results/{COMMAND_ID}.json")),
+        );
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["enabled"], false);
+        assert_eq!(result["error"], "permission denied");
+        let state = read_json(&dir.path().join("autostart-state.json"));
+        assert_eq!(state["error"], "permission denied");
     }
 
     #[test]
-    fn a_request_already_applied_is_a_no_op() {
-        let current = AutostartState {
-            applied_request_id: 2,
-            desired_enabled: false,
-            enabled: false,
-            error: None,
-            request_id: 2,
+    fn answered_command_is_not_applied_again() {
+        let dir = tempdir().expect("tempdir");
+        let calls = Cell::new(0);
+        write_server_command(dir.path(), COMMAND_ID, true, now());
+        let enable = || {
+            calls.set(calls.get() + 1);
+            Ok(())
         };
-        let result = apply_autostart_desired_state(
-            Some(current.clone()),
-            || panic!("is_enabled() should not be called for an already-applied request"),
-            || panic!("enable() should not be called for an already-applied request"),
-            || panic!("disable() should not be called for an already-applied request"),
+
+        tick_autostart_protocol(dir.path(), now(), || Ok(true), enable, || Ok(())).expect("tick");
+        tick_autostart_protocol(dir.path(), now(), || Ok(true), enable, || Ok(())).expect("tick");
+
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn concurrent_commands_are_applied_in_created_order() {
+        let dir = tempdir().expect("tempdir");
+        let enabled = Cell::new(false);
+        let second = "ast_BBBBBBBBBBBBBBBBBBBBBB";
+        let created = now();
+        // The later command has the lexically smaller id, so directory order
+        // alone would apply it first.
+        write_server_command(dir.path(), second, false, created);
+        write_server_command(
+            dir.path(),
+            "ast_zzzzzzzzzzzzzzzzzzzzzz",
+            true,
+            created - chrono::Duration::milliseconds(1),
+        );
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Ok(enabled.get()),
+            || {
+                enabled.set(true);
+                Ok(())
+            },
+            || {
+                enabled.set(false);
+                Ok(())
+            },
         )
-        .expect("no-op should succeed");
+        .expect("tick");
 
-        assert_eq!(result, current);
+        assert!(!enabled.get(), "the newest command must win");
+        let result = read_json(&dir.path().join(format!("autostart-results/{second}.json")));
+        assert_eq!(result["desiredEnabled"], false);
+        assert_eq!(result["status"], "succeeded");
     }
 
     #[test]
-    fn state_file_round_trips_through_save_and_load() {
+    fn expired_command_is_removed_without_being_applied() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("autostart.json");
-        let state = AutostartState {
-            applied_request_id: 3,
-            desired_enabled: true,
-            enabled: true,
-            error: None,
-            request_id: 3,
-        };
+        let calls = Cell::new(0);
+        write_server_command(
+            dir.path(),
+            COMMAND_ID,
+            true,
+            now() - chrono::Duration::seconds(601),
+        );
 
-        save_autostart_state(&path, &state).expect("save should succeed");
-        let loaded = load_autostart_state(&path).expect("load should succeed");
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Ok(false),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect("tick");
 
-        match loaded {
-            LoadedAutostartState::Present(loaded_state) => assert_eq!(loaded_state, state),
-            LoadedAutostartState::Missing => panic!("expected Present, got Missing"),
-            LoadedAutostartState::Corrupt(error) => {
-                panic!("expected Present, got Corrupt({error})")
-            }
-        }
-    }
-
-    #[test]
-    fn a_missing_state_file_loads_as_missing() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("autostart.json");
-
-        let loaded = load_autostart_state(&path).expect("load should succeed");
-
-        assert!(matches!(loaded, LoadedAutostartState::Missing));
-    }
-
-    /// Reproduces the reported incident directly: a process killed mid-write
-    /// (a crash, `kill -9`, or a rebuild terminating the dev binary) can
-    /// leave `autostart.json` truncated to zero bytes. `path.exists()` is
-    /// still true, so `load_autostart_state` reads it, and
-    /// `serde_json::from_str("")` fails with exactly the error Tim saw on
-    /// his machine: "EOF while parsing a value at line 1 column 0".
-    ///
-    /// Before the fix, this surfaced as `Err(...)` from `load_autostart_state`
-    /// itself, which `tick_autostart_watcher` propagated as a hard failure
-    /// with no recovery -- the "Autostart watcher tick failed" log line
-    /// this whole fix exists to stop repeating forever. After the fix,
-    /// `load_autostart_state` never fails on a parse error: it reports
-    /// `Corrupt` (carrying the same underlying message, still asserted
-    /// below) so the caller can fall back to a default and self-heal the
-    /// file, which `tick_autostart_watcher`'s own test coverage in
-    /// `unified.rs` verifies end-to-end.
-    #[test]
-    fn an_empty_state_file_is_reported_as_corrupt_not_a_hard_error() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("autostart.json");
-        fs::write(&path, "").expect("write zero-byte file");
-
-        let result = load_autostart_state(&path)
-            .expect("a corrupt file must not fail load_autostart_state itself");
-
-        match result {
-            LoadedAutostartState::Corrupt(error) => {
-                assert!(
-                    error.contains("EOF while parsing a value"),
-                    "expected the exact serde_json EOF message Tim saw, got: {error}"
-                );
-            }
-            LoadedAutostartState::Missing => {
-                panic!("expected Corrupt for a zero-byte file, got Missing")
-            }
-            LoadedAutostartState::Present(_) => {
-                panic!("expected Corrupt for a zero-byte file, got Present")
-            }
-        }
-    }
-
-    /// End-to-end proof of the self-heal: drives the exact sequence
-    /// `tick_autostart_watcher` (`unified.rs`) performs against a
-    /// zero-byte file -- load (sees Corrupt), fall back to `None` the same
-    /// way the watcher does, run it through `apply_autostart_desired_state`
-    /// (which seeds a fresh default from `is_enabled()`, same as a
-    /// never-before-seen file), then save. Confirms the important part of
-    /// the fix that a bare "swallow the error and keep polling" would miss:
-    /// the file on disk is NO LONGER corrupt afterward, so the next tick's
-    /// `load_autostart_state` reads it as `Present`, not `Corrupt` again.
-    /// `tick_autostart_watcher` itself is not unit-tested directly because
-    /// it requires a real `AppHandle`; this covers the same pure sequence
-    /// its doc comment says it delegates to.
-    #[test]
-    fn a_corrupt_state_file_self_heals_on_the_next_tick_sequence() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("autostart.json");
-        fs::write(&path, "").expect("write zero-byte file");
-
-        let current = match load_autostart_state(&path).expect("load should not hard-fail") {
-            LoadedAutostartState::Corrupt(_) => None,
-            LoadedAutostartState::Missing => {
-                panic!("expected Corrupt for a zero-byte file, got Missing")
-            }
-            LoadedAutostartState::Present(_) => {
-                panic!("expected Corrupt for a zero-byte file, got Present")
-            }
-        };
-        let healed = apply_autostart_desired_state(current, || Ok(false), || Ok(()), || Ok(()))
-            .expect("seeding a fresh default should succeed");
-        save_autostart_state(&path, &healed).expect("self-heal write should succeed");
-
-        let reloaded = load_autostart_state(&path).expect("reload after self-heal should succeed");
-        match reloaded {
-            LoadedAutostartState::Present(state) => assert_eq!(state, healed),
-            LoadedAutostartState::Missing => panic!("self-heal write did not create the file"),
-            LoadedAutostartState::Corrupt(error) => {
-                panic!("file is still corrupt after the self-heal write: {error}")
-            }
-        }
+        assert_eq!(calls.get(), 0);
+        assert!(!dir
+            .path()
+            .join(format!("autostart-commands/{COMMAND_ID}.json"))
+            .exists());
+        assert!(!dir
+            .path()
+            .join(format!("autostart-results/{COMMAND_ID}.json"))
+            .exists());
     }
 
     #[test]

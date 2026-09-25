@@ -477,4 +477,45 @@ mod tests {
         assert!(decoded.database_encryption_key.is_some());
         assert!(!decoded.credential_encryption_key.is_empty());
     }
+
+    #[test]
+    fn exported_v2_kit_imports_both_keys() {
+        let directory = tempdir().expect("temp directory");
+        let database_key_path = directory.path().join("database-encryption-key");
+        let credential_key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let code =
+            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
+                .expect("export recovery kit");
+        let database_key =
+            load_or_create_database_encryption_key(&database_key_path, &database_path)
+                .map_err(DatabaseKeyError::into_message)
+                .expect("database key");
+        let credential_key =
+            load_or_create_credential_encryption_key(&credential_key_path, &database_path)
+                .expect("credential key");
+
+        let imported = recovery_code::decode_for_import(&code).expect("import decodes kit");
+        assert_eq!(imported.database_encryption_key, database_key);
+        assert_eq!(imported.credential_encryption_key, Some(credential_key));
+    }
+
+    #[test]
+    fn legacy_v1_code_still_imports_the_database_key() {
+        let directory = tempdir().expect("temp directory");
+        let database_key_path = directory.path().join("database-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let code =
+            export_recovery_code_at(&database_key_path, &database_path).expect("export v1 code");
+        let database_key =
+            load_or_create_database_encryption_key(&database_key_path, &database_path)
+                .map_err(DatabaseKeyError::into_message)
+                .expect("database key");
+
+        let imported = recovery_code::decode_for_import(&code).expect("import decodes v1");
+        assert_eq!(imported.database_encryption_key, database_key);
+        assert_eq!(imported.credential_encryption_key, None);
+    }
 }

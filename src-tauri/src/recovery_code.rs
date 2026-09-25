@@ -45,6 +45,7 @@ pub(crate) enum RecoveryCodeError {
     InvalidUtf8,
     KeyTooLong,
     MissingCredentialKey,
+    MissingDatabaseKey,
     TrailingData,
     UnsupportedVersion,
     TooLarge,
@@ -63,6 +64,7 @@ impl fmt::Display for RecoveryCodeError {
             Self::InvalidUtf8 => "Recovery code did not decode to valid credential data",
             Self::KeyTooLong => "Recovery kit key exceeds the v2 length limit",
             Self::MissingCredentialKey => "Recovery kit credential key is required",
+            Self::MissingDatabaseKey => "Recovery kit does not contain a database key",
             Self::TrailingData => "Recovery kit code contains trailing data",
             Self::UnsupportedVersion => "Recovery kit code uses an unsupported version",
             Self::TooLarge => "Recovery kit code is too large",
@@ -136,6 +138,38 @@ pub(crate) fn decode(code: &str) -> Result<String, RecoveryCodeError> {
     }
 
     String::from_utf8(payload_bytes).map_err(|_| RecoveryCodeError::InvalidUtf8)
+}
+
+/// Keys an owner-supplied recovery code restores. A v1 code carries only
+/// the database key; a v2 kit also carries the credential encryption key.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ImportedRecoveryKeys {
+    pub(crate) database_encryption_key: String,
+    pub(crate) credential_encryption_key: Option<String>,
+}
+
+/// Decode a recovery code of either format for import.
+///
+/// Both formats use the same trailing checksum, so a v2 kit also passes v1
+/// `decode` and yields a garbage key. Try v2 first and fall back to v1 only
+/// when the input is not a v2 kit (wrong version byte, or too short to be
+/// one). A printable v1 credential never starts with the 0x02 version byte.
+pub(crate) fn decode_for_import(code: &str) -> Result<ImportedRecoveryKeys, RecoveryCodeError> {
+    match decode_v2(code) {
+        Ok(kit) => Ok(ImportedRecoveryKeys {
+            database_encryption_key: kit
+                .database_encryption_key
+                .ok_or(RecoveryCodeError::MissingDatabaseKey)?,
+            credential_encryption_key: Some(kit.credential_encryption_key),
+        }),
+        Err(RecoveryCodeError::UnsupportedVersion | RecoveryCodeError::Truncated) => {
+            Ok(ImportedRecoveryKeys {
+                database_encryption_key: decode(code)?,
+                credential_encryption_key: None,
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn encode_v2(kit: &RecoveryKitV2) -> Result<String, RecoveryCodeError> {
@@ -407,6 +441,23 @@ mod tests {
         let code = encode_v2(&kit).expect("encode v2");
         let decoded = decode_v2(&code).expect("decode v2");
         assert_eq!(decoded, kit);
+    }
+
+    #[test]
+    fn import_rejects_v2_kit_without_database_key_instead_of_falling_back_to_v1() {
+        let code = encode_v2(&RecoveryKitV2 {
+            database_encryption_key: None,
+            credential_encryption_key: "credential-key".to_string(),
+        })
+        .expect("encode v2");
+        assert!(
+            decode(&code).is_ok(),
+            "v1 decode accepts v2 bytes as garbage"
+        );
+        assert_eq!(
+            decode_for_import(&code),
+            Err(RecoveryCodeError::MissingDatabaseKey)
+        );
     }
 
     #[test]
