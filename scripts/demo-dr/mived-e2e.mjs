@@ -2,8 +2,10 @@
 //
 // Drives a real browser through the citizen flow:
 //   portal /  ─click─▶  PDPP sign-in  ─▶  consent (review, approve)  ─▶  portal /solicitud
-// then asserts the form is pre-filled from the SIUBEN records, and that a
-// denied consent returns to the portal with a Spanish error and a retry.
+// then asserts the form is pre-filled from the SIUBEN records, re-verifies
+// them, revokes the grant in the console tab and checks the portal's re-read is
+// refused (old copy kept), and that a denied consent (fresh session) returns to
+// the portal with a Spanish error and a retry.
 //
 // Usage:
 //   PORTAL_URL=http://localhost:8766 OWNER_PASSWORD=... SHOTS_DIR=./tmp/mived \
@@ -17,6 +19,8 @@ const PORTAL_URL = (process.env.PORTAL_URL ?? "http://localhost:8766").replace(/
 const OWNER_PASSWORD = process.env.OWNER_PASSWORD;
 const SHOTS_DIR = process.env.SHOTS_DIR ?? "tmp/mived-e2e";
 const PREFILL_BUTTON = "Completar con mis datos del SIUBEN";
+const REFRESH_BUTTON = "Volver a consultar el SIUBEN";
+const GRANT_LINK = "Ver o revocar esta autorización";
 const NAV_TIMEOUT_MS = 30_000;
 
 // Expected values from the fictitious seed (reference-implementation/connectors/seed).
@@ -70,8 +74,18 @@ async function signInIfAsked(page) {
   await Promise.all([page.waitForLoadState("load"), form.locator("button[type=submit]").first().click()]);
 }
 
+// Click "Volver a consultar el SIUBEN" and wait for the redirect back to /solicitud.
+async function clickRefresh(page) {
+  await Promise.all([
+    page.waitForURL(`${PORTAL_URL}/solicitud`, { timeout: NAV_TIMEOUT_MS }),
+    page.getByRole("button", { name: REFRESH_BUTTON }).click(),
+  ]);
+  await page.waitForLoadState("load");
+}
+
+const CONTEXT_OPTIONS = { locale: "es-DO", viewport: { height: 900, width: 1280 } };
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
-const page = await browser.newPage({ locale: "es-DO", viewport: { height: 900, width: 1280 } });
+let page = await browser.newPage(CONTEXT_OPTIONS);
 
 try {
   // 1. Portal, before state.
@@ -104,13 +118,53 @@ try {
   check((await page.locator("tr[data-member]").count()) === EXPECTED_MEMBERS, `${EXPECTED_MEMBERS} household member rows`);
   check(text.includes("Datos obtenidos del SIUBEN con tu autorización"), "success banner shown");
   check(/grt_[0-9a-z]+/.test(text), "authorization note shows the grant id");
-  check(text.includes("Consulta única"), "authorization note shows single-use access");
-  const grantLink = await page.getByRole("link", { name: "Ver o revocar esta autorización" }).getAttribute("href");
+  check(text.includes("Acceso continuo"), "authorization note shows continuous access");
+  const grantLinkEl = page.getByRole("link", { name: GRANT_LINK });
+  const grantLink = await grantLinkEl.getAttribute("href");
   check(/\/grants\/grt_[0-9a-z]+$/.test(grantLink ?? ""), `grant link ${grantLink}`);
+  check((await grantLinkEl.getAttribute("target")) === "_blank", "grant link opens in a new tab");
   check(!LICENCE_PATTERN.test(html), "page does not mention the driving licence");
 
-  // 5. Denied consent: back on the portal with a Spanish error and a retry.
-  await Promise.all([page.waitForURL(`${PORTAL_URL}/`), page.getByRole("button", { name: "quitar los datos del SIUBEN" }).click()]);
+  // 5. Re-read SIUBEN with the stored token while the grant is active.
+  await clickRefresh(page);
+  await shot(page, "portal-reverified");
+  const reverified = await page.innerText("body");
+  check(/Datos verificados nuevamente con el SIUBEN a las \d{1,2}:\d{2}/.test(reverified), "re-verified banner shown");
+  check((await page.content()).includes(EXPECTED_JEFA), `re-verified form still shows ${EXPECTED_JEFA}`);
+  check((await page.locator("tr[data-member]").count()) === EXPECTED_MEMBERS, "re-verified member rows");
+
+  // 6. Revoke in the console tab the grant link opens.
+  const [consoleTab] = await Promise.all([page.context().waitForEvent("page"), grantLinkEl.click()]);
+  await consoleTab.waitForLoadState("load");
+  await signInIfAsked(consoleTab);
+  const confirm = consoleTab.locator("input[name=confirm_revoke]");
+  await confirm.waitFor({ timeout: NAV_TIMEOUT_MS });
+  await shot(consoleTab, "console-grant");
+  await confirm.check();
+  const revokeForm = consoleTab.locator("form").filter({ has: confirm });
+  await Promise.all([
+    consoleTab.waitForURL(/[?&]revoked=yes/, { timeout: NAV_TIMEOUT_MS }),
+    revokeForm.locator("button[type=submit]").first().click(),
+  ]);
+  await consoleTab.waitForLoadState("load");
+  await shot(consoleTab, "console-revoked");
+  check((await consoleTab.innerText("body")).includes("Autorización revocada"), "console shows the revoked banner");
+  await consoleTab.close();
+
+  // 7. Back on the portal: the re-read is refused, the received copy stays.
+  await page.bringToFront();
+  await clickRefresh(page);
+  await shot(page, "portal-revoked");
+  const revokedText = await page.innerText("body");
+  check(revokedText.includes("El ciudadano revocó esta autorización"), "portal shows the revoked alert");
+  check(revokedText.includes("Revocada"), "authorization note marked Revocada");
+  check((await page.getByRole("button", { name: REFRESH_BUTTON }).count()) === 0, "refresh button removed");
+  check(await page.getByRole("button", { name: "Solicitar autorización nuevamente" }).isVisible(), "offers to request authorization again");
+  check((await page.content()).includes(EXPECTED_JEFA), `retained copy still shows ${EXPECTED_JEFA}`);
+
+  // 8. Denied consent (fresh portal session): back on the portal with a Spanish error and a retry.
+  page = await browser.newPage(CONTEXT_OPTIONS);
+  await page.goto(`${PORTAL_URL}/`);
   await clickPrefill(page);
   await signInIfAsked(page);
   await page.waitForURL(/\/consent/, { timeout: NAV_TIMEOUT_MS });

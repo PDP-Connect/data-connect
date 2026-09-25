@@ -72,14 +72,14 @@ export default async function GrantDetailPage({
           <>
             {sp.revoke_error ? (
               <div className="pdpp-caption mb-6 rounded-md border border-destructive/30 border-l-4 border-l-destructive/60 bg-destructive/5 px-4 py-2.5">
-                <span className="font-medium text-destructive">Revoke error:</span> <span>{sp.revoke_error}</span>
+                <span className="font-medium text-destructive">No se pudo revocar:</span> <span>{sp.revoke_error}</span>
               </div>
             ) : null}
 
             {sp.revoked === "yes" ? (
               <div className="pdpp-caption mb-6 rounded-md border border-emerald-500/30 border-l-4 border-l-emerald-500/60 bg-emerald-500/5 px-4 py-2.5">
-                <span className="font-medium text-emerald-700 dark:text-emerald-400">Grant revoked.</span>{" "}
-                <span>The client's tokens for this grant no longer read data.</span>
+                <span className="font-medium text-emerald-700 dark:text-emerald-400">Autorización revocada.</span>{" "}
+                <span>La aplicación ya no puede leer estos datos.</span>
               </div>
             ) : null}
 
@@ -95,17 +95,17 @@ export default async function GrantDetailPage({
             </div>
 
             {revoked ? null : (
-              <Section description="Revoking ends this client's access to the granted data." title="Revoke">
+              <Section description="Al revocarla, la aplicación deja de tener acceso a los datos autorizados." title="Revocar autorización">
                 <form action={revokeGrantAction} className="flex flex-wrap items-center gap-3">
                   <input name="grant_id" type="hidden" value={grantId} />
                   <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
                     <input name="confirm_revoke" type="checkbox" value="yes" />
                     <span>
-                      Confirm revoke of grant <code className="font-mono">{grantId}</code>.
+                      Confirmo que quiero revocar esta autorización (<code className="font-mono">{grantId}</code>).
                     </span>
                   </label>
                   <IcButton type="submit" variant="destructive">
-                    Revoke grant
+                    Revocar autorización
                   </IcButton>
                 </form>
               </Section>

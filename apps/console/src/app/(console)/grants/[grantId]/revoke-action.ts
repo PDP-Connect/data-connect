@@ -26,7 +26,7 @@ function errorMessage(err: unknown): string {
   if (err instanceof Error && err.message) {
     return err.message;
   }
-  return "Unexpected revoke action failure";
+  return "Error inesperado al revocar la autorización.";
 }
 
 export async function revokeGrantAction(formData: FormData): Promise<void> {
@@ -40,7 +40,7 @@ export async function revokeGrantAction(formData: FormData): Promise<void> {
 
   const confirm = formData.get("confirm_revoke");
   if (typeof confirm !== "string" || confirm !== "yes") {
-    redirect(detailHref(grantId, { revoke_error: "Confirmation required: tick the box before submitting." }));
+    redirect(detailHref(grantId, { revoke_error: "Marca la casilla de confirmación antes de revocar." }));
   }
 
   try {

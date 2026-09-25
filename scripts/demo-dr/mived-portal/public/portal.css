@@ -160,3 +160,5 @@ td.empty { text-align: center; color: var(--gob-gray); padding: 22px; }
   .logo-text small { display: none; }
   table { font-size: 13px; }
 }
+.auth-note .note-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.auth-note .revoked { color: var(--gob-error); font-weight: 600; }

@@ -4,6 +4,7 @@
 //
 //   renderSolicitud({ prefill: null, error })   -> "before" state (empty form)
 //   renderSolicitud({ prefill: {...} })         -> "after" state (SIUBEN data)
+//   renderSolicitud({ prefill, notice })        -> after a re-read: verified or revoked
 
 const SOURCE_TAG = '<span class="tag">SIUBEN</span>';
 const ACCESS_MODE_LABELS = { single_use: "Consulta única", continuous: "Acceso continuo" };
@@ -100,8 +101,12 @@ function errorAlert(error) {
   }
   return `<div class="alert-error" role="alert">
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#EE2A24" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16.5v.5"/></svg>
-  <div><p><b>${esc(error.title)}</b> ${esc(error.detail)}</p>
-  <form method="POST" action="/siuben/start" class="inline-form"><button class="btn btn-blue" type="submit" style="margin-top:10px">Intentar de nuevo</button></form></div>
+  <div><p><b>${esc(error.title)}</b> ${esc(error.detail)}</p>${
+    error.retry === false
+      ? ""
+      : `
+  <form method="POST" action="/siuben/start" class="inline-form"><button class="btn btn-blue" type="submit" style="margin-top:10px">Intentar de nuevo</button></form>`
+  }</div>
 </div>`;
 }
 
@@ -114,9 +119,30 @@ function successAlert(prefill) {
 </div>`;
 }
 
+// Re-read succeeded: the data were confirmed against SIUBEN just now.
+function verifiedAlert(notice) {
+  return `<div class="alert-ok" role="status">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2ECC71" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m8 12 3 3 5-6"/></svg>
+  <div><b>Datos verificados nuevamente con el SIUBEN a las ${esc(notice.time)}.</b></div>
+</div>`;
+}
+
+// Re-read refused (401/403): the citizen withdrew the grant; only the old copy remains.
+function revokedAlert(prefill) {
+  return `<div class="alert-error" role="alert">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#EE2A24" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16.5v.5"/></svg>
+  <div><p><b>El ciudadano revocó esta autorización.</b> MIVHED ya no puede consultar sus datos del SIUBEN. Se conserva solo la copia recibida el ${esc(prefill.receivedAt)}.</p>
+  <form method="POST" action="/siuben/start" class="inline-form"><button class="btn btn-blue" type="submit" style="margin-top:10px">Solicitar autorización nuevamente</button></form></div>
+</div>`;
+}
+
 function authNote(prefill, pdppOrigin) {
   const g = prefill.grant;
   const mode = ACCESS_MODE_LABELS[g.accessMode] ?? g.accessMode ?? "";
+  const status = g.revoked ? '<span class="revoked">Revocada</span>' : "Vigente";
+  const refresh = g.revoked
+    ? ""
+    : '<form method="POST" action="/siuben/refresh" class="inline-form"><button class="btn btn-outline-blue" type="submit">Volver a consultar el SIUBEN</button></form>';
   const grantUrl = `${pdppOrigin}/grants/${encodeURIComponent(g.id)}`;
   return `<aside class="auth-note" aria-label="Autorización">
   <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#003670" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Autorización</h3>
@@ -124,9 +150,13 @@ function authNote(prefill, pdppOrigin) {
     <dt>Identificador</dt><dd><code>${esc(g.id)}</code></dd>
     <dt>Propósito</dt><dd>${esc(g.purpose)}</dd>
     <dt>Tipo de acceso</dt><dd>${esc(mode)}</dd>
+    <dt>Estado</dt><dd>${status}</dd>
     <dt>Fuente</dt><dd>SIUBEN · clasificación del hogar y miembros del hogar</dd>
   </dl>
-  <a href="${esc(grantUrl)}" target="_blank" rel="noopener">Ver o revocar esta autorización</a>
+  <div class="note-actions">
+    ${refresh}
+    <a href="${esc(grantUrl)}" target="_blank" rel="noopener">Ver o revocar esta autorización</a>
+  </div>
 </aside>`;
 }
 
@@ -180,10 +210,24 @@ const FOOTER = `<footer>
   </div>
 </footer>`;
 
+// Banner above the pre-filled form: revoked > refresh error > re-verified > first read.
+function prefillAlert(prefill, notice, error) {
+  if (prefill.grant.revoked) {
+    return revokedAlert(prefill);
+  }
+  if (error) {
+    return errorAlert(error);
+  }
+  if (notice?.kind === "verified") {
+    return verifiedAlert(notice);
+  }
+  return successAlert(prefill);
+}
+
 // Full application page. `prefill` = { hogar, miembros, grant } or null.
-export function renderSolicitud({ prefill, error, pdppOrigin }) {
+export function renderSolicitud({ prefill, error, notice, pdppOrigin }) {
   const userName = prefill ? shortName(prefill.hogar?.nombre_jefe_hogar) : null;
-  const top = prefill ? `${successAlert(prefill)}\n${authNote(prefill, pdppOrigin)}` : `${errorAlert(error)}\n${PREFILL_PROMPT}`;
+  const top = prefill ? `${prefillAlert(prefill, notice, error)}\n${authNote(prefill, pdppOrigin)}` : `${errorAlert(error)}\n${PREFILL_PROMPT}`;
   const leftAction = prefill
     ? '<button class="btn btn-link" type="button">Agregar otro miembro</button>'
     : '<button class="btn btn-link" type="button">Llenar manualmente</button>';

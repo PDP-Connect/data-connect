@@ -13,8 +13,11 @@
 //                      token exchange ────────────────────▶ POST /oauth/token
 //                      read streams (Bearer) ─────────────▶ GET /v1/streams/*/records
 //                  ◀── 302 /solicitud  ("after" form, real records)
+//   POST /siuben/refresh ─▶ re-read streams (stored Bearer) ─▶ GET /v1/streams/*/records
+//                  ◀── 302 /solicitud  (re-verified, or "revoked" if 401/403)
 //
-// Env: PORT (8080), PORTAL_ORIGIN (public origin of this app), PDPP_ORIGIN.
+// Env: PORT (8080), PORTAL_ORIGIN (public origin of this app), PDPP_ORIGIN,
+//      ACCESS_MODE ("continuous" | "single_use", default "continuous").
 // State is in memory only: sessions keyed by an HttpOnly cookie.
 
 import { createHash, randomBytes } from "node:crypto";
@@ -35,8 +38,13 @@ const PENDING_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_PAGES = 20;
 
+const ACCESS_MODE = process.env.ACCESS_MODE ?? "continuous";
+const TIME_ZONE = "America/Santo_Domingo";
+
 const HTTP_OK = 200;
 const HTTP_FOUND = 302;
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const HTTP_METHOD_NOT_ALLOWED = 405;
 const HTTP_SERVER_ERROR = 500;
@@ -52,7 +60,7 @@ const AUTHORIZATION_DETAILS = [
     source: { id: SIUBEN_SOURCE_ID, kind: "connector" },
     purpose_code: "https://mivhed.gob.do/purpose/vivienda-elegibilidad",
     purpose_description: "Evaluar la elegibilidad del hogar para el programa de vivienda",
-    access_mode: "single_use",
+    access_mode: ACCESS_MODE,
     streams: [
       {
         name: STREAM_HOGAR,
@@ -88,7 +96,20 @@ const ERRORS = {
     title: "No pudimos obtener tus datos del SIUBEN.",
     detail: "Ocurrió un problema al comunicarnos con Cuenta Única. Intenta de nuevo en unos minutos.",
   },
+  refresh: {
+    title: "No pudimos volver a consultar el SIUBEN.",
+    detail: "Se muestran los datos recibidos anteriormente. Intenta de nuevo en unos minutos.",
+    retry: false,
+  },
 };
+
+// Santo Domingo wall clock: TIME -> "14:05", DATE_TIME -> "25/09/2026, 14:05".
+const CLOCK = { DATE_TIME: "date_time", TIME: "time" };
+function formatDateTime(date, clock) {
+  const opts = { hour: "2-digit", hourCycle: "h23", minute: "2-digit", timeZone: TIME_ZONE };
+  const dateOpts = clock === CLOCK.DATE_TIME ? { day: "2-digit", month: "2-digit", year: "numeric" } : {};
+  return new Intl.DateTimeFormat("es-DO", { ...opts, ...dateOpts }).format(date);
+}
 
 const CSS = readFileSync(new URL("./public/portal.css", import.meta.url));
 
@@ -127,7 +148,7 @@ function getSession(req, res) {
 
   sweepSessions();
   const newId = randomBytes(24).toString("base64url");
-  const session = { error: null, pending: null, prefill: null, touchedAt: Date.now() };
+  const session = { access: null, error: null, notice: null, pending: null, prefill: null, touchedAt: Date.now() };
   sessions.set(newId, session);
   const secure = SECURE_COOKIE ? "; Secure" : "";
   res.setHeader("set-cookie", `${SESSION_COOKIE}=${newId}; Path=/; HttpOnly; SameSite=Lax${secure}`);
@@ -213,14 +234,24 @@ const byId = (a, b) => String(a.id).localeCompare(String(b.id), "es", { numeric:
 // Reads both SIUBEN streams and shapes them for the form.
 async function loadPrefill(tokenResponse) {
   const token = tokenResponse.access_token;
-  const [hogares, miembros] = await Promise.all([readStream(token, STREAM_HOGAR), readStream(token, STREAM_MIEMBROS)]);
+  const { hogar, miembros } = await readSiuben(token);
   const detail = tokenResponse.authorization_details?.[0] ?? AUTHORIZATION_DETAILS[0];
   return {
     grant: {
       accessMode: detail.access_mode,
       id: tokenResponse.grant_id,
       purpose: detail.purpose_description,
+      revoked: false,
     },
+    hogar,
+    miembros,
+    receivedAt: formatDateTime(new Date(), CLOCK.DATE_TIME),
+  };
+}
+
+async function readSiuben(token) {
+  const [hogares, miembros] = await Promise.all([readStream(token, STREAM_HOGAR), readStream(token, STREAM_MIEMBROS)]);
+  return {
     hogar: hogares[0] ?? null,
     miembros: miembros.sort(byId),
   };
@@ -251,6 +282,11 @@ async function startSiuben(res, session) {
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const state = randomBytes(16).toString("base64url");
   session.pending = { clientId, createdAt: Date.now(), state, verifier };
+
+  // A new request replaces any earlier (e.g. revoked) copy, so a denial lands
+  // on the empty form with its message instead of the old /solicitud.
+  session.access = null;
+  session.prefill = null;
 
   const url = new URL(`${PDPP_ORIGIN}/oauth/authorize`);
   url.search = new URLSearchParams({
@@ -286,6 +322,7 @@ async function callback(url, res, session) {
   try {
     const tokens = await exchangeCode(pending.clientId, url.searchParams.get("code") ?? "", pending.verifier);
     session.prefill = await loadPrefill(tokens);
+    session.access = { grantId: tokens.grant_id, token: tokens.access_token };
     console.log(`grant ${tokens.grant_id}: read ${session.prefill.miembros.length} miembros`);
     redirect(res, "/solicitud");
   } catch (err) {
@@ -299,11 +336,40 @@ async function callback(url, res, session) {
   }
 }
 
+// Re-read SIUBEN with the stored token. 401/403 means the grant is gone
+// (e.g. grant_revoked): keep the copy already received, mark it revoked.
+async function refreshSiuben(res, session) {
+  const prefill = session.prefill;
+  if (!prefill || !session.access) {
+    return redirect(res, "/");
+  }
+
+  try {
+    Object.assign(prefill, await readSiuben(session.access.token));
+    prefill.receivedAt = formatDateTime(new Date(), CLOCK.DATE_TIME);
+    session.notice = { kind: "verified", time: formatDateTime(new Date(), CLOCK.TIME) };
+    console.log(`grant ${session.access.grantId}: re-read ${prefill.miembros.length} miembros`);
+  } catch (err) {
+    console.error("refresh failed:", err.message);
+    if (err.status !== HTTP_UNAUTHORIZED && err.status !== HTTP_FORBIDDEN) {
+      session.error = ERRORS.refresh;
+      return redirect(res, "/solicitud");
+    }
+    prefill.grant.revoked = true;
+    session.access = null;
+    session.notice = { kind: "revoked" };
+  }
+  redirect(res, "/solicitud");
+}
+
 function solicitud(res, session) {
   if (!session.prefill) {
     return redirect(res, "/");
   }
-  sendHtml(res, renderSolicitud({ pdppOrigin: PDPP_ORIGIN, prefill: session.prefill }));
+  const { error, notice } = session;
+  session.error = null;
+  session.notice = null;
+  sendHtml(res, renderSolicitud({ error, notice, pdppOrigin: PDPP_ORIGIN, prefill: session.prefill }));
 }
 
 async function route(req, res) {
@@ -331,12 +397,15 @@ async function route(req, res) {
       return callback(url, res, session);
     case "GET /solicitud":
       return solicitud(res, session);
+    case "POST /siuben/refresh":
+      return refreshSiuben(res, session);
     case "POST /siuben/clear":
+      session.access = null;
       session.prefill = null;
       return redirect(res, "/");
   }
 
-  const known = ["/", "/siuben/start", "/callback", "/solicitud", "/siuben/clear"].includes(url.pathname);
+  const known = ["/", "/siuben/start", "/callback", "/solicitud", "/siuben/refresh", "/siuben/clear"].includes(url.pathname);
   res.writeHead(known ? HTTP_METHOD_NOT_ALLOWED : HTTP_NOT_FOUND, { "content-type": "text/plain; charset=utf-8" });
   res.end(known ? "Método no permitido" : "Página no encontrada");
 }
