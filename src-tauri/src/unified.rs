@@ -5296,7 +5296,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     fn rust_declaration_starts(source: &str, declaration: &str) -> Vec<usize> {
         let mut starts = Vec::new();
         let mut index = 0;
-        let mut brace_depth = 0;
+        let mut brace_depth: usize = 0;
         while index < source.len() {
             if brace_depth == 0
                 && starts_line_declaration(source, index)
