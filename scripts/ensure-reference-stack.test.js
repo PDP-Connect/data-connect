@@ -1,7 +1,17 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -9,7 +19,9 @@ import {
   buildManifest,
   installStagedDependencies,
   launchScript,
+  manifestTarget,
   pruneForeignPlatformPrebuilds,
+  referenceGenerationId,
   referenceStackRoot,
   sourceInputHash,
   stageReferenceStack,
@@ -63,6 +75,75 @@ function fixtureRoot() {
   return root
 }
 
+function tauriHookFixture() {
+  const root = fixtureRoot()
+  const target = "x86_64-unknown-linux-gnu"
+  const binaryDirectory = join(root, "src-tauri", "binaries")
+  mkdirSync(binaryDirectory, { recursive: true })
+  const nodeBinary = join(
+    binaryDirectory,
+    `pdpp-node-${target}`
+  )
+  writeFileSync(
+    nodeBinary,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    { mode: 0o755 }
+  )
+  chmodSync(nodeBinary, 0o755)
+  writeFileSync(
+    join(binaryDirectory, "pdpp-node-aarch64-apple-darwin"),
+    "not selected by the Tauri target triple\n"
+  )
+
+  writeFileSync(
+    join(root, "package.json"),
+    JSON.stringify({ devDependencies: { tsx: "4.0.0" } })
+  )
+  writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+  writeFileSync(
+    join(root, "reference-implementation", "package.json"),
+    JSON.stringify({ dependencies: {} })
+  )
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true })
+  writeFileSync(join(root, "node_modules", ".bin", "tsx"), "")
+
+  for (const [name, path] of [
+    ["@pdpp/collector-runtime", "packages/collector-runtime"],
+    ["@pdpp/connector-protocol", "packages/connector-protocol"],
+    ["@pdpp/display", "reference-implementation/vendor/display"],
+    ["@pdpp/cli", "reference-implementation/vendor/cli"],
+    ["@pdpp/read-core", "reference-implementation/vendor/read-core"],
+    ["@pdpp/mcp-server", "reference-implementation/vendor/mcp-server"],
+  ]) {
+    const packageRoot = join(root, path)
+    mkdirSync(packageRoot, { recursive: true })
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name, version: "1.0.0" })
+    )
+  }
+  for (const path of [
+    "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz",
+    "reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz",
+  ]) {
+    writeFileSync(join(root, path), "fixture tarball")
+  }
+
+  const fakeNpm = join(root, "fake-npm.mjs")
+  const nativeExtension =
+    process.platform === "darwin"
+      ? "dylib"
+      : process.platform === "win32"
+        ? "dll"
+        : "so"
+  writeFileSync(
+    fakeNpm,
+    `import { mkdirSync, writeFileSync } from "node:fs"\nimport { join } from "node:path"\n\nif (process.argv[2] === "install") {\n  const files = [\n    ["node_modules/tsx/package.json", "{}\\n"],\n    ["node_modules/patchright/package.json", "{}\\n"],\n    ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "sqlite\\n"],\n    ["node_modules/sqlite-vec/build/Release/vec0.${nativeExtension}", "vec\\n"],\n  ]\n  for (const [path, content] of files) {\n    const filePath = join(process.cwd(), path)\n    mkdirSync(join(filePath, ".."), { recursive: true })\n    writeFileSync(filePath, content)\n  }\n}\n`
+  )
+
+  return { fakeNpm, nodeBinary, root, target }
+}
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0))
     rmSync(root, { force: true, recursive: true })
@@ -79,6 +160,43 @@ describe("reference stack staging contract", () => {
     expect(() =>
       referenceStackRoot("/workspace/data-connect", "../release")
     ).toThrow(/invalid Tauri profile/)
+  })
+
+  it("uses Tauri's target triple in build hooks", () => {
+    expect(
+      manifestTarget(undefined, {
+        TAURI_ENV_PLATFORM: "linux",
+        TAURI_ENV_ARCH: "x86_64",
+        TAURI_ENV_TARGET_TRIPLE: "x86_64-unknown-linux-gnu",
+      })
+    ).toBe("x86_64-unknown-linux-gnu")
+    expect(
+      manifestTarget("explicit-target", {
+        TAURI_ENV_TARGET_TRIPLE: "x86_64-unknown-linux-gnu",
+      })
+    ).toBe("explicit-target")
+  })
+
+  it("keys immutable reference generations by the complete manifest", () => {
+    const manifest = {
+      profile: "release",
+      target: "x86_64-unknown-linux-gnu",
+      node: { abi: "127", version: "24.21.0" },
+      inputs: { sha256: "same-source" },
+      files: [{ path: "native.node", sha256: "linux-bytes" }],
+    }
+    expect(referenceGenerationId(manifest)).toBe(
+      referenceGenerationId({ ...manifest })
+    )
+    expect(
+      referenceGenerationId({ ...manifest, target: "aarch64-apple-darwin" })
+    ).not.toBe(referenceGenerationId(manifest))
+    expect(
+      referenceGenerationId({
+        ...manifest,
+        files: [{ path: "native.node", sha256: "different-bytes" }],
+      })
+    ).not.toBe(referenceGenerationId(manifest))
   })
 
   it("requires the verifier root to use the same profile-scoped contract", () => {
@@ -244,6 +362,51 @@ describe("reference stack staging contract", () => {
     expect(result).toEqual({ manifest, reused: true, root })
   })
 
+  it.skipIf(process.platform !== "linux")(
+    "reuses the explicit release stage from Tauri's target-triple hook",
+    () => {
+      const { fakeNpm, nodeBinary, root, target } = tauriHookFixture()
+      const environmentKeys = [
+        "PDPP_NODE_BINARY",
+        "TARGET",
+        "TAURI_ENV_TARGET",
+        "TAURI_ENV_TARGET_TRIPLE",
+        "npm_execpath",
+      ]
+      const previousEnvironment = Object.fromEntries(
+        environmentKeys.map(key => [key, process.env[key]])
+      )
+      try {
+        for (const key of environmentKeys) delete process.env[key]
+        process.env.npm_execpath = fakeNpm
+        const explicitStage = stageReferenceStack({
+          projectRoot: root,
+          nodeBinary,
+          profile: "release",
+          target,
+        })
+        process.env.TAURI_ENV_TARGET_TRIPLE = target
+        const hookStage = stageReferenceStack({
+          projectRoot: root,
+          profile: "release",
+        })
+
+        expect(explicitStage.reused).toBe(false)
+        expect(hookStage).toEqual({
+          manifest: explicitStage.manifest,
+          reused: true,
+          root: explicitStage.root,
+        })
+      } finally {
+        for (const key of environmentKeys) {
+          const value = previousEnvironment[key]
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
+    }
+  )
+
   it("fails closed, without deleting anything, on a stage that matches by metadata but is missing a required file", () => {
     // A corrupt/incomplete stage can still match on metadata (interrupted
     // publish, partial disk write, external deletion of one file). Cache
@@ -312,13 +475,9 @@ describe("reference stack staging contract", () => {
     // Both runs call buildWorkspacePackages, which rebuilds dist/ (including
     // dist/.tsbuildinfo) for packages/collector-runtime, packages/connector-protocol,
     // reference-implementation/vendor/read-core, and reference-implementation/vendor/mcp-server.
-    // Those dist/ files used to be walked as "source" inputs, so the second
-    // run's rebuild changed inputs.sha256 even though nothing under src/
-    // changed, which sent staging down the "not reused" path and made it
-    // recompute a new ri-<hash> generation directory that collided with the
-    // one the first run had just installed -- tripping "Existing immutable
-    // stage ... does not match this build; refusing to replace a tree a
-    // process may be using" in installStageGeneration.
+    // Those dist/ files are not behavioral source inputs. The build hook
+    // must also use the same target triple as the explicit staging step;
+    // Tauri provides it as TAURI_ENV_TARGET_TRIPLE.
     const projectRoot = process.cwd()
     const distDir = join(projectRoot, "packages", "collector-runtime", "dist")
     const tsbuildinfoPath = join(distDir, ".tsbuildinfo")

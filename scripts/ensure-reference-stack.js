@@ -195,13 +195,23 @@ export function sourceInputHash(projectRoot) {
   return hash.digest("hex")
 }
 
-function manifestTarget(target) {
+function targetFromEnvironment(env = process.env) {
+  return env.TAURI_ENV_TARGET_TRIPLE || env.TAURI_ENV_TARGET || env.TARGET
+}
+
+export function manifestTarget(target, env = process.env) {
   return (
     target ||
-    process.env.TAURI_ENV_TARGET ||
-    process.env.TARGET ||
+    targetFromEnvironment(env) ||
     `${process.platform}-${process.arch}`
   )
+}
+
+export function referenceGenerationId(manifest) {
+  return createHash("sha256")
+    .update(JSON.stringify(manifest))
+    .digest("hex")
+    .slice(0, 12)
 }
 
 function manifestProfile(profile) {
@@ -272,7 +282,7 @@ function defaultNodeBinary(projectRoot) {
   const candidates = nodeSidecarCandidates(projectRoot)
   if (candidates.length === 1) return candidates[0]
   if (candidates.length > 1) {
-    const target = process.env.TAURI_ENV_TARGET || process.env.TARGET
+    const target = targetFromEnvironment()
     const matching = candidates.find(
       candidate => target && candidate.includes(target)
     )
@@ -726,9 +736,13 @@ export function stageReferenceStack({
     // Reuse an existing directory only after its manifest and file hashes
     // match this candidate; never replace a possibly live generation.
     mkdirSync(parent, { recursive: true })
+    // Source identity alone is not a generation identity: native modules,
+    // Node ABI, profile, and target are part of the manifest too. Name the
+    // immutable directory from the complete artifact description so builds
+    // with identical source but different outputs never collide.
     const generationRoot = join(
       parent,
-      `ri-${manifest.inputs.sha256.slice(0, 12)}`
+      `ri-${referenceGenerationId(manifest)}`
     )
     const generationCandidate = join(parent, `.ri-generation-${process.pid}`)
     rmSync(generationCandidate, { force: true, recursive: true })
