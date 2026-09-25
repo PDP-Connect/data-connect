@@ -84,7 +84,7 @@ if [[ "$IMAGE_BUILD" != "1" ]]; then
   docker build --target core --build-arg "PDPP_REFERENCE_REVISION=$revision" --tag "$IMAGE" "$REPOSITORY_ROOT"
 fi
 
-docker network create --subnet "$NETWORK_SUBNET" "$NETWORK" >/dev/null
+docker network create --ipv6=false --subnet "$NETWORK_SUBNET" "$NETWORK" >/dev/null || { echo "docker-core-demo-smoke: cannot create $NETWORK_SUBNET; remove a leftover pdpp-core-demo-*-network or set PDPP_CORE_SMOKE_SUBNET" >&2; exit 1; }
 docker volume create "$VOLUME" >/dev/null
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TEMP_ROOT/tunnel.key" -out "$TEMP_ROOT/tunnel.crt" -days 1 -subj "/CN=$TUNNEL_HOST" -addext "subjectAltName=DNS:$TUNNEL_HOST,DNS:$CIMD_HOST" >/dev/null 2>&1
 cat >"$TEMP_ROOT/nginx.conf" <<'NGINX'

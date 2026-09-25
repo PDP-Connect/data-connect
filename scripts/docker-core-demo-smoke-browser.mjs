@@ -139,7 +139,7 @@ try {
     "manual-upload route must render WhatsApp export instructions"
   );
 
-  // The CIMD document is an external, public test fixture on this branch. This
+  // The smoke's TLS ingress serves the CIMD document from this checkout. This
   // preserves Core's real URL fetch and SSRF checks while the private key stays
   // a committed, non-production test vector.
   const verifier = randomBytes(32).toString("base64url");

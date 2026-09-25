@@ -15,7 +15,7 @@
  * 1. The destination address is a global-unicast address, not merely "not on
  *    a small deny list." A deny list is inherently incomplete: IANA carves
  *    out many special-purpose ranges (benchmarking 198.18.0.0/15, the three
- *    TEST-NET ranges, AS112, AMT, and their IPv6 equivalents, plus IPv6-only
+ *    TEST-NET ranges, and their IPv6 equivalents, plus IPv6-only
  *    ranges like local-use NAT64 translation and SRv6 SIDs) that are not
  *    globally reachable but also are not RFC 1918 private space, loopback,
  *    or link-local — a hand-maintained "block these known-bad ranges" list
