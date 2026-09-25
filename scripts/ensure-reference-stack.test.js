@@ -20,6 +20,7 @@ import {
   installStagedDependencies,
   launchScript,
   manifestTarget,
+  pruneForeignLibcPackages,
   pruneForeignPlatformPrebuilds,
   referenceGenerationId,
   referenceStackRoot,
@@ -253,6 +254,28 @@ describe("reference stack staging contract", () => {
     expect(verifyReferenceStackRoot(first)).toEqual(firstManifest)
   })
 
+  it("records the Tauri target triple when beforeBuildCommand omits --target", () => {
+    const root = fixtureRoot()
+    writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
+    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    const previous = process.env.TAURI_ENV_TARGET_TRIPLE
+    process.env.TAURI_ENV_TARGET_TRIPLE = "x86_64-unknown-linux-gnu"
+    try {
+      const manifest = buildManifest({
+        nodeBinary: process.execPath,
+        projectRoot: root,
+        stageRoot: root,
+        profile: "release",
+      })
+      // CI stages with --target first; Tauri's beforeBuildCommand must reuse
+      // that stage rather than rebuild under a different target label.
+      expect(manifest.target).toBe("x86_64-unknown-linux-gnu")
+    } finally {
+      if (previous === undefined) delete process.env.TAURI_ENV_TARGET_TRIPLE
+      else process.env.TAURI_ENV_TARGET_TRIPLE = previous
+    }
+  })
+
   it("rejects a changed staged file", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
@@ -373,6 +396,28 @@ describe("reference stack staging contract", () => {
         join(root, "node_modules", "better-sqlite3-multiple-ciphers")
       )
     ).toBe(false)
+  })
+  it("removes optional packages built for a libc the target does not use", () => {
+    const root = fixtureRoot()
+    const packages = {
+      "@img/sharp-linuxmusl-x64": ["musl"],
+      "@img/sharp-linux-x64": ["glibc"],
+      "canvas-linux-x64-musl": ["musl"],
+    }
+    for (const [name, libc] of Object.entries(packages)) {
+      mkdirSync(join(root, "node_modules", name), { recursive: true })
+      writeFileSync(
+        join(root, "node_modules", name, "package.json"),
+        JSON.stringify({ name, os: ["linux"], libc })
+      )
+    }
+
+    pruneForeignLibcPackages(root, "glibc")
+
+    expect(existsSync(join(root, "node_modules", "@img", "sharp-linuxmusl-x64"))).toBe(false)
+    expect(existsSync(join(root, "node_modules", "canvas-linux-x64-musl"))).toBe(false)
+    expect(existsSync(join(root, "node_modules", "@img", "sharp-linux-x64"))).toBe(true)
+    expect(existsSync(join(root, "node_modules", "tsx"))).toBe(true)
   })
   it("the staging module resolves its own helpers at import time", async () => {
     // Regression: an import of ./stage-generations.js was once inserted
