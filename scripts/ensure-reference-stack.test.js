@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
+  installStagedDependencies,
   launchScript,
   pruneForeignPlatformPrebuilds,
   referenceStackRoot,
@@ -329,5 +330,69 @@ describe("reference stack staging contract", () => {
     expect(verifyReferenceStackRoot(stage)).toEqual(manifest)
     writeFileSync(join(stage, "node_modules", "tsx", "package.json"), '{"changed":true}\n')
     expect(() => verifyReferenceStackRoot(stage)).toThrow(/manifest file hashes/)
+  })
+
+  it("pins the staged install to the project's resolved lockfile instead of re-resolving ranges", () => {
+    // Regression for F4: staging used to run `npm install --no-package-lock`
+    // against a synthetic package.json, so a transitive dependency could
+    // resolve to a newer version at build time without the cached stage's
+    // source-input hash (which never reads package-lock.json contents for
+    // resolution purposes here) reflecting that drift. The fix must (a)
+    // carry the project's exact resolved lock into the stage, and (b) stop
+    // telling npm to ignore it.
+    const project = mkdtempSync(join(tmpdir(), "reference-stack-project-"))
+    temporaryRoots.push(project)
+    mkdirSync(join(project, "reference-implementation"), { recursive: true })
+    writeFileSync(
+      join(project, "reference-implementation", "package.json"),
+      JSON.stringify({ dependencies: { tsx: "^4.23.13" } })
+    )
+    writeFileSync(
+      join(project, "package.json"),
+      JSON.stringify({ devDependencies: { tsx: "^4.23.13" } })
+    )
+    const resolvedLock = JSON.stringify({
+      name: "pdpp-reference-implementation",
+      lockfileVersion: 3,
+      packages: {
+        "node_modules/tsx": { version: "4.23.13", resolved: "https://registry.npmjs.org/tsx/-/tsx-4.23.13.tgz" },
+      },
+    })
+    writeFileSync(join(project, "package-lock.json"), resolvedLock)
+
+    const stage = mkdtempSync(join(tmpdir(), "reference-stack-stage-"))
+    temporaryRoots.push(stage)
+
+    const npmRecorderDir = mkdtempSync(join(tmpdir(), "reference-stack-npm-"))
+    temporaryRoots.push(npmRecorderDir)
+    const invocationsPath = join(npmRecorderDir, "invocations.json")
+    writeFileSync(invocationsPath, "[]")
+    const npmRecorderPath = join(npmRecorderDir, "npm-recorder.cjs")
+    writeFileSync(
+      npmRecorderPath,
+      `const fs = require("node:fs")
+const invocations = JSON.parse(fs.readFileSync(${JSON.stringify(invocationsPath)}, "utf8"))
+invocations.push(process.argv.slice(2))
+fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations))
+`
+    )
+
+    const previousNpmExecpath = process.env.npm_execpath
+    process.env.npm_execpath = npmRecorderPath
+    try {
+      installStagedDependencies(project, stage, process.execPath)
+    } finally {
+      if (previousNpmExecpath === undefined) delete process.env.npm_execpath
+      else process.env.npm_execpath = previousNpmExecpath
+    }
+
+    expect(readFileSync(join(stage, "package-lock.json"), "utf8")).toBe(
+      resolvedLock
+    )
+
+    const invocations = JSON.parse(readFileSync(invocationsPath, "utf8"))
+    const installArgs = invocations.find(args => args[0] === "install")
+    expect(installArgs).toBeDefined()
+    expect(installArgs).not.toContain("--no-package-lock")
   })
 })

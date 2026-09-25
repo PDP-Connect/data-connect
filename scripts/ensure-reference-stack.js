@@ -411,10 +411,18 @@ export function pruneForeignPlatformPrebuilds(stageRoot) {
   }
 }
 
-function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
+export function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
   writeFileSync(
     join(stageRoot, "package.json"),
     `${JSON.stringify(createStagedPackageJson(projectRoot, stageRoot), null, 2)}\n`
+  )
+  // Pin the stage to the workspace's already-resolved versions instead of
+  // letting npm re-resolve semver ranges against the live registry: the
+  // cache's source-input hash does not otherwise change when a transitive
+  // dependency publishes a new version matching an existing range.
+  copyFileSync(
+    join(projectRoot, "package-lock.json"),
+    join(stageRoot, "package-lock.json")
   )
   runNpm(
     nodeBinary,
@@ -423,7 +431,6 @@ function installStagedDependencies(projectRoot, stageRoot, nodeBinary) {
       "--ignore-scripts",
       "--omit=dev",
       "--install-links",
-      "--no-package-lock",
       "--no-audit",
       "--no-fund",
     ],
