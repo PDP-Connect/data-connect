@@ -5252,7 +5252,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     canonicalConnectorKey,
     encodeHostedMcpSelection,
     encodeHostedMcpStreamSelection,
-    getConnectorManifest,
+    getConnectorManifest: async (connectorId: string) => {
+      const registered = await getConnectorManifest(connectorId);
+      if (registered) {
+        return registered;
+      }
+      return (
+        (await opts.connectorInstallService?.resolveManifestFromCatalog?.(connectorId)) ?? null
+      );
+    },
     hostedMcpSourceKey,
     isInternalConnectorId,
     listActiveBindingsForGrant,
@@ -6658,10 +6666,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) =>
-        registerConnector(manifest, {
-          skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
-        }),
+      registerManifest: (manifest) => registerConnector(manifest),
     });
 
   {
@@ -8232,10 +8237,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) =>
-          registerConnector(manifest, {
-            skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
-          }),
+        registerManifest: (manifest) => registerConnector(manifest),
       }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
@@ -9114,10 +9116,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) =>
-        registerConnector(manifest, {
-          skipManifestPersistence: !process.env.PDPP_CONNECTOR_PRELOAD_DIR,
-        }),
+      registerManifest: (manifest) => registerConnector(manifest),
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,

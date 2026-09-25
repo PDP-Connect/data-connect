@@ -128,5 +128,6 @@ docker exec \
   --env "PDPP_CORE_SMOKE_ORIGIN=$ORIGIN" \
   --env "PDPP_CORE_SMOKE_SETUP_TOKEN=$setup_token" \
   --env "PDPP_CORE_SMOKE_OWNER_PASSWORD=$OWNER_PASSWORD" \
+  --env PDPP_DATA_DIR=/var/lib/pdpp \
   --workdir /app \
   "$CORE_CONTAINER" node --import tsx scripts/docker-core-demo-smoke-browser.mjs

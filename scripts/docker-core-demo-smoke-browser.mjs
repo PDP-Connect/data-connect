@@ -5,6 +5,9 @@ import assert from "node:assert/strict";
 import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { chromium } from "patchright";
+import { createConnectorInstallStore, inspectActiveConnector } from "../reference-implementation/server/connector-install/index.ts";
+import { initDb } from "../reference-implementation/server/db.ts";
+import { createSqliteConnectorInstanceStore } from "../reference-implementation/server/stores/connector-instance-store.ts";
 
 const origin = requiredEnv("PDPP_CORE_SMOKE_ORIGIN");
 const setupToken = requiredEnv("PDPP_CORE_SMOKE_SETUP_TOKEN");
@@ -99,6 +102,32 @@ try {
     await installRow.getByTestId("connector-package-status").filter({ hasText: /Installed|Active/i }).waitFor({ state: "visible" });
   }
 
+  // Installing a connector package does not create an owner connection. Seed
+  // the same disposable active-instance fixture used by hosted-mcp-oauth.test
+  // so the real consent flow has a source with eligible streams to authorize.
+  initDb(process.env.PDPP_DB_PATH || "/var/lib/pdpp/pdpp.sqlite");
+  const connectorId = "claude-code";
+  const installed = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+  assert.equal(
+    installed.status,
+    "active",
+    `${connectorId} must have a verified active install before OAuth; status=${installed.status}; reason=${"reason" in installed ? installed.reason : "none"}`
+  );
+  const connectorInstanceId = `cin_hosted_${connectorId}`;
+  const now = new Date().toISOString();
+  await createSqliteConnectorInstanceStore().upsert({
+    connectorId,
+    connectorInstanceId,
+    createdAt: now,
+    displayName: `${connectorId} Docker smoke fixture`,
+    ownerSubjectId: "owner_local",
+    sourceBinding: { fixture: connectorInstanceId },
+    sourceBindingKey: connectorInstanceId,
+    sourceKind: "account",
+    status: "active",
+    updatedAt: now,
+  });
+
   const documentIdAfterInstalls = await page.evaluate(() => window.__coreSmokeDocumentId);
   assert.equal(documentIdAfterInstalls, documentId, "/sources/add must remain on the loaded app document after installs");
 
@@ -123,7 +152,6 @@ try {
   authorize.searchParams.set("state", state);
   authorize.searchParams.set("code_challenge", pkceChallenge(verifier));
   authorize.searchParams.set("code_challenge_method", "S256");
-  authorize.searchParams.set("connector_id", "claude-code");
 
   await page.route(`${redirectUri}**`, async (route) =>
     route.fulfill({ status: 200, contentType: "text/plain", body: "OAuth callback captured" })
@@ -134,8 +162,9 @@ try {
     200,
     `OAuth request must reach owner consent; body=${(await page.locator("body").innerText()).slice(0, 500)}`
   );
-  await page.locator('form[action="/consent/approve"]').waitFor({ state: "visible" });
-  await page.locator('form[action="/consent/approve"] button[type="submit"]').first().click();
+  await page.getByRole("heading", { name: /wants to read your data/ }).waitFor({ state: "visible" });
+  await page.getByLabel("Share data from Claude Code").check();
+  await page.getByRole("button", { name: "Allow access", exact: true }).click();
   await page.waitForURL(`${redirectUri}**`, { timeout: 45_000 });
   const callback = new URL(page.url());
   assert.equal(callback.searchParams.get("state"), state, "consent callback must preserve state");
