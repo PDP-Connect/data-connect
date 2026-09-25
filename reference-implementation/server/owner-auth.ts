@@ -174,6 +174,8 @@ export interface OwnerAuthPlaceholderOptions {
   password?: string | null;
   passwordVerifier?: OwnerPasswordVerifier | null;
   providerName?: string;
+  /** Resolves a client_id to its display name for the sign-in page (injected; avoids importing the AS). */
+  clientNameLookup?: ClientNameLookup | null;
   sameSite?: OwnerSessionSameSite;
   sessionTtlSeconds?: number;
   subjectId?: string | null;
@@ -277,7 +279,7 @@ const ARROW_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" 
  * Name of the app the owner continues to, from the authorize URL's client_id.
  * Best effort: any lookup failure falls back to generic copy.
  */
-async function resolveLoginClientName(returnTo: string): Promise<string | null> {
+async function resolveLoginClientName(returnTo: string, lookup: ClientNameLookup | null): Promise<string | null> {
   let url: URL;
   try {
     url = new URL(returnTo, "http://localhost");
@@ -285,14 +287,11 @@ async function resolveLoginClientName(returnTo: string): Promise<string | null> 
     return null;
   }
   const clientId = url.pathname === AUTHORIZE_PATH ? url.searchParams.get("client_id") : null;
-  if (!clientId) {
+  if (!(clientId && lookup)) {
     return null;
   }
   try {
-    // Lazy import: the client store belongs to the AS module, loaded by then.
-    const { getRegisteredClient } = await import("./auth.ts");
-    const name = (await getRegisteredClient(clientId))?.metadata?.client_name;
-    return typeof name === "string" && name.trim() ? name.trim() : null;
+    return await lookup(clientId);
   } catch {
     return null;
   }
@@ -635,7 +634,10 @@ function labelOwnerSession(userAgent: string | null): string {
   return platform ? `${browser} on ${platform}` : browser;
 }
 
+export type ClientNameLookup = (clientId: string) => Promise<string | null>;
+
 interface OwnerAuthRouteContext {
+  readonly clientNameLookup: ClientNameLookup | null;
   readonly csrfPairValid: (req: AuthRequest) => boolean;
   readonly enabled: boolean;
   readonly ensureCsrfToken: (req: AuthRequest, res: AuthResponse) => string;
@@ -825,6 +827,7 @@ function replyLogoutCsrfFailure(req: AuthRequest, res: AuthResponse, providerNam
 
 async function sendOwnerLoginPage(
   res: AuthResponse,
+  clientNameLookup: ClientNameLookup | null,
   providerName: string,
   csrfToken: string,
   returnTo: string,
@@ -832,7 +835,7 @@ async function sendOwnerLoginPage(
   error: string | null,
   themeChoice?: string
 ): Promise<void> {
-  const clientName = await resolveLoginClientName(returnTo);
+  const clientName = await resolveLoginClientName(returnTo, clientNameLookup);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.status(status).send(
     renderLoginPage({
@@ -864,7 +867,7 @@ async function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context:
   const currentSession = await context.session.readSession(req);
   if (!currentSession) {
     const csrfToken = context.ensureCsrfToken(req, res);
-    const clientName = await resolveLoginClientName(returnTo);
+    const clientName = await resolveLoginClientName(returnTo, context.clientNameLookup);
     res.status(200).send(
       renderLoginPage({
         clientName,
@@ -918,6 +921,7 @@ async function handleOwnerLoginPost(
     const csrfToken = context.ensureCsrfToken(req, res);
     await sendOwnerLoginPage(
       res,
+      context.clientNameLookup,
       context.providerName,
       csrfToken,
       returnTo,
@@ -945,6 +949,7 @@ async function handleOwnerLoginPost(
     const csrfToken = context.ensureCsrfToken(req, res);
     await sendOwnerLoginPage(
       res,
+      context.clientNameLookup,
       context.providerName,
       csrfToken,
       returnTo,
@@ -959,6 +964,7 @@ async function handleOwnerLoginPost(
     const csrfToken = context.ensureCsrfToken(req, res);
     await sendOwnerLoginPage(
       res,
+      context.clientNameLookup,
       context.providerName,
       csrfToken,
       returnTo,
@@ -1069,6 +1075,7 @@ export function createOwnerAuthPlaceholder({
   passwordVerifier,
   subjectId,
   providerName = DATACONNECT_PRODUCT_IDENTITY.name,
+  clientNameLookup = null,
   sessionTtlSeconds = OWNER_SESSION_DEFAULT_TTL_SECONDS,
   sameSite = "lax",
   forceSecureCookies = false,
@@ -1268,6 +1275,7 @@ export function createOwnerAuthPlaceholder({
 
   function attachRoutes(app: AuthAppLike): void {
     const context: OwnerAuthRouteContext = {
+      clientNameLookup,
       csrfPairValid,
       credentialSource: () => credentialSource,
       changeAppPassword,

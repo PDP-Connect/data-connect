@@ -111,6 +111,7 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  getRegisteredClient,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
@@ -4875,6 +4876,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     : true;
   const lockConnectorRegistry = ownerExposurePosture ? ownerExposurePosture.lockConnectorRegistry : false;
   const ownerAuth = createOwnerAuthPlaceholder({
+    // Sign-in page shows which app the owner continues to.
+    clientNameLookup: async (clientId) => {
+      const name = (await getRegisteredClient(clientId))?.metadata?.client_name;
+      return typeof name === "string" && name.trim() ? name.trim() : null;
+    },
     password: ownerAuthConfig.password,
     ...(opts.ownerAuthPasswordVerifier === undefined ? {} : { passwordVerifier: opts.ownerAuthPasswordVerifier }),
     ...(opts.ownerPasswordVerifierStore ? { passwordVerifierStore: opts.ownerPasswordVerifierStore } : {}),
