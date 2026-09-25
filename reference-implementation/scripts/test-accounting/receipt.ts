@@ -119,6 +119,7 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "PostgreSQL: a stale lexical page cannot overwrite the index after manifest B publishes",
   "PostgreSQL: a stale semantic page cannot overwrite the index after manifest B publishes",
   "PostgreSQL: stale record-column repair cannot overwrite manifest B",
+  "PostgreSQL: a stale derived write cannot commit after manifest B publishes",
   "PostgreSQL stale failure publication cannot overwrite newer evidence",
   "Postgres: every setup-binding kind promotes on success, stays hidden on abandon, survives its revoke path",
   "postgresFetchUpcoming: live Postgres in-flight partition workers never exceed the configured limit",
@@ -155,6 +156,15 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "real PostgreSQL mutation: a 1ms cold 25-row page starts at most one slow repair and later converges",
   "real PostgreSQL mutation: a 1ms 2,001-event fold is capped and resumes from its durable checkpoint",
   "real PostgreSQL mutation: an expired fold stops its delayed participant checkpoint-write tail after one started write",
+  // These arrived as per-test PostgreSQL gates after the prior receipt update.
+  // Keep them together because memory-default emits boolean skips and the
+  // receipt parser reports only the first missing mapping in a run.
+  "PostgreSQL: delayed live lexical and semantic maintenance cannot publish after manifest B",
+  "PostgreSQL: active installed connectors allow refresh-policy updates but reject stream-shape changes",
+  "Postgres owner-device approval fence rejects stale sessions and rotation revokes completed approvals",
+  "Postgres stores app-managed owner password verifiers",
+  "Postgres fences owner login session issuance against password rotation",
+  "Postgres owner-session store supports device replacement, revocation, and bearer inventory",
 ];
 // Every row above uses a PER-TEST boolean `skip` (e.g. `skip: !PDPP_TEST_POSTGRES_URL`)
 // inside a file that still REGISTERS the test under every profile. Under
