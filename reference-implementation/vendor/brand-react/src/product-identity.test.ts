@@ -11,6 +11,6 @@ test("the shared console identity is always DataConnect", () => {
     description: "The DataConnect desktop console for your personal data.",
     name: "DataConnect",
     protocolName: "PDPP",
-    version: "0.7.54",
+    version: "0.7.55",
   })
 })
