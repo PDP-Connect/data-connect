@@ -1,0 +1,88 @@
+name: rust-unit-tests
+
+on:
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - "connectors/**"
+      - "pdpp-runtime/**"
+      - "reference-implementation/vendor/**"
+      - "scripts/ensure-pdpp-runtime.js"
+      - "scripts/is-main-module.js"
+      - "scripts/resolve-connectors.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/rust-unit-tests.yml"
+  merge_group: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: rust-unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-rust-lib:
+    name: test Rust library
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install connector tooling
+        run: npm ci --ignore-scripts
+
+      - name: Resolve locked connector fixtures
+        run: node scripts/resolve-connectors.js --install-locked
+
+      - name: Install PDPP runtime fixtures
+        run: node scripts/ensure-pdpp-runtime.js
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Test Rust library
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo_home="$HOME/.cargo"
+          rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          test_home="$RUNNER_TEMP/dataconnect-rust-test-home"
+          test_tmp="$RUNNER_TEMP/dataconnect-rust-test-tmp"
+          mkdir -p "$test_home" "$test_tmp"
+          CARGO_HOME="$cargo_home" \
+            RUSTUP_HOME="$rustup_home" \
+            HOME="$test_home" \
+            XDG_CONFIG_HOME="$test_home/.config" \
+            XDG_DATA_HOME="$test_home/.local/share" \
+            XDG_CACHE_HOME="$test_home/.cache" \
+            TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
+            CARGO_BUILD_JOBS=4 \
+            TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
+            cargo test --lib
