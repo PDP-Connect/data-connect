@@ -15,11 +15,13 @@ published image is `ghcr.io/pdp-connect/data-connect/core:*`; it bundles
 Patchright/Chromium, enables semantic search downloads, and persists runtime
 state under `/var/lib/pdpp`.
 
-The repository also still has `deploy/docker/Dockerfile`. Its `core` stage is
-only `FROM reference-browser AS core`, so that path remains AS/RS-only and
-does not build the bundled console + AS/RS Core runtime. Use the root
-`Dockerfile --target core` for bundled Core images and for the OCI/runtime
-identity contract described below.
+The repository also still has `deploy/docker/Dockerfile`. Its `core` stage
+now builds the bundled console + AS/RS Core runtime (same as root Dockerfile),
+and both core build paths enforce the same image identity contract described
+below: OCI labels (org.opencontainers.image.revision, source, created),
+runtime env matching, and full-SHA validation. The root `Dockerfile` remains
+the canonical production path (published to GHCR); `deploy/docker/Dockerfile`
+supports manual/Compose builds and must carry the same identity guarantees.
 
 ## Building from `main` (or any commit) with a real identity
 
