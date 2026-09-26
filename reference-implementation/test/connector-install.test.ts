@@ -545,19 +545,54 @@ test("the RI transport bounds signed config and profile blobs", async () => {
 
 test("normalizes the pinned core collection-profiles layout before verification", () => {
   const root = mkdtempSync(join(tmpdir(), "pdpp-connector-install-layout-"));
+  const verifiedSourceDeclaration = Buffer.from('{"source":"verified"}\n');
   try {
     writeFixture(join(root, "collection-profiles", "github"));
     mkdirSync(join(root, "collection-profiles", "github", "licenses"), { recursive: true });
     mkdirSync(join(root, "collection-profiles", "github", "assets"), { recursive: true });
-    writeFileSync(join(root, "collection-profiles", "github", "source-declaration.json"), "{}\n");
+    writeFileSync(
+      join(root, "collection-profiles", "github", "source-declaration.json"),
+      verifiedSourceDeclaration
+    );
     writeFileSync(join(root, "collection-profiles", "github", "licenses", "NOTICE"), "notice");
     writeFileSync(join(root, "collection-profiles", "github", "assets", "icon.svg"), "<svg />");
-    normalizeCoreInstallLayout(root, "github");
+    normalizeCoreInstallLayout(root, "github", verifiedSourceDeclaration);
     assert.equal(existsSync(join(root, "profile", "collection-profile.json")), true);
     assert.equal(existsSync(join(root, "dist", "collection-profile.mjs")), true);
-    assert.equal(existsSync(join(root, "source-declaration.json")), true);
+    assert.deepEqual(readFileSync(join(root, "source-declaration.json")), verifiedSourceDeclaration);
     assert.equal(existsSync(join(root, "licenses", "NOTICE")), true);
     assert.equal(existsSync(join(root, "assets", "icon.svg")), true);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("normalization rejects a staged tree without the verified source declaration", () => {
+  const root = mkdtempSync(join(tmpdir(), "pdpp-connector-install-layout-missing-declaration-"));
+  try {
+    writeFixture(join(root, "collection-profiles", "github"));
+    assert.throws(
+      () => normalizeCoreInstallLayout(root, "github", Buffer.from('{"source":"verified"}\n')),
+      /incomplete collection-profile layout/
+    );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("normalization rejects source declaration bytes different from installer-core verification", () => {
+  const root = mkdtempSync(join(tmpdir(), "pdpp-connector-install-layout-mismatched-declaration-"));
+  const verifiedSourceDeclaration = Buffer.from('{"source":"verified"}\n');
+  try {
+    writeFixture(join(root, "collection-profiles", "github"));
+    writeFileSync(
+      join(root, "collection-profiles", "github", "source-declaration.json"),
+      '{"source":"changed"}\n'
+    );
+    assert.throws(
+      () => normalizeCoreInstallLayout(root, "github", verifiedSourceDeclaration),
+      /does not match installer-core verification/
+    );
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

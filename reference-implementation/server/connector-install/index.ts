@@ -1150,6 +1150,13 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
       ociCertificateIdentityResolver: identityResolver,
     }
   );
+  const verifiedSourceDeclaration =
+    isRecord(preflight) && preflight.sourceDeclarationBuffer instanceof Uint8Array
+      ? preflight.sourceDeclarationBuffer
+      : null;
+  if (verifiedSourceDeclaration === null) {
+    throw new Error("Pinned installer core did not return the verified source declaration.");
+  }
   const preflightOci = isRecord(preflight) && isRecord(preflight.oci) ? preflight.oci : null;
   const configDigest = preflightOci && typeof preflightOci.configDigest === "string" ? preflightOci.configDigest : null;
   if (!(configDigest && DIGEST.test(configDigest)) || (entry.config_digest && entry.config_digest !== configDigest)) {
@@ -1196,12 +1203,24 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
       `OCI install config digest was not confirmed by the transport (preflight=${configDigest}, manifest=${installedConfigDigest ?? "none"}).`
     );
   }
-  normalizeCoreInstallLayout(root, entry.connector_id);
+  normalizeCoreInstallLayout(root, entry.connector_id, verifiedSourceDeclaration);
   return configDigest;
 }
 
-export function normalizeCoreInstallLayout(root: string, connectorId: string): void {
+export function normalizeCoreInstallLayout(
+  root: string,
+  connectorId: string,
+  verifiedSourceDeclaration: Uint8Array
+): void {
   const coreRoot = join(root, "collection-profiles", connectorId);
+  const sourceDeclarationPath = join(coreRoot, "source-declaration.json");
+  if (!existsSync(sourceDeclarationPath)) {
+    throw new Error("Pinned installer core produced an incomplete collection-profile layout.");
+  }
+  if (!readFileSync(sourceDeclarationPath).equals(Buffer.from(verifiedSourceDeclaration))) {
+    throw new Error("Staged source declaration does not match installer-core verification.");
+  }
+
   for (const name of ["profile", "dist", "provenance.json", "source-declaration.json"]) {
     const source = join(coreRoot, name);
     if (!existsSync(source)) {
